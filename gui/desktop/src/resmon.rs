@@ -720,20 +720,14 @@ impl ResourceMonitor {
 }
 
 /// Format a bytes-per-second value into a compact human-readable string.
+///
+/// Only `ResourceType::Network` reaches here, so this is a link rate and is
+/// decimal — the same convention as the tray indicator, which the user can see
+/// at the same time as this graph. It used to divide by 1024 and write `KB/s`,
+/// so the two disagreed by 2.4% while claiming the same unit. See
+/// design-decisions.md §489.
 fn format_bytes_per_sec(bps: u64) -> String {
-    const KB: u64 = 1024;
-    const MB: u64 = 1024 * 1024;
-    const GB: u64 = 1024 * 1024 * 1024;
-
-    if bps >= GB {
-        format!("{:.1} GB/s", bps as f64 / GB as f64)
-    } else if bps >= MB {
-        format!("{:.1} MB/s", bps as f64 / MB as f64)
-    } else if bps >= KB {
-        format!("{:.1} KB/s", bps as f64 / KB as f64)
-    } else {
-        format!("{bps} B/s")
-    }
+    guitk::bytes::si_rate(bps)
 }
 
 // ============================================================================
@@ -1341,8 +1335,8 @@ mod tests {
 
     #[test]
     fn test_format_bytes_per_sec_kilobytes() {
-        assert_eq!(format_bytes_per_sec(1024), "1.0 KB/s");
-        assert_eq!(format_bytes_per_sec(2560), "2.5 KB/s");
+        assert_eq!(format_bytes_per_sec(1024), "1.0 kB/s");
+        assert_eq!(format_bytes_per_sec(2560), "2.6 kB/s");
     }
 
     #[test]
@@ -1352,6 +1346,6 @@ mod tests {
 
     #[test]
     fn test_format_bytes_per_sec_gigabytes() {
-        assert_eq!(format_bytes_per_sec(1_073_741_824), "1.0 GB/s");
+        assert_eq!(format_bytes_per_sec(1_073_741_824), "1.1 GB/s");
     }
 }

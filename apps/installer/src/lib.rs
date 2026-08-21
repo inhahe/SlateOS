@@ -1831,22 +1831,7 @@ auto_reboot: true
 
 /// Format a byte count into a human-readable string.
 fn format_bytes(bytes: u64) -> String {
-    const KIB: u64 = 1024;
-    const MIB: u64 = 1024 * 1024;
-    const GIB: u64 = 1024 * 1024 * 1024;
-    const TIB: u64 = 1024 * 1024 * 1024 * 1024;
-
-    if bytes >= TIB {
-        format!("{} TiB", bytes / TIB)
-    } else if bytes >= GIB {
-        format!("{} GiB", bytes / GIB)
-    } else if bytes >= MIB {
-        format!("{} MiB", bytes / MIB)
-    } else if bytes >= KIB {
-        format!("{} KiB", bytes / KIB)
-    } else {
-        format!("{bytes} B")
-    }
+    textfmt::bytes::iec(bytes)
 }
 
 // ============================================================================
@@ -2695,9 +2680,9 @@ users:
     #[test]
     fn format_bytes_units() {
         assert_eq!(format_bytes(500), "500 B");
-        assert_eq!(format_bytes(2048), "2 KiB");
-        assert_eq!(format_bytes(1024 * 1024), "1 MiB");
-        assert_eq!(format_bytes(2 * 1024 * 1024 * 1024), "2 GiB");
-        assert_eq!(format_bytes(3 * 1024 * 1024 * 1024 * 1024), "3 TiB");
+        assert_eq!(format_bytes(2048), "2.0 KiB");
+        assert_eq!(format_bytes(1024 * 1024), "1.0 MiB");
+        assert_eq!(format_bytes(2 * 1024 * 1024 * 1024), "2.0 GiB");
+        assert_eq!(format_bytes(3 * 1024 * 1024 * 1024 * 1024), "3.0 TiB");
     }
 }

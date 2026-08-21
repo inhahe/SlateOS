@@ -77,7 +77,10 @@ pub mod widget;
 // library. It is re-exported here under its original paths: `guitk::csv` and
 // `guitk::escape` are what 137 applications already say, and moving the code
 // is not a reason to touch all of them.
-pub use textfmt::{csv, escape, fold, kv};
+// `bytes` is here for the same reason and joined them for the same one: the
+// forty-seven hand-written `format_size`/`format_bytes` copies included the
+// backup tool and the installer, neither of which can reach `guitk`.
+pub use textfmt::{bytes, csv, escape, fold, kv};
 
 // Case-insensitive substring search lives in `textfind` for the same reason:
 // the headless components search text too, and the applications that need it

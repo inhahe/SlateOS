@@ -673,19 +673,7 @@ impl OutputSettings {
 
 /// Format a byte count as a human-readable file size.
 pub fn format_file_size(bytes: u64) -> String {
-    const KB: u64 = 1024;
-    const MB: u64 = 1024 * 1024;
-    const GB: u64 = 1024 * 1024 * 1024;
-
-    if bytes >= GB {
-        format!("{:.1} GB", bytes as f64 / GB as f64)
-    } else if bytes >= MB {
-        format!("{:.1} MB", bytes as f64 / MB as f64)
-    } else if bytes >= KB {
-        format!("{:.1} KB", bytes as f64 / KB as f64)
-    } else {
-        format!("{} B", bytes)
-    }
+    guitk::bytes::iec(bytes)
 }
 
 /// Format a duration in seconds as HH:MM:SS.
@@ -3727,7 +3715,7 @@ mod tests {
         assert_eq!(out.max_size_display(), "No limit");
 
         out.max_file_size = 1_048_576;
-        assert_eq!(out.max_size_display(), "1.0 MB");
+        assert_eq!(out.max_size_display(), "1.0 MiB");
     }
 
     // -- format helpers -----------------------------------------------------
@@ -3736,9 +3724,9 @@ mod tests {
     fn test_format_file_size() {
         assert_eq!(format_file_size(0), "0 B");
         assert_eq!(format_file_size(512), "512 B");
-        assert_eq!(format_file_size(1024), "1.0 KB");
-        assert_eq!(format_file_size(1_048_576), "1.0 MB");
-        assert_eq!(format_file_size(1_073_741_824), "1.0 GB");
+        assert_eq!(format_file_size(1024), "1.0 KiB");
+        assert_eq!(format_file_size(1_048_576), "1.0 MiB");
+        assert_eq!(format_file_size(1_073_741_824), "1.0 GiB");
     }
 
     #[test]
@@ -3831,7 +3819,7 @@ mod tests {
         let e = HistoryEntry::new(1, "test".into(), PathBuf::new(), 3661, 1_048_576, 300, 30, 1920, 1080)
             .with_timestamp(2026, 5, 18, 14, 30, 0);
         assert_eq!(e.duration_display(), "01:01:01");
-        assert_eq!(e.size_display(), "1.0 MB");
+        assert_eq!(e.size_display(), "1.0 MiB");
         assert_eq!(e.resolution_display(), "1920x1080");
         assert_eq!(e.timestamp_display(), "2026-05-18 14:30:00");
     }

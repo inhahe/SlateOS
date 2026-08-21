@@ -1032,19 +1032,7 @@ impl CaptureMode {
 
 /// Format a byte count for display.
 fn format_bytes(bytes: u64) -> String {
-    if bytes < 1024 {
-        return format!("{bytes} B");
-    }
-    let kb = bytes / 1024;
-    if kb < 1024 {
-        return format!("{kb} KB");
-    }
-    let mb = kb / 1024;
-    if mb < 1024 {
-        return format!("{mb} MB");
-    }
-    let gb = mb / 1024;
-    format!("{gb} GB")
+    guitk::bytes::iec(bytes)
 }
 
 /// Format milliseconds as MM:SS or HH:MM:SS.
@@ -3784,9 +3772,9 @@ mod tests {
     #[test]
     fn test_format_bytes() {
         assert_eq!(format_bytes(500), "500 B");
-        assert_eq!(format_bytes(2048), "2 KB");
-        assert!(format_bytes(2_000_000).contains("MB"));
-        assert!(format_bytes(3_000_000_000).contains("GB"));
+        assert_eq!(format_bytes(2048), "2.0 KiB");
+        assert!(format_bytes(2_000_000).contains("MiB"));
+        assert!(format_bytes(3_000_000_000).contains("GiB"));
     }
 
     #[test]

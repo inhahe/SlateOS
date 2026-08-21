@@ -396,15 +396,7 @@ impl Default for RecordingStats {
 
 /// Format a byte count into human-readable form.
 fn format_bytes(bytes: u64) -> String {
-    if bytes < 1024 {
-        format!("{} B", bytes)
-    } else if bytes < 1024 * 1024 {
-        format!("{:.1} KB", bytes as f64 / 1024.0)
-    } else if bytes < 1024 * 1024 * 1024 {
-        format!("{:.1} MB", bytes as f64 / (1024.0 * 1024.0))
-    } else {
-        format!("{:.2} GB", bytes as f64 / (1024.0 * 1024.0 * 1024.0))
-    }
+    guitk::bytes::iec(bytes)
 }
 
 // ============================================================================
@@ -1055,9 +1047,9 @@ mod tests {
         s.bytes_written = 500;
         assert_eq!(s.size_display(), "500 B");
         s.bytes_written = 2048;
-        assert_eq!(s.size_display(), "2.0 KB");
+        assert_eq!(s.size_display(), "2.0 KiB");
         s.bytes_written = 5 * 1024 * 1024;
-        assert_eq!(s.size_display(), "5.0 MB");
+        assert_eq!(s.size_display(), "5.0 MiB");
     }
 
     // --- RecordingEntry ---
@@ -1321,10 +1313,10 @@ mod tests {
     fn test_format_bytes() {
         assert_eq!(format_bytes(0), "0 B");
         assert_eq!(format_bytes(512), "512 B");
-        assert_eq!(format_bytes(1024), "1.0 KB");
-        assert_eq!(format_bytes(1536), "1.5 KB");
-        assert_eq!(format_bytes(1048576), "1.0 MB");
-        assert_eq!(format_bytes(1073741824), "1.00 GB");
+        assert_eq!(format_bytes(1024), "1.0 KiB");
+        assert_eq!(format_bytes(1536), "1.5 KiB");
+        assert_eq!(format_bytes(1048576), "1.0 MiB");
+        assert_eq!(format_bytes(1073741824), "1.0 GiB");
     }
 
     // --- Config ---

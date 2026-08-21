@@ -14,6 +14,12 @@ safeio = { path = "../safeio" }
 # turned up two that were not SHA-256 at all.
 sha2 = { path = "../../sha2" }
 
+# Byte sizes for the listings this tool prints. It is a command-line program and
+# must not link a widget library, so it reaches the shared formatter through the
+# dependency-free crate rather than through `guitk` -- the same layering the
+# `tzrules` date request argues for, and the reason `textfmt` exists at all.
+textfmt = { path = "../../textfmt" }
+
 # The same crate again with its `audit` counters on, so the tests can prove the
 # store's writes really went through `safeio` and did not quietly regress to
 # `std::fs::write`/`fs::copy`. Cargo unifies this with the dependency above when

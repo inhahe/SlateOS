@@ -357,13 +357,7 @@ impl PrintJob {
 
     /// Size display.
     pub fn size_display(&self) -> String {
-        if self.size_bytes < 1024 {
-            format!("{} B", self.size_bytes)
-        } else if self.size_bytes < 1024 * 1024 {
-            format!("{:.1} KB", self.size_bytes as f64 / 1024.0)
-        } else {
-            format!("{:.1} MB", self.size_bytes as f64 / (1024.0 * 1024.0))
-        }
+        guitk::bytes::iec(self.size_bytes)
     }
 }
 
@@ -1086,7 +1080,7 @@ mod tests {
             size_bytes: 2048,
             owner: "user".to_string(),
         };
-        assert_eq!(job.size_display(), "2.0 KB");
+        assert_eq!(job.size_display(), "2.0 KiB");
     }
 
     // --- PrintManager ---

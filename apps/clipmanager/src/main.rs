@@ -713,15 +713,7 @@ fn detect_code_language(text: &str) -> Option<&'static str> {
 // ---------------------------------------------------------------------------
 
 fn format_size(bytes: u64) -> String {
-    if bytes < 1024 {
-        return format!("{bytes} B");
-    }
-    let kb = bytes as f64 / 1024.0;
-    if kb < 1024.0 {
-        return format!("{kb:.1} KB");
-    }
-    let mb = kb / 1024.0;
-    format!("{mb:.2} MB")
+    guitk::bytes::iec(bytes)
 }
 
 // ---------------------------------------------------------------------------
@@ -2579,12 +2571,12 @@ mod tests {
 
     #[test]
     fn test_format_size_kilobytes() {
-        assert_eq!(format_size(2048), "2.0 KB");
+        assert_eq!(format_size(2048), "2.0 KiB");
     }
 
     #[test]
     fn test_format_size_megabytes() {
-        assert_eq!(format_size(2 * 1024 * 1024), "2.00 MB");
+        assert_eq!(format_size(2 * 1024 * 1024), "2.0 MiB");
     }
 
     // == AppState tests =====================================================

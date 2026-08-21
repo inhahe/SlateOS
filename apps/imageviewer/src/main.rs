@@ -391,13 +391,7 @@ pub struct ImageInfo {
 impl ImageInfo {
     /// Format the file size for display.
     pub fn file_size_display(&self) -> String {
-        if self.file_size < 1024 {
-            format!("{} B", self.file_size)
-        } else if self.file_size < 1024 * 1024 {
-            format!("{:.1} KB", self.file_size as f64 / 1024.0)
-        } else {
-            format!("{:.1} MB", self.file_size as f64 / (1024.0 * 1024.0))
-        }
+        guitk::bytes::iec(self.file_size)
     }
 
     /// Dimensions as a display string.
@@ -2060,10 +2054,10 @@ mod tests {
         assert_eq!(info.file_size_display(), "500 B");
 
         info.file_size = 2048;
-        assert_eq!(info.file_size_display(), "2.0 KB");
+        assert_eq!(info.file_size_display(), "2.0 KiB");
 
         info.file_size = 1_500_000;
-        assert_eq!(info.file_size_display(), "1.4 MB");
+        assert_eq!(info.file_size_display(), "1.4 MiB");
     }
 
     #[test]

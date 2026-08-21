@@ -3154,22 +3154,7 @@ fn make_demo_process(
 
 /// Format a byte count for human-readable display.
 fn format_bytes(bytes: u64) -> String {
-    const KIB: u64 = 1024;
-    const MIB: u64 = 1024 * 1024;
-    const GIB: u64 = 1024 * 1024 * 1024;
-    const TIB: u64 = 1024 * 1024 * 1024 * 1024;
-
-    if bytes >= TIB {
-        format!("{:.1} TiB", bytes as f64 / TIB as f64)
-    } else if bytes >= GIB {
-        format!("{:.1} GiB", bytes as f64 / GIB as f64)
-    } else if bytes >= MIB {
-        format!("{:.1} MiB", bytes as f64 / MIB as f64)
-    } else if bytes >= KIB {
-        format!("{:.1} KiB", bytes as f64 / KIB as f64)
-    } else {
-        format!("{bytes} B")
-    }
+    guitk::bytes::iec(bytes)
 }
 
 /// Format a byte rate for human-readable display (e.g. "1.5 MiB/s").

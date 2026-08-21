@@ -791,19 +791,7 @@ pub fn format_duration(total_secs: u32) -> String {
 
 /// Format bytes as human-readable size.
 pub fn format_bytes(bytes: u64) -> String {
-    if bytes < 1024 {
-        return format!("{} B", bytes);
-    }
-    let kb = bytes as f64 / 1024.0;
-    if kb < 1024.0 {
-        return format!("{:.1} KB", kb);
-    }
-    let mb = kb / 1024.0;
-    if mb < 1024.0 {
-        return format!("{:.1} MB", mb);
-    }
-    let gb = mb / 1024.0;
-    format!("{:.2} GB", gb)
+    guitk::bytes::iec(bytes)
 }
 
 // ============================================================================
@@ -3845,16 +3833,16 @@ mod tests {
     fn test_format_bytes() {
         assert_eq!(format_bytes(0), "0 B");
         assert_eq!(format_bytes(512), "512 B");
-        assert_eq!(format_bytes(1024), "1.0 KB");
-        assert_eq!(format_bytes(1_048_576), "1.0 MB");
-        assert_eq!(format_bytes(1_073_741_824), "1.00 GB");
+        assert_eq!(format_bytes(1024), "1.0 KiB");
+        assert_eq!(format_bytes(1_048_576), "1.0 MiB");
+        assert_eq!(format_bytes(1_073_741_824), "1.0 GiB");
     }
 
     #[test]
     fn test_format_bytes_large() {
         let size = 45_000_000u64;
         let display = format_bytes(size);
-        assert!(display.contains("MB"));
+        assert!(display.contains("MiB"));
     }
 
     // -----------------------------------------------------------------------
@@ -4125,7 +4113,7 @@ mod tests {
             download_status: DownloadStatus::NotDownloaded,
             notes: EpisodeNotes::new(),
         };
-        assert!(ep.file_size_display().contains("MB"));
+        assert!(ep.file_size_display().contains("MiB"));
     }
 
     // -----------------------------------------------------------------------

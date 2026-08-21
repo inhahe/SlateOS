@@ -1114,26 +1114,7 @@ impl DefragStats {
 
 /// Format a byte count into a human-readable string.
 pub fn format_size(bytes: u64) -> String {
-    const KIB: u64 = 1024;
-    const MIB: u64 = 1024 * 1024;
-    const GIB: u64 = 1024 * 1024 * 1024;
-    const TIB: u64 = 1024 * 1024 * 1024 * 1024;
-
-    if bytes >= TIB {
-        let val = bytes as f64 / TIB as f64;
-        format!("{val:.2} TiB")
-    } else if bytes >= GIB {
-        let val = bytes as f64 / GIB as f64;
-        format!("{val:.2} GiB")
-    } else if bytes >= MIB {
-        let val = bytes as f64 / MIB as f64;
-        format!("{val:.2} MiB")
-    } else if bytes >= KIB {
-        let val = bytes as f64 / KIB as f64;
-        format!("{val:.2} KiB")
-    } else {
-        format!("{bytes} B")
-    }
+    guitk::bytes::iec(bytes)
 }
 
 /// Format a duration in seconds as "Xh Ym Zs".
@@ -4274,10 +4255,10 @@ mod tests {
     fn test_format_size() {
         assert_eq!(format_size(0), "0 B");
         assert_eq!(format_size(512), "512 B");
-        assert_eq!(format_size(1024), "1.00 KiB");
-        assert_eq!(format_size(1024 * 1024), "1.00 MiB");
-        assert_eq!(format_size(1024 * 1024 * 1024), "1.00 GiB");
-        assert_eq!(format_size(1024u64 * 1024 * 1024 * 1024), "1.00 TiB");
+        assert_eq!(format_size(1024), "1.0 KiB");
+        assert_eq!(format_size(1024 * 1024), "1.0 MiB");
+        assert_eq!(format_size(1024 * 1024 * 1024), "1.0 GiB");
+        assert_eq!(format_size(1024u64 * 1024 * 1024 * 1024), "1.0 TiB");
     }
 
     #[test]

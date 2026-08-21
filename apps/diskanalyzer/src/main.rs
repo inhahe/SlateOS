@@ -766,26 +766,7 @@ fn collect_ext_stats(
 
 /// Format a byte count into a human-readable string.
 pub fn format_size(bytes: u64) -> String {
-    const KIB: u64 = 1024;
-    const MIB: u64 = 1024 * 1024;
-    const GIB: u64 = 1024 * 1024 * 1024;
-    const TIB: u64 = 1024 * 1024 * 1024 * 1024;
-
-    if bytes >= TIB {
-        let val = bytes as f64 / TIB as f64;
-        format!("{val:.2} TiB")
-    } else if bytes >= GIB {
-        let val = bytes as f64 / GIB as f64;
-        format!("{val:.2} GiB")
-    } else if bytes >= MIB {
-        let val = bytes as f64 / MIB as f64;
-        format!("{val:.2} MiB")
-    } else if bytes >= KIB {
-        let val = bytes as f64 / KIB as f64;
-        format!("{val:.2} KiB")
-    } else {
-        format!("{bytes} B")
-    }
+    guitk::bytes::iec(bytes)
 }
 
 /// Format a percentage with one decimal place.
@@ -2255,24 +2236,24 @@ mod tests {
 
     #[test]
     fn test_format_size_kib() {
-        assert_eq!(format_size(1024), "1.00 KiB");
-        assert_eq!(format_size(2048), "2.00 KiB");
+        assert_eq!(format_size(1024), "1.0 KiB");
+        assert_eq!(format_size(2048), "2.0 KiB");
     }
 
     #[test]
     fn test_format_size_mib() {
-        assert_eq!(format_size(1024 * 1024), "1.00 MiB");
-        assert_eq!(format_size(1_500_000), "1.43 MiB");
+        assert_eq!(format_size(1024 * 1024), "1.0 MiB");
+        assert_eq!(format_size(1_500_000), "1.4 MiB");
     }
 
     #[test]
     fn test_format_size_gib() {
-        assert_eq!(format_size(1024 * 1024 * 1024), "1.00 GiB");
+        assert_eq!(format_size(1024 * 1024 * 1024), "1.0 GiB");
     }
 
     #[test]
     fn test_format_size_tib() {
-        assert_eq!(format_size(1024u64 * 1024 * 1024 * 1024), "1.00 TiB");
+        assert_eq!(format_size(1024u64 * 1024 * 1024 * 1024), "1.0 TiB");
     }
 
     // -- Sorting ---------------------------------------------------------------

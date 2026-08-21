@@ -2939,10 +2939,10 @@ impl RemoteDesktopApp {
                 format!("{:.1} fps", self.perf_metrics.frame_rate),
                 fps_color(self.perf_metrics.frame_rate),
             ),
-            ("Sent", format_bytes(self.perf_metrics.bytes_sent), SUBTEXT0),
+            ("Sent", format_link_bytes(self.perf_metrics.bytes_sent), SUBTEXT0),
             (
                 "Received",
-                format_bytes(self.perf_metrics.bytes_received),
+                format_link_bytes(self.perf_metrics.bytes_received),
                 SUBTEXT0,
             ),
             (
@@ -3091,21 +3091,21 @@ fn fps_color(fps: f32) -> Color {
     }
 }
 
-/// Format bytes to human-readable size.
+/// Format a transferred file's size.
+///
+/// Binary, because the same file is a file in the explorer's listing too, and
+/// the two windows must agree. See design-decisions.md §489.
 fn format_bytes(bytes: u64) -> String {
-    const KB: u64 = 1024;
-    const MB: u64 = 1024 * KB;
-    const GB: u64 = 1024 * MB;
+    guitk::bytes::iec(bytes)
+}
 
-    if bytes >= GB {
-        format!("{:.2} GB", bytes as f64 / GB as f64)
-    } else if bytes >= MB {
-        format!("{:.1} MB", bytes as f64 / MB as f64)
-    } else if bytes >= KB {
-        format!("{:.1} KB", bytes as f64 / KB as f64)
-    } else {
-        format!("{bytes} B")
-    }
+/// Format a session's link counter.
+///
+/// Decimal, because these are bytes moved over the wire rather than bytes
+/// occupying storage, and the tray indicator reports the same quantity the
+/// same way. See design-decisions.md §489.
+fn format_link_bytes(bytes: u64) -> String {
+    guitk::bytes::si(bytes)
 }
 
 /// Format duration in seconds to a human-readable string.
@@ -4032,20 +4032,31 @@ mod tests {
 
     #[test]
     fn test_format_bytes_kb() {
-        let s = format_bytes(2048);
-        assert!(s.contains("KB"));
+        assert_eq!(format_bytes(2048), "2.0 KiB");
     }
 
     #[test]
     fn test_format_bytes_mb() {
-        let s = format_bytes(5_000_000);
-        assert!(s.contains("MB"));
+        assert_eq!(format_bytes(5_000_000), "4.8 MiB");
     }
 
     #[test]
     fn test_format_bytes_gb() {
-        let s = format_bytes(2_000_000_000);
-        assert!(s.contains("GB"));
+        assert_eq!(format_bytes(2_000_000_000), "1.9 GiB");
+    }
+
+    /// This file needs two formatters, and the whole point is that they differ.
+    /// `format_bytes` sizes a transferred *file* — the same file the explorer
+    /// lists, so binary. `format_link_bytes` reports the *session's* wire
+    /// counters — the same quantity the tray indicator shows, so decimal. See
+    /// design-decisions.md §489. If someone ever collapses these back into one
+    /// function, this test says which caller they broke.
+    #[test]
+    fn a_file_size_and_a_link_counter_use_different_unit_families() {
+        assert_eq!(format_bytes(2_000_000_000), "1.9 GiB");
+        assert_eq!(format_link_bytes(2_000_000_000), "2.0 GB");
+        assert_eq!(format_link_bytes(100), "100 B");
+        assert_eq!(format_link_bytes(1500), "1.5 kB");
     }
 
     #[test]

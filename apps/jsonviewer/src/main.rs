@@ -4054,13 +4054,7 @@ impl App {
 }
 
 fn format_size(bytes: usize) -> String {
-    if bytes < 1024 {
-        format!("{bytes} B")
-    } else if bytes < 1024 * 1024 {
-        format!("{:.1} KB", bytes as f64 / 1024.0)
-    } else {
-        format!("{:.1} MB", bytes as f64 / (1024.0 * 1024.0))
-    }
+    guitk::bytes::iec(u64::try_from(bytes).unwrap_or(u64::MAX))
 }
 
 fn char_to_byte_pos(s: &str, char_idx: usize) -> usize {
@@ -4893,13 +4887,13 @@ mod tests {
     #[test]
     fn format_size_kilobytes() {
         let s = format_size(2048);
-        assert!(s.contains("KB"));
+        assert!(s.contains("KiB"));
     }
 
     #[test]
     fn format_size_megabytes() {
         let s = format_size(2_000_000);
-        assert!(s.contains("MB"));
+        assert!(s.contains("MiB"));
     }
 
     // --- Edge case tests ---

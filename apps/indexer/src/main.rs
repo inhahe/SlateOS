@@ -1827,15 +1827,7 @@ fn format_timestamp(ts: u64) -> String {
 }
 
 fn format_size(bytes: u64) -> String {
-    if bytes < 1024 {
-        format!("{} B", bytes)
-    } else if bytes < 1024 * 1024 {
-        format!("{:.1} KB", bytes as f64 / 1024.0)
-    } else if bytes < 1024 * 1024 * 1024 {
-        format!("{:.1} MB", bytes as f64 / (1024.0 * 1024.0))
-    } else {
-        format!("{:.2} GB", bytes as f64 / (1024.0 * 1024.0 * 1024.0))
-    }
+    textfmt::bytes::iec(bytes)
 }
 
 // ============================================================================
@@ -2778,10 +2770,10 @@ exclude_extensions = .o, .tmp
     fn test_format_size() {
         assert_eq!(format_size(0), "0 B");
         assert_eq!(format_size(500), "500 B");
-        assert_eq!(format_size(1024), "1.0 KB");
-        assert_eq!(format_size(1536), "1.5 KB");
-        assert_eq!(format_size(1048576), "1.0 MB");
-        assert_eq!(format_size(1073741824), "1.00 GB");
+        assert_eq!(format_size(1024), "1.0 KiB");
+        assert_eq!(format_size(1536), "1.5 KiB");
+        assert_eq!(format_size(1048576), "1.0 MiB");
+        assert_eq!(format_size(1073741824), "1.0 GiB");
     }
 
     #[test]

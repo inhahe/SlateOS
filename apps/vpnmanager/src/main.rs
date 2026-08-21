@@ -1175,21 +1175,14 @@ fn parse_profile_text(text: &str, default_id: u32) -> Result<VpnProfile, String>
     Ok(profile)
 }
 
-/// Format bytes as a human-readable string.
+/// Format a tunnel's transfer counter.
+///
+/// Decimal, not binary: every number this formats is a `bytes_sent` or
+/// `bytes_received` counter on a link, the same quantity the tray indicator
+/// and the network settings page report. See design-decisions.md §489 --
+/// bytes moved over a link are SI, bytes occupying storage are IEC.
 fn format_bytes(bytes: u64) -> String {
-    if bytes < 1024 {
-        return format!("{bytes} B");
-    }
-    let kb = bytes as f64 / 1024.0;
-    if kb < 1024.0 {
-        return format!("{kb:.1} KB");
-    }
-    let mb = kb / 1024.0;
-    if mb < 1024.0 {
-        return format!("{mb:.1} MB");
-    }
-    let gb = mb / 1024.0;
-    format!("{gb:.2} GB")
+    guitk::bytes::si(bytes)
 }
 
 /// Format a timestamp as HH:MM:SS.
@@ -3399,31 +3392,45 @@ mod tests {
     }
 
     // --- format_bytes tests ---
+    //
+    // A tunnel's `rx_bytes`/`tx_bytes` is a link counter, so `format_bytes` is
+    // decimal (design-decisions.md §489). The inputs below are therefore powers
+    // of ten: these tests used to feed powers of two to a formatter that had
+    // been base-1024-labelled-`KB`, which made the expectations agree with the
+    // bug rather than with the unit.
 
     #[test]
     fn test_format_bytes_small() {
         assert_eq!(format_bytes(0), "0 B");
         assert_eq!(format_bytes(512), "512 B");
-        assert_eq!(format_bytes(1023), "1023 B");
+        assert_eq!(format_bytes(999), "999 B");
     }
 
     #[test]
     fn test_format_bytes_kb() {
-        assert_eq!(format_bytes(1024), "1.0 KB");
-        assert_eq!(format_bytes(1536), "1.5 KB");
+        assert_eq!(format_bytes(1000), "1.0 kB");
+        assert_eq!(format_bytes(1500), "1.5 kB");
     }
 
     #[test]
     fn test_format_bytes_mb() {
-        let mb = 1024 * 1024;
-        assert_eq!(format_bytes(mb), "1.0 MB");
-        assert_eq!(format_bytes(mb + mb / 2), "1.5 MB");
+        assert_eq!(format_bytes(1_000_000), "1.0 MB");
+        assert_eq!(format_bytes(1_500_000), "1.5 MB");
     }
 
     #[test]
     fn test_format_bytes_gb() {
-        let gb = 1024 * 1024 * 1024;
-        assert_eq!(format_bytes(gb), "1.00 GB");
+        assert_eq!(format_bytes(1_000_000_000), "1.0 GB");
+    }
+
+    /// The decimal choice is deliberate, so pin the one place it is visible: a
+    /// mebibyte of traffic is 1.0 MiB but 1.05 MB, and this counter reports the
+    /// latter — the same figure the tray indicator and the network settings
+    /// page show for the same bytes.
+    #[test]
+    fn a_binary_quantity_is_reported_in_decimal_units() {
+        assert_eq!(format_bytes(1024 * 1024), "1.0 MB");
+        assert_eq!(format_bytes(1024 * 1024 * 1024), "1.1 GB");
     }
 
     #[test]

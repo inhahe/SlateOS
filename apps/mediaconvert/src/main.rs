@@ -988,15 +988,7 @@ impl SourceFile {
 }
 
 fn human_file_size(bytes: u64) -> String {
-    if bytes < 1024 {
-        format!("{bytes} B")
-    } else if bytes < 1024 * 1024 {
-        format!("{:.1} KB", bytes as f64 / 1024.0)
-    } else if bytes < 1024 * 1024 * 1024 {
-        format!("{:.1} MB", bytes as f64 / (1024.0 * 1024.0))
-    } else {
-        format!("{:.2} GB", bytes as f64 / (1024.0 * 1024.0 * 1024.0))
-    }
+    guitk::bytes::iec(bytes)
 }
 
 fn format_duration(secs: f64) -> String {
@@ -2418,7 +2410,7 @@ mod tests {
     #[test]
     fn test_source_file_human_size() {
         let s = SourceFile::new(1, "/a", "a.mp3", 5_242_880, MediaCategory::Audio);
-        assert_eq!(s.human_size(), "5.0 MB");
+        assert_eq!(s.human_size(), "5.0 MiB");
     }
 
     #[test]
@@ -2720,7 +2712,7 @@ mod tests {
     #[test]
     fn test_human_file_size() {
         assert_eq!(human_file_size(500), "500 B");
-        assert_eq!(human_file_size(1024), "1.0 KB");
-        assert_eq!(human_file_size(1048576), "1.0 MB");
+        assert_eq!(human_file_size(1024), "1.0 KiB");
+        assert_eq!(human_file_size(1048576), "1.0 MiB");
     }
 }

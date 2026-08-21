@@ -121,6 +121,44 @@ impl SnapLayoutPreset {
         ]
     }
 
+    /// How many zones this preset divides a work area into.
+    ///
+    /// Stated separately from [`build`](Self::build) rather than derived from
+    /// it because [`SnapSlot`] needs the count without a work area to build
+    /// against — a wire byte has to be checked for validity before anyone knows
+    /// what display it will be resolved on. `zone_counts_match_the_zones_built`
+    /// keeps the two honest.
+    #[must_use]
+    pub const fn zone_count(self) -> u8 {
+        match self {
+            Self::TwoEqualHalves | Self::TwoThirdsLeft | Self::TwoThirdsRight => 2,
+            Self::ThreeColumns | Self::ThreeLeftTwoRight => 3,
+            Self::FourQuadrants => 4,
+            Self::SixGrid => 6,
+        }
+    }
+
+    /// The wire index of this preset's zone 0.
+    ///
+    /// The presets are laid out end to end in the order of [`all`](Self::all),
+    /// each taking [`zone_count`](Self::zone_count) indices, so every
+    /// (preset, zone) pair has an index of its own. **These offsets are wire
+    /// format**: changing a preset's zone count, or the order of `all`, moves
+    /// every later preset's zones onto different bytes, and a peer built
+    /// against the old numbering would tile windows into the wrong rectangles
+    /// rather than failing. Add new presets at the end.
+    const fn first_slot(self) -> u8 {
+        match self {
+            Self::TwoEqualHalves => 0,
+            Self::ThreeColumns => 2,
+            Self::TwoThirdsLeft => 5,
+            Self::TwoThirdsRight => 7,
+            Self::FourQuadrants => 9,
+            Self::ThreeLeftTwoRight => 13,
+            Self::SixGrid => 16,
+        }
+    }
+
     /// Build the concrete [`SnapLayout`] filling `area`.
     ///
     /// `area` is the **work area**, not the screen: the region left over once
@@ -387,6 +425,127 @@ impl SnapLayoutPreset {
                     .collect()
             }
         }
+    }
+}
+
+// ============================================================================
+// SnapSlot -- one (layout, zone) pair, which is what travels
+// ============================================================================
+
+/// A place a window can be tiled to, named without naming pixels.
+///
+/// This is the payload of the protocol's zone-tiling verb, and it is a type
+/// rather than a loose `(preset, zone)` pair for one reason: `zone` is only
+/// meaningful against the preset it belongs to. `(TwoEqualHalves, 5)` is
+/// nothing — the two-halves layout has zones 0 and 1 — but nothing about a pair
+/// of integers says so, and a compositor handed one would have to decide at the
+/// far end of the wire what to do with a request that never made sense. The
+/// fields are private and [`new`](Self::new) is the only way in, so an invalid
+/// slot cannot be built at all, and the encoding is therefore total: every
+/// `SnapSlot` has a byte and every accepted byte has a `SnapSlot`.
+///
+/// There are [`COUNT`](Self::COUNT) of them across the seven presets, which is
+/// what lets the tiling verb keep this protocol's one-byte-per-action rule
+/// exactly rather than bending it: the slot is folded into the same byte as the
+/// action, so no reader or writer of a frame grows a special case for a nested
+/// payload. See [`ShellControlAction`](crate::control::ShellControlAction).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct SnapSlot {
+    preset: SnapLayoutPreset,
+    zone: u8,
+}
+
+impl SnapSlot {
+    /// How many slots exist across every preset.
+    ///
+    /// The sum of every preset's [`zone_count`](SnapLayoutPreset::zone_count);
+    /// `count_is_the_sum_of_every_presets_zones` holds the two together.
+    pub const COUNT: u8 = 22;
+
+    /// The slot for `zone` of `preset`, or `None` if that preset has no such
+    /// zone.
+    #[must_use]
+    pub const fn new(preset: SnapLayoutPreset, zone: u8) -> Option<Self> {
+        if zone < preset.zone_count() {
+            Some(Self { preset, zone })
+        } else {
+            None
+        }
+    }
+
+    /// The layout this slot belongs to.
+    #[must_use]
+    pub const fn preset(self) -> SnapLayoutPreset {
+        self.preset
+    }
+
+    /// Which zone of that layout, counting from zero.
+    #[must_use]
+    pub const fn zone(self) -> u8 {
+        self.zone
+    }
+
+    /// This slot's position in the flat numbering shared by both ends.
+    ///
+    /// The `saturating_add` cannot saturate: the largest
+    /// [`first_slot`](SnapLayoutPreset::first_slot) is 16 and the largest zone
+    /// within it is 5. It is written that way so the function is total without
+    /// an unreachable panicking branch, and
+    /// `an_index_and_the_slot_it_names_are_inverses` proves the arithmetic is
+    /// the inverse of [`from_index`](Self::from_index) rather than merely
+    /// plausible.
+    #[must_use]
+    pub const fn index(self) -> u8 {
+        self.preset.first_slot().saturating_add(self.zone)
+    }
+
+    /// The slot an index names, or `None` if it names none of them.
+    #[must_use]
+    pub const fn from_index(index: u8) -> Option<Self> {
+        let preset = match index {
+            0..=1 => SnapLayoutPreset::TwoEqualHalves,
+            2..=4 => SnapLayoutPreset::ThreeColumns,
+            5..=6 => SnapLayoutPreset::TwoThirdsLeft,
+            7..=8 => SnapLayoutPreset::TwoThirdsRight,
+            9..=12 => SnapLayoutPreset::FourQuadrants,
+            13..=15 => SnapLayoutPreset::ThreeLeftTwoRight,
+            16..=21 => SnapLayoutPreset::SixGrid,
+            _ => return None,
+        };
+        // Cannot underflow: every arm above begins at its preset's own
+        // `first_slot`. Saturating rather than checked for `index`'s reason.
+        Some(Self {
+            preset,
+            zone: index.saturating_sub(preset.first_slot()),
+        })
+    }
+
+    /// Every slot there is, in wire order.
+    ///
+    /// Derived from [`from_index`](Self::from_index) rather than written out a
+    /// second time, so the list cannot drift from the numbering it is supposed
+    /// to enumerate — which is the failure a hand-written table invites and the
+    /// reason the tests below can trust this one.
+    pub fn all() -> impl Iterator<Item = Self> {
+        (0..Self::COUNT).filter_map(Self::from_index)
+    }
+
+    /// Where this slot lands on a display whose usable region is `area`.
+    ///
+    /// The one call the compositor makes: it is the only party that knows its
+    /// own bounds, and the shell is not allowed to compute a rectangle. `None`
+    /// only if a preset's [`zone_count`](SnapLayoutPreset::zone_count) ever
+    /// disagreed with the zones it actually builds, which
+    /// `zone_counts_match_the_zones_built` forbids — but it is reported rather
+    /// than asserted, because ignoring a request that makes no sense is the
+    /// right thing for a value that arrived over a wire.
+    #[must_use]
+    pub fn rect(self, area: WorkArea) -> Option<SnapZone> {
+        self.preset
+            .build(area)
+            .zones
+            .into_iter()
+            .nth(usize::from(self.zone))
     }
 }
 
@@ -856,5 +1015,167 @@ mod tests {
             full.zones[0].height,
             desk.zones[0].height
         );
+    }
+
+    // ======================================================================
+    // SnapSlot
+    //
+    // Four tables have to agree for a tiling request to mean the same thing at
+    // both ends: each preset's `zones_with_gap` arm, its `zone_count`, its
+    // `first_slot` offset, and `from_index`'s ranges. Nothing in the compiler
+    // relates them, and a disagreement is silent — a window lands in a zone
+    // other than the one the user aimed at, or a byte the sender considered
+    // valid is refused. The tests below are what relate them.
+    // ======================================================================
+
+    #[test]
+    fn zone_counts_match_the_zones_built() {
+        // `zone_count` exists because a wire byte has to be validated with no
+        // work area in hand, so it restates something `build` already knows.
+        // Restating it is exactly how the two come apart.
+        for &preset in SnapLayoutPreset::all() {
+            assert_eq!(
+                usize::from(preset.zone_count()),
+                preset.build(SCREEN).zones.len(),
+                "{preset:?} says it has {} zones and builds a different number",
+                preset.zone_count()
+            );
+        }
+    }
+
+    #[test]
+    fn count_is_the_sum_of_every_presets_zones() {
+        let summed: u8 = SnapLayoutPreset::all().iter().map(|p| p.zone_count()).sum();
+        assert_eq!(
+            summed,
+            SnapSlot::COUNT,
+            "COUNT is {} but the presets between them have {summed} zones",
+            SnapSlot::COUNT
+        );
+    }
+
+    #[test]
+    fn the_presets_slot_ranges_are_end_to_end_with_no_gap_or_overlap() {
+        // `first_slot` is a hand-written offset table. If one entry is off by
+        // one, two presets share a slot — so a request to tile into the left
+        // half arrives as a request to tile into the left third, which is a
+        // wrong window position rather than an error anyone would notice.
+        let mut expected = 0u8;
+        for &preset in SnapLayoutPreset::all() {
+            assert_eq!(
+                preset.first_slot(),
+                expected,
+                "{preset:?} starts at slot {} but the presets before it end at {expected}",
+                preset.first_slot()
+            );
+            expected += preset.zone_count();
+        }
+        assert_eq!(expected, SnapSlot::COUNT);
+    }
+
+    #[test]
+    fn an_index_and_the_slot_it_names_are_inverses() {
+        // Both directions, over the whole byte, because `index` and
+        // `from_index` are separate pieces of arithmetic over the same table
+        // and nothing but this makes them agree.
+        for index in 0..=u8::MAX {
+            match SnapSlot::from_index(index) {
+                Some(slot) => {
+                    assert!(
+                        index < SnapSlot::COUNT,
+                        "{index} decoded but is out of range"
+                    );
+                    assert_eq!(
+                        slot.index(),
+                        index,
+                        "{slot:?} came from {index} but indexes back to {}",
+                        slot.index()
+                    );
+                }
+                None => assert!(
+                    index >= SnapSlot::COUNT,
+                    "{index} is inside the range but names no slot"
+                ),
+            }
+        }
+
+        for slot in SnapSlot::all() {
+            assert_eq!(SnapSlot::from_index(slot.index()), Some(slot));
+        }
+    }
+
+    #[test]
+    fn every_slot_names_a_zone_its_preset_actually_has() {
+        for slot in SnapSlot::all() {
+            assert!(
+                slot.zone() < slot.preset().zone_count(),
+                "{slot:?} names zone {} of a layout with {} of them",
+                slot.zone(),
+                slot.preset().zone_count()
+            );
+            assert_eq!(SnapSlot::new(slot.preset(), slot.zone()), Some(slot));
+        }
+    }
+
+    #[test]
+    fn a_zone_a_preset_does_not_have_is_not_a_slot() {
+        for &preset in SnapLayoutPreset::all() {
+            assert_eq!(
+                SnapSlot::new(preset, preset.zone_count()),
+                None,
+                "{preset:?} accepted one zone more than it has"
+            );
+            assert_eq!(SnapSlot::new(preset, u8::MAX), None);
+        }
+    }
+
+    #[test]
+    fn all_visits_every_slot_exactly_once() {
+        let slots: Vec<SnapSlot> = SnapSlot::all().collect();
+        assert_eq!(slots.len(), usize::from(SnapSlot::COUNT));
+        for slot in &slots {
+            assert_eq!(
+                slots.iter().filter(|s| *s == slot).count(),
+                1,
+                "{slot:?} appears more than once"
+            );
+        }
+    }
+
+    #[test]
+    fn a_slots_rectangle_is_the_zone_of_that_number_in_its_layout() {
+        // The compositor's only call. If `rect` reached into the wrong layout,
+        // or counted from the wrong end, the window would land somewhere
+        // plausible rather than nowhere — so compare against the layout the
+        // shell's own picker draws, zone for zone.
+        for &preset in SnapLayoutPreset::all() {
+            let drawn = preset.build(TOP_BAR_DESK).zones;
+            for (index, zone) in drawn.iter().enumerate() {
+                let slot = SnapSlot::new(preset, u8::try_from(index).expect("small"))
+                    .expect("a zone the layout built is a zone the layout has");
+                assert_eq!(
+                    slot.rect(TOP_BAR_DESK).as_ref(),
+                    Some(zone),
+                    "{preset:?} zone {index} resolves to a different rectangle than it is drawn at"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_rectangle_is_resolved_against_the_display_it_is_asked_about() {
+        // The whole point of sending a slot rather than a rectangle: the same
+        // request means different pixels on different displays, and the sender
+        // does not have to know which.
+        let slot = SnapSlot::new(SnapLayoutPreset::TwoEqualHalves, 1).expect("right half exists");
+        let wide = slot.rect(SCREEN).expect("resolves");
+        let inset = slot.rect(TOP_BAR_DESK).expect("resolves");
+        assert!(
+            inset.y > wide.y,
+            "the inset work area's zone starts at {} , the same as the full screen's {}",
+            inset.y,
+            wide.y
+        );
+        assert!(inset.height < wide.height);
     }
 }

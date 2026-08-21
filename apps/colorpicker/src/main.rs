@@ -59,6 +59,27 @@ const PALETTE_GAP: f32 = 4.0;
 const MAX_HISTORY: usize = 50;
 const CONTRAST_PANEL_HEIGHT: f32 = 80.0;
 
+/// How many `cell`-wide swatches, separated by `gap`, fit across `avail`
+/// pixels — never fewer than one.
+///
+/// Both swatch grids below index their cells with `i % cells` and `i / cells`
+/// over a loop bounded by the *number of colors*, not by `cells`, so a zero
+/// here is a divide-by-zero panic rather than an empty row. `avail` is derived
+/// from the window width, which is a runtime value the user controls, and a
+/// window narrower than one swatch plus its padding is an ordinary thing to
+/// drag rather than a bug.
+///
+/// Returning `NonZeroUsize` puts the guarantee in the type instead of in a
+/// `.max(1)` at each use site: `render_palette` wrote that guard at both of
+/// its divisions and `render_history` at neither, which is exactly the failure
+/// a proof stated separately from the code it justifies produces.
+fn cells_across(avail: f32, cell: f32, gap: f32) -> core::num::NonZeroUsize {
+    // `as usize` on a float saturates: a negative or NaN width gives 0, which
+    // `NonZeroUsize::new` then rejects into the floor of one cell per row.
+    let fitting = ((avail + gap) / (cell + gap)) as usize;
+    core::num::NonZeroUsize::new(fitting).unwrap_or(core::num::NonZeroUsize::MIN)
+}
+
 // ============================================================================
 // Color format enum
 // ============================================================================
@@ -1462,7 +1483,7 @@ impl ColorPickerApp {
 
         // Calculate how many cells fit in one row.
         let avail_w = self.width - 2.0 * PADDING;
-        let cells_per_row = ((avail_w + HISTORY_GAP) / (HISTORY_CELL + HISTORY_GAP)) as usize;
+        let cells_per_row = cells_across(avail_w, HISTORY_CELL, HISTORY_GAP);
 
         for (i, color) in self.history.iter().enumerate() {
             let col = i % cells_per_row;
@@ -1492,7 +1513,10 @@ impl ColorPickerApp {
             });
         }
 
-        let rows_shown = if self.history.len() > cells_per_row {
+        // `.get()` is right here and nowhere else in this function: this is a
+        // comparison, not a division, so there is no non-zero-ness for the
+        // type to carry.
+        let rows_shown = if self.history.len() > cells_per_row.get() {
             2
         } else if self.history.is_empty() {
             0
@@ -1521,11 +1545,11 @@ impl ColorPickerApp {
         *y += 18.0;
 
         let avail_w = self.width - 2.0 * PADDING;
-        let cells_per_row = ((avail_w + PALETTE_GAP) / (PALETTE_CELL + PALETTE_GAP)) as usize;
+        let cells_per_row = cells_across(avail_w, PALETTE_CELL, PALETTE_GAP);
 
         for (i, (name, color)) in palette.colors.iter().enumerate() {
-            let col = i % cells_per_row.max(1);
-            let row = i / cells_per_row.max(1);
+            let col = i % cells_per_row;
+            let row = i / cells_per_row;
             let cx = PADDING + col as f32 * (PALETTE_CELL + PALETTE_GAP);
             let cy = *y + row as f32 * (PALETTE_CELL + PALETTE_GAP + 14.0);
 
@@ -2296,5 +2320,61 @@ mod tests {
         });
         assert_eq!(app.current.a, 128);
         assert_eq!(app.current.r, 255);
+    }
+
+    #[test]
+    fn a_window_too_narrow_for_one_swatch_still_renders() {
+        // Both grids index with `i % cells_per_row` over a loop bounded by the
+        // number of colors, so a window narrower than one cell used to divide
+        // by zero in `render_history` — `render_palette` happened to carry a
+        // `.max(1)` and `render_history` did not.
+        let mut app = ColorPickerApp::create();
+        for i in 0..12u8 {
+            app.set_color(PickedColor::from_rgb(i, i, i));
+        }
+        assert!(!app.history.is_empty(), "history must be non-empty");
+        assert!(
+            app.palettes.first().is_some_and(|p| !p.colors.is_empty()),
+            "default palette must be non-empty"
+        );
+
+        // A drag past the left edge, and the degenerate widths on either side
+        // of it. Each is a width the user can produce with the mouse.
+        for width in [0.0_f32, 1.0, 2.0 * PADDING, 2.0 * PADDING + 1.0, 30.0] {
+            app.width = width;
+            let cmds = app.render();
+            assert!(
+                !cmds.is_empty(),
+                "rendering at width {width} produced nothing"
+            );
+        }
+    }
+
+    #[test]
+    fn cells_across_never_returns_zero() {
+        // The floor of one cell per row is what keeps the modulo defined; a
+        // NaN or negative width saturates to zero on the `as usize` and must
+        // land on the same floor rather than wrapping to `usize::MAX`.
+        for avail in [
+            f32::NAN,
+            f32::NEG_INFINITY,
+            -1000.0,
+            -1.0,
+            0.0,
+            1.0,
+            27.9,
+        ] {
+            assert_eq!(
+                cells_across(avail, HISTORY_CELL, HISTORY_GAP).get(),
+                1,
+                "avail {avail} should floor to one cell"
+            );
+        }
+        // And it still counts correctly once a row genuinely fits: the default
+        // 600-wide window holds 18 history swatches across.
+        assert_eq!(
+            cells_across(WINDOW_WIDTH - 2.0 * PADDING, HISTORY_CELL, HISTORY_GAP).get(),
+            18
+        );
     }
 }

@@ -32426,6 +32426,46 @@ design-decisions.md #86 (TD-KERNEL-EMBED-BLOAT — why these ELFs moved out of t
 kernel image and onto the rootfs in the first place, which is what makes them
 skippable and therefore what makes this decision cheap).
 
+**As implemented — the gate was itself an instance of this.** Landing the decision
+turned up one thing the analysis had not: the *existing* mtime staleness check
+in `create-ext4-rootfs.sh` lived inside the ctest staging loop and so covered
+the 9 C fixtures, while the 61 fastpy ELFs were staged by a different loop, a
+few hundred lines away, that checked nothing at all.
+
+So the coverage number that condemned the content stamps — 9 of 70 — was not the
+stamps' number. It was the number for *every* guard this tree had over these
+files, arrived at twice independently, because both guards were written inside
+the loop that handled the family that had visibly failed and neither was ever
+carried to the family beside it. That is the more general lesson and it is worth
+stating separately from the storage decision: **a per-family check written inside
+a per-family loop produces a per-family blind spot, and nothing about it looks
+wrong when you read it.** Both guards were correct code. Both were tested in both
+directions. Neither had any way to notice that eight times as many fixtures sat
+outside them.
+
+The implementation therefore has one loop, over the tracked `build.py` recipes,
+answering both questions for both families: is the ELF there, and is it behind
+its inputs. The set it iterates is a fact of the checkout rather than a list
+anybody maintains, which is the property that makes a 71st fixture — or a third
+family — covered on the day it lands rather than on the day it first fails.
+
+Two smaller findings from the same pass:
+
+- **`_inputs()` did not glob `*.h` and the shell gate did.** No fixture has a
+  header today, so nothing was wrong; but the *builder* was the less inclusive
+  of the two, which is the wrong way round. The first fixture to grow a header
+  would have been reported stale on every image build and not fixable by the
+  command the report names. Where a gate and a builder disagree about what an
+  input is, the builder must be the more inclusive.
+- **The four spike ELFs are what is left of the old pattern.** bash, GNU make,
+  pkgconf and CPython still print a rebuild command instead of running it, and
+  that cost a full cycle during this very verification. Measured: 83 s to
+  rebuild all four, against an image build of minutes — so the cost argument for
+  leaving them manual does not survive being measured either. Logged as
+  `TD-B-THE-FOUR-SPIKE-ELFS-STILL-MAKE-YOU-RUN-THE-REBUILD-BY-HAND`; not folded
+  into this change because it fails *closed* (no stale spike can reach an image),
+  which makes it debt rather than a hazard.
+
 **Revisit if:** fastpy is ever vendored into this tree or pinned to a recorded
 revision, which would make its identity expressible in git and reopen C as a way
 to keep the binaries; or if the cold rebuild grows past the boot test itself, at

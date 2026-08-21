@@ -3783,6 +3783,18 @@ extern "C" fn kernel_main() -> ! {
         );
     }
 
+    // The layer underneath that one: `copy_{to,from}_user_as` walk another
+    // process's page table by hand, so nothing faults and the two states a
+    // fault would have fixed — an untouched committed page and a copy-on-write
+    // page — have to be resolved explicitly. Needs live process infrastructure,
+    // so it runs here rather than beside the other mm self-tests at step 8b.
+    if let Err(e) = mm::user::self_test_cross_as_resolution() {
+        serial_println!(
+            "WARNING: cross-address-space fault-resolution self-test failed: {:?}",
+            e
+        );
+    }
+
     boot_timing::mark(boot_timing::Milestone::Filesystem);
 
     // ProcFs self-test — constructs its own `ProcFs::new()` and reads live

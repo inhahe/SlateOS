@@ -24344,6 +24344,272 @@ feature-flag parse. And if gang *writes* are ever wanted, none of this transfers
 — the allocator side is the hard half, and reading is deliberately the only half
 built.
 
+## §249 — Reading another process's memory resolves its faults for it, because nothing is going to fault on its behalf
+
+**Date:** 2026-08-20
+**Decided by:** Claude (autonomous)
+
+**In short.** A debugger can ask the kernel to read or write another running
+program's memory (that is how `process_vm_readv`/`writev`, and hence a debugger's
+"show me that variable", work). The kernel did this by reading the other
+program's memory map by hand — and gave up with a "bad address" error on two
+kinds of page that the program itself would have had no trouble using: a page it
+has been given but has not touched yet, and a page it is sharing with a copy of
+itself after `fork` (the operating system hands out one shared copy and only
+splits it when somebody writes). The second case is the killer, because
+immediately after a `fork` *every* page is in that state — so poking a
+just-started child process failed on every single byte. The kernel now finishes
+the job the same way the processor's own fault handler would have.
+
+**Decision.** `copy_to_user_as` / `copy_from_user_as` (kernel/src/mm/user.rs)
+no longer treat a failed page-table walk as final. On failure they look up which
+process owns the address space, synthesize the page-fault error code the hardware
+*would* have produced for the access they are about to perform by hand, hand it
+to `pcb::try_resolve_fault`, and walk once more. If the second walk fails, the
+address really is unusable and the caller gets `EFAULT` exactly as before.
+
+**Why the same-address-space path already did this and this one did not.** When
+the kernel touches the *current* process's user memory, `validate_user_range`
+pre-faults and pre-breaks CoW, because a real `#PF` is available as a fallback if
+it misses something. The cross-address-space path has no such fallback: it reads
+another process's page tables through the HHDM, so no access it performs can ever
+fault against the address space it is reading. Whatever the walk does not resolve,
+nothing else will. The asymmetry was not a deliberate policy — it was the
+consequence of writing the cross-AS path as "the same walk, but with an explicit
+pml4", and never revisiting what the walk was allowed to leave unresolved.
+
+**Why no signature had to change.** `pcb::try_resolve_fault` already takes the
+pid explicitly and operates entirely on *that* process's `pml4_phys` and VMA
+list — it never reads `CR3`. `cow::resolve_cow_fault` likewise takes an explicit
+pml4, and its `tlb::flush_range` broadcasts an IPI to every CPU rather than
+flushing only the local one, which is conservative for the local case and exactly
+right for this one. The resolver was already correct across address spaces; it
+was simply never called. The only genuinely missing piece was the reverse
+lookup, added as `pcb::pid_for_pml4`.
+
+**Why `pid_for_pml4` uses `try_lock` and answers `None` rather than blocking.**
+It is reached only from a path where a translation has *already* failed, so its
+entire job is to upgrade an error into a success. Declining to answer costs an
+`EFAULT` that would have been returned anyway, whereas blocking could deadlock a
+caller already holding the process table. The scan is linear in live processes,
+which is affordable precisely because the common path — the walk succeeding —
+never calls it.
+
+**Why the synthesized error code's *present* bit is the whole design.**
+`try_resolve_fault` dispatches on it: `present && write` selects the CoW break,
+`!present` selects demand paging, and everything else is unresolvable. So the bit
+must describe the page actually found, not the access desired. The pre-existing
+same-AS helper `try_fault_in_user_page` hard-codes it to zero, which is correct
+*there* only because it is called solely after `translate` returned `None`.
+Copying that convention across would have silently turned every CoW page into an
+unresolvable demand-page request — the exact bug, reintroduced in a new place.
+
+**Why one retry and not a loop.** Each resolvable state is cleared outright by
+its resolver: a populated page is present, a broken CoW page is writable and no
+longer marked `COW`. A second failure therefore means the address is genuinely
+unusable — an unmapped hole, or a read-only VMA — and a loop would spin instead
+of converging.
+
+**Why this does not become a write override.** Resolution does only what a fault
+would have done, so a write to a read-only mapping still fails, in both of its
+forms: while the page is absent, `try_resolve_fault`'s VMA permission check
+refuses; once it is present, `resolve_cow_fault` refuses a page without the `COW`
+bit. Both are asserted by the self-test rather than assumed.
+
+**How it was verified.** A new `mm::user::self_test_cross_as_resolution` builds a
+throwaway process with four one-frame VMAs and exercises: a write into an
+untouched committed page, a read of one, a read-only mapping in both its absent
+and present forms, and — via a real `clone_address_space_cow` — an actual
+copy-on-write break. The CoW case asserts its own preconditions (the page is
+`PRESENT && !WRITABLE && COW`, refcount ≥ 2) before writing, then asserts the
+target moved to a different writable frame carrying *both* the poke and the eight
+stamped bytes it did not write (a fresh zero page would pass the first check and
+fail the second), and that the forked address space still maps the original frame
+with the original contents.
+
+Three assertions are explicit **negative controls**: they call
+`user_page_phys_once` — which *is* the pre-fix code path, still present as the
+raw walk — and require it to fail at the same address the resolving walk then
+succeeds at. Without them the test would be green for reasons it could not
+distinguish from resolution doing nothing at all, which is the failure mode the
+2026-08-19 "zero KASAN reports" and 2026-08-20 "clean ZFS bench" corrections were
+both made of. Boot test PASSED with all of it.
+
+**Why the existing `process_vm` self-test did not catch the bug.** It calls
+`pcb::try_resolve_fault` by hand to pre-fault its target page before copying, and
+only ever uses a plain writable anonymous page. It tests the transfer once the
+page is already there; it works *around* the missing resolution rather than
+exercising it. A test that sets up the easy case is not evidence about the hard
+one.
+
+**Where it lives.** `kernel/src/mm/user.rs` (`user_page_phys`,
+`user_page_phys_once`, `try_resolve_remote`, `self_test_cross_as_resolution`);
+`kernel/src/proc/pcb.rs` (`pid_for_pml4`).
+
+**How to reverse.** Delete `try_resolve_remote` and inline
+`user_page_phys_once` back into `user_page_phys`. Nothing else depends on the
+retry.
+
+**What would change this.** If cross-AS copies ever move to a
+fault-catching design (an exception table, the way Linux's `copy_to_user` works)
+the hand walk disappears and so does the need to resolve on its behalf. And if a
+third resolvable fault class is ever added that its resolver does *not* clear
+outright, the single retry has to become a bounded loop.
+
+## §250 — The benchmark gate lists what nothing measures, because a directory is not a promise
+
+**Date:** 2026-08-20
+**Decided by:** Claude (autonomous)
+
+**In short.** When you change kernel code, the boot test looks at which files
+you touched and tells you whether you ought to run the benchmark suite. It
+decided that by directory: touch anything under `kernel/src/fs`, and it said
+"CLAUDE.md requires benchmarking these — run `--bench`". But `kernel/src/fs`
+holds 467 source files and the suite has a stopwatch on three of them. So for
+almost every file the gate named, running the twenty-minute suite it asked for
+measured nothing about the change and came back green — an assurance nobody had
+earned. The gate now says, per file, whether a benchmark exists: measured files
+in one list, unmeasured files in another headed "running `--bench` will not tell
+you whether these got slower". The tradeoff is that the second list is often
+long and slightly pessimistic.
+
+**Decision.** Replace the directory-level coverage claim with a per-file map
+(`BENCH_COVERAGE` in `scripts/boot-test.sh`), where the default for any file not
+explicitly listed is *no benchmark is known to cover this*. The gate's report is
+split into a covered list and an uncovered list, and it only recommends
+`--bench` when something in the change is actually covered.
+
+**The numbers that forced it.** Counted 2026-08-20 against the 86 benchmarks in
+the newest recorded run:
+
+| Watched directory | Tracked `.rs` files | Files the suite reaches |
+|---|---|---|
+| `kernel/src/fs` | 467 | 3 |
+| `kernel/src/net` | 49 | 10 |
+| `kernel/src/mm` | 47 | 5 |
+| `kernel/src/ipc` | 22 | 10 |
+| `kernel/src/sched` | 18 | 5 |
+| `kernel/src/syscall` | 9 | 3 |
+
+**Four benchmarks measure a copy of the code rather than the code.** This is the
+part that makes the old annotations worse than merely coarse, because they cited
+these by name as the benchmarks a directory "actually guards":
+
+| Benchmark | What it actually times |
+|---|---|
+| `net_checksum` | `internet_checksum()` — defined in `bench.rs:6395` |
+| `tcp_checksum_v4` | `tcp_checksum_bench()` — `bench.rs:6451` |
+| `tcp_checksum_v6` | `tcp_checksum_v6_bench()` — `bench.rs:6520` |
+| `dns_build_query` | `build_dns_query_bench()` — `bench.rs:6664` |
+
+Each is a private reimplementation living in `bench.rs`; one even says so in its
+own doc comment ("duplicated to avoid depending on tcp module internals"). Make
+the real label encoder in `net/dns.rs` ten times slower and all four stay green,
+because none of them ever calls it. Two more were cited for files they never
+enter: `isr_latency` opens its measurement window at `apic.rs:1059`, *inside*
+`handle_timer_irq` and well past the `idt.rs` stub, and `page_fault` hand-rolls
+map/unmap through `page_table` with the CPU exception explicitly excluded
+(`bench.rs:5450`) — so neither measures `kernel/src/idt.rs`, and neither
+measures `mm/fault.rs`, the actual `#PF` handler.
+
+**Why the default is "uncovered" and not "inherit from the parent directory".**
+This is the real tradeoff, and it is a genuine one. Inheritance is quieter: a
+file exercised incidentally by a benchmark aimed at its neighbour gets credit
+without anyone writing a rule. The per-file default is noisier, and it will
+sometimes call a file uncovered that a benchmark does in fact walk through.
+
+It wins anyway because the two errors are not the same size. A file wrongly
+listed as uncovered costs one line of output and, at worst, a benchmark someone
+did not strictly need to write. A file wrongly implied covered costs a
+regression that ships, and costs it *silently* — the whole documented failure
+mode of this mechanism, stated in `BENCH_CRITICAL_PATHS`' own comment, is that
+its false negatives make no sound. When one direction fails loudly and the other
+fails quietly, the default belongs on the loud side.
+
+**Why the map is per-file rather than a smarter rule.** Every entry was read out
+of `bench.rs`'s call sites — which module each benchmark actually invokes — not
+inferred from a name or a directory. That is what makes it checkable, and it is
+what a directory rule can never be: there is no property of "being under
+`kernel/src/fs`" that implies a stopwatch exists.
+
+**Why a rot check is part of the fix, not an extra.** A map that decides whether
+a file counts as covered is exactly as dangerous as the directory rule it
+replaced once it goes stale — a rule left behind by a deleted, renamed, or
+runtime-`SKIP`ped benchmark answers "yes, covered" for a file nothing measures.
+`report_bench_coverage_rot()` therefore checks every name the map cites against
+the newest row of `bench/history.jsonl` on every green boot. Checking the
+*recorded run* rather than grepping `bench.rs` is deliberate: several benchmarks
+print `SKIP` and record nothing, and a source grep cannot see that.
+
+**Alternatives considered.**
+
+- *Leave the directories and add the missing benchmarks instead.* This is not an
+  alternative so much as the other half, and it is still open (a ZFS read
+  benchmark is logged in `known-issues.md`). But it cannot be a substitute:
+  covering 467 `fs` files is not a task that finishes, and until it does the
+  gate would keep certifying the uncovered remainder.
+- *Derive coverage automatically by instrumenting a `--bench` run* (which files
+  executed). Genuinely better in principle — it cannot go stale and it catches
+  incidental coverage. Rejected for now because "a benchmark's code path touched
+  this file" is not the same claim as "this benchmark would notice this file
+  getting slower", and the automated version would reinstate exactly the
+  over-claim being removed, with more authority behind it.
+- *Drop the gate.* It has found real omissions; the problem was never that it
+  asked, it was what it implied by asking.
+
+**How it was verified.** The gate's functions were extracted into a standalone
+harness and run against deliberately dirtied trees: a modified covered file
+(`mm/frame.rs`) is reported under "measured by the suite" with its three
+benchmark names; a modified uncovered file (`mm/user.rs`), a modified file in an
+entirely unbenchmarked subtree (`fs/zfs/mod.rs`) and an untracked new file
+(`ipc/scratch_new.rs`) are all reported under "covered by NO benchmark"; and
+with no covered file in the change, the `--bench` recommendation is correctly
+replaced by "the missing piece is a benchmark, not a run". The rot check was
+given a negative control — a bogus `crypto_sha256_DELETED` spliced into the map
+— and reported it; against the real map it is silent, which means all 86 cited
+names were confirmed present in the last recorded run.
+
+**The first draft of the map contained six of the same over-claims it exists to
+remove**, which is the strongest available argument for both the rot check and
+the pessimistic default. Auditing it entry by entry against `bench.rs` found
+that `mm/frame_owner.rs` is A/B-tested only through `timed()`/`ab_interleaved()`
+and recorded nowhere (an unrecorded measurement cannot detect a regression, so
+it is not coverage); `syscall/number.rs` contributes a compile-time constant and
+therefore no instruction inside the window; `net/interface.rs` is named by four
+benchmarks but only to construct an `Ipv4Addr` *outside* the timed closure;
+`sched/task.rs` supplies types the switch reads while the timed work happens
+elsewhere; `fs/path.rs` was credited to `vfs_stat_breakdown_ns`, which times an
+atomic load on the namespace fast path, rather than to `_prologue`/`_resolve`,
+which actually run `validate_path`/`normalize_path` over its types; and
+`sched/priority_rr.rs` was *under*-claimed, missing `context_switch` even though
+`PerCpuScheduler::pick_next_local` lives there and sits on the yield path.
+
+Five of those six were over-claims, made in the course of writing a fix *for*
+over-claiming, by someone who had just spent an hour cataloguing the harm it
+does. That is not carelessness so much as the nature of the mistake: "this
+benchmark mentions this file" is a much easier question than "this benchmark
+would notice this file getting slower", and the first is constantly mistaken for
+the second. A map maintained by hand will keep drifting toward the easy
+question, which is why the rot check is mandatory rather than nice-to-have, and
+why the default has to fail loudly.
+
+**The demonstration that prompted it.** Earlier the same day the gate named
+`kernel/src/mm/user.rs`, the `--bench` cycle it asked for was duly run, and all
+86 benchmarks completed without once calling `copy_to_user` or `copy_from_user`.
+The run was not wrong about anything; it simply had nothing to say, and the old
+report gave no way to know that in advance.
+
+**How to reverse.** Delete `BENCH_COVERAGE`, `bench_coverage_for()` and
+`report_bench_coverage_rot()`, and restore the single undifferentiated list in
+`report_bench_absence()`. `BENCH_CRITICAL_PATHS` is unchanged in meaning and
+keeps working on its own.
+
+**What would change this.** If the suite ever grows to where most watched files
+are genuinely measured, the uncovered list stops being informative and becomes
+noise, and the balance above flips. Likewise if execution-trace-derived coverage
+becomes available and can distinguish "executed" from "would detect a
+regression", the hand-written map should give way to it.
+
 ## §463 — Two shared RNG crates merge into the dependency-free one
 
 **Date:** 2026-08-18

@@ -13661,6 +13661,33 @@ disabled. Same tactic as the bytes-at-RIP dump added for
 `B-PTHREAD-TEARDOWN-PF`: when a bug is rare and unreproducible, the
 actionable work is to guarantee the *next* occurrence is self-explaining.
 
+**[A] 2026-08-20 — the audit this entry asks for was done, and found a real
+instance in a place this entry does not cover.** The "proper fix if it recurs"
+above says to hunt for kernel paths that write through a user pointer without
+pre-validating. That hunt does not need a repro, so it was run. It found one —
+but not a ring-0 fault path, because the path in question can never fault at
+all: `mm::user::copy_to_user_as` / `copy_from_user_as` walk *another* process's
+page tables through the HHDM, so no access they perform faults against the
+address space they are reading. They were returning a hard `EFAULT` for both an
+untouched-but-committed page and a present CoW page — and immediately after
+`fork` an address space is entirely CoW, so `process_vm_writev` into a
+just-forked target failed on every page. Fixed by resolving explicitly (see
+design-decisions §249), with a self-test covering demand paging, CoW breaks, and
+read-only mappings in both their absent and present forms.
+
+Two consequences for *this* entry. First, its scope is narrower than its title
+suggests: the entry is about the **same-address-space, ring-0 fault** case, and
+the cross-address-space case was never in view because there is no fault there
+to route. Second, it does **not** make this entry reproducible — the fixed path
+is one that could not have raised the `error=0x3` signature described above, so
+the WATCH stands unchanged and the diagnostic added on 2026-08-14 is still the
+mechanism that will identify a genuine recurrence.
+
+Still unaudited, and the natural continuation: every *other* kernel path that
+writes through a user pointer in the current address space without calling
+`validate_user_write` first. `copy_to_user` itself pre-validates, so the
+candidates are paths that bypass it and touch a user address directly.
+
 ### B-ABI1. A *bare* static Linux ELF (no OSABI/PT_INTERP/PT_GNU_PROPERTY) is misclassified as Native-ABI on `exec` — KNOWN LIMITATION (escalated as open-questions.md Q9)
 
 **Symptom:** A Linux binary with none of the markers `elf::detect_linux_abi`
@@ -46337,6 +46364,158 @@ deserve unrelated budgets — but the first is what any run should do today.
 **Workaround until then.** `python scripts/run-timeout.py --poll 60 2700
 ./scripts/boot-test.sh`, backgrounded via the Bash tool's `run_in_background`,
 with no pipe on the command.
+
+## `[A]` The bench gate names `fs/zfs` as perf-critical, but no benchmark can see it
+
+**Status:** OPEN (2026-08-20)
+
+**What happens.** `boot-test.sh` compares the changed file list against its
+perf-critical path rule and, on a match, prints "Performance-critical code
+changed since the last benchmarked commit … CLAUDE.md requires benchmarking
+these" and names the files. On 2026-08-20 it named all three of
+`kernel/src/fs/zfs/{dmu,mod,tests}.rs` after the gang-block change. The
+requested `./scripts/boot-test.sh --bench` run then came back **RUN CLEAN**, 86
+benchmarks, nothing outside its own range.
+
+**Why that is worth an entry.** The suite has **no ZFS benchmark**. Its 86
+entries include sixteen `vfs_*`/`crypto_*` ones, and none of them reaches the
+ZFS reader — it is not mounted at boot and is exercised only by its in-memory
+self-test. So the clean verdict is true and also uninformative: the instrument
+that was asked to check the change is structurally incapable of observing it.
+This is the same failure shape as the 2026-08-19 "zero KASAN reports"
+correction, where the check used a matcher the kernel never emits and therefore
+could not have failed. A gate that always passes teaches the next session to
+stop reading it.
+
+**Two defensible fixes, and they are not equivalent.**
+
+1. *Give the gate something to measure.* Add a ZFS read benchmark — block read
+   with checksum verify (fletcher4 and sha256), indirect-block walk, and gang
+   reassembly are all real per-block costs, and the last is new. This makes the
+   existing rule honest and is the better answer if ZFS is ever mounted for
+   real.
+2. *Make the gate admit what it does not cover.* Have the perf-critical rule
+   report which changed paths have **no** covering benchmark, so the message
+   reads "no benchmark covers this" instead of silently implying one does.
+
+(2) is the more general fix — the same blind spot presumably exists for other
+paths in the rule, and nobody has checked which. (1) is worth doing regardless.
+Neither is urgent: nothing is wrong with the ZFS code, and the risk is one of
+false assurance, not of a missed regression that a *working* instrument would
+have caught.
+
+**Where.** The rule and its message live in `scripts/boot-test.sh`; the
+benchmark registry is under `bench/`.
+
+**[A] 2026-08-20 — a *second*, different defect in the same rule, found and
+fixed.** While reading the rule for fix (2) above, its revision comparison
+turned out to be `git diff --name-only "$last_commit" HEAD`, i.e. a diff between
+two **commits**. Every uncommitted change was therefore invisible to it — and
+since the workflow here is edit, boot-test, then commit, an unbenchmarked change
+to a listed path is *most likely to be uncommitted at exactly the moment the
+gate runs*. The blind spot was the common case, not a corner one.
+
+The proof arrived in two halves one commit apart, with no code change between
+them: a run built from a tree containing a modified `kernel/src/mm/user.rs` (a
+listed path) printed "No perf-critical changes since the last benchmarked
+commit", and the byte-identical tree printed "!! Performance-critical code
+changed … kernel/src/mm/user.rs" on the next run, once the file had been
+committed. Same code, opposite verdicts, decided by nothing but `git add`.
+
+Fixed by diffing the **working tree** (`git diff <commit> -- <paths>`, no second
+rev) and querying untracked files separately — a new file under a benchmarked
+path is code the suite has never measured, which is the strongest reason to
+escalate. The message now also says how many of the named files are uncommitted,
+because `bench/history.jsonl` stamps rows with a commit hash and a row recorded
+from a dirty tree names only an ancestor of what was measured. Verified against
+all three cases (uncommitted modification, new untracked file, committed-only)
+by extracting the function and running it against deliberately dirtied trees.
+
+This does **not** close this entry. It was a missing *revision*; the entry above
+is about a missing *benchmark*, and the gate can now correctly name a path that
+still nothing measures. If anything it raises the priority of fix (2), since the
+rule will now fire in strictly more situations.
+
+**`[A]` 2026-08-20 — fix (2) is now done, and the audit it required found the
+defect underneath both of them.** The gate no longer implies coverage it does
+not have: `scripts/boot-test.sh` carries a per-file `BENCH_COVERAGE` map, and
+its report is split into files the suite measures and files headed "covered by
+NO benchmark. Running --bench will not tell you whether these got slower". The
+default for anything not written down is *uncovered*, so silence is never read
+as coverage. Rationale and the noise-vs-false-assurance tradeoff: design-decisions
+§250.
+
+Building that map required going through all 86 recorded benchmarks and reading
+which module each one actually calls, and that turned up three things worse than
+coarse granularity:
+
+- **Four benchmarks measure a copy of the code rather than the code.**
+  `net_checksum`, `tcp_checksum_v4`, `tcp_checksum_v6` and `dns_build_query` all
+  time private reimplementations living in `bench.rs` (lines 6395, 6451, 6520,
+  6664); one says so in its own doc comment. They cover no kernel file at all.
+  Make the real label encoder in `net/dns.rs` ten times slower and every one of
+  them stays green — and the old `BENCH_CRITICAL_PATHS` annotation cited them by
+  name as the benchmarks `kernel/src/net` "actually guards".
+- **`kernel/src/idt.rs` is measured by neither benchmark cited for it.**
+  `isr_latency`'s window opens at `apic.rs:1059`, inside `handle_timer_irq` and
+  past the IDT stub; `page_fault` hand-rolls map/unmap through `page_table` with
+  the CPU exception explicitly excluded (`bench.rs:5450`). The same two facts
+  mean **`mm/fault.rs`, the actual `#PF` handler, is unbenchmarked** despite
+  "page fault handling" being a row in CLAUDE.md's perf-critical table.
+- **`kernel/src/apic.rs` was not watched at all**, despite holding the only code
+  `isr_latency` times. Added to `BENCH_CRITICAL_PATHS`.
+
+The per-path benchmark annotations on `BENCH_CRITICAL_PATHS` were deleted rather
+than corrected: they were a second copy of a mapping that now lives in
+`BENCH_COVERAGE`, and a second copy is a second thing to be wrong. A
+`report_bench_coverage_rot()` check runs on every green boot and fails the map
+if it cites a benchmark the newest `bench/history.jsonl` row does not contain —
+which catches renames, deletions, and the several benchmarks that print `SKIP`
+and record nothing, the last of which a source grep cannot see.
+
+**Confirmed first-hand the same day.** The `--bench` run this gate demanded for
+`kernel/src/mm/user.rs` completed — PASSED, 86 benchmarks recorded, boot streak
+33 — and observed nothing about the change, because no benchmark calls
+`copy_to_user` or `copy_from_user`. That run was flagged `RUN CONTAMINATED` by
+its own instruments (wall time 212 s against a median of 144 s; lane-B held the
+boot lock for the preceding 300 s), so its one `REGRESSED, UNREPLICATED` line —
+`net_veth_roundtrip` 875 ns → 1334 ns, inside its own 635–1326 ns range at the
+top end — is not attributable to any code change and is logged here rather than
+chased. Under the new report, that same `mm/user.rs` change would have been told
+"nothing here would be measured by --bench", which is both true and 21 minutes
+cheaper.
+
+**Still open:** fix (1), a ZFS read benchmark. Also now visible as consequences
+of the audit: `mm/fault.rs` and `net/dns.rs` have no honest benchmark, and four
+existing benchmarks should either be pointed at the real implementations or
+renamed to admit they are microbenchmarks of `bench.rs`. Pointing them at the
+real code is the correct fix — the reason given for duplicating
+(`tcp_checksum_bench`: "to avoid depending on tcp module internals") is a reason
+to widen the module's public surface, not a reason to measure something else.
+
+**`[A]` 2026-08-20 (follow-up) — the map's own first draft over-claimed six
+times.** Auditing `BENCH_COVERAGE` entry by entry against `bench.rs` before
+trusting it removed `mm/frame_owner.rs` (A/B-tested only via
+`timed()`/`ab_interleaved()`, recorded nowhere — an unrecorded measurement
+cannot detect a regression), `syscall/number.rs` (a compile-time constant),
+`net/interface.rs` (named by four benchmarks, but only to build an `Ipv4Addr`
+outside the timed closure) and `sched/task.rs`; re-pointed `fs/path.rs` from
+`vfs_stat_breakdown_ns` (an atomic load on the namespace fast path) to
+`_prologue`/`_resolve`, which really do run `validate_path`/`normalize_path`
+over its types; and added the missing `context_switch` to
+`sched/priority_rr.rs`, where `PerCpuScheduler::pick_next_local` lives. Corrected
+totals: mm 4 of 47, sched 4 of 18, syscall 2 of 9, net 9 of 49.
+
+Five of the six were over-claims, committed while writing the fix for
+over-claiming. The lesson is in design-decisions §250: "this benchmark mentions
+this file" is an easy question, "this benchmark would notice this file getting
+slower" is the real one, and the first is habitually mistaken for the second.
+Treat `report_bench_coverage_rot()` as load-bearing, and when adding a rule,
+check that the call is inside the `run(...)` closure and that the benchmark is
+`score`d or `track`ed rather than `run_diagnostic`'d.
+
+Validated on a real boot: PASSED, streak 34, with the rot check running silently
+on the live `finish_pass` path under `set -euo pipefail`.
 
 ---
 

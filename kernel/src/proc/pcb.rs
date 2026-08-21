@@ -6068,6 +6068,38 @@ pub fn get_pml4(pid: ProcessId) -> Option<u64> {
     table.get(&pid).map(|p| p.pml4_phys)
 }
 
+/// The inverse of [`get_pml4`]: which process owns this address space?
+///
+/// The cross-address-space copy primitives in [`crate::mm::user`] are handed a
+/// bare PML4, but resolving a fault in that address space needs the *process* —
+/// its VMA list says whether an absent page is committed, and its page table is
+/// what a CoW break rewrites. Rather than thread a pid through every caller,
+/// they ask here. A pml4 that belongs to no live process (a self-test's
+/// throwaway page table, or a target that exited mid-copy) answers `None`, and
+/// the caller then behaves exactly as it did before fault resolution existed.
+///
+/// Uses `try_lock`, and returns `None` rather than blocking, for two reasons.
+/// It is called from a page-walk failure path that may already be nested inside
+/// process-table work, and its whole purpose is to *upgrade* an error into a
+/// success — so failing to answer costs a `EFAULT` that would have been
+/// returned anyway, whereas blocking here could deadlock a caller that already
+/// holds the table.
+///
+/// Linear in the number of live processes, which is affordable because it is
+/// only reached when a translation already failed: the common path never calls
+/// it at all.
+#[must_use]
+pub fn pid_for_pml4(pml4_phys: u64) -> Option<ProcessId> {
+    if pml4_phys == 0 {
+        return None;
+    }
+    let table = PROCESS_TABLE.try_lock()?;
+    table
+        .iter()
+        .find(|(_, p)| p.pml4_phys == pml4_phys)
+        .map(|(pid, _)| *pid)
+}
+
 /// Get the syscall ABI mode for a process.
 ///
 /// Returns `None` if the process does not exist (already reaped,

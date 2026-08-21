@@ -14,7 +14,12 @@ round-trip regression test. `TRANSFER_FROM_HOST` stays `ENOSYS` — the base spe
 no 2D form of it. **Read the "Update 2026-08-21" section of the reply before you
 call any of it**: render resources are *not* GEM objects and their stride is
 unpadded, so a row address computed from a dumb buffer's `pitch` will be wrong.
-**Ask 3 unchanged** — still needs the operator, and is *not* in `open-questions.md`.
+**Ask 3: the operator has now said yes — 2026-08-21.** Q51 is answered and closed as
+`design-decisions.md` §264: *do the port, sequenced after wifi and before Chromium.*
+So Ask 3 is no longer gated on a decision; it is gated on **wifi**, which is ahead of
+Mesa in the queue. Nothing is asked of lane A yet — do not start `CTX_CREATE`/`SUBMIT_3D`
+on the strength of this line. Lane C will re-file with a concrete shape when Mesa is
+actually next, because what the driver needs depends on how the Mesa winsys is built.
 Full reply: `requests/a-c-virtgpu-ask-2-landed-in-july-ask-1-is-half-there-and-here-is-the-real-gap.md`.
 
 **In short:** the compositor draws every pixel on the CPU. The operator has

@@ -39,6 +39,12 @@ mod tests {
 
     #[test]
     fn test_personality_query() {
+        // PERSONALITY_STATE is a process-global atomic and cargo runs these
+        // tests on parallel threads, so take the cross-test lock and set the
+        // value this test asserts on rather than assuming it.  See
+        // `unistd::PERSONALITY_TEST_LOCK`.
+        let _g = crate::unistd::lock_personality_for_test();
+        personality(u64::from(PER_LINUX));
         let ret = personality(0xFFFF_FFFF);
         assert_eq!(ret, 0);
     }

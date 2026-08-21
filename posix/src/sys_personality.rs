@@ -97,23 +97,38 @@ mod tests {
         assert_eq!(PER_LINUX32, 0x0008);
     }
 
-    /// Restore the personality to PER_LINUX so tests don't bleed
-    /// state into each other.  Returns the previous value in case the
-    /// test wants to assert what it was.
-    fn reset_personality() -> i32 {
-        personality(PER_LINUX as u64)
+    /// Take the process-wide personality lock and reset the personality
+    /// to `PER_LINUX`, so tests don't bleed state into each other.
+    ///
+    /// **Bind the returned guard** (`let _g = reset_personality();`) — it is
+    /// the lock, and dropping it immediately would leave the test racing
+    /// again.  `#[must_use]` on `lock_personality_for_test` enforces that one
+    /// level up, and returning the guard rather than the previous personality
+    /// value is what makes the mistake hard to make here: there is no longer
+    /// a plausible reason to call this and discard the result.
+    ///
+    /// Resetting *after* taking the lock is the point.  The old version of
+    /// this helper reset without locking and was paired with a snapshot /
+    /// restore RAII guard, which is not isolation at all — cargo runs these
+    /// tests on parallel threads of one process against one global atomic, so
+    /// a restore-on-drop cannot stop a concurrent writer and can itself
+    /// clobber another test mid-run.  See `unistd::PERSONALITY_TEST_LOCK`.
+    fn reset_personality() -> std::sync::MutexGuard<'static, ()> {
+        let g = crate::unistd::lock_personality_for_test();
+        personality(PER_LINUX as u64);
+        g
     }
 
     #[test]
     fn test_personality_query() {
-        reset_personality();
+        let _g = reset_personality();
         let result = personality(PERSONALITY_QUERY as u64);
         assert_eq!(result, PER_LINUX as i32);
     }
 
     #[test]
     fn test_personality_set() {
-        reset_personality();
+        let _g = reset_personality();
         let result = personality(PER_LINUX as u64);
         assert_eq!(result, PER_LINUX as i32);
     }
@@ -169,22 +184,15 @@ mod tests {
     // query sentinel.  Phase 78 fixes both behaviours.
     // -----------------------------------------------------------------------
 
-    /// RAII guard restoring the personality on drop.
-    struct PersonalityGuard {
-        saved: u32,
-    }
-    impl PersonalityGuard {
-        fn snapshot() -> Self {
-            Self {
-                saved: current_personality(),
-            }
-        }
-    }
-    impl Drop for PersonalityGuard {
-        fn drop(&mut self) {
-            let _ = personality(self.saved as u64);
-        }
-    }
+    // A `PersonalityGuard` used to live here: an RAII type that snapshot the
+    // personality on construction and restored it on drop.  It was removed on
+    // 2026-08-21 because it did not do the job it appeared to do — see
+    // `reset_personality` above and `unistd::PERSONALITY_TEST_LOCK`.  Do not
+    // reintroduce it: save/restore is the wrong tool against a global that
+    // parallel test threads write concurrently, and having it present made
+    // these tests *look* isolated for long enough that a real flake
+    // (`unistd::tests::test_personality_query` reading `0x54_0000`) went
+    // unexplained.  Mutual exclusion is the tool; that is what the lock is.
 
     #[test]
     fn test_phase78_query_constant_value() {
@@ -193,8 +201,7 @@ mod tests {
 
     #[test]
     fn test_phase78_set_returns_previous_value() {
-        let _g = PersonalityGuard::snapshot();
-        reset_personality();
+        let _g = reset_personality();
         // Set to PER_LINUX32, observe previous (PER_LINUX = 0).
         let old = personality(PER_LINUX32 as u64);
         assert_eq!(old, PER_LINUX as i32);
@@ -205,8 +212,7 @@ mod tests {
 
     #[test]
     fn test_phase78_query_returns_current_after_set() {
-        let _g = PersonalityGuard::snapshot();
-        reset_personality();
+        let _g = reset_personality();
         let _ = personality(PER_LINUX32 as u64);
         let q = personality(PERSONALITY_QUERY as u64);
         assert_eq!(q, PER_LINUX32 as i32);
@@ -217,8 +223,7 @@ mod tests {
 
     #[test]
     fn test_phase78_query_does_not_clobber_state() {
-        let _g = PersonalityGuard::snapshot();
-        reset_personality();
+        let _g = reset_personality();
         let _ = personality((ADDR_NO_RANDOMIZE | PER_LINUX) as u64);
         let _ = personality(PERSONALITY_QUERY as u64); // query (should not change)
         let _ = personality(PERSONALITY_QUERY as u64);
@@ -229,8 +234,7 @@ mod tests {
 
     #[test]
     fn test_phase78_current_personality_helper_matches_query() {
-        let _g = PersonalityGuard::snapshot();
-        reset_personality();
+        let _g = reset_personality();
         let _ = personality(PER_BSD as u64);
         assert_eq!(current_personality(), PER_BSD);
         let queried = personality(PERSONALITY_QUERY as u64) as u32;
@@ -244,8 +248,7 @@ mod tests {
         // Linux's syscall is `unsigned int`; bits above 32 are dropped.
         // 0xFFFF_FFFF_FFFF_FFFF must be treated as the query sentinel,
         // not as a set with garbage high bits.
-        let _g = PersonalityGuard::snapshot();
-        reset_personality();
+        let _g = reset_personality();
         let _ = personality(PER_LINUX32 as u64);
         let q = personality(0xFFFF_FFFF_FFFF_FFFF);
         assert_eq!(q, PER_LINUX32 as i32);
@@ -255,8 +258,7 @@ mod tests {
 
     #[test]
     fn test_phase78_high_bits_of_u64_truncated_for_set() {
-        let _g = PersonalityGuard::snapshot();
-        reset_personality();
+        let _g = reset_personality();
         // Set with high bits that should be discarded.  Only the low
         // 32 bits become the stored personality.
         let _ = personality(0xDEAD_BEEF_0000_0008);
@@ -265,7 +267,7 @@ mod tests {
 
     #[test]
     fn test_phase78_zero_set_returns_to_per_linux() {
-        let _g = PersonalityGuard::snapshot();
+        let _g = crate::unistd::lock_personality_for_test();
         let _ = personality(PER_LINUX32 as u64);
         let old = personality(0);
         // Could be PER_LINUX32 if just set, but generally the previous
@@ -280,8 +282,7 @@ mod tests {
     fn test_phase78_unknown_bits_are_preserved() {
         // Linux does NOT validate the bits; whatever you store comes
         // back out.  This mirrors `proc/self/personality` behaviour.
-        let _g = PersonalityGuard::snapshot();
-        reset_personality();
+        let _g = reset_personality();
         let weird: u32 = 0x1234_5678;
         let _ = personality(weird as u64);
         assert_eq!(current_personality(), weird);
@@ -291,8 +292,7 @@ mod tests {
 
     #[test]
     fn test_phase78_combined_flags_round_trip() {
-        let _g = PersonalityGuard::snapshot();
-        reset_personality();
+        let _g = reset_personality();
         let combined = PER_LINUX | ADDR_NO_RANDOMIZE | MMAP_PAGE_ZERO | READ_IMPLIES_EXEC;
         let _ = personality(combined as u64);
         assert_eq!(current_personality(), combined);
@@ -302,8 +302,7 @@ mod tests {
     fn test_phase78_max_u32_minus_one_is_set_not_query() {
         // 0xFFFFFFFE is *not* the query sentinel — only 0xFFFFFFFF is.
         // It must be stored.
-        let _g = PersonalityGuard::snapshot();
-        reset_personality();
+        let _g = reset_personality();
         let _ = personality(0xFFFF_FFFE);
         assert_eq!(current_personality(), 0xFFFF_FFFE);
         // A subsequent real query reads it back.
@@ -315,8 +314,7 @@ mod tests {
 
     #[test]
     fn test_phase78_workflow_set_query_set_returns_chain() {
-        let _g = PersonalityGuard::snapshot();
-        reset_personality();
+        let _g = reset_personality();
         // After each `personality(new)` the *previous* is returned.
         let a = personality(PER_LINUX as u64); // prev: whatever, now 0
         let _ = a;
@@ -334,8 +332,7 @@ mod tests {
     fn test_phase78_addr_no_randomize_set_then_query() {
         // Common real-world use: a debugger setting ADDR_NO_RANDOMIZE
         // before exec'ing the target.  Verify the bit survives a query.
-        let _g = PersonalityGuard::snapshot();
-        reset_personality();
+        let _g = reset_personality();
         let _ = personality((PER_LINUX | ADDR_NO_RANDOMIZE) as u64);
         let q = personality(PERSONALITY_QUERY as u64) as u32;
         assert_eq!(q & ADDR_NO_RANDOMIZE, ADDR_NO_RANDOMIZE);
@@ -349,8 +346,7 @@ mod tests {
         // C code that does `personality((unsigned long)(-1))` on a
         // 64-bit platform passes 0xFFFFFFFFFFFFFFFF as u64.  This must
         // be the query, not a corrupt set.
-        let _g = PersonalityGuard::snapshot();
-        reset_personality();
+        let _g = reset_personality();
         let _ = personality(PER_LINUX32 as u64);
         let neg_one_as_ulong: u64 = !0u64;
         let q = personality(neg_one_as_ulong);
@@ -363,8 +359,7 @@ mod tests {
         // i32::MIN bit pattern (0x80000000) cast to u64 — top bit set.
         // After truncation it's 0x80000000, a valid personality value
         // (no Linux validation).  Must be stored.
-        let _g = PersonalityGuard::snapshot();
-        reset_personality();
+        let _g = reset_personality();
         let _ = personality(0x8000_0000_u64);
         assert_eq!(current_personality(), 0x8000_0000);
     }

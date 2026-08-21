@@ -282,20 +282,40 @@ pub enum CtcpMessage {
     Unknown(String, String),
 }
 
+/// Strip the `\x01` delimiters that frame a CTCP payload, or `None` if `text`
+/// is not framed as one.
+///
+/// `strip_prefix`/`strip_suffix` rather than a `starts_with`/`ends_with` test
+/// followed by `&text[1..text.len() - 1]`, because the latter puts the proof
+/// that the slice is in bounds in a *different statement* from the slice. It
+/// was wrong: a lone `"\x01"` starts with `\x01` and also ends with it — the
+/// same byte answering both tests — so the guard passed and the slice became
+/// `1..0`, which panics. `text` here is a PRIVMSG trailing parameter, i.e.
+/// whatever the server sent, so that was a one-line remote client kill.
+///
+/// Stripping in sequence cannot make that mistake: after the prefix is
+/// removed, the suffix is looked for in what is *left*, and an empty string
+/// has no `\x01` to end with.
+fn ctcp_payload(text: &str) -> Option<&str> {
+    text.strip_prefix('\x01')?.strip_suffix('\x01')
+}
+
+/// Split a CTCP payload into its verb and the rest, per the one-space
+/// convention. A payload with no space is all verb and no argument.
+fn ctcp_split_verb(inner: &str) -> (&str, &str) {
+    inner.split_once(' ').unwrap_or((inner, ""))
+}
+
 impl CtcpMessage {
     /// Parse CTCP from a PRIVMSG trailing parameter.
     pub fn parse(text: &str) -> Option<Self> {
-        if !text.starts_with('\x01') || !text.ends_with('\x01') {
-            return None;
-        }
-        let inner = &text[1..text.len() - 1];
-        let (cmd, rest) = if let Some(space) = inner.find(' ') {
-            (&inner[..space], &inner[space + 1..])
-        } else {
-            (inner, "")
-        };
+        let (cmd, rest) = ctcp_split_verb(ctcp_payload(text)?);
 
-        match cmd.to_uppercase().as_str() {
+        // ASCII folding, not `to_uppercase`: CTCP verbs are ASCII by spec, and
+        // `action_text` below has to agree with this match exactly. Unicode
+        // folding would let the two disagree — `"actıon"` (dotless i)
+        // uppercases to `"ACTION"` but is not `eq_ignore_ascii_case` to it.
+        match cmd.to_ascii_uppercase().as_str() {
             "VERSION" => Some(Self::Version),
             "PING" => Some(Self::Ping(rest.to_string())),
             "ACTION" => Some(Self::Action(rest.to_string())),
@@ -306,16 +326,29 @@ impl CtcpMessage {
         }
     }
 
+    /// Whether `text` is a CTCP ACTION — defined as, and therefore unable to
+    /// disagree with, [`Self::action_text`] finding one.
     pub fn is_action(text: &str) -> bool {
-        text.starts_with("\x01ACTION") && text.ends_with('\x01')
+        Self::action_text(text).is_some()
     }
 
+    /// The text of a CTCP ACTION, borrowed from `text`, or `None`.
+    ///
+    /// Recognises exactly what [`Self::parse`] reports as [`Self::Action`].
+    /// It used to be its own parser — `starts_with("\x01ACTION")` and then
+    /// `&text[8..text.len() - 1]` — and the two disagreed three ways, all of
+    /// them reachable from the wire:
+    ///
+    /// * `"\x01ACTION\x01"` passed the guard at 8 bytes and sliced `8..7`,
+    ///   which panics.
+    /// * `"\x01ACTIONfoo\x01"` was an action with text `"oo"` here (the
+    ///   hard-coded `8` assumed a space that was never checked for) and the
+    ///   unknown verb `ACTIONFOO` in `parse`.
+    /// * `"\x01ACTIONé \x01"` put index 8 in the middle of the `é`, which
+    ///   panics on the char boundary.
     pub fn action_text(text: &str) -> Option<&str> {
-        if Self::is_action(text) {
-            Some(&text[8..text.len() - 1])
-        } else {
-            None
-        }
+        let (cmd, rest) = ctcp_split_verb(ctcp_payload(text)?);
+        cmd.eq_ignore_ascii_case("ACTION").then_some(rest)
     }
 
     pub fn format_action(text: &str) -> String {
@@ -1830,6 +1863,54 @@ mod tests {
         let text = "\x01ACTION waves\x01";
         assert!(CtcpMessage::is_action(text));
         assert_eq!(CtcpMessage::action_text(text), Some("waves"));
+    }
+
+    /// Every one of these strings used to panic the client, and every one of
+    /// them is something a server can put in a PRIVMSG. The old framing test
+    /// (`starts_with('\x01') && ends_with('\x01')`) let a single `\x01` answer
+    /// both halves, and the old ACTION parser hard-coded the byte offset 8.
+    #[test]
+    fn hostile_ctcp_framing_does_not_panic() {
+        // One byte answering both `starts_with` and `ends_with`: sliced 1..0.
+        assert!(CtcpMessage::parse("\x01").is_none());
+        assert!(CtcpMessage::action_text("\x01").is_none());
+        // Empty, and unframed-but-suffixed, and prefixed-but-unterminated.
+        for text in ["", "\x01ACTION", "ACTION\x01", "\x01\x01"] {
+            let _ = CtcpMessage::parse(text);
+            let _ = CtcpMessage::action_text(text);
+        }
+        // 8 bytes exactly: the old `&text[8..text.len() - 1]` was `8..7`.
+        assert_eq!(CtcpMessage::action_text("\x01ACTION\x01"), Some(""));
+        // Index 8 landed inside the `é`, panicking on the char boundary.
+        assert_eq!(CtcpMessage::action_text("\x01ACTIONé \x01"), None);
+        assert_eq!(CtcpMessage::action_text("\x01ACTION é\x01"), Some("é"));
+    }
+
+    /// `action_text` and `parse` are one recogniser, so they cannot report a
+    /// different verb for the same string. `\x01ACTIONfoo\x01` used to be an
+    /// action with the text `"oo"` to one and the unknown verb `ACTIONFOO` to
+    /// the other.
+    #[test]
+    fn action_text_agrees_with_parse() {
+        for text in [
+            "\x01ACTION waves\x01",
+            "\x01ACTIONfoo\x01",
+            "\x01ACTION\x01",
+            "\x01action waves\x01",
+            "\x01VERSION\x01",
+            "\x01\x01",
+            "plain text",
+        ] {
+            let by_parse = match CtcpMessage::parse(text) {
+                Some(CtcpMessage::Action(a)) => Some(a),
+                _ => None,
+            };
+            assert_eq!(
+                by_parse.as_deref(),
+                CtcpMessage::action_text(text),
+                "disagreement on {text:?}"
+            );
+        }
     }
 
     #[test]

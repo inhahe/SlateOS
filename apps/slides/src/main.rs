@@ -2298,8 +2298,8 @@ impl SlidesApp {
         let thumb_w: f32 = 220.0;
         let thumb_h: f32 = thumb_w / SLIDE_ASPECT;
         let gap: f32 = 16.0;
-        let cols = ((avail_w - gap) / (thumb_w + gap)).max(1.0) as usize;
-        let total_grid_w = (cols as f32) * (thumb_w + gap) - gap;
+        let cols = guitk::grid::columns_across(avail_w - 2.0 * gap, thumb_w, gap);
+        let total_grid_w = (cols.get() as f32) * (thumb_w + gap) - gap;
         let grid_x = (avail_w - total_grid_w) / 2.0;
 
         // Clip to the sorter area.
@@ -2311,12 +2311,11 @@ impl SlidesApp {
         });
 
         for (i, slide) in self.slides.iter().enumerate() {
-            // cols was clamped to >= 1 above, so the divisions are
-            // safe — silence arithmetic_side_effects locally rather
-            // than going through checked_* helpers.
-            #[allow(clippy::arithmetic_side_effects)]
+            // `cols` is a `NonZeroUsize`, so these use the `Rem`/`Div` impls
+            // that cannot divide by zero. The clamp used to be a `.max(1.0)`
+            // twenty lines up, with an `#[allow(arithmetic_side_effects)]` at
+            // each division vouching for it from a distance.
             let col = i % cols;
-            #[allow(clippy::arithmetic_side_effects)]
             let row = i / cols;
             let tx = grid_x + (col as f32) * (thumb_w + gap);
             let ty = top + gap + (row as f32) * (thumb_h + gap + 24.0);

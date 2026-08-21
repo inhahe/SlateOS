@@ -9,6 +9,7 @@
 //! via a capability-gated registration API.
 
 use guitk::color::Color;
+use guitk::idseq::IdSeq;
 use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::style::CornerRadii;
 
@@ -427,8 +428,8 @@ pub struct DesktopWidgetManager {
     pub layer_visible: bool,
     /// Whether in edit mode (can move/resize/add/remove widgets).
     pub edit_mode: bool,
-    /// Next widget instance ID.
-    next_id: WidgetInstanceId,
+    /// Source of widget instance IDs.
+    ids: IdSeq<WidgetInstanceId>,
     /// Maximum number of widgets.
     pub max_widgets: usize,
     /// Whether the add-widget picker is open.
@@ -444,7 +445,7 @@ impl DesktopWidgetManager {
             grid: WidgetGridConfig::default(),
             layer_visible: true,
             edit_mode: false,
-            next_id: 1,
+            ids: IdSeq::new(),
             max_widgets: 20,
             picker_open: false,
             selected_widget: None,
@@ -462,12 +463,7 @@ impl DesktopWidgetManager {
             return None;
         }
 
-        // Refusing when the ID space is exhausted is the only answer that
-        // keeps IDs unique — wrapping or saturating would alias two widgets,
-        // and every lookup here is by ID.
-        let next = self.next_id.checked_add(1)?;
-        let id = self.next_id;
-        self.next_id = next;
+        let id = self.ids.issue_infallible();
         self.widgets.push(WidgetInstance::new(id, kind, position));
         Some(id)
     }

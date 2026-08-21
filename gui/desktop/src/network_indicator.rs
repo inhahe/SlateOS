@@ -6,6 +6,7 @@
 
 use guitk::color::Color;
 use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
+use guitk::step;
 use guitk::style::CornerRadii;
 
 // ============================================================================
@@ -429,26 +430,35 @@ impl NetworkIndicator {
         self.state.airplane_mode = !self.state.airplane_mode;
     }
 
+    /// Move the highlight to the next network, wrapping past the last.
+    ///
+    /// Wrapping, unlike the launcher's clamped list: this is a short menu of
+    /// nearby networks with no meaningful order, so thumbing off the bottom
+    /// and round to the top is what a user expects. The empty-list guard
+    /// stays because "no networks" must leave the selection *absent*, which
+    /// is a different thing from selecting the zeroth of nothing.
     pub fn select_next(&mut self) {
         if self.wifi_networks.is_empty() {
             return;
         }
-        let max = self.wifi_networks.len().saturating_sub(1);
+        let len = self.wifi_networks.len();
         self.selected_index = Some(match self.selected_index {
-            Some(i) if i < max => i + 1,
-            _ => 0,
+            Some(i) => step::wrapping_after(len, i),
+            // Nothing selected yet: the first network, not the one after it.
+            None => 0,
         });
     }
 
+    /// Move the highlight to the previous network, wrapping past the first.
     pub fn select_prev(&mut self) {
         if self.wifi_networks.is_empty() {
             return;
         }
-        let max = self.wifi_networks.len().saturating_sub(1);
-        self.selected_index = Some(match self.selected_index {
-            Some(0) | None => max,
-            Some(i) => i - 1,
-        });
+        let len = self.wifi_networks.len();
+        // With nothing selected, stepping back enters the list at the end —
+        // which is exactly where wrapping back from the first one lands.
+        let from = self.selected_index.unwrap_or(0);
+        self.selected_index = Some(step::wrapping_before(len, from));
     }
 
     pub fn selected_index(&self) -> Option<usize> {

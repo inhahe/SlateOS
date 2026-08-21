@@ -424,17 +424,21 @@ impl TaskbarState {
             MouseEventKind::Leave => {
                 self.hover_index = None;
                 self.update_hover_states();
-                if let Some(ref mut drag) = self.drag {
+                if let Some(drag) = self.drag.take() {
                     // Dragging out of the taskbar — unpin if it was pinned.
-                    if drag.active {
-                        let idx = drag.source_index;
-                        if idx < self.buttons.len() && self.buttons[idx].pinned {
-                            let app_id = self.buttons[idx].app_id.clone();
-                            self.remove_pinned(&app_id);
-                            self.events.push(TaskbarEvent::AppUnpinned { app_id });
-                        }
+                    // The index can be stale for the same reason it can be on
+                    // release: the button list is rebuilt whenever a window
+                    // opens or closes.
+                    let unpin = drag
+                        .active
+                        .then(|| self.buttons.get(drag.source_index))
+                        .flatten()
+                        .filter(|button| button.pinned)
+                        .map(|button| button.app_id.clone());
+                    if let Some(app_id) = unpin {
+                        self.remove_pinned(&app_id);
+                        self.events.push(TaskbarEvent::AppUnpinned { app_id });
                     }
-                    self.drag = None;
                 }
                 EventResult::Consumed
             }
@@ -822,40 +826,44 @@ impl TaskbarState {
                 let drop_idx = self.drop_target_index(x);
                 let src_idx = d.source_index;
 
-                if src_idx < self.buttons.len() {
-                    let button = &self.buttons[src_idx];
-                    if button.pinned {
-                        // Reorder pinned apps.
-                        let pinned_idx = self
-                            .pinned_apps
-                            .iter()
-                            .position(|p| p.app_id == button.app_id);
-                        if let Some(from) = pinned_idx {
-                            let to = drop_idx.min(self.pinned_apps.len().saturating_sub(1));
-                            if from != to {
-                                let app_id = self.pinned_apps[from].app_id.clone();
-                                self.reorder_pinned(from, to);
-                                self.events.push(TaskbarEvent::PinnedReordered {
-                                    app_id,
-                                    new_position: to as u32,
-                                });
-                            }
+                // The button list is rebuilt whenever a window opens or
+                // closes, so between the press that started the drag and this
+                // release the source index can go stale. `get` makes that a
+                // dropped drag rather than a panic in the shell.
+                let Some(button) = self.buttons.get(src_idx) else {
+                    return EventResult::Consumed;
+                };
+                let app_id = button.app_id.clone();
+                let display_name = button.display_name.clone();
+
+                if button.pinned {
+                    // Reorder pinned apps. The search below matches on this
+                    // very `app_id`, so the slot it finds necessarily carries
+                    // it — reading the id back out of the slot would be a
+                    // second lookup answering a question we already answered.
+                    let pinned_idx = self.pinned_apps.iter().position(|p| p.app_id == app_id);
+                    if let Some(from) = pinned_idx {
+                        let to = drop_idx.min(self.pinned_apps.len().saturating_sub(1));
+                        if from != to {
+                            self.reorder_pinned(from, to);
+                            self.events.push(TaskbarEvent::PinnedReordered {
+                                app_id,
+                                new_position: to as u32,
+                            });
                         }
-                    } else {
-                        // Dragging an unpinned running app into the pinned section — pin it.
-                        let app_id = button.app_id.clone();
-                        let display_name = button.display_name.clone();
-                        let position = drop_idx as u32;
-                        self.add_pinned(PinnedApp {
-                            app_id: app_id.clone(),
-                            display_name,
-                            icon_type: IconType::Generic,
-                            exec_path: String::new(),
-                            position,
-                        });
-                        self.events
-                            .push(TaskbarEvent::AppPinned { app_id, position });
                     }
+                } else {
+                    // Dragging an unpinned running app into the pinned section — pin it.
+                    let position = drop_idx as u32;
+                    self.add_pinned(PinnedApp {
+                        app_id: app_id.clone(),
+                        display_name,
+                        icon_type: IconType::Generic,
+                        exec_path: String::new(),
+                        position,
+                    });
+                    self.events
+                        .push(TaskbarEvent::AppPinned { app_id, position });
                 }
                 EventResult::Consumed
             }
@@ -908,11 +916,9 @@ impl TaskbarState {
     }
 
     fn handle_button_click(&mut self, idx: usize) -> EventResult {
-        if idx >= self.buttons.len() {
+        let Some(button) = self.buttons.get(idx) else {
             return EventResult::Ignored;
-        }
-
-        let button = &self.buttons[idx];
+        };
         if button.is_running() {
             if button.state == ButtonState::Focused {
                 // Already focused — minimize.
@@ -964,10 +970,9 @@ impl TaskbarState {
     }
 
     fn context_menu_items(&self, button_index: usize) -> Vec<ContextMenuItem> {
-        if button_index >= self.buttons.len() {
+        let Some(button) = self.buttons.get(button_index) else {
             return Vec::new();
-        }
-        let button = &self.buttons[button_index];
+        };
         let mut items = Vec::new();
 
         if button.pinned {
@@ -1013,11 +1018,13 @@ impl TaskbarState {
             None => return,
         };
         let idx = menu.button_index;
-        if idx >= self.buttons.len() {
+        // The menu carries the index it was opened for, and the button list is
+        // rebuilt whenever a window opens or closes — so between the right
+        // click and the menu click the index can go stale. `get` is what makes
+        // that a no-op rather than a panic in the shell.
+        let Some(button) = self.buttons.get(idx) else {
             return;
-        }
-
-        let button = &self.buttons[idx];
+        };
         match item {
             ContextMenuItem::Pin => {
                 let app_id = button.app_id.clone();
@@ -1738,6 +1745,53 @@ mod tests {
     // ==========================================================================
     // Drag tests
     // ==========================================================================
+
+    /// The button list is rebuilt whenever a window opens or closes, which can
+    /// happen between the press that starts a drag and the release that ends
+    /// it — the dragged window closing on its own is the ordinary case. The
+    /// index the drag carries is then stale, and a taskbar is the last process
+    /// in the system that may abort over it.
+    #[test]
+    fn a_drag_whose_button_disappeared_mid_gesture_is_dropped_not_fatal() {
+        let mut state = default_state();
+        state.add_pinned(make_pinned("a", "A", 0));
+        state.add_running_window(WindowId(1), "b", "B Window");
+        state.add_running_window(WindowId(2), "c", "C Window");
+        state.rebuild_buttons();
+        let last = state.buttons.len() - 1;
+        let x = (0..2000)
+            .map(|i| i as f32)
+            .find(|&x| state.button_at_x(x) == Some(last))
+            .expect("the last button has to be somewhere on the bar");
+
+        state.handle_mouse_event(&MouseEvent {
+            x,
+            y: 20.0,
+            kind: MouseEventKind::Press(MouseButton::Left),
+        });
+        state.handle_mouse_event(&MouseEvent {
+            x: x + 40.0,
+            y: 20.0,
+            kind: MouseEventKind::Move,
+        });
+
+        // Both unpinned windows close while the button is still held.
+        state.remove_running_window(WindowId(1));
+        state.remove_running_window(WindowId(2));
+        state.rebuild_buttons();
+        state.drain_events();
+
+        let result = state.handle_mouse_event(&MouseEvent {
+            x: x + 40.0,
+            y: 20.0,
+            kind: MouseEventKind::Release(MouseButton::Left),
+        });
+        assert_eq!(result, EventResult::Consumed);
+        assert!(
+            state.drain_events().is_empty(),
+            "a drag of a button that no longer exists must not pin or reorder anything",
+        );
+    }
 
     #[test]
     fn test_drag_threshold_not_met_is_click() {

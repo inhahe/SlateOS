@@ -20,8 +20,9 @@ use guitk::color::Color;
 use guitk::event::{Event, EventResult, Key, KeyEvent, Modifiers, MouseButton, MouseEventKind};
 use guitk::fold;
 #[allow(unused_imports)]
+use guitk::ratio;
 use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
-use guitk::rng::{seeded_from_system, RandomSource, SeededRng};
+use guitk::rng::{RandomSource, SeededRng, seeded_from_system};
 #[allow(unused_imports)]
 use guitk::style::CornerRadii;
 use guitk::wheel;
@@ -405,7 +406,11 @@ impl LatencyTester {
         // Destructured rather than indexed: `windows(2)` does only yield pairs,
         // but a slice pattern says so to the compiler instead of to the reader,
         // so the guarantee is checked rather than commented.
-        for &[a, b] in self.samples.windows(2).filter_map(|w| <&[f64; 2]>::try_from(w).ok()) {
+        for &[a, b] in self
+            .samples
+            .windows(2)
+            .filter_map(|w| <&[f64; 2]>::try_from(w).ok())
+        {
             total_diff += (b - a).abs();
             count = count.saturating_add(1);
         }
@@ -415,12 +420,10 @@ impl LatencyTester {
         Some(total_diff / count as f64)
     }
 
-    /// Packet loss percentage (0.0 to 100.0).
+    /// Packet loss percentage (0.0 to 100.0). No probes sent is no loss.
+    #[must_use]
     pub fn packet_loss_pct(&self) -> f64 {
-        if self.probes_sent == 0 {
-            return 0.0;
-        }
-        (self.probes_lost as f64 / self.probes_sent as f64) * 100.0
+        ratio::percent(self.probes_lost, self.probes_sent).unwrap_or(0.0)
     }
 
     /// Number of successful samples collected.
@@ -2333,9 +2336,19 @@ mod tests {
     fn two_simulated_runs_of_one_app_differ() {
         let mut app = SpeedTestUI::with_seed(0xA5A5_1234_5678_9ABC);
         app.simulate_test();
-        let first: Vec<f64> = app.download_tester.samples().iter().map(|s| s.mbps).collect();
+        let first: Vec<f64> = app
+            .download_tester
+            .samples()
+            .iter()
+            .map(|s| s.mbps)
+            .collect();
         app.simulate_test();
-        let second: Vec<f64> = app.download_tester.samples().iter().map(|s| s.mbps).collect();
+        let second: Vec<f64> = app
+            .download_tester
+            .samples()
+            .iter()
+            .map(|s| s.mbps)
+            .collect();
         assert_ne!(first, second, "the second run replayed the first");
     }
 
@@ -2352,7 +2365,11 @@ mod tests {
     fn a_fresh_app_is_seeded_by_the_system_and_not_by_a_literal() {
         fn first_run(mut app: SpeedTestUI) -> Vec<f64> {
             app.simulate_test();
-            app.download_tester.samples().iter().map(|s| s.mbps).collect()
+            app.download_tester
+                .samples()
+                .iter()
+                .map(|s| s.mbps)
+                .collect()
         }
         let fresh = first_run(SpeedTestUI::new());
         assert_eq!(fresh, first_run(SpeedTestUI::with_seed(FALLBACK_SEED)));

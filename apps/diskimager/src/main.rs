@@ -26,6 +26,7 @@ use guitk::event::{
 #[allow(unused_imports)]
 use guitk::layout::{FlexAlign, FlexDirection, FlexItem, FlexJustify, SizeConstraint};
 #[allow(unused_imports)]
+use guitk::ratio;
 use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 #[allow(unused_imports)]
 use guitk::style::{Borders, CornerRadii, Edges, FontWeight, Style, TextAlign};
@@ -864,12 +865,10 @@ impl OperationProgress {
         }
     }
 
-    /// Fraction complete (0.0 to 1.0).
+    /// Fraction complete (0.0 to 1.0). An image of unknown size is at 0%.
+    #[must_use]
     pub fn fraction(&self) -> f32 {
-        if self.bytes_total == 0 {
-            return 0.0;
-        }
-        (self.bytes_done as f64 / self.bytes_total as f64) as f32
+        ratio::fraction(self.bytes_done, self.bytes_total).unwrap_or(0.0) as f32
     }
 
     /// Percentage complete.

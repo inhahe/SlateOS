@@ -32,6 +32,7 @@
 
 use guitk::color::Color;
 use guitk::event::{EventResult, Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
+use guitk::idseq::IdSeq;
 use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::style::CornerRadii;
 use guitk::text;
@@ -198,11 +199,15 @@ impl TimeGroup {
     }
 
     /// Classify a timestamp relative to `now`.
+    ///
+    /// A notification stamped in the *future* — an NTP correction or a DST
+    /// fix moved the clock back after it arrived, or another process stamped
+    /// it from a slightly faster clock — is aged zero rather than aged the
+    /// whole way around `u64`. Saturating rather than guarding above puts
+    /// that proof in the same expression as the subtraction it justifies,
+    /// which is the difference between a guard and a guard someone can move.
     fn classify(timestamp: u64, now: u64) -> Self {
-        if now < timestamp {
-            return Self::Today;
-        }
-        let age = now - timestamp;
+        let age = now.saturating_sub(timestamp);
         if age < SECS_PER_DAY {
             Self::Today
         } else if age < 2 * SECS_PER_DAY {
@@ -479,8 +484,8 @@ pub struct NotificationPane {
     state: PaneState,
     /// Stored notifications (newest first).
     notifications: Vec<Notification>,
-    /// Next notification ID to assign.
-    next_id: u64,
+    /// Source of notification IDs.
+    ids: IdSeq,
     /// Quick settings state.
     quick_settings: QuickSettingsState,
     /// Per-app notification settings.
@@ -515,7 +520,7 @@ impl NotificationPane {
         Self {
             state: PaneState::Hidden,
             notifications: Vec::new(),
-            next_id: 1,
+            ids: IdSeq::new(),
             quick_settings: QuickSettingsState::default(),
             app_settings: Vec::new(),
             scroll_offset: 0.0,
@@ -574,8 +579,7 @@ impl NotificationPane {
     /// If the pane already has `MAX_NOTIFICATIONS`, the oldest is evicted.
     /// Returns the assigned notification ID.
     pub fn push_notification(&mut self, mut notif: Notification) -> u64 {
-        let id = self.next_id;
-        self.next_id += 1;
+        let id = self.ids.issue_infallible();
         notif.id = id;
 
         // Ensure per-app settings exist.
@@ -1808,11 +1812,18 @@ impl NotificationPane {
         }
     }
 
+    /// How long ago `timestamp` was, as a label.
+    ///
+    /// The two cases that are not a duration are kept apart: a pane that has
+    /// never been given a clock reading genuinely does not know, and says
+    /// `"now"`; a timestamp ahead of the clock is one the clock has moved
+    /// backwards past, which is an age of zero and says `"just now"` like
+    /// every other age of zero.
     fn format_relative_time(&self, timestamp: u64) -> String {
-        if self.current_time == 0 || timestamp > self.current_time {
+        if self.current_time == 0 {
             return "now".to_string();
         }
-        let diff = self.current_time - timestamp;
+        let diff = self.current_time.saturating_sub(timestamp);
         if diff < 60 {
             "just now".to_string()
         } else if diff < 3600 {
@@ -2768,10 +2779,25 @@ mod tests {
         assert_eq!(TimeGroup::classify(two_weeks_ago, now), TimeGroup::Older);
     }
 
+    /// A clock that moves backwards — NTP correcting a drift, a DST fix, or
+    /// a notification stamped by a process whose clock ran slightly ahead —
+    /// leaves timestamps in the future. Aged by subtraction they would come
+    /// out near `u64::MAX`, which sorts every affected notification into
+    /// `Older` and dates it at half a trillion years. They are aged zero.
     #[test]
-    fn time_group_future_classified_as_today() {
+    fn a_notification_from_the_future_is_aged_zero_not_aged_forever() {
         let now = 5000;
         assert_eq!(TimeGroup::classify(now + 100, now), TimeGroup::Today);
+        assert_eq!(TimeGroup::classify(u64::MAX, now), TimeGroup::Today);
+
+        let mut pane = NotificationPane::new();
+        pane.current_time = now;
+        assert_eq!(pane.format_relative_time(now + 100), "just now");
+        assert_eq!(pane.format_relative_time(u64::MAX), "just now");
+        // A pane that has never been told the time is a different case: it
+        // does not know the age, rather than knowing the age is zero.
+        pane.current_time = 0;
+        assert_eq!(pane.format_relative_time(now), "now");
     }
 
     // ========================================================================

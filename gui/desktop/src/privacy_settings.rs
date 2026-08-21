@@ -518,8 +518,14 @@ impl PrivacySettingsUI {
         mut y: f32,
         width: f32,
     ) {
-        if let Some(sel) = self.selected_permission {
-            let kind = PermissionKind::ALL[sel];
+        // `select_permission` range-checks the index, but that check lives
+        // ninety lines away and `ALL` is a list that grows as new sensitive
+        // resources are added; resolving the index to the value here keeps the
+        // proof in the same expression as the use.
+        if let Some(kind) = self
+            .selected_permission
+            .and_then(|sel| PermissionKind::ALL.get(sel).copied())
+        {
             // Detail view for selected permission.
             cmds.push(RenderCommand::Text {
                 x,

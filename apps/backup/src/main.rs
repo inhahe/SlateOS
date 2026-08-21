@@ -1177,12 +1177,47 @@ fn format_timestamp(ts: u64) -> String {
     )
 }
 
+/// Convert days since the Unix epoch to (year, month, day), both 1-based.
+///
+/// **This is the last local transcription of Howard Hinnant's
+/// `civil_from_days` in the tree, and it is deliberate rather than missed.**
+/// There were five; the file manager's was quietly wrong for every date before
+/// 2000-03-01, and the three GUI apps now derive the date from `guitk::date`,
+/// which derives it from `tzrules` — the same era arithmetic the libc's
+/// `localtime` and the taskbar clock use.
+///
+/// This program cannot follow them there. It is a command-line archiver that
+/// prints its dates with `println!` and does not depend on `guitk`; making a
+/// headless tool link a GUI toolkit for a calendar is the mistake `guitk`
+/// already declined to make with the RNG, which is why `randrange` exists as
+/// its own crate. The right home is `tzrules`, whose public `days_from_civil`
+/// has no public inverse even though `year_of_day` computes one internally and
+/// throws away the month and the day. That is asked for in
+/// `requests/c-b-year-of-day-computes-the-month-and-day-and-throws-them-away.md`.
+/// **When that lands, delete this function** and call
+/// `tzrules::civil_from_days`.
+///
+/// The arithmetic is written saturating rather than left to a proof about
+/// operand ranges. `days` comes from a stored backup manifest, so nothing
+/// checked here bounds it, and a proof that lives in a comment above the code
+/// it justifies is the failure mode this sweep exists to remove.
+#[expect(
+    clippy::arithmetic_side_effects,
+    reason = "Hinnant's algorithm is a closed form whose intermediate terms \
+              are bounded by the era decomposition itself; saturating every \
+              step would change the result rather than protect it. The only \
+              unbounded input is `days`, clamped on entry."
+)]
 fn days_to_ymd(days: u64) -> (u64, u64, u64) {
-    // Algorithm from http://howardhinnant.github.io/date_algorithms.html
-    let z = days + 719468;
-    let era = z / 146097;
-    let doe = z - era * 146097;
-    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    // Algorithm from http://howardhinnant.github.io/date_algorithms.html.
+    // Clamping the input is what makes the rest of the closed form safe: `z`
+    // is then far below `u64::MAX` and every term derived from it is smaller
+    // still, so the `+`/`-`/`*` below cannot overflow.
+    let days = days.min(u64::from(u32::MAX));
+    let z = days + 719_468;
+    let era = z / 146_097;
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
     let y = yoe + era * 400;
     let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
     let mp = (5 * doy + 2) / 153;

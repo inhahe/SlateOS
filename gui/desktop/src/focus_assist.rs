@@ -6,6 +6,7 @@
 //! through.
 
 use guitk::color::Color;
+use guitk::daywindow::DailyWindow;
 use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::style::CornerRadii;
 
@@ -100,12 +101,14 @@ impl NotifPriority {
 /// An automatic rule that activates focus assist.
 #[derive(Clone, Debug, PartialEq)]
 pub enum AutoRule {
-    /// Activate during specific hours (start_hour, start_min, end_hour, end_min).
+    /// Activate during a window of the day, on the listed days.
+    ///
+    /// A [`DailyWindow`] rather than four public `u8`s. Unvalidated, a start
+    /// hour of 25 became a minute count past the end of the day, which
+    /// compared as an overnight window and then never opened -- the rule would
+    /// silently stop firing. The notification daemon shipped exactly that.
     Schedule {
-        start_hour: u8,
-        start_min: u8,
-        end_hour: u8,
-        end_min: u8,
+        window: DailyWindow,
         /// Which days (0=Sun..6=Sat).
         days: Vec<u8>,
         mode: FocusMode,
@@ -126,15 +129,13 @@ pub enum AutoRule {
 impl AutoRule {
     pub fn label(&self) -> String {
         match self {
-            Self::Schedule {
-                start_hour,
-                start_min,
-                end_hour,
-                end_min,
-                ..
-            } => {
-                format!("Schedule {start_hour:02}:{start_min:02}–{end_hour:02}:{end_min:02}")
-            }
+            Self::Schedule { window, .. } => format!(
+                "Schedule {:02}:{:02}–{:02}:{:02}",
+                window.start().hour(),
+                window.start().minute(),
+                window.end().hour(),
+                window.end().minute(),
+            ),
             Self::Fullscreen { .. } => "Fullscreen app".to_string(),
             Self::Presentation { .. } => "Presenting".to_string(),
             Self::Gaming { .. } => "Gaming".to_string(),
@@ -158,31 +159,14 @@ impl AutoRule {
 
     /// Check if a schedule rule is currently active.
     pub fn is_schedule_active(&self, hour: u8, minute: u8, day_of_week: u8) -> bool {
-        if let Self::Schedule {
-            start_hour,
-            start_min,
-            end_hour,
-            end_min,
-            days,
-            ..
-        } = self
-        {
-            if !days.is_empty() && !days.contains(&day_of_week) {
-                return false;
-            }
-            let now = hour as u16 * 60 + minute as u16;
-            let start = *start_hour as u16 * 60 + *start_min as u16;
-            let end = *end_hour as u16 * 60 + *end_min as u16;
-
-            if start <= end {
-                now >= start && now < end
-            } else {
-                // Overnight span (e.g., 22:00–06:00).
-                now >= start || now < end
-            }
-        } else {
-            false
+        let Self::Schedule { window, days, .. } = self else {
+            return false;
+        };
+        // An empty day list means every day.
+        if !days.is_empty() && !days.contains(&day_of_week) {
+            return false;
         }
+        window.contains_hm(hour, minute)
     }
 }
 
@@ -359,7 +343,7 @@ impl FocusAssistManager {
 
     /// Record a suppressed notification.
     pub fn record_suppressed(&mut self) {
-        self.suppressed_count += 1;
+        self.suppressed_count = self.suppressed_count.saturating_add(1);
     }
 
     /// Evaluate auto rules given current time and system state.
@@ -781,10 +765,7 @@ mod tests {
     #[test]
     fn schedule_rule_active_within_range() {
         let rule = AutoRule::Schedule {
-            start_hour: 22,
-            start_min: 0,
-            end_hour: 7,
-            end_min: 0,
+            window: DailyWindow::from_hm(22, 0, 7, 0).unwrap(),
             days: vec![],
             mode: FocusMode::AlarmsOnly,
         };
@@ -796,10 +777,7 @@ mod tests {
     #[test]
     fn schedule_rule_respects_days() {
         let rule = AutoRule::Schedule {
-            start_hour: 9,
-            start_min: 0,
-            end_hour: 17,
-            end_min: 0,
+            window: DailyWindow::from_hm(9, 0, 17, 0).unwrap(),
             days: vec![1, 2, 3, 4, 5], // weekdays
             mode: FocusMode::PriorityOnly,
         };
@@ -810,10 +788,7 @@ mod tests {
     #[test]
     fn schedule_rule_daytime() {
         let rule = AutoRule::Schedule {
-            start_hour: 9,
-            start_min: 0,
-            end_hour: 17,
-            end_min: 0,
+            window: DailyWindow::from_hm(9, 0, 17, 0).unwrap(),
             days: vec![],
             mode: FocusMode::PriorityOnly,
         };
@@ -972,10 +947,7 @@ mod tests {
             mode: FocusMode::AlarmsOnly,
         });
         mgr.add_auto_rule(AutoRule::Schedule {
-            start_hour: 22,
-            start_min: 0,
-            end_hour: 7,
-            end_min: 0,
+            window: DailyWindow::from_hm(22, 0, 7, 0).unwrap(),
             days: vec![],
             mode: FocusMode::AlarmsOnly,
         });
@@ -997,10 +969,7 @@ mod tests {
     #[test]
     fn auto_rule_labels() {
         let r = AutoRule::Schedule {
-            start_hour: 22,
-            start_min: 0,
-            end_hour: 7,
-            end_min: 0,
+            window: DailyWindow::from_hm(22, 0, 7, 0).unwrap(),
             days: vec![],
             mode: FocusMode::AlarmsOnly,
         };

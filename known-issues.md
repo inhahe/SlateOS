@@ -590,11 +590,24 @@ on an invariant maintained by four other methods. All three are now a single
 
 ## The same broken reduction is copy-pasted into 27 crates, and `randrange` now exists to replace it (lane C)
 
-**Status: OPEN 2026-08-16 — fourteen of 27 crates fixed** (`simon`,
-`battleship`, `sliding`, `asteroids`, `yahtzee`, `hearts`, `solitaire`,
-`freecell`, `minesweeper`, `flood`, `snake`, `wordsearch`, `pacman`,
-`breakout`); the shared crate that the rest should move to is written and
-green.
+**Status: CLOSED 2026-08-20 — the sweep finished; no private copy remains.**
+The status line below sat at "fourteen of 27" from 2026-08-16 while the
+migration actually ran to completion (`7d147cb83` retired the last three
+private `Lcg`s), so the entry was stale rather than open. Verified two ways on
+2026-08-20: `build/scratch/lcg_scan.py` — the scan that produced the 27-crate
+figure in the first place — now prints **nothing** across `apps/**` and
+`gui/**`, and a plain grep for the LCG multiplier over `apps`, `gui`, `net*`
+and `pkg` finds exactly **one** hit, inside `apps/breakout`'s `#[cfg(test)]`
+`opening_angle_lattice_points`, which *deliberately* reimplements the old
+`Lcg::next_u64` so the new generator can be compared against the old one on a
+single lattice. That is a regression test *about* the defect, not a surviving
+instance of it, and it should stay. 16 crates now depend on `randrange`.
+
+Original status line, kept for the record: *OPEN 2026-08-16 — fourteen of 27
+crates fixed (`simon`, `battleship`, `sliding`, `asteroids`, `yahtzee`,
+`hearts`, `solitaire`, `freecell`, `minesweeper`, `flood`, `snake`,
+`wordsearch`, `pacman`, `breakout`); the shared crate that the rest should
+move to is written and green.*
 
 The defect above is not `simon`'s. A scan of the tree
 (`build/scratch/lcg_scan.py`) finds the same LCG constants in **~36 places** and
@@ -31996,7 +32009,7 @@ been worth defining before the driver exists. This entry therefore stays open,
 and the sentence in `TD-NO-APP-CONNECTS-TO-THE-COMPOSITOR` calling this the last
 link to a photon stays true of SlateOS, not of the harness.
 
-## TD-GUI-CRATES-OPT-OUT-OF-THE-WORKSPACE-LINTS (lane C, 2026-08-17)
+## TD-GUI-CRATES-OPT-OUT-OF-THE-WORKSPACE-LINTS (lane C, 2026-08-17) - **fixed**
 
 **What.** `CLAUDE.md` requires every crate to enable `clippy::all` +
 `clippy::pedantic` and five defensive lints (`unwrap_used`, `expect_used`,
@@ -32316,6 +32329,116 @@ were one hand-rolled tokeniser cursor, and `textview`'s ANSI parser was
 hand-decoding UTF-8 it had already been handed decoded. Before fixing a group,
 check whether the group is one shape — the repeated *source line* is the tell,
 and `scripts/clippy-sites.py --sites` prints it.
+
+
+### 2026-08-20 — `gui/desktop`, the tenth and last crate. Sweep complete.
+
+**Correcting the figure in this entry.** The 1561 recorded for `gui/desktop`
+was measured with `cargo clippy -p desktop -- -W clippy::…`, which is not what
+that crate is graded on: the flags leak into every dependency, and they bypass
+the workspace `[workspace.lints.clippy]` table rather than adding to it.
+`gui/desktop` had *already* opted in with `[lints] workspace = true`. Built
+alone, with `--message-format=json`, filtered to `gui/desktop/src`, and
+deduplicated by `(file, line, column, lint)`, the real backlog was **66**.
+
+The methodology matters more than the number, so state it plainly: **never
+quote a raw total from a `-W`-flagged run.** Measure the crate as configured,
+filter to its own files, and deduplicate — the same site reported once per
+target (lib, bin, test) triples a count for free.
+
+Note also that `clippy::arithmetic_side_effects` **does not lint
+floating-point arithmetic**, so none of desktop's f32 layout code fires. Every
+site in this crate was integer arithmetic. That is worth knowing before
+budgeting a sweep of a rendering crate.
+
+**Three more abstractions the crate had re-derived**, each found the same way —
+a lint firing many times turned out to be one shape repeated, and *the copies
+disagreed with one another*. The disagreement is the finding; the lint was only
+what pointed at it.
+
+| Copies | What they disagreed about | Written once as |
+|---|---|---|
+| 14 id counters | What happens at the top of the range: `+= 1` (6), `saturating_add` (6), `wrapping_add` (3), `checked_add` (2) — **four answers** | `guitk::idseq` |
+| 15 percentages | What "percent of nothing" is: `0`, `0.0`, `100`, `100.0` — **four answers**; and only one of the fifteen clamped | `guitk::ratio` |
+| 3 quiet-hours windows | Nothing — but all three shared one hole, and one shipped it | `guitk::daywindow` |
+| 22 index steps | What happens at the end of the list: 13 wrapped, 9 clamped — **and no call site said which it meant** | `guitk::step` |
+
+Each of those is worth reading as a separate lesson:
+
+- **`idseq`.** Wrapping is the worst of the four answers, and three of the
+  fourteen chose it. The ids it reuses first are the *lowest*, which in a shell
+  that has been up long enough to wrap are overwhelmingly the ones still alive
+  — the first workspace, the pinned window, the tray notification sitting there
+  since boot. A duplicate id is not a crash; it is one object answering to
+  another's name, which is how a dismissal dismisses the wrong notification.
+  The module offers `issue() -> Option<T>` universally and
+  `issue_infallible() -> T` **only** for `T: Inexhaustible` (u64/u128), so the
+  shortcut is gated by the compiler rather than by a comment. The four 32-bit
+  sequences were *widened* rather than given an error path no caller could act
+  on: `IconId`, `DeviceId`, `RuleId`, `RecordingId`.
+- **`ratio`.** Each of the four zero-case answers was right for its own caller,
+  which is exactly why it is not a decision a shared helper should make for
+  them. `percent` returns `Option`, so `.unwrap_or(0.0)` puts each caller's
+  answer in the same expression as the division. An empty disk is 0% used; a
+  battery with no recorded design capacity is assumed healthy at 100%.
+- **`step`** (renamed from `cycle`, which had owned only the wrapping half).
+  This one is a fault *one level up* from the rest of the sweep: not arithmetic
+  without a proof, but **behaviour without a decision**. The launcher stops at
+  the last result; the Wi-Fi list wraps to the first network. Both are right —
+  a ranking has no meaningful "after the worst match", a short menu of networks
+  is a ring you thumb through — but no call site stated which it had chosen, so
+  the answer was settled by whoever typed the loop. The policy is now in the
+  name (`wrapping_after` / `clamped_after`) and neither is the default.
+
+**Live defects found.**
+
+- `backup_settings::record_backup` advanced a `next_backup_id` counter that
+  **nothing ever read**. Every caller invented its own id, and all the tests
+  passed `id: 1`, so nothing stopped two history entries sharing one — which
+  would have made delete-by-id ambiguous the first time it mattered. The
+  function now assigns the id and returns it.
+- `notif_pane` aged notifications with bare subtraction behind an
+  `if now < timestamp` guard. A clock moved backwards — NTP correction, DST
+  fix, or a stamp from a process whose clock ran ahead — leaves timestamps in
+  the future; without the guard those age to near `u64::MAX`, i.e. sorted
+  `Older` and dated half a trillion years ago. ~18 sites elsewhere in the tree
+  already used `saturating_sub`; these two were the outliers.
+- `security_dialog::truncate_str` was the **fifth** copy of the char-boundary
+  walk `TextCursor::snapped_in` was extracted to own, and its doc comment said
+  `max` was in characters. It has always been bytes — a name like that is how a
+  caller sizes a field in characters and gets a third of it for text that is
+  not ASCII.
+- `resmon`'s sparkline indexed `i` and `i - 1` with a `.unwrap_or(0.0)` on each
+  end, so a missing sample would have been drawn as a spike down to the floor —
+  a fabricated reading in a graph of real ones. It walks `windows(2)` now, and
+  the pair is always real.
+- `login_screen`'s lockout expiry could wrap *behind* `now_ms` and clear the
+  lockout on the next tick. It saturates in the safe direction now: an
+  unrepresentable expiry is a lockout that does not end.
+
+**`.get()` throws the proof away.** The last two sites in the crate were
+`icons::GridConfig::columns_in`/`rows_in`, still firing after the cell size had
+been moved to `NonZeroU32`, because they divided by `self.cell_width.get()`.
+The lint is right to fire: `.get()` hands the compiler a plain `u32`, so the
+division one expression later is by a value with no non-zero proof attached.
+Dividing by the `NonZeroU32` itself uses `Div<NonZeroU32> for u32`, which
+cannot panic. The cost is `const`, since operator impls are not const — no
+caller wanted it. Worth remembering as the general shape: **reach for `.get()`
+last, not first**, or the type you introduced to carry a fact stops carrying it
+at the first call site.
+
+**One shape deliberately left alone.** `let before = v.len(); v.retain(…);
+v.len() < before` appears **27 times** across `gui/` and `apps/` — by count the
+largest duplicated shape in the sweep. It was *not* extracted, because it fails
+the test the other four passed: the copies do not disagree, and none of them is
+wrong. 25 return the boolean, 2 return a count, and both are correct APIs.
+Extraction here would buy two fewer lines per site at the cost of an
+indirection over an idiom every Rust reader already knows. Recorded here so the
+next sweep does not re-discover it and reach a different conclusion by
+accident: **duplication alone is not the warrant — divergence is.**
+
+**`gui/desktop` is at 0 sites.** All ten `gui/` crates are now clean under the
+full workspace lint set.
 
 ## C-TEXT-WAS-CUT-BY-COUNTING-CHARACTERS-INSTEAD-OF-MEASURING-IT (lane C, 2026-08-17) - **fixed**
 
@@ -46393,3 +46516,252 @@ check that the call is inside the `run(...)` closure and that the benchmark is
 
 Validated on a real boot: PASSED, streak 34, with the rot check running silently
 on the live `finish_pass` path under `set -euo pipefail`.
+
+---
+
+## `apps/**` bug-hunt sweep, round 1: four live defects and two latent (lane C)
+**Status:** FIXED 2026-08-20 — `5b4dd7731` (calendar), `80dd0a5f3` (slices),
+`c989b21d0` (clipboard preview), `e1390abb1` (sticky-note columns),
+`d5a1e7eb8` + `ae3946e33` (grid column counts).
+
+The roadmap asks lane C to run bug-hunt sweeps over `apps/**` between
+features; ~200 crates there have never had a systematic audit. This is the
+first round's findings, filed closed because all five were fixed in the same
+sitting. They are recorded rather than merely committed because the *shape* of
+each recurs, and the next sweep should start by grepping for it.
+
+### The shape, again: a proof that lives in a different statement than the code it justifies
+
+All five are the same fault the `gui/**` lint sweep kept finding. A value is
+checked in one statement and used in another, and in between, something makes
+the check not mean what it looks like it means.
+
+### 1. `apps/explorer` listed a fabricated date for every file older than 2000-03-01
+
+`columns.rs::format_datetime` — the Date Modified column — carried a local
+civil calendar that shifted the epoch to 2000-03-01 "to simplify leap-year
+handling", and then, for anything *before* that epoch, did not compute a date
+at all. It estimated one:
+
+| | |
+|---|---|
+| year | `1970 + days / 365` |
+| month | `day_of_year / 30 + 1`, clamped to ≤ 12 |
+| day | clamped to ≤ 28 |
+
+| Real date | Shown as |
+|---|---|
+| 1985-07-04 | 1985-07-09 |
+| 1999-06-15 | 1999-06-23 |
+| 2000-02-29 (a real leap day) | 2000-03-07 |
+| 1970-01-01 | 1970-01-01 (the one it got right) |
+
+**Why nothing caught it.** Every value it produced was *in range* — a plausible
+month, a plausible day — so no clamp, assertion, or type could have flagged it.
+The error grew with the file's age, and old files are exactly the ones a user
+sorts by date to find. The crate's single `test_format_datetime` sampled a 2024
+timestamp, which is on the correct side of the seam; the whole bug lived in a
+branch no test entered.
+
+The post-2000 path was arithmetically identical to Hinnant's, which is why the
+damage was confined: `719468 + 11017 = 5 × 146097`, so 2000-03-01 is an exact
+era boundary and the shifted form degenerates to the standard one above it.
+
+### 2 & 3. `starts_with(q) && ends_with(q)` is not a bounds proof
+
+A string of a *single* `q` starts with it and ends with it — the same byte
+answering both tests. The guard passes at `len == 1`, and the `&s[1..s.len() -
+1]` that follows becomes `1..0`, which panics.
+
+| Crate | Trigger | Reachable by |
+|---|---|---|
+| `apps/ircclient` `CtcpMessage::parse` | `"\x01"` | a PRIVMSG trailing parameter, i.e. anything the server sends — a one-line remote client kill |
+| `apps/installer` YAML scalar parser | a lone `"` or `'` | a typo in a hand-edited install manifest |
+
+The installer's had a `wrapping_sub()` in it, which is the interesting part:
+somebody silenced `clippy::arithmetic_side_effects` at the subtraction instead
+of asking why it fired. That made the underflow *silent but not harmless* — it
+produced `usize::MAX` and the slice panicked anyway, one line later and less
+legibly. **A suppression that moves a panic rather than removing it is worse
+than the warning was.**
+
+Both now `strip_prefix`/`strip_suffix` in sequence, which structurally cannot
+make the mistake: after the prefix is removed, the suffix is looked for in what
+is *left*, and an empty string has no delimiter to end with. Grep
+`starts_with(.*).*&&.*ends_with(` before believing any similar guard; as of
+this sweep the remaining lane-C hits are all `filter`/`any` predicates that
+never slice.
+
+### `is_action` vs `parse`: two recognisers for one grammar
+
+`CtcpMessage` had a second, independent ACTION parser (`starts_with("\x01ACTION")`
+plus `&text[8..text.len() - 1]`). It disagreed with `parse()` three ways, all
+reachable from the wire:
+
+| Input | `action_text` said | `parse` said |
+|---|---|---|
+| `"\x01ACTION\x01"` | *panic* (sliced `8..7`) | `Action("")` |
+| `"\x01ACTIONfoo\x01"` | `Action("oo")` — the hard-coded `8` assumed a space nobody checked for | `Unknown("ACTIONFOO", "")` |
+| `"\x01ACTIONé \x01"` | *panic* — index 8 fell inside the `é` | `Unknown(…)` |
+
+Fixed by defining `action_text` in terms of the same framing and verb split
+`parse` uses, and `is_action` in terms of `action_text`. `parse` also folds case
+with ASCII rules rather than `to_uppercase`, so the two cannot drift on
+`"actıon"` (dotless i, which *does* uppercase to `ACTION`).
+
+### 4 & 5. `String::truncate`/`insert`/`remove` panic off a character boundary
+
+The byte/character confusion again, in the standard library's most
+panic-prone corner. Found by grepping for `String` mutators that take an
+offset, after `String::truncate` turned one up.
+
+**`apps/clipmanager::ClipEntry::preview` — live, and a crash in a render
+path.** Documented as "`PREVIEW_MAX_CHARS` total characters", implemented
+entirely in bytes: it compared `out.len()` against the limit and cut with
+`out.truncate(120)`. The clipboard holds whatever the user copied, so copying
+a couple of sentences of Greek, Cyrillic, Hebrew, Arabic, CJK or emoji took the
+clipboard manager down *while drawing its own list* — and because the entry was
+already in the history, it recurred on every restart until the entry aged out.
+Counting bytes was wrong even when it did not crash: 120 bytes of Japanese is
+40 characters, so a preview that filled a row in English was cut to a third of
+it. The one existing test used `"a".repeat(200)`; ASCII is exactly the input
+that cannot fail, the same blind spot that let `apps/explorer`'s date bug live
+behind a test that only sampled 2024.
+
+**`apps/stickynotes::Note::insert_char`/`delete_char` — latent.** Both take a
+byte offset and clamped it to the line's length and no further. Clamping stops
+an offset running off the *end*; it says nothing about the *boundary*. Nothing
+outside the tests calls either today, which is why the 2026-08-16 audit
+recorded in `GUI-TEXT-INPUT-CURSORS-STEP-BY-BYTES` missed them: that sweep
+looked for `cursor ± 1` and these have no cursor field, only a parameter whose
+signature never said whether it meant bytes or characters. Now snapped back to
+the boundary, matching `apps/editor::snap_to_boundary` and
+`apps/markdowneditor::clamp_col`, and the unit is stated.
+
+**Everything else in that class was checked and is correct**, mostly by having
+already been fixed on 2026-08-16: `apps/editor` (`snap_to_boundary`),
+`apps/markdowneditor` (`clamp_col`, `len_utf8` steps), `apps/paint` (scans for
+the adjacent character), `apps/launcher` and `apps/jsonviewer` and
+`apps/spreadsheet` (caret counts characters, converted at each use),
+`apps/calculator` (`len() - last.len_utf8()`, which is a boundary by
+construction), `apps/dbviewer` (a `Vec<String>`, so `Vec::truncate`),
+`apps/netscan` (`char_indices().nth`), `apps/unitconverter` (ASCII-only input
+filter, invariant documented at the site).
+
+### A test-design trap worth remembering: 120 is divisible by 2, 3 and 4
+
+The first draft of the clipmanager regression test used `"日".repeat(200)` and
+friends — and **passed against the broken code**. `PREVIEW_MAX_CHARS` is 120,
+which is a multiple of every UTF-8 width, so byte 120 of a solid run of
+2-, 3- or 4-byte characters lands on a boundary by accident. A test of a
+boundary bug has to *shift the grid*: the cases are now a single ASCII prefix
+followed by a run, and each asserts `!is_char_boundary(PREVIEW_MAX_CHARS)` up
+front so it cannot quietly stop testing the bug if the constant changes.
+
+Generally: **a regression test for a "lands inside a character" bug must assert
+that its input actually lands inside a character.** Otherwise the alignment is
+a coincidence, and coincidences are not stable under refactoring.
+
+### (6) `apps/colorpicker` divided by zero in one grid and not in its twin
+
+`ColorPickerApp::render_history` computed how many swatches fit across the
+window and then indexed its cells with `i % cells_per_row` over a loop bounded
+by **the number of colors in the history**, not by `cells_per_row`. A window
+narrower than one 28px swatch plus its padding makes that count zero and the
+modulo panics.
+
+`render_palette`, **sixty lines below in the same file**, computes the same
+quantity and writes `.max(1)` at *both* of its divisions. The author knew — in
+one of the two places — and neither site says why. Same shape as everything
+above: a proof that lives in a different statement from the code it justifies.
+
+Latent rather than live today, and only by accident: `self.width` is assigned
+`WINDOW_WIDTH` once in `create()` and there is no `Resize` handler yet, so
+`cells_per_row` is 18 forever. It goes live the moment resize lands.
+
+Fixed in `d5a1e7eb8`, then folded into (7). Verified regressive: with the old
+body restored, the new test panics at the modulo rather than merely failing an
+assertion.
+
+### (7) …and five other spellings of the same guard, one crate away from the answer
+
+Finding (6) is not one site, it is the sixth transcription of one piece of
+arithmetic. Every place in lane C's tree that asks "how many `cell`-wide
+columns fit across this width":
+
+| Where | Guard against zero |
+|---|---|
+| `gui/toolkit/src/grid.rs` `LayoutCache::compute` | `NonZeroUsize`, with the reasoning written out |
+| `apps/worldclock` `render_grid` | `.max(1.0)` before the cast |
+| `apps/charmap` `render_grid` | `.max(1.0)` before the cast |
+| `apps/slides` sorter grid | `.max(1.0)`, **plus an `#[allow(arithmetic_side_effects)]` at each division** vouching for it from twenty lines away |
+| `apps/charmap` recent/favorites strip | **none** — safe only because the cap is `cols * 3`, so zero columns made both loops `take(0)` |
+| `apps/defrag` block map | `if cols > 0 { … checked_div … }` |
+| `apps/colorpicker` `render_history` | **none at all** — finding (6) |
+
+Seven sites, five spellings, one outright missing and one present-by-accident.
+The toolkit already had the right answer — `NonZeroUsize`, with a comment
+explaining exactly why the floor is one — and **kept it private**, so every app
+wrote its own. That is the same asymmetry as the `tzrules` request filed the
+same day (`requests/c-b-year-of-day-computes-the-month-and-day-and-throws-them-away.md`):
+export one direction of a piece of arithmetic and the tree grows transcriptions
+of the other, and one of them will be wrong.
+
+`ae3946e33` adds `guitk::grid::columns_across(avail, cell, gap) -> NonZeroUsize`,
+makes `LayoutCache::compute` call it, and routes colorpicker (both grids),
+charmap (both grids), worldclock and slides through it. The floor of one is now
+in the return type, so `i % columns` uses the `Rem<NonZeroUsize> for usize` impl
+that *cannot* divide by zero — slides drops both `#[allow]`s and charmap drops a
+`checked_div` and a `.max(1)`.
+
+Each migration is an **exact identity**, deliberately, not a re-derivation:
+worldclock's and slides' `(w - gap) / (cell + gap)` is
+`columns_across(w - 2*gap, cell, gap)`, and charmap's gapless grids pass
+`gap = 0.0`. The single visible change is charmap's recent strip, which now
+shows one clipped column where it previously showed none — which is the
+toolkit's documented floor, and the more useful rendering.
+
+Two subtleties worth keeping:
+
+- **The degenerate case is keyed off `cell`, not off the pitch.** A zero-width
+  cell separated by an 8px gap would otherwise "fit" once per gap, counting the
+  separators as though they were content. `LayoutCache` had this right
+  (`if cell_width <= 0.0`) and the first draft of `columns_across` did not;
+  the `columns_across_agrees_with_the_layout_cache` test is what pins it.
+- **`inf as usize` saturates, it does not wrap**, so a zero pitch would have
+  produced `usize::MAX` columns rather than a panic — non-zero, so no
+  zero-check would have caught it, and a grid of `usize::MAX` columns is not an
+  answer anyone wants.
+
+**Not migrated: `apps/defrag`.** Its `if cols > 0` skips the whole block map
+rather than clipping it — a different contract, and correct as it stands.
+Migrating it would change what the user sees for no defect. Same rule as the
+`(i + 1) % len()` sites below: divergence in *correctness* is the warrant for
+extraction; divergence in *spelling*, over code that is already right, is not.
+
+### Deliberately not changed: the ~15 `(i + 1) % len()` sites
+
+Every wrapping-index step in `apps/**` that divides by a runtime length was
+checked, and **every one is guarded** — always in a different statement from the
+division, which is the shape above, but the guard is genuinely there each time.
+`startupmanager::field_count()` and `life`'s `Grid` dimensions look unguarded
+but are constants behind a method and a constructor.
+
+They were left alone on the sweep's own rule: **duplication alone is not the
+warrant for extraction — divergence is.** These ~15 do not disagree with each
+other; they all wrap a stale index by `%`. They *do* disagree with
+`guitk::step::wrapping_after`, which clamps first (`step::wrapping_after(3, 9)`
+is `0`; `(9 + 1) % 3` is `1`) — as does `apps/filediff`'s local
+`wrap_next`/`wrap_prev`. So a migration to `guitk::step` would not be removing
+a divergence, it would be *introducing* one into fifteen call sites at once, to
+delete a `%`. Not done. If `guitk::step` ever grows a mod-wrap variant, that
+changes; until then this note is why nobody should "tidy" these.
+
+### Remaining backlog
+
+`apps/**` opts into the workspace lints (all 142 crates do), but the defensive
+five are `warn`, not `deny`, so a warning backlog accumulates uncounted — the
+installer's `wrapping_sub` and `apps/backup`'s `days + 719_468` were both
+firing silently for months. A measured figure for `apps/**` (via
+`scripts/clippy-sites.py`, deduplicated by `(file, line, column, lint)` — never
+a raw total) is the next round's first step.

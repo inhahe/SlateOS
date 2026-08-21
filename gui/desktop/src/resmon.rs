@@ -38,6 +38,7 @@
 
 use guitk::color::Color;
 use guitk::history::SampleHistory;
+use guitk::ratio;
 use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::style::CornerRadii;
 
@@ -187,11 +188,9 @@ pub struct MemoryInfo {
 
 impl MemoryInfo {
     /// Memory usage as a percentage, clamped to 0..100.
+    #[must_use]
     pub fn usage_pct(&self) -> f32 {
-        if self.total_mb == 0 {
-            return 0.0;
-        }
-        ((self.used_mb as f64 / self.total_mb as f64) * 100.0) as f32
+        ratio::percent(self.used_mb, self.total_mb).unwrap_or(0.0) as f32
     }
 }
 
@@ -621,13 +620,16 @@ impl ResourceMonitor {
         let max_val = 100.0_f32; // percentage scale
         let step = w / (count as f32 - 1.0);
 
-        for i in 1..count {
-            let prev = samples.get(i - 1).copied().unwrap_or(0.0);
-            let curr = samples.get(i).copied().unwrap_or(0.0);
+        // `windows(2)` yields the consecutive pairs directly. Indexing `i`
+        // and `i - 1` needed a `.unwrap_or(0.0)` on each end, which would
+        // have drawn a spike down to the floor from a sample that was merely
+        // missing — a fabricated reading in a graph of real ones.
+        for (segment, pair) in samples.windows(2).enumerate() {
+            let [prev, curr] = *pair else { continue };
 
-            let x1 = x + (i as f32 - 1.0) * step;
+            let x1 = x + segment as f32 * step;
             let y1 = y + h - (prev.clamp(0.0, max_val) / max_val * h);
-            let x2 = x + i as f32 * step;
+            let x2 = x + (segment as f32 + 1.0) * step;
             let y2 = y + h - (curr.clamp(0.0, max_val) / max_val * h);
 
             cmds.push(RenderCommand::Line {

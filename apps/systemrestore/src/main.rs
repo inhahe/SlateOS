@@ -25,6 +25,7 @@
 #[allow(unused_imports)]
 use guitk::color::Color;
 #[allow(unused_imports)]
+use guitk::ratio;
 use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 #[allow(unused_imports)]
 use guitk::style::CornerRadii;
@@ -1760,14 +1761,15 @@ impl OperationProgress {
     }
 
     /// Progress fraction (0.0 to 1.0).
+    ///
+    /// Measured in bytes where there are bytes to measure, in steps where
+    /// there are not, and reported complete when there is neither — a restore
+    /// of an empty snapshot has nothing left to do.
+    #[must_use]
     pub fn fraction(&self) -> f32 {
-        if self.total_bytes == 0 {
-            if self.total_steps == 0 {
-                return 1.0;
-            }
-            return self.step_index as f32 / self.total_steps as f32;
-        }
-        (self.bytes_processed as f64 / self.total_bytes as f64) as f32
+        ratio::fraction(self.bytes_processed, self.total_bytes)
+            .or_else(|| ratio::fraction(self.step_index, self.total_steps))
+            .unwrap_or(1.0) as f32
     }
 
     /// Progress percentage (0 to 100).
@@ -6168,7 +6170,12 @@ mod tests {
         let inc2 = ids
             .iter()
             .copied()
-            .find(|&id| restored.tree.get_snapshot(id).is_some_and(|s| s.name == "Inc2"))
+            .find(|&id| {
+                restored
+                    .tree
+                    .get_snapshot(id)
+                    .is_some_and(|s| s.name == "Inc2")
+            })
             .expect("Inc2 was not imported");
         let snap = restored.tree.get_snapshot(inc2).unwrap();
         assert!(snap.locked, "the lock was lost on import");

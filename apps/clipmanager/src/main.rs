@@ -134,24 +134,49 @@ impl ClipEntry {
 
     /// Return the first `PREVIEW_LINES` lines of content, truncated to
     /// `PREVIEW_MAX_CHARS` total characters.
+    ///
+    /// **Characters, as the name says.** This used to count `out.len()`, which
+    /// is bytes, and then call `String::truncate(PREVIEW_MAX_CHARS)` — which
+    /// *panics* rather than rounding when the byte offset lands inside a
+    /// character. The clipboard holds whatever the user copied, so any Greek,
+    /// Cyrillic, Hebrew, Arabic, CJK or emoji text longer than 120 bytes had
+    /// about a two-in-three chance of taking the whole clipboard manager down
+    /// while drawing its own list. The only test covered `"a".repeat(200)`,
+    /// which is ASCII and so is exactly the case that cannot fail.
+    ///
+    /// Counting bytes was also wrong when it did not crash: 120 bytes of
+    /// Japanese is 40 characters, so a preview that fits one line in English
+    /// was cut to a third of it in Japanese. Nothing here wants a byte count —
+    /// the number exists to bound how much text is *drawn*.
+    ///
+    /// Characters rather than caret stops (`TextCursor`), because this cuts
+    /// text that is only ever displayed, never edited, and a cut between a
+    /// base letter and a combining mark shows as one wrong glyph rather than a
+    /// crash or a bad offset. Characters rather than pixels because a preview
+    /// is measured before any font is chosen for it.
     fn preview(&self) -> String {
         let mut out = String::new();
-        let mut lines_taken = 0usize;
-        for line in self.content.lines() {
-            if lines_taken >= PREVIEW_LINES {
-                break;
-            }
+        let mut overflowed = false;
+        for line in self.content.lines().take(PREVIEW_LINES) {
             if !out.is_empty() {
+                if out.chars().count() >= PREVIEW_MAX_CHARS {
+                    overflowed = true;
+                    break;
+                }
                 out.push(' ');
             }
-            out.push_str(line);
-            lines_taken = lines_taken.saturating_add(1);
-            if out.len() >= PREVIEW_MAX_CHARS {
+            // Take only what is left of the budget from each line, so a
+            // multi-megabyte clipboard entry is never copied whole just to
+            // throw all but 120 characters of it away.
+            let room = PREVIEW_MAX_CHARS.saturating_sub(out.chars().count());
+            let mut rest = line.chars();
+            out.extend(rest.by_ref().take(room));
+            if rest.next().is_some() {
+                overflowed = true;
                 break;
             }
         }
-        if out.len() > PREVIEW_MAX_CHARS {
-            out.truncate(PREVIEW_MAX_CHARS);
+        if overflowed {
             out.push_str("...");
         }
         out
@@ -2003,7 +2028,68 @@ mod tests {
         let long = "a".repeat(200);
         let e = ClipEntry::new(1, long, ClipType::PlainText, 0, String::new());
         let p = e.preview();
-        assert!(p.len() <= PREVIEW_MAX_CHARS + 3); // +3 for "..."
+        // Characters, not bytes — see `preview`. On this all-ASCII input the
+        // two agree, which is why this test alone could not see the bug.
+        assert_eq!(p.chars().count(), PREVIEW_MAX_CHARS + 3); // +3 for "..."
+    }
+
+    /// The clipboard holds whatever the user copied. `preview` used to measure
+    /// it in bytes and then cut it at byte 120 with `String::truncate`, which
+    /// panics rather than rounding when that offset is inside a character — so
+    /// copying a couple of sentences of any non-Latin script crashed the
+    /// clipboard manager as it drew its own list.
+    #[test]
+    fn a_long_multibyte_preview_is_cut_by_characters_and_does_not_panic() {
+        // A uniform-width script does *not* demonstrate this on its own:
+        // `PREVIEW_MAX_CHARS` is 120, which is divisible by 2, 3 and 4, so byte
+        // 120 of solid Cyrillic, CJK or emoji lands on a boundary by accident
+        // and the old code survived. Every case below is asserted to actually
+        // split a character, so this test cannot quietly stop testing the bug
+        // if the constant changes.
+        // Note these are a *single* ASCII prefix followed by a run, not a
+        // repeated pattern: repeating "xЯ" gives a 3-byte period, and 120 is
+        // divisible by that too. Shifting the whole run by one or two bytes is
+        // what actually moves byte 120 off the grid.
+        for text in [
+            format!("x{}", "Я".repeat(200)),  // 2-byte run, shifted by 1
+            format!("x{}", "日".repeat(200)), // 3-byte run, shifted by 1
+            format!("x{}", "🎉".repeat(200)), // 4-byte run, shifted by 1
+            format!("xx{}", "日".repeat(200)), // 3-byte run, shifted by 2
+        ] {
+            let head: String = text.chars().take(4).collect();
+            assert!(
+                !text.is_char_boundary(PREVIEW_MAX_CHARS),
+                "this case no longer splits a character: {head:?}"
+            );
+            let e = ClipEntry::new(1, text.clone(), ClipType::PlainText, 0, String::new());
+            let p = e.preview();
+            assert_eq!(p.chars().count(), PREVIEW_MAX_CHARS + 3, "on {head:?}");
+            assert!(p.ends_with("..."));
+            // Every character kept is a whole one from the original.
+            assert!(text.starts_with(p.trim_end_matches('.')));
+        }
+    }
+
+    /// 120 characters of Japanese is 360 bytes. Counting bytes cut that to 40
+    /// characters — a third of the preview an English entry got — on the
+    /// entries that did not crash outright.
+    #[test]
+    fn a_preview_holds_the_same_number_of_characters_in_every_script() {
+        let ascii = ClipEntry::new(1, "a".repeat(300), ClipType::PlainText, 0, String::new());
+        let cjk = ClipEntry::new(2, "日".repeat(300), ClipType::PlainText, 0, String::new());
+        assert_eq!(
+            ascii.preview().chars().count(),
+            cjk.preview().chars().count()
+        );
+    }
+
+    /// Short content is returned whole, with no ellipsis and no padding.
+    #[test]
+    fn a_short_preview_is_verbatim() {
+        for text in ["", "hi", "héllo wörld", "日本語"] {
+            let e = ClipEntry::new(1, text.to_string(), ClipType::PlainText, 0, String::new());
+            assert_eq!(e.preview(), text);
+        }
     }
 
     #[test]

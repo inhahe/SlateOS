@@ -1267,11 +1267,14 @@ impl CharMapApp {
         let grid_y = y + title_h;
         let grid_h = h - title_h;
         let cell_size: f32 = 36.0;
-        let cols = ((w - 8.0) / cell_size).max(1.0) as usize;
+        // `(w - 8.0) / cell_size` with a floor of one, from the toolkit, so
+        // the grid this app draws by hand and the one `guitk::grid` draws
+        // agree about how many cells a width holds.
+        let cols = guitk::grid::columns_across(w - 8.0, cell_size, 0.0);
         let visible_rows = ((grid_h - 4.0) / cell_size) as usize;
 
         // Ensure scroll is valid
-        let row_of_selected = selected.checked_div(cols).unwrap_or(0);
+        let row_of_selected = selected / cols;
         let scroll_row = if row_of_selected < self.grid_scroll {
             row_of_selected
         } else if row_of_selected >= self.grid_scroll.saturating_add(visible_rows) {
@@ -1284,8 +1287,8 @@ impl CharMapApp {
 
         for vi_row in 0..visible_rows {
             let data_row = scroll_row.saturating_add(vi_row);
-            for col in 0..cols {
-                let idx = data_row.saturating_mul(cols).saturating_add(col);
+            for col in 0..cols.get() {
+                let idx = data_row.saturating_mul(cols.get()).saturating_add(col);
                 if idx >= chars.len() {
                     break;
                 }
@@ -1540,8 +1543,13 @@ impl CharMapApp {
         detail_y += 16.0;
 
         let recent_cell: f32 = 24.0;
-        let recent_cols = ((w - 20.0) / recent_cell) as usize;
-        let max_recent_show: usize = recent_cols.saturating_mul(3);
+        // Was `((w - 20.0) / recent_cell) as usize`, unguarded: the two
+        // `ri % recent_cols` below were safe only because `max_recent_show`
+        // is three times it, so a zero column count made both loops take
+        // nothing. A cap written as a constant instead would have made it a
+        // panic, three lines from a `.max(1)` the same author wrote.
+        let recent_cols = guitk::grid::columns_across(w - 20.0, recent_cell, 0.0);
+        let max_recent_show: usize = recent_cols.get().saturating_mul(3);
         let mut ri: usize = 0;
         for &cp in self.recent.iter().take(max_recent_show) {
             let col = ri % recent_cols;
@@ -1574,7 +1582,7 @@ impl CharMapApp {
         }
 
         // Favorites section
-        let fav_y = detail_y + (((max_recent_show / recent_cols.max(1)) as f32) + 1.0) * recent_cell + 8.0;
+        let fav_y = detail_y + (((max_recent_show / recent_cols) as f32) + 1.0) * recent_cell + 8.0;
         if fav_y + 20.0 < y + h {
             cmds.push(RenderCommand::Text {
                 x: x + 10.0,

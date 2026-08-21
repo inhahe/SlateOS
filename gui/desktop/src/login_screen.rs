@@ -310,11 +310,21 @@ impl LoginScreen {
     }
 
     /// Password display (masked).
+    ///
+    /// One bullet per *character*, not per byte. `type_char` pushes a `char`
+    /// and `backspace` pops one, so counting bytes made a password containing
+    /// any non-ASCII character draw more bullets than the user had pressed
+    /// keys — two for `é`, three for `€`, four for an emoji — and made one
+    /// backspace erase several of them. That is worse than untidy: the bullets
+    /// are the only feedback that a keystroke registered at all, so a user
+    /// whose password is not pure ASCII could not tell a doubled character
+    /// from a correct one. It also published the password's UTF-8 byte length
+    /// to anyone watching the screen, which distinguishes `é` from `e`.
     pub fn password_display(&self) -> String {
         if self.show_password {
             self.password_input.clone()
         } else {
-            "\u{2022}".repeat(self.password_input.len())
+            "\u{2022}".repeat(self.password_input.chars().count())
         }
     }
 
@@ -324,12 +334,17 @@ impl LoginScreen {
         if self.phase != LoginPhase::PasswordEntry || self.locked_out {
             return None;
         }
-        if self.selected_user >= self.users.len() {
-            return None;
-        }
-
+        // Take the name through the accessor that already resolves it, and
+        // take it *before* advancing the phase. The bounds proof used to sit
+        // three statements above the indexing it justified, and the phase
+        // change sat between them — so any later edit that reordered those two
+        // lines would have left the login screen in `Authenticating` with
+        // nobody to authenticate, or panicked outright. A panic here locks the
+        // user out of the machine, which is the worst place in the shell to
+        // leave a proof that can drift from its use.
+        let username = self.current_user()?.username.clone();
         self.phase = LoginPhase::Authenticating;
-        Some(self.users[self.selected_user].username.clone())
+        Some(username)
     }
 
     /// Called when authentication succeeds.
@@ -343,7 +358,7 @@ impl LoginScreen {
     pub fn auth_failure(&mut self, message: &str) {
         self.phase = LoginPhase::Failed;
         self.error_message = Some(message.to_string());
-        self.failed_attempts += 1;
+        self.failed_attempts = self.failed_attempts.saturating_add(1);
         self.shake_timer = 1.0; // start shake animation
 
         // Check lockout.
@@ -370,9 +385,15 @@ impl LoginScreen {
     }
 
     /// Set lockout expiry (called after auth_failure triggers lockout).
+    ///
+    /// Saturating, and saturating in the safe direction: an expiry that
+    /// cannot be represented becomes `u64::MAX`, which is a lockout that
+    /// does not end. A wrapping one would land *behind* `now_ms` and clear
+    /// the lockout on the next tick, which is the failure that matters here.
     pub fn set_lockout_expiry(&mut self, now_ms: u64) {
         if self.locked_out {
-            self.lockout_until = now_ms + self.config.lockout_seconds as u64 * 1000;
+            self.lockout_until =
+                now_ms.saturating_add(u64::from(self.config.lockout_seconds).saturating_mul(1000));
         }
     }
 
@@ -990,6 +1011,62 @@ mod tests {
         s.type_char('b');
         s.type_char('c');
         assert_eq!(s.password_display(), "\u{2022}\u{2022}\u{2022}");
+    }
+
+    #[test]
+    fn the_mask_draws_one_bullet_per_keystroke_not_per_byte() {
+        // `password_display_masked` above is pure ASCII, where a byte count and
+        // a character count are the same number — so it passed throughout the
+        // life of the bug. Three keys pressed, three bullets, whatever those
+        // keys were worth in UTF-8: 'e' is 1 byte, 'é' is 2, '€' is 3, an emoji
+        // is 4.
+        for (label, ch) in [
+            ("ascii", 'e'),
+            ("two-byte", '\u{e9}'),
+            ("three-byte", '\u{20ac}'),
+            ("four-byte", '\u{1f512}'),
+        ] {
+            let mut s = make_screen();
+            s.select_user(0);
+            s.type_char(ch);
+            s.type_char(ch);
+            s.type_char(ch);
+            assert_eq!(
+                s.password_display(),
+                "\u{2022}\u{2022}\u{2022}",
+                "three {label} keystrokes must draw three bullets"
+            );
+        }
+    }
+
+    #[test]
+    fn one_backspace_erases_one_bullet_whatever_the_character_cost() {
+        // The other half of the same defect: `backspace` pops a char, so under
+        // a byte count one press removed a character and several bullets.
+        let mut s = make_screen();
+        s.select_user(0);
+        s.type_char('\u{1f512}');
+        s.type_char('\u{e9}');
+        assert_eq!(s.password_display(), "\u{2022}\u{2022}");
+        s.backspace();
+        assert_eq!(s.password_display(), "\u{2022}");
+        s.backspace();
+        assert_eq!(s.password_display(), "");
+    }
+
+    #[test]
+    fn submitting_with_no_selectable_user_does_not_strand_the_phase() {
+        // The guard used to sit above the phase change, so this path returned
+        // None correctly — but the indexing it protected sat below. Pin the
+        // property that actually matters: a refused submit leaves the screen
+        // where the user can try again, rather than in `Authenticating` with
+        // nothing in flight.
+        let mut s = make_screen();
+        s.select_user(0);
+        s.type_char('x');
+        s.users.clear();
+        assert_eq!(s.submit_password(), None);
+        assert_eq!(s.phase, LoginPhase::PasswordEntry);
     }
 
     #[test]

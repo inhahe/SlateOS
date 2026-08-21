@@ -8,9 +8,9 @@
 //! Both support vertical scrolling, text selection, copy-to-clipboard, and search.
 
 use crate::color::Color;
-use crate::cycle;
 use crate::event::{Event, EventResult, Key, KeyEvent, MouseEvent, MouseEventKind};
 use crate::render::{FontFamily, FontWeightHint, RenderCommand, RenderTree, TextOverflow};
+use crate::step;
 use crate::style::CornerRadii;
 use crate::wheel;
 use textfind::Case;
@@ -589,7 +589,7 @@ impl SearchState {
             return None;
         }
         Some(match self.current_match {
-            Some(idx) => cycle::after(self.matches.len(), idx),
+            Some(idx) => step::wrapping_after(self.matches.len(), idx),
             // No current match: start at the first.
             None => 0,
         })
@@ -599,7 +599,7 @@ impl SearchState {
     fn prev_index(&self) -> Option<usize> {
         let last = self.matches.len().checked_sub(1)?;
         Some(match self.current_match {
-            Some(idx) => cycle::before(self.matches.len(), idx),
+            Some(idx) => step::wrapping_before(self.matches.len(), idx),
             None => last,
         })
     }

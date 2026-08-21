@@ -11,6 +11,7 @@
 //! - System tray indicator
 
 use guitk::color::Color;
+use guitk::ratio;
 use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::scroll_window;
 use guitk::style::CornerRadii;
@@ -275,11 +276,11 @@ pub struct FileTransfer {
 }
 
 impl FileTransfer {
+    /// Progress as a percentage (0-100). A transfer that has not yet been
+    /// told its size is at 0%, not at 100%.
+    #[must_use]
     pub fn progress_pct(&self) -> u32 {
-        if self.total_bytes == 0 {
-            return 0;
-        }
-        ((self.transferred_bytes * 100) / self.total_bytes) as u32
+        ratio::percent_whole(self.transferred_bytes, self.total_bytes).unwrap_or(0)
     }
 }
 

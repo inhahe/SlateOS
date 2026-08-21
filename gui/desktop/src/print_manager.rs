@@ -11,6 +11,7 @@
 //! - Print history / job log
 
 use guitk::color::Color;
+use guitk::ratio;
 use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::style::CornerRadii;
 
@@ -348,12 +349,10 @@ pub struct PrintJob {
 }
 
 impl PrintJob {
-    /// Progress as percentage (0-100).
+    /// Progress as percentage (0-100). A job with no page count is at 0%.
+    #[must_use]
     pub fn progress_pct(&self) -> u32 {
-        if self.total_pages == 0 {
-            return 0;
-        }
-        ((self.pages_printed as u64 * 100) / self.total_pages as u64) as u32
+        ratio::percent_whole(self.pages_printed, self.total_pages).unwrap_or(0)
     }
 
     /// Size display.
@@ -610,7 +609,8 @@ impl PrintManager {
     pub fn purge_terminal_jobs(&mut self) -> usize {
         let before = self.jobs.len();
         self.jobs.retain(|j| !j.state.is_terminal());
-        before - self.jobs.len()
+        // `retain` only shrinks; saturating says so in the expression itself.
+        before.saturating_sub(self.jobs.len())
     }
 
     /// Total pages printed across all completed jobs.

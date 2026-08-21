@@ -708,7 +708,8 @@ impl BlurRenderer {
                 let (Ok(x), Ok(y)) = (u32::try_from(col), u32::try_from(row)) else {
                     continue;
                 };
-                let noise = i64::from(pixel_hash(x, y) % span) - i64::from(strength);
+                let noise = i64::from(pixel_hash(x, y).checked_rem(span).unwrap_or(0))
+                    .saturating_sub(i64::from(strength));
                 let shift =
                     |v: u32| -> u32 { (i64::from(v).saturating_add(noise)).clamp(0, 255) as u32 };
                 let c = Rgb::from_argb(px);

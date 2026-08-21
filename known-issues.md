@@ -49044,3 +49044,46 @@ delete `DesktopShell::render_window_decorations`, `window_chrome`, and the
 argument above is unchanged — corner radius first, deletion second, because
 deleting while the compositor still draws square corners ships a visible
 regression for anyone who set `Rounded`.
+
+**Correction 2026-08-21 — there is a *third* feature, and the count above was
+wrong.** The entry has said since it was written that deleting the shell's
+renderer "would lose two real features". Re-reading
+`render_window_decorations` line by line before deleting it — which is the only
+way to be sure — turned up a third, and the same reading found that
+prerequisite 2 is not the narrow job the name "corner radius" suggests.
+
+3. **Two shadow behaviours the compositor does not have.**
+   - **The `drop_shadows` user toggle.** `AppearanceSettings::drop_shadows`
+     (`gui/appearance/src/lib.rs:621`) is a real, YAML-persisted, settings-UI
+     exposed switch (`gui/desktop/src/appearance_settings.rs:715`), and the
+     shell honours it in four places, window decorations among them
+     (`gui/desktop/src/lib.rs:2384`). The compositor's `render_window` calls
+     `render_shadow` unconditionally for every window that has a title bar. So
+     a user who turns drop shadows off today would see them turn off
+     everywhere the shell draws and stay on around every window — and after
+     the deletion, stay on everywhere, with the setting doing nothing at all.
+   - **No shadow on a maximized window.** The shell suppresses it because a
+     maximized window "has no edge to cast from — there is nothing beside it
+     for a shadow to fall on, and one drawn anyway would bleed over the screen
+     border". The compositor keeps `maximized` and `fullscreen` deliberately
+     distinct (`gui/compositor/src/lib.rs:562`): fullscreen drops the title bar
+     and so drops the shadow with it, but **maximized keeps its decorations**,
+     and therefore gets a shadow drawn into the screen edge. Half of this is
+     already right by accident; the maximized half is not.
+
+**Consequently prerequisite 2 is "the appearance settings the compositor
+ignores", not "corner radius".** Both remaining items — `WindowCorners` and
+`drop_shadows` — are fields of the same `AppearanceSettings` struct that the
+compositor has no connection to at all. The work is one channel carrying both,
+not two unrelated features, and building the channel for corner radius alone
+and then discovering `drop_shadows` needs the same channel is exactly the
+band-aid accumulation `CLAUDE.md` warns about. Do them together.
+
+**And the corner-radius half is not plumbing.** The compositor's render engine
+*already receives* corner radii and throws them away: `execute_command`
+destructures `corner_radii: _` on both `RenderCommand::FillRect` and
+`StrokeRect` (`gui/compositor/src/lib.rs:2923`, `2938`, and again at `3055`).
+Every rounded rectangle any client or the shell has ever submitted has been
+rasterised square. So this needs rounded-rectangle fill and stroke implemented
+in the rasteriser first — which also fixes a silent, tree-wide bug of its own,
+independent of window decorations.

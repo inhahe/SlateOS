@@ -31982,7 +31982,7 @@ been worth defining before the driver exists. This entry therefore stays open,
 and the sentence in `TD-NO-APP-CONNECTS-TO-THE-COMPOSITOR` calling this the last
 link to a photon stays true of SlateOS, not of the harness.
 
-## TD-GUI-CRATES-OPT-OUT-OF-THE-WORKSPACE-LINTS (lane C, 2026-08-17)
+## TD-GUI-CRATES-OPT-OUT-OF-THE-WORKSPACE-LINTS (lane C, 2026-08-17) - **fixed**
 
 **What.** `CLAUDE.md` requires every crate to enable `clippy::all` +
 `clippy::pedantic` and five defensive lints (`unwrap_used`, `expect_used`,
@@ -32302,6 +32302,116 @@ were one hand-rolled tokeniser cursor, and `textview`'s ANSI parser was
 hand-decoding UTF-8 it had already been handed decoded. Before fixing a group,
 check whether the group is one shape — the repeated *source line* is the tell,
 and `scripts/clippy-sites.py --sites` prints it.
+
+
+### 2026-08-20 — `gui/desktop`, the tenth and last crate. Sweep complete.
+
+**Correcting the figure in this entry.** The 1561 recorded for `gui/desktop`
+was measured with `cargo clippy -p desktop -- -W clippy::…`, which is not what
+that crate is graded on: the flags leak into every dependency, and they bypass
+the workspace `[workspace.lints.clippy]` table rather than adding to it.
+`gui/desktop` had *already* opted in with `[lints] workspace = true`. Built
+alone, with `--message-format=json`, filtered to `gui/desktop/src`, and
+deduplicated by `(file, line, column, lint)`, the real backlog was **66**.
+
+The methodology matters more than the number, so state it plainly: **never
+quote a raw total from a `-W`-flagged run.** Measure the crate as configured,
+filter to its own files, and deduplicate — the same site reported once per
+target (lib, bin, test) triples a count for free.
+
+Note also that `clippy::arithmetic_side_effects` **does not lint
+floating-point arithmetic**, so none of desktop's f32 layout code fires. Every
+site in this crate was integer arithmetic. That is worth knowing before
+budgeting a sweep of a rendering crate.
+
+**Three more abstractions the crate had re-derived**, each found the same way —
+a lint firing many times turned out to be one shape repeated, and *the copies
+disagreed with one another*. The disagreement is the finding; the lint was only
+what pointed at it.
+
+| Copies | What they disagreed about | Written once as |
+|---|---|---|
+| 14 id counters | What happens at the top of the range: `+= 1` (6), `saturating_add` (6), `wrapping_add` (3), `checked_add` (2) — **four answers** | `guitk::idseq` |
+| 15 percentages | What "percent of nothing" is: `0`, `0.0`, `100`, `100.0` — **four answers**; and only one of the fifteen clamped | `guitk::ratio` |
+| 3 quiet-hours windows | Nothing — but all three shared one hole, and one shipped it | `guitk::daywindow` |
+| 22 index steps | What happens at the end of the list: 13 wrapped, 9 clamped — **and no call site said which it meant** | `guitk::step` |
+
+Each of those is worth reading as a separate lesson:
+
+- **`idseq`.** Wrapping is the worst of the four answers, and three of the
+  fourteen chose it. The ids it reuses first are the *lowest*, which in a shell
+  that has been up long enough to wrap are overwhelmingly the ones still alive
+  — the first workspace, the pinned window, the tray notification sitting there
+  since boot. A duplicate id is not a crash; it is one object answering to
+  another's name, which is how a dismissal dismisses the wrong notification.
+  The module offers `issue() -> Option<T>` universally and
+  `issue_infallible() -> T` **only** for `T: Inexhaustible` (u64/u128), so the
+  shortcut is gated by the compiler rather than by a comment. The four 32-bit
+  sequences were *widened* rather than given an error path no caller could act
+  on: `IconId`, `DeviceId`, `RuleId`, `RecordingId`.
+- **`ratio`.** Each of the four zero-case answers was right for its own caller,
+  which is exactly why it is not a decision a shared helper should make for
+  them. `percent` returns `Option`, so `.unwrap_or(0.0)` puts each caller's
+  answer in the same expression as the division. An empty disk is 0% used; a
+  battery with no recorded design capacity is assumed healthy at 100%.
+- **`step`** (renamed from `cycle`, which had owned only the wrapping half).
+  This one is a fault *one level up* from the rest of the sweep: not arithmetic
+  without a proof, but **behaviour without a decision**. The launcher stops at
+  the last result; the Wi-Fi list wraps to the first network. Both are right —
+  a ranking has no meaningful "after the worst match", a short menu of networks
+  is a ring you thumb through — but no call site stated which it had chosen, so
+  the answer was settled by whoever typed the loop. The policy is now in the
+  name (`wrapping_after` / `clamped_after`) and neither is the default.
+
+**Live defects found.**
+
+- `backup_settings::record_backup` advanced a `next_backup_id` counter that
+  **nothing ever read**. Every caller invented its own id, and all the tests
+  passed `id: 1`, so nothing stopped two history entries sharing one — which
+  would have made delete-by-id ambiguous the first time it mattered. The
+  function now assigns the id and returns it.
+- `notif_pane` aged notifications with bare subtraction behind an
+  `if now < timestamp` guard. A clock moved backwards — NTP correction, DST
+  fix, or a stamp from a process whose clock ran ahead — leaves timestamps in
+  the future; without the guard those age to near `u64::MAX`, i.e. sorted
+  `Older` and dated half a trillion years ago. ~18 sites elsewhere in the tree
+  already used `saturating_sub`; these two were the outliers.
+- `security_dialog::truncate_str` was the **fifth** copy of the char-boundary
+  walk `TextCursor::snapped_in` was extracted to own, and its doc comment said
+  `max` was in characters. It has always been bytes — a name like that is how a
+  caller sizes a field in characters and gets a third of it for text that is
+  not ASCII.
+- `resmon`'s sparkline indexed `i` and `i - 1` with a `.unwrap_or(0.0)` on each
+  end, so a missing sample would have been drawn as a spike down to the floor —
+  a fabricated reading in a graph of real ones. It walks `windows(2)` now, and
+  the pair is always real.
+- `login_screen`'s lockout expiry could wrap *behind* `now_ms` and clear the
+  lockout on the next tick. It saturates in the safe direction now: an
+  unrepresentable expiry is a lockout that does not end.
+
+**`.get()` throws the proof away.** The last two sites in the crate were
+`icons::GridConfig::columns_in`/`rows_in`, still firing after the cell size had
+been moved to `NonZeroU32`, because they divided by `self.cell_width.get()`.
+The lint is right to fire: `.get()` hands the compiler a plain `u32`, so the
+division one expression later is by a value with no non-zero proof attached.
+Dividing by the `NonZeroU32` itself uses `Div<NonZeroU32> for u32`, which
+cannot panic. The cost is `const`, since operator impls are not const — no
+caller wanted it. Worth remembering as the general shape: **reach for `.get()`
+last, not first**, or the type you introduced to carry a fact stops carrying it
+at the first call site.
+
+**One shape deliberately left alone.** `let before = v.len(); v.retain(…);
+v.len() < before` appears **27 times** across `gui/` and `apps/` — by count the
+largest duplicated shape in the sweep. It was *not* extracted, because it fails
+the test the other four passed: the copies do not disagree, and none of them is
+wrong. 25 return the boolean, 2 return a count, and both are correct APIs.
+Extraction here would buy two fewer lines per site at the cost of an
+indirection over an idiom every Rust reader already knows. Recorded here so the
+next sweep does not re-discover it and reach a different conclusion by
+accident: **duplication alone is not the warrant — divergence is.**
+
+**`gui/desktop` is at 0 sites.** All ten `gui/` crates are now clean under the
+full workspace lint set.
 
 ## C-TEXT-WAS-CUT-BY-COUNTING-CHARACTERS-INSTEAD-OF-MEASURING-IT (lane C, 2026-08-17) - **fixed**
 

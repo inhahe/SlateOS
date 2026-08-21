@@ -105,14 +105,26 @@ fn pathz_missing(rung: &str, required: &[&str]) -> bool {
 /// the nonzero path: `boot-test.sh` greps for `rung(s) SKIPPED` and surfaces it,
 /// so a boot that quietly lost a chunk of its coverage can no longer be read as
 /// a clean run.
+///
+/// The advice names the *host* prerequisite rather than only the rebuild
+/// command, because "rebuild the image" is the wrong instruction in the case
+/// that actually happens.  On 2026-08-21 all 26 tcc rungs vanished at once
+/// because WSL had restarted and cleared `/tmp/tccinstall`; rebuilding the
+/// image as instructed would have produced an identical image with the same 26
+/// SKIPs and no new information.  A remedy that does not fix the failure it is
+/// printed under teaches its reader to skip the line.
 pub fn pathz_report_skips() {
     let n = PATHZ_SKIPPED.load(core::sync::atomic::Ordering::Relaxed);
     if n == 0 {
         serial_println!("[spawn] Path-Z prerequisites: complete — 0 rungs skipped");
     } else {
         serial_println!(
-            "[spawn] Path-Z prerequisites: {} rung(s) SKIPPED — coverage is INCOMPLETE \
-             (rebuild rootfs.ext4 via scripts/create-ext4-rootfs.sh; see the SKIP lines above)",
+            "[spawn] Path-Z prerequisites: {} rung(s) SKIPPED — coverage is INCOMPLETE. \
+             Each SKIP line above names the file that was missing; rebuilding the image \
+             helps only if the HOST can supply it. The tcc rungs need a tcc on PATH or at \
+             ~/.cache/slateos/tccinstall/bin/tcc — build instructions are in the tcc \
+             section of scripts/create-ext4-rootfs.sh. Install what is missing FIRST, then \
+             rebuild: wsl -d Ubuntu -- bash scripts/create-ext4-rootfs.sh",
             n
         );
     }

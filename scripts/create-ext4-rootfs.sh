@@ -736,11 +736,26 @@ fi
 # (A hosted compile against the staged glibc/crt/headers is a later rung.)
 #
 # tcc is not on a default Ubuntu install and `apt install tcc` needs root, so
-# this script accepts tcc from PATH or from a cached source build at
-# /tmp/tccinstall/bin/tcc (build: git clone https://repo.or.cz/tinycc.git &&
-# ./configure && make && make install prefix=/tmp/tccinstall).  Absent tcc the
-# self-test no-ops, matching the make/dash best-effort pattern above.
+# this script accepts tcc from PATH or from a cached source build.  To make one:
+#
+#   git clone https://repo.or.cz/tinycc.git && cd tinycc
+#   ./configure --prefix=$HOME/.cache/slateos/tccinstall && make && make install
+#
+# Absent tcc the self-test no-ops, matching the make/dash best-effort pattern
+# above.
+#
+# ~/.cache is searched *before* /tmp and is the place to build into.  /tmp is
+# still accepted because that is where the original instructions put it, but it
+# is the wrong home for this: /tmp is cleared when WSL restarts, and when it
+# went, the image lost tcc silently.  The boot stayed green, 26 Path Z rungs
+# turned into SKIP lines, and nothing anywhere read as a regression.  A cache
+# that survives a reboot is the difference between "this host has a C compiler"
+# being something you arrange once and something that quietly un-arranges
+# itself.
 TCC_SRC="$(command -v tcc || true)"
+if [ -z "$TCC_SRC" ] && [ -x "$HOME/.cache/slateos/tccinstall/bin/tcc" ]; then
+    TCC_SRC="$HOME/.cache/slateos/tccinstall/bin/tcc"
+fi
 if [ -z "$TCC_SRC" ] && [ -x /tmp/tccinstall/bin/tcc ]; then
     TCC_SRC="/tmp/tccinstall/bin/tcc"
 fi

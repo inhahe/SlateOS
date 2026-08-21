@@ -24719,6 +24719,84 @@ optimisation the private version got — cross-crate inlining is unaffected here
 but if it were measurable — the shared-inner-module alternative becomes the
 right answer rather than merely a heavier one.
 
+### Postscript: the fix opened a *new* way to measure nothing
+
+The first run after the change (`fe9882a55`) reported
+`tcp_checksum_v6` at **18 ns**, down 99% from ~1604 ns. That is not a
+speedup; it is impossible. The segment is 1460 bytes, so the checksum loop
+runs 730 iterations, and 18 ns is ~70 cycles — 0.1 cycles per iteration,
+against a suite that runs at roughly **8 cycles per iteration** under QEMU's
+TCG interpreter, on a host where `rdtsc_overhead` alone measures 138 cycles.
+Nor can SIMD explain it: TCG *emulates* vector instructions, so
+auto-vectorisation there is slower, not faster.
+
+The call had been hoisted out of the timing loop. **And this change is what
+made it hoistable.** The copies took their arguments from mutable locals
+built inside `bench.rs`; re-pointing at the real functions meant passing a
+loop-invariant immutable local to a pure function, which is exactly the shape
+loop-invariant code motion looks for. `black_box` was already wrapped around
+the *return value*, and that is the part worth writing down:
+
+> `core::hint::black_box` on a result prevents **dead-code elimination**. It
+> does not prevent **hoisting**. To stop LLVM computing something once and
+> reusing it, the *input* must be opaque — `black_box(&segment[..])` — which
+> denies the optimiser its proof that the pointed-to bytes are unchanged
+> between iterations.
+
+All three checksum benchmarks now blackbox their input buffer.
+`net_checksum` was demonstrably *not* being hoisted (21 ns = 80 cycles over
+10 iterations, right on the suite's 8-cycles/iteration line), and it was
+guarded anyway: "not hoisted by this LLVM" is a property of a compiler
+version, not of a benchmark, and a future one noticing would collapse the
+series silently. The evidence that unguarded form was worth keeping for —
+that §251's re-pointing did not by itself move the number — had already been
+banked by `fe9882a55`, which ran re-pointed and unguarded. `dns_build_query`
+needs no guard: it allocates, and the global allocator is an opaque call the
+optimiser cannot move.
+
+The v4 and v6 benchmarks had to be guarded *identically* rather than
+individually judged. They exist to be subtracted from each other; if one were
+hoisted and the other not, the "cost of the larger IPv6 pseudo-header" would
+be the difference between a real call and no call at all — which is the same
+species of falsehood §251 was written to remove, arrived at from the opposite
+direction.
+
+**The general lesson, which is why this is recorded rather than just fixed:**
+a benchmark can fail to measure its subject in two ways, and they pull in
+opposite directions. §251's original defect was measuring *something else*
+(a copy) — findable only by reading the code. This one is measuring *nothing* —
+and it falls out of arithmetic in seconds, because a number implying 0.1 cycles
+per iteration cannot be true. **An implausible win is a bug report.**
+
+It should be said plainly that the harness reported this properly:
+`bench-history.py` printed `tcp_checksum_v6: 1604ns -> 18ns (-99% vs suite,
+-99% raw); its own range is 1595-1610ns (median 1602ns over 8 runs)` under its
+`IMPROVED` heading. Detection was never the problem. The problem is that a −99%
+move is filed as good news and the run passes — and no amount of extra
+statistics would change that, because the number is statistically flawless
+(`split 1st=70 2nd=70 (0%)`, a perfectly replicating level shift). Only a
+physical argument rejects it.
+
+The cheapest such argument is already sitting in the suite: `self_test_nop`, the
+empty-closure control, measured **72 cycles** on that same run, and the
+checksum measured **70**. *Nothing real costs less than nothing.* That check is
+exact rather than tuned, and is recorded as the follow-up in `known-issues.md`
+— along with the version of it that does **not** work ("below `rdtsc_overhead`"
+fires on eight legitimate benchmarks, because the harness amortises).
+
+**And this is the third time in this one file.** `measure_access_at`'s doc
+comment already records two: the optimiser removed the `write_volatile` stores
+being measured (nop=400 vs store=244 — the *store* arm cheaper than the empty
+one), and then it unrolled the constant-trip-count empty loop but not the store
+loop, so the delta silently included ~11 cycles of scaffolding asymmetry that
+moved 4× with `N`. That comment draws the moral itself — *"first the optimiser
+removed the thing being measured, then it removed the thing being measured
+against"* — and both fixes were local. A third instance in a different
+benchmark says the moral is right and the response was too small: the property
+"this window measures something" is worth checking mechanically, once, for
+every window, rather than reasoned about per site by whoever writes the next
+benchmark.
+
 ## §463 — Two shared RNG crates merge into the dependency-free one
 
 **Date:** 2026-08-18

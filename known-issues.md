@@ -46573,6 +46573,101 @@ through `page_table` with the CPU exception explicitly excluded) and
 `kernel/src/idt.rs` (no benchmark's measurement window contains it;
 `isr_latency`'s opens inside `apic::handle_timer_irq`, well past the stub).
 
+**`[A]` 2026-08-21 — the §251 fix introduced a *new* way to measure nothing:
+`black_box` on a result does not prevent hoisting.** Postscript in
+design-decisions §251. The first post-fix run (`fe9882a55`) reported
+`tcp_checksum_v6` at **18 ns**, down 99% from ~1604 ns — and the run was
+otherwise green, so nothing flagged it. It is arithmetically impossible: 1460
+bytes is 730 checksum iterations, and 18 ns is ~70 cycles, i.e. **0.1 cycles per
+iteration**, against a suite that runs at ~8 cycles/iteration under QEMU TCG on a
+host whose `rdtsc_overhead` alone is 138 cycles. (SIMD cannot explain it either —
+TCG emulates vector instructions, so auto-vectorisation is *slower* there.)
+
+Cause, and it was self-inflicted: the deleted copies took their arguments from
+mutable locals built in `bench.rs`, whereas calling the real function passes a
+**loop-invariant immutable local to a pure function** — precisely the shape LLVM
+hoists out of `run()`'s loop. The existing `black_box` was around the *return
+value*, which prevents dead-code elimination but **not** loop-invariant code
+motion. The guard that works is an opaque **input**:
+
+```rust
+let seg = core::hint::black_box(&segment[..]);
+let _ = core::hint::black_box(crate::net::tcp::tcp_checksum_v6(seg, &src, &dst));
+```
+
+Applied to all three checksum benchmarks. Two notes on the reasoning, so neither
+looks like an oversight later:
+
+- **v4 and v6 must be guarded identically, not judged individually.** They exist
+  to be subtracted from each other; one hoisted and one not would make "the cost
+  of the larger IPv6 pseudo-header" the difference between a real call and no
+  call — the same falsehood §251 removed, reached from the other side.
+- **`net_checksum` was guarded even though it was demonstrably fine** (21 ns = 80
+  cycles over 10 iterations, right on the 8-cycles/iteration line). "Not hoisted"
+  is a property of an LLVM version, not of a benchmark. Its unguarded run had
+  already banked the one thing it was worth — evidence that re-pointing at the
+  real function did not by itself move the number — so expect a small one-time
+  step there too. `dns_build_query` needs no guard: it allocates, and the global
+  allocator is an opaque call that cannot be moved.
+
+**What the harness did and did not do.** It reported this correctly and
+prominently — `bench-history.py` printed it under `IMPROVED (>25% faster than the
+suite AND outside its own recent range)` with the full comparison,
+`tcp_checksum_v6: 1604ns -> 18ns (-99% vs suite, -99% raw); its own range is
+1595-1610ns (median 1602ns over 8 runs)`. Nothing was hidden. The gap is *not*
+detection, it is **interpretation**: a −99% move is filed under good news, and
+the run PASSED. Nor would more statistics help, because statistically the number
+is impeccable — `split 1st=70 2nd=70 (0%)`, a perfectly replicating level shift.
+What marks it false is physics, not variance.
+
+**The check that would catch it, and that the suite already has the ingredient
+for.** `self_test_nop` — `run_diagnostic("self_test_nop", 1000, || black_box(42))`
+— is an empty-closure control measuring the harness's own per-sample floor. It
+came in at **72 cycles**. `net_tcp_checksum_v6_1460b` came in at **70**. A
+benchmark that costs less than an empty closure is not running, and that is true
+by construction rather than by threshold-picking, so it has no false positives to
+tune. Note the *wrong* version of this idea, which was tried first and discarded:
+"below `rdtsc_overhead` (138 cycles)" would fire on `self_test_nop` itself,
+`net_ip_checksum_20b` (80), `sd_current_task_id` (106), `preempt_pair` (108) and
+four others, all legitimate — the harness amortises, so the instrument's own
+overhead is not the floor. The empty closure is.
+
+Not yet implemented. It belongs in the kernel rather than in
+`bench-history.py`, because `self_test_nop` is `run_diagnostic`'d and so never
+reaches `history.jsonl`; the value is in memory at `finish_pass` time. One
+caveat to handle when writing it: the nop control runs 1000 iterations while
+scored benchmarks run 1000–5000, and more rounds means a lower minimum, so the
+floor is mildly optimistic and the check should warn rather than fail.
+
+**Aside, logged because it recurred while fixing the above:** the verification
+build was launched as `run-timeout.py … cargo build -p kernel | tail -25`. It hit
+its 900 s timeout and was killed — and the tool reported **exit code 0**, because
+a pipeline's status is `tail`'s. That is the trap already documented above at
+"Two more traps in the same family", but the mitigation written for it
+(`scripts/workspace-test.py`) covers only the *test* gate; an ad-hoc `cargo
+build` has no such wrapper and re-opened the same hole. It was caught only
+because `run-timeout`'s `TIMEOUT after 900s -- killing process tree` line
+survived inside the captured text and the file was read rather than the status
+trusted. **Never pipe a `run-timeout.py` invocation** — it also defeats the
+30-second heartbeats, which are the only signal distinguishing "slow" from
+"hung", and here 900 s was in fact too short: three lanes were building at once
+(13 `rustc`, 5 `cargo`), so the kernel crate did not finish.
+
+**This is the third instance of the same shape in `bench.rs`, which is the
+argument for doing it mechanically rather than per-site.** `measure_access_at`'s
+doc comment records the other two: the optimiser eliminated the stores the
+canary was measuring (leaving `nop=400` against `store=244` — the store arm
+*cheaper* than the empty one), and later it fully unrolled the empty
+constant-trip-count loop while leaving the `write_volatile` loop rolled, putting
+~11 cycles of scaffolding asymmetry inside the delta and moving the per-access
+figure 4× (16.6 → 5.2 cyc) when `N` changed. Both were fixed locally —
+`write_volatile` instead of `black_box`, then `black_box` on the trip count —
+and the comment already states the moral: *"first the optimiser removed the
+thing being measured, then it removed the thing being measured against … a
+benchmark whose validity silently depended on the optimiser declining to do
+something it was entitled to do."* A third instance in an unrelated benchmark
+says the moral held and the response was too narrow.
+
 ---
 
 ## `apps/**` bug-hunt sweep, round 1: four live defects and two latent (lane C)

@@ -6381,8 +6381,23 @@ fn bench_net_checksum() {
         0x0A, 0x00, 0x00, 0x01, 0x0A, 0x00, 0x00, 0x02,
     ];
 
+    // `black_box` on the *header*, as in the two tcp_checksum benchmarks. This
+    // one demonstrably was *not* being hoisted — run fe9882a55 reported 21ns,
+    // i.e. 80 cycles over 10 iterations, exactly the ~8 cycles/iteration the
+    // rest of the suite runs at under TCG — but "not hoisted today" is a
+    // property of this LLVM version, not of the benchmark. A future compiler
+    // that noticed `ip_checksum` is a pure function of a loop-invariant local
+    // would silently collapse the series to nothing, which is the same failure
+    // §251 exists to correct. Guarding it costs one compiler barrier and buys
+    // the property outright.
+    //
+    // The one thing the unguarded form was worth — evidence that §251's
+    // re-pointing at the real function did not itself move the number — was
+    // already collected on fe9882a55, which ran re-pointed and unguarded. So
+    // adding the guard now forfeits nothing; expect a small one-time step.
     let result = run("net_ip_checksum_20b", 5000, || {
-        let _ = core::hint::black_box(crate::net::ipv4::ip_checksum(&header));
+        let hdr = core::hint::black_box(&header[..]);
+        let _ = core::hint::black_box(crate::net::ipv4::ip_checksum(hdr));
     });
 
     serial_println!(
@@ -6423,8 +6438,15 @@ fn bench_net_tcp_checksum_v4() {
     let src = crate::net::interface::Ipv4Addr([10, 0, 0, 1]);
     let dst = crate::net::interface::Ipv4Addr([10, 0, 0, 2]);
 
+    // `black_box` on the *segment*, matching the v6 benchmark below. The two
+    // exist to be compared against each other, so they must be shielded from the
+    // optimiser identically: if only one of them denied LLVM the loop-invariance
+    // proof, the "cost of the larger pseudo-header" would be the difference
+    // between a hoisted call and a real one. See the longer note at
+    // `bench_net_tcp_checksum_v6`, where the hoist actually fired.
     let result = run("net_tcp_checksum_v4_1460b", 2000, || {
-        let _ = core::hint::black_box(crate::net::tcp::tcp_checksum(&segment, src, dst));
+        let seg = core::hint::black_box(&segment[..]);
+        let _ = core::hint::black_box(crate::net::tcp::tcp_checksum(seg, src, dst));
     });
 
     serial_println!(
@@ -6477,8 +6499,18 @@ fn bench_net_tcp_checksum_v6() {
     let src = crate::net::ipv6::Ipv6Addr(src);
     let dst = crate::net::ipv6::Ipv6Addr(dst);
 
+    // `black_box` on the *segment*, not just on the result. Every argument here
+    // is a loop-invariant immutable local and `tcp_checksum_v6` is a pure
+    // function of them, so LLVM is free to compute the checksum once and hoist
+    // it out of `run`'s iteration loop; blackboxing only the return value stops
+    // the call being deleted but not being moved. That is not hypothetical —
+    // it happened on the first §251 run and reported 18ns, i.e. 70 cycles for
+    // 730 loop iterations (0.1 cycles each) where the rest of the suite runs at
+    // ~8 cycles per iteration under TCG. Making the pointer opaque denies LLVM
+    // the proof that the pointed-to bytes are unchanged between iterations.
     let result = run("net_tcp_checksum_v6_1460b", 2000, || {
-        let _ = core::hint::black_box(crate::net::tcp::tcp_checksum_v6(&segment, &src, &dst));
+        let seg = core::hint::black_box(&segment[..]);
+        let _ = core::hint::black_box(crate::net::tcp::tcp_checksum_v6(seg, &src, &dst));
     });
 
     serial_println!(

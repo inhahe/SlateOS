@@ -48894,10 +48894,11 @@ architecture. The shell's copy is the one to delete.
 **But deleting it plainly would lose two real features**, which is the actual
 work in this entry:
 
-1. **Display scaling.** The shell scales every decoration dimension by the
-   user's scale factor; the compositor hardcodes pixels. On a 2× display the
-   compositor's title bar is 30 physical pixels — half the height it should be,
-   with 20px buttons inside it.
+1. **Display scaling.** ✅ **Done 2026-08-21.** *(Original text kept below; the
+   note at the end of this entry records what was built.)* The shell scales
+   every decoration dimension by the user's scale factor; the compositor
+   hardcodes pixels. On a 2× display the compositor's title bar is 30 physical
+   pixels — half the height it should be, with 20px buttons inside it.
 
    The sharp part: **the compositor already knows the scale factor and does not
    use it.** `Display::scale_factor` exists, is set per display, and is reported
@@ -48945,3 +48946,34 @@ on another lane — `gui/compositor` and `gui/desktop` are both lane C's.
 because nothing exercises it, and the first person to wire the loop up
 naively gets doubled title bars and reasonably concludes the compositor is
 broken.
+
+**Progress 2026-08-21 — prerequisite 1 (display scaling) is done.** The
+compositor now scales its own decorations. See `design-decisions.md` §497 for
+the three decisions this needed; the mechanics, in brief:
+
+- `Window::scale_factor` (decorations only — never the client area, which is the
+  client's own pixels) is applied inside `Window::frame_insets`, the documented
+  chokepoint, so hit testing, damage and drag detection all moved with the
+  drawing rather than lagging it.
+- `DisplayManager::display_for` / `scale_for` answer "which display is this
+  window on" by largest intersection, not by which display holds the top-left
+  corner.
+- `Compositor::refresh_window_scales` recomputes every window's scale at the top
+  of `compose_frame` and of `handle_input`, rather than the six placement sites
+  each remembering to bump it.
+- Four things sat *outside* `frame_insets` and each was its own bug:
+  `render_shadow`'s layer count and its alpha falloff, `window_drawn_extent`'s
+  damage allowance, and the title font size. All four are now scaled; 1×
+  rendering is bit-identical to before.
+
+Nine new tests, each proved a real regression test by reintroducing the bug it
+guards (ten reintroductions in all, every one failing deterministically and
+naming the right test).
+
+**What is left in this entry is now prerequisite 2 and the deletion**: bring
+`WindowCorners` across from `AppearanceSettings` into the compositor, then
+delete `DesktopShell::render_window_decorations`, `window_chrome`, and the
+`ManagedWindow` geometry fields that exist only to feed them. The ordering
+argument above is unchanged — corner radius first, deletion second, because
+deleting while the compositor still draws square corners ships a visible
+regression for anyone who set `Rounded`.

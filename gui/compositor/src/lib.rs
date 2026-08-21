@@ -597,6 +597,49 @@ pub struct Window {
     /// file manager next to it, which is exactly what a single compositor-wide
     /// shape did — any client could repaint the desktop cursor from anywhere.
     pub cursor: CursorShape,
+    /// The scale factor of the display this window mostly sits on.
+    ///
+    /// **Decorations only.** It scales the title bar, borders, buttons and
+    /// shadow — the parts the compositor draws. It deliberately does *not*
+    /// scale `width`/`height`, which are the client area in physical pixels and
+    /// are the client's to choose: a client is told its display's scale over
+    /// the wire and decides for itself whether to render larger or to render
+    /// the same content at more pixels. Scaling the client area here would
+    /// resize windows behind their owners' backs.
+    ///
+    /// Recomputed from scratch by
+    /// [`Compositor::refresh_window_scales`](Compositor::refresh_window_scales)
+    /// before every frame and every input event, rather than being bumped by
+    /// each of the several places that move a window — see that method for why.
+    /// 1.0 until the compositor first refreshes it, which is what makes this
+    /// field invisible on a single 96dpi display.
+    pub scale_factor: f32,
+}
+
+/// Scale a decoration dimension to physical pixels, never rounding a visible
+/// dimension away to nothing.
+///
+/// `BORDER_WIDTH` is 1, so any scale under 1.5 rounds it to 1 or 0 — and 0 is
+/// not a thin border, it is a window whose edge cannot be grabbed to resize it,
+/// because hit testing derives from the same number. Anything the unscaled
+/// value made non-zero stays non-zero; anything already zero (the undecorated
+/// case) stays zero, since inventing a 1px title bar for a tooltip would be
+/// worse than the bug being guarded against.
+fn scale_dimension(value: u32, scale: f32) -> u32 {
+    if value == 0 {
+        return 0;
+    }
+    // `max(1.0)` before the cast, not `.max(1)` after: the cast saturates at 0
+    // for a negative or NaN scale, and a `u32` max cannot tell that apart from
+    // a legitimately tiny result.
+    #[allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "clamped to a sane range before the cast; the cast's own \
+                  saturation is what the clamp exists to pre-empt"
+    )]
+    let scaled = (value as f32 * scale).round().max(1.0) as u32;
+    scaled
 }
 
 impl Window {
@@ -635,6 +678,12 @@ impl Window {
             min_size: spec.min_size,
             max_size: spec.max_size,
             cursor: CursorShape::Arrow,
+            // 1.0 until the compositor places the window and learns which
+            // display that put it on. A `Window` on its own has no way to know:
+            // the display list lives on `DisplayManager`, and the honest
+            // default is the one that leaves geometry exactly as it was before
+            // this field existed.
+            scale_factor: 1.0,
         }
     }
 
@@ -656,9 +705,20 @@ impl Window {
     /// `TITLE_BAR_HEIGHT`/`BORDER_WIDTH` directly, so an undecorated window is
     /// undecorated everywhere — hit testing, damage and drag detection
     /// included — instead of only where someone remembered to check.
-    pub const fn frame_insets(&self) -> (u32, u32, u32) {
+    ///
+    /// It is also the single place [`scale_factor`](Self::scale_factor) is
+    /// applied to the frame, for the same reason: a title bar drawn at 2× and
+    /// hit-tested at 1× is a title bar the user can see but not drag.
+    ///
+    /// No longer `const` — `f32` arithmetic is not permitted in a `const fn`.
+    /// Nothing depended on it being one.
+    pub fn frame_insets(&self) -> (u32, u32, u32) {
         if self.is_framed() {
-            (TITLE_BAR_HEIGHT, BORDER_WIDTH, BORDER_WIDTH)
+            (
+                scale_dimension(TITLE_BAR_HEIGHT, self.scale_factor),
+                scale_dimension(BORDER_WIDTH, self.scale_factor),
+                scale_dimension(BORDER_WIDTH, self.scale_factor),
+            )
         } else {
             (0, 0, 0)
         }
@@ -666,8 +726,12 @@ impl Window {
 
     /// How far the drop shadow extends beyond the frame. Zero when unframed:
     /// the shadow is part of the decoration, not of the window.
-    pub const fn shadow_extent(&self) -> u32 {
-        if self.is_framed() { SHADOW_SIZE } else { 0 }
+    pub fn shadow_extent(&self) -> u32 {
+        if self.is_framed() {
+            scale_dimension(SHADOW_SIZE, self.scale_factor)
+        } else {
+            0
+        }
     }
 
     /// Get the total bounds including decorations (title bar, borders, shadow).
@@ -776,22 +840,23 @@ impl Window {
         // whole chain is saturating: a button positioned off the coordinate
         // space is one the user cannot click, where an overflow here is the
         // display server dying while drawing a title bar.
-        let step = (TITLE_BUTTON_SIZE.saturating_add(TITLE_BUTTON_SPACING)) as i32;
+        //
+        // Scaled alongside the bar that contains them: buttons left at 20px
+        // inside a 60px title bar would sit in its top-left corner with the
+        // centring arithmetic below pushing them further off as the bar grows.
+        let size = scale_dimension(TITLE_BUTTON_SIZE, self.scale_factor);
+        let spacing = scale_dimension(TITLE_BUTTON_SPACING, self.scale_factor);
+        let step = (size.saturating_add(spacing)) as i32;
         let btn_x = title_rect
             .x
             .saturating_add(title_rect.width as i32)
-            .saturating_sub(TITLE_BUTTON_SIZE as i32)
-            .saturating_sub(TITLE_BUTTON_SPACING as i32)
+            .saturating_sub(size as i32)
+            .saturating_sub(spacing as i32)
             .saturating_sub((slot as i32).saturating_mul(step));
-        let btn_y = title_rect.y.saturating_add(
-            (title_rect.height as i32).saturating_sub(TITLE_BUTTON_SIZE as i32) / 2,
-        );
-        Some(Rect::new(
-            btn_x,
-            btn_y,
-            TITLE_BUTTON_SIZE,
-            TITLE_BUTTON_SIZE,
-        ))
+        let btn_y = title_rect
+            .y
+            .saturating_add((title_rect.height as i32).saturating_sub(size as i32) / 2);
+        Some(Rect::new(btn_x, btn_y, size, size))
     }
 
     /// Get the close button rectangle, or `None` when there is no title bar.
@@ -833,6 +898,7 @@ impl Window {
             close: self.close_button_rect(),
             maximize: self.maximize_button_rect(),
             minimize: self.minimize_button_rect(),
+            scale: self.scale_factor,
         })
     }
 
@@ -876,6 +942,16 @@ pub struct TitleBarLayout {
     pub maximize: Option<Rect>,
     /// The minimize button. Always present on a title bar.
     pub minimize: Option<Rect>,
+    /// The display scale the rectangles above were measured at — a copy of
+    /// [`Window::scale_factor`].
+    ///
+    /// Carried rather than passed alongside, for the reason in this struct's
+    /// own doc comment: the renderer needs it for the several decoration
+    /// dimensions that are *not* rectangles — the shadow's layer count and cast
+    /// offset, the border stroke width, the title font size, the text inset —
+    /// and threading it as a second argument would let a caller hand one
+    /// function's rectangles to another function's scale.
+    pub scale: f32,
 }
 
 impl TitleBarLayout {
@@ -2103,6 +2179,50 @@ impl DisplayManager {
     /// Get all displays.
     pub fn displays(&self) -> &[Display] {
         &self.displays
+    }
+
+    /// The display a window belongs to: the one it overlaps most.
+    ///
+    /// Largest-intersection rather than "the display containing the top-left
+    /// corner", because the corner rule gives the wrong answer for exactly the
+    /// window a user would ask about — one dragged mostly onto the second
+    /// monitor still has its top-left on the first, and would keep the first
+    /// monitor's scaling while nine tenths of it sat on the second.
+    ///
+    /// A window overlapping nothing — dragged into a gap between monitors, or
+    /// off the virtual desktop entirely — answers the primary display rather
+    /// than `None`. Callers want a scale factor, and there is no sensible "no
+    /// scale"; falling back to the primary keeps such a window drawn at the
+    /// size it had before it was dragged off-screen.
+    pub fn display_for(&self, rect: &Rect) -> Option<&Display> {
+        self.displays
+            .iter()
+            .filter_map(|d| {
+                // `u64` because the product of two virtual-desktop dimensions
+                // need not fit `u32` even though each dimension does. It
+                // cannot overflow `u64` either, but a saturating multiply says
+                // so in a form the compiler checks, and costs the same.
+                rect.intersect(&d.bounds())
+                    .map(|i| (u64::from(i.width).saturating_mul(u64::from(i.height)), d))
+            })
+            .filter(|&(area, _)| area > 0)
+            // `max_by_key` returns the *last* maximum, so an exact tie — a
+            // window centred on the seam — goes to the rightmost display.
+            // Either answer is defensible; what matters is that it is
+            // deterministic rather than dependent on hotplug order.
+            .max_by_key(|&(area, _)| area)
+            .map(|(_, d)| d)
+            .or_else(|| self.primary())
+    }
+
+    /// The scale factor to draw a window's decorations at.
+    ///
+    /// Separate from [`display_for`](Self::display_for) so the common caller
+    /// does not have to handle an `Option` it has no answer for: with no
+    /// displays connected at all, 1.0 is the only scale that leaves geometry
+    /// unchanged rather than collapsing it.
+    pub fn scale_for(&self, rect: &Rect) -> f32 {
+        self.display_for(rect).map_or(1.0, |d| d.scale_factor)
     }
 
     /// Get the refresh rate of the primary display.
@@ -3917,6 +4037,15 @@ impl Compositor {
 
     /// Process an input event and route it to the appropriate window.
     pub fn handle_input(&mut self, event: InputEvent) {
+        // Hit testing derives from `frame_insets`, which is scaled, so input
+        // needs the same refresh compositing does — and needs it more often.
+        // A drag delivers pointer motion far faster than frames are composed,
+        // so a window dragged onto a higher-DPI display would otherwise be hit
+        // tested against the *previous* display's title-bar height for the
+        // remainder of the frame: the grab would slip out from under the
+        // pointer mid-drag, which is the one moment a user would notice.
+        self.refresh_window_scales();
+
         match event {
             InputEvent::MouseMove { x, y } => self.handle_mouse_move(x, y),
             InputEvent::MouseButton {
@@ -4300,6 +4429,65 @@ impl Compositor {
         self.cursor_shape = self.cursor_at(x, y);
     }
 
+    /// Bring every window's [`scale_factor`](Window::scale_factor) up to date
+    /// with the display it currently sits on, damaging any window whose frame
+    /// changed size as a result.
+    ///
+    /// # Why this is derived before use rather than maintained on move
+    ///
+    /// The obvious alternative is to set `scale_factor` at each of the places
+    /// that move a window — `move_window`, maximize, restore, tile, snap,
+    /// display hotplug. That is six sites today and seven the moment someone
+    /// adds a window-placement feature, and a forgotten bump does not fail
+    /// loudly: the window simply keeps the old monitor's decorations, which
+    /// looks like a rendering bug a long way from the placement code that
+    /// caused it. This is the same argument that made `route_window_list`
+    /// compare bytes instead of counting epochs (design-decisions §494/§495) —
+    /// a value recomputed before use has no site to forget.
+    ///
+    /// It is cheap enough to mean it: one rectangle intersection per window per
+    /// display, on a list that is tens of entries long, once per frame — next
+    /// to compositing millions of pixels it does not register.
+    ///
+    /// # Why the *client* rect decides the display
+    ///
+    /// Not [`outer_rect`](Window::outer_rect), which would be circular: the
+    /// outer rect is the client rect plus decorations, decorations are sized by
+    /// the scale, and the scale is what we are computing. Feeding the result
+    /// back into its own input lets a window sitting astride a seam alternate
+    /// between two scales forever, repainting on every frame. The client area
+    /// is scale-independent — it is the client's own pixels — so it is a fixed
+    /// point.
+    ///
+    /// # Why the comparison is on rectangles, not on the float
+    ///
+    /// What matters is whether anything moved, and a scale change too small to
+    /// shift a pixel has not moved anything. Comparing the derived
+    /// `outer_rect`s answers exactly that question, and sidesteps asking
+    /// whether two `f32`s are "equal".
+    pub fn refresh_window_scales(&mut self) {
+        // Collected rather than damaged in place: `self.damage` and
+        // `self.windows` are disjoint fields, but the borrow of `windows` is
+        // held across the whole loop.
+        let mut redraw: Vec<Rect> = Vec::new();
+        for window in &mut self.windows {
+            let scale = self.display_manager.scale_for(&window.client_rect());
+            let before = window.outer_rect();
+            window.scale_factor = scale;
+            let after = window.outer_rect();
+            if before != after {
+                window.dirty = true;
+                // Both: the frame vacated the old box and now occupies the new
+                // one, and neither contains the other when the window shrank.
+                redraw.push(before);
+                redraw.push(after);
+            }
+        }
+        for rect in redraw {
+            self.damage.add(rect);
+        }
+    }
+
     // -----------------------------------------------------------------------
     // Compositing pipeline
     // -----------------------------------------------------------------------
@@ -4307,6 +4495,12 @@ impl Compositor {
     /// Composite a frame. Returns true if a frame was actually composited
     /// (false if skipped due to no damage or frame budget).
     pub fn compose_frame(&mut self) -> bool {
+        // Before the damage check, not after: a window that moved onto a
+        // higher-DPI display has grown, and the growth *is* the damage. Asking
+        // "is there anything to draw?" first would answer no and leave the
+        // frame at the old size until something else happened to dirty it.
+        self.refresh_window_scales();
+
         // Check if we should compose (frame timing).
         if !self.frame_stats.should_compose() {
             return false;
@@ -4450,11 +4644,21 @@ impl Compositor {
     /// constants, which is what it used to do under a comment promising it
     /// "mirrors the geometry in `render_shadow`" — a promise nothing checked.
     /// The padding covers the furthest anything reaches: the shadow's last
-    /// layer (`SHADOW_SIZE - 1` out, cast 3 px down-right) and the border
-    /// stroke (one out), with room to spare in every direction.
+    /// layer (one short of the shadow extent, cast 3 px down-right at 1×) and
+    /// the border stroke (one out), with room to spare in every direction.
+    ///
+    /// All three terms are the window's *scaled* values, not the raw
+    /// constants. A 2× window casts a 16 px shadow; culling it against an 8 px
+    /// allowance would shave the outer half of the shadow off every window on
+    /// a HiDPI display — and the symptom (a shadow that ends in a hard edge)
+    /// looks nothing like the cause.
     fn window_drawn_extent(win: &Window) -> Rect {
-        win.frame_rect()
-            .inflate(SHADOW_SIZE.saturating_add(BORDER_WIDTH).saturating_add(3))
+        let (_, side, _) = win.frame_insets();
+        win.frame_rect().inflate(
+            win.shadow_extent()
+                .saturating_add(side)
+                .saturating_add(scale_dimension(3, win.scale_factor)),
+        )
     }
 
     /// Benchmark/test hook: perform one full recomposite and buffer swap
@@ -4673,7 +4877,7 @@ impl Compositor {
         // owns the whole display. Both report it by having no title bar.
         if let Some(bar) = title_bar {
             // 1. Draw window shadow.
-            self.render_shadow(bar.frame, opacity);
+            self.render_shadow(bar.frame, bar.scale, opacity);
 
             // 2. Draw window border.
             let border_color = if focused {
@@ -4681,7 +4885,7 @@ impl Compositor {
             } else {
                 self.theme.border_unfocused
             };
-            self.render_border(bar.frame, border_color, opacity);
+            self.render_border(bar.frame, bar.scale, border_color, opacity);
 
             // 3. Draw title bar.
             self.render_title_bar(&bar, focused, &title, opacity);
@@ -4754,17 +4958,37 @@ impl Compositor {
 
     /// Render the window shadow: concentric outlines around the frame box,
     /// offset down-right and fading with distance.
-    fn render_shadow(&mut self, frame: Rect, opacity: f32) {
-        /// How far down and right the shadow is cast from the frame.
-        const SHADOW_OFFSET: i32 = 3;
-        /// Alpha of the innermost shadow layer, falling off per layer.
+    fn render_shadow(&mut self, frame: Rect, scale: f32, opacity: f32) {
+        /// How far down and right the shadow is cast from the frame, at 1×.
+        const SHADOW_OFFSET: u32 = 3;
+        /// Alpha of the innermost shadow layer, falling off to nothing at the
+        /// outermost.
         const SHADOW_ALPHA: u32 = 40;
-        const SHADOW_FALLOFF: u32 = 5;
 
-        let base = frame.offset(SHADOW_OFFSET, SHADOW_OFFSET);
-        for layer in 0..SHADOW_SIZE {
+        let extent = scale_dimension(SHADOW_SIZE, scale);
+        let offset = scale_dimension(SHADOW_OFFSET, scale);
+        // The falloff is derived from the layer count rather than being a
+        // constant per-layer step, because the count now varies: a fixed step
+        // of 5 over the 16 layers of a 2× shadow would reach zero alpha
+        // half-way out and draw the outer half as nothing. Dividing the same
+        // total alpha across however many layers there are keeps a 2× shadow a
+        // scaled-up version of the 1× one instead of a truncated one. At the
+        // unscaled extent of 8 this is 40/8 = 5, exactly the constant it
+        // replaces.
+        // `checked_div` rather than guarding the divisor: `scale_dimension`
+        // already guarantees a non-zero extent for a non-zero constant, but a
+        // guard is a second place that has to keep agreeing with the first. The
+        // fallback value is unreachable anyway — a zero extent runs no layers.
+        let falloff = SHADOW_ALPHA.checked_div(extent).unwrap_or(SHADOW_ALPHA);
+
+        #[allow(
+            clippy::cast_possible_wrap,
+            reason = "a scaled 3px offset cannot approach i32::MAX"
+        )]
+        let base = frame.offset(offset as i32, offset as i32);
+        for layer in 0..extent {
             let alpha = SHADOW_ALPHA
-                .saturating_sub(layer.saturating_mul(SHADOW_FALLOFF))
+                .saturating_sub(layer.saturating_mul(falloff))
                 .min(255);
             let ring = base.inflate(layer);
             // Only the outline of each layer: the interior is covered by the
@@ -4790,12 +5014,13 @@ impl Compositor {
     /// layout set aside. Harmless (the band is 8 px of shadow) but a real
     /// inconsistency; see `known-issues.md`
     /// `TD-THE-TOP-BORDER-IS-DRAWN-OUTSIDE-THE-FRAME-INSETS`.
-    fn render_border(&mut self, frame: Rect, color: u32, opacity: f32) {
+    fn render_border(&mut self, frame: Rect, scale: f32, color: u32, opacity: f32) {
+        let width = scale_dimension(BORDER_WIDTH, scale);
         let border = Rect::new(
             frame.x,
-            frame.y.saturating_sub(BORDER_WIDTH as i32),
+            frame.y.saturating_sub(width as i32),
             frame.width,
-            frame.height.saturating_add(BORDER_WIDTH),
+            frame.height.saturating_add(width),
         );
         self.render_engine.stroke_rect(
             &mut self.backend,
@@ -4803,7 +5028,7 @@ impl Compositor {
             border.y,
             border.width,
             border.height,
-            BORDER_WIDTH,
+            width,
             color,
             opacity,
         );
@@ -4843,26 +5068,34 @@ impl Compositor {
         } else {
             self.theme.title_text_unfocused
         };
-        /// Gap between the left edge of the title bar and the title text.
+        /// Gap between the left edge of the title bar and the title text, at 1×.
         const TITLE_TEXT_INSET: u32 = 8;
-        let text_x = tb_x.saturating_add(TITLE_TEXT_INSET as i32);
+        let inset = scale_dimension(TITLE_TEXT_INSET, bar.scale);
+        // A 16px title inside a 60px bar is the visible half of an unscaled
+        // title bar: the frame grows and the writing on it does not, which
+        // reads as a bug long before anyone measures the pixels. `max` keeps a
+        // fractional scale from producing a font size of zero.
+        let font_size = (DEFAULT_FONT_SIZE * bar.scale).max(1.0);
+        let text_x = tb_x.saturating_add(inset as i32);
         // Centred on the font's own line height rather than a hardcoded cell
         // size, so the title stays centred if the title-bar font ever changes.
         let line_height = self
             .render_engine
             .fonts
-            .get(DEFAULT_FONT_SIZE, Weight::Regular, Family::Ui)
+            .get(font_size, Weight::Regular, Family::Ui)
             .line_height();
         let text_y =
             tb_y.saturating_add((bar.bar.height as i32).saturating_sub(line_height as i32) / 2);
         // Reserve exactly the buttons this window actually has, so a window
         // with no maximize button gets that space for its title instead of
-        // eliding text to make room for nothing.
-        let buttons = TITLE_BUTTON_SIZE
-            .saturating_add(TITLE_BUTTON_SPACING)
+        // eliding text to make room for nothing. Measured from the drawn
+        // rectangles rather than from the constants, so the reservation cannot
+        // disagree with the buttons it is reserving for.
+        let buttons = scale_dimension(TITLE_BUTTON_SIZE, bar.scale)
+            .saturating_add(scale_dimension(TITLE_BUTTON_SPACING, bar.scale))
             .saturating_mul(bar.button_count());
         let max_text_width =
-            tb_width.saturating_sub(buttons.saturating_add(TITLE_TEXT_INSET.saturating_mul(2)));
+            tb_width.saturating_sub(buttons.saturating_add(inset.saturating_mul(2)));
         self.render_engine.draw_text(
             &mut self.backend,
             text_x,
@@ -4872,7 +5105,7 @@ impl Compositor {
             &[],
             opacity,
             Some(max_text_width),
-            DEFAULT_FONT_SIZE,
+            font_size,
             FontWeightHint::Regular,
             // A window title is chosen by the window, is as long as it likes,
             // and is the one string on screen a reader uses to tell two windows
@@ -8614,5 +8847,400 @@ mod tests {
         let mut comp = Compositor::new(800, 600, 60).unwrap();
         let id = comp.create_window("Legacy".to_string(), 300, 200, 1);
         assert_eq!(comp.window_ref(id).unwrap().layer, Layer::Normal);
+    }
+
+    // -----------------------------------------------------------------------
+    // Display scaling of the decorations
+    //
+    // `Display::scale_factor` existed from the start and its only reader was
+    // the wire report that tells a client what its display's scale is. The
+    // compositor drew every frame at 96dpi regardless, so on a 2× display the
+    // title bar was half the height it should be and the buttons a quarter of
+    // the area — small enough to be hard to hit, which is the practical
+    // symptom. These tests pin the whole chain: the scale is picked up, it
+    // reaches geometry, hit testing agrees with drawing, and nothing rounds to
+    // an unusable zero.
+    // -----------------------------------------------------------------------
+
+    /// A compositor whose single display has the given scale, plus a second
+    /// display of the given scale immediately to its right.
+    ///
+    /// Both are 800×600, so the seam is at x = 800 and a window's share of
+    /// each side is easy to state.
+    fn two_displays(left_scale: f32, right_scale: f32) -> Compositor {
+        let mut comp = Compositor::new(800, 600, 60).expect("compositor");
+        if let Some(d) = comp.display_manager.displays.first_mut() {
+            d.scale_factor = left_scale;
+        }
+        comp.display_manager
+            .add_display(Display::new(1, 800, 600, 60, right_scale, false));
+        comp
+    }
+
+    #[test]
+    fn a_window_on_a_2x_display_gets_a_2x_title_bar_and_2x_buttons() {
+        let mut comp = two_displays(2.0, 1.0);
+        let mut spec = WindowSpec::new("HiDPI", 200, 150);
+        spec.position = Some((100, 100));
+        let id = comp.create_window_from_spec(&spec, 1);
+
+        comp.refresh_window_scales();
+
+        let win = comp.window_ref(id).expect("window");
+        assert!(
+            (win.scale_factor - 2.0).abs() < f32::EPSILON,
+            "the window never learned its display's scale: {}",
+            win.scale_factor
+        );
+
+        let (top, side, _) = win.frame_insets();
+        assert_eq!(
+            top,
+            TITLE_BAR_HEIGHT * 2,
+            "the title bar is still the 96dpi height"
+        );
+        assert_eq!(side, BORDER_WIDTH * 2);
+        assert_eq!(win.shadow_extent(), SHADOW_SIZE * 2);
+
+        let close = win.close_button_rect().expect("a decorated window closes");
+        assert_eq!(
+            (close.width, close.height),
+            (TITLE_BUTTON_SIZE * 2, TITLE_BUTTON_SIZE * 2),
+            "the buttons did not grow with the bar, so they are a quarter of \
+             the area the user expects to hit"
+        );
+
+        // The client area is emphatically *not* scaled: it is the client's own
+        // pixels, and resizing a window behind its owner's back is a different
+        // and much worse bug than a small title bar.
+        assert_eq!(win.client_rect(), Rect::new(100, 100, 200, 150));
+    }
+
+    #[test]
+    fn a_scaled_title_bar_is_still_grabbable_where_it_is_drawn() {
+        // The point of applying the scale inside `frame_insets` rather than at
+        // each drawing site: a title bar drawn at 2× and hit-tested at 1× is a
+        // title bar the user can see but cannot drag. The dead band is the
+        // lower half of the bar — exactly where a user aims.
+        let mut comp = two_displays(2.0, 1.0);
+        let mut spec = WindowSpec::new("Grab", 200, 150);
+        spec.position = Some((100, 200));
+        let id = comp.create_window_from_spec(&spec, 1);
+
+        // Deliberately *not* refreshed by hand: the whole point is that input
+        // routing brings the scale up to date itself. A drag delivers pointer
+        // motion far faster than frames are composed, so relying on
+        // `compose_frame` to have done it would leave the grab slipping out
+        // from under the pointer for the rest of the frame.
+        //
+        // y = 155 with the client area starting at 200: 45 px above the client
+        // edge. The 2× bar spans 140..200 and contains it; the 1× bar spans
+        // 170..200 and does not, so an unscaled hit test puts this press on the
+        // desktop and starts no drag at all.
+        let (px, py) = (200, 155);
+        comp.handle_input(InputEvent::MouseButton {
+            button: MouseButton::Left,
+            pressed: true,
+            x: px,
+            y: py,
+        });
+
+        let bar = comp
+            .window_ref(id)
+            .and_then(Window::title_bar_rect)
+            .expect("framed");
+        assert_eq!(bar.height, TITLE_BAR_HEIGHT * 2);
+        assert!(bar.contains(px, py), "the press was meant to be on the bar");
+
+        let drag = comp
+            .drag
+            .clone()
+            .expect("pressing the title bar starts a move");
+        assert_eq!(drag.mode, DragMode::MoveWindow);
+        assert_eq!(drag.window_id, id);
+
+        // And it really moves, rather than merely arming.
+        comp.handle_input(InputEvent::MouseMove {
+            x: px + 40,
+            y: py + 25,
+        });
+        let win = comp.window_ref(id).expect("window");
+        assert_eq!((win.x, win.y), (140, 225));
+    }
+
+    #[test]
+    fn a_scaled_shadow_is_actually_drawn_to_its_scaled_extent() {
+        // `shadow_extent` is the layer count as well as the geometry, and
+        // `render_shadow` used to loop over the raw `SHADOW_SIZE`. That leaves
+        // a 2× window with an 8-layer shadow inside a 16 px allowance: the
+        // damage test above still passes (under-drawing is inside the extent),
+        // and the visible result is a shadow that stops halfway with a hard
+        // edge. So this asserts on the pixel that only the outer half reaches.
+        let mut comp = Compositor::new(400, 300, 60).expect("compositor");
+        if let Some(d) = comp.display_manager.displays.first_mut() {
+            d.scale_factor = 2.0;
+        }
+        let mut spec = WindowSpec::new("Framed", 120, 90);
+        spec.position = Some((160, 140));
+        let id = comp.create_window_from_spec(&spec, 1);
+        comp.refresh_window_scales();
+
+        let bg = comp.theme.desktop_background;
+        comp.backend.clear(bg);
+        comp.render_window(id);
+
+        let win = comp.window_ref(id).expect("window");
+        let (frame, extent) = (win.frame_rect(), win.shadow_extent());
+        assert_eq!(extent, SHADOW_SIZE * 2);
+
+        // How far right of the frame box anything is painted, on a row level
+        // with the middle of the window. Measured rather than predicted from a
+        // formula: re-deriving `render_shadow`'s arithmetic here would just be
+        // a second copy of it that can agree with a wrong original.
+        #[allow(
+            clippy::cast_sign_loss,
+            reason = "the sampled row and columns are inside the 400x300 buffer"
+        )]
+        let row = (frame.y + frame.height as i32 / 2) as u32;
+        let rightmost = (0..400u32)
+            .rev()
+            .find(|&x| working_pixel(&comp.backend, x, row) != Some(bg))
+            .expect("the window is on screen");
+        let reach = rightmost as i32 + 1 - frame.right();
+
+        // The invariant, which holds at any scale: the shadow reaches at least
+        // as far beyond the frame as the extent that was reserved for it. At 1×
+        // the reach is 10 against an extent of 8. A 2× window whose shadow is
+        // still drawn in 8 layers reaches 13 against an extent of 16, and looks
+        // like a shadow cut off with a knife.
+        assert!(
+            reach >= extent as i32,
+            "the shadow reaches {reach}px past the frame but {extent}px were \
+             reserved for it: it stops where a 1x shadow would"
+        );
+    }
+
+    #[test]
+    fn a_window_dragged_mostly_onto_the_second_monitor_adopts_its_scale() {
+        // Largest intersection, not "the display containing the top-left
+        // corner". Under the corner rule this window keeps the left monitor's
+        // 1× decorations while three quarters of it sits on the 2× monitor.
+        let mut comp = two_displays(1.0, 2.0);
+        let mut spec = WindowSpec::new("Straddler", 200, 150);
+        spec.position = Some((0, 100));
+        let id = comp.create_window_from_spec(&spec, 1);
+        comp.refresh_window_scales();
+        assert!(
+            (comp.window_ref(id).unwrap().scale_factor - 1.0).abs() < f32::EPSILON,
+            "it started on the left monitor"
+        );
+
+        // 50 px of the 200 px width remain left of the seam at x = 800.
+        comp.move_window(id, 750, 100).expect("move");
+        comp.refresh_window_scales();
+        let win = comp.window_ref(id).expect("window");
+        assert!(
+            (win.scale_factor - 2.0).abs() < f32::EPSILON,
+            "three quarters of it is on the 2x monitor and it is still drawn \
+             at {}x",
+            win.scale_factor
+        );
+
+        // The other way round, to prove it is a rule and not a one-way latch.
+        // 650 rather than 700: at 700 the window straddles the seam in exact
+        // halves, and an exact tie deliberately goes to the rightmost display
+        // (`max_by_key` returns the last maximum). Testing the tie here would
+        // be testing the tiebreak, not the rule.
+        comp.move_window(id, 650, 100).expect("move");
+        comp.refresh_window_scales();
+        assert!(
+            (comp.window_ref(id).unwrap().scale_factor - 1.0).abs() < f32::EPSILON,
+            "three quarters of it went back and it kept the second monitor's \
+             scale"
+        );
+
+        // And the tie itself, pinned so that changing it is a deliberate act:
+        // 100 px on each side.
+        comp.move_window(id, 700, 100).expect("move");
+        comp.refresh_window_scales();
+        assert!(
+            (comp.window_ref(id).unwrap().scale_factor - 2.0).abs() < f32::EPSILON,
+            "a window split exactly across the seam should take the rightmost \
+             display's scale, deterministically rather than by hotplug order"
+        );
+    }
+
+    #[test]
+    fn a_window_dragged_off_every_display_keeps_a_usable_scale() {
+        // Falling back to the primary rather than to nothing: a window in the
+        // gap beyond the right-hand monitor still has to be drawn, and there is
+        // no such thing as "no scale".
+        let mut comp = two_displays(1.0, 2.0);
+        let mut spec = WindowSpec::new("Adrift", 200, 150);
+        spec.position = Some((100, 100));
+        let id = comp.create_window_from_spec(&spec, 1);
+
+        comp.window_mut(id).expect("window").x = 100_000;
+        comp.refresh_window_scales();
+        let win = comp.window_ref(id).expect("window");
+        assert!(
+            (win.scale_factor - 1.0).abs() < f32::EPSILON,
+            "off-screen windows are drawn at the primary display's scale"
+        );
+        assert_eq!(win.frame_insets().0, TITLE_BAR_HEIGHT);
+    }
+
+    #[test]
+    fn a_border_never_scales_down_to_nothing() {
+        // `BORDER_WIDTH` is 1, so any scale below 1.5 rounds it to 1 or to 0 —
+        // and a 0 px border is not a thin border, it is a window whose edge
+        // cannot be grabbed to resize it, because `detect_border_drag` reads
+        // the same inset. Sub-1× scales are real: a 4K panel driven at a
+        // fractional scale, or a projector configured down.
+        assert_eq!(scale_dimension(BORDER_WIDTH, 0.5), 1);
+        assert_eq!(scale_dimension(BORDER_WIDTH, 0.01), 1);
+        assert_eq!(scale_dimension(SHADOW_SIZE, 0.05), 1);
+        // A dimension that was already nothing stays nothing: this is the
+        // unframed case, and inventing a 1 px title bar for a tooltip would be
+        // worse than the bug being guarded against.
+        assert_eq!(scale_dimension(0, 4.0), 0);
+        // A nonsense scale cannot produce a nonsense size. The cast saturates
+        // at 0 for negatives and NaN, which is why the clamp is applied to the
+        // float before the cast rather than to the integer after it.
+        assert_eq!(scale_dimension(TITLE_BAR_HEIGHT, -3.0), 1);
+        assert_eq!(scale_dimension(TITLE_BAR_HEIGHT, f32::NAN), 1);
+
+        let mut comp = two_displays(0.5, 1.0);
+        let mut spec = WindowSpec::new("Downscaled", 200, 150);
+        spec.position = Some((100, 100));
+        let id = comp.create_window_from_spec(&spec, 1);
+        comp.refresh_window_scales();
+        let win = comp.window_ref(id).expect("window").clone();
+        assert_eq!(win.frame_insets().1, 1, "the resize edge vanished");
+        assert!(
+            comp.detect_border_drag(&win, win.x - 1, win.y + 10)
+                .is_some(),
+            "a 0.5x window cannot be resized by its left edge"
+        );
+    }
+
+    #[test]
+    fn nothing_a_scaled_window_draws_falls_outside_its_damage_extent() {
+        // The 1× version of this test is
+        // `nothing_a_window_draws_falls_outside_its_damage_extent`. It passed
+        // throughout the period when `window_drawn_extent` inflated by the raw
+        // `SHADOW_SIZE`, because at 1× the raw constant *is* the scaled value.
+        // A 2× window casts a 16 px shadow into an 8 px allowance, and the
+        // symptom — a drop shadow that ends in a hard edge — looks nothing like
+        // its cause.
+        let mut comp = Compositor::new(400, 300, 60).expect("compositor");
+        if let Some(d) = comp.display_manager.displays.first_mut() {
+            d.scale_factor = 2.0;
+        }
+        let mut spec = WindowSpec::new("Framed", 120, 90);
+        spec.position = Some((160, 140));
+        let id = comp.create_window_from_spec(&spec, 1);
+        comp.refresh_window_scales();
+        assert_eq!(comp.window_ref(id).expect("window").shadow_extent(), 16);
+
+        let bg = comp.theme.desktop_background;
+        comp.backend.clear(bg);
+        comp.render_window(id);
+
+        let extent = comp
+            .window_ref(id)
+            .map(Compositor::window_drawn_extent)
+            .expect("window");
+        for y in 0..300u32 {
+            for x in 0..400u32 {
+                if working_pixel(&comp.backend, x, y) == Some(bg) {
+                    continue;
+                }
+                assert!(
+                    extent.contains(x as i32, y as i32),
+                    "painted ({x}, {y}), outside the damage extent {extent:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_window_that_shrinks_its_frame_repaints_the_box_it_vacated() {
+        // Going 2× → 1× is the direction that matters. Growing, the new box
+        // contains the old one and damaging only the new box happens to be
+        // enough; shrinking, the old box is the larger, and damaging only the
+        // new one leaves the outside of the old decorations on screen with
+        // nothing that will ever clean it up.
+        let mut comp = two_displays(1.0, 2.0);
+        let mut spec = WindowSpec::new("Shrinker", 200, 150);
+        spec.position = Some((900, 100));
+        let id = comp.create_window_from_spec(&spec, 1);
+        comp.refresh_window_scales();
+        assert!(
+            (comp.window_ref(id).expect("window").scale_factor - 2.0).abs() < f32::EPSILON,
+            "it started on the 2x monitor"
+        );
+
+        comp.move_window(id, 100, 100).expect("move");
+        // Cleared *after* the move: `move_window` damages the old and new
+        // positions itself, and leaving that in would let this test pass on
+        // damage that has nothing to do with the scale. What remains is the
+        // window sitting still at its new home, still wearing 2× decorations.
+        comp.damage.clear();
+        let before = comp.window_ref(id).expect("window").outer_rect();
+
+        comp.refresh_window_scales();
+        let after = comp.window_ref(id).expect("window").outer_rect();
+        assert!(
+            after.width < before.width,
+            "the frame did not shrink: {before:?} -> {after:?}"
+        );
+        assert!(
+            comp.window_ref(id).expect("window").dirty,
+            "a window whose frame changed size was left clean"
+        );
+
+        // The band the shadow vacated: just outside the new box, well inside
+        // the old one. Nothing else in this test will ever repaint it.
+        let vacated = (after.right() + 1, after.y + 20);
+        assert!(before.contains(vacated.0, vacated.1));
+        let damaged = comp.damage.rects().to_vec();
+        assert!(
+            damaged.iter().any(|r| r.contains(vacated.0, vacated.1)),
+            "the vacated pixel {vacated:?} was never damaged; damage was \
+             {damaged:?}"
+        );
+    }
+
+    #[test]
+    fn composing_a_frame_notices_a_window_that_moved_to_another_display() {
+        // The refresh has to run *before* `compose_frame`'s damage check, not
+        // after: the growth of the frame is itself the damage, so asking "is
+        // there anything to draw?" first would answer no and leave the window
+        // at the old display's size until something unrelated dirtied it.
+        let mut comp = two_displays(1.0, 2.0);
+        let mut spec = WindowSpec::new("Mover", 200, 150);
+        spec.position = Some((100, 100));
+        let id = comp.create_window_from_spec(&spec, 1);
+        assert!(comp.compose_frame(), "the first frame draws everything");
+        comp.damage.clear();
+        comp.full_recomposite = false;
+        // The vsync gate would otherwise refuse a second frame this soon, and
+        // this test is about the damage check, not about frame pacing.
+        comp.frame_stats.last_frame_start = None;
+
+        // Moved by hand rather than through `move_window`, so that the *only*
+        // thing that can produce damage is the scale refresh itself.
+        comp.window_mut(id).expect("window").x = 900;
+        assert!(!comp.damage.has_damage(), "nothing has asked for a repaint");
+
+        assert!(
+            comp.compose_frame(),
+            "the frame changed size and no frame was composited"
+        );
+        assert_eq!(
+            comp.window_ref(id).expect("window").frame_insets().0,
+            TITLE_BAR_HEIGHT * 2
+        );
     }
 }

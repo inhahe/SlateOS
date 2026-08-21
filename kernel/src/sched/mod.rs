@@ -1882,7 +1882,30 @@ pub fn set_task_cgroup(task_id: TaskId, new_cgroup: crate::cgroup::CgroupId) -> 
 ///
 /// This is used by IPC channels, futexes, and other blocking
 /// primitives.
+#[track_caller]
 pub fn block_current() {
+    block_current_inner(core::panic::Location::caller(), 0);
+}
+
+/// [`block_current`], but also records the hrtimer id armed to wake this task.
+///
+/// Only `sleep_ns_interruptible` uses this.  Recording the id *inside* the same
+/// `SCHED` critical section that parks the task is what makes it trustworthy —
+/// a separate setter would need its own lock acquisition and could interleave
+/// with the park it is describing.
+#[track_caller]
+pub fn block_current_for_timer(timer_id: u64) {
+    block_current_inner(core::panic::Location::caller(), timer_id);
+}
+
+fn block_current_inner(site: &'static core::panic::Location<'static>, timer_id: u64) {
+    // `site` is recorded before the lock so it is set even on the
+    // `pending_wake` early return: the two hang dumps need to name the wait
+    // that parked a task, and reconstructing that from a serial log is
+    // guesswork.  `#[track_caller]` on the public wrappers resolves it to
+    // *their* caller's file:line, so it names the wait primitive
+    // (`sleep_until_tick_interruptible`, futex, channel recv, …) rather than
+    // this function.
     if let Some(ctr) = VOLUNTARY_SWITCHES.get(current_cpu_id()) {
         ctr.fetch_add(1, Ordering::Relaxed);
     }
@@ -1896,6 +1919,7 @@ pub fn block_current() {
     {
         let mut state = SCHED.lock();
         if let Some(task) = state.tasks.get_mut(&current_id) {
+            task.block_site = Some(site);
             // Check for pending wake: if someone called wake() on us
             // between registering in a wait queue and now, the pending
             // flag is set.  Consume it and don't actually block — this
@@ -1907,6 +1931,11 @@ pub fn block_current() {
             // Record burst length for interactive task detection.
             task.record_block();
             task.state = TaskState::Blocked;
+            // Only a *real* park updates these, so a dump can tell a live wait
+            // from a `block_site` left over by an earlier early-returning call.
+            task.block_tick = crate::apic::tick_count();
+            task.block_seq = task.block_seq.saturating_add(1);
+            task.sleep_timer_id = timer_id;
         }
     }
     // Park.  `requeue = true` reads as a contradiction but is not: the guard in
@@ -3159,7 +3188,7 @@ fn dump_all_tasks_serial() {
         };
         serial_println!(
             "[liveness]   tid={} state={:?} cpu={} prio={} pending_wake={} \
-             ready_since={} waited={} blocked_on_pi={:#x} name={:?}",
+             ready_since={} waited={} blocked_on_pi={:#x} block_site={}              block_tick={} block_seq={} sleep_timer={} name={:?}",
             id,
             task.state,
             task.last_cpu,
@@ -3168,9 +3197,83 @@ fn dump_all_tasks_serial() {
             task.ready_since_tick,
             waited,
             task.blocked_on_pi_addr.unwrap_or(0),
+            BlockSite(task.block_site),
+            task.block_tick,
+            task.block_seq,
+            task.sleep_timer_id,
             core::str::from_utf8(name).unwrap_or("<non-utf8>"),
         );
     }
+
+    // A `Blocked` task in the table above is only half the story: the other
+    // half is whether anything is still armed to wake it.  Dump both timer
+    // sources so a hang report answers that in one pass instead of one boot
+    // cycle per hypothesis.
+    dump_timer_sources(now);
+}
+
+/// Dump the sleep queue and the hrtimer queues — every mechanism that can
+/// wake a `Blocked` task on a timeout.
+///
+/// Shared by the liveness watchdog and [`dump_idle_fallback_wedge`], which
+/// both need to answer the same question: for a task parked in a
+/// wait-with-timeout, is its wakeup still armed (a firing bug) or gone
+/// (a lifetime bug)?
+fn dump_timer_sources(now_tick: u64) {
+    let mut occupied = 0usize;
+    for (i, entry) in SLEEP_QUEUE.iter().enumerate() {
+        let claim = entry.claim.load(Ordering::Acquire);
+        if claim == 0 {
+            continue;
+        }
+        occupied = occupied.saturating_add(1);
+        let deadline = entry.wake_tick.load(Ordering::Acquire);
+        serial_println!(
+            "[sched]   sleep-slot[{}] {} task={} wake_tick={} now={} ({})",
+            i,
+            if claim == SLEEP_CLAIM_RELEASING {
+                "RELEASING"
+            } else {
+                "held"
+            },
+            entry.task_id.load(Ordering::Relaxed),
+            deadline,
+            now_tick,
+            if deadline != 0 && now_tick >= deadline {
+                "EXPIRED - should have fired"
+            } else {
+                "pending"
+            },
+        );
+    }
+    serial_println!(
+        "[sched]   sleep queue: {}/{} slots occupied",
+        occupied,
+        MAX_SLEEPERS
+    );
+
+    // The deferred-wake queue is the third thing that can wake a parked task,
+    // and the one whose failures are silent: a queued slot that never drains
+    // and a dropped wake both look identical from the task's side (blocked,
+    // `pending_wake=false`, no timer).  Print the queue and the drop counter so
+    // the log distinguishes them.
+    let mut deferred = 0usize;
+    for (i, slot) in DEFERRED_WAKES.iter().enumerate() {
+        let tid = slot.load(Ordering::Acquire);
+        if tid != DEFERRED_WAKE_EMPTY {
+            deferred = deferred.saturating_add(1);
+            serial_println!("[sched]   deferred-wake slot[{}] = task {}", i, tid);
+        }
+    }
+    serial_println!(
+        "[sched]   deferred wakes: {}/{} queued, pending_flag={}, dropped={}",
+        deferred,
+        DEFERRED_WAKE_SLOTS,
+        DEFERRED_WAKES_PENDING.load(Ordering::Acquire),
+        DEFERRED_WAKE_DROPS.load(Ordering::Relaxed),
+    );
+
+    crate::hrtimer::dump_pending();
 }
 
 // ---------------------------------------------------------------------------
@@ -5231,25 +5334,124 @@ pub fn panic_diagnostics() -> PanicSchedInfo {
 /// typical desktop workloads have tens of tasks, not hundreds sleeping.
 const MAX_SLEEPERS: usize = 256;
 
+/// Sentinel stored in [`SleepEntry::claim`] while a slot is being torn down.
+///
+/// A slot in this state is owned by neither the sleeper nor the ISR scan: a
+/// claimer's `compare_exchange(0, …)` fails against it, so the teardown can
+/// finish without anyone observing a half-initialised slot.
+const SLEEP_CLAIM_RELEASING: u64 = u64::MAX;
+
+/// Source of sleep-slot claim tokens.  Starts at 1 so that 0 always means
+/// "free"; `SLEEP_CLAIM_RELEASING` is skipped on the (unreachable) wrap.
+static SLEEP_CLAIM_SEQ: AtomicU64 = AtomicU64::new(1);
+
 /// A single entry in the sleep queue.
 ///
-/// `wake_tick` == 0 means the slot is empty.  Written atomically by
-/// `sleep_until_tick` (which sets wake_tick + task_id) and read by the
-/// timer ISR (which zeroes wake_tick when it fires the wakeup).
+/// `claim` — **not** `wake_tick` — is the free/busy marker.  It holds a
+/// globally unique token for the duration of one sleep, which is what makes
+/// releasing a slot unambiguous: a releaser proves it still owns the slot by
+/// CAS-ing *its own* token out, so a stale releaser whose slot was already
+/// retired and re-claimed by somebody else simply fails and does nothing.
+///
+/// The previous design used `wake_tick == 0` as "empty", which left no way to
+/// tell "my slot" from "a slot that happens to hold the same deadline", and
+/// therefore no way for a sleeper woken *before* its deadline to release its
+/// own slot.  Those slots stayed armed for the whole remaining timeout — so a
+/// `wait_until_timeout(30s)` satisfied in a millisecond occupied a slot for
+/// thirty seconds, and enough of them at once exhausted the queue.  See
+/// `known-issues.md` → `BUG-SLEEPSLOT-HELD-UNTIL-DEADLINE`.
 struct SleepEntry {
-    /// Tick count at which to wake.  0 = slot is empty.
+    /// Claim token: 0 = free, `SLEEP_CLAIM_RELEASING` = teardown in progress,
+    /// anything else = the token of the sleep that owns this slot.
+    claim: AtomicU64,
+    /// Tick count at which to wake.  Only meaningful while `claim` is owned.
     wake_tick: AtomicU64,
-    /// Task ID to wake.
+    /// Task ID to wake.  Only meaningful while `claim` is owned.
     task_id: AtomicU64,
 }
 
 impl SleepEntry {
     const fn new() -> Self {
         Self {
+            claim: AtomicU64::new(0),
             wake_tick: AtomicU64::new(0),
             task_id: AtomicU64::new(0),
         }
     }
+}
+
+/// A held sleep-queue slot: the index and the token that proves ownership.
+///
+/// Not `Copy` and marked `#[must_use]` so that a claimed slot cannot be
+/// dropped on the floor without a visible `release_sleep_slot` call — the
+/// leak this whole mechanism exists to prevent.
+#[must_use = "a claimed sleep slot must be released with release_sleep_slot"]
+struct SleepSlot {
+    /// Index into [`SLEEP_QUEUE`].
+    idx: usize,
+    /// The token written into `claim` when the slot was taken.
+    claim: u64,
+}
+
+/// Allocate a claim token that is never `0` and never `SLEEP_CLAIM_RELEASING`.
+fn next_sleep_claim() -> u64 {
+    loop {
+        let token = SLEEP_CLAIM_SEQ.fetch_add(1, Ordering::Relaxed);
+        if token != 0 && token != SLEEP_CLAIM_RELEASING {
+            return token;
+        }
+    }
+}
+
+/// Claim a free sleep-queue slot for `task_id`, armed for `wake_tick`.
+///
+/// Returns `None` when every slot is occupied.  The caller must pass the
+/// returned slot to [`release_sleep_slot`] once its sleep is over, whether it
+/// ended at the deadline or early.
+fn claim_sleep_slot(wake_tick: u64, task_id: TaskId) -> Option<SleepSlot> {
+    let token = next_sleep_claim();
+    for (idx, entry) in SLEEP_QUEUE.iter().enumerate() {
+        if entry
+            .claim
+            .compare_exchange(0, token, Ordering::AcqRel, Ordering::Relaxed)
+            .is_ok()
+        {
+            // The slot is ours: nobody else can read these fields until we
+            // publish a non-zero `wake_tick`, and the ISR skips a slot whose
+            // `wake_tick` is still 0.
+            entry.task_id.store(task_id, Ordering::Relaxed);
+            entry.wake_tick.store(wake_tick, Ordering::Release);
+            return Some(SleepSlot { idx, claim: token });
+        }
+    }
+    None
+}
+
+/// Release a slot previously returned by [`claim_sleep_slot`].
+///
+/// Safe to call whether or not the ISR already retired the slot: the CAS fails
+/// if the slot has moved on, and the release is then somebody else's business.
+fn release_sleep_slot(slot: SleepSlot) {
+    let Some(entry) = SLEEP_QUEUE.get(slot.idx) else {
+        return;
+    };
+    if entry
+        .claim
+        .compare_exchange(
+            slot.claim,
+            SLEEP_CLAIM_RELEASING,
+            Ordering::AcqRel,
+            Ordering::Relaxed,
+        )
+        .is_err()
+    {
+        // Already retired by `process_sleep_wakeups`, or being retired right
+        // now.  Either way the slot is not ours to clear.
+        return;
+    }
+    entry.wake_tick.store(0, Ordering::Relaxed);
+    entry.task_id.store(0, Ordering::Relaxed);
+    entry.claim.store(0, Ordering::Release);
 }
 
 // SAFETY: `SleepEntry` fields are `AtomicU64`, which are `Sync`.
@@ -5283,36 +5485,45 @@ static SLEEP_QUEUE: [SleepEntry; MAX_SLEEPERS] = {
 pub fn sleep_until_tick_interruptible(wake_tick: u64) {
     let task_id = load_current_task();
 
-    // Find an empty slot.
-    let mut found = false;
-    for entry in &SLEEP_QUEUE {
-        // CAS: try to claim an empty slot (wake_tick == 0).
-        if entry
-            .wake_tick
-            .compare_exchange(0, wake_tick, Ordering::AcqRel, Ordering::Relaxed)
-            .is_ok()
-        {
-            entry.task_id.store(task_id, Ordering::Release);
-            found = true;
-            break;
+    let Some(slot) = claim_sleep_slot(wake_tick, task_id) else {
+        // No free slot — all MAX_SLEEPERS slots occupied.  Fall back to a
+        // spin-yield loop, which is correct but pins a CPU, so say so — once.
+        //
+        // Rate-limited deliberately.  Exhaustion is self-amplifying: every
+        // spinning task hammers `SCHED` through `yield_now`, which makes the
+        // timer ISR's `try_lock` in `wake_expired_sleeper` fail, which stops
+        // expired slots being retired, which keeps the queue full.  Printing a
+        // line per attempt adds serial I/O to that loop and turns a transient
+        // squeeze into a livelock — that is exactly how it presented (see
+        // `known-issues.md` → `BUG-SLEEPSLOT-HELD-UNTIL-DEADLINE`).
+        static WARNED: AtomicBool = AtomicBool::new(false);
+        if !WARNED.swap(true, Ordering::Relaxed) {
+            serial_println!(
+                "[sched] WARNING: sleep queue full ({} slots), task {} falling back to \
+                 spin — a CPU is now busy-waiting. (one-shot warning)",
+                MAX_SLEEPERS,
+                task_id
+            );
         }
-    }
-
-    if !found {
-        // No free slot — all 256 slots occupied.  Fall back to a
-        // simple spin-yield loop.  This is extremely unlikely.
-        serial_println!(
-            "[sched] WARNING: sleep queue full, task {} falling back to spin",
-            task_id
-        );
         while crate::apic::tick_count() < wake_tick {
             yield_now();
         }
         return;
-    }
+    };
 
-    // Block the task.  The timer ISR will wake it.
+    // Block the task.  The timer ISR will wake it at the deadline — but any
+    // other wake can return us here first, which is the whole point of the
+    // `_interruptible` variant.
     block_current();
+
+    // Release the slot on *both* paths.  If the ISR retired it at the deadline
+    // this is a no-op (the CAS fails); if we were woken early it hands the slot
+    // straight back instead of parking it until a deadline nobody is waiting
+    // for any more.  It also disarms the delayed `pending_wake` that
+    // `wake_expired_sleeper` would otherwise plant on us at that deadline — a
+    // token that would make some *later*, unrelated `block_current()` return
+    // without blocking.
+    release_sleep_slot(slot);
 }
 
 /// Put the current task to sleep until the given tick count has *actually*
@@ -5325,9 +5536,9 @@ pub fn sleep_until_tick_interruptible(wake_tick: u64) {
 /// back to sleep for the remaining time.  Without this, a `sleep(5s)` could
 /// return after a millisecond.
 ///
-/// Each iteration claims a fresh sleep-queue slot.  A slot left armed by an
-/// early wake is not leaked: the timer ISR retires every expired slot
-/// whether or not its task is still blocked.
+/// Each iteration claims a sleep-queue slot and releases it again before
+/// looping, so a long sleep broken by many early wakes occupies exactly one
+/// slot at a time rather than one per wake.
 pub fn sleep_until_tick(wake_tick: u64) {
     while crate::apic::tick_count() < wake_tick {
         sleep_until_tick_interruptible(wake_tick);
@@ -5389,10 +5600,12 @@ static IDLE_FALLBACK_WEDGE_DUMPED: AtomicBool = AtomicBool::new(false);
 /// context and need the `try_wake` → `defer_wake` fallback pattern
 /// to reliably wake blocked tasks.
 ///
-/// If the queue is full (extremely unlikely — 32 slots), the wake is
-/// dropped.  The task will remain blocked until another explicit wake
-/// occurs.  This should never happen in practice because the queue
-/// drains every tick (10ms).
+/// If the queue is full (extremely unlikely — 32 slots), one last direct
+/// [`try_wake`] is attempted; if that also loses the lock the wake is
+/// dropped, counted in [`DEFERRED_WAKE_DROPS`], and warned about once.  A
+/// dropped wake leaves the target blocked until some other path wakes it,
+/// which is a hang if nothing else will — so it must be visible in the log
+/// rather than inferred later from the symptom.
 pub fn defer_wake(task_id: TaskId) {
     for slot in &DEFERRED_WAKES {
         // CAS: claim an empty slot.
@@ -5417,9 +5630,36 @@ pub fn defer_wake(task_id: TaskId) {
             return;
         }
     }
-    // Queue full — this is a diagnostic-only path.
-    // In practice should never happen (32 slots, drained every 10ms).
+
+    // Queue full.  This wake cannot be recorded in a slot, so if it is simply
+    // discarded the target may never run again.  `defer_wake` is only reached
+    // because `try_wake` lost the race for the scheduler lock earlier; the
+    // holder may have released it since, so try once more directly (still
+    // `try_lock`, so this is safe in ISR context and cannot deadlock).
+    if try_wake(task_id) {
+        return;
+    }
+
+    DEFERRED_WAKE_DROPS.fetch_add(1, Ordering::Relaxed);
+    if !DEFERRED_WAKE_DROP_WARNED.swap(true, Ordering::Relaxed) {
+        serial_println!(
+            "[sched] CRITICAL: deferred-wake queue full ({} slots) — wake for tid {} dropped; \
+             that task can hang. Further drops counted, not printed.",
+            DEFERRED_WAKE_SLOTS,
+            task_id
+        );
+    }
 }
+
+/// Number of deferred wakes dropped because every slot was occupied.
+///
+/// Non-zero means a task was left blocked with nothing left to wake it.
+/// Reported by the wedge and liveness dumps so the *cause* appears in the log
+/// next to the symptom instead of having to be reconstructed from it.
+static DEFERRED_WAKE_DROPS: AtomicU64 = AtomicU64::new(0);
+
+/// One-shot guard so a queue-full storm prints one line, not thousands.
+static DEFERRED_WAKE_DROP_WARNED: AtomicBool = AtomicBool::new(false);
 
 /// Process all pending deferred wakes (lock-free path for softirq).
 ///
@@ -5436,6 +5676,12 @@ pub fn process_deferred_wakes() {
         return;
     }
 
+    // Clear the flag *before* the scan — same reasoning as
+    // `drain_deferred_wakes_locked`: a `defer_wake` that claims a slot behind
+    // the loop's cursor re-sets the flag after us, and a trailing
+    // `store(false)` would erase that store and strand the slot.
+    DEFERRED_WAKES_PENDING.store(false, Ordering::Release);
+
     let mut any_remaining = false;
     for slot in &DEFERRED_WAKES {
         let task_id = slot.load(Ordering::Acquire);
@@ -5451,9 +5697,9 @@ pub fn process_deferred_wakes() {
         }
     }
 
-    // Only clear the flag if all slots were successfully drained.
-    if !any_remaining {
-        DEFERRED_WAKES_PENDING.store(false, Ordering::Release);
+    // Something is still queued, so make sure the next drain scans for it.
+    if any_remaining {
+        DEFERRED_WAKES_PENDING.store(true, Ordering::Release);
     }
 }
 
@@ -5470,6 +5716,13 @@ fn drain_deferred_wakes_locked(state: &mut SchedState, _cpu: usize) {
         return;
     }
 
+    // Clear the flag *before* the scan, not after.  A `defer_wake` that claims
+    // a slot this loop has already walked past sets the flag again behind us;
+    // a trailing `store(false)` would erase exactly that store and strand the
+    // slot until some unrelated later wake happened to set the flag again.
+    // Clearing first can only cost a redundant scan, never a lost wake.
+    DEFERRED_WAKES_PENDING.store(false, Ordering::Release);
+
     for slot in &DEFERRED_WAKES {
         let task_id = slot.load(Ordering::Acquire);
         if task_id == DEFERRED_WAKE_EMPTY {
@@ -5484,15 +5737,27 @@ fn drain_deferred_wakes_locked(state: &mut SchedState, _cpu: usize) {
                 let target_cpu = choose_cpu_for_task(task);
                 task.last_cpu = target_cpu;
                 PER_CPU_SCHED.enqueue(task_id, prio, target_cpu);
+            } else {
+                // Task has not parked yet (Running/Ready).  Record the wake on
+                // the task so its next `block_current()` returns immediately —
+                // exactly what `wake`/`try_wake` do in this case, and the whole
+                // reason `pending_wake` exists.
+                //
+                // Dropping the wake here instead was a genuine lost wakeup, and
+                // on a single-CPU boot it was *the* lost wakeup: this is the
+                // primary drain path (ISR-context `try_wake` always loses the
+                // race for the lock against the code it interrupted), so every
+                // deferred wake aimed at a task in the window between arming a
+                // timer and calling `block_current()` evaporated.  The task then
+                // parked with its timer already fired and nothing left to wake
+                // it — see `BUG-DEFERRED-WAKE-DROPPED-BEFORE-PARK`.
+                task.pending_wake = true;
             }
         }
         // Clear the slot regardless (task might have already been woken
         // by another path, or may not exist anymore).
         slot.store(DEFERRED_WAKE_EMPTY, Ordering::Release);
     }
-
-    // All slots drained — clear the pending flag.
-    DEFERRED_WAKES_PENDING.store(false, Ordering::Release);
 }
 
 /// Dump scheduler + timer state when the `schedule_inner` idle fallback has
@@ -5506,6 +5771,19 @@ fn drain_deferred_wakes_locked(state: &mut SchedState, _cpu: usize) {
 /// (and the wake was lost)?  Are there stuck deferred-wake slots?
 ///
 /// Called only on the wedge path, so the serial cost is irrelevant.
+/// `Display` shim for [`task::Task::block_site`], so a never-blocked task
+/// prints as `none` instead of forcing every call site to unwrap the `Option`.
+struct BlockSite(Option<&'static core::panic::Location<'static>>);
+
+impl core::fmt::Display for BlockSite {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self.0 {
+            Some(loc) => write!(f, "{}:{}", loc.file(), loc.line()),
+            None => f.write_str("none"),
+        }
+    }
+}
+
 #[cold]
 fn dump_idle_fallback_wedge(state: &SchedState, cpu: usize, blocked_id: TaskId) {
     let now_ns = crate::hrtimer::now_ns();
@@ -5534,13 +5812,17 @@ fn dump_idle_fallback_wedge(state: &SchedState, cpu: usize, blocked_id: TaskId) 
     if let Some(task) = state.tasks.get(&blocked_id) {
         serial_println!(
             "[sched]   parked task {}: state={:?} pending_wake={} last_cpu={} \
-             prio={} ready_since_tick={}",
+             prio={} ready_since_tick={} block_site={} block_tick={}              block_seq={} sleep_timer={}",
             blocked_id,
             task.state,
             task.pending_wake,
             task.last_cpu,
             task.priority,
             task.ready_since_tick,
+            BlockSite(task.block_site),
+            task.block_tick,
+            task.block_seq,
+            task.sleep_timer_id,
         );
     } else {
         serial_println!(
@@ -5549,25 +5831,27 @@ fn dump_idle_fallback_wedge(state: &SchedState, cpu: usize, blocked_id: TaskId) 
         );
     }
 
-    // Any occupied deferred-wake slots (task IDs queued for a retry wake).
-    for (i, slot) in DEFERRED_WAKES.iter().enumerate() {
-        let tid = slot.load(Ordering::Acquire);
-        if tid != DEFERRED_WAKE_EMPTY {
-            serial_println!("[sched]   deferred-wake slot[{}] = task {}", i, tid);
-        }
-    }
+    // The sleep queue, the deferred-wake queue and the hrtimer queues — the
+    // other three things that can wake a parked task, and the ones this dump
+    // was blind to.
+    dump_timer_sources(crate::apic::tick_count());
 
     // Full table (few tasks during boot self-tests): reveals whether any
     // task is Ready-but-unqueued, which is the orphan signature.
     serial_println!("[sched]   {} task(s) in table:", state.tasks.len());
     for (&id, task) in state.tasks.iter() {
         serial_println!(
-            "[sched]     tid={} state={:?} pending_wake={} last_cpu={} prio={}",
+            "[sched]     tid={} state={:?} pending_wake={} last_cpu={} prio={} \
+             block_site={} block_tick={} block_seq={} sleep_timer={}",
             id,
             task.state,
             task.pending_wake,
             task.last_cpu,
             task.priority,
+            BlockSite(task.block_site),
+            task.block_tick,
+            task.block_seq,
+            task.sleep_timer_id,
         );
     }
 }
@@ -5635,10 +5919,27 @@ pub fn sleep_ns_interruptible(duration_ns: u64) {
         }
     }
 
-    let _handle = crate::hrtimer::schedule_ns(duration_ns, wake_callback, task_id);
+    let handle = crate::hrtimer::schedule_ns(duration_ns, wake_callback, task_id);
 
-    // Block until the timer fires and wakes us.
-    block_current();
+    // Block until the timer fires and wakes us — or until anything else does,
+    // which is what `_interruptible` means.  The handle's id goes on the task
+    // so a hang dump can say what happened to *this* sleep's timer.
+    block_current_for_timer(handle.id());
+
+    // Disarm on the early-wake path.  A no-op if the timer already fired.
+    //
+    // Not cancelling here was a leak with two heads.  `sleep_ns` (the
+    // non-interruptible wrapper) loops around this function, so a sleep broken
+    // by repeated early wakes armed one timer per iteration and cancelled
+    // none: the per-CPU timer list filled with orphans whose sleeper had long
+    // since moved on.  The old overflow policy then *evicted the furthest
+    // pending timer to make room*, destroying an armed timeout belonging to
+    // some unrelated subsystem — a silent lost wakeup, 1541 of them in one
+    // boot.  Second, an orphan that survives to its expiry calls `try_wake` on
+    // a task that is no longer sleeping, planting a `pending_wake` token that
+    // makes some later, unrelated `block_current()` return without blocking.
+    // See `known-issues.md` → `BUG-HRTIMER-ORPHANED-BY-EARLY-WAKE`.
+    crate::hrtimer::cancel(handle);
 }
 
 /// Sleep the current task for `duration_ns`, all of it.
@@ -5788,21 +6089,46 @@ pub fn process_sleep_wakeups() {
     let now = crate::apic::tick_count();
 
     for entry in &SLEEP_QUEUE {
-        let deadline = entry.wake_tick.load(Ordering::Acquire);
-        if deadline == 0 {
-            // Empty slot — skip.
+        let token = entry.claim.load(Ordering::Acquire);
+        if token == 0 || token == SLEEP_CLAIM_RELEASING {
+            // Free, or its owner is tearing it down right now — skip.
             continue;
         }
-        if now < deadline {
-            // Not yet expired — skip.
+        let deadline = entry.wake_tick.load(Ordering::Acquire);
+        if deadline == 0 || now < deadline {
+            // Claimed but not yet armed, or not yet expired — skip.
             continue;
         }
 
-        // Deadline passed.  Resolve the wake and release the slot unless the
-        // scheduler lock was contended (in which case retry next tick).
-        let task_id = entry.task_id.load(Ordering::Acquire);
-        if let SleeperWake::Release = wake_expired_sleeper(task_id) {
-            entry.wake_tick.store(0, Ordering::Release);
+        // Deadline passed.  Take the slot into the teardown state *before*
+        // reading `task_id`: that locks out both a concurrent
+        // `release_sleep_slot` and a re-claim, so the id we read is certainly
+        // the one this deadline belongs to.  Reading it first would let the
+        // slot be recycled underneath us and wake an unrelated task.
+        if entry
+            .claim
+            .compare_exchange(
+                token,
+                SLEEP_CLAIM_RELEASING,
+                Ordering::AcqRel,
+                Ordering::Relaxed,
+            )
+            .is_err()
+        {
+            continue;
+        }
+        let task_id = entry.task_id.load(Ordering::Relaxed);
+        match wake_expired_sleeper(task_id) {
+            SleeperWake::Release => {
+                entry.wake_tick.store(0, Ordering::Relaxed);
+                entry.task_id.store(0, Ordering::Relaxed);
+                entry.claim.store(0, Ordering::Release);
+            }
+            SleeperWake::Retry => {
+                // Scheduler lock contended.  Put the slot back exactly as it
+                // was so the sleeper still owns it and we try again next tick.
+                entry.claim.store(token, Ordering::Release);
+            }
         }
     }
 }

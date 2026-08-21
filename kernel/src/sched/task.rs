@@ -297,6 +297,49 @@ pub struct Task {
     ///
     /// Always accessed under the `SCHED` lock, so no atomics needed.
     pub pending_wake: bool,
+    /// Source location of the most recent [`block_current()`](super::block_current)
+    /// call that parked this task, or `None` if it has never blocked.
+    ///
+    /// Diagnostic only — nothing branches on it.  It exists because the two
+    /// hang dumps (`dump_idle_fallback_wedge` and the liveness watchdog) could
+    /// say *that* a task was `Blocked` with no wakeup source armed, but not
+    /// *which* wait parked it — and reconstructing that from a serial log meant
+    /// guessing at call graphs.  One pointer store per block buys the answer
+    /// outright.
+    ///
+    /// Always accessed under the `SCHED` lock, like `pending_wake`.
+    pub block_site: Option<&'static core::panic::Location<'static>>,
+    /// Tick at which this task last actually parked, or `0` if it never has.
+    ///
+    /// Diagnostic only, and it exists to answer one question `block_site`
+    /// alone cannot: *is that site stale?*  `block_current()` records
+    /// `block_site` before its `pending_wake` early return, so a site can name
+    /// a wait the task sailed straight through.  Only a real park updates this
+    /// field, so comparing it against the dump's `now_tick` says whether the
+    /// task parked seconds ago or minutes ago — which is the difference
+    /// between "the wait you are looking at" and "a wait from three self-tests
+    /// back".
+    ///
+    /// Always accessed under the `SCHED` lock, like `pending_wake`.
+    pub block_tick: u64,
+    /// Number of times this task has actually parked.
+    ///
+    /// Diagnostic only.  Two dumps taken seconds apart with the same
+    /// `block_seq` prove the task has not moved at all, as opposed to
+    /// spinning through a wake/park cycle that merely *looks* stuck.
+    ///
+    /// Always accessed under the `SCHED` lock, like `pending_wake`.
+    pub block_seq: u64,
+    /// hrtimer id armed to wake this task from `sleep_ns_interruptible`, or
+    /// `0` when the last park was not a timed sleep.
+    ///
+    /// Diagnostic only.  A task found `Blocked` in a timed sleep with no
+    /// matching entry in any per-CPU timer list has lost its wakeup; this
+    /// field plus `hrtimer`'s fired/cancelled disposition rings say whether
+    /// that timer fired, was cancelled, or was never armed at all.
+    ///
+    /// Always accessed under the `SCHED` lock, like `pending_wake`.
+    pub sleep_timer_id: u64,
     /// Base priority level (0 = highest, 31 = lowest).
     ///
     /// This is the user-assigned priority.  The effective scheduling
@@ -874,6 +917,10 @@ impl Task {
             name_len: tag.len(),
             state: TaskState::Running,
             pending_wake: false,
+            block_site: None,
+            block_tick: 0,
+            block_seq: 0,
+            sleep_timer_id: 0,
             priority: IDLE_PRIORITY,
             context: Context::empty(),
             stack_phys: 0,
@@ -956,6 +1003,10 @@ impl Task {
             name_len: idx_str,
             state: TaskState::Running,
             pending_wake: false,
+            block_site: None,
+            block_tick: 0,
+            block_seq: 0,
+            sleep_timer_id: 0,
             priority: IDLE_PRIORITY,
             context: Context::empty(),
             stack_phys: 0,
@@ -1100,6 +1151,10 @@ impl Task {
             name_len: copy_len,
             state: TaskState::Ready,
             pending_wake: false,
+            block_site: None,
+            block_tick: 0,
+            block_seq: 0,
+            sleep_timer_id: 0,
             priority,
             context,
             stack_phys,

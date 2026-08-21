@@ -28304,3 +28304,255 @@ comment because the failure is invisible until it fires, and because "one
 version constant per format" is the kind of rule that gets undone by the next
 person who sees three constants with the same value.
 
+
+---
+
+## §255 — A full timer queue refuses the newest request; it does not evict an armed one
+
+**Date:** 2026-08-21
+**Decided by:** Claude (autonomous)
+
+**In short:** the kernel keeps a per-CPU list of pending timers — alarms set by
+code that is waiting for something and wants to give up after a while. The list
+had a fixed size, and when it filled up the code threw away the alarm with the
+most distant deadline to make room for the new one. Whoever set the discarded
+alarm was never told, so they waited forever for a wake-up that had been
+deleted. This decides what to do instead: refuse the *new* request, tell the
+new caller, and never touch an alarm that is already set.
+
+### The situation
+
+`kernel/src/hrtimer.rs`'s `schedule_absolute` did, on reaching
+`MAX_TIMERS_PER_CPU`:
+
+```rust
+serial_println!("[hrtimer] WARNING: per-CPU timer limit reached — oldest timer evicted");
+state.timers.pop(); // Remove the last (furthest) timer.
+```
+
+Every hrtimer call site in the tree is a wait-with-timeout —
+`channel_recv_timeout`, `futex_wait_timeout`, eventfd/pipe/stream-socket
+timeouts, `timerfd`, `itimer`, the container restart backoff. So the evicted
+entry always belongs to a task that is blocked and expecting it. Discarding it
+converts a timeout into an indefinite block, silently, in a subsystem chosen at
+random by whichever deadline happened to be furthest out. It fired 1541 times in
+one boot (`known-issues.md` → `BUG-HRTIMER-EVICTS-AN-ARMED-TIMER`).
+
+### The decision
+
+Three parts.
+
+**1. Never evict.** An armed timer is a promise to a task that has already
+committed to blocking. There is no capacity pressure worth breaking that for.
+
+**2. Refuse the newest request at a hard ceiling, rather than growing without
+limit.** *What changes:* at 4096 pending timers on one CPU, `schedule_ns`
+returns a handle for a timer that was never inserted, and a one-shot `*** BUG:`
+line names the ceiling.
+
+This is genuinely worse for the refused caller than for a caller in a healthy
+system — it will block without its timeout. The reason it is still right: the
+harm now lands on the request that is *arriving into* an already-broken
+condition, not on an arbitrary earlier caller that did nothing wrong. And it is
+diagnosable — there is a message, a counter (`refused_count()`), and the caller
+is on the stack. The old behaviour was harm to a random victim with no record
+at all.
+
+The considered alternative was returning `Option<HrTimerHandle>` and making all
+23 call sites handle refusal. That is the honest signature and it is the right
+end state, but it is a different change: the callers' correct behaviour on
+refusal is "fail the syscall with a timeout-ish errno", which is 23 separate
+semantic decisions, and bundling them with a lost-wakeup fix would make neither
+reviewable. The ceiling is set high enough that reaching it means the machine
+is already failing, which is why the interim is tolerable and not a fudge.
+
+**3. `MAX_TIMERS_PER_CPU` (256) demoted from limit to soft threshold.**
+*What changes:* crossing 256 is accepted and reported once instead of silently
+corrupting the queue. 256 is the depth past which no healthy workload should
+go — roughly one timer per task in a timed wait — so crossing it is evidence
+about a *caller*, and the diagnostic says so ("some caller is arming timers it
+never cancels"), which is what actually leads to the bug. In this case it led
+straight to `sleep_ns_interruptible`, which armed a timer per iteration and
+cancelled none.
+
+### Where the diagnostics go
+
+Both warnings moved out of the `without_interrupts` block and out of the lock.
+The original wrote to the serial port with interrupts disabled and the per-CPU
+timer lock held, once per overflowing schedule. Serial I/O with interrupts off
+delays the APIC tick that drains the timer queue — so the flood made the
+condition it was reporting measurably worse. Both are now one-shot.
+
+This is the same call made in §253's hardening branch and in the sleep-queue
+exhaustion warning: **a diagnostic on a saturation path must be rate-limited,
+because the path is by definition being taken at high frequency, and an
+un-limited print turns a squeeze into a livelock.** Three instances in one day
+is enough to state it as a rule rather than three coincidences.
+
+### Cost accepted
+
+The hard ceiling is 4096 against a sorted `Vec` with O(n) insert, so the
+worst-case insert is a ~160 KiB memmove with interrupts disabled — far outside
+the < 10 µs ISR latency target. That is a real regression in the *worst* case
+and no change at all in the normal one (the list is < 64 deep in a healthy
+boot). It is accepted only because it is bounded and logged: `todo.txt` carries
+the structural fix (min-heap with lazy cancel-by-id), with the one-shot
+soft-threshold warning as its trigger.
+
+
+---
+
+## §256 — A timer handle names the CPU that holds it, and that pins an invariant
+
+**Date:** 2026-08-21
+**Decided by:** Claude (autonomous)
+
+**In short:** the kernel keeps one list of pending alarms per processor core.
+Cancelling an alarm used to mean searching every core's list, one after another,
+with interrupts switched off for the whole search. That turned out to be slow
+enough to stop the clock interrupt itself from being delivered, which hung the
+machine. The fix is to write down, in the ticket you get when you set an alarm,
+*which* core's list it went on — so cancelling looks in one place. The cost is
+that this only works while alarms never move between lists, so that has to
+become a rule rather than an accident.
+
+### The situation
+
+`hrtimer::cancel` took a bare id and had to find the entry:
+
+```rust
+crate::cpu::without_interrupts(|| {
+    let mut state = CPU_TIMERS[current_cpu_index()].lock();
+    if let Some(pos) = state.timers.iter().position(|t| t.id == handle.0) { ... }
+    // Try other CPUs (timer might have been scheduled from a different CPU
+    // if the task migrated).  This is rare but correct.
+    for i in 0..live_cpus { ... }
+});
+```
+
+The comment is wrong in a specific and instructive way: it conflates the *task*
+migrating with the *timer entry* migrating. The task does migrate. The entry
+does not — `schedule_absolute` inserts into `CPU_TIMERS[current_cpu_index()]`,
+and only that CPU's `process_expired()` ever removes it, including the re-insert
+that re-arms a repeating timer (same id, same list). So the cross-CPU walk could
+never find anything the first lookup had missed, except by finding the *current*
+CPU's list after the task moved — which is the same list under a different
+index, not a different list.
+
+That made it pure cost, and the cost was not small. A miss is the *common* case
+(`cancel` runs on the success path of every wait-with-timeout, where the timer
+has usually already fired), and a miss walked every live CPU's list to the end,
+taking a lock per list, with interrupts disabled throughout. Once
+`sleep_ns_interruptible` started cancelling correctly — which is the fix in
+§255's neighbourhood — that landed on the kernel's hottest wait path, and
+`process_expired()` runs *only* from the APIC timer ISR. Missed ticks mean
+timers do not fire, which means waits never end. Three boots hung
+(`known-issues.md` → `BUG-HRTIMER-CANCEL-SCANS-EVERY-CPU`).
+
+### The decision
+
+`HrTimerHandle` changes from `(u64)` to `{ id: u64, cpu: usize }`.
+`cancel` locks `CPU_TIMERS[handle.cpu]` and scans it, once.
+
+*What changes:* a cancel takes one lock instead of up to `cpu_count()`, and the
+interrupts-off window shrinks from "scan every core's list" to "scan one list".
+Nothing observable changes when a cancel succeeds.
+
+A handle for a request refused at the hard ceiling carries `cpu == usize::MAX`,
+so `CPU_TIMERS.get(handle.cpu)` returns `None` and cancelling is a no-op. This
+is better than the alternative of returning some plausible CPU index: a refused
+timer is on no list, and a search that can never succeed is exactly the pattern
+this change exists to delete.
+
+### What it costs, and the invariant it pins
+
+The handle doubles in size, 8 bytes to 16. Irrelevant — handles are held one per
+blocked waiter, never in bulk.
+
+The real cost is that this **promotes "a timer entry never changes CPU list"
+from an accident of the implementation to a load-bearing invariant.** Today
+nothing violates it, and the doc comment on `HrTimerHandle` says so explicitly
+with the reasoning. But a future change that migrated timers with their task —
+which is a reasonable thing to want, so that a task's timeouts fire on the core
+it is running on — would silently break cancellation: `cancel` would look at the
+old list, find nothing, and return `false` while leaving the entry armed on the
+new one. That is precisely the leak class §255 was fixing.
+
+The alternative that does not pin the invariant is to keep the search and make
+it cheap some other way — e.g. a global id→cpu map, or a per-entry "cancelled"
+flag with lazy removal. Both are more machinery than the problem deserves right
+now, and the lazy-removal one is what the eventual min-heap rewrite in
+`todo.txt` will bring anyway. So: take the invariant, document it at the type,
+and let the rewrite revisit it.
+
+Filed in `todo.txt` under the existing `hrtimer: replace the sorted Vec` entry:
+whoever does that rewrite must decide migration and cancellation together.
+
+---
+
+## §257 — An undeliverable wake is counted and shouted about, never quietly dropped
+
+**Date:** 2026-08-21
+**Decided by:** Claude (autonomous)
+
+**In short:** when the scheduler cannot immediately tell a sleeping task "wake
+up", it parks the message in a small queue for the next scheduling pass. That
+queue has 32 slots. The old code, on finding all 32 full, just gave up and
+returned — the task it was trying to wake would sleep forever. The new code
+tries once more to deliver the wake directly, and if that fails too it counts
+the loss and prints one loud line. The decision is to prefer a noisy, diagnosable
+failure over a silent one, and specifically *not* to make the queue block or
+spin until a slot frees.
+
+### Context
+
+`defer_wake` exists for one situation: something in interrupt context wants to
+wake a task, but the code it interrupted is holding the scheduler lock, so it
+cannot. It writes the task id into a slot and returns; the next `schedule_inner`
+delivers it.
+
+The queue-full case had a comment saying it "should never happen (32 slots,
+drained every 10ms)". That reasoning is sound in the steady state and useless as
+a guarantee: there are ~20 call sites across futex, pipe, channel, eventfd,
+signal, timerfd and the hrtimer callbacks, and a burst is exactly the condition
+under which the queue is both full *and* the wakes matter most.
+
+This came up while fixing `BUG-DEFERRED-WAKE-DROPPED-BEFORE-PARK`, where a
+*different* silent drop in the same file cost several boot cycles to find
+precisely because it left no trace. The lesson generalises: in this queue, a lost
+message is a hung machine, and a hung machine with no log line is the most
+expensive kind of bug this project produces.
+
+### The options
+
+**(a) Block or spin until a slot frees.** Guarantees delivery. Rejected: this
+runs in hard-IRQ context, and the entity that frees a slot is `schedule_inner`
+on a CPU that may be the one now spinning inside the ISR. That is a deadlock,
+not a slow path. The same objection kills "just take the scheduler lock" — the
+whole reason we are here is that the lock is held by the interrupted code.
+
+**(b) Grow the queue.** Cheap and it raises the threshold, but it does not change
+the shape of the failure, only its frequency — and it makes the drain scan
+longer on every scheduling decision, which is the hot path. Worth doing if the
+counter ever proves non-zero; not worth doing speculatively.
+
+**(c) Retry `try_wake` once, then count and warn.** Chosen. The retry is free and
+occasionally works: `defer_wake` is only reached because `try_wake` lost the race
+for the lock some instructions earlier, and the holder may well have released it
+since. `try_lock` keeps it ISR-safe, so it cannot deadlock. If it still fails,
+`DEFERRED_WAKE_DROPS` increments and a one-shot `CRITICAL` line names the task.
+
+### What it costs
+
+A dropped wake is still a dropped wake — option (c) does not make delivery
+reliable, and it would be wrong to read the counter as "harmless". What it buys
+is that the next person to see a machine wedged with a `Blocked` task and no
+timer can read one line and know whether this was the cause, instead of
+reasoning it out from the absence of evidence. Both dumps (`dump_timer_sources`
+via the liveness watchdog and the idle-fallback wedge) print the counter, the
+pending flag and every occupied slot alongside the sleep queue and the hrtimer
+lists, so the three ways a wake can vanish are distinguishable in the log.
+
+The one-shot guard on the warning is deliberate: if the queue is thrashing, the
+first line is the diagnosis and the following thousand are a serial-port denial
+of service on the very log you need to read.

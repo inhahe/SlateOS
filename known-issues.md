@@ -47899,3 +47899,369 @@ restated more than three times was worth generalising; three rounds now say yes,
 and the discriminator that makes such an audit tractable is question 2 above —
 **start from objects displayed on more than one surface**, not from functions
 that look alike.
+
+---
+
+## Three timer leaks with one shape, found from a boot that hung after 1208s (lane A)
+
+**In short:** a task that asks to sleep for five seconds, and is then woken
+after one millisecond by something else, used to leave *two* pieces of
+bookkeeping behind - a sleep-queue slot and a kernel timer - both still armed
+for the remaining 4.999 seconds, for a sleep nobody is waiting on any more.
+Enough of those at once filled two fixed-size tables. One of the tables
+responded by **throwing away somebody else's armed timer**, which is a lost
+wakeup manufactured on demand. All three are fixed.
+
+The failure that exposed them: boot `1208s FAIL` on `lane-a`, 2026-08-21. It is
+not reproducible on demand - it needs the machine's real network to be slow, so
+it will not appear in most boots. A comparison boot on a byte-identical kernel
+passed in 691s with none of the symptoms, which is what makes the network the
+differentiator rather than any code change.
+
+### The observed sequence
+
+| Serial line | Symptom |
+|---|---|
+| 2153-3709 | **1541 x** `[hrtimer] WARNING: per-CPU timer limit reached - oldest timer evicted`, all inside the ring-3 network tests |
+| 27913 | `[sched] WARNING: sleep queue full, task 0 falling back to spin` |
+| 28077 | `[futex]   FAIL: timeout_expires returned Ok(true)` -> `[FATAL]` |
+| 28084-28969 | `[irq-storm] IRQ 10 MASKED: ~500000 IRQs/sec` x 9, escalating cooldowns, never recovering |
+| end | `!! could not acquire SCHED lock - a task is likely wedged holding it`, then panic |
+
+The comparison boot had `[hrtimer] Stats: scheduled=359`; the failing one had
+`scheduled=5308`. Same tests, same image, same 26 skipped Path-Z rungs - the
+only difference is that the failing boot's TCP fetches to the real internet were
+slow, so far more code sat in timed waits at once.
+
+### `BUG-SLEEPSLOT-HELD-UNTIL-DEADLINE` - fixed
+
+`kernel/src/sched/mod.rs`, `sleep_until_tick_interruptible`.
+
+`SLEEP_QUEUE` is 256 fixed slots. A slot was claimed by CAS-ing `wake_tick`
+from 0, and released **only** by `process_sleep_wakeups` once `now >= deadline`.
+`_interruptible` exists precisely so that another wake can return early - and on
+that path the slot stayed armed for the whole remaining timeout. A
+`WaitQueue::wait_until_timeout(30s)` satisfied in a millisecond held a slot for
+thirty seconds. `sleep_until_tick` loops around the interruptible variant and
+claimed a *fresh* slot per iteration, so one long sleep with many early wakes
+could hold many slots at once.
+
+Two follow-on harms, both seen:
+
+1. Exhaustion is **self-amplifying**. The fallback is `while tick < deadline
+   { yield_now(); }`, and every spinner hammers `SCHED`; the timer ISR retires
+   expired slots under `SCHED.try_lock()`, which then fails, so slots are *not*
+   retired, so the queue stays full. The old code also printed a serial line per
+   failed claim - 1100+ of them - adding serial I/O to that loop. That is the
+   livelock in the table above.
+2. When the ISR finally reaches an orphaned slot it takes the
+   `Some(task)`-but-not-`Blocked` branch and sets `pending_wake = true` on a
+   task that is awake and doing something else entirely. The next
+   `block_current()` that task makes returns *without blocking*. That is the
+   most plausible reading of `timeout_expires returned Ok(true)`: a futex wait
+   with a 5 ms timeout reported "I was woken" because a token left by an
+   unrelated sleep was sitting there waiting to be spent.
+
+**Fix.** `SleepEntry` gains a `claim` field holding a globally unique token,
+and `claim` - not `wake_tick` - is now the free/busy marker. A sleeper releases
+its own slot by CAS-ing *its own token* out, so a stale releaser whose slot was
+already retired and re-claimed simply fails and does nothing. The ISR takes the
+slot into a `RELEASING` state *before* reading `task_id`, which closes the
+window where a slot could be recycled underneath the scan and the wrong task
+woken. `sleep_until_tick_interruptible` now releases on both paths, and the
+exhaustion warning is one-shot.
+
+### `BUG-HRTIMER-ORPHANED-BY-EARLY-WAKE` - fixed
+
+`kernel/src/sched/mod.rs`, `sleep_ns_interruptible`.
+
+The same shape, one table over: `let _handle = hrtimer::schedule_ns(...);
+block_current();` - and no `cancel`. Woken early, the timer stays armed. And
+`sleep_ns` loops around this function, so a sleep broken by repeated early wakes
+armed one timer per iteration and cancelled none.
+
+The arithmetic in the failing boot says this is where the pressure came from:
+`scheduled=5308, fired=3730, cancelled=32`. Thirty-two cancellations against
+five thousand arms, in a kernel whose every hrtimer call site is a
+wait-with-timeout that ought to cancel on the success path.
+
+**Fix.** `hrtimer::cancel(handle)` after `block_current()`. A no-op if the timer
+already fired.
+
+### `BUG-HRTIMER-EVICTS-AN-ARMED-TIMER` - fixed
+
+`kernel/src/hrtimer.rs`, `schedule_absolute`.
+
+On reaching `MAX_TIMERS_PER_CPU` (256) the code did `state.timers.pop()` -
+discarding the furthest-out pending timer to make room. That timer is armed,
+someone is blocked waiting for it, and its owner is never told. It is a silent
+lost wakeup, and it happened **1541 times in one boot**, to subsystems that had
+done nothing wrong. `channel_recv_timeout`, `futex_wait_timeout`,
+`eventfd`/`pipe`/`stream_socket` timeouts and `timerfd` are all reachable this
+way; the victim is whoever happened to have the longest deadline.
+
+The warning made it worse rather than better: it was `serial_println!` from
+inside `without_interrupts` with the per-CPU timer lock held, unconditionally,
+once per overflowing schedule. Serial I/O with interrupts disabled delays the
+APIC tick that drains the queue, so the flood deepened the queue it was
+reporting on.
+
+**Fix.** Never evict. `MAX_TIMERS_PER_CPU` becomes a soft threshold that warns
+once and keeps accepting; a new `MAX_TIMERS_HARD_CEILING` (4096) refuses instead
+of evicting, on the grounds that concentrating the harm on the caller that is
+actually asking is the only version of this that is diagnosable. Both
+diagnostics moved outside the IRQ-disabled critical section and are one-shot,
+and `TOTAL_REFUSED` is now reported by the self-test alongside a
+`scheduled - fired - cancelled - pending` tripwire that would have made the
+original bug visible on the first boot that hit it.
+
+### Not fixed, and deliberately so
+
+- **`IRQ 10` storming at ~500 kHz.** IRQ 10 is a shared level-triggered PCI
+  line in this QEMU config (virtio-net, virtio-blk dev 0, ATI VGA, AC97, NVMe,
+  xHCI, AHCI, SMBus). The dispatcher at `kernel/src/ioapic.rs:735-770` acks
+  virtio-blk, virtio-net and rtl8139 on every IRQ; the other five devices have
+  no handler, so if one of them asserts, nothing deasserts it and the line stays
+  low. **A single storm-mask-cooldown cycle happens on passing boots too** - it
+  is only fatal when the scheduler is too wedged to service the device during
+  the cooldown. So the storm is a real and separate defect, but it was a
+  passenger here, not the driver. Needs its own investigation: identify which
+  of the five unhandled devices asserts, and either give it a stub handler that
+  acks or mask it at the PCI command register.
+- **`hrtimer`'s sorted `Vec`.** O(n) insert under a lock with interrupts
+  disabled. At the new ceiling that is a 160 KiB memmove worst case. Logged in
+  `todo.txt`; wants a real min-heap with lazy cancel-by-id, or a timer wheel.
+
+---
+
+## The fix for the timer leaks unmasked a boot hang: a dropped wakeup (lane A)
+
+**In short:** adding "cancel the timer when you wake up early" - which was the
+correct fix for `BUG-HRTIMER-ORPHANED-BY-EARLY-WAKE` above - made boots hang
+intermittently. The hang itself was **not** in the new code. It was a
+long-standing hole in the scheduler's "deferred wake" queue: when a wake-up
+signal could not be delivered immediately, it was parked in a queue for the next
+scheduling pass - and if, by the time that pass ran, the target task had not
+gone to sleep yet, the queue **threw the signal away** instead of leaving a note
+saying "don't go to sleep, you were already woken." The task then went to sleep
+with nothing left to wake it. The leak fixes just made that window get hit far
+more often. Fixed by making the queue leave the note, which is what every other
+wake path in the scheduler already did.
+
+**Two defects, one investigation.** They are written up separately below:
+`BUG-HRTIMER-CANCEL-SCANS-EVERY-CPU` (real, fixed, *not* the hang - the hang
+reproduced identically with it fixed) and
+`BUG-DEFERRED-WAKE-DROPPED-BEFORE-PARK` (the hang).
+
+### How it presented
+
+Three separate boots with the timer-leak fixes applied stalled at three
+different places, all of them **immediately after a task exited**:
+
+| Run | Stalled at | Preceding line |
+|---|---|---|
+| 1 | serial line 2333 | `[sched] Task 109 exiting` (`spawn-test-linux-brk`) |
+| 2 | serial line 26395 | `[sched] Spawned task 335` (barrier self-test) |
+| 3 | serial line 2178 | `[sched] Task 108 exiting` (netstack daemon) |
+
+Neither of the two pre-change baseline logs (`serial-fail-A.txt`,
+`serial-pass-B.txt`) contains a single `IDLE-FALLBACK WEDGE`, so this was new.
+
+### How it was found
+
+Three successive theories were wrong (hrtimer id reuse; the new hard-ceiling
+refusal handing back a handle for a timer that was never inserted; the
+`process_sleep_wakeups` `Retry` path orphaning a slot). All three were disproved
+by reading, and the wasted effort is the point: the fix was to stop theorising
+and add **permanent** diagnostics, which named the culprit on the very first
+boot afterwards.
+
+The diagnostics, all now committed:
+
+- `Task::block_site` - `block_current()` is `#[track_caller]` and records
+  `core::panic::Location::caller()` on the task before it parks. This is
+  authoritative: `git grep "state = TaskState::Blocked"` has exactly one hit,
+  inside `block_current()`, in the same `SCHED`-locked critical section that
+  writes `block_site`.
+- `sched::dump_timer_sources()` - prints every held sleep slot with its
+  deadline against `now`, flagging any that is already expired, and then calls:
+- `hrtimer::dump_pending()` - per-CPU pending lists with an `OVERDUE` flag,
+  plus the `scheduled/fired/cancelled/refused` totals.
+
+Both the liveness watchdog and `dump_idle_fallback_wedge` call it, so either
+kind of stall now prints the same evidence.
+
+What the first instrumented boot printed:
+
+```
+tid=0   state=Blocked cpu=0 prio=31 pending_wake=false waited=4683
+        block_site=kernel\src\sched\mod.rs:5814 name="idle"
+tid=335 state=Blocked cpu=0 prio=16 pending_wake=false waited=0
+        block_site=kernel\src\sched\waitqueue.rs:181 name="test-barrier"
+```
+
+`mod.rs:5814` is the `block_current()` inside `sleep_ns_interruptible` - i.e.
+a wait-with-timeout whose hrtimer never fired. `waited=4683` ticks against a
+timeout that `wait_timeout_ns` caps at 100 ms (10 ticks). Note also that `tid=0`
+is simultaneously the boot thread *and* cpu0's idle task, which is why cpu0
+fell into the idle-fallback HLT loop with nothing left to wake it.
+
+### `BUG-HRTIMER-CANCEL-SCANS-EVERY-CPU` - fixed, but **not** the hang
+
+`kernel/src/hrtimer.rs`, `cancel()`.
+
+**Read the last paragraph of this subsection before believing the middle of
+it.** The IRQ-off-cost story below is a plausible mechanism that turned out not
+to be the one operating here; it is kept because the defect it describes is
+real and the fix is worth having.
+
+A `HrTimerHandle` was a bare id, so `cancel` had to search for the entry. It
+tried the current CPU, and on a miss dropped that lock and locked+scanned every
+other live CPU's list - the whole thing inside `without_interrupts`. A miss is
+the *common* case, because `cancel` runs on the success path of every
+wait-with-timeout, where the timer has usually already fired.
+
+Before the leak fix that cost nothing, because `cancel` was almost never called
+(`cancelled=32` against `scheduled=5308` in the failing boot). Adding the
+correct `cancel` moved it onto the hottest wait path in the kernel: `kmutex`,
+semaphore, condvar, `kchannel` and `once_event` all route through
+`wait_timeout_ns` -> `sleep_ns_interruptible`. `process_expired()` runs **only**
+from the APIC timer ISR, so frequent long IRQ-off windows coalesce or lose
+ticks, and timers then do not fire at all. Hence: the cancel path could stop the
+very timers it was cancelling.
+
+**The cross-CPU walk was not merely expensive, it was unnecessary.** A timer
+entry never migrates. `schedule_absolute` inserts into
+`CPU_TIMERS[current_cpu_index()]`, and only that CPU's `process_expired()`
+removes it - including the re-insert of a repeating timer, which keeps both the
+same id and the same list. The comment that justified the walk ("timer might
+have been scheduled from a different CPU if the task migrated") conflated the
+*task* migrating with the *entry* migrating; the entry does not move.
+
+**Fix.** `HrTimerHandle` becomes `{ id, cpu }`, carrying the list the entry
+landed on. `cancel` takes exactly one lock and does exactly one scan. A handle
+returned by a request that was refused at the hard ceiling carries
+`cpu == usize::MAX`, so cancelling it is a no-op instead of a search that could
+never succeed.
+
+**This did not fix the hang.** The next boot with it applied stalled at the
+*identical* serial line (2178, `[sched] Task 108 exiting`). Keep the change - it
+removes a cross-CPU lock walk from the kernel's hottest wait path and pins a
+real invariant - but it is an optimisation, not the bug. See the next section
+for what was actually wrong.
+
+### `BUG-DEFERRED-WAKE-DROPPED-BEFORE-PARK` - fixed (this was the hang)
+
+`kernel/src/sched/mod.rs`, `drain_deferred_wakes_locked()`.
+
+**What the wedge dump showed.** Single-CPU boot, every other task `Dead`:
+
+```
+tid=0   state=Blocked pending_wake=false block_site=kernel\src\container.rs:4311  name="idle"
+tid=108 state=Blocked pending_wake=false waited=4664
+        block_site=kernel\src\sched\mod.rs:5828                                  name="netstack-dns"
+[sched]   sleep queue: 0/256 slots occupied
+[hrtimer] totals: scheduled=19467 fired=10 cancelled=19457 refused=0
+[hrtimer] cpu0: 0 pending
+```
+
+`container.rs:4311` is `wait_process()`, so tid 0 is waiting for the netstack
+daemon. `mod.rs:5828` is the `block_current()` inside `sleep_ns_interruptible`.
+Tid 108 is parked on a sleep whose **timer no longer exists** (`0 pending`, and
+the totals account for every timer ever created: `19467 = 10 + 19457 + 0`), with
+`pending_wake=false`. Nothing anywhere could ever run again. Note the totals are
+*healthy*: a 19457:10 cancel-to-fire ratio is the leak fix working, since every
+`wait_timeout_ns` satisfied early legitimately cancels its timer.
+
+**The defect.** Three functions wake a task. All three must handle the case
+where the target has not parked yet, because the ordinary
+register-then-recheck interleaving puts it there constantly:
+
+| | target `Blocked` | target `Running`/`Ready` |
+|---|---|---|
+| `wake()` | enqueue | `pending_wake = true` |
+| `try_wake()` | enqueue | `pending_wake = true` |
+| `drain_deferred_wakes_locked()` | enqueue | **wake discarded, slot cleared** |
+
+The third one is not a rare path - it is the *primary* one. Its own doc comment
+says so: on a single-CPU system the ISR-context `try_wake` always loses the race
+for the scheduler lock against the code it interrupted, so every deferred wake
+is delivered here. So every wake that arrived in the window between a task
+arming its timer and reaching `block_current()` was silently dropped.
+
+The sequence that hung the boot:
+
+1. tid 108 calls `sleep_ns_interruptible`, arms its hrtimer, and is still
+   `Running`.
+2. The timer expires. `process_expired` removes the entry (this is the `fired`
+   that leaves `0 pending`) and calls the callback, which calls
+   `try_wake(108)` - contended, so it falls back to `defer_wake(108)`.
+3. `schedule_inner` drains. tid 108 is still `Running`, so the drain discards
+   the wake and clears the slot.
+4. tid 108 reaches `block_current()`, sees `pending_wake == false`, and parks
+   forever with no timer armed.
+
+Step 3 is a window of a few instructions, which is why the hang was
+intermittent, and why it needed the leak fixes (which multiplied timer traffic
+~4x) to become frequent enough to catch.
+
+**Fix.** `drain_deferred_wakes_locked` sets `pending_wake = true` in the
+not-`Blocked` case, exactly like the other two.
+
+### Two smaller defects fixed in the same file, found by reading around it
+
+Neither is known to have caused an observed failure; both are the same class of
+silent wake loss.
+
+1. **The pending-flag was cleared after the scan, not before.** Both
+   `drain_deferred_wakes_locked` and `process_deferred_wakes` scanned the 32
+   slots and then stored `DEFERRED_WAKES_PENDING = false`. A `defer_wake`
+   landing in a slot the loop had already walked past sets the flag *behind* the
+   cursor - and the trailing store then erased it, stranding that slot until
+   some unrelated later wake happened to set the flag again. Both now clear the
+   flag before the scan, where a redundant rescan is the worst outcome.
+
+2. **A full queue dropped the wake silently.** `defer_wake` fell off the end of
+   its 32-slot search and returned, with a comment saying this "should never
+   happen". A dropped wake is a hang, so it must not be invisible: it now
+   retries `try_wake` once directly (the lock holder may have released it since,
+   and `try_lock` keeps this ISR-safe), and if that also fails it increments
+   `DEFERRED_WAKE_DROPS` and prints one `CRITICAL` line. The counter and the
+   occupied slots are printed by `dump_timer_sources()`, so both dumps show
+   them.
+
+**Diagnostic gap this closed.** From the parked task's side, a dropped wake, a
+stranded queue slot and a timer that never fired look identical - `Blocked`,
+`pending_wake=false`, no timer. `dump_timer_sources()` now prints the sleep
+queue, the deferred-wake queue (occupied slots, the pending flag, the drop
+count) and the hrtimer lists together, from both the liveness watchdog and the
+idle-fallback wedge dump, so the log tells them apart.
+
+### `BUG-DEFERRED-WAKE-NO-REMOTE-IPI` - open, latency only
+
+`kernel/src/sched/mod.rs`, `drain_deferred_wakes_locked()`.
+
+`wake()` and `try_wake()` both call `signal_cpu(target_cpu)` after enqueueing,
+so a target CPU sitting in HLT is IPI'd immediately. The deferred drain does
+not - it cannot, because it runs with the `SCHED` guard held and every other
+call site deliberately sends the IPI *after* releasing it.
+
+Not a hang: each CPU's APIC timer is periodic, so an idle target picks the task
+up on its next tick. But it is up to a full tick (~10 ms) of added wake latency
+for any deferred wake that lands on a remote CPU, and it is an inconsistency
+with the other two wake paths, which is exactly the kind of asymmetry that hid
+`BUG-DEFERRED-WAKE-DROPPED-BEFORE-PARK` above.
+
+**Proper fix:** have the drain collect the target CPUs into a small fixed-size
+set and have `schedule_inner` signal them after it drops the guard. Deferred
+rather than done now only because the boot in progress is validating the
+lost-wakeup fix and this would change the same function; it is not blocked on
+anything. Currently invisible because the boot tests run single-CPU.
+
+### Process note, for whoever reads this next
+
+The restored copy of the section above this one exists because a
+`git checkout -- known-issues.md`, run to undo a botched append, threw away an
+hour of uncommitted analysis. Never use `git checkout --` / `git restore` to
+undo an edit to a file with other uncommitted work in it. Edit the file back,
+or commit first and revert the commit.

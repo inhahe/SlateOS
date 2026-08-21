@@ -54491,3 +54491,54 @@ adding the check in the same change.
 Everything else about it is already right: the override clears the ticket as
 well as the lock, so it cannot leave a session whose *next* lock opens for
 free (`the_administrative_override_needs_no_password_and_leaves_no_ticket`).
+
+## hrtimer: replace the sorted Vec with a real min-heap (lane A)
+
+`kernel/src/hrtimer.rs` keeps each CPU's pending timers in a `Vec<TimerEntry>`
+sorted by expiry, with `insert_sorted` doing an O(n) `Vec::insert`. That runs
+inside `without_interrupts` while holding the per-CPU `Mutex`, i.e. with
+interrupts disabled on that CPU.
+
+The comment on `CpuTimerState` justifies it with "the number of active timers
+per CPU is typically small (< 64)". That assumption failed on 2026-08-21: a boot
+with slow real-world networking held >256 concurrently (see `known-issues.md` →
+`BUG-HRTIMER-EVICTS-AN-ARMED-TIMER`). The eviction that used to hide the
+overflow is gone, and `MAX_TIMERS_HARD_CEILING` is now 4096 — so the worst case
+is a ~160 KiB memmove with IRQs off, which is far outside the < 10 µs ISR
+latency target in `CLAUDE.md`.
+
+Correct fix: a `BinaryHeap<Reverse<TimerEntry>>` for O(log n) insert and
+pop-min, plus lazy cancellation (a per-CPU `BTreeSet<u64>` of cancelled ids,
+consulted when an entry is popped) because a heap has no cheap remove-by-id.
+Linux's answer is a timer wheel plus a separate hrtimer rbtree; the rbtree half
+is the closer analogue. Deferred because it is a self-contained subsystem
+rewrite and the correctness bugs above were the urgent half.
+
+Trigger to do it properly: any boot that prints the `[hrtimer] WARNING:
+per-CPU timer queue passed 256 entries` one-shot, or any measured ISR-latency
+regression traceable to timer scheduling.
+
+---
+
+sched: the deferred-wake drain does not IPI a remote target CPU (lane A)
+------------------------------------------------------------------------
+
+`kernel/src/sched/mod.rs`, `drain_deferred_wakes_locked()`.
+
+`wake()` and `try_wake()` both `signal_cpu(target_cpu)` after enqueueing, so a
+target CPU sitting in HLT is IPI'd at once. The deferred drain cannot: it runs
+with the `SCHED` guard held, and the convention everywhere else is to send the
+IPI only after dropping it. An idle remote CPU therefore picks the task up on
+its own next APIC tick instead — up to ~10 ms of extra wake latency.
+
+Not a hang, and currently invisible because the boot tests run single-CPU. It is
+still an asymmetry between the three wake paths, and that exact asymmetry is
+what hid `BUG-DEFERRED-WAKE-DROPPED-BEFORE-PARK` (see `known-issues.md` →
+`BUG-DEFERRED-WAKE-NO-REMOTE-IPI`).
+
+Correct fix: have the drain collect target CPUs into a small fixed-size set
+(there are at most 32 slots, and duplicates collapse) and have `schedule_inner`
+signal them after it releases the guard.
+
+Trigger: bringing up SMP in the boot test, or any measured wake-latency
+regression on a multi-CPU configuration.

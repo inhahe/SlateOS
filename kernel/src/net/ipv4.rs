@@ -44,6 +44,7 @@ use core::sync::atomic::{AtomicU16, Ordering};
 use crate::error::{KernelError, KernelResult};
 
 use super::ethernet::{self, ETHERTYPE_IPV4};
+use super::checksum;
 use super::interface::{self, Ipv4Addr};
 use crate::virtio::net::MacAddress;
 
@@ -290,29 +291,9 @@ pub fn build_packet_ecn(
 /// Compute the Internet checksum (RFC 1071) over a byte slice.
 ///
 /// Returns the checksum in network byte order.
-#[allow(clippy::arithmetic_side_effects)]
+#[must_use]
 pub fn ip_checksum(data: &[u8]) -> u16 {
-    let mut sum: u32 = 0;
-
-    // Sum 16-bit words.
-    let mut i = 0;
-    while i + 1 < data.len() {
-        let word = u16::from_be_bytes([data[i], data[i + 1]]);
-        sum = sum.wrapping_add(u32::from(word));
-        i += 2;
-    }
-
-    // Handle odd byte.
-    if i < data.len() {
-        sum = sum.wrapping_add(u32::from(data[i]) << 8);
-    }
-
-    // Fold 32-bit sum into 16 bits.
-    while sum > 0xFFFF {
-        sum = (sum & 0xFFFF).wrapping_add(sum >> 16);
-    }
-
-    !sum as u16
+    checksum::finish(checksum::sum_bytes(0, data))
 }
 
 /// Verify a TCP or UDP checksum using the IPv4 pseudo-header (RFC 793/768).
@@ -341,41 +322,15 @@ pub fn verify_transport_checksum(
         }
     }
 
-    // Build pseudo-header + segment and compute checksum.
     let seg_len = segment.len() as u16;
-    let mut sum: u32 = 0;
-
-    // Pseudo-header: src IP (4 bytes as two 16-bit words).
-    sum = sum.wrapping_add(u32::from(u16::from_be_bytes([src.0[0], src.0[1]])));
-    sum = sum.wrapping_add(u32::from(u16::from_be_bytes([src.0[2], src.0[3]])));
-    // Pseudo-header: dst IP.
-    sum = sum.wrapping_add(u32::from(u16::from_be_bytes([dst.0[0], dst.0[1]])));
-    sum = sum.wrapping_add(u32::from(u16::from_be_bytes([dst.0[2], dst.0[3]])));
-    // Pseudo-header: zero + protocol.
-    sum = sum.wrapping_add(u32::from(protocol));
-    // Pseudo-header: segment length.
-    sum = sum.wrapping_add(u32::from(seg_len));
-
-    // Sum the segment itself (16-bit words).
-    let mut i = 0;
-    while i + 1 < segment.len() {
-        let word = u16::from_be_bytes([segment[i], segment[i + 1]]);
-        sum = sum.wrapping_add(u32::from(word));
-        i += 2;
-    }
-    // Handle odd trailing byte.
-    if i < segment.len() {
-        sum = sum.wrapping_add(u32::from(segment[i]) << 8);
-    }
-
-    // Fold 32-bit sum into 16 bits.
-    while sum > 0xFFFF {
-        sum = (sum & 0xFFFF).wrapping_add(sum >> 16);
-    }
+    let sum = checksum::sum_bytes(
+        checksum::pseudo_v4(src, dst, protocol, seg_len),
+        segment,
+    );
 
     // Valid checksum folds to 0xFFFF (since the checksum field is
     // included in the computation, the complement is zero).
-    sum == 0xFFFF
+    checksum::fold(sum) == checksum::VALID
 }
 
 /// Compute a TCP/UDP checksum using the IPv4 pseudo-header (RFC 793/768).
@@ -395,37 +350,10 @@ pub fn compute_transport_checksum(
     segment: &[u8],
 ) -> u16 {
     let seg_len = segment.len() as u16;
-    let mut sum: u32 = 0;
-
-    // Pseudo-header: src IP.
-    sum = sum.wrapping_add(u32::from(u16::from_be_bytes([src.0[0], src.0[1]])));
-    sum = sum.wrapping_add(u32::from(u16::from_be_bytes([src.0[2], src.0[3]])));
-    // Pseudo-header: dst IP.
-    sum = sum.wrapping_add(u32::from(u16::from_be_bytes([dst.0[0], dst.0[1]])));
-    sum = sum.wrapping_add(u32::from(u16::from_be_bytes([dst.0[2], dst.0[3]])));
-    // Pseudo-header: zero + protocol.
-    sum = sum.wrapping_add(u32::from(protocol));
-    // Pseudo-header: segment length.
-    sum = sum.wrapping_add(u32::from(seg_len));
-
-    // Sum the segment (16-bit words).
-    let mut i = 0;
-    while i + 1 < segment.len() {
-        let word = u16::from_be_bytes([segment[i], segment[i + 1]]);
-        sum = sum.wrapping_add(u32::from(word));
-        i += 2;
-    }
-    // Handle odd trailing byte.
-    if i < segment.len() {
-        sum = sum.wrapping_add(u32::from(segment[i]) << 8);
-    }
-
-    // Fold 32-bit sum into 16 bits.
-    while sum > 0xFFFF {
-        sum = (sum & 0xFFFF).wrapping_add(sum >> 16);
-    }
-
-    let cksum = !sum as u16;
+    let cksum = checksum::finish(checksum::sum_bytes(
+        checksum::pseudo_v4(src, dst, protocol, seg_len),
+        segment,
+    ));
 
     // For UDP, a computed checksum of 0x0000 is transmitted as 0xFFFF
     // (RFC 768: 0x0000 means "no checksum").

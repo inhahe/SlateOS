@@ -46688,6 +46688,96 @@ benchmark whose validity silently depended on the optimiser declining to do
 something it was entitled to do."* A third instance in an unrelated benchmark
 says the moral held and the response was too narrow.
 
+### Postscript 2: the residual was not the pseudo-header either, and the cause was seven copies of one loop
+
+**Status:** FIXED — `net::checksum` unification.
+
+The pseudo-header rewrite (`e1de4aaaa`) was justified by a prediction, written
+down before the run precisely so it could fail:
+
+> if the 2536-cycle gap really is the stack round-trip, v4 should land near v6
+> but slightly above it… If v4 instead stays well above v6, my account of the
+> cause is wrong and the difference is somewhere I haven't looked.
+
+**It failed.** v4 went 7896 → 7208 cycles (−688, −8.7%) — a real win, and enough
+to put `net_tcp_checksum_v4_1460b` under its 2000 ns target for the first time
+(2115 → 1904 ns) — but it stayed **1844 cycles (34%) above** v6's 5364. The
+stack round-trip accounted for roughly 27% of the gap. The rest was somewhere I
+had not looked.
+
+**Where it was: the two functions were not running the same code, despite
+running identical source.** `llvm-objdump` on the exact `e1de4aaaa` kernel that
+produced those numbers shows only *one* of the pair as a symbol —
+`tcp_checksum_v6` survives out-of-line, and its segment loop is **unrolled 2×**:
+
+```
+ffffffff808ccf30: movzwl (%rdi,%rcx), %r9d      ; word 0
+ffffffff808ccf35: movzwl 0x2(%rdi,%rcx), %r10d  ; word 1
+…
+ffffffff808ccf53: addq   $0x4, %rcx             ; four bytes per iteration
+```
+
+`tcp_checksum` has no symbol at all — it was inlined into its callers, and the
+copy inlined into the benchmark did not get the same treatment. 1460 bytes is
+730 words: 365 unrolled iterations against 730 rolled ones.
+
+**So the benchmark pair, which exists specifically to price IPv4's
+pseudo-header against IPv6's, was actually reporting an unrolling decision.**
+Both readings of that pair were wrong, in opposite directions and for different
+reasons: before §251 it compared two hand-written `bench.rs` copies of code that
+did not exist; after §251 it compared two independently-compiled copies of code
+that did.
+
+**Root cause: the loop existed seven times.** `grep` for `while i + 1 <` across
+`kernel/src/net/` returned seven verbatim copies of the one's-complement data
+loop — three in `ipv4.rs`, two in `ipv6.rs`, two in `tcp.rs` — plus four copies
+of the IPv4 pseudo-header prologue and four of the IPv6 one. Each copy is a
+separate function body to LLVM, so each independently wins or loses the
+unrolling lottery, and nothing anywhere asserts they agree.
+
+That is worse than ordinary duplication, and the reason is specific:
+**duplicated code that is *supposed* to be identical invites the reader to
+attribute any measured difference to the one thing that genuinely differs.**
+Here the only visible difference between the two functions was the
+pseudo-header, so a 34% gap "obviously" meant the pseudo-header cost 34%. The
+inference is sound; the premise — that the rest was the same code — was false,
+and was false in a way no amount of reading the source could reveal.
+
+**Fix:** one canonical `kernel/src/net/checksum.rs` (`sum_bytes` / `fold` /
+`finish` / `pseudo_v4` / `pseudo_v6`), and all seven sites call it. Now the two
+TCP checksums differ by exactly their pseudo-header prologues and nothing else,
+which is what the benchmark pair always claimed to be measuring. It also means
+optimising the checksum is one edit that lifts TCP, UDP, ICMP, ICMPv6 and the
+IPv4 header check together, instead of seven edits that drift apart again.
+
+Because every checksum in the stack now funnels through one loop, a single
+wrong fold or a mis-padded odd byte would corrupt all of them at once — so
+`checksum::self_test()` runs at boot (`main.rs`, step 22e⅞++++n1) rather than
+only under `cargo test`, which never executes against the target binary. It
+pins RFC 1071 §3's own worked example (an *external* vector, so it cannot share
+a bug with a test written from this code), the high-side padding of an odd
+trailing byte, split-invariance of the accumulator, the stamp-and-verify round
+trip, and the 64 KiB worst case that the module's no-overflow claim rests on.
+
+**Two general lessons, both of which cost a full measure-and-conclude cycle
+here:**
+
+1. **"Identical source" is not "identical code."** Two functions with
+   byte-identical loop bodies can differ by 2× in emitted work depending on
+   inlining context. Any benchmark that compares two functions and attributes
+   the difference to their *visible* difference is assuming the compiler treated
+   the invisible parts equally — and that assumption is checkable in about
+   ninety seconds with `llvm-objdump -t` plus
+   `--disassemble-symbols=`. Do that before writing the causal story, not after
+   the story fails.
+2. **A prediction that fails is worth more than the fix that prompted it.** The
+   `e1de4aaaa` optimisation was correct and is kept. But had it not carried an
+   explicit falsifiable claim about *how much* it should recover, "−8.7%, target
+   met, done" would have closed the task with the actual defect untouched and
+   the benchmark still lying. The habit worth keeping is not "predict the
+   direction" — direction was never in doubt — it is **predict the magnitude**,
+   because that is the part that can be wrong while everything looks fine.
+
 ---
 
 ## `apps/**` bug-hunt sweep, round 1: four live defects and two latent (lane C)

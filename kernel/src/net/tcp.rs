@@ -123,6 +123,7 @@ use alloc::vec::Vec;
 
 use crate::error::{KernelError, KernelResult};
 
+use super::checksum;
 use super::interface::{self, IpAddr, Ipv4Addr};
 use super::ipv4::{self, Ipv4Packet, PROTO_TCP};
 use super::ipv6::{self, Ipv6Addr, Ipv6Packet};
@@ -820,59 +821,23 @@ fn build_segment_with_options(
 /// against [`tcp_checksum_v6`] — was the one part it did not measure. Widening
 /// a module's surface by one function is the cheaper price. See
 /// design-decisions.md §251.
-#[allow(clippy::arithmetic_side_effects)]
+#[must_use]
 pub(crate) fn tcp_checksum(segment: &[u8], src_ip: Ipv4Addr, dst_ip: Ipv4Addr) -> u16 {
-    let mut sum: u32 = 0;
-
-    // Pseudo-header: src IP, dst IP, zero, protocol (6), TCP length — summed as
-    // the six 16-bit words it is, rather than materialised as 12 bytes and read
-    // back.
+    // The pseudo-header is summed as the six 16-bit words it is, not
+    // materialised as a `[u8; 12]` and read back: design-decisions.md §251,
+    // where the array form cost 688 cycles per call. The segment loop lives in
+    // `net::checksum` — see that module's docs for why the copy that used to be
+    // here made this function look 34% dearer than its IPv6 twin.
     //
-    // The previous form built a `[u8; 12]` on the stack and walked it with
-    // `chunks(2)` plus a `.get(1).copied().unwrap_or(0)` that could never fire
-    // (12 is even). That is ~24 guest memory accesses to compute six adds, and
-    // under TCG a guest access costs ~218 cycles (see `bench.rs`'s calibration
-    // block), so the prologue dominated the function.
-    //
-    // It was measured, not guessed. On run `d4b03ce54` — the first run in which
-    // both checksum benchmarks timed the real functions — this one cost **7896
-    // cycles** against `tcp_checksum_v6`'s **5360**, for the same 1460-byte
-    // segment and a byte-identical main loop. IPv4 was 47% dearer than IPv6
-    // while carrying a 12-byte pseudo-header against IPv6's 40: the whole 2536
-    // cycles were this prologue.
-    //
-    // That inversion was invisible until design-decisions.md §251, and the
-    // reason is worth keeping: the `bench.rs` copy this benchmark used to time
-    // "hand-unrolled the pseudo-header into six adds" — i.e. the copy was
-    // written the way this code should have been written, so the benchmark
-    // reported the cost of code that did not exist, on the hotter of the two
-    // paths.
-    sum = sum.wrapping_add(u32::from(u16::from_be_bytes([src_ip.0[0], src_ip.0[1]])));
-    sum = sum.wrapping_add(u32::from(u16::from_be_bytes([src_ip.0[2], src_ip.0[3]])));
-    sum = sum.wrapping_add(u32::from(u16::from_be_bytes([dst_ip.0[0], dst_ip.0[1]])));
-    sum = sum.wrapping_add(u32::from(u16::from_be_bytes([dst_ip.0[2], dst_ip.0[3]])));
-    // The zero byte and the protocol byte form one word: 0x0006.
-    sum = sum.wrapping_add(u32::from(PROTO_TCP));
-    // TCP length is a 16-bit field here (IPv6's is 32), so only the low half.
-    sum = sum.wrapping_add(segment.len() as u32 & 0xFFFF);
-
-    // TCP segment.
-    let mut i = 0;
-    while i + 1 < segment.len() {
-        let word = u16::from_be_bytes([segment[i], segment[i + 1]]);
-        sum = sum.wrapping_add(u32::from(word));
-        i += 2;
-    }
-    if i < segment.len() {
-        sum = sum.wrapping_add(u32::from(segment[i]) << 8);
-    }
-
-    // Fold.
-    while sum > 0xFFFF {
-        sum = (sum & 0xFFFF).wrapping_add(sum >> 16);
-    }
-
-    !sum as u16
+    // The length truncates to 16 bits by definition: the IPv4 pseudo-header's
+    // length field *is* 16 bits (IPv6's is 32), and a segment cannot exceed a
+    // 64 KiB datagram anyway.
+    #[allow(clippy::cast_possible_truncation)]
+    let seg_len = segment.len() as u16;
+    checksum::finish(checksum::sum_bytes(
+        checksum::pseudo_v4(src_ip, dst_ip, PROTO_TCP, seg_len),
+        segment,
+    ))
 }
 
 /// Compute TCP checksum including the IPv6 pseudo-header (RFC 8200 §8.1).
@@ -884,44 +849,15 @@ pub(crate) fn tcp_checksum(segment: &[u8], src_ip: Ipv4Addr, dst_ip: Ipv4Addr) -
 /// `pub(crate)` for the same reason as [`tcp_checksum`]: `crate::bench` timed a
 /// copy of this, which summed src and dst in one interleaved 8-iteration loop
 /// where this walks each address in its own. See design-decisions.md §251.
-#[allow(clippy::arithmetic_side_effects)]
+#[must_use]
 pub(crate) fn tcp_checksum_v6(segment: &[u8], src_ip: &Ipv6Addr, dst_ip: &Ipv6Addr) -> u16 {
-    let mut sum: u32 = 0;
-
-    // Pseudo-header: source address (16 bytes).
-    for i in 0..8 {
-        let word = u16::from_be_bytes([src_ip.0[i * 2], src_ip.0[i * 2 + 1]]);
-        sum = sum.wrapping_add(u32::from(word));
-    }
-    // Pseudo-header: destination address (16 bytes).
-    for i in 0..8 {
-        let word = u16::from_be_bytes([dst_ip.0[i * 2], dst_ip.0[i * 2 + 1]]);
-        sum = sum.wrapping_add(u32::from(word));
-    }
-    // Pseudo-header: upper-layer packet length (32 bits).
+    // 32-bit upper-layer length per RFC 8200 §8.1; a segment cannot reach 4 GiB.
+    #[allow(clippy::cast_possible_truncation)]
     let seg_len = segment.len() as u32;
-    sum = sum.wrapping_add(seg_len >> 16);
-    sum = sum.wrapping_add(seg_len & 0xFFFF);
-    // Pseudo-header: zero (3 bytes) + next header = 6 (TCP).
-    sum = sum.wrapping_add(6);
-
-    // TCP segment.
-    let mut i = 0;
-    while i + 1 < segment.len() {
-        let word = u16::from_be_bytes([segment[i], segment[i + 1]]);
-        sum = sum.wrapping_add(u32::from(word));
-        i += 2;
-    }
-    if i < segment.len() {
-        sum = sum.wrapping_add(u32::from(segment[i]) << 8);
-    }
-
-    // Fold.
-    while sum > 0xFFFF {
-        sum = (sum & 0xFFFF).wrapping_add(sum >> 16);
-    }
-
-    !sum as u16
+    checksum::finish(checksum::sum_bytes(
+        checksum::pseudo_v6(src_ip, dst_ip, PROTO_TCP, seg_len),
+        segment,
+    ))
 }
 
 /// Compute TCP checksum with the appropriate pseudo-header for the
@@ -5767,16 +5703,18 @@ fn test_v4_pseudo_header_unchanged() -> KernelResult<()> {
         sum
     }
 
-    /// The rewritten computation, in the same order.
-    fn pseudo_sum_unrolled(len: usize, src_ip: Ipv4Addr, dst_ip: Ipv4Addr) -> u32 {
-        let mut sum: u32 = 0;
-        sum = sum.wrapping_add(u32::from(u16::from_be_bytes([src_ip.0[0], src_ip.0[1]])));
-        sum = sum.wrapping_add(u32::from(u16::from_be_bytes([src_ip.0[2], src_ip.0[3]])));
-        sum = sum.wrapping_add(u32::from(u16::from_be_bytes([dst_ip.0[0], dst_ip.0[1]])));
-        sum = sum.wrapping_add(u32::from(u16::from_be_bytes([dst_ip.0[2], dst_ip.0[3]])));
-        sum = sum.wrapping_add(u32::from(PROTO_TCP));
-        sum = sum.wrapping_add(len as u32 & 0xFFFF);
-        sum
+    /// The current computation — the *real* one, not a copy of it.
+    ///
+    /// This calls [`checksum::pseudo_v4`] rather than restating its six adds.
+    /// A restatement would drift silently the moment the real code changed,
+    /// leaving a test that proves two dead copies agree with each other; that
+    /// is the same mistake as §251's, just small enough to feel harmless.
+    fn pseudo_sum_current(len: usize, src_ip: Ipv4Addr, dst_ip: Ipv4Addr) -> u32 {
+        // `as u16` truncates exactly as the array form's `(len >> 8) as u8` /
+        // `len as u8` pair did.
+        #[allow(clippy::cast_possible_truncation)]
+        let seg_len = len as u16;
+        checksum::pseudo_v4(src_ip, dst_ip, PROTO_TCP, seg_len)
     }
 
     // Addresses chosen so every byte lane is distinct: a lane swapped with its
@@ -5803,7 +5741,7 @@ fn test_v4_pseudo_header_unchanged() -> KernelResult<()> {
     for (src, dst) in cases {
         for len in lengths {
             let old = pseudo_sum_via_array(len, src, dst);
-            let new = pseudo_sum_unrolled(len, src, dst);
+            let new = pseudo_sum_current(len, src, dst);
             if old != new {
                 crate::serial_println!(
                     "[tcp]   FAIL: v4 pseudo-header sum changed for len={len}: {old} != {new}"

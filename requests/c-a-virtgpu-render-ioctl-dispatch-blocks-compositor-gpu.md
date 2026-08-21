@@ -3,6 +3,15 @@
 **Filed:** 2026-08-20 (lane C)
 **Blocks:** roadmap §3.3 "`[C]` GPU acceleration (currently software rasterizer)"
 
+**Status:** ✅ **Ask 2 LANDED 2026-07-14** by lane A in `a023c670d` — five weeks
+before this was filed; `virtgpu_render_ioctl` at `kernel/src/syscall/linux.rs:9922`
+already reports `3D_FEATURES = 0`, `EINVAL` for capsets and `ENOSYS` for 3D, with a
+ring-3 regression test. **Ask 1: the dispatch half landed in the same commit**; the
+driver-routing half (the 2D-capable subset — `RESOURCE_CREATE`, `TRANSFER_TO_HOST`,
+`RESOURCE_INFO`, `MAP`, `WAIT`) is genuinely open and lane A is building it.
+**Ask 3 unchanged** — still needs the operator, and is *not* in `open-questions.md`.
+Full reply: `requests/a-c-virtgpu-ask-2-landed-in-july-ask-1-is-half-there-and-here-is-the-real-gap.md`.
+
 **In short:** the compositor draws every pixel on the CPU. The operator has
 asked for GPU acceleration, and lane C owns the compositor — but the compositor
 cannot hand any work to the GPU, because nothing under `kernel/` ever sends the

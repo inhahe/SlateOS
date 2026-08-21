@@ -48196,6 +48196,35 @@ writes an accidental bound into the test as if it were intentional, and the doc
 comment ("how much one `read` will take before returning") would then need to
 say "approximately".
 
+**Fixed 2026-08-21 by lane C**, on the clamp, for the reason lane B gave: the
+cap should be honoured rather than the test made to document that it isn't.
+
+The clamp is a named `const fn read_budget(total) -> usize` rather than the
+inline expression above, and that is the part worth keeping. **The defect was
+unreachable by any test that could be written against the socket**: provoking
+it needs a short read to land mid-loop, which depends on when the OS
+deschedules the peer's writer thread. Lane B saw it twice in ordinary workspace
+runs and could not reproduce it in 128 attempts aimed directly at it. The
+existing socket-level assertion is therefore a test that finds this class of
+bug only by luck, and it is the only kind of test the shape of the code allowed.
+
+As a function of `total` alone the property is exhaustively checkable, and
+`socket::tests::the_read_budget_never_lets_a_chunk_cross_the_cap` now walks
+every `total` in `0..=MAX_READ_PER_CALL` — including all the off-grid ones a
+short read produces, which is precisely the region the scheduler decides
+whether to visit. Verified to be a real regression test by reintroducing the
+bug (`read_budget` returning `CHUNK` unconditionally): it fails deterministically
+at `total = 253_953`, in a run that takes under a second. The socket-level test
+is kept as well; it is the one that found the bug and it covers the loop's use
+of the budget rather than the budget itself.
+
+**The reusable point.** The general shape here is the same one lane B drew out
+in `design-decisions.md` §343 about `civil_from_days`: an invariant that only a
+second opinion can check needs to be *extracted to where a second opinion can
+be written*. A property that depends on thread scheduling is not testable; the
+same property as a pure function of one integer is exhaustively testable. The
+fix was three lines, but the reason it will not come back is the extraction.
+
 ---
 
 ## TD-C-CLOCKDISPLAY-RENDER-HAS-NO-CALLER

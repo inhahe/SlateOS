@@ -933,33 +933,19 @@ const fn sample_ts(days: u64, secs: u64) -> u64 {
         .saturating_add(secs)
 }
 
-/// Convert days since the Unix epoch to (year, month, day).
-///
-/// Was a local transcription of Howard Hinnant's `civil_from_days`, carrying a
-/// twenty-line `#[expect(arithmetic_side_effects)]` arguing that every operand
-/// was bounded by the shape of the algorithm. The argument was correct; it was
-/// also the second place in this tree making it, and `guitk::date` reaches the
-/// same algorithm through `tzrules`.
-///
-/// It replaced a `loop` that subtracted one year's worth of days at a time
-/// starting from 1970, where the iteration count came out of a feed's
-/// `<pubDate>` — see [`days_from_civil`] for the measurement.
-///
-/// A feed still chooses its own timestamp, so `days` is bounded by nothing
-/// this program controls. Saturating at `i32::MAX` days lands in the year
-/// 5 881 580 rather than wrapping into the past, which is the failure a reader
-/// would actually notice: an article dated before the epoch sorts to the top
-/// of a list ordered by date.
-fn days_to_ymd(days: u64) -> (u64, u64, u64) {
-    let date = date::Date::from_days_since_epoch(i32::try_from(days).unwrap_or(i32::MAX));
-    let (year, month, day) = date.ymd();
-    // The year cannot be negative: `days` is unsigned and the epoch is 1970.
-    (
-        u64::try_from(year).unwrap_or(0),
-        u64::from(month),
-        u64::from(day),
-    )
-}
+// `days_to_ymd` lived here — days since the epoch to a `(year, month, day)`
+// triple, one of four transcriptions of the same algorithm across `apps/`. Its
+// only production caller was `format_timestamp`, which now renders through
+// `guitk::datetime`; the only use left is this file's own round-trip property,
+// which reads `guitk::date` directly instead. The property therefore now says
+// "`days_from_civil` inverts the calendar the tree uses" rather than the
+// weaker "it inverts our copy of it".
+//
+// Nothing warned when it went orphaned: this file carries a file-level
+// `#![allow(dead_code)]`, so an unreferenced function here is silent. The
+// sibling app that had *not* switched that warning off reported its own
+// orphaned copy the moment its last caller left. See known-issues
+// `TD-C-DEAD-CODE-IS-ALLOWED-WHOLESALE`.
 
 /// Days from 0000-03-01 (the epoch of the shifted civil calendar) to
 /// 1970-01-01.
@@ -4484,11 +4470,31 @@ mod tests {
         );
     }
 
-    /// `days_from_civil` and `days_to_ymd` are inverses, and this is the
-    /// property that says so — the two closed forms replaced two loops that
-    /// were each other's inverse by construction, so nothing weaker than a
-    /// round trip over the whole accepted range would catch a transcription
-    /// slip in one of them.
+    /// The shared calendar's answer for `days` since the epoch, in the `u64`
+    /// triple this file's parser speaks.
+    ///
+    /// This used to be a production `days_to_ymd` — a local transcription of
+    /// Howard Hinnant's `civil_from_days`. Its display caller moved to
+    /// `guitk::datetime`, leaving only the round-trip property below, so it
+    /// reads `guitk::date` and lives in the test module: the property is
+    /// stronger for it, because it now checks `days_from_civil` against the
+    /// calendar the rest of the tree renders through rather than against a
+    /// second copy of the same derivation.
+    fn shared_calendar_ymd(days: u64) -> (u64, u64, u64) {
+        let (year, month, day) =
+            date::Date::from_days_since_epoch(i32::try_from(days).unwrap_or(i32::MAX)).ymd();
+        // The year cannot be negative: `days` is unsigned and the epoch is 1970.
+        (
+            u64::try_from(year).unwrap_or(0),
+            u64::from(month),
+            u64::from(day),
+        )
+    }
+
+    /// `days_from_civil` and the shared calendar are inverses, and this is the
+    /// property that says so — the closed form replaced a loop that was its
+    /// inverse by construction, so nothing weaker than a round trip over the
+    /// whole accepted range would catch a transcription slip in it.
     #[test]
     fn the_two_calendar_directions_are_inverses_over_the_whole_year_range() {
         let mut checked = 0u32;
@@ -4500,7 +4506,7 @@ mod tests {
                     let days = days_from_civil(year, month, day)
                         .unwrap_or_else(|| panic!("{year:04}-{month:02}-{day:02} is a real date"));
                     assert_eq!(
-                        days_to_ymd(days),
+                        shared_calendar_ymd(days),
                         (year, month, day),
                         "round trip failed for {year:04}-{month:02}-{day:02}"
                     );
@@ -5020,45 +5026,44 @@ mod tests {
         }
     }
 
+    /// The epoch and a recent new year, asserted through the pane's own
+    /// formatter rather than through a calendar helper.
+    ///
+    /// These were two `days_to_ymd` tests. Restating them on
+    /// `format_timestamp` keeps the boundaries they pinned — the epoch, and a
+    /// year far enough out that a leap rule has had chances to drift — while
+    /// checking the thing a reader can actually see.
     #[test]
-    fn test_days_to_ymd_epoch() {
-        let (y, m, d) = days_to_ymd(0);
-        assert_eq!((y, m, d), (1970, 1, 1));
-    }
-
-    #[test]
-    fn test_days_to_ymd_known_date() {
-        // 2024-01-01 is day 19723 since epoch
+    fn the_epoch_and_a_recent_new_year_render_as_themselves() {
+        assert_eq!(format_timestamp(0), "1970-01-01 00:00");
         let ts = ymd_hms_to_epoch(2024, 1, 1, 0, 0, 0).expect("2024-01-01 is a date");
-        let days = ts / 86400;
-        let (y, m, d) = days_to_ymd(days);
-        assert_eq!((y, m, d), (2024, 1, 1));
+        assert_eq!(format_timestamp(ts), "2024-01-01 00:00");
     }
 
     #[test]
     fn a_timestamp_beyond_the_calendar_dates_in_the_future_not_the_past() {
-        // A feed chooses its own `<pubDate>`, so `days_to_ymd` is reachable
-        // with any `u64` at all -- including values past the `i32` the shared
-        // date module counts days in. Which way that conversion saturates is
-        // a decision the reader can see, not an implementation detail: the
-        // article list is ordered by date, so saturating *backwards* files
-        // the most absurd timestamp at the top where it displaces real news,
-        // while saturating forwards files it at the bottom.
+        // A feed chooses its own `<pubDate>`, so `format_timestamp` is
+        // reachable with any `u64` at all -- including values past the `i64`
+        // of seconds, and the `i32` of days, that the shared datetime module
+        // counts in. Which way those conversions saturate is a decision the
+        // reader can see, not an implementation detail: the article list is
+        // ordered by date, so saturating *backwards* files the most absurd
+        // timestamp at the top where it displaces real news, while saturating
+        // forwards files it at the bottom.
         //
-        // Asserted because `days_to_ymd`'s doc comment promises exactly this
-        // and nothing exercised it: replacing `i32::MAX` with `i32::MIN`
-        // failed no test in the whole suite.
-        let (recent, _, _) = days_to_ymd(SAMPLE_BASE_TS / 86_400);
+        // Asserted because nothing else exercises it: replacing the `i64::MAX`
+        // in `format_timestamp` with `i64::MIN` fails no other test in the
+        // whole suite.
+        let recent = format_timestamp(SAMPLE_BASE_TS);
         for absurd in [u64::from(u32::MAX), u64::MAX / 86_400, u64::MAX] {
-            let (year, month, day) = days_to_ymd(absurd);
-            assert!(year > recent, "{absurd} days: year {year} is not after {recent}");
-            assert!((1..=12).contains(&month), "{absurd} days: month {month}");
-            assert!((1..=31).contains(&day), "{absurd} days: day {day}");
+            let far = format_timestamp(absurd);
+            assert!(far > recent, "{absurd}: {far} does not sort after {recent}");
         }
-        // And through the formatter, which is what actually reaches a pane.
-        let far = format_timestamp(u64::MAX);
-        assert!(far.starts_with("5881580-07-11"), "{far}");
-        assert!(far > format_timestamp(SAMPLE_BASE_TS), "{far}");
+        assert!(
+            format_timestamp(u64::MAX).starts_with("5881580-07-11"),
+            "{}",
+            format_timestamp(u64::MAX)
+        );
     }
 
     #[test]

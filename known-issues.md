@@ -47259,3 +47259,153 @@ more than one surface, not from functions that look alike* — and that is
 precisely what surfaced the undelete bug: it was found by asking "who else
 renders a file's mtime", not by noticing that its code looked odd. Its code did
 not look odd. It looked like the other four.
+
+---
+
+### TD-CRON-MATCHES-UTC-FIELDS. A task scheduled for 03:00 runs at 03:00 UTC, wherever the user is (lane C, 2026-08-21)
+
+**In short:** The task scheduler lets you say "run this every day at 3 a.m."
+It then runs it at 3 a.m. *UTC* — which in New York is 11 p.m. the previous
+evening, and in Berlin is 4 or 5 a.m. depending on the season. Nothing in the
+program tells the user this. It is not a rounding error; it is the schedule
+being off by whole hours, and by a different number of hours in summer than in
+winter.
+
+**Where:** `apps/taskscheduler/src/main.rs`, `decompose_timestamp` — it builds
+a `guitk::datetime::DateTime` with an explicit `Tz::utc()` and hands the
+resulting minute/hour/day/month/weekday to `CronExpr::matches`.
+
+**Why it is still UTC.** Two reasons, and only the first is about plumbing:
+
+1. There is no per-process zone to read
+   (`TD-NO-SYSTEM-DEFAULT-ZONE-WITHOUT-TZ`). Every lane-C program that renders
+   an instant is in the same position and says so with an explicit
+   `Tz::utc()`.
+2. Cron under a zone that observes DST has real semantics to settle, and they
+   are not obvious. A daily 02:30 task on the spring-forward day has no 02:30
+   to run at; on the fall-back day it has two. Every implementation picks a
+   rule and they do not agree — Vixie cron runs the skipped job once at the
+   moment the clock jumps and runs a repeated job only once; systemd timers
+   with `Persistent=` behave differently again. Picking one silently, in the
+   commit that merely stops the file having two calendars in it, would be
+   inventing user-visible policy in a cleanup.
+
+**The proper fix,** in order:
+
+1. `calculate_next_run` takes a `&Tz` (four production call sites, seven test
+   ones), and the scheduler holds the zone rather than assuming one.
+2. Settle the DST rule and write it down. Recommended default: match Vixie —
+   a wall-clock time skipped by a forward jump fires once at the jump, and a
+   wall-clock time repeated by a backward jump fires once. That is what a user
+   who has used cron before will expect. This is the part that wants an
+   operator decision, and it should be promoted to `open-questions.md` at the
+   point where step 1 is otherwise ready, not before.
+3. Interval schedules (`Hourly`, `EveryNMinutes`) must *not* be zone-adjusted:
+   "every 15 minutes" is a span, not a wall-clock time, and stays elapsed-time
+   arithmetic. Only the `Cron` and `Daily`/`Weekly`/`Monthly` arms are
+   wall-clock.
+
+**If never fixed:** schedules keep firing at the wrong hour for every user not
+in UTC, and shift by an hour twice a year for users who observe DST. It does
+not get worse with time, and it is not a data-loss risk — but it makes the
+`Daily` frequency effectively useless for its most common purpose (an
+overnight job).
+
+**Related:** `design-decisions.md` §491 (the zone is an argument that is never
+defaulted), `TD-NO-SYSTEM-DEFAULT-ZONE-WITHOUT-TZ`.
+
+---
+
+### TD-C-DEAD-CODE-IS-ALLOWED-WHOLESALE. 120 lane-C files switch off the warning that finds orphaned code, and one of them was hiding a dead calendar (lane C, 2026-08-21)
+
+**In short:** Rust warns you when a function exists that nothing calls. 120
+files in lane C's tree begin with a line that turns that warning off for the
+whole file. So when the round-4 migration made several private helpers
+unreachable, the compiler said nothing about most of them. The one crate that
+*had not* switched the warning off reported its orphan immediately, which is
+how the pattern was noticed at all.
+
+**Where:** `#![allow(dead_code)]` at the top of 120 files under `apps/`,
+`gui/`, `net*/` and `pkg/` (148 files carry an `allow(dead_code)` in some
+form). Enumerate with:
+
+```
+grep -rn '^#!\[allow(dead_code' apps/ gui/ net/ pkg/ --include=*.rs
+```
+
+**How it bit.** Round 4 moved nine programs' timestamp rendering onto
+`guitk::datetime`. That orphaned three private calendars:
+
+| Crate | Orphaned | Did the compiler say so? |
+|---|---|---|
+| `apps/archivemanager` | `days_to_ymd` | **Yes** — no file-level allow. Deleted the same minute. |
+| `apps/rssreader` | `days_to_ymd` | No — `#![allow(dead_code)]` at line 24. Found by hand. |
+| `apps/taskscheduler` | `days_to_ymd` | No — its last caller was inside the same file, so it was still live until `decompose_timestamp` was rewritten. |
+
+A dead private calendar is not merely clutter. It is a second answer sitting
+in the file, correct-looking and untested against anything, waiting to be
+picked up by the next person who needs a date here — which is the exact
+failure round 4 exists to undo.
+
+**Why the allows are there.** Almost all of them are original-authorship
+convenience: an app was written with a full set of helpers before the UI that
+calls them existed, and the allow silenced the noise. That reason expires once
+the app is written; the line does not.
+
+**The proper fix:** delete the file-level allow from each crate and either use
+or delete what falls out. This is per-crate work with no shared blast radius —
+each file can be done independently and gated on that crate's own tests — so
+it is a good background task rather than one large change. Where a helper is
+genuinely a deliberate public-shaped API that nothing yet calls, narrow the
+allow to that item with a comment naming the caller it is waiting for, rather
+than leaving it file-wide.
+
+**If never fixed:** the tree keeps accumulating unreferenced code that no
+tooling reports, and every future consolidation like round 4 has to find its
+own orphans by hand.
+
+---
+
+### TD-C-ROUND-4-CRATES-CARRY-316-PRE-EXISTING-CLIPPY-WARNINGS (lane C, 2026-08-21)
+
+**In short:** `CLAUDE.md` says a crate must be clippy-clean. Six of the
+applications touched in round 4 are not, and were not before round 4 either —
+between them they emit 316 warnings, none of which the migration introduced.
+Recording the count so that the next person to open one of these files knows
+the mess predates them and roughly how big it is.
+
+**Where and how many** (`cargo clippy --target x86_64-pc-windows-gnu`, all
+targets, 2026-08-21):
+
+| Crate | Warnings |
+|---|---|
+| `apps/systemrestore` | 129 |
+| `apps/archivemanager` | 77 |
+| `apps/taskscheduler` | 56 |
+| `apps/explorer` | 34 |
+| `apps/rssreader` | 11 |
+| `apps/screenrecorder` | 9 |
+
+Overwhelmingly `clippy::arithmetic_side_effects` and
+`clippy::indexing_slicing` — the two defensive lints `CLAUDE.md` asks for by
+name. Both are the same shape of finding: a subtraction or an index that is
+fine for the values the program actually produces, and that nothing stops from
+receiving a value it is not fine for.
+
+**Verified not introduced by round 4:** the warning sites in the two files the
+migration edited most (`apps/explorer/src/columns.rs` at 462, 463, 1201, 1423,
+1455, 1475; `apps/screenrecorder/src/main.rs` at 161, 167, 172, 3780, 3814,
+4070, 4121, 4122, 4139) are all far from the edit sites (columns.rs ~1506,
+screenrecorder ~709–790), and the migrated crates build and test with zero
+warnings.
+
+**The proper fix:** one crate at a time, replacing bare arithmetic with
+`checked_*`/`saturating_*` and bare indexing with `.get()`, and suppressing
+individually only where the invariant is real and can be written down. Not
+folded into round 4 because it is a different kind of work — round 4 removes
+duplicate answers, this removes unproven assumptions — and mixing them would
+make both diffs unreviewable.
+
+**If never fixed:** the lints stay noisy enough that a genuinely new warning
+in one of these crates is invisible, which is the failure mode that matters
+more than any individual warning.

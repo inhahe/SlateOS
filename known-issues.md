@@ -13648,6 +13648,33 @@ disabled. Same tactic as the bytes-at-RIP dump added for
 `B-PTHREAD-TEARDOWN-PF`: when a bug is rare and unreproducible, the
 actionable work is to guarantee the *next* occurrence is self-explaining.
 
+**[A] 2026-08-20 — the audit this entry asks for was done, and found a real
+instance in a place this entry does not cover.** The "proper fix if it recurs"
+above says to hunt for kernel paths that write through a user pointer without
+pre-validating. That hunt does not need a repro, so it was run. It found one —
+but not a ring-0 fault path, because the path in question can never fault at
+all: `mm::user::copy_to_user_as` / `copy_from_user_as` walk *another* process's
+page tables through the HHDM, so no access they perform faults against the
+address space they are reading. They were returning a hard `EFAULT` for both an
+untouched-but-committed page and a present CoW page — and immediately after
+`fork` an address space is entirely CoW, so `process_vm_writev` into a
+just-forked target failed on every page. Fixed by resolving explicitly (see
+design-decisions §249), with a self-test covering demand paging, CoW breaks, and
+read-only mappings in both their absent and present forms.
+
+Two consequences for *this* entry. First, its scope is narrower than its title
+suggests: the entry is about the **same-address-space, ring-0 fault** case, and
+the cross-address-space case was never in view because there is no fault there
+to route. Second, it does **not** make this entry reproducible — the fixed path
+is one that could not have raised the `error=0x3` signature described above, so
+the WATCH stands unchanged and the diagnostic added on 2026-08-14 is still the
+mechanism that will identify a genuine recurrence.
+
+Still unaudited, and the natural continuation: every *other* kernel path that
+writes through a user pointer in the current address space without calling
+`validate_user_write` first. `copy_to_user` itself pre-validates, so the
+candidates are paths that bypass it and touch a user address directly.
+
 ### B-ABI1. A *bare* static Linux ELF (no OSABI/PT_INTERP/PT_GNU_PROPERTY) is misclassified as Native-ABI on `exec` — KNOWN LIMITATION (escalated as open-questions.md Q9)
 
 **Symptom:** A Linux binary with none of the markers `elf::detect_linux_abi`

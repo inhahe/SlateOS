@@ -15,6 +15,8 @@
 
 #![cfg_attr(not(unix), allow(dead_code))]
 
+use coreutils::human::{human_readable, Opts};
+
 #[derive(Default)]
 #[cfg_attr(test, derive(Debug, PartialEq, Eq))]
 struct DuFlags {
@@ -46,17 +48,26 @@ fn parse_args(args: &[String]) -> Result<(DuFlags, Vec<String>), String> {
     Ok((flags, paths))
 }
 
-/// Format an IEC byte count like `1.5K`, `2.0M`, `3.0G`, or `512B`.
+/// Format a byte count the way `du -h` does: `1.1K`, `16M`, `4.6T`, or a bare
+/// `5` below a kibibyte.
+///
+/// This is [`human_readable`] with the exact option set GNU's `du` passes —
+/// autoscale, ceiling, IEC suffixes, no `B` — and it replaces a hand-rolled
+/// chain of `{:.1}` formats that disagreed with GNU in four independent ways
+/// at once:
+///
+/// | bytes | GNU `du -h` | the old chain |
+/// |---|---|---|
+/// | 5 | `5` | `5B` — `du` never suffixes a bare byte count |
+/// | 1025 | `1.1K` | `1.0K` — `{:.1}` rounds to nearest; `du` rounds **up** |
+/// | 16777216 | `16M` | `16.0M` — the decimal drops at ten |
+/// | 5×10¹² | `4.6T` | `4768.4G` — the chain stopped at `G` |
+///
+/// The last one is the reason this matters beyond cosmetics: on a machine with
+/// terabyte disks the old code printed a four-digit gigabyte figure that no
+/// other `du` on earth produces.
 fn human_size(bytes: u64) -> String {
-    if bytes >= 1_073_741_824 {
-        format!("{:.1}G", bytes as f64 / 1_073_741_824.0)
-    } else if bytes >= 1_048_576 {
-        format!("{:.1}M", bytes as f64 / 1_048_576.0)
-    } else if bytes >= 1024 {
-        format!("{:.1}K", bytes as f64 / 1024.0)
-    } else {
-        format!("{bytes}B")
-    }
+    human_readable(bytes, Opts::AUTOSCALE | Opts::CEILING | Opts::SI | Opts::BASE_1024, 1, 1)
 }
 
 /// Format a single output line: size, tab, path. In non-human mode, sizes
@@ -263,10 +274,17 @@ mod tests {
         assert_eq!(p, vec!["-"]);
     }
 
+    // Every expectation below was measured from GNU `du -a -h --apparent-size`
+    // on a file of exactly that length, not derived from reading the rules.
+    // The previous versions of these tests asserted `0B` and `1023B`, which no
+    // `du` has ever printed -- they were written to match the implementation
+    // rather than the utility, and so locked the bug in rather than catching
+    // it. See design-decisions.md §338.
+
     #[test]
-    fn human_size_bytes() {
-        assert_eq!(human_size(0), "0B");
-        assert_eq!(human_size(1023), "1023B");
+    fn a_bare_byte_count_carries_no_suffix() {
+        assert_eq!(human_size(0), "0");
+        assert_eq!(human_size(1023), "1023");
     }
 
     #[test]
@@ -275,14 +293,33 @@ mod tests {
         assert_eq!(human_size(1536), "1.5K");
     }
 
+    /// `du` rounds **up**, so that a file never reads as smaller than it is.
+    /// A `{:.1}` format string rounds to nearest and gets this wrong.
+    #[test]
+    fn an_inexact_size_rounds_up() {
+        assert_eq!(human_size(1025), "1.1K");
+    }
+
     #[test]
     fn human_size_mib() {
         assert_eq!(human_size(1024 * 1024), "1.0M");
     }
 
+    /// The decimal disappears at ten, not at a byte-count threshold.
+    #[test]
+    fn ten_and_over_loses_the_decimal() {
+        assert_eq!(human_size(16 * 1024 * 1024), "16M");
+    }
+
     #[test]
     fn human_size_gib() {
         assert_eq!(human_size(1024 * 1024 * 1024), "1.0G");
+    }
+
+    /// The old chain stopped at `G` and printed `4768.4G` here.
+    #[test]
+    fn terabytes_get_their_own_letter() {
+        assert_eq!(human_size(5_000_000_000_000), "4.6T");
     }
 
     #[test]
@@ -303,6 +340,8 @@ mod tests {
 
     #[test]
     fn format_line_under_kib_human() {
-        assert_eq!(format_line(512, "x", true), "512B\tx");
+        // `512`, not `512B`: measured against GNU `du -h`, which suffixes only
+        // a scaled value. This assertion previously said `512B`.
+        assert_eq!(format_line(512, "x", true), "512\tx");
     }
 }

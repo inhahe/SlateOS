@@ -40,8 +40,35 @@ $sysroot = Join-Path $PSScriptRoot "sysroot\lib"
 #                           baseline), which all read %xmm0 — so every one of
 #                           those calls silently returned garbage.  See
 #                           BUG-SYSROOT-SOFT-FLOAT-ABI in known-issues.md.
+#   codegen-units=4096      THE OTHER IMPORTANT ONE, and it is about the
+#                           *archive*, not the code.  A libc archive is not
+#                           just a bag of functions: the linker extracts a
+#                           member only if that member defines a symbol still
+#                           undefined, so an archive's object granularity is
+#                           the granularity at which a program can *decline*
+#                           our definition and use its own.  glibc gets one
+#                           object per `.c` file for free; rustc's default
+#                           `codegen-units = 16` instead packed this whole
+#                           crate into 16 objects with unrelated modules
+#                           merged, so `getopt` shared a member with
+#                           `sem_wait`, `glob` with `printf`, `fnmatch` with
+#                           `fopen`, and `error` with `getenv`.  Every one of
+#                           those four names is one that gnulib supplies a
+#                           replacement for, i.e. one that every GNU package
+#                           defines itself — and every one of them rode along
+#                           with a symbol no C program can avoid, so the
+#                           member was always extracted and the duplicate was
+#                           unavoidable.  GNU make 4.4.1 failed to link with
+#                           11 duplicate symbols and 0 undefined ones for
+#                           exactly this reason; at 4096 the partitioner stops
+#                           merging and emits ~one object per module (fnmatch
+#                           alone, glob+globfree, the getopt family, the error
+#                           family), and the duplicate count went to 0.
+#                           See design-decisions.md §339 and
+#                           scripts/make-spike/README.md.
 $sysrootFlags = "-C code-model=large " +
                 "-C relocation-model=static " +
+                "-C codegen-units=4096 " +
                 "-C target-feature=+sse,+sse2,-soft-float"
 
 Write-Host "=== Building POSIX library ($sysrootFlags) ===" -ForegroundColor Cyan

@@ -108,6 +108,28 @@ SLATE_PKGCONF_VERSION="2.3.0"
 SLATE_PKGCONF_SHA256="3a9080ac51d03615e7c1910a0a2a8df08424892b5f13b0628a204d3fcce0ea8b"
 SLATE_PKGCONF_TARBALL="$SLATE_ZIG_CACHE/pkgconf-$SLATE_PKGCONF_VERSION.tar.xz"
 
+# Upstream GNU make, the fourth port's source. Pinned and cross-checked on the
+# same rule as the three above: the distfiles server is not allowed to vouch for
+# its own bytes, so the hash comes from two packagers who have no relationship
+# to it or to each other.
+#
+#   OpenEmbedded-core  meta/recipes-devtools/make/make_4.4.1.bb
+#                      SRC_URI[sha256sum] = the hex below.
+#   Alpine aports      main/make/APKBUILD, which pins sha512 rather than
+#                      sha256 — a *different function* over the same artifact,
+#                      which is a stronger corroboration than a second copy of
+#                      the same digest would be. Its
+#                      145260cb…e2b433c matches the tarball this pin accepts.
+#
+# Note what is deliberately NOT used here. Buildroot, Void and Homebrew all
+# agree on 8814ba07…0d90b — but that is the `.tar.lz`, a different archive of
+# the same source, and lzip is not installed on this machine or in the WSL image
+# the spikes run in. Three packagers agreeing about an artifact we cannot open
+# is not an attestation of the one we do open; the two above are.
+SLATE_MAKE_VERSION="4.4.1"
+SLATE_MAKE_SHA256="dd16fb1d67bfab79a72f5e8390735c49e3e8e70b4945a15ab1f81ddb78658fb3"
+SLATE_MAKE_TARBALL="$SLATE_ZIG_CACHE/make-$SLATE_MAKE_VERSION.tar.gz"
+
 # Scratch, keyed by worktree. The hard-coded paths were only half the problem:
 # these scripts also wrote fixed names like /tmp/libc_syms.txt and
 # /tmp/bash_needs.txt, and they hand results to each other through those files
@@ -305,6 +327,50 @@ slate_ensure_pkgconf_src() {
     fi
 
     SLATE_PKGCONF_TARBALL="$tarball"
+}
+
+# Resolve $SLATE_MAKE_TARBALL, downloading the pinned GNU make source if this
+# machine has not got it yet. Same shape and same rules as the two above.
+#
+# Named `slate_ensure_make_src`, not `slate_ensure_make` — the latter reads as
+# "ensure make(1) is installed", which is a different and much more plausible
+# thing for a caller to want.
+slate_ensure_make_src() {
+    local name="make-$SLATE_MAKE_VERSION.tar.gz"
+    local cand got
+    for cand in "/tmp/make-spike-$SLATE_LANE/$name" "$SLATE_SPIKE/$name"; do
+        [ -f "$cand" ] || continue
+        got="$(sha256sum "$cand" | cut -d' ' -f1)"
+        if [ "$got" = "$SLATE_MAKE_SHA256" ]; then
+            SLATE_MAKE_TARBALL="$cand"
+            return 0
+        fi
+        echo "worktree.sh: ignoring $cand — sha256 $got, pin is $SLATE_MAKE_SHA256" >&2
+    done
+
+    local tarball="$SLATE_ZIG_CACHE/$name"
+    local url="https://ftp.gnu.org/gnu/make/$name"
+    mkdir -p "$SLATE_ZIG_CACHE" || return 1
+    if [ ! -f "$tarball" ]; then
+        echo "worktree.sh: make $SLATE_MAKE_VERSION source not found; fetching to $SLATE_ZIG_CACHE" >&2
+        curl -sSL --fail --max-time 900 -o "$tarball.part" "$url" || {
+            echo "worktree.sh: download failed: $url" >&2
+            rm -f "$tarball.part"
+            return 1
+        }
+        mv "$tarball.part" "$tarball"
+    fi
+
+    got="$(sha256sum "$tarball" | cut -d' ' -f1)"
+    if [ "$got" != "$SLATE_MAKE_SHA256" ]; then
+        echo "worktree.sh: make tarball sha256 mismatch — refusing to extract." >&2
+        echo "             expected $SLATE_MAKE_SHA256" >&2
+        echo "             got      $got" >&2
+        echo "             ($tarball — delete it to retry the download)" >&2
+        return 1
+    fi
+
+    SLATE_MAKE_TARBALL="$tarball"
 }
 
 slate_make_zig_wrappers() {

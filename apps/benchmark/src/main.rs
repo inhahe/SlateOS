@@ -716,12 +716,13 @@ impl ProgressTracker {
         self.current_test_name.push_str(test_name);
     }
 
-    /// Format elapsed time as mm:ss.
+    /// Format elapsed time as `mm:ss`, widening to `hh:mm:ss` past an hour.
+    ///
+    /// A full suite run is not bounded by an hour — the storage and memory
+    /// phases alone are minutes each — so the hours field this used to lack
+    /// is reachable, and the display read `73:20` when it was reached.
     pub fn elapsed_display(&self) -> String {
-        let secs = self.elapsed_ms / 1000;
-        let mins = secs / 60;
-        let remainder = secs % 60;
-        format!("{:02}:{:02}", mins, remainder)
+        guitk::duration::clock(self.elapsed_ms / 1000)
     }
 }
 

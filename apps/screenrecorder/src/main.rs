@@ -678,14 +678,7 @@ pub fn format_file_size(bytes: u64) -> String {
 
 /// Format a duration in seconds as HH:MM:SS.
 pub fn format_duration(total_secs: u64) -> String {
-    let hours = total_secs / 3600;
-    let minutes = (total_secs % 3600) / 60;
-    let secs = total_secs % 60;
-    if hours > 0 {
-        format!("{:02}:{:02}:{:02}", hours, minutes, secs)
-    } else {
-        format!("{:02}:{:02}", minutes, secs)
-    }
+    guitk::duration::clock(total_secs)
 }
 
 // ============================================================================

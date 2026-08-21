@@ -26830,3 +26830,177 @@ rustflags, which this script deliberately replaces wholesale and does not
 touch. If that ceases to be true — if the script grows a step that builds
 something outside `posix`/`stubs` — the flag should move to a per-crate
 mechanism rather than the shared one.
+
+## §340 — `libc.a`'s shape is now asserted by a script, and seventeen functions were split into one-function modules to satisfy it
+
+**Date:** 2026-08-20
+**Decided by:** Claude (autonomous)
+
+**In short:** Fixing the GNU make link (§339) left a hole: we now *depend* on
+`libc.a` being carved up a particular way, and nothing checked that it was.
+`scripts/check-libc-shape.py` now checks it. The first time it ran it found four
+more places with the same defect make had tripped on — different functions,
+same mechanism — so seventeen functions in `posix` were moved into
+one-function-each inline modules to give them their own object files. Nothing
+about what those functions *do* changed; only which object file they land in.
+
+### Terms used below
+
+- **archive** — `libc.a`: a bag of object files with an index. Linking pulls
+  out only the ones it needs.
+- **object file / member** — one item in that bag. The linker takes a member
+  **whole or not at all**; it cannot take half.
+- **codegen unit (CGU)** — the chunk rustc compiles at a time. One CGU becomes
+  one object file, so CGU boundaries *are* member boundaries.
+- **gnulib** — a library of portability replacements GNU projects copy into
+  their own source. If gnulib supplies `getopt`, the program defines `getopt`
+  itself, and a second definition from libc is a link error.
+
+### What §339 actually fixed, and what it did not
+
+§339 raised `codegen-units` to 4096 so rustc stopped merging unrelated modules.
+That was correct and it fixed make. But the finest granularity that flag can
+buy is **one member per module**, because the partitioner starts from modules
+and only ever merges downward. It cannot split one.
+
+For the four families make collided with — `getopt`, `glob`, `fnmatch`,
+`error` — that was enough, because each already *was* its own module. It was
+easy to conclude the problem was solved. It was not: it was solved for the
+four cases that happened to be shaped conveniently.
+
+`string.rs` is 4,300 lines and holds `memcpy` and `strlen` next to `strndup`,
+`strverscmp`, `stpcpy`, `stpncpy`, `mempcpy`, `strchrnul`, `memrchr`,
+`rawmemchr`, `strcasestr` and `strnlen` — ten names gnulib replaces. One
+module, therefore one member, therefore: any program at all extracts that
+member for `memcpy`, and receives ten definitions it may already have. Same
+story for `getline`/`getdelim`/`fseeko`/`ftello` riding with `fopen` in
+`stdio.rs`, `asprintf`/`vasprintf` riding with `printf` in `printf.rs`, and
+`canonicalize_file_name` riding with `abort` in `unistd.rs`.
+
+Make did not hit these only because its `./configure` did not compile in those
+particular gnulib replacements. coreutils and tar would have.
+
+### Decision 1 — assert the shape, in a script, on the artifact
+
+`scripts/check-libc-shape.py` reads the built archive and makes two assertions:
+
+1. **Strict**, for `getopt`/`glob`/`fnmatch`/`error`: the member defining the
+   family defines *nothing else*. This is glibc's property exactly, and it is
+   the strongest available statement — a program bringing its own copy declines
+   the member and loses nothing.
+2. **Broad**, generalising: no member may define both a name third-party code
+   commonly replaces and a name no C program can avoid (`printf`, `malloc`,
+   `fopen`, `getenv`, `memcpy`, …). That combination is precisely the failure
+   shape, and it needs no per-family curation, so it keeps working as the libc
+   grows.
+
+Three things about how it is built, each of which was a choice:
+
+- **It parses the archive itself rather than shelling out to `nm`.** The
+  sysroot is produced on Windows by `build-sysroot.ps1`, where `nm` is not on
+  PATH — it exists only inside WSL here. A check that cannot run where the
+  artifact is produced is not a check. GNU `ar`'s symbol index already stores
+  the symbol→member map that `nm --defined-only -g` would print, so reading it
+  directly is both simpler and dependency-free.
+- **A missing archive exits 2, not 0.** A fresh checkout with no sysroot is a
+  legitimate state, but it is not a *passing* one, and a caller that treats
+  "could not look" as "looked and it was fine" is exactly how a gate ends up
+  permanently green. This is the same failure the make spike's `config.h` grep
+  had, one day earlier, and it was avoided here only because that one had just
+  been fixed.
+- **It ignores Rust-mangled and `.llvm.`-suffixed symbols.** Its first run
+  flagged `fnmatch` for sharing a member with
+  `_ZN5posix7fnmatch8do_match…llvm.…` — which is `fnmatch`'s own helper, hoisted
+  to an external symbol by LLVM. No C program can define that name, so it is
+  not a hazard. Left unfiltered, the check would have cried wolf about the one
+  family it exists to protect.
+
+### Decision 2 — one inline module per replaceable function
+
+rustc partitions by **module path**, and an *inline* `mod { }` is a distinct
+module path. Verified empirically before relying on it: a three-function
+staticlib built at `codegen-units=4096` with three inline modules produced three
+separate members. So
+
+```rust
+mod gnu_strndup { use super::*; /* … */ }
+pub use gnu_strndup::strndup;
+```
+
+gives `strndup` its own object file while leaving it physically where it was,
+next to its relatives, and leaves every in-crate call site (`string::strndup`)
+working unchanged.
+
+**Alternatives rejected:**
+
+- *One `.rs` file per function, as glibc does.* Same result, far more churn, and
+  it scatters ten string functions across ten files away from the code they
+  belong with. The inline module buys the identical archive layout with the
+  diff confined to indentation.
+- *One `gnulib_compat` module holding all seventeen.* Tempting, and it would
+  satisfy the broad check — that member would define no unavoidable name. But
+  it is wrong: gnulib compiles in only the replacements `./configure` decided
+  were needed, so a program may replace `strndup` and not `getline`. One lump
+  member is declined only by a program that replaces *everything* in it;
+  anyone else takes all seventeen and collides. Independently replaceable
+  functions need independently declinable members.
+- *Wait for the next port to fail.* This is what §339 was, and it cost a
+  full day of a spike to diagnose from an eleven-line duplicate-symbol dump.
+  The check that would have found it takes under a second.
+
+### What this costs
+
+Seventeen more archive members (576 → 593, measured) and a convention (`gnu_*`)
+that a reader has to be told about — hence the long module header in
+`string.rs` explaining the mechanism once, and a one-line pointer at each of
+the other sites.
+
+There is a real risk the convention rots: someone adds an eighteenth
+gnulib-replaceable function to `string.rs` without wrapping it. That is exactly
+why the check exists rather than a comment asking people to be careful, and why
+its failure message names the flag and the design-decision section rather than
+just printing the offending symbols.
+
+### Decision 3 — the check runs from `build-sysroot.ps1`, and it is fatal
+
+Written after the above, and the most important of the three: a check that
+lives in `scripts/` for someone to remember is not a check either. This project
+has now twice shipped something described as proven whose only artifact sat in
+`/tmp`, and once written a `config.h` grep that could not fail. So
+`toolchain/build-sysroot.ps1` invokes `check-libc-shape.py` immediately after
+it assembles the archive, and `throw`s if it does not pass — the sysroot is
+still on disk at that point, but the build reports failure, because a sysroot
+with the wrong archive shape is precisely the thing that looks fine until a
+port fails weeks later.
+
+It is fatal rather than a warning for the same reason. A warning in a build
+that otherwise says `=== Sysroot ready ===` in green is a warning nobody reads.
+
+### Verified in the failing direction, not only the passing one
+
+A gate that has only ever been observed green is not known to be a gate. So
+after wiring it up, `posix` was deliberately rebuilt with the old
+`-C codegen-units=16` into a scratch target dir. The check reported **9
+violations** and reproduced the historical pre-§339 shape exactly: `getopt`
+sharing a member with 97 unrelated symbols, `fnmatch` with 157, `error` with
+82, `glob` with 47. It then passed again on the real archive. (Scratch target
+dir deleted immediately — see CLAUDE.md on build output.)
+
+### Two smaller things found while doing this
+
+- **`global_asm!` is attributed to the CGU of the module it is written in.**
+  `asprintf` is not an ordinary `fn`; it is emitted by the `va_trampoline!`
+  macro as raw assembly. Assembly has no module semantics of its own, so it was
+  not obvious that wrapping it in `mod gnu_asprintf { … }` would move it to its
+  own member — it could equally have been emitted crate-wide. It does land in
+  the module's CGU; confirmed against the built archive, and noted at the call
+  site so nobody has to re-derive it.
+- **The check's own diagnostics had to be made ASCII-only.** It prints from a
+  Windows console during the build, where the code page is often cp437, in
+  which `—`, `§` and `…` are all un-encodable. Python's default
+  `errors="strict"` would then raise `UnicodeEncodeError` *from inside the
+  print explaining what was wrong*, replacing the message that names the
+  dropped compiler flag with a traceback about character encoding. The strings
+  are now plain ASCII, and `sys.stdout`/`sys.stderr` are reconfigured to
+  `errors="backslashreplace"` so that the next person to type an em dash into
+  an error string gets a cosmetic `\u2014` rather than a lost diagnostic.

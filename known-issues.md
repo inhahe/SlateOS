@@ -46106,32 +46106,65 @@ any change to how the sysroot is built; the proper guard is a test that asserts
 than the getopt family, and that has not been written — see the tech-debt entry
 below.
 
-## TD-B-NOTHING-TESTS-THE-SHAPE-OF-LIBC-A (lane B, 2026-08-20)
+## FIXED-B-NOTHING-TESTS-THE-SHAPE-OF-LIBC-A (lane B, 2026-08-20)
 
-**What.** We now depend on `libc.a` having one-symbol-family-per-archive-member
-granularity (see the FIXED entry above), and nothing checks it. Every existing
+**Was.** We depended on `libc.a` having one-symbol-family-per-archive-member
+granularity (see the FIXED entry above), and nothing checked it. Every existing
 libc test links a fixture and calls a function; none of them would notice if the
 archive collapsed back to 16 objects, because a fixture that defines no `getopt`
 of its own links fine either way. The defect only shows up when a *third-party*
 program brings its own copy — i.e. at the moment we are trying to port
 something, which is the worst time to discover it.
 
-**Where.** `toolchain/build-sysroot.ps1` (`$sysrootFlags`) produces the archive;
-there is no test crate that inspects it.
+**Fixed by** `scripts/check-libc-shape.py`, invoked from
+`toolchain/build-sysroot.ps1` immediately after the archive is assembled, and
+fatal on failure. It implements both checks this entry asked for: the strict
+per-family one (the member defining `getopt`/`glob`/`fnmatch`/`error` must define
+*nothing else*) and the generalising one (no member may define both a
+gnulib-replaceable name and a name no C program can avoid).
 
-**Proper fix.** A test that runs `nm --defined-only -g` over each member of the
-built `libc.a` and asserts that the member defining `getopt` defines nothing
-outside the getopt family, and likewise for `glob`, `fnmatch` and `error`. Better
-still, invert it: assert that *no* member defines both a gnulib-replaceable name
-and a name from a short list of unavoidable ones (`printf`, `malloc`, `fopen`,
-`getenv`, `memcpy`). That generalises to the next gnulib module we have not
-thought of. It needs `nm` and a built sysroot, so it belongs with the other
-sysroot-level checks rather than in `cargo test -p posix`.
+Two departures from the fix as originally sketched here, both discovered while
+writing it:
 
-**Why not done now.** The spike that found the bug is not itself a test — it
-downloads and builds GNU make, which is far too heavy for the normal suite, and
-it lives in `scripts/make-spike/` for that reason. Writing the lightweight
-archive-shape assertion is a separate, smaller piece of work.
+- **It does not use `nm`.** This entry assumed it would, and that would have
+  made the check unrunnable where it matters: the sysroot is built on Windows
+  by a PowerShell script, and `nm` exists on this machine only inside WSL. A
+  check that cannot run where the artifact is produced is not a check — it is a
+  script someone has to remember. GNU `ar`'s own symbol index already stores
+  exactly the symbol→member map `nm --defined-only -g` would print, so the
+  script parses that directly and needs no external tools at all.
+- **It runs from the build script, not from `cargo test`.** Same reasoning:
+  `cargo test -p posix` does not build the sysroot, so a test there would be
+  asserting against whatever archive happened to be on disk.
+
+**What it caught on its first run — the §339 fix was only half a fix.**
+`-C codegen-units=4096` buys one member per *module*, and that was sufficient
+for `getopt`/`glob`/`fnmatch`/`error` only because each of those happened
+already to be its own module. Nothing made that true in general, and for
+seventeen other gnulib-replaceable functions it was not:
+
+| Member | Replaceable names it held | Riding along with |
+|---|---|---|
+| `/434` | `asprintf`, `vasprintf` | `printf`, `fprintf`, `snprintf`, `vfprintf` |
+| `/496` | `canonicalize_file_name` | `abort` |
+| `/682` | `fseeko`, `ftello`, `getdelim`, `getline` | `fopen`, `fread`, `fwrite`, `fclose`, `fflush`, `putchar`, `puts` |
+| `/930` | `strndup`, `strverscmp`, `stpcpy`, `stpncpy`, `mempcpy`, `strchrnul`, `memrchr`, `rawmemchr`, `strcasestr`, `strnlen` | `memcpy`, `memset`, `strlen`, `strcmp`, … |
+
+Every one of those is a name gnulib supplies a replacement for, each welded to
+a symbol no C program can avoid — i.e. the identical defect that stopped GNU
+make linking, in four more places. Make itself missed them only because its
+`./configure` happened not to compile in those particular gnulib modules;
+coreutils and tar would have hit them. Fixed by wrapping each of the seventeen
+in a one-function inline `mod gnu_<name> { … }` (rustc partitions by module
+path, and an inline `mod` is a distinct module path, so this splits the member
+without moving the code to a new file). See `design-decisions.md` §340.
+
+**Verified negatively, not just positively.** A gate that has only ever been
+seen green is not known to be a gate. `posix` was rebuilt with
+`-C codegen-units=16` into a scratch target dir and the check reported 9
+violations, reproducing the historical pre-§339 shape exactly (`getopt` with 97
+unrelated symbols, `glob` with 47, `fnmatch` with 157, `error` with 82). Scratch
+dir deleted immediately after.
 
 ## TD-B-CARGO-TEST-WORKSPACE-NO-LONGER-FINISHES (lane B, 2026-08-20)
 
@@ -46179,3 +46212,90 @@ accounts for a >50-minute compile, and check that the log actually contains
 the three options is right, and picking one is a workspace-layout decision with
 consequences for every lane. Promote to `open-questions.md` if the routine
 per-crate workaround starts letting real regressions through.
+
+## FIXED-B-BUILD-SCRIPTS-CRASHED-ON-THEIR-OWN-OUTPUT-ON-A-NON-UTF8-CONSOLE (lane B, 2026-08-20)
+
+**What.** `python scripts/ctest-fixtures.py --help` did not print help. It died
+with `UnicodeEncodeError: 'charmap' codec can't encode character '\u2192'`.
+Reproduced on this machine on 2026-08-20, not hypothetical.
+
+**Why.** These scripts are run from a Windows console, whose code page here is
+cp1252 (cp437 on many other machines), and Python's default encoding error
+handler is `strict`. The module docstring — which argparse prints as the
+`--help` description — contained one right-arrow in a `known-issues.md`
+cross-reference. That is enough: one un-encodable character anywhere in the
+string aborts the whole write.
+
+**Why it is worse than a cosmetic bug.** The failure lands *inside the print
+that was explaining something*. `scripts/check-libc-shape.py` was written the
+same day and had the same flaw in its failure path, where the consequence would
+have been: the sysroot build breaks, the check correctly diagnoses that
+`-C codegen-units=4096` was dropped, and the operator sees a traceback about
+character encoding instead of the diagnosis. A guard whose diagnostic can be
+destroyed by its own prose is a guard that fails exactly when it is needed.
+cp437 is the worse case — there `—`, `§` and `…` are all un-encodable, and this
+repo's prose style uses all three constantly.
+
+**Where.** `scripts/ctest-fixtures.py` (module docstring, line 15) and
+`scripts/check-libc-shape.py` (failure-path messages).
+
+**Fixed** two ways, because either alone rots:
+
+1. The offending characters were replaced with ASCII (`->`, `--`, `S339`,
+   `...`). `check-libc-shape.py` is now ASCII-only in full.
+2. Both scripts reconfigure `sys.stdout`/`sys.stderr` to
+   `errors="backslashreplace"` at import. Fixing the characters alone would
+   have lasted until the next edit — the house style reaches for em dashes by
+   default, and nobody will remember this rule. The guard turns that inevitable
+   mistake into a cosmetic `\u2014` in the output instead of a lost message.
+
+**Scope measured, deliberately not fixed repo-wide.** 26 of the Python scripts
+in `scripts/` contain non-ASCII characters. Each was then actually run, rather
+than assumed about:
+
+- **On cp1252 (this machine) only `ctest-fixtures.py` broke.** cp1252 *can*
+  encode `—`, `…` and `§`, so the other 25 files are latent, not broken. The
+  right-arrow `→` is the one character that is both un-encodable in cp1252 and
+  common in this repo's cross-references, and it is the one that bit.
+- **On cp437 most of them would break**, since `—`, `…` and `§` are all absent
+  there. That includes two scripts CLAUDE.md *requires* every agent to run:
+  `run-timeout.py` and `which-lane.py`. Both were checked directly here
+  (`--help`) and neither raises on cp1252.
+
+They were left alone on purpose. `scripts/` is shared by all three lanes, the
+fix is a mechanical six-line guard per file, and editing 25 files that are not
+currently failing would produce a large cross-lane diff at the exact moment
+three agents are merging — a certain conflict cost against a hypothetical code
+page. The two that were fixed are the two on the sysroot build path, and one of
+them was genuinely broken.
+
+**Trigger to do the rest:** the first `UnicodeEncodeError` reported from any
+script on a console that is not cp1252, or CI moving to a host with a different
+default code page. The sweep is `grep -P '[^\x00-\x7F]' scripts/*.py` plus the
+guard copied from `check-libc-shape.py`.
+
+## TD-B-PRINTF-RS-CONTAINS-RAW-NUL-BYTES-SO-GNU-GREP-SKIPS-IT (lane B, 2026-08-20)
+
+**What.** `posix/src/printf.rs` contains 47 literal `0x00` bytes, inside byte-
+string literals in its test module: `fmt_f(b"%.1f\x00", 8.25)` is written with a
+real NUL byte rather than the `\0` escape. This is valid Rust and the tests pass
+— but GNU `grep` applies a binary-content heuristic, sees the NULs, and reports
+`Binary file posix/src/printf.rs matches` instead of the matching lines. With
+`-l` it is listed; with a normal content search its lines are invisible.
+
+**Why it is worth an entry.** A search that silently returns nothing is the same
+class of false-green this file is full of. An agent grepping `posix/src` for a
+symbol defined in `printf.rs` gets no lines back and may reasonably conclude the
+symbol is not there.
+
+**Actual exposure is small**, which is why this is low priority and not fixed:
+ripgrep — the tool this project's agents are told to use for searching, and
+which the Grep tool wraps — handles the file correctly and returns matches
+normally. Verified both ways. Only bash-invoked `grep`/`git grep` are affected.
+
+**Proper fix.** Replace the 47 raw NUL bytes with `\0` escapes. Purely
+mechanical, no behaviour change (`b"%.1f\0"` and `b"%.1f<NUL>"` are the same
+bytes to rustc), and it makes the file plain text again. Not done here only
+because it touches 47 test lines in a file already carrying a large diff for
+the archive-granularity work, and mixing a mechanical byte-level rewrite into
+that diff would make both harder to review.

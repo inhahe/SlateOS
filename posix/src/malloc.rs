@@ -108,7 +108,48 @@ fn map_region(total: usize) -> *mut u8 {
     // first and adds `HEADER_SIZE` — which is `alloc_zeroed`'s one
     // requirement.  Zeroed, because `calloc` documents that it relies on the
     // backing store already being zero.
-    unsafe { std::alloc::alloc_zeroed(layout) }
+    let ptr = unsafe { std::alloc::alloc_zeroed(layout) };
+    #[cfg(test)]
+    if !ptr.is_null() {
+        live_regions::bump(1);
+    }
+    ptr
+}
+
+/// Per-thread count of regions this thread mapped and has not yet unmapped.
+///
+/// Exists so a test can assert **"nothing leaked"** rather than assume it: a
+/// function that reports an error after allocating — `regcomp` rejecting a bad
+/// pattern part-way through the compile, say — returns exactly the same code
+/// whether or not it freed what it had.  Only a count distinguishes them.
+///
+/// It is **thread-local, and signed**, because `cargo test` runs thousands of
+/// tests in parallel in one process.  A global counter would be perturbed by
+/// every unrelated test that happened to allocate at the same moment, making
+/// the check flaky in exactly the way that gets a test deleted rather than
+/// fixed.  A thread-local one is perturbed only by this thread — and libtest
+/// gives each test its own — so a delta of zero across a call really is that
+/// call's own accounting.  Signed, because a region mapped on one thread and
+/// freed on another legitimately drives the freeing thread's count negative;
+/// that is a valid program, not an error, and it must not panic on overflow.
+#[cfg(all(test, not(target_os = "none")))]
+pub(crate) mod live_regions {
+    extern crate std;
+    use core::cell::Cell;
+
+    std::thread_local! {
+        static COUNT: Cell<i64> = const { Cell::new(0) };
+    }
+
+    /// Add `delta` to this thread's live-region count.
+    pub(super) fn bump(delta: i64) {
+        COUNT.with(|c| c.set(c.get().wrapping_add(delta)));
+    }
+
+    /// This thread's live-region count.  Only differences are meaningful.
+    pub(crate) fn count() -> i64 {
+        COUNT.with(Cell::get)
+    }
 }
 
 /// Release a region obtained from `map_region`.
@@ -126,6 +167,8 @@ unsafe fn unmap_region(base: *mut u8, total: usize) {
     // `map_region`, and `Layout::from_size_align` is deterministic, so this
     // layout is the one it was allocated with.
     unsafe { std::alloc::dealloc(base, layout) };
+    #[cfg(test)]
+    live_regions::bump(-1);
 }
 
 /// Allocate `size` bytes of memory.

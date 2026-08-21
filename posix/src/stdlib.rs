@@ -2849,9 +2849,7 @@ mod tests {
         for n in [
             0usize, 1, 2, 3, 11, 12, 13, 14, 16, 17, 31, 32, 33, 63, 100, 127, 128, 129, 1000, 4096,
         ] {
-            let arr: Vec<i32> = (0..n)
-                .map(|_| qsort_test_rand(&mut seed) as i32)
-                .collect();
+            let arr: Vec<i32> = (0..n).map(|_| qsort_test_rand(&mut seed) as i32).collect();
             check_qsort_i32(arr);
         }
     }
@@ -2918,7 +2916,11 @@ mod tests {
             // The tail must still belong to this key — i.e. the whole element
             // moved, not just its first word.
             for (j, b) in elem[4..].iter().enumerate() {
-                assert_eq!(*b, (got as u8).wrapping_add(j as u8), "tail byte {j} at {i}");
+                assert_eq!(
+                    *b,
+                    (got as u8).wrapping_add(j as u8),
+                    "tail byte {j} at {i}"
+                );
             }
         }
     }
@@ -2968,9 +2970,7 @@ mod tests {
         // the public entry point would be a rare mis-sort on adversarial data.
         let mut seed = 0x1357_9BDF_u64;
         for n in [2usize, 3, 8, 17, 64, 1000] {
-            let mut arr: Vec<i32> = (0..n)
-                .map(|_| qsort_test_rand(&mut seed) as i32)
-                .collect();
+            let mut arr: Vec<i32> = (0..n).map(|_| qsort_test_rand(&mut seed) as i32).collect();
             let mut expected = arr.clone();
             expected.sort_unstable();
             unsafe {
@@ -3007,7 +3007,9 @@ mod tests {
         }
 
         let mut seed = 0x2468_ACE0_u64;
-        let mut arr: Vec<i32> = (0..500).map(|_| qsort_test_rand(&mut seed) as i32).collect();
+        let mut arr: Vec<i32> = (0..500)
+            .map(|_| qsort_test_rand(&mut seed) as i32)
+            .collect();
         let mut ascending = arr.clone();
         ascending.sort_unstable();
         let mut descending = ascending.clone();
@@ -3068,15 +3070,11 @@ mod tests {
             let mut end_plain: *const u8 = core::ptr::null();
             let mut end_l: *const u8 = core::ptr::null();
             let plain = unsafe { strtod(s.as_ptr(), &mut end_plain) };
-            let with_locale = unsafe {
-                strtod_l(
-                    s.as_ptr(),
-                    &mut end_l,
-                    crate::locale::LC_GLOBAL_LOCALE,
-                )
-            };
+            let with_locale =
+                unsafe { strtod_l(s.as_ptr(), &mut end_l, crate::locale::LC_GLOBAL_LOCALE) };
             assert!(
-                (plain - with_locale).abs() < f64::EPSILON || (plain.is_nan() && with_locale.is_nan()),
+                (plain - with_locale).abs() < f64::EPSILON
+                    || (plain.is_nan() && with_locale.is_nan()),
                 "value mismatch for {s:?}"
             );
             // The end pointer must advance identically, not merely the value.

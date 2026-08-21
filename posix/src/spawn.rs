@@ -785,7 +785,10 @@ pub struct PosixSpawnattrT {
 /// `const` too, because the test only helps on a run somebody makes; see the
 /// note on `PosixSpawnFileActionsT`'s assertion for the argument.
 const _: () = {
-    assert!(size_of::<PosixSpawnattrT>() <= 336, "musl posix_spawnattr_t");
+    assert!(
+        size_of::<PosixSpawnattrT>() <= 336,
+        "musl posix_spawnattr_t"
+    );
     assert!(align_of::<PosixSpawnattrT>() <= 8);
 };
 

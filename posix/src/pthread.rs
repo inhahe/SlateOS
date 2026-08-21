@@ -163,7 +163,10 @@ pub struct PthreadMutexT {
 
 /// See the module note on why these are `const` and not `#[test]`.
 const _: () = {
-    assert!(size_of::<PthreadMutexT>() <= 40, "musl/glibc pthread_mutex_t");
+    assert!(
+        size_of::<PthreadMutexT>() <= 40,
+        "musl/glibc pthread_mutex_t"
+    );
     assert!(align_of::<PthreadMutexT>() <= 8);
 };
 
@@ -1695,7 +1698,10 @@ pub struct PthreadRwlockT {
 
 /// See the module note on why these are `const` and not `#[test]`.
 const _: () = {
-    assert!(size_of::<PthreadRwlockT>() <= 56, "musl/glibc pthread_rwlock_t");
+    assert!(
+        size_of::<PthreadRwlockT>() <= 56,
+        "musl/glibc pthread_rwlock_t"
+    );
     assert!(align_of::<PthreadRwlockT>() <= 8);
 };
 
@@ -2276,7 +2282,10 @@ pub struct PthreadBarrierT {
 
 /// See the module note on why these are `const` and not `#[test]`.
 const _: () = {
-    assert!(size_of::<PthreadBarrierT>() <= 32, "musl/glibc pthread_barrier_t");
+    assert!(
+        size_of::<PthreadBarrierT>() <= 32,
+        "musl/glibc pthread_barrier_t"
+    );
     assert!(align_of::<PthreadBarrierT>() <= 8);
 };
 

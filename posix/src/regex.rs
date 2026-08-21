@@ -1297,6 +1297,280 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
+    // Public API: regcomp / regexec / regfree / regerror
+    //
+    // Everything below the "Helpers" banner goes in through the *internal*
+    // `compile_pattern`/`try_match`, which is the right shape for testing the
+    // engine but leaves the four functions a C caller actually links against
+    // untested end to end.  In particular it exercises none of what only the
+    // public path has: the malloc of `RegexProgram`, the `re_nsub` writeback,
+    // `regfree`'s teardown, and every error return that has to release a
+    // part-built program on the way out.
+    //
+    // These call the `extern "C"` entry points with the pointers a C caller
+    // would pass.
+    // -----------------------------------------------------------------------
+
+    /// A null-terminated pattern's pointer, as `regcomp` expects.
+    fn cstr(s: &[u8]) -> *const u8 {
+        assert_eq!(s.last(), Some(&0), "test patterns must be NUL-terminated");
+        s.as_ptr()
+    }
+
+    /// Compile, match, free — the whole life of a `regex_t` as C uses it.
+    #[test]
+    fn test_regcomp_regexec_regfree_round_trip() {
+        let mut re = RegexT::new();
+        // SAFETY: `re` is a live, writable RegexT; the pattern is NUL-terminated.
+        let rc = unsafe { regcomp(&raw mut re, cstr(b"^a(b+)c$\0"), REG_EXTENDED) };
+        assert_eq!(rc, 0, "pattern is valid");
+        assert_eq!(re.re_nsub, 1, "one parenthesised sub-expression");
+        assert!(!re.program.is_null(), "regcomp installed a program");
+
+        let mut m = [RegMatch {
+            rm_so: -1,
+            rm_eo: -1,
+        }; 2];
+        // SAFETY: `re` is compiled; the subject is NUL-terminated; `m` has 2 slots.
+        let rc = unsafe { regexec(&raw const re, cstr(b"abbbc\0"), 2, m.as_mut_ptr(), 0) };
+        assert_eq!(rc, 0, "abbbc matches ^a(b+)c$");
+        assert_eq!((m[0].rm_so, m[0].rm_eo), (0, 5), "whole match");
+        assert_eq!((m[1].rm_so, m[1].rm_eo), (1, 4), "the b+ group");
+
+        // SAFETY: `re` is compiled and not yet freed.
+        let rc = unsafe { regexec(&raw const re, cstr(b"ac\0"), 2, m.as_mut_ptr(), 0) };
+        assert_eq!(rc, REG_NOMATCH, "b+ needs at least one b");
+
+        // SAFETY: `re` was compiled by `regcomp` and is freed exactly once here.
+        unsafe { regfree(&raw mut re) };
+        assert_eq!(re.re_nsub, 0, "regfree resets re_nsub");
+        assert!(re.program.is_null(), "regfree clears the program pointer");
+    }
+
+    /// `regfree` leaves the object safe to free again.
+    ///
+    /// POSIX does not require a second `regfree` to be defined, but C code
+    /// reaches error paths that free twice, and the cost of surviving it is a
+    /// null check we already have.  What must *not* happen is a double free of
+    /// the program — which the region count below would catch as a second
+    /// decrement.
+    #[test]
+    fn test_regfree_is_idempotent() {
+        let before = crate::malloc::live_regions::count();
+        let mut re = RegexT::new();
+        // SAFETY: `re` is a live, writable RegexT; the pattern is NUL-terminated.
+        assert_eq!(unsafe { regcomp(&raw mut re, cstr(b"x\0"), 0) }, 0);
+        // SAFETY: compiled above; the second call sees a null program and returns.
+        unsafe { regfree(&raw mut re) };
+        // SAFETY: `re` is a valid RegexT whose program is already null.
+        unsafe { regfree(&raw mut re) };
+        assert!(re.program.is_null());
+        assert_eq!(
+            crate::malloc::live_regions::count(),
+            before,
+            "one alloc, one free — not two frees"
+        );
+    }
+
+    /// The live-region counter the two leak tests below rely on actually
+    /// moves.
+    ///
+    /// Without this, `assert_eq!(count(), before)` passes just as happily
+    /// against an instrument that is wired to nothing — which is the failure
+    /// mode a leak test is least able to notice about itself.  So: the count
+    /// must *rise* while a program is held, and only then return.
+    #[test]
+    fn test_live_region_counter_is_wired_up() {
+        let before = crate::malloc::live_regions::count();
+        let mut re = RegexT::new();
+        // SAFETY: `re` is a live, writable RegexT; the pattern is NUL-terminated.
+        assert_eq!(unsafe { regcomp(&raw mut re, cstr(b"a\0"), 0) }, 0);
+        assert!(
+            crate::malloc::live_regions::count() > before,
+            "regcomp holds a program, so the count must have risen"
+        );
+        // SAFETY: compiled above, freed exactly once.
+        unsafe { regfree(&raw mut re) };
+        assert_eq!(crate::malloc::live_regions::count(), before);
+    }
+
+    /// A rejected pattern frees the program it had already allocated.
+    ///
+    /// This is the case the internal-helper tests structurally cannot see:
+    /// they never allocate, so "returns `REG_EPAREN`" is the whole of what
+    /// they can check.  The public path mallocs a `RegexProgram` *before*
+    /// compiling, so every error return between there and the end has to
+    /// release it, and the error code alone is identical either way.
+    #[test]
+    fn test_regcomp_error_paths_leak_nothing() {
+        // (pattern, cflags, expected code) — one per reachable error return
+        // that happens after the program has been allocated.
+        let cases: &[(&[u8], i32, i32)] = &[
+            (b"a\\\0", 0, REG_EESCAPE),          // trailing backslash
+            (b"(a\0", REG_EXTENDED, REG_EPAREN), // unclosed group
+            (b"\\(a\0", 0, REG_EPAREN),          // unclosed BRE group
+            (b"[z-a]\0", 0, REG_ERANGE),         // reversed range
+            (b"[[:nosuch:]]\0", 0, REG_ECTYPE),  // unknown character class
+        ];
+        for &(pat, cflags, want) in cases {
+            let before = crate::malloc::live_regions::count();
+            let mut re = RegexT::new();
+            // SAFETY: `re` is a live, writable RegexT; `pat` is NUL-terminated.
+            let rc = unsafe { regcomp(&raw mut re, cstr(pat), cflags) };
+            assert_eq!(rc, want, "pattern {pat:?} under cflags {cflags}");
+            assert!(
+                re.program.is_null(),
+                "a failed regcomp must not install a program ({pat:?})"
+            );
+            assert_eq!(
+                crate::malloc::live_regions::count(),
+                before,
+                "failed regcomp leaked its part-built program ({pat:?})"
+            );
+        }
+    }
+
+    /// `regcomp` rejects null pointers rather than dereferencing them.
+    #[test]
+    fn test_regcomp_rejects_null_arguments() {
+        let mut re = RegexT::new();
+        // SAFETY: passing a null pattern is exactly what is under test; the
+        // function must check it before any dereference.
+        assert_eq!(
+            unsafe { regcomp(&raw mut re, core::ptr::null(), 0) },
+            REG_BADPAT
+        );
+        assert!(re.program.is_null(), "nothing installed on rejection");
+        // SAFETY: passing a null `preg` is likewise the case under test.
+        assert_eq!(
+            unsafe { regcomp(core::ptr::null_mut(), cstr(b"a\0"), 0) },
+            REG_BADPAT
+        );
+    }
+
+    /// `regexec` on a `regex_t` that was never compiled reports no match
+    /// instead of following a null program pointer.
+    ///
+    /// This is reachable from ordinary C: `regex_t re;` then a `regexec` on a
+    /// path where the `regcomp` was skipped or failed.  `RegexT::new()` is the
+    /// zeroed object such a declaration would give after a `memset`.
+    #[test]
+    fn test_regexec_on_uncompiled_regex_is_nomatch() {
+        let re = RegexT::new();
+        let mut m = [RegMatch {
+            rm_so: -1,
+            rm_eo: -1,
+        }; 1];
+        // SAFETY: `re` is a valid RegexT with a null program — the case under
+        // test — and the subject is NUL-terminated.
+        let rc = unsafe { regexec(&raw const re, cstr(b"anything\0"), 1, m.as_mut_ptr(), 0) };
+        assert_eq!(rc, REG_NOMATCH);
+        // SAFETY: freeing a never-compiled RegexT must be a no-op.
+        let mut re = re;
+        unsafe { regfree(&raw mut re) };
+    }
+
+    /// `regexec` fills every one of `nmatch` slots, even past the groups the
+    /// pattern has, because POSIX says the surplus must read -1/-1 — a caller
+    /// that sizes `pmatch` from `re_nsub + 1` but passes a larger `nmatch`
+    /// would otherwise read its own uninitialised stack.
+    #[test]
+    fn test_regexec_clears_surplus_pmatch_slots() {
+        let mut re = RegexT::new();
+        // SAFETY: `re` is a live, writable RegexT; the pattern is NUL-terminated.
+        assert_eq!(
+            unsafe { regcomp(&raw mut re, cstr(b"(a)\0"), REG_EXTENDED) },
+            0
+        );
+        // Poison every slot, so "-1" can only come from regexec writing it.
+        let mut m = [RegMatch {
+            rm_so: 77,
+            rm_eo: 77,
+        }; MAX_GROUPS + 3];
+        // SAFETY: `re` is compiled; `m` has `MAX_GROUPS + 3` slots, which is
+        // the `nmatch` passed.
+        let rc = unsafe {
+            regexec(
+                &raw const re,
+                cstr(b"a\0"),
+                MAX_GROUPS + 3,
+                m.as_mut_ptr(),
+                0,
+            )
+        };
+        assert_eq!(rc, 0);
+        assert_eq!((m[0].rm_so, m[0].rm_eo), (0, 1), "whole match");
+        assert_eq!((m[1].rm_so, m[1].rm_eo), (0, 1), "group 1");
+        for (i, slot) in m.iter().enumerate().skip(MAX_GROUPS) {
+            assert_eq!(
+                (slot.rm_so, slot.rm_eo),
+                (-1, -1),
+                "slot {i} past MAX_GROUPS must be cleared, not left poisoned"
+            );
+        }
+        // SAFETY: compiled above, freed exactly once.
+        unsafe { regfree(&raw mut re) };
+    }
+
+    /// A compiled regex survives being used repeatedly, and each `regcomp`
+    /// owns its own program — the count returns to where it started only if
+    /// every one of them is released.
+    #[test]
+    fn test_many_regcomps_all_free() {
+        let before = crate::malloc::live_regions::count();
+        for i in 0..8 {
+            let mut re = RegexT::new();
+            // SAFETY: `re` is a live, writable RegexT; the pattern is NUL-terminated.
+            assert_eq!(
+                unsafe { regcomp(&raw mut re, cstr(b"[0-9]+\0"), REG_EXTENDED) },
+                0
+            );
+            // SAFETY: compiled immediately above.
+            let rc = unsafe { regexec(&raw const re, cstr(b"n42\0"), 0, core::ptr::null_mut(), 0) };
+            assert_eq!(rc, 0, "iteration {i}");
+            // SAFETY: compiled above, freed exactly once per iteration.
+            unsafe { regfree(&raw mut re) };
+        }
+        assert_eq!(
+            crate::malloc::live_regions::count(),
+            before,
+            "eight compiles, eight frees"
+        );
+    }
+
+    /// `regerror` null-terminates within the buffer it was given, and reports
+    /// the size it *wanted* — which is how a caller sizes a second call.
+    #[test]
+    fn test_regerror_truncates_and_reports_full_length() {
+        let mut buf = [0xAAu8; 32];
+        let want = regerror(REG_NOMATCH, core::ptr::null(), buf.as_mut_ptr(), buf.len());
+        assert_eq!(want, b"No match\0".len(), "length includes the NUL");
+        assert_eq!(&buf[..want], b"No match\0");
+
+        // A buffer too small must still come back NUL-terminated, and the
+        // reported length must stay the full one so a retry can size up.
+        let mut small = [0xAAu8; 4];
+        let want = regerror(
+            REG_NOMATCH,
+            core::ptr::null(),
+            small.as_mut_ptr(),
+            small.len(),
+        );
+        assert_eq!(want, b"No match\0".len(), "unchanged by truncation");
+        assert_eq!(small[small.len() - 1], 0, "truncated output is terminated");
+
+        // Zero size and a null buffer must not be written to at all.
+        let mut untouched = [0xAAu8; 4];
+        let want = regerror(REG_NOMATCH, core::ptr::null(), untouched.as_mut_ptr(), 0);
+        assert_eq!(want, b"No match\0".len());
+        assert_eq!(untouched, [0xAAu8; 4], "size 0 must write nothing");
+        assert_eq!(
+            regerror(REG_NOMATCH, core::ptr::null(), core::ptr::null_mut(), 32),
+            b"No match\0".len(),
+        );
+    }
+
+    // -----------------------------------------------------------------------
     // Helpers
     //
     // These build a `RegexProgram` on the stack and call the internal
@@ -1304,11 +1578,10 @@ mod tests {
     // `regcomp`/`regfree`.  That started as a workaround — our `malloc` sits
     // on `mmap` → `syscall`, which returned `-ENOSYS` on the host, so the
     // public API could not run here at all.  `malloc` now has a host backing
-    // store (see malloc.rs), so the public path *is* reachable; these helpers
-    // stay because they let a test exercise one pattern without a compile
-    // step, and because they keep the match tests independent of allocator
-    // behaviour.  A regcomp-level test would be a genuine addition, not a
-    // replacement — tracked in known-issues.md.
+    // store (see malloc.rs), so the public path *is* reachable — and the
+    // section above now takes it.  These helpers stay because they let a test
+    // exercise one pattern without a compile step, and because they keep the
+    // match tests independent of allocator behaviour.
     // -----------------------------------------------------------------------
 
     /// Create a zeroed `RegexProgram` with the given flags.

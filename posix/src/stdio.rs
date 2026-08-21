@@ -2276,7 +2276,11 @@ mod gnu_fpending {
         // SAFETY: stream_to_file yields a valid, uniquely-borrowed File, as in
         // every other entry point here.
         let f = unsafe { &*file };
-        if f.buf_dir == BUF_DIR_WRITE { f.buf_pos } else { 0 }
+        if f.buf_dir == BUF_DIR_WRITE {
+            f.buf_pos
+        } else {
+            0
+        }
     }
 }
 pub use gnu_fpending::__fpending;
@@ -2896,15 +2900,17 @@ mod tests {
         let mut w = File::new(42, BUF_MODE_FULL);
         w.buf_dir = BUF_DIR_WRITE;
         w.buf_pos = 8;
-        assert!(unsafe { __freadptr(core::ptr::addr_of_mut!(w).cast::<u8>(), &raw mut size) }
-            .is_null());
+        assert!(
+            unsafe { __freadptr(core::ptr::addr_of_mut!(w).cast::<u8>(), &raw mut size) }.is_null()
+        );
 
         let mut e = File::new(42, BUF_MODE_FULL);
         e.buf_dir = BUF_DIR_READ;
         e.buf_len = 5;
         e.buf_pos = 5;
-        assert!(unsafe { __freadptr(core::ptr::addr_of_mut!(e).cast::<u8>(), &raw mut size) }
-            .is_null());
+        assert!(
+            unsafe { __freadptr(core::ptr::addr_of_mut!(e).cast::<u8>(), &raw mut size) }.is_null()
+        );
     }
 
     #[test]

@@ -936,15 +936,25 @@ pub(crate) enum Input {
 /// Block until an input byte is available for `id`.
 ///
 /// The console never reports [`Input::Hangup`] — a program cannot unplug the
-/// keyboard — and never reports [`Input::Interrupted`] either, because
-/// `keyboard::read_char` is an uninterruptible HLT-spin with no waiter set to
-/// register against. That is a pre-existing console limitation (a task blocked
-/// reading the console cannot be killed until a key is pressed), tracked in
-/// `known-issues.md`; it is not one this refactor introduces, and the pty path
-/// deliberately does better.
+/// keyboard. It *does* now report [`Input::Interrupted`]: the console read is a
+/// `HLT` poll that re-checks the calling process's pending-signal mask on every
+/// wake, so a task blocked reading the console can be killed without a key
+/// being pressed. (The wake still costs up to one timer tick of latency,
+/// because nothing signals the poll directly; making the reader genuinely park
+/// is stage 2 of `known-issues.md` → `BUG-CONSOLE-READ-UNINTERRUPTIBLE`, and
+/// is blocked on moving USB HID polling out of the read path.)
 fn backend_read_char(id: TtyId, backend: Backend) -> Input {
     match backend {
-        Backend::Console => Input::Byte(crate::keyboard::read_char()),
+        Backend::Console => {
+            let pid = crate::ipc::waiters::current_user_pid();
+            match crate::keyboard::read_char_interruptible(pid) {
+                crate::keyboard::ReadOutcome::Byte(ch) => Input::Byte(ch),
+                crate::keyboard::ReadOutcome::Interrupted => Input::Interrupted,
+                // Unreachable — no deadline was given. Treat as "nothing yet"
+                // rather than fabricating a byte; the caller's loop retries.
+                crate::keyboard::ReadOutcome::TimedOut => Input::Empty,
+            }
+        }
         Backend::Pty => pty::slave_read_input_blocking(id),
     }
 }
@@ -961,8 +971,14 @@ fn backend_try_read_char(id: TtyId, backend: Backend) -> Input {
 /// reaches `deadline_ns`.
 fn backend_read_char_timeout(id: TtyId, backend: Backend, deadline_ns: u64) -> Input {
     match backend {
-        Backend::Console => crate::keyboard::read_char_timeout(deadline_ns)
-            .map_or(Input::Empty, Input::Byte),
+        Backend::Console => {
+            let pid = crate::ipc::waiters::current_user_pid();
+            match crate::keyboard::read_char_timeout_interruptible(deadline_ns, pid) {
+                crate::keyboard::ReadOutcome::Byte(ch) => Input::Byte(ch),
+                crate::keyboard::ReadOutcome::Interrupted => Input::Interrupted,
+                crate::keyboard::ReadOutcome::TimedOut => Input::Empty,
+            }
+        }
         Backend::Pty => pty::slave_read_input_timeout(id, deadline_ns),
     }
 }

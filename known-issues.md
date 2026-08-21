@@ -50451,7 +50451,62 @@ it.
 
 ---
 
-## `BUG-CONSOLE-READ-UNINTERRUPTIBLE` — open (lane A)
+## `BUG-CONSOLE-READ-UNINTERRUPTIBLE` — **stage 1 FIXED 2026-08-21; stage 2 open** (lane A)
+
+**Status:** the user-visible half is fixed — a process blocked reading the
+console is now interruptible by a signal, and `SYS_CONSOLE_READ_CHAR` /
+`tty::read` return `EINTR`. What remains open is that the reader still *polls*
+rather than parking, so the wake costs up to one timer tick and a core cannot
+go idle. See "**The proper fix, corrected**" below: the fix originally recorded
+here would have broken USB keyboards, which is why it was split.
+
+**Stage 1, as landed (2026-08-21).** `kernel/src/keyboard.rs` grew
+`pub enum ReadOutcome { Byte(u8), Interrupted, TimedOut }` and one private
+`read_char_inner(deadline_ns: Option<u64>, pid: u64)` that all four public
+entry points share. The loop is unchanged except for one added test per `HLT`
+wake: `ipc::waiters::deliverable_signal_pending(pid)`. Because
+`deliverable_signal_pending(0)` is unconditionally `false`, the pre-existing
+`read_char()` / `read_char_timeout()` pass `pid = 0` and keep their exact old
+semantics for kshell's six call sites — no duplicated loop, and no behaviour
+change on the kernel-task path. The new `read_char_interruptible(pid)` and
+`read_char_timeout_interruptible(deadline_ns, pid)` pass the real pid and are
+what `tty::backend_read_char` / `backend_read_char_timeout` and
+`sys_console_read_char` (`kernel/src/syscall/handlers.rs`) now call. As
+predicted below, `canonical_read`/`raw_read` needed no edit: the four-state
+`Input` enum already carried `Interrupted` through to `ConsoleRead::Interrupted`.
+
+**The proper fix, corrected — and why the original one below is wrong.** The
+text under "The proper fix" says to replace the `HLT` spin with
+`park_interruptible` plus a wake from the IRQ 1 handler. **That would make a
+USB keyboard dead.** USB HID keys are not interrupt-driven here at all: they
+are noticed only by `keyboard::poll_usb_keyboard()` → `xhci::poll_keyboard()`,
+and that function has exactly three call sites in the whole kernel — all of
+them *inside* `try_read_char` and the blocking read loop. Nothing else in the
+system drives the poll. A reader that parked indefinitely would stop polling,
+and only a PS/2 keyboard would still work. IRQ 1 is the PS/2 line; it says
+nothing about xHCI.
+
+So stage 2 is two changes, in order:
+
+1. **Move USB HID polling out of the read path** into a driver-owned periodic
+   task (a timer callback, or a workqueue item re-armed on the tick), so
+   keystrokes are noticed whether or not anybody is blocked reading. This also
+   fixes a *separate* latent bug that the current arrangement hides: **USB
+   keystrokes are only ever polled while some task is inside a console read.**
+   A USB key pressed while the system is busy elsewhere is not buffered, it is
+   simply never fetched from the ring until the next read comes along.
+2. **Then** convert the loop to a real park: a waiter set on the scancode
+   queue, `park_interruptible`, and a wake from both the PS/2 IRQ and the new
+   HID poll task. The wake must use the ISR-safe idiom — `sched::try_wake(tid)`
+   and, on failure, `sched::defer_wake(tid)` — **not** `WaitQueue::try_wake_one`
+   and not a `try_lock`ed waiter set: both of those *lose* the wake when the
+   ISR loses the lock, and a lost wake here is a hang. The natural shape is a
+   lock-free CAS array of waiting task ids whose full-array fallback is today's
+   `HLT` poll, so the degenerate case degrades to current behaviour rather than
+   to a deadlock.
+
+**Original report follows, unedited apart from the heading, because the
+reasoning it records is what stage 1 acted on.**
 
 **Found:** 2026-08-21, while generalising `kernel/src/tty` from one console into
 N terminal devices (`requests/b-a-pty-devices-need-the-line-discipline-that-the-console-already-has.md`).

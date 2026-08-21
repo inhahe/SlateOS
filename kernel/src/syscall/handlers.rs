@@ -7733,6 +7733,12 @@ fn tty_write_from_user(tty: crate::tty::TtyId, ptr: u64, len: usize) -> SyscallR
 /// job control: a background caller is stopped with `SIGTTIN` exactly as in
 /// [`sys_tty_read`].  Which layer decodes the keystrokes is irrelevant to
 /// whose job is entitled to them.
+///
+/// **Interruptible.** Returns [`KernelError::Interrupted`] (`EINTR`) if a
+/// signal becomes deliverable while blocked, without consuming a character.
+/// Until 2026-08-21 it did not: a process blocked here could not be killed
+/// until somebody pressed a key, which is `known-issues.md` →
+/// `BUG-CONSOLE-READ-UNINTERRUPTIBLE`.
 pub fn sys_console_read_char(args: &SyscallArgs) -> SyscallResult {
     if args.arg0 == 0 {
         return SyscallResult::err(KernelError::InvalidArgument);
@@ -7753,8 +7759,19 @@ pub fn sys_console_read_char(args: &SyscallArgs) -> SyscallResult {
         return SyscallResult::err(e);
     }
 
-    // Block until a key is available.
-    let ch = crate::keyboard::read_char();
+    // Block until a key is available, or a signal cuts the wait short.
+    let pid = crate::ipc::waiters::current_user_pid();
+    let ch = match crate::keyboard::read_char_interruptible(pid) {
+        crate::keyboard::ReadOutcome::Byte(ch) => ch,
+        crate::keyboard::ReadOutcome::Interrupted => {
+            return SyscallResult::err(KernelError::Interrupted);
+        }
+        // Unreachable: no deadline was supplied.  Report it as EINTR rather
+        // than inventing a byte — a restartable error is the safe direction.
+        crate::keyboard::ReadOutcome::TimedOut => {
+            return SyscallResult::err(KernelError::Interrupted);
+        }
+    };
 
     if let Err(e) = crate::mm::user::write_user_value::<u8>(args.arg0, ch) {
         return SyscallResult::err(e);

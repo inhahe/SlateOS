@@ -542,9 +542,41 @@ report_bench_absence() {
         return 0
     fi
 
-    local changed
-    changed="$(git -C "$PROJECT_ROOT" diff --name-only "$last_commit" HEAD -- \
-        "${BENCH_CRITICAL_PATHS[@]}" 2>/dev/null)"
+    # Compare against the WORKING TREE, not HEAD.
+    #
+    # `git diff A HEAD` compares two *commits*, so every uncommitted change is
+    # invisible to it -- and edit, boot-test, then commit is the normal workflow
+    # here, which makes an unbenchmarked change to a listed path most likely to
+    # be uncommitted at exactly the moment this gate runs.  So the blind spot was
+    # not a corner case; it was the common one.
+    #
+    # Observed 2026-08-20, with the two halves of the proof one commit apart: a
+    # run whose kernel was built from a tree containing a modified
+    # kernel/src/mm/user.rs -- a path listed above -- printed "No perf-critical
+    # changes since the last benchmarked commit", and the byte-identical tree
+    # printed "!! Performance-critical code changed ... kernel/src/mm/user.rs"
+    # on the next run, once the file had been committed.  Same code, opposite
+    # verdicts, decided by nothing but `git add`.  This is the SILENT false
+    # negative the comment on BENCH_CRITICAL_PATHS warns about, arriving through
+    # the one door that comment was not watching: not a missing path, a missing
+    # *revision*.  The banner at the top of this script already prints
+    # `+uncommitted` for this very tree; the gate simply never asked.
+    #
+    # `git diff <commit> -- <paths>` with no second rev diffs the commit against
+    # the working tree, covering committed and uncommitted changes alike.
+    # Untracked files need their own query: a brand-new file under a benchmarked
+    # path is code the suite has *never* measured, which is the strongest reason
+    # to escalate rather than the weakest.
+    local changed untracked
+    untracked="$(git -C "$PROJECT_ROOT" ls-files --others --exclude-standard -- \
+        "${BENCH_CRITICAL_PATHS[@]}" 2>/dev/null || true)"
+    changed="$(
+        {
+            git -C "$PROJECT_ROOT" diff --name-only "$last_commit" -- \
+                "${BENCH_CRITICAL_PATHS[@]}" 2>/dev/null || true
+            printf '%s\n' "$untracked"
+        } | grep -a . | sort -u || true
+    )"
 
     if [ -n "$changed" ]; then
         echo "  !! Performance-critical code changed since the last benchmarked commit"
@@ -553,6 +585,23 @@ report_bench_absence() {
         local n
         n="$(echo "$changed" | grep -c .)"
         [ "$n" -gt 8 ] && echo "       ... and $((n - 8)) more"
+        # Say how many are not in any commit.  It changes what the reader should
+        # do: an uncommitted one will not be attributable later, because
+        # bench/history.jsonl stamps rows with a commit hash.
+        local n_dirty
+        n_dirty="$(
+            {
+                git -C "$PROJECT_ROOT" diff --name-only HEAD -- \
+                    "${BENCH_CRITICAL_PATHS[@]}" 2>/dev/null || true
+                printf '%s\n' "$untracked"
+            } | grep -ac . || true
+        )"
+        if [ "$n_dirty" -gt 0 ]; then
+            local is_are="are"
+            [ "$n_dirty" -eq 1 ] && is_are="is"
+            echo "     ($n_dirty of these $is_are uncommitted in the tree just built, so a"
+            echo "      bench row recorded now would be stamped with an ancestor commit.)"
+        fi
         if [ -n "$last_dirty" ]; then
             echo "     (That run measured $last_commit plus uncommitted changes, so some"
             echo "      of the files above may already have been benchmarked.)"

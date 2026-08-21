@@ -46283,3 +46283,32 @@ have caught.
 
 **Where.** The rule and its message live in `scripts/boot-test.sh`; the
 benchmark registry is under `bench/`.
+
+**[A] 2026-08-20 — a *second*, different defect in the same rule, found and
+fixed.** While reading the rule for fix (2) above, its revision comparison
+turned out to be `git diff --name-only "$last_commit" HEAD`, i.e. a diff between
+two **commits**. Every uncommitted change was therefore invisible to it — and
+since the workflow here is edit, boot-test, then commit, an unbenchmarked change
+to a listed path is *most likely to be uncommitted at exactly the moment the
+gate runs*. The blind spot was the common case, not a corner one.
+
+The proof arrived in two halves one commit apart, with no code change between
+them: a run built from a tree containing a modified `kernel/src/mm/user.rs` (a
+listed path) printed "No perf-critical changes since the last benchmarked
+commit", and the byte-identical tree printed "!! Performance-critical code
+changed … kernel/src/mm/user.rs" on the next run, once the file had been
+committed. Same code, opposite verdicts, decided by nothing but `git add`.
+
+Fixed by diffing the **working tree** (`git diff <commit> -- <paths>`, no second
+rev) and querying untracked files separately — a new file under a benchmarked
+path is code the suite has never measured, which is the strongest reason to
+escalate. The message now also says how many of the named files are uncommitted,
+because `bench/history.jsonl` stamps rows with a commit hash and a row recorded
+from a dirty tree names only an ancestor of what was measured. Verified against
+all three cases (uncommitted modification, new untracked file, committed-only)
+by extracting the function and running it against deliberately dirtied trees.
+
+This does **not** close this entry. It was a missing *revision*; the entry above
+is about a missing *benchmark*, and the gate can now correctly name a path that
+still nothing measures. If anything it raises the priority of fix (2), since the
+rule will now fire in strictly more situations.

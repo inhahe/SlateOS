@@ -639,8 +639,10 @@ Roadmap:
   device to N. Filed as
   `requests/b-a-pty-devices-need-the-line-discipline-that-the-console-already-has.md`.
   Blocks: interactive CPython, `apps/terminal` driving a real shell (C), and
-  sshd's PTY support (marked `[x]` at line ~2857, which cannot be true in the
-  sense that matters).
+  sshd's PTY support. That last was marked `[x]`; it has since been corrected
+  to `[-]` and sshd now *refuses* `pty-req` and `shell` rather than replying
+  SUCCESS and printing a fake prompt — see
+  `known-issues.md` → `B-SSHD-EXEC-REPLIED-WITH-THE-COMMAND-INSTEAD-OF-RUNNING-IT`.
 - `[B]` Translate POSIX calls to native syscalls (line ~1738)
 - `[B]` gcc, cmake, make, pkg-config via the POSIX layer (line ~5343)
 - `[B]` Rust toolchain, CPython, fastpy compiler self-hosting (lines ~5344–5346)
@@ -2731,7 +2733,7 @@ _Port ext4 first. Don't write a custom filesystem._
 - [x] Port coreutils (85 binaries: echo, cat, ls, head, wc, mkdir, rm, cp, mv, touch, tail, sort, grep, ln, pwd, env, sleep, true, false, uname, basename, dirname, tee, rmdir, seq, yes, which, date, uniq, cut, tr, chmod, chown, id, whoami, hostname, readlink, realpath, stat, printf, test, kill, dd, df, du, xargs, find, ps, nohup, nice, mkfifo, expr, nl, paste, comm, expand, fold, md5sum, sha256sum, tty, diff, cmp, od, strings, uptime, free, unexpand, cal, time, sed, awk, ed, more, sh, tar, bc, patch, split, join, csplit, logger, logname, who, tsort, renice)
 - [x] Port rsync (replaces robocopy need) — Rust implementation: recursive, archive mode, checksums, delete, exclude/include, dry-run, progress, stats
 - [x] Port curl — Rust HTTP/1.1 client: GET/POST/PUT/DELETE/HEAD/PATCH, auth, cookies, redirects, chunked, progress, -o/-O, verbose
-- [x] Port ssh/sshd — Rust SSH-2 client: version exchange, key exchange, password auth, interactive session, host key verification
+- [x] Port ssh/sshd — Rust SSH-2 client: version exchange, key exchange, password auth, interactive session, host key verification; exits with the *remote* command's status and writes remote stderr to local stderr, per `ssh(1)` (2026-08-21 — both were silently discarded before; `known-issues.md` → `B-SSH-CLIENT-DISCARDED-THE-REMOTE-EXIT-STATUS-AND-ALL-OF-STDERR`). Interactive shell sessions depend on the *server* having a pty — see the sshd line further down.
 - [x] Build custom grep (Rust, regex support, line numbers, recursive, case-insensitive)
 - [x] Port find (glob matching, -name, -type, -maxdepth)
 - [x] System administration utilities — Rust userspace binaries:
@@ -2869,7 +2871,7 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] dc: desk calculator (reverse Polish notation, registers, conditionals, base conversion, modular exponentiation)
   - [x] crond2: cron daemon with anacron (crontab scheduling, catch-up missed jobs, idle delay, daemon mode, mail notifications)
   - [x] ntpd: NTP time synchronization (NTP v4 packet format, drift correction, stratum hierarchy, poll intervals, jitter detection)
-  - [x] sshd: SSH server daemon (key exchange, user auth, channel multiplexing, PTY support, session management, debug logging)
+  - [-] sshd: SSH server daemon (key exchange, user auth, channel multiplexing, debug logging; `exec` runs the command as the authenticated user with real stdout/stderr/`exit-status` — 2026-08-21). **`pty-req` and `shell` are refused**, not supported: SlateOS has no pty device (blocked by `requests/b-a-pty-devices-need-the-line-discipline-that-the-console-already-has.md`, lane A) and the connection loop cannot yet move bytes both ways at once. `exec` also collects output rather than streaming it. All three in `known-issues.md` → `TD-B-SSHD-RUNS-A-COMMAND-BUT-CANNOT-HOST-A-SESSION`. This line previously read `[x] … PTY support, session management`, which was true only in the sense that the messages parsed.
   - [x] dhcpcd: DHCP client daemon (DHCP v4 discover/offer/request/ack, lease management, renewal timers, interface config)
   - [x] getty/agetty/mingetty: virtual terminal login manager (/etc/issue processing, baud rate config, autologin, serial support)
   - [x] login: user authentication (passwd/shadow parsing, nologin/securetty checks, session env setup, MOTD, mail check, faillog)

@@ -49014,6 +49014,7 @@ because nothing exercises it, and the first person to wire the loop up
 naively gets doubled title bars and reasonably concludes the compositor is
 broken.
 
+
 **Progress 2026-08-21 — prerequisite 1 (display scaling) is done.** The
 compositor now scales its own decorations. See `design-decisions.md` §497 for
 the three decisions this needed; the mechanics, in brief:
@@ -49107,3 +49108,247 @@ does not know the user's `WindowCorners` choice (its own decorations are still
 drawn with the flat primitives) nor the `drop_shadows` toggle, and it still
 draws a shadow on maximized windows. Note that `gui/appearance` depends only on
 `guitk` and `yamldoc`, so `compositor` can depend on it without a cycle.
+
+## B-SSHD-EXEC-REPLIED-WITH-THE-COMMAND-INSTEAD-OF-RUNNING-IT — 2026-08-21 — FIXED
+
+**In short:** `ssh host 'cat /etc/passwd'` used to come back with the text
+`exec: cat /etc/passwd` and an exit code of 0. Nothing ran. The output looked
+enough like output that a script could not tell, and the success was invented
+too — so `ssh host false` also said everything was fine. `exec` now really runs
+the command, as the authenticated user, and reports its real stdout, stderr and
+exit status.
+
+**Where it was:** `userspace/sshd/src/main.rs`, `handle_channel_request`'s
+three session arms.
+
+### What was wrong
+
+sshd is a protocol-complete SSH-2 server — real Diffie-Hellman key exchange,
+AES-128-CTR, HMAC-SHA256, password and public-key auth, channel windows, the
+lot. Underneath that, the session layer fabricated all three of its answers:
+
+| Request | Old behaviour | Why that is worse than not implementing it |
+|---|---|---|
+| `exec` | replied SUCCESS, then sent `format!("exec: {cmd}\r\n")` as channel data | the client cannot distinguish echoed input from real output |
+| `shell` | replied SUCCESS, sent `Welcome to Slate OS, {user}!\r\n$ ` and echoed keystrokes | looks like a shell at the terminal; there is no process |
+| `pty-req` | replied SUCCESS, allocated nothing | client puts *its* terminal in raw mode and waits for echo forever |
+
+And no `exit-status` was ever sent on any path. RFC 4254 §6.10 makes that
+request the only way a server reports how a command ended; the OpenSSH client
+treats a channel that closes without one as **success**. So every failure — a
+command that did not exist, a command that ran and returned 1, a command that
+was never run at all — arrived at the caller as exit 0. `roadmap.md` marked
+"PTY support, session management" as `[x]` on the strength of the messages
+being *parsed*.
+
+### The fix
+
+- **`exec` executes.** `run_exec_request` resolves the authenticated username
+  in `/etc/passwd`, spawns `<login shell> -c '<command>'` as that user, and
+  reports the result. stdout goes on the data stream, stderr on
+  `SSH_MSG_CHANNEL_EXTENDED_DATA` type 1 (RFC 4254 §5.2) so `ssh host cmd >
+  file` does not fold diagnostics into `file`, and the exit is reported as
+  `exit-status`, or as `exit-signal` when the child was killed and the signal
+  is one of the thirteen the RFC names.
+- **The spawn happens before the reply.** §6.5's reply says whether the request
+  was *accepted*; a command that could not be started was not, so it gets
+  `SSH_MSG_CHANNEL_FAILURE` rather than a SUCCESS followed by an error.
+- **Privilege drop, and a refusal instead of a fallback.** sshd binds port 22
+  and therefore runs as root. The child is spawned with `CommandExt::gid`/`uid`
+  set to the account's, under `#[cfg(unix)]` — which is every target this
+  daemon actually runs on, the slateos target spec declaring
+  `target-family: ["unix"]`. If the username has **no** `/etc/passwd` entry the
+  request is refused, because the only other identity available is the
+  daemon's. Running an authenticated user's command as root would have been a
+  privilege escalation introduced by the very change that made `exec` work.
+- **The environment is built, not inherited.** `env_clear()` then `HOME`,
+  `USER`, `LOGNAME`, `SHELL`, `PATH`. Inheriting init's environment leaks the
+  daemon's configuration to a remote user and lets a variable set at boot
+  change how their commands behave.
+- **`pty-req` and `shell` now answer FAILURE.** See the next entry.
+- **Output is split to the peer's `max_packet`.** `remote_max_packet` was
+  parsed from `CHANNEL_OPEN` and then carried an `#[allow(dead_code)]`;
+  exceeding it is a protocol violation and a command whose output is larger
+  than one packet is the ordinary case.
+- **Inbound channel data is dropped instead of echoed.** With `exec`'s stdin on
+  `/dev/null` and `shell` refused, nothing is waiting on the channel's input.
+  The receive window is credited back so a client that keeps sending is not
+  left blocked on a window that never reopens.
+
+### Verification
+
+123 tests pass (`cargo test -p sshd --target x86_64-pc-windows-gnu`), clippy
+clean on both the host and `x86_64-slateos`. New tests cover `/etc/passwd`
+parsing including malformed lines and the empty-shell default, the environment
+being built solely from the account, the RFC signal-name table, `exit-status`'s
+`want_reply = false` framing, and that the chunk overhead constant matches the
+real header size.
+
+### What this does *not* mean
+
+`exec` is real but not yet streamed, and `shell` is refused outright. Both are
+recorded in the next entry rather than left to be discovered.
+
+
+## TD-B-SSHD-RUNS-A-COMMAND-BUT-CANNOT-HOST-A-SESSION — 2026-08-21
+
+**In short:** `ssh host 'some command'` works properly now. `ssh host` — a
+plain interactive login — does not, and answers with "shell request failed".
+Two separate things are missing: a pseudo-terminal (a fake keyboard-and-screen
+pair that lets a program believe it is at a real terminal), and a connection
+loop that can move bytes in both directions at once. Until both exist, refusing
+is the honest answer; the previous code answered SUCCESS and printed a fake
+prompt.
+
+**Where it lives:** `userspace/sshd/src/main.rs` — `handle_channel_request`'s
+`pty-req` and `shell` arms, and `run_exec_request`.
+
+### The three limitations, and what each one costs
+
+**1. `pty-req` is refused, because SlateOS has no pty device.**
+
+`kernel/src/tty.rs` contains a complete, self-tested line discipline —
+canonical mode, `ERASE`/`KILL`, `^C`→`SIGINT`, `VMIN`/`VTIME`, `termios`,
+`winsize` — but it exists exactly once, hardwired to the physical keyboard and
+screen. A pty is that same discipline with a program on the far end. Filed as
+`requests/b-a-pty-devices-need-the-line-discipline-that-the-console-already-has.md`
+(lane A owns `kernel/**`); the reasoning for why this cannot be done in libc is
+`design-decisions.md` §345.
+
+*Cost while unfixed:* clients print "PTY allocation request failed on channel
+0" and continue without one. That is exactly what they do against a real server
+configured with `PermitTTY no`, so it is a supported state rather than a broken
+one.
+
+**2. `shell` is refused, because an interactive shell needs both a pty and
+bidirectional I/O.**
+
+Even given a pty, `run_connection` is a single-threaded loop of blocking
+`recv_packet` calls. Hosting a shell means watching the socket and the child's
+pipes simultaneously. The proper fix is to give the connection loop a readiness
+wait over both — the same `SYS_IO_POLL`-shaped primitive the rest of userspace
+uses — rather than threads, which the target spec's `has-thread-local: false`
+makes a poor bet.
+
+*Cost while unfixed:* no interactive login over SSH. `ssh host command` covers
+scripted use, which is the majority of what a headless machine needs.
+
+**3. `exec` collects output rather than streaming it.**
+
+`child.wait_with_output()` runs to completion and then sends. This is deliberate
+and not merely lazy: reading two pipes one after the other from a single thread
+deadlocks the moment the child fills the pipe that is not being read, and
+`wait_with_output` is the standard-library primitive that drains both together.
+
+*Cost while unfixed:* a command that never exits (`tail -f`) produces nothing at
+all, and a command with very large output is buffered in RAM. `ssh host 'find
+/'` will work but will hold the whole listing in memory first.
+
+*Proper fix:* the same readiness wait as (2). Once the loop can poll the child's
+pipes alongside the socket, all three limitations dissolve into one
+implementation — which is why they are one entry and not three.
+
+### Also missing, smaller
+
+- **`env` requests are accepted and discarded.** The arm replies SUCCESS
+  without recording anything, so `ssh -o SendEnv=LC_ALL host` silently loses
+  the variable. Accepting is the right answer only once the variables reach the
+  child; today refusing would be more truthful, but OpenSSH's default is to
+  ignore unlisted variables *silently* too, so this is consistent with the
+  reference implementation rather than a lie.
+- **`exec`'s stdin is `/dev/null`.** `ssh host 'wc -l' < file` reports 0. This
+  is a consequence of (3), not a separate decision.
+- **Supplementary groups are not set.** `session_command` sets the primary gid
+  and uid; `setgroups` is not called, so a session does not carry the account's
+  secondary group memberships. Blocked on the same gap `su` and `doas` have —
+  see the comment at `userspace/doas/src/main.rs:731`.
+
+**Trigger:** revisit when lane A lands the pty syscalls, or sooner if a
+readiness wait over pipes plus sockets appears for another reason.
+
+**If never fixed:** SSH remains a command-execution channel rather than a login
+service. Nothing lies about it — every unsupported request is refused at the
+protocol level and the client says so — but `apps/terminal` and interactive
+CPython over SSH stay out of reach.
+
+
+## B-SSH-CLIENT-DISCARDED-THE-REMOTE-EXIT-STATUS-AND-ALL-OF-STDERR — 2026-08-21 — FIXED
+
+**In short:** our `ssh` client exited 0 no matter what the remote command
+returned, and threw away every byte the remote command wrote to stderr without
+so much as a warning. So `ssh host false` looked like a success, and
+`ssh host 'cc broken.c'` printed nothing at all about why the compile failed.
+Both now work: the client exits with the remote status, and remote stderr comes
+out on the local stderr.
+
+**Where it was:** `userspace/ssh/src/main.rs` — `handle_channel_request`,
+`process_server_message`, and `main`.
+
+### What was wrong
+
+Three separate holes, all in the same direction — information the server sent
+that the client silently dropped.
+
+**1. `exit-status` was parsed and discarded.** `handle_channel_request` read
+the request type, logged it at `-v`, and returned. `main` then exited 0
+unconditionally. This is the mirror of the sshd bug fixed the same day
+(`B-SSHD-EXEC-REPLIED-WITH-THE-COMMAND-INSTEAD-OF-RUNNING-IT`): between the
+two, a failing remote command was reported as a success at *both* ends, and
+fixing only the server would have left the client still lying.
+
+**2. `SSH_MSG_CHANNEL_EXTENDED_DATA` was not handled at all.** Message type 95
+was not even in the client's `msg` module, so it fell through
+`process_server_message`'s catch-all to `verbose("unhandled message type: 95")`
+— invisible unless `-v` was passed. Everything a remote command wrote to
+stderr vanished.
+
+**3. A latent MAC desynchronisation.** When a server-initiated request set
+`want_reply`, the client replied by calling `tcp_send_all` directly with
+`build_packet(..., self.seq_send, ...)` and **did not advance `seq_send`**. The
+sequence number is an input to every packet's MAC, so the next packet the
+client sent would have been MACed with a number the server had already moved
+past, and the server would have rejected it and everything after it. The
+function took `&self`, which is why it could not advance the counter — the
+signature was the bug. It is `&mut self` now and goes through `send_packet`.
+
+Never observed in practice only because no server this client talks to sends a
+channel request with `want_reply` set. `exit-status` and `exit-signal` must
+both have it clear (RFC 4254 §6.10).
+
+### The fix
+
+- `exit-status` and `exit-signal` are parsed into a `RemoteExit` on the
+  session, and `main` exits with it.
+- Exit codes now follow `ssh(1)` exactly: the remote command's status on
+  success, **255** for any failure of the client or the connection. The four
+  `process::exit(1)` sites became `EXIT_SSH_FAILURE`. Reserving one code is
+  what lets a caller distinguish "the command failed" from "the command never
+  ran"; with 1 doing double duty it could not.
+- A command killed by a signal has no status of its own; it is reported on
+  stderr and exits 255, matching OpenSSH.
+- Extended data type 1 goes to stderr; any other type code is discarded with a
+  verbose note rather than being written to stdout, where it would corrupt the
+  command's output. Malformed messages are dropped whole.
+- `shell request failed` / `exec request failed` are now distinguished in the
+  error text, and name the channel. They have different causes — a server with
+  no pseudo-terminal support refuses `shell` and accepts `exec`, which is
+  exactly what SlateOS's own sshd now does — and a combined message sends the
+  reader looking in the wrong place.
+
+### A note on what could not be fixed
+
+A server that sends **no** `exit-status` still yields exit 0, because that is
+what an interactive session looks like and the client cannot tell the two
+apart. This is not a client-side gap that can be closed; it is the reason a
+*server* must always send one, and is why the sshd fix was the necessary half.
+
+### Verification
+
+The client had **no test module at all** — 2556 lines, zero tests. It has 11
+now, covering: a status recorded and returned; a non-zero status not becoming
+success; a missing status meaning success; `exit-signal` including that the
+name is stored verbatim without a `SIG` prefix; an unknown request not
+overwriting a status already received; a truncated `exit-status` being an error
+rather than a silent zero; unknown and malformed extended data being dropped;
+and that `EXIT_SSH_FAILURE` is 255. Clippy clean on the host and on
+`x86_64-slateos`.

@@ -27,7 +27,21 @@
 //! - Encryption: AES-128-CTR
 //! - MAC: HMAC-SHA256
 //! - User auth: password (against /etc/shadow), public key (`authorized_keys`)
-//! - Session channels with PTY allocation and shell/exec requests
+//! - Session channels: `exec` requests run the command
+//!
+//! # What a session can and cannot do
+//!
+//! `exec` is real: the command runs through the authenticated user's login
+//! shell, as that user, and its stdout, stderr and exit status are reported
+//! separately and truthfully. It does not stream — output is delivered when
+//! the command exits — and its stdin is `/dev/null`.
+//!
+//! `pty-req` and `shell` are **refused**, and the refusal is the honest
+//! answer rather than a missing feature dressed up as one. `Slate OS` has no
+//! pseudo-terminal device yet (see `requests/b-a-pty-devices-need-the-line-
+//! discipline-that-the-console-already-has.md`), so there is no terminal to
+//! allocate and nothing for an interactive shell to be interactive on. A
+//! client that asks gets `SSH_MSG_CHANNEL_FAILURE` and says so.
 
 // Lint policy is inherited from the workspace (`[lints] workspace = true`):
 // `clippy::all` denied, `clippy::pedantic` at warn, with the curated allow
@@ -39,10 +53,7 @@
 // already bounded by RFC 4253 packet limits and `data.len()` length checks.
 // Indexing/slicing into packet buffers is gated by length checks at the
 // call site; out-of-range conditions return Err, never panic.
-#![allow(
-    clippy::arithmetic_side_effects,
-    clippy::indexing_slicing,
-)]
+#![allow(clippy::arithmetic_side_effects, clippy::indexing_slicing)]
 
 use std::env;
 use std::fmt;
@@ -426,7 +437,6 @@ mod msg {
     pub const SSH_MSG_CHANNEL_OPEN_FAILURE: u8 = 92;
     pub const SSH_MSG_CHANNEL_WINDOW_ADJUST: u8 = 93;
     pub const SSH_MSG_CHANNEL_DATA: u8 = 94;
-    #[allow(dead_code)]
     pub const SSH_MSG_CHANNEL_EXTENDED_DATA: u8 = 95;
     pub const SSH_MSG_CHANNEL_EOF: u8 = 96;
     pub const SSH_MSG_CHANNEL_CLOSE: u8 = 97;
@@ -1950,8 +1960,270 @@ fn is_root_login_allowed(auth_method: &str, config: &SshdConfig) -> bool {
 }
 
 // ============================================================================
+// Account lookup (/etc/passwd)
+// ============================================================================
+
+/// One account, as read from `/etc/passwd`.
+///
+/// Authentication proves *who* the client is; this record says what that
+/// identity means to the operating system — which uid to run as, where the
+/// session starts, and which program `shell`/`exec` requests go through.
+/// Without it a session request has no identity to assume, and the only
+/// identity available would be the daemon's own, which is root.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PasswdEntry {
+    username: String,
+    uid: u32,
+    gid: u32,
+    home: String,
+    shell: String,
+}
+
+/// The login shell assumed when the `/etc/passwd` field is empty.
+///
+/// POSIX says an empty shell field means `/bin/sh`, and every implementation
+/// agrees; an empty field is a default, not a locked account.
+const DEFAULT_LOGIN_SHELL: &str = "/bin/sh";
+
+/// Parse `/etc/passwd` content into entries.
+///
+/// Malformed lines are skipped rather than failing the whole file: one bad
+/// line in `/etc/passwd` must not lock every account out of the machine.
+fn parse_passwd(content: &str) -> Vec<PasswdEntry> {
+    let mut entries = Vec::new();
+    for line in content.lines() {
+        let line = line.trim_end_matches(['\r', '\n']);
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let fields: Vec<&str> = line.split(':').collect();
+        // name:passwd:uid:gid:gecos:home:shell -- seven fields.
+        if fields.len() < 7 {
+            continue;
+        }
+        let (Ok(uid), Ok(gid)) = (fields[2].parse::<u32>(), fields[3].parse::<u32>()) else {
+            continue;
+        };
+        let shell = if fields[6].is_empty() {
+            DEFAULT_LOGIN_SHELL.to_string()
+        } else {
+            fields[6].to_string()
+        };
+        entries.push(PasswdEntry {
+            username: fields[0].to_string(),
+            uid,
+            gid,
+            home: fields[5].to_string(),
+            shell,
+        });
+    }
+    entries
+}
+
+/// Look an authenticated username up in `/etc/passwd`.
+///
+/// Returns `None` when the file is unreadable or the name is absent. Callers
+/// must treat that as a refusal to run anything — see [`session_command`].
+fn lookup_passwd(username: &str) -> Option<PasswdEntry> {
+    let data = fs_read_file("/etc/passwd").ok()?;
+    let content = String::from_utf8_lossy(&data);
+    parse_passwd(&content)
+        .into_iter()
+        .find(|e| e.username == username)
+}
+
+/// The `PATH` given to a session, chosen by whether the account is root.
+///
+/// Matches the split every Unix uses: the superuser gets the `sbin`
+/// directories, an unprivileged user does not.
+fn default_path_for_uid(uid: u32) -> &'static str {
+    if uid == 0 {
+        "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+    } else {
+        "/usr/local/bin:/usr/bin:/bin"
+    }
+}
+
+/// Build the environment for a session, from scratch.
+///
+/// The daemon's own environment is *not* inherited. sshd is started by init
+/// with whatever init happened to be holding, and passing that to a remote
+/// user leaks the daemon's configuration to them and lets a variable set at
+/// boot silently change how their commands behave.
+fn session_env(user: &PasswdEntry) -> Vec<(String, String)> {
+    vec![
+        ("HOME".to_string(), user.home.clone()),
+        ("USER".to_string(), user.username.clone()),
+        ("LOGNAME".to_string(), user.username.clone()),
+        ("SHELL".to_string(), user.shell.clone()),
+        (
+            "PATH".to_string(),
+            default_path_for_uid(user.uid).to_string(),
+        ),
+    ]
+}
+
+// ============================================================================
+// Session execution
+// ============================================================================
+
+/// How a session's command finished, in the two forms RFC 4254 §6.10 defines.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum SessionExit {
+    /// The command exited normally with this status.
+    Status(u32),
+    /// The command was killed by a signal, named as the RFC requires:
+    /// the bare name with no `SIG` prefix.
+    ///
+    /// Only constructed on Unix — which is every target this daemon actually
+    /// runs on. The development host builds this crate for its unit tests and
+    /// has no signals to report.
+    #[cfg_attr(not(unix), allow(dead_code))]
+    Signal {
+        name: &'static str,
+        core_dumped: bool,
+    },
+}
+
+/// Map a signal number to the name RFC 4254 §6.10 expects.
+///
+/// The RFC enumerates exactly these thirteen names and says anything else
+/// must use the `name@domain` extension form. Rather than invent one, an
+/// unrecognised signal is reported as an exit *status* of `128 + n` — the
+/// convention every shell already uses, so the number a caller sees matches
+/// what they would have got running the command locally.
+///
+/// Only called on Unix; see [`SessionExit::Signal`].
+#[cfg_attr(not(unix), allow(dead_code))]
+fn rfc4254_signal_name(sig: i32) -> Option<&'static str> {
+    Some(match sig {
+        1 => "HUP",
+        2 => "INT",
+        3 => "QUIT",
+        4 => "ILL",
+        6 => "ABRT",
+        8 => "FPE",
+        9 => "KILL",
+        10 => "USR1",
+        11 => "SEGV",
+        12 => "USR2",
+        13 => "PIPE",
+        14 => "ALRM",
+        15 => "TERM",
+        _ => return None,
+    })
+}
+
+/// Classify a finished child process into a [`SessionExit`].
+#[cfg(unix)]
+fn classify_exit(status: &std::process::ExitStatus) -> SessionExit {
+    use std::os::unix::process::ExitStatusExt;
+    if let Some(code) = status.code() {
+        return SessionExit::Status(u32::try_from(code).unwrap_or(255));
+    }
+    if let Some(sig) = status.signal() {
+        if let Some(name) = rfc4254_signal_name(sig) {
+            return SessionExit::Signal {
+                name,
+                core_dumped: status.core_dumped(),
+            };
+        }
+        // Outside the RFC's list: fall back to the shell's 128+n convention.
+        let n = u32::try_from(sig).unwrap_or(0);
+        return SessionExit::Status(128u32.saturating_add(n));
+    }
+    SessionExit::Status(255)
+}
+
+/// Classify a finished child process into a [`SessionExit`].
+///
+/// The non-Unix arm exists because this crate's unit tests are compiled and
+/// run on the development host, which is not `Slate OS`. It is never the arm
+/// that runs in production.
+#[cfg(not(unix))]
+fn classify_exit(status: &std::process::ExitStatus) -> SessionExit {
+    SessionExit::Status(
+        status
+            .code()
+            .map_or(255, |c| u32::try_from(c).unwrap_or(255)),
+    )
+}
+
+/// Build the `Command` that runs `command_line` as `user`.
+///
+/// The identity change is the point of this function. sshd binds port 22 and
+/// therefore runs as root; if it spawned a session without dropping to the
+/// authenticated account, every user who could log in would get root, which
+/// is a worse failure than having no session support at all.
+fn session_command(user: &PasswdEntry, command_line: &str) -> process::Command {
+    let mut cmd = process::Command::new(&user.shell);
+    cmd.arg("-c").arg(command_line);
+
+    // Start from an empty environment; see `session_env` for why the
+    // daemon's own environment is not a safe base.
+    cmd.env_clear();
+    for (key, value) in session_env(user) {
+        cmd.env(key, value);
+    }
+
+    cmd.stdin(process::Stdio::null());
+    cmd.stdout(process::Stdio::piped());
+    cmd.stderr(process::Stdio::piped());
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        // Group first: after the uid drops, the process can no longer choose
+        // its group, so a uid-then-gid order would leave the session in the
+        // daemon's group. (`std` orders the two calls correctly on its own;
+        // writing them in this order keeps the reader from having to know
+        // that.)
+        cmd.gid(user.gid);
+        cmd.uid(user.uid);
+    }
+
+    cmd
+}
+
+/// Spawn a session command, retrying from `/` if the home directory is
+/// unusable.
+///
+/// A missing home directory is common on a freshly-provisioned account and
+/// must not turn every command into a spawn failure — the account exists and
+/// the user authenticated, so the session should start, just not there.
+/// OpenSSH does the same, logging the fallback.
+fn spawn_session_command(
+    user: &PasswdEntry,
+    command_line: &str,
+) -> Result<process::Child, io::Error> {
+    if !user.home.is_empty() {
+        let mut cmd = session_command(user, command_line);
+        cmd.current_dir(&user.home);
+        // A failure here falls through to the `/` retry below. The original
+        // error is dropped deliberately: if the retry also fails, its error is
+        // the one that describes why no session could start at all, and if the
+        // retry succeeds there was nothing to report.
+        if let Ok(child) = cmd.spawn() {
+            return Ok(child);
+        }
+    }
+    let mut cmd = session_command(user, command_line);
+    cmd.current_dir("/");
+    cmd.spawn()
+}
+
+// ============================================================================
 // SSH channel
 // ============================================================================
+
+/// The receive window advertised on every channel we open, and the figure the
+/// window is credited back up to.
+const INITIAL_LOCAL_WINDOW: u32 = 0x0020_0000; // 2 MiB
+
+/// Credit the peer more window once the remaining window falls below this.
+/// Chosen at a quarter of the window so the credit message is sent long
+/// before the peer would actually stall on it.
+const WINDOW_ADJUST_THRESHOLD: u32 = INITIAL_LOCAL_WINDOW / 4;
 
 struct Channel {
     /// Our channel number (server-side).
@@ -1962,13 +2234,9 @@ struct Channel {
     remote_window: u32,
     /// Our window size.
     local_window: u32,
-    /// Maximum packet size for sending.
-    // Stored from the channel-open request; will cap outbound DATA payloads once
-    // the daemon writes channel data back to the client. Not yet read in prod.
-    #[allow(dead_code)]
+    /// Maximum packet size for sending, from the peer's `CHANNEL_OPEN`.
+    /// Outbound data is split to fit it — see `send_channel_stream`.
     remote_max_packet: u32,
-    /// Whether a PTY has been requested.
-    pty_requested: bool,
     /// Terminal type (from PTY request).
     term: String,
     /// Terminal width in columns.
@@ -1987,9 +2255,8 @@ impl Channel {
             local_id,
             remote_id,
             remote_window,
-            local_window: 0x0020_0000, // 2 MiB
+            local_window: INITIAL_LOCAL_WINDOW,
             remote_max_packet,
-            pty_requested: false,
             term: String::new(),
             term_width: 80,
             term_height: 24,
@@ -2708,13 +2975,23 @@ fn handle_channel_request(conn: &mut ConnectionState, payload: &[u8]) -> Result<
 
     match req_type.as_str() {
         "pty-req" => {
+            // Parsed for the log and for the terminal size, but *refused*:
+            // SlateOS has no pseudo-terminal device yet, so there is nothing
+            // to allocate. Answering SUCCESS here would tell the client it had
+            // a terminal, after which it would put its own terminal in raw
+            // mode and wait for echo that no line discipline is producing.
+            // The client handles a FAILURE correctly — it reports "PTY
+            // allocation request failed" and continues without one.
+            //
+            // See `requests/b-a-pty-devices-need-the-line-discipline-that-the-
+            // console-already-has.md` for what has to land before this can
+            // succeed.
             let (term, width, height, _wpx, _hpx, _modes) = parse_pty_request(payload, off)?;
-            channel.pty_requested = true;
             channel.term = term;
             channel.term_width = width;
             channel.term_height = height;
             let term_info = format!(
-                "PTY: term={} {}x{}",
+                "PTY request refused (no pty device): term={} {}x{}",
                 channel.term, channel.term_width, channel.term_height
             );
             // The mutable borrow of `channel` ends here (its last read above),
@@ -2722,45 +2999,38 @@ fn handle_channel_request(conn: &mut ConnectionState, payload: &[u8]) -> Result<
             conn.debug_log(&term_info);
 
             if want_reply {
-                let mut success = Vec::new();
-                success.push(msg::SSH_MSG_CHANNEL_SUCCESS);
-                success.extend_from_slice(&remote_id.to_be_bytes());
-                conn.send_packet(&success)?;
+                let mut fail = Vec::new();
+                fail.push(msg::SSH_MSG_CHANNEL_FAILURE);
+                fail.extend_from_slice(&remote_id.to_be_bytes());
+                conn.send_packet(&fail)?;
             }
         }
         "shell" => {
-            conn.debug_log("shell request");
+            // Refused for the same reason as `pty-req`, one step removed. An
+            // interactive shell needs a terminal to be interactive on: without
+            // one there is no echo, no line editing, and no way for ^C to
+            // reach the shell. It also needs the connection loop to move bytes
+            // in both directions at once, which this single-threaded blocking
+            // loop cannot do.
+            //
+            // The previous behaviour was to answer SUCCESS and print a
+            // `Welcome to Slate OS` banner with a `$ ` prompt behind which no
+            // process existed, echoing back whatever was typed. That looks
+            // like a shell closely enough to be mistaken for one.
+            conn.debug_log("shell request refused (no pty device)");
 
             if want_reply {
-                let mut success = Vec::new();
-                success.push(msg::SSH_MSG_CHANNEL_SUCCESS);
-                success.extend_from_slice(&remote_id.to_be_bytes());
-                conn.send_packet(&success)?;
+                let mut fail = Vec::new();
+                fail.push(msg::SSH_MSG_CHANNEL_FAILURE);
+                fail.extend_from_slice(&remote_id.to_be_bytes());
+                conn.send_packet(&fail)?;
             }
-
-            // Send a welcome message.
-            let welcome = format!("Welcome to Slate OS, {}!\r\n$ ", conn.username);
-            send_channel_data(conn, remote_id, welcome.as_bytes())?;
         }
         "exec" => {
             let (cmd_bytes, _) = read_ssh_string(payload, off)?;
-            let cmd = String::from_utf8_lossy(cmd_bytes);
+            let cmd = String::from_utf8_lossy(cmd_bytes).into_owned();
             conn.debug_log(&format!("exec request: {cmd}"));
-
-            if want_reply {
-                let mut success = Vec::new();
-                success.push(msg::SSH_MSG_CHANNEL_SUCCESS);
-                success.extend_from_slice(&remote_id.to_be_bytes());
-                conn.send_packet(&success)?;
-            }
-
-            // Execute and send output.
-            let output = format!("exec: {cmd}\r\n");
-            send_channel_data(conn, remote_id, output.as_bytes())?;
-
-            // Send EOF and close.
-            send_channel_eof(conn, remote_id)?;
-            send_channel_close(conn, recipient)?;
+            run_exec_request(conn, recipient, remote_id, &cmd, want_reply)?;
         }
         "subsystem" => {
             let (subsys_bytes, _) = read_ssh_string(payload, off)?;
@@ -2818,6 +3088,103 @@ fn handle_channel_request(conn: &mut ConnectionState, payload: &[u8]) -> Result<
     Ok(())
 }
 
+/// Send `SSH_MSG_CHANNEL_SUCCESS` for a request that was accepted.
+fn send_channel_success(conn: &mut ConnectionState, remote_id: u32) -> Result<(), SshdError> {
+    let mut reply = Vec::new();
+    reply.push(msg::SSH_MSG_CHANNEL_SUCCESS);
+    reply.extend_from_slice(&remote_id.to_be_bytes());
+    conn.send_packet(&reply)
+}
+
+/// Send `SSH_MSG_CHANNEL_FAILURE` for a request that was refused.
+fn send_channel_failure(conn: &mut ConnectionState, remote_id: u32) -> Result<(), SshdError> {
+    let mut reply = Vec::new();
+    reply.push(msg::SSH_MSG_CHANNEL_FAILURE);
+    reply.extend_from_slice(&remote_id.to_be_bytes());
+    conn.send_packet(&reply)
+}
+
+/// Run an `exec` request's command line and report its output and exit status.
+///
+/// The command really runs, as the authenticated user, through that user's
+/// login shell — the same `shell -c 'command'` contract OpenSSH offers, so a
+/// caller's quoting, redirections and pipelines behave the way they expect.
+///
+/// Ordering note: the account is resolved and the child spawned *before* the
+/// request is answered, because RFC 4254 §6.5's reply reports whether the
+/// request was accepted, and a command that could not be started was not.
+///
+/// Limitation, deliberate and documented: output is collected in full and
+/// sent when the command exits, rather than streamed as it is produced. A
+/// command that never exits (`tail -f`) therefore produces nothing, and a
+/// command with very large output is buffered in memory. Streaming needs the
+/// connection loop to watch the child's pipes and the socket at the same
+/// time, which this single-threaded blocking loop cannot do; see
+/// `known-issues.md`.
+fn run_exec_request(
+    conn: &mut ConnectionState,
+    local_id: u32,
+    remote_id: u32,
+    command_line: &str,
+    want_reply: bool,
+) -> Result<(), SshdError> {
+    let Some(user) = lookup_passwd(&conn.username) else {
+        // Authentication proved who they are; without a passwd entry there is
+        // no identity to *become*. Running as the daemon's own identity (root)
+        // instead is not an acceptable fallback, so the request is refused.
+        let name = conn.username.clone();
+        conn.debug_log(&format!("exec refused: no /etc/passwd entry for {name}"));
+        if want_reply {
+            send_channel_failure(conn, remote_id)?;
+        }
+        return Ok(());
+    };
+
+    let child = match spawn_session_command(&user, command_line) {
+        Ok(child) => child,
+        Err(e) => {
+            conn.debug_log(&format!("exec spawn failed: {e}"));
+            if want_reply {
+                send_channel_failure(conn, remote_id)?;
+            }
+            return Ok(());
+        }
+    };
+
+    if want_reply {
+        send_channel_success(conn, remote_id)?;
+    }
+
+    // `wait_with_output` drains stdout and stderr together. Reading them one
+    // after the other from this thread would deadlock as soon as the child
+    // filled whichever pipe we were not reading.
+    let output = match child.wait_with_output() {
+        Ok(output) => output,
+        Err(e) => {
+            let note = format!("sshd: could not collect command output: {e}\r\n");
+            send_channel_stream(conn, local_id, true, note.as_bytes())?;
+            send_session_exit(conn, remote_id, &SessionExit::Status(255))?;
+            send_channel_eof(conn, remote_id)?;
+            send_channel_close(conn, local_id)?;
+            return Ok(());
+        }
+    };
+
+    let exit = classify_exit(&output.status);
+    conn.debug_log(&format!(
+        "exec finished: {exit:?} stdout={}B stderr={}B",
+        output.stdout.len(),
+        output.stderr.len()
+    ));
+
+    send_channel_stream(conn, local_id, false, &output.stdout)?;
+    send_channel_stream(conn, local_id, true, &output.stderr)?;
+    send_session_exit(conn, remote_id, &exit)?;
+    send_channel_eof(conn, remote_id)?;
+    send_channel_close(conn, local_id)?;
+    Ok(())
+}
+
 /// Handle `CHANNEL_DATA`.
 fn handle_channel_data(conn: &mut ConnectionState, payload: &[u8]) -> Result<(), SshdError> {
     let (recipient, off) = read_u32(payload, 1)?;
@@ -2828,15 +3195,48 @@ fn handle_channel_data(conn: &mut ConnectionState, payload: &[u8]) -> Result<(),
         data.len()
     ));
 
-    let channel = conn.channels.iter().find(|ch| ch.local_id == recipient);
-    if let Some(channel) = channel {
-        let remote_id = channel.remote_id;
-
-        // Echo data back (simplified shell).
-        send_channel_data(conn, remote_id, data)?;
+    // There is nothing on this end to receive it. `exec` runs its command with
+    // stdin connected to /dev/null and `shell` is refused outright, so no
+    // process is waiting on the channel's input. The data is consumed and
+    // dropped, and the window is credited back so a client that keeps sending
+    // is not left blocked on a window that never reopens.
+    //
+    // This used to echo the data straight back, which made an interactive
+    // client look like it was talking to a shell that echoed its typing --
+    // indistinguishable, at the terminal, from a real session.
+    let mut credit = None;
+    if let Some(channel) = conn.channels.iter_mut().find(|ch| ch.local_id == recipient) {
+        let consumed = u32::try_from(data.len()).unwrap_or(u32::MAX);
+        channel.local_window = channel.local_window.saturating_sub(consumed);
+        // Re-open the window well before it runs out, in one large credit,
+        // rather than one message per data packet.
+        if channel.local_window < WINDOW_ADJUST_THRESHOLD {
+            credit = Some((
+                channel.remote_id,
+                INITIAL_LOCAL_WINDOW.saturating_sub(channel.local_window),
+            ));
+            channel.local_window = INITIAL_LOCAL_WINDOW;
+        }
+    }
+    // The mutable borrow of `channel` has ended, so `conn` is free to send.
+    if let Some((remote_id, bytes)) = credit {
+        send_window_adjust(conn, remote_id, bytes)?;
     }
 
     Ok(())
+}
+
+/// Send `SSH_MSG_CHANNEL_WINDOW_ADJUST`, crediting the peer more send window.
+fn send_window_adjust(
+    conn: &mut ConnectionState,
+    remote_channel_id: u32,
+    bytes_to_add: u32,
+) -> Result<(), SshdError> {
+    let mut msg_buf = Vec::new();
+    msg_buf.push(msg::SSH_MSG_CHANNEL_WINDOW_ADJUST);
+    msg_buf.extend_from_slice(&remote_channel_id.to_be_bytes());
+    msg_buf.extend_from_slice(&bytes_to_add.to_be_bytes());
+    conn.send_packet(&msg_buf)
 }
 
 /// Handle `CHANNEL_WINDOW_ADJUST`.
@@ -2914,6 +3314,158 @@ fn send_channel_data(
     msg_buf.extend_from_slice(&remote_channel_id.to_be_bytes());
     msg_buf.extend_from_slice(&ssh_string(data));
     conn.send_packet(&msg_buf)
+}
+
+/// `data_type_code` for `SSH_MSG_CHANNEL_EXTENDED_DATA` carrying stderr
+/// (RFC 4254 §5.2 — the only code the specification defines).
+const SSH_EXTENDED_DATA_STDERR: u32 = 1;
+
+/// Send data on a channel's *extended* data stream.
+///
+/// This is how a command's stderr reaches the client as stderr rather than
+/// being folded into its stdout.  The distinction is not cosmetic: a caller
+/// doing `ssh host cmd > file` expects diagnostics on its own terminal and
+/// only the command's real output in `file`, and merging the two streams
+/// silently corrupts the file with whatever the command warned about.
+fn send_channel_extended_data(
+    conn: &mut ConnectionState,
+    remote_channel_id: u32,
+    data_type_code: u32,
+    data: &[u8],
+) -> Result<(), SshdError> {
+    let mut msg_buf = Vec::new();
+    msg_buf.push(msg::SSH_MSG_CHANNEL_EXTENDED_DATA);
+    msg_buf.extend_from_slice(&remote_channel_id.to_be_bytes());
+    msg_buf.extend_from_slice(&data_type_code.to_be_bytes());
+    msg_buf.extend_from_slice(&ssh_string(data));
+    conn.send_packet(&msg_buf)
+}
+
+/// Send the `exit-status` channel request (RFC 4254 §6.10).
+///
+/// `want_reply` is always false for this request — it is a notification, and
+/// the specification says a reply must not be sent.
+///
+/// Without this, `ssh host false` exits **0**: the OpenSSH client treats a
+/// channel that closes with no `exit-status` as success, so a server that
+/// omits it reports every failure as a pass.  That silence is worse than a
+/// wrong number, because a shell script's `if ssh host cmd; then` reads it as
+/// a green light.
+fn send_exit_status(
+    conn: &mut ConnectionState,
+    remote_channel_id: u32,
+    status: u32,
+) -> Result<(), SshdError> {
+    let mut msg_buf = Vec::new();
+    msg_buf.push(msg::SSH_MSG_CHANNEL_REQUEST);
+    msg_buf.extend_from_slice(&remote_channel_id.to_be_bytes());
+    msg_buf.extend_from_slice(&ssh_string(b"exit-status"));
+    msg_buf.push(0); // want_reply = false
+    msg_buf.extend_from_slice(&status.to_be_bytes());
+    conn.send_packet(&msg_buf)
+}
+
+/// Send the `exit-signal` channel request (RFC 4254 §6.10).
+///
+/// Reported instead of `exit-status` when the command was killed rather than
+/// having exited, so the client can print "Killed by signal 15" rather than
+/// inventing an exit code the command never returned.
+fn send_exit_signal(
+    conn: &mut ConnectionState,
+    remote_channel_id: u32,
+    signal_name: &str,
+    core_dumped: bool,
+    error_message: &str,
+) -> Result<(), SshdError> {
+    let mut msg_buf = Vec::new();
+    msg_buf.push(msg::SSH_MSG_CHANNEL_REQUEST);
+    msg_buf.extend_from_slice(&remote_channel_id.to_be_bytes());
+    msg_buf.extend_from_slice(&ssh_string(b"exit-signal"));
+    msg_buf.push(0); // want_reply = false
+    msg_buf.extend_from_slice(&ssh_string(signal_name.as_bytes()));
+    msg_buf.push(u8::from(core_dumped));
+    msg_buf.extend_from_slice(&ssh_string(error_message.as_bytes()));
+    msg_buf.extend_from_slice(&ssh_string(b"")); // language tag
+    conn.send_packet(&msg_buf)
+}
+
+/// Report a finished session command's outcome to the client.
+fn send_session_exit(
+    conn: &mut ConnectionState,
+    remote_channel_id: u32,
+    exit: &SessionExit,
+) -> Result<(), SshdError> {
+    match exit {
+        SessionExit::Status(code) => send_exit_status(conn, remote_channel_id, *code),
+        SessionExit::Signal { name, core_dumped } => send_exit_signal(
+            conn,
+            remote_channel_id,
+            name,
+            *core_dumped,
+            &format!("killed by SIG{name}"),
+        ),
+    }
+}
+
+/// The per-message overhead of a `SSH_MSG_CHANNEL_DATA` payload: the message
+/// byte, the recipient channel number, and the 4-byte string length.
+const CHANNEL_DATA_OVERHEAD: u32 = 1 + 4 + 4;
+
+/// Send a whole byte stream on a channel, split to respect the peer's
+/// advertised maximum packet size.
+///
+/// The peer told us its limit in `CHANNEL_OPEN`; exceeding it is a protocol
+/// violation, and a command whose output is larger than one packet is the
+/// normal case rather than an edge case, so the split has to happen here
+/// rather than at each call site.
+fn send_channel_stream(
+    conn: &mut ConnectionState,
+    local_channel_id: u32,
+    stderr_stream: bool,
+    data: &[u8],
+) -> Result<(), SshdError> {
+    let Some((remote_id, max_packet)) = conn
+        .channels
+        .iter()
+        .find(|ch| ch.local_id == local_channel_id)
+        .map(|ch| (ch.remote_id, ch.remote_max_packet))
+    else {
+        return Ok(());
+    };
+
+    // Extended data carries an extra uint32 type code ahead of the string.
+    let overhead = if stderr_stream {
+        CHANNEL_DATA_OVERHEAD.saturating_add(4)
+    } else {
+        CHANNEL_DATA_OVERHEAD
+    };
+    // A peer that advertises a max packet smaller than the header cannot be
+    // satisfied; clamp to a minimum rather than dividing into zero-size
+    // chunks and looping forever.
+    let chunk = usize::try_from(max_packet.saturating_sub(overhead))
+        .unwrap_or(usize::MAX)
+        .max(1);
+
+    for piece in data.chunks(chunk) {
+        if stderr_stream {
+            send_channel_extended_data(conn, remote_id, SSH_EXTENDED_DATA_STDERR, piece)?;
+        } else {
+            send_channel_data(conn, remote_id, piece)?;
+        }
+        if let Some(channel) = conn
+            .channels
+            .iter_mut()
+            .find(|ch| ch.local_id == local_channel_id)
+        {
+            // Track the peer's window so a future streaming implementation
+            // has an accurate figure to block on. Saturating rather than
+            // wrapping: a negative window is not a thing the protocol has.
+            channel.remote_window = channel
+                .remote_window
+                .saturating_sub(u32::try_from(piece.len()).unwrap_or(u32::MAX));
+        }
+    }
+    Ok(())
 }
 
 /// Send EOF on a channel.
@@ -3695,6 +4247,147 @@ DenyGroups nogroup
         assert_eq!(entries[0].username, "root");
     }
 
+    // ---- /etc/passwd parsing ----
+
+    #[test]
+    fn test_parse_passwd() {
+        let content = "root:x:0:0:root:/root:/bin/sh\n\
+                       alice:x:1000:1000:Alice,,,:/home/alice:/bin/bash\n";
+        let entries = parse_passwd(content);
+        assert_eq!(entries.len(), 2);
+        assert_eq!(
+            entries[0],
+            PasswdEntry {
+                username: "root".into(),
+                uid: 0,
+                gid: 0,
+                home: "/root".into(),
+                shell: "/bin/sh".into(),
+            }
+        );
+        assert_eq!(entries[1].uid, 1000);
+        assert_eq!(entries[1].home, "/home/alice");
+        assert_eq!(entries[1].shell, "/bin/bash");
+    }
+
+    /// POSIX: an empty shell field means `/bin/sh`, not "no shell".
+    #[test]
+    fn test_parse_passwd_empty_shell_defaults() {
+        let entries = parse_passwd("bob:x:1001:1001::/home/bob:\n");
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].shell, DEFAULT_LOGIN_SHELL);
+    }
+
+    /// One malformed line must not lock every account out of the machine.
+    #[test]
+    fn test_parse_passwd_skips_malformed_lines() {
+        let content = "# comment\n\
+                       truncated:x:1:1\n\
+                       bad-uid:x:notanumber:1:x:/h:/bin/sh\n\
+                       bad-gid:x:1:notanumber:x:/h:/bin/sh\n\
+                       \n\
+                       good:x:7:8:x:/home/good:/bin/sh\n";
+        let entries = parse_passwd(content);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].username, "good");
+        assert_eq!(entries[0].uid, 7);
+        assert_eq!(entries[0].gid, 8);
+    }
+
+    /// A `gecos` field containing colons must not shift the later fields:
+    /// `split(':')` is correct precisely because the field count is fixed and
+    /// gecos commas — not colons — separate its subfields.
+    #[test]
+    fn test_parse_passwd_gecos_with_commas() {
+        let entries = parse_passwd("c:x:5:6:Full Name,Room 1,555,555:/home/c:/bin/zsh\n");
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].home, "/home/c");
+        assert_eq!(entries[0].shell, "/bin/zsh");
+    }
+
+    #[test]
+    fn test_default_path_for_uid() {
+        assert!(default_path_for_uid(0).contains("/sbin"));
+        assert!(!default_path_for_uid(1000).contains("/sbin"));
+    }
+
+    /// The daemon's own environment must not leak into a session: the
+    /// environment is built from the account, and from nothing else.
+    #[test]
+    fn test_session_env_is_built_from_the_account() {
+        let user = PasswdEntry {
+            username: "alice".into(),
+            uid: 1000,
+            gid: 1000,
+            home: "/home/alice".into(),
+            shell: "/bin/bash".into(),
+        };
+        let env = session_env(&user);
+        let get = |k: &str| {
+            env.iter()
+                .find(|(key, _)| key == k)
+                .map(|(_, v)| v.clone())
+                .unwrap_or_default()
+        };
+        assert_eq!(get("HOME"), "/home/alice");
+        assert_eq!(get("USER"), "alice");
+        assert_eq!(get("LOGNAME"), "alice");
+        assert_eq!(get("SHELL"), "/bin/bash");
+        assert_eq!(get("PATH"), default_path_for_uid(1000));
+        assert_eq!(env.len(), 5);
+    }
+
+    // ---- Session exit reporting ----
+
+    #[test]
+    fn test_rfc4254_signal_names() {
+        // The thirteen the RFC enumerates, spot-checked at both ends.
+        assert_eq!(rfc4254_signal_name(1), Some("HUP"));
+        assert_eq!(rfc4254_signal_name(9), Some("KILL"));
+        assert_eq!(rfc4254_signal_name(15), Some("TERM"));
+        // Not in the RFC's list: the caller falls back to 128+n.
+        assert_eq!(rfc4254_signal_name(31), None);
+        assert_eq!(rfc4254_signal_name(0), None);
+    }
+
+    /// `exit-status` is a request with `want_reply = false` (RFC 4254 §6.10);
+    /// a server that sets the flag would have the client wait for a reply that
+    /// the specification forbids sending.
+    #[test]
+    fn test_exit_status_message_shape() {
+        let mut msg_buf = Vec::new();
+        msg_buf.push(msg::SSH_MSG_CHANNEL_REQUEST);
+        msg_buf.extend_from_slice(&7u32.to_be_bytes());
+        msg_buf.extend_from_slice(&ssh_string(b"exit-status"));
+        msg_buf.push(0);
+        msg_buf.extend_from_slice(&42u32.to_be_bytes());
+
+        assert_eq!(msg_buf[0], 98);
+        let (recipient, off) = read_u32(&msg_buf, 1).expect("recipient");
+        assert_eq!(recipient, 7);
+        let (req_type, off) = read_ssh_string(&msg_buf, off).expect("request type");
+        assert_eq!(req_type, b"exit-status");
+        let (want_reply, off) = read_bool(&msg_buf, off).expect("want_reply");
+        assert!(!want_reply, "exit-status must not request a reply");
+        let (status, _) = read_u32(&msg_buf, off).expect("status");
+        assert_eq!(status, 42);
+    }
+
+    /// The chunk size must leave room for the message header, or a peer that
+    /// advertises exactly `n` bytes would receive `n + 9`.
+    #[test]
+    fn test_channel_data_overhead_is_the_real_header_size() {
+        // msg byte + recipient u32 + string length u32.
+        assert_eq!(CHANNEL_DATA_OVERHEAD, 9);
+        let framed = {
+            let mut v = vec![msg::SSH_MSG_CHANNEL_DATA];
+            v.extend_from_slice(&0u32.to_be_bytes());
+            v.extend_from_slice(&ssh_string(b"abcd"));
+            v
+        };
+        assert_eq!(framed.len(), 4 + CHANNEL_DATA_OVERHEAD as usize);
+    }
+
     // ---- Authorized keys parsing ----
 
     #[test]
@@ -3753,7 +4446,7 @@ DenyGroups nogroup
         assert_eq!(ch.remote_id, 1);
         assert_eq!(ch.remote_window, 65536);
         assert_eq!(ch.remote_max_packet, 32768);
-        assert!(!ch.pty_requested);
+        assert_eq!(ch.local_window, INITIAL_LOCAL_WINDOW);
         assert!(!ch.closed);
     }
 

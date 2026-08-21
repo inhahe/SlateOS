@@ -24,6 +24,25 @@
 //! - MAC: HMAC-SHA256
 //! - User auth: password method
 //! - Channel: session with PTY and shell/exec
+//!
+//! # Exit status
+//!
+//! Follows `ssh(1)`: the client exits with **the remote command's** exit
+//! status, so `ssh host cmd && next` behaves as if `cmd` had run locally. A
+//! failure of the client or the connection — a bad argument, an unresolvable
+//! host, a refused connection, a protocol error — exits **255**, which is
+//! reserved for exactly that purpose so a caller can tell "the command failed"
+//! from "the command never ran". A command killed by a signal has no exit
+//! status of its own; that is reported on stderr and also exits 255.
+//!
+//! If the server sends no `exit-status` at all, the client exits 0. That is
+//! unavoidable — it is what an interactive session looks like — and it is
+//! precisely why a *server* must always send one.
+//!
+//! The remote command's stderr arrives on the extended-data stream
+//! (RFC 4254 §5.2) and is written to *this* process's stderr, so
+//! `ssh host cmd > file` puts output in the file and diagnostics on the
+//! terminal, as it would locally.
 
 #![deny(clippy::all)]
 #![allow(clippy::manual_range_contains)]
@@ -263,6 +282,7 @@ mod msg {
     pub const SSH_MSG_CHANNEL_OPEN_FAILURE: u8 = 92;
     pub const SSH_MSG_CHANNEL_WINDOW_ADJUST: u8 = 93;
     pub const SSH_MSG_CHANNEL_DATA: u8 = 94;
+    pub const SSH_MSG_CHANNEL_EXTENDED_DATA: u8 = 95;
     pub const SSH_MSG_CHANNEL_EOF: u8 = 96;
     pub const SSH_MSG_CHANNEL_CLOSE: u8 = 97;
     pub const SSH_MSG_CHANNEL_REQUEST: u8 = 98;
@@ -372,10 +392,7 @@ fn read_packet(
         // Verify MAC.
         let expected_mac = compute_mac(&enc.mac_key_s2c, seq, &dec);
         if mac_data.len() >= mac_len
-            && !constant_time_eq(
-                mac_data.get(..mac_len).unwrap_or_default(),
-                &expected_mac,
-            )
+            && !constant_time_eq(mac_data.get(..mac_len).unwrap_or_default(), &expected_mac)
         {
             return Err(SshError::ProtocolError("MAC verification failed".into()));
         }
@@ -747,9 +764,7 @@ impl BigUint {
             return self.clone();
         }
         if self.is_zero() {
-            return BigUint {
-                bytes: vec![val],
-            };
+            return BigUint { bytes: vec![val] };
         }
         let mut result = self.bytes.clone();
         let mut carry = u16::from(val);
@@ -778,7 +793,11 @@ impl BigUint {
         for i in (0..len).rev() {
             let av = i16::from(a[i]);
             let bi = i as isize - (len as isize - b.len() as isize);
-            let bv = if bi >= 0 { i16::from(b[bi as usize]) } else { 0 };
+            let bv = if bi >= 0 {
+                i16::from(b[bi as usize])
+            } else {
+                0
+            };
             let diff = av - bv - borrow;
             if diff < 0 {
                 result[i] = (diff + 256) as u8;
@@ -893,24 +912,22 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
 
 /// AES S-Box lookup table.
 const AES_SBOX: [u8; 256] = [
-    0x63, 0x7c, 0x77, 0x7b, 0xf2, 0x6b, 0x6f, 0xc5, 0x30, 0x01, 0x67, 0x2b, 0xfe, 0xd7, 0xab,
-    0x76, 0xca, 0x82, 0xc9, 0x7d, 0xfa, 0x59, 0x47, 0xf0, 0xad, 0xd4, 0xa2, 0xaf, 0x9c, 0xa4,
-    0x72, 0xc0, 0xb7, 0xfd, 0x93, 0x26, 0x36, 0x3f, 0xf7, 0xcc, 0x34, 0xa5, 0xe5, 0xf1, 0x71,
-    0xd8, 0x31, 0x15, 0x04, 0xc7, 0x23, 0xc3, 0x18, 0x96, 0x05, 0x9a, 0x07, 0x12, 0x80, 0xe2,
-    0xeb, 0x27, 0xb2, 0x75, 0x09, 0x83, 0x2c, 0x1a, 0x1b, 0x6e, 0x5a, 0xa0, 0x52, 0x3b, 0xd6,
-    0xb3, 0x29, 0xe3, 0x2f, 0x84, 0x53, 0xd1, 0x00, 0xed, 0x20, 0xfc, 0xb1, 0x5b, 0x6a, 0xcb,
-    0xbe, 0x39, 0x4a, 0x4c, 0x58, 0xcf, 0xd0, 0xef, 0xaa, 0xfb, 0x43, 0x4d, 0x33, 0x85, 0x45,
-    0xf9, 0x02, 0x7f, 0x50, 0x3c, 0x9f, 0xa8, 0x51, 0xa3, 0x40, 0x8f, 0x92, 0x9d, 0x38, 0xf5,
-    0xbc, 0xb6, 0xda, 0x21, 0x10, 0xff, 0xf3, 0xd2, 0xcd, 0x0c, 0x13, 0xec, 0x5f, 0x97, 0x44,
-    0x17, 0xc4, 0xa7, 0x7e, 0x3d, 0x64, 0x5d, 0x19, 0x73, 0x60, 0x81, 0x4f, 0xdc, 0x22, 0x2a,
-    0x90, 0x88, 0x46, 0xee, 0xb8, 0x14, 0xde, 0x5e, 0x0b, 0xdb, 0xe0, 0x32, 0x3a, 0x0a, 0x49,
-    0x06, 0x24, 0x5c, 0xc2, 0xd3, 0xac, 0x62, 0x91, 0x95, 0xe4, 0x79, 0xe7, 0xc8, 0x37, 0x6d,
-    0x8d, 0xd5, 0x4e, 0xa9, 0x6c, 0x56, 0xf4, 0xea, 0x65, 0x7a, 0xae, 0x08, 0xba, 0x78, 0x25,
-    0x2e, 0x1c, 0xa6, 0xb4, 0xc6, 0xe8, 0xdd, 0x74, 0x1f, 0x4b, 0xbd, 0x8b, 0x8a, 0x70, 0x3e,
-    0xb5, 0x66, 0x48, 0x03, 0xf6, 0x0e, 0x61, 0x35, 0x57, 0xb9, 0x86, 0xc1, 0x1d, 0x9e, 0xe1,
-    0xf8, 0x98, 0x11, 0x69, 0xd9, 0x8e, 0x94, 0x9b, 0x1e, 0x87, 0xe9, 0xce, 0x55, 0x28, 0xdf,
-    0x8c, 0xa1, 0x89, 0x0d, 0xbf, 0xe6, 0x42, 0x68, 0x41, 0x99, 0x2d, 0x0f, 0xb0, 0x54, 0xbb,
-    0x16,
+    0x63, 0x7c, 0x77, 0x7b, 0xf2, 0x6b, 0x6f, 0xc5, 0x30, 0x01, 0x67, 0x2b, 0xfe, 0xd7, 0xab, 0x76,
+    0xca, 0x82, 0xc9, 0x7d, 0xfa, 0x59, 0x47, 0xf0, 0xad, 0xd4, 0xa2, 0xaf, 0x9c, 0xa4, 0x72, 0xc0,
+    0xb7, 0xfd, 0x93, 0x26, 0x36, 0x3f, 0xf7, 0xcc, 0x34, 0xa5, 0xe5, 0xf1, 0x71, 0xd8, 0x31, 0x15,
+    0x04, 0xc7, 0x23, 0xc3, 0x18, 0x96, 0x05, 0x9a, 0x07, 0x12, 0x80, 0xe2, 0xeb, 0x27, 0xb2, 0x75,
+    0x09, 0x83, 0x2c, 0x1a, 0x1b, 0x6e, 0x5a, 0xa0, 0x52, 0x3b, 0xd6, 0xb3, 0x29, 0xe3, 0x2f, 0x84,
+    0x53, 0xd1, 0x00, 0xed, 0x20, 0xfc, 0xb1, 0x5b, 0x6a, 0xcb, 0xbe, 0x39, 0x4a, 0x4c, 0x58, 0xcf,
+    0xd0, 0xef, 0xaa, 0xfb, 0x43, 0x4d, 0x33, 0x85, 0x45, 0xf9, 0x02, 0x7f, 0x50, 0x3c, 0x9f, 0xa8,
+    0x51, 0xa3, 0x40, 0x8f, 0x92, 0x9d, 0x38, 0xf5, 0xbc, 0xb6, 0xda, 0x21, 0x10, 0xff, 0xf3, 0xd2,
+    0xcd, 0x0c, 0x13, 0xec, 0x5f, 0x97, 0x44, 0x17, 0xc4, 0xa7, 0x7e, 0x3d, 0x64, 0x5d, 0x19, 0x73,
+    0x60, 0x81, 0x4f, 0xdc, 0x22, 0x2a, 0x90, 0x88, 0x46, 0xee, 0xb8, 0x14, 0xde, 0x5e, 0x0b, 0xdb,
+    0xe0, 0x32, 0x3a, 0x0a, 0x49, 0x06, 0x24, 0x5c, 0xc2, 0xd3, 0xac, 0x62, 0x91, 0x95, 0xe4, 0x79,
+    0xe7, 0xc8, 0x37, 0x6d, 0x8d, 0xd5, 0x4e, 0xa9, 0x6c, 0x56, 0xf4, 0xea, 0x65, 0x7a, 0xae, 0x08,
+    0xba, 0x78, 0x25, 0x2e, 0x1c, 0xa6, 0xb4, 0xc6, 0xe8, 0xdd, 0x74, 0x1f, 0x4b, 0xbd, 0x8b, 0x8a,
+    0x70, 0x3e, 0xb5, 0x66, 0x48, 0x03, 0xf6, 0x0e, 0x61, 0x35, 0x57, 0xb9, 0x86, 0xc1, 0x1d, 0x9e,
+    0xe1, 0xf8, 0x98, 0x11, 0x69, 0xd9, 0x8e, 0x94, 0x9b, 0x1e, 0x87, 0xe9, 0xce, 0x55, 0x28, 0xdf,
+    0x8c, 0xa1, 0x89, 0x0d, 0xbf, 0xe6, 0x42, 0x68, 0x41, 0x99, 0x2d, 0x0f, 0xb0, 0x54, 0xbb, 0x16,
 ];
 
 /// AES round constants.
@@ -1091,7 +1108,13 @@ fn decrypt_packet_aes_ctr(packet: &mut [u8], key: &[u8], iv: &[u8], _seq: u32) {
 }
 
 /// Decrypt just the first block to peek at packet_length.
-fn decrypt_block_aes_ctr(data: &[u8], key: &[u8], iv: &[u8], _seq: u32, _block_idx: usize) -> Vec<u8> {
+fn decrypt_block_aes_ctr(
+    data: &[u8],
+    key: &[u8],
+    iv: &[u8],
+    _seq: u32,
+    _block_idx: usize,
+) -> Vec<u8> {
     let mut result = data.to_vec();
     encrypt_packet_aes_ctr(&mut result, key, iv, _seq);
     result
@@ -1428,7 +1451,10 @@ fn base64_decode(input: &str) -> Vec<u8> {
         }
     }
 
-    let bytes: Vec<u8> = input.bytes().filter(|&b| b != b'=' && b != b'\n' && b != b'\r').collect();
+    let bytes: Vec<u8> = input
+        .bytes()
+        .filter(|&b| b != b'=' && b != b'\n' && b != b'\r')
+        .collect();
     let mut result = Vec::with_capacity(bytes.len() * 3 / 4);
     let mut i = 0;
     while i + 3 < bytes.len() {
@@ -1508,9 +1534,7 @@ fn parse_args() -> Result<Config, String> {
                 let val = args
                     .get(i)
                     .ok_or_else(|| "-p requires a port number".to_string())?;
-                port = val
-                    .parse()
-                    .map_err(|_| format!("invalid port: {val}"))?;
+                port = val.parse().map_err(|_| format!("invalid port: {val}"))?;
             }
             "-v" => {
                 verbose = true;
@@ -1583,6 +1607,23 @@ fn parse_args() -> Result<Config, String> {
 // SSH session — main protocol state machine
 // ============================================================================
 
+/// `data_type_code` for `SSH_MSG_CHANNEL_EXTENDED_DATA` carrying stderr
+/// (RFC 4254 §5.2 — the only code the specification defines).
+const SSH_EXTENDED_DATA_STDERR: u32 = 1;
+
+/// How the remote command ended, if the server said (RFC 4254 §6.10).
+///
+/// `None` on the session means the server never sent either request. That is
+/// the normal case for an interactive session, and for a server that does not
+/// implement the notification — which is why a missing status has to mean
+/// success rather than failure, even though it makes an incomplete server
+/// indistinguishable from a command that worked.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum RemoteExit {
+    Status(u32),
+    Signal { name: String, core_dumped: bool },
+}
+
 struct SshSession {
     handle: u64,
     buf: StreamBuffer,
@@ -1598,6 +1639,8 @@ struct SshSession {
     channel_id: u32,
     remote_channel_id: u32,
     remote_window: u32,
+    /// What the server reported about how the remote command ended.
+    remote_exit: Option<RemoteExit>,
 }
 
 impl SshSession {
@@ -1617,6 +1660,28 @@ impl SshSession {
             channel_id: 0,
             remote_channel_id: 0,
             remote_window: 0,
+            remote_exit: None,
+        }
+    }
+
+    /// The process exit code this client should exit with.
+    ///
+    /// `ssh(1)`'s contract: exit with the remote command's status, so that
+    /// `ssh host cmd && something` behaves as if `cmd` had been run locally.
+    /// A command killed by a signal has no exit status of its own; OpenSSH
+    /// reports that as 255 and prints why, and matching it keeps scripts
+    /// written against OpenSSH working here.
+    fn exit_code(&self) -> i32 {
+        match &self.remote_exit {
+            Some(RemoteExit::Status(code)) => i32::try_from(*code).unwrap_or(255),
+            Some(RemoteExit::Signal { name, core_dumped }) => {
+                eprintln!(
+                    "ssh: remote command killed by SIG{name}{}",
+                    if *core_dumped { " (core dumped)" } else { "" }
+                );
+                255
+            }
+            None => 0,
         }
     }
 
@@ -1687,7 +1752,9 @@ impl SshSession {
         self.verbose(&format!("remote version: {}", self.server_version));
 
         // Verify it speaks SSH-2.
-        if !self.server_version.starts_with("SSH-2.0-") && !self.server_version.starts_with("SSH-1.99-") {
+        if !self.server_version.starts_with("SSH-2.0-")
+            && !self.server_version.starts_with("SSH-1.99-")
+        {
             return Err(SshError::ProtocolError(format!(
                 "unsupported server version: {}",
                 self.server_version
@@ -1903,23 +1970,16 @@ impl SshSession {
             false => {
                 // Host not in known_hosts.
                 match self.config.strict_host_key {
-                    StrictHostKey::Yes => {
-                        Err(SshError::HostKeyMismatch(format!(
-                            "host '{}' not found in known_hosts (StrictHostKeyChecking=yes)",
-                            self.config.hostname
-                        )))
-                    }
+                    StrictHostKey::Yes => Err(SshError::HostKeyMismatch(format!(
+                        "host '{}' not found in known_hosts (StrictHostKeyChecking=yes)",
+                        self.config.hostname
+                    ))),
                     StrictHostKey::No => {
                         eprintln!(
                             "Warning: Permanently added '{}' ({key_type}) to the list of known hosts.",
                             self.config.hostname
                         );
-                        add_known_host(
-                            &self.config.hostname,
-                            self.config.port,
-                            key_type,
-                            key_blob,
-                        );
+                        add_known_host(&self.config.hostname, self.config.port, key_type, key_blob);
                         Ok(())
                     }
                     StrictHostKey::Ask => {
@@ -2036,14 +2096,17 @@ impl SshSession {
         io::stderr().flush().ok();
 
         let mut password = String::new();
-        io::stdin().read_line(&mut password).map_err(|e| {
-            SshError::ProtocolError(format!("failed to read password: {e}"))
-        })?;
+        io::stdin()
+            .read_line(&mut password)
+            .map_err(|e| SshError::ProtocolError(format!("failed to read password: {e}")))?;
 
         // Print newline after password entry.
         eprintln!();
 
-        Ok(password.trim_end_matches('\n').trim_end_matches('\r').to_string())
+        Ok(password
+            .trim_end_matches('\n')
+            .trim_end_matches('\r')
+            .to_string())
     }
 
     // === Phase 4: Channel open + PTY + shell/exec ===
@@ -2095,7 +2158,9 @@ impl SshSession {
                     // Skip informational messages.
                 }
                 Some(other) => {
-                    self.verbose(&format!("ignoring message type {other} while opening channel"));
+                    self.verbose(&format!(
+                        "ignoring message type {other} while opening channel"
+                    ));
                 }
                 None => {
                     return Err(SshError::ProtocolError("empty response".into()));
@@ -2189,7 +2254,20 @@ impl SshSession {
                     return Ok(());
                 }
                 Some(msg::SSH_MSG_CHANNEL_FAILURE) => {
-                    return Err(SshError::ProtocolError("shell/exec request failed".into()));
+                    // Name which request was refused: "shell request failed"
+                    // and "exec request failed" have different causes, and a
+                    // combined message sends the reader looking in the wrong
+                    // place. A server with no pseudo-terminal support refuses
+                    // `shell` and accepts `exec`.
+                    let what = if self.config.command.is_some() {
+                        "exec"
+                    } else {
+                        "shell"
+                    };
+                    return Err(SshError::ProtocolError(format!(
+                        "{what} request failed on channel {}",
+                        self.channel_id
+                    )));
                 }
                 Some(msg::SSH_MSG_CHANNEL_WINDOW_ADJUST) => {
                     self.handle_window_adjust(&reply);
@@ -2198,9 +2276,16 @@ impl SshSession {
                     // Early data — process it.
                     self.handle_channel_data(&reply);
                 }
+                Some(msg::SSH_MSG_CHANNEL_EXTENDED_DATA) => {
+                    // Early stderr — a command that fails immediately can have
+                    // written its diagnostic before the reply arrives.
+                    self.handle_channel_extended_data(&reply);
+                }
                 Some(msg::SSH_MSG_IGNORE | msg::SSH_MSG_DEBUG) => {}
                 Some(other) => {
-                    self.verbose(&format!("ignoring message type {other} during shell request"));
+                    self.verbose(&format!(
+                        "ignoring message type {other} during shell request"
+                    ));
                 }
                 None => {
                     return Err(SshError::ProtocolError("empty response".into()));
@@ -2323,6 +2408,10 @@ impl SshSession {
                 self.handle_channel_data(payload);
                 Ok(false)
             }
+            Some(msg::SSH_MSG_CHANNEL_EXTENDED_DATA) => {
+                self.handle_channel_extended_data(payload);
+                Ok(false)
+            }
             Some(msg::SSH_MSG_CHANNEL_EOF) => {
                 self.verbose("received channel EOF");
                 Ok(false) // Wait for CLOSE.
@@ -2375,38 +2464,102 @@ impl SshSession {
         }
     }
 
+    /// Handle `CHANNEL_EXTENDED_DATA`: the remote command's stderr.
+    ///
+    /// Writing it to *our* stderr is what keeps `ssh host cmd > file` honest:
+    /// the file gets the command's output and the terminal gets its
+    /// diagnostics, exactly as if the command had run locally. Before this
+    /// existed the message fell through to "unhandled message type" and every
+    /// byte the remote command wrote to stderr was silently discarded.
+    ///
+    /// Format: `u8 type, u32 recipient_channel, u32 data_type_code, string data`.
+    fn handle_channel_extended_data(&self, payload: &[u8]) {
+        let Ok((data_type_code, off)) = read_u32(payload, 5) else {
+            return;
+        };
+        let Ok((data, _)) = read_ssh_string(payload, off) else {
+            return;
+        };
+        if data_type_code == SSH_EXTENDED_DATA_STDERR {
+            // Ignoring the write failure: a closed stderr is not a reason to
+            // abandon a session whose real output is going to stdout.
+            let _ = io::stderr().write_all(data);
+            let _ = io::stderr().flush();
+        } else {
+            // No other code is defined. Discarding is required — writing an
+            // unknown stream to stdout would corrupt the command's output.
+            self.verbose(&format!(
+                "discarding {} bytes of extended data, unknown type {data_type_code}",
+                data.len()
+            ));
+        }
+    }
+
     /// Handle CHANNEL_WINDOW_ADJUST: increase our send window.
     fn handle_window_adjust(&mut self, payload: &[u8]) {
         // Format: u8 type, u32 recipient_channel, u32 bytes_to_add
         if let Ok((adjustment, _)) = read_u32(payload, 5) {
             self.remote_window = self.remote_window.saturating_add(adjustment);
-            self.verbose(&format!("window adjust +{adjustment}, now {}", self.remote_window));
+            self.verbose(&format!(
+                "window adjust +{adjustment}, now {}",
+                self.remote_window
+            ));
         }
     }
 
-    /// Handle server-initiated CHANNEL_REQUEST (e.g., exit-status, exit-signal).
-    fn handle_channel_request(&self, payload: &[u8]) -> Result<(), SshError> {
+    /// Handle a server-initiated `CHANNEL_REQUEST`.
+    ///
+    /// The two that matter are `exit-status` and `exit-signal` (RFC 4254
+    /// §6.10) — between them they are the *only* way the server says how the
+    /// remote command ended. This used to parse the request type, log it, and
+    /// throw it away, which made `ssh host false` exit 0 no matter what the
+    /// server reported.
+    fn handle_channel_request(&mut self, payload: &[u8]) -> Result<(), SshError> {
         // Format: u8 type, u32 recipient_channel, string request_type, bool want_reply, ...
         let mut off = 1;
         let (_, next) = read_u32(payload, off)?; // recipient_channel
         off = next;
         let (req_type, next) = read_ssh_string(payload, off)?;
         off = next;
-        let (want_reply, _next) = read_byte(payload, off)?;
+        let (want_reply, next) = read_byte(payload, off)?;
+        off = next;
 
         let req_type_str = std::str::from_utf8(req_type).unwrap_or("unknown");
         self.verbose(&format!("channel request: {req_type_str}"));
 
+        match req_type_str {
+            "exit-status" => {
+                let (status, _) = read_u32(payload, off)?;
+                self.verbose(&format!("remote command exited with status {status}"));
+                self.remote_exit = Some(RemoteExit::Status(status));
+            }
+            "exit-signal" => {
+                // string signal name (no "SIG" prefix), bool core dumped,
+                // string error message, string language tag.
+                let (name_bytes, next) = read_ssh_string(payload, off)?;
+                let name = String::from_utf8_lossy(name_bytes).into_owned();
+                let (core_dumped, _) = read_byte(payload, next)?;
+                self.verbose(&format!("remote command killed by SIG{name}"));
+                self.remote_exit = Some(RemoteExit::Signal {
+                    name,
+                    core_dumped: core_dumped != 0,
+                });
+            }
+            _ => {}
+        }
+
         if want_reply != 0 {
-            // Send CHANNEL_SUCCESS (we don't actually handle these).
+            // Nothing a server can ask of this client is something it can do,
+            // so the answer is FAILURE. It goes through `send_packet` so the
+            // send sequence number advances with it: the sequence number is
+            // an input to every packet's MAC, and a packet sent without
+            // bumping it desynchronises the server's MAC check for the whole
+            // rest of the connection. (This function previously called
+            // `tcp_send_all` directly and did not advance it.)
             let mut reply = Vec::new();
             reply.push(msg::SSH_MSG_CHANNEL_FAILURE);
             reply.extend_from_slice(&self.remote_channel_id.to_be_bytes());
-            // Ignoring send failure here — we're just being polite.
-            let _ = tcp_send_all(
-                self.handle,
-                &build_packet(&reply, self.encrypted, self.seq_send, &self.enc),
-            );
+            self.send_packet(&reply)?;
         }
 
         Ok(())
@@ -2490,19 +2643,30 @@ impl SshSession {
 // Entry point
 // ============================================================================
 
+/// `ssh(1)`'s reserved exit code for a failure of the client or the
+/// connection, as opposed to a status the remote command returned.
+///
+/// The whole point of reserving one code is that `ssh host cmd; echo $?` can
+/// distinguish "cmd failed" from "cmd never ran". 255 is the value OpenSSH
+/// documents, so scripts written against OpenSSH keep working.
+const EXIT_SSH_FAILURE: i32 = 255;
+
 fn main() {
     let config = match parse_args() {
         Ok(c) => c,
         Err(msg) => {
             eprintln!("ssh: {msg}");
-            process::exit(1);
+            process::exit(EXIT_SSH_FAILURE);
         }
     };
 
     let verbose = config.verbose;
 
     if verbose {
-        eprintln!("debug1: connecting to {} port {}", config.hostname, config.port);
+        eprintln!(
+            "debug1: connecting to {} port {}",
+            config.hostname, config.port
+        );
     }
 
     // Resolve hostname.
@@ -2510,7 +2674,7 @@ fn main() {
         Ok(ip) => ip,
         Err(e) => {
             eprintln!("ssh: {e}");
-            process::exit(1);
+            process::exit(EXIT_SSH_FAILURE);
         }
     };
 
@@ -2530,7 +2694,7 @@ fn main() {
                 "ssh: connect to host {} port {}: {e}",
                 config.hostname, config.port
             );
-            process::exit(1);
+            process::exit(EXIT_SSH_FAILURE);
         }
     };
 
@@ -2548,9 +2712,203 @@ fn main() {
             eprintln!("ssh: {e}");
             session.send_disconnect(2, "protocol error");
             tcp_close(handle);
-            process::exit(1);
+            // 255 is `ssh(1)`'s reserved code for "the connection or the
+            // client failed", as distinct from any status a remote command
+            // could return — the distinction a caller needs in order to tell
+            // "the command failed" from "ssh could not run it".
+            process::exit(EXIT_SSH_FAILURE);
         }
     }
 
     tcp_close(handle);
+
+    // Exit with the remote command's status. Computed after the socket is
+    // closed because `process::exit` runs no destructors.
+    let code = session.exit_code();
+    if code != 0 {
+        process::exit(code);
+    }
+}
+
+// ============================================================================
+// Tests
+// ============================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_config() -> Config {
+        Config {
+            user: "alice".into(),
+            hostname: "example".into(),
+            port: 22,
+            command: Some("true".into()),
+            verbose: false,
+            strict_host_key: StrictHostKey::No,
+            connect_timeout: 0,
+        }
+    }
+
+    /// A session with no socket. Every function exercised below either does no
+    /// I/O at all or does it only when `want_reply` is set, which these
+    /// payloads never set.
+    fn test_session() -> SshSession {
+        SshSession::new(0, test_config())
+    }
+
+    fn channel_request(req_type: &[u8], want_reply: bool, rest: &[u8]) -> Vec<u8> {
+        let mut p = vec![msg::SSH_MSG_CHANNEL_REQUEST];
+        p.extend_from_slice(&0u32.to_be_bytes()); // recipient channel
+        p.extend_from_slice(&ssh_string(req_type));
+        p.push(u8::from(want_reply));
+        p.extend_from_slice(rest);
+        p
+    }
+
+    // ---- exit-status / exit-signal ----
+
+    #[test]
+    fn exit_status_is_recorded_and_becomes_the_process_exit_code() {
+        let mut s = test_session();
+        assert_eq!(s.remote_exit, None);
+        let payload = channel_request(b"exit-status", false, &42u32.to_be_bytes());
+        s.handle_channel_request(&payload).expect("parse");
+        assert_eq!(s.remote_exit, Some(RemoteExit::Status(42)));
+        assert_eq!(s.exit_code(), 42);
+    }
+
+    /// The bug this whole path exists to prevent: a server that reports
+    /// failure must not produce a client that reports success.
+    #[test]
+    fn a_nonzero_remote_status_does_not_become_success() {
+        let mut s = test_session();
+        let payload = channel_request(b"exit-status", false, &1u32.to_be_bytes());
+        s.handle_channel_request(&payload).expect("parse");
+        assert_ne!(s.exit_code(), 0);
+    }
+
+    /// A server that never sends `exit-status` — an interactive session, or a
+    /// server that does not implement the notification — must not be treated
+    /// as a failure.
+    #[test]
+    fn a_missing_exit_status_is_success() {
+        let s = test_session();
+        assert_eq!(s.remote_exit, None);
+        assert_eq!(s.exit_code(), 0);
+    }
+
+    #[test]
+    fn exit_signal_is_recorded_and_reported_as_255() {
+        let mut s = test_session();
+        let mut rest = ssh_string(b"TERM");
+        rest.push(1); // core dumped
+        rest.extend_from_slice(&ssh_string(b"killed by SIGTERM"));
+        rest.extend_from_slice(&ssh_string(b""));
+        let payload = channel_request(b"exit-signal", false, &rest);
+        s.handle_channel_request(&payload).expect("parse");
+        assert_eq!(
+            s.remote_exit,
+            Some(RemoteExit::Signal {
+                name: "TERM".into(),
+                core_dumped: true,
+            })
+        );
+        // A signalled command has no exit status of its own; `ssh(1)` reports
+        // its reserved failure code rather than inventing one.
+        assert_eq!(s.exit_code(), EXIT_SSH_FAILURE);
+    }
+
+    /// The signal name arrives without a `SIG` prefix (RFC 4254 §6.10); a
+    /// client that stripped or added one would print the wrong name.
+    #[test]
+    fn exit_signal_name_is_stored_verbatim() {
+        let mut s = test_session();
+        let mut rest = ssh_string(b"KILL");
+        rest.push(0);
+        rest.extend_from_slice(&ssh_string(b""));
+        rest.extend_from_slice(&ssh_string(b""));
+        s.handle_channel_request(&channel_request(b"exit-signal", false, &rest))
+            .expect("parse");
+        match s.remote_exit {
+            Some(RemoteExit::Signal { ref name, .. }) => assert_eq!(name, "KILL"),
+            ref other => panic!("expected a signal exit, got {other:?}"),
+        }
+    }
+
+    /// An unrecognised request must be ignored, not mistaken for an exit
+    /// report and not allowed to overwrite one already received.
+    #[test]
+    fn an_unknown_request_leaves_the_exit_status_alone() {
+        let mut s = test_session();
+        s.handle_channel_request(&channel_request(b"exit-status", false, &7u32.to_be_bytes()))
+            .expect("parse");
+        s.handle_channel_request(&channel_request(b"keepalive@openssh.com", false, &[]))
+            .expect("parse");
+        assert_eq!(s.remote_exit, Some(RemoteExit::Status(7)));
+    }
+
+    /// A truncated request must be an error, not a silent zero: reading past
+    /// the end and defaulting would turn a malformed packet into "success".
+    #[test]
+    fn a_truncated_exit_status_is_an_error() {
+        let mut s = test_session();
+        let payload = channel_request(b"exit-status", false, &[0, 0]); // two of four bytes
+        assert!(s.handle_channel_request(&payload).is_err());
+        assert_eq!(s.remote_exit, None);
+    }
+
+    // ---- extended data ----
+
+    /// Type 1 is the only defined extended-data code. Anything else must be
+    /// discarded rather than written to stdout, where it would corrupt the
+    /// command's real output.
+    #[test]
+    fn extended_data_of_an_unknown_type_is_discarded() {
+        let s = test_session();
+        let mut p = vec![msg::SSH_MSG_CHANNEL_EXTENDED_DATA];
+        p.extend_from_slice(&0u32.to_be_bytes());
+        p.extend_from_slice(&99u32.to_be_bytes()); // not SSH_EXTENDED_DATA_STDERR
+        p.extend_from_slice(&ssh_string(b"junk"));
+        s.handle_channel_extended_data(&p); // must not panic, must not print
+        assert_eq!(SSH_EXTENDED_DATA_STDERR, 1);
+    }
+
+    /// A malformed extended-data message must be dropped, not partially
+    /// written: a truncated length prefix would otherwise emit whatever
+    /// happened to follow it.
+    #[test]
+    fn malformed_extended_data_is_dropped() {
+        let s = test_session();
+        s.handle_channel_extended_data(&[msg::SSH_MSG_CHANNEL_EXTENDED_DATA, 0, 0]);
+        let mut p = vec![msg::SSH_MSG_CHANNEL_EXTENDED_DATA];
+        p.extend_from_slice(&0u32.to_be_bytes());
+        p.extend_from_slice(&1u32.to_be_bytes());
+        p.extend_from_slice(&[0, 0, 0, 8, b'a']); // claims 8 bytes, carries 1
+        s.handle_channel_extended_data(&p);
+    }
+
+    // ---- exit code contract ----
+
+    /// 255 must stay reserved for client/connection failure, so that a caller
+    /// can tell "the command failed" from "ssh could not run it".
+    #[test]
+    fn ssh_failure_code_matches_openssh() {
+        assert_eq!(EXIT_SSH_FAILURE, 255);
+    }
+
+    // ---- encoding helpers used by the above ----
+
+    #[test]
+    fn channel_request_round_trips() {
+        let payload = channel_request(b"exit-status", false, &3u32.to_be_bytes());
+        let (recipient, off) = read_u32(&payload, 1).expect("recipient");
+        assert_eq!(recipient, 0);
+        let (req_type, off) = read_ssh_string(&payload, off).expect("type");
+        assert_eq!(req_type, b"exit-status");
+        let (want_reply, off) = read_byte(&payload, off).expect("want_reply");
+        assert_eq!(want_reply, 0);
+        let (status, _) = read_u32(&payload, off).expect("status");
+        assert_eq!(status, 3);
+    }
 }

@@ -45941,3 +45941,38 @@ in a dead spot, and one that the renderer paints each of the `2·n·(n−1)` lin
 exactly once. Mutation sweep 27/28, then 28/28 once the threshold was pinned by
 something other than itself. rustfmt drift 173 → 0 (committed separately),
 binary clippy 95 → 78, test-module warnings 7 → 0.
+
+## `[A]` A cold kernel build no longer fits the boot test's 900 s default
+
+**Status:** OPEN (2026-08-20)
+
+**What happens.** `python scripts/run-timeout.py 900 ./scripts/boot-test.sh` —
+the budget most of this project's history used — now times out *during the
+build*, before QEMU is ever launched, whenever the rustc fingerprint cache is
+cold. It was hit on 2026-08-20 while gating the ZFS gang-block work: the run
+died at 900 s with the log's last line still `Compiling kernel v0.1.0`. The
+re-run with `--poll 60 2700` finished the same work in 1349 s, of which 677 s
+(11m17s) was the build alone.
+
+**Why the cache is cold more often than it looks.** Nothing dramatic is needed
+to invalidate it. A `cargo clippy` run immediately before the boot test does
+it, because clippy and rustc write different fingerprints into the same target
+directory and each evicts the other. So the ordinary "lint, then boot-test"
+sequence is exactly the sequence that guarantees a cold build.
+
+**Two things that made it worse than a plain timeout.** The run was piped
+through `| tail -60`, which buffered the child's entire output, so the log file
+sat at 0 bytes for the full 900 s and the job looked wedged rather than busy.
+And the pipeline's exit status is `tail`'s, so the harness reported **0** while
+`run-timeout.py` had in fact returned 124. Both are avoidable: never pipe
+`run-timeout.py`, and read its log incrementally instead.
+
+**Proper fix.** Either raise `run-timeout.py`'s recommended boot-test budget in
+`CLAUDE.md`/`scripts` to ~2700 s, or split the build out of `boot-test.sh` so
+the timeout covers only the QEMU phase and a slow build cannot be mistaken for
+a hang. The second is better — the two phases fail for unrelated reasons and
+deserve unrelated budgets — but the first is what any run should do today.
+
+**Workaround until then.** `python scripts/run-timeout.py --poll 60 2700
+./scripts/boot-test.sh`, backgrounded via the Bash tool's `run_in_background`,
+with no pipe on the command.

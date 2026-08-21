@@ -31791,6 +31791,11 @@ cost of a mismatch is small.
   keyboard or mouse driver feeding `Compositor::handle_input`, so outside a test
   that injects them, `route_input` has nothing to route.
 
+  *(Update 2026-08-21: scanout is done — `TD-COMPOSITOR-HAS-NO-SCANOUT` is
+  closed and `gui/compositor/src/present/drm.rs` page-flips composited frames
+  onto a real display. The input half of that sentence still stands, and is now
+  its own entry: `TD-COMPOSITOR-HAS-NO-LOCAL-INPUT`.)*
+
 **Severity.** High as a *blocker* — it is the single gap between "142 app
 crates" and "an OS with any usable application at all". Low as a *defect*:
 nothing that exists is wrong, it is only unreachable, so the fix is additive
@@ -31804,6 +31809,10 @@ from it. This entry stays open for the remaining 137 apps, none of which is
 wired yet, and because a window whose pixels never reach a screen is not yet a
 usable desktop — `TD-COMPOSITOR-HAS-NO-SCANOUT` is now the last link in the
 chain from an app's `RenderTree` to a photon.
+
+*(Update 2026-08-21: that last link is closed. The chain from a `RenderTree` to
+a photon is complete on SlateOS. This entry stays open for the remaining 137
+unwired applications, which is now the only thing it is about.)*
 
 
 **One of the 137 now has something specific it cannot call (2026-08-21).**
@@ -32045,7 +32054,7 @@ polling shape is the kind of thing that gets copied into the next server
 written in this tree if nobody has written down that it was a constraint of
 the standard library rather than a preference.
 
-## TD-COMPOSITOR-HAS-NO-SCANOUT (lane C, 2026-08-17)
+## TD-COMPOSITOR-HAS-NO-SCANOUT (lane C, 2026-08-17) - **fixed 2026-08-21**
 
 > **Read the Status note at the end of this entry first.** The description
 > below is the state *before* the `Present` trait and the Win32 host window
@@ -32131,6 +32140,201 @@ nothing else in this crate changing, which is the argument for the trait having
 been worth defining before the driver exists. This entry therefore stays open,
 and the sentence in `TD-NO-APP-CONNECTS-TO-THE-COMPOSITOR` calling this the last
 link to a photon stays true of SlateOS, not of the harness.
+
+**Status 2026-08-21: (1) is done. This entry is CLOSED.**
+
+**In short:** the compositor now puts its frames on a real SlateOS screen. It
+opens the graphics card, asks it which monitor is plugged in and what resolution
+that monitor is already running, gets two chunks of video memory it can write
+pixels into, and tells the card to display them alternately. The chain from an
+application's window to a photon is complete.
+
+`gui/compositor/src/present/drm.rs` implements `Present` as `DrmScanout`, the
+third implementor beside `Headless` and the Win32 harness, and — as this entry
+predicted — **nothing else in the crate changed**: `Server::run_with` drives it
+unmodified. The binary's `run()` gained a `#[cfg(target_os = "linux")]` arm
+(`x86_64-slateos` reports `target_os = "linux"`) that opens `/dev/dri/card0` and
+falls back to headless with a printed reason if there is no display.
+
+The pipeline it drives is Linux's, because our kernel implements Linux's DRM
+ioctls: `GETRESOURCES` → `GETCONNECTOR` → `GETENCODER` → `CREATE_DUMB` →
+`MAP_DUMB` → `mmap` → `ADDFB2` → `PAGE_FLIP`. Two dumb buffers are allocated at
+the connected display's preferred mode, mapped, and page-flipped alternately;
+the front index advances only on a flip the kernel accepted, so a refused flip
+drops a frame instead of putting the pair permanently out of step.
+
+**The three things that were not obvious**, recorded because each is a defect
+that would have shipped:
+
+* **`SETCRTC` is absent from this kernel and is not needed.** The first reading
+  of `kernel/src/drm/` said scanout was blocked on lane A adding it. Reading
+  `DrmDevice::page_flip` and all three backends showed otherwise: the flip
+  validates the CRTC id, the fb id and its GEM object, all three backends ignore
+  `crtc_id`, and the ATI backend self-modesets inside the flip. Driving the mode
+  the firmware already lit needs no `SETCRTC`. No cross-lane request was filed,
+  because the premise was false. What it *does* cost is the ability to change
+  resolution — see `TD-COMPOSITOR-CANNOT-CHANGE-MODE` below.
+* **Pitch is not width × 4.** Dumb buffers are 64-byte aligned, so a 1366-wide
+  screen has a 5504-byte pitch, not 5464. Every row copy and the `ADDFB2`
+  registration use the driver's returned pitch. Getting this wrong skews every
+  row after the first, and is invisible at any width divisible by 16.
+* **`possible_crtcs` is a bitmask over the CRTC array *index*, not over CRTC
+  ids.** This hides completely on a single-CRTC machine, where index 0 and the
+  only id both make bit 0 look right — which is why the test fake models two.
+
+**How it is tested without hardware.** The protocol half is not `cfg`-gated and
+runs on the development machine against a strict in-memory fake card; only the
+~50 lines of raw `syscall` mechanism are target-only, and those are compiled and
+linted via `--target x86_64-unknown-linux-gnu`. 57 tests: 23 pinning the wire
+structs against the `_IOC`-encoded sizes in the request numbers, 34 driving the
+scanout end to end. The fake is deliberately hostile — it re-checks every
+payload's length against the size its request number declares, rejects `ADDFB2`
+unless the load-bearing zero fields are zero, and panics on any ioctl the kernel
+does not implement — because a permissive fake lets the protocol drift and still
+reports green. All 34 were then proved to be regression tests by reintroducing
+the ten defects they name, one at a time, and confirming a deterministic failure
+that names the test back. Design rationale: `design-decisions.md` §511.
+
+**What this closed and what it did not.** It closed *scanout*. It did not close
+input: `DrmScanout` inherits the default `Present::input`, which returns nothing,
+because the kernel exposes no evdev-style device — see
+`TD-COMPOSITOR-HAS-NO-LOCAL-INPUT`. A SlateOS desktop now draws and cannot be
+typed at, which is the exact mirror of where the Win32 harness started.
+
+## TD-COMPOSITOR-CANNOT-CHANGE-MODE (lane C, 2026-08-21)
+
+**In short:** on SlateOS the desktop runs at whatever resolution the monitor was
+already using when the machine booted, and nothing can change it. There is no
+"Display settings → Resolution" that can work. This is a missing kernel feature,
+not a compositor bug.
+
+**What.** `DrmScanout::new` reads the connected display's preferred mode and
+builds the compositor at that size. It never sets a mode, because
+`kernel/src/drm/` implements no `DRM_IOCTL_MODE_SETCRTC`. `PAGE_FLIP` works
+without it — the CRTC is already scanning out the mode the firmware programmed —
+so this is a limitation rather than a blocker, but it means the mode we get is
+the mode we keep. The compositor binary reports `--size` as ignored on this path
+rather than silently obeying it, since obeying it would compose frames the
+display cannot show.
+
+**What is missing:** `SETCRTC` in lane A's `kernel/src/drm/`, and then the
+matching call here, plus a `Compositor` that can be resized after construction —
+which is a second, separate piece of work: `Compositor::new` takes a size and
+everything downstream of it assumes that size for its lifetime.
+
+**Severity.** Low. A display running its own native mode is the right default,
+and it is what the user is already looking at. This bites only when the native
+mode is wrong for the user (a projector, a scaled-down mode for performance, a
+panel whose EDID lies).
+
+**Filed to lane A?** Not yet — deliberately. A `SETCRTC` with no caller is worse
+than none, and the caller needs compositor resize first, which is lane C's work
+and not started. File it when resize lands.
+
+## TD-COMPOSITOR-PICKS-CARD0 (lane C, 2026-08-21)
+
+**In short:** on a machine with two graphics cards the compositor always uses the
+first one, and if a monitor is plugged into the second one the screen stays
+black. There is no way to tell it otherwise.
+
+**What.** `DrmScanout::card0()` opens `/dev/dri/card0` and nothing else. A
+laptop with integrated graphics plus a discrete GPU has `card0` and `card1`, and
+which one is which is not stable across boots. There is no `--card` flag, no
+enumeration of `/dev/dri/*`, and no policy for choosing.
+
+**The proper fix**, in the order the cost rises: (1) a `--card N` flag or
+`SLATE_DRM_CARD` variable, which is minutes and makes the machine usable by
+hand; (2) enumerate `card0..card15` and take the first with a connected
+connector, which makes the common case automatic — `DrmScanout::new` already
+returns `NoConnectedDisplay` distinguishably, so the loop is exactly "try each,
+keep the first that is not that error"; (3) actual multi-GPU policy (prefer the
+discrete one, or the one the monitor is physically wired to), which needs
+information DRM does not hand over cheaply.
+
+**Severity.** Low today — QEMU presents one card — and it rises the moment this
+runs on real hardware. Do (1) and (2) together before any bare-metal bring-up.
+
+## TD-COMPOSITOR-DRIVES-ONE-HEAD (lane C, 2026-08-21)
+
+**In short:** with two monitors plugged in, one shows the desktop and the other
+stays dark. Not a bug in what exists — the second screen was never implemented.
+
+**What.** `choose_display` returns the *first* connected connector that has a
+usable mode and a CRTC that can reach it, and `DrmScanout` owns exactly one
+CRTC, one connector and one pair of buffers. Every later connector is skipped.
+
+**Why it is not a small fix.** The scanout side is genuinely easy: loop over the
+connectors, allocate a buffer pair per head, flip each. The hard half is
+upstream — `Compositor` composes *one* frame at *one* size, and a second monitor
+is not a second copy of that frame but a second viewport onto one desktop with
+its own resolution, its own position in a virtual screen, and windows that can
+straddle the boundary. `gui/compositor/src/display.rs` already models multiple
+displays, modes and refresh rates faithfully; it is the compositing pipeline
+that assumes one.
+
+**Severity.** Low as a defect, medium as a missing feature. Multi-monitor is
+table stakes for a desktop OS, but a one-headed desktop is fully usable and
+nothing about the current design has to be unwound to add the second — the
+per-head state is already a struct.
+
+## TD-COMPOSITOR-HAS-NO-LOCAL-INPUT (lane C, 2026-08-21)
+
+**In short:** on SlateOS the desktop draws correctly and the keyboard and mouse
+do nothing. Frames go out; nothing comes back in.
+
+**What.** `DrmScanout` implements `Present::show` and inherits the default
+`Present::input`, which returns an empty `Vec`. `Compositor::handle_input` and
+`route_input` are complete and correct and have no source on this platform, so
+they are reachable only from tests and from the Win32 harness — which is exactly
+the state `TD-COMPOSITOR-HAS-NO-SCANOUT` described for the output half before it
+was closed, now surviving in the input half alone.
+
+**What is missing.** A device to read. The kernel has a PS/2 and USB keyboard
+path for the console, but exposes nothing an unprivileged display server can
+open and poll for scancodes and mouse deltas — no `/dev/input/event*`, no
+equivalent. Wiring this needs (a) lane A to expose a readable device or an IPC
+endpoint carrying input events, then (b) a `DrmInput` here that translates its
+reports into `InputEvent`s, most likely alongside `DrmScanout` rather than
+inside it, since the card and the keyboard are different devices.
+
+**Severity.** High as a *blocker*: an OS whose desktop cannot be typed at is not
+a desktop. Low as a *defect*: everything that exists is right, `keymap.rs`
+already turns scan-code-set-1 into characters, and the fix is additive.
+
+**Filed to lane A?** Not yet. Do it once the shape of (a) is worth asking for —
+"expose input somehow" is not a request lane A can act on. Determine first
+whether the kernel's existing keyboard path can be given a second consumer, or
+whether this wants a new device; that reading is lane C's to do before filing.
+
+## TD-COMPOSITOR-COPIES-EVERY-FRAME-TWICE (lane C, 2026-08-21)
+
+**In short:** every frame the desktop draws is copied one extra time on its way
+to the screen. It is correct, just wasteful — and the waste grows with screen
+size, so it matters most on the big displays where it is least affordable.
+
+**What.** `Compositor::compose_frame` blends into its own back buffer, and then
+`DrmScanout::show` copies that whole buffer into the mapped scanout buffer,
+row by row at the driver's pitch. At 4K that is ~33 MB moved per frame, ~2 GB/s
+at 60 Hz, for a copy that produces no pixels.
+
+**The proper fix.** Compose *directly into* the mapped scanout buffer. The
+compositor already owns a back/front pair, and so does the scanout — they are
+the same pair, duplicated. The obstacle is that `Compositor` allocates its
+buffers as `Vec<u32>` at construction and hands out `&[u32]`, whereas the
+scanout's are kernel-mapped `&mut [u8]` at a pitch that is not `width * 4`.
+Reconciling them means `Compositor` composing into a caller-supplied buffer with
+a caller-supplied stride, which is a real refactor of the rasteriser's
+addressing and touches every draw path.
+
+**Also blocked on `TD-NO-WRITE-COMBINING`.** Composing into the mapped buffer is
+only a win if that memory is write-combining. Blending *reads* the destination,
+and reads from uncached video memory are catastrophically slow — an order of
+magnitude worse than the copy this replaces. Do not attempt this optimisation
+until write-combining is confirmed on the mapping.
+
+**Severity.** Low now — nothing is measured yet and QEMU is not where this is
+judged. Revisit when there is a frame-time budget to hold, and measure before
+touching the rasteriser.
 
 ## TD-GUI-CRATES-OPT-OUT-OF-THE-WORKSPACE-LINTS (lane C, 2026-08-17) - **fixed**
 

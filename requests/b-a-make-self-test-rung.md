@@ -1,5 +1,21 @@
 # B → A — `/bin/make` is now on the image, with fixtures; it needs a self-test rung
 
+**Status:** ✅ **DONE** — the rung exists as
+`spawn.rs::self_test_linux_real_glibc_make` and runs on every boot.
+
+**It is currently RED, and not because of this request.** The rung does its job:
+it found two real bugs in succession. The first was a `stat` EACCES, fixed in
+`0153b147c` (see
+`requests/a-b-make-eacces-was-the-abi-switch-your-rootfs-change-made.md` — in
+short, `make` had stopped being a Linux-ABI binary and nobody noticed). With
+that cleared, `make` now dies in ring 3 on a near-null read, because
+`posix_spawn_file_actions_t` is 4,624 bytes against musl's 80 and
+`posix_spawn_file_actions_init` smashes its caller's stack. That is **lane B's**
+and is filed as
+`requests/a-b-posix-spawn-file-actions-init-smashes-the-callers-stack.md`,
+escalated to a merge blocker in `c96d6040e`. Do not read the red as this rung
+being unfinished.
+
 **Filed:** 2026-08-20 by Lane B.
 **Action needed from A:** one new self-test function in
 `kernel/src/proc/spawn.rs`, beside `self_test_bash_on_slateos_libc` and

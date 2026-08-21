@@ -29197,7 +29197,27 @@ int main(void){\n\
     // --- run make: it builds /cap-prog by invoking tcc per the Makefile ----
     let argv: &[&[u8]] = &[b"make", b"-f", b"/cap.mk", b"all"];
     let envp: &[&[u8]] = &[b"PATH=/bin", b"LANG=C", b"SHELL=/bin/sh"];
-    let caps = [(ResourceType::File, 1u64, Rights::READ | Rights::WRITE)];
+    // METADATA, for the same reason as `self_test_linux_real_glibc_make` — see
+    // the ABI note in that function's doc comment.  `/bin/make` is not the
+    // Debian glibc binary this test's name implies: `create-ext4-rootfs.sh`
+    // overwrites it with `build/spike/make-slateos.elf`, which speaks the
+    // *native* ABI, and native `sys_fs_stat` is gated on `METADATA` while the
+    // Linux-ABI stat path checks nothing.  Without it, `stat("/cap.mk")`
+    // returns EACCES, make maps any failed stat to "does not exist", and the
+    // symptom surfaces as `No rule to make target '/cap.mk'` — naming neither
+    // stat nor permissions.
+    //
+    // `0153b147c` fixed that in the sibling test and missed this one, because
+    // the two are 1600 lines apart and only the sibling was in the failing
+    // report.  These are the *only* two tests that run `make`; both now grant
+    // it.  (This is a symptom of Q56 in `open-questions.md`: the same operation
+    // needs a capability under one ABI and nothing under the other, so every
+    // launch site has to remember which door its binary comes in by.)
+    let caps = [(
+        ResourceType::File,
+        1u64,
+        Rights::READ | Rights::WRITE | Rights::METADATA,
+    )];
     let options = SpawnOptions {
         name: "spawn-test-make-cc",
         parent: 0,

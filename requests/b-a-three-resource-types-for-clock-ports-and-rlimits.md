@@ -1,5 +1,15 @@
 # B → A — three new `ResourceType`s, so "set the clock", "bind port 80" and "raise my own rlimit" have something to derive permission from
 
+**Status:** ✅ **DONE 2026-08-21** in `78ef2879d`. Reply:
+`requests/a-b-three-resource-types-landed.md`.
+
+**Read the reply before using them.** Adding the variants surfaced a separate
+bug in the same file that had been live for months, and which these three types
+would otherwise have inherited silently: the `admin` group did not in fact grant
+every `ResourceType`, because `MAX_CAPS_PER_GROUP` was 16 against 26 types and
+the overflow was dropped without a word. Fixed in `169689df2`, with a boot
+self-test that now fails if `admin` ever misses a type again.
+
 **Filed:** 2026-08-21 by Lane B. **Action needed:** add three variants to
 `ResourceType` in `kernel/src/cap/mod.rs`, one new `Rights` bit, and the boot
 grants that hand them to `init`. Nothing in your tree changes behaviour on the

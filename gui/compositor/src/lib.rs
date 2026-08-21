@@ -2350,6 +2350,13 @@ pub enum CompositorRequest {
     SetOpacity { window_id: WindowId, opacity: f32 },
     /// Query display information.
     GetDisplayInfo,
+    /// Re-read the user's `appearance.yaml` and adopt whatever it now says.
+    ///
+    /// Carries no settings: see
+    /// [`guiremote::control::RequestBody::ReloadAppearance`] for why a
+    /// notification rather than a setter, and [`Compositor::reload_appearance`]
+    /// for what it does.
+    ReloadAppearance,
     /// Begin a remote draw-command stream session (returns a stream id).
     StreamStart,
     /// Capture the current scene for a stream session as an encoded wire frame.
@@ -3969,9 +3976,36 @@ impl Compositor {
     /// strip, and squaring a corner leaves the quarter-disc of frame colour that
     /// used to fill it. Nothing marks those regions dirty — no window moved —
     /// so the repaint has to be asked for here.
+    ///
+    /// *Unless nothing changed*, in which case there is nothing to repaint and
+    /// the damage state is left alone. This is the one place that comparison
+    /// belongs: [`reload_appearance`](Self::reload_appearance) can be sent by
+    /// any connected client at any rate, and a full-screen repaint per request
+    /// would make a harmless notification into a way to keep the compositor
+    /// redrawing the whole desktop for nothing.
     pub fn set_appearance(&mut self, settings: AppearanceSettings) {
+        if settings == self.appearance {
+            return;
+        }
         self.appearance = settings;
         self.full_recomposite = true;
+    }
+
+    /// Re-read the user's `appearance.yaml` and adopt whatever it now says.
+    ///
+    /// This is the only place in the library that touches the filesystem, and
+    /// the asymmetry with [`Compositor::new`] is deliberate rather than
+    /// inconsistent: a *constructor* that consulted `$HOME` would make every
+    /// test in this crate depend on the machine running it, whereas re-reading
+    /// the user's file is the entire meaning of this call — a caller that did
+    /// not want it would not have made it. Tests point it somewhere harmless
+    /// with `appearance::config::testing::with_scratch_config`.
+    ///
+    /// A missing or unreadable file yields the defaults, exactly as at startup:
+    /// a user who has never opened the Personalization page is the ordinary
+    /// case, not a failure to report.
+    pub fn reload_appearance(&mut self) {
+        self.set_appearance(appearance::AppearanceFile::load().settings);
     }
 
     /// The appearance preferences currently in force.
@@ -5852,6 +5886,14 @@ impl Compositor {
                         message: "no primary display".to_string(),
                     }
                 }
+            }
+            CompositorRequest::ReloadAppearance => {
+                self.reload_appearance();
+                // `Ok` whether or not anything changed. The client is being
+                // told the compositor has re-read the file, which is true
+                // either way, and a reply that differed would leak the state of
+                // the user's settings to anyone allowed to ask for a reload.
+                CompositorResponse::Ok
             }
             CompositorRequest::StreamStart => {
                 let stream_id = self.start_stream();
@@ -10879,5 +10921,114 @@ mod tests {
             comp.compose_frame(),
             "the corner setting changed and nothing was redrawn"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // Live reload
+    //
+    // Reading the settings once at startup left the user changing a setting and
+    // watching nothing happen until they logged out. These tests cover the
+    // reload path itself; that a wire request reaches it is covered in
+    // `wire.rs`, where both halves of the protocol are in scope.
+    // -----------------------------------------------------------------------
+
+    /// Write `settings` to the scratch configuration directory as the user's
+    /// own `appearance.yaml`, through the same type the Settings app saves
+    /// with.
+    ///
+    /// Deliberately not a hand-written YAML literal: the file's key spellings
+    /// belong to `gui/appearance`, and a literal here would be a second copy of
+    /// them that could agree with a wrong reader or drift from a renamed key
+    /// and fail for a reason that has nothing to do with the compositor.
+    fn save_user_appearance(settings: AppearanceSettings) {
+        let mut file = appearance::AppearanceFile::new();
+        file.settings = settings;
+        file.save().expect("write scratch appearance.yaml");
+    }
+
+    #[test]
+    fn a_reload_adopts_what_the_users_file_now_says() {
+        // The gap this closes: the settings were read once, in `main`, before
+        // the first frame. Everything after that ran on whatever the file said
+        // at login, so the Settings app could write a change the running
+        // compositor would never see.
+        appearance::config::testing::with_scratch_config("compositor-reload", |_root| {
+            let mut comp = Compositor::new(DECOR_W, DECOR_H, 60).expect("compositor");
+            assert_eq!(
+                comp.appearance().window_corners,
+                WindowCorners::Rounded,
+                "the constructor should start from the defaults, not the disk"
+            );
+
+            save_user_appearance(AppearanceSettings {
+                window_corners: WindowCorners::Square,
+                drop_shadows: false,
+                ..AppearanceSettings::default()
+            });
+            comp.reload_appearance();
+
+            assert_eq!(
+                comp.appearance().window_corners,
+                WindowCorners::Square,
+                "the corner setting written to the file did not reach the compositor"
+            );
+            assert!(
+                !comp.appearance().drop_shadows,
+                "the shadow setting written to the file did not reach the compositor"
+            );
+        });
+    }
+
+    #[test]
+    fn a_reload_that_changed_something_repaints_the_whole_screen() {
+        // The same argument as `changing_the_appearance_repaints_what_is_
+        // already_on_screen`, asserted through the reload path: the pixels a
+        // corner or shadow change moves are outside every window's damage, so
+        // without a forced recomposite the file changes and the screen does
+        // not.
+        appearance::config::testing::with_scratch_config("compositor-reload-damage", |_root| {
+            // See `changing_the_appearance_repaints_what_is_already_on_screen`
+            // for why the refresh rate is absurd: at 60 Hz these three calls
+            // fall inside one frame interval and would measure the vsync gate.
+            let mut comp = Compositor::new(DECOR_W, DECOR_H, 2_000_000).expect("compositor");
+            comp.create_window("Framed".to_string(), 160, 120, 1);
+            assert!(comp.compose_frame(), "the first frame draws the new window");
+            assert!(
+                !comp.compose_frame(),
+                "an unchanged desktop should have nothing to redraw"
+            );
+
+            save_user_appearance(with_corners(WindowCorners::Square));
+            comp.reload_appearance();
+
+            assert!(
+                comp.compose_frame(),
+                "the reload changed the corners and nothing was redrawn"
+            );
+        });
+    }
+
+    #[test]
+    fn a_reload_that_finds_nothing_changed_costs_nothing() {
+        // Any client that can open the display socket can ask for a reload, as
+        // often as it likes. If each one repainted the screen, a request whose
+        // whole safety argument is that it carries no data would still be a way
+        // to hold the compositor at a full-screen redraw indefinitely. So the
+        // damage state must survive a reload that read the same settings back.
+        appearance::config::testing::with_scratch_config("compositor-reload-noop", |_root| {
+            let mut comp = Compositor::new(DECOR_W, DECOR_H, 2_000_000).expect("compositor");
+            comp.create_window("Framed".to_string(), 160, 120, 1);
+            assert!(comp.compose_frame(), "the first frame draws the new window");
+
+            // No file written at all: a fresh install, where `load` yields the
+            // defaults the compositor is already holding.
+            for _ in 0..3 {
+                comp.reload_appearance();
+                assert!(
+                    !comp.compose_frame(),
+                    "a reload that changed nothing forced a full repaint"
+                );
+            }
+        });
     }
 }

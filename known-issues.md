@@ -31723,6 +31723,28 @@ wired yet, and because a window whose pixels never reach a screen is not yet a
 usable desktop — `TD-COMPOSITOR-HAS-NO-SCANOUT` is now the last link in the
 chain from an app's `RenderTree` to a photon.
 
+
+**One of the 137 now has something specific it cannot call (2026-08-21).**
+`apps/settings` is the only application in the tree that edits the user's
+appearance settings, and the compositor now accepts a `ReloadAppearance`
+request so that a change to window corners or drop shadows reaches windows that
+are already open (`design-decisions.md` §500). The sender API exists —
+`oswindow::EventLoop::appearance_changed()` — and Settings cannot call it,
+because it is one of the unwired 137: its `Cargo.toml` names only `guitk` and
+`appearance`, and its `main()` says *"In a real Slate OS environment, this
+would enter the compositor event loop. For now, render one frame to verify the
+UI builds correctly."*
+
+So the live-reload path is complete on the compositor's side and has no caller.
+That is recorded here rather than papered over: opening a socket inside a
+program with no event loop to service it would put a connection in a process
+that cannot answer anything that arrives on it, which is the `oswindow`
+simulation mistake of (d½) in a new place. Until Settings is wired, changing an
+appearance setting still requires restarting the compositor, and the fix is
+step (e) applied to Settings — an `oswindow` event loop, a window, and one
+`appearance_changed()` call after `AppearanceFile::save()` in
+`save_appearance` (`apps/settings/src/main.rs`, ~line 880).
+
 ## TD-ONLY-ONE-KEYBOARD-LAYOUT (lane C, 2026-08-17)
 
 **What.** `gui/compositor/src/keymap.rs` holds one hard-coded US-QWERTY
@@ -49140,21 +49162,30 @@ itself: one asserted an absolute pixel count that is simply false (a "square"
 title), and one was reading `compose_frame`'s vsync gate instead of its damage
 state, so its middle assertion passed for entirely the wrong reason.
 
-**What remains is a startup-only channel, and it is the last piece before the
-deletion.** `main` reads `appearance.yaml` at startup and calls
-`set_appearance`; changing a setting in the Settings app does not reach a
-running compositor, so the user must restart it. The fix is a protocol verb and
-its shape is already decided: a `ReloadAppearance` request carrying **no data**,
-so the compositor re-reads the user's own file rather than being told what to
-draw. A setter would let any connected client restyle the whole desktop; a
-reload notification lets a hostile client at worst force a redundant re-read of
-a file it cannot write. Concretely: a new `RequestBody::ReloadAppearance` at tag
-`0x0F` in `gui/remote/src/control.rs` (variant, tag, `from_u8` arm, encode arm,
-decode arm, roundtrip test), the mapping in `to_compositor_request`
-(`gui/compositor/src/wire.rs`), and a handler arm that calls
-`AppearanceFile::load()`.
+**Progress 2026-08-21 — the startup-only channel is now a live one.** ✅ The
+`ReloadAppearance` verb described here as "the last piece before the deletion"
+is built, exactly to the shape this entry specified: tag `0x0F` in
+`gui/remote/src/control.rs`, **no payload**, mapped in `to_compositor_request`
+with no `link.resolve` (it names no window, so a client that has never opened
+one may still send it — which matters, because Settings is such a client), and
+handled by `Compositor::reload_appearance`, which re-reads the user's file.
+`main` now calls the same method at startup instead of loading the file itself,
+so startup and reload cannot disagree about where the settings live. Adopting
+settings that turn out to be identical does *nothing*, so an unlimited-rate
+notification cannot become an unlimited-rate full-screen repaint. The
+application-facing sender is `oswindow::EventLoop::appearance_changed()`.
+Rationale in `design-decisions.md` §500; seven tests, each proved a real
+regression test by reinstating its bug and watching the named test fail.
 
-After that, the deletion: `DesktopShell::render_window_decorations`
+**What remains before the deletion is a caller, and it belongs to another
+entry.** `apps/settings` cannot send the request: it has no compositor
+connection at all, which is `TD-NO-APP-CONNECTS-TO-THE-COMPOSITOR` (noted there
+under "One of the 137 now has something specific it cannot call"). Nothing in
+*this* entry's scope is blocked by that — the compositor draws the user's
+corners and shadows, and adopts a change the moment anyone tells it to — so the
+deletion below is unblocked.
+
+The deletion: `DesktopShell::render_window_decorations`
 (`gui/desktop/src/lib.rs:2367`), `window_chrome` (`:1238`), and the
 `ManagedWindow` geometry fields that exist only to feed them.
 

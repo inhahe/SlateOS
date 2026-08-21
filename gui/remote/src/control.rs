@@ -384,6 +384,29 @@ pub enum RequestBody {
     /// does re-send the list, which is the useful reading of a repeated
     /// subscribe — "I may have lost track, tell me again".
     SubscribeWindowList { subscribe: bool },
+    /// Tell the compositor its copy of the user's appearance settings is out
+    /// of date, so that it re-reads `appearance.yaml` and redraws.
+    ///
+    /// **Carries no data, and that is the whole point.** The compositor draws
+    /// every window frame on the desktop, so a request that *set* the
+    /// appearance would let any process able to open this socket restyle the
+    /// entire machine — invisible title-bar text, a close button the same
+    /// colour as the bar behind it. A notification cannot do that: the
+    /// compositor goes and reads the *user's* file, which the sender may well
+    /// have no permission to write. The worst a hostile client achieves is a
+    /// redundant re-read and a repaint of a screen that already looks the way
+    /// it looks.
+    ///
+    /// It is also why this is not `SetAppearance(AppearanceSettings)` even
+    /// though that would save a file read: the settings are one document with
+    /// one owner (`gui/appearance`), and a wire form for them would be a
+    /// second copy of that model, free to drift from the crate that defines it.
+    ///
+    /// Answered with [`ResponseBody::Ok`], including when the file turns out
+    /// not to have changed — "I have re-read it" is the truthful answer either
+    /// way, and a client asking has no business learning what the user's
+    /// settings say from the shape of the reply.
+    ReloadAppearance,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -403,6 +426,7 @@ enum RequestTag {
     SetFullscreen = 0x0C,
     SetOpacity = 0x0D,
     SubscribeWindowList = 0x0E,
+    ReloadAppearance = 0x0F,
 }
 
 impl RequestTag {
@@ -422,6 +446,7 @@ impl RequestTag {
             0x0C => Self::SetFullscreen,
             0x0D => Self::SetOpacity,
             0x0E => Self::SubscribeWindowList,
+            0x0F => Self::ReloadAppearance,
             _ => return None,
         })
     }
@@ -639,6 +664,7 @@ fn encode_request_body(out: &mut Vec<u8>, body: &RequestBody) {
             out.push(RequestTag::SubscribeWindowList as u8);
             out.push(u8::from(*subscribe));
         }
+        RequestBody::ReloadAppearance => out.push(RequestTag::ReloadAppearance as u8),
     }
 }
 
@@ -861,6 +887,7 @@ fn decode_request_body(r: &mut Reader<'_>) -> Result<RequestBody, DecodeError> {
         RequestTag::SubscribeWindowList => RequestBody::SubscribeWindowList {
             subscribe: read_bool(r)?,
         },
+        RequestTag::ReloadAppearance => RequestBody::ReloadAppearance,
     })
 }
 
@@ -1010,8 +1037,26 @@ mod tests {
             // would round-trip one of these and not the other.
             Request::new(14, RequestBody::SubscribeWindowList { subscribe: true }),
             Request::new(15, RequestBody::SubscribeWindowList { subscribe: false }),
+            Request::new(16, RequestBody::ReloadAppearance),
         ];
         assert_eq!(round_trip_requests(&reqs), reqs);
+    }
+
+    #[test]
+    fn a_reload_request_carries_nothing_a_client_could_restyle_the_desktop_with() {
+        // The security argument for `ReloadAppearance` is that it is a
+        // notification and not a setter: the compositor re-reads the user's own
+        // file rather than being handed a picture of what to draw. That rests
+        // entirely on the request having no payload, so it is asserted on the
+        // bytes rather than left to the enum's shape — the day someone adds
+        // "just a corner radius, to save a file read" this fails and says why.
+        let bytes = encode_requests(&[Request::new(1, RequestBody::ReloadAppearance)]);
+        assert_eq!(
+            bytes.len(),
+            CONTROL_HEADER_LEN + 4 + 1,
+            "a reload request should be a header, a seq and a tag byte — nothing \
+             else; a payload here is a client dictating how the desktop looks"
+        );
     }
 
     #[test]

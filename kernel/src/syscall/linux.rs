@@ -33410,9 +33410,15 @@ fn sys_landlock_restrict_self(args: &SyscallArgs) -> SyscallResult {
 ///     contract (`idx2` is a 16-byte `kcmp_epoll_slot`) and answer 3
 ///     ("not comparable") because no epoll fds exist.
 ///   * Negative or too-large pid (truncates to negative i32) → `ESRCH`.
+///   * Authority: the caller must be able to introspect **both**
+///     targets — each target's owning process must be the caller's
+///     own, or the caller must hold a `Process` capability over it
+///     with [`Rights::DEBUG`](crate::cap::Rights::DEBUG).  Otherwise
+///     `EPERM`, undifferentiated between the two targets.  This is
+///     Linux's `ptrace_may_access` step, expressed in capabilities.
 ///   * Kernel-context callers (`caller_pid()` is `None`) skip the
-///     TID-liveness gate so the self-test can exercise the
-///     comparator paths; comparison then falls back to the raw
+///     TID-liveness and authority gates so the self-test can exercise
+///     the comparator paths; comparison then falls back to the raw
 ///     `(pid, idx)` tuples.
 ///
 /// Limitations: we don't model partial sharing (`CLONE_VM` without
@@ -33471,6 +33477,50 @@ fn sys_kcmp(args: &SyscallArgs) -> SyscallResult {
     // self-test exercise the comparator paths.
     if !kernel_ctx && (owner1.is_none() || owner2.is_none()) {
         return linux_err(errno::ESRCH);
+    }
+
+    // Linux gate step 2: `ptrace_may_access` on *both* targets.
+    //
+    // This was in the comment above and missing from the code until lane B's
+    // audit (`requests/b-a-kcmp-compares-any-two-processes-with-no-authority-
+    // check.md`) noticed the function contained no `EPERM` path at all, so no
+    // caller could ever be refused.  Two things leaked:
+    //
+    //   * types 1..=6 all collapse to "do these two TIDs belong to one
+    //     process?", i.e. the private thread layout of anybody's program; and
+    //   * `KCMP_FILE` resolves `idx1`/`idx2` in the *target's* fd table and
+    //     answers `EBADF` when either is absent, which is an fd-presence
+    //     oracle over an arbitrary process — walk `idx1` and watch `EBADF`
+    //     turn into `0`/`1`/`2`.  When both resolve, the ordering further
+    //     discloses `handle_kind_ord`, so the caller learns whether the
+    //     target's fd 7 is a socket or a file.  Linux requires
+    //     `ptrace_may_access` for exactly this.
+    //
+    // The gate is the one `sys_process_vm_readv` already uses: a `Process`
+    // capability over the target's owning process carrying `DEBUG`, never
+    // ambient PID authority — plus the caller's own process, which
+    // `ptrace_may_access` also always permits and which is the only form real
+    // callers (glibc's rwlock self-deadlock check, `kcmp(getpid(), getpid())`)
+    // use.
+    //
+    // Placed between the `ESRCH` liveness gate and the `type` range gate so
+    // the errno discriminator still matches Linux: `(pid=-1, type=99)` sees
+    // `ESRCH`, and an unauthorised probe with a bad type sees `EPERM` rather
+    // than `EINVAL`.
+    //
+    // Not a KASLR oracle, and worth saying so once so nobody re-derives it:
+    // the ordering here is over `handle_kind_ord` and a handle-table index,
+    // never a kernel address, so Linux's `kptr_obfuscate()` cookie has no
+    // analogue to add.  This is an authority bug only.
+    if !kernel_ctx {
+        // `kernel_ctx` is `caller_pid().is_none()`, so this is `Some`.  Refuse
+        // rather than assume if that ever stops being true.
+        let Some(caller) = caller_pid() else {
+            return linux_err(errno::EPERM);
+        };
+        if !kcmp_may_compare(caller, owner1, owner2) {
+            return linux_err(errno::EPERM);
+        }
     }
 
     // Linux's `int type` truncates to i32 before the switch; a sentinel
@@ -33567,6 +33617,49 @@ fn sys_kcmp(args: &SyscallArgs) -> SyscallResult {
     } else {
         SyscallResult::ok(2)
     }
+}
+
+/// May `caller` introspect the process owning one `kcmp` target?
+///
+/// True for the caller's own process — `ptrace_may_access` always permits
+/// self, and `kcmp(getpid(), getpid(), …)` is the only form real callers use
+/// (glibc's `pthread_rwlock` self-deadlock check) — or when the caller holds a
+/// `Process` capability over that process carrying [`Rights::DEBUG`]. Never by
+/// ambient PID authority; this is the same gate `sys_process_vm_readv` uses.
+///
+/// A target with no owning process is refused rather than allowed: by the time
+/// this runs, `sys_kcmp`'s liveness gate has already answered `ESRCH` for that
+/// case, so reaching here with `None` means the thread vanished mid-call.
+///
+/// [`Rights::DEBUG`]: crate::cap::Rights::DEBUG
+fn kcmp_may_access(caller: u64, owner: Option<u64>) -> bool {
+    owner.is_some_and(|o| {
+        o == caller
+            || crate::proc::pcb::has_capability_for(
+                caller,
+                crate::cap::ResourceType::Process,
+                o,
+                crate::cap::Rights::DEBUG,
+            )
+    })
+}
+
+/// May `caller` run a `kcmp` comparison across *both* targets?
+///
+/// Linux's gate is `ptrace_may_access(task1) && ptrace_may_access(task2)`, and
+/// the conjunction is the whole point: a caller entitled to introspect one side
+/// learns nothing it is entitled to about the other, since every answer this
+/// syscall gives is a relation *between* the two.
+///
+/// Both sides are evaluated unconditionally. `&&` would short-circuit on the
+/// first failing target, and since the refusal is deliberately a single
+/// undifferentiated `EPERM` — so the caller cannot learn *which* target it
+/// lacked authority over — leaving a timing difference in would hand back the
+/// same bit through the side door.
+fn kcmp_may_compare(caller: u64, owner1: Option<u64>, owner2: Option<u64>) -> bool {
+    let ok1 = kcmp_may_access(caller, owner1);
+    let ok2 = kcmp_may_access(caller, owner2);
+    ok1 && ok2
 }
 
 /// Stable ordering for [`HandleKind`] used by `kcmp(KCMP_FILE)`.
@@ -49108,6 +49201,124 @@ pub fn self_test_madvise_dontneed() -> crate::error::KernelResult<()> {
     pcb::destroy(pid);
     serial_println!(
         "[syscall/linux]   madvise(MADV_DONTNEED): frames freed + VMA persists + zero-refault: OK"
+    );
+    Ok(())
+}
+
+/// Self-test for `kcmp`'s authority gate — Linux's `ptrace_may_access` step,
+/// expressed in capabilities.
+///
+/// Unit-level, for the same reason `self_test_process_vm_cross_as` is:
+/// `caller_pid()` is `None` in kernel context, so `sys_kcmp` takes the
+/// `kernel_ctx` escape and the gated arm is unreachable from here. What is
+/// testable — and what the bug actually was — is the predicate itself, so this
+/// drives [`kcmp_may_compare`] directly against real PCBs and real capability
+/// grants.
+///
+/// The gate this covers did not exist until lane B's audit found `sys_kcmp`
+/// contained no `EPERM` path at all: it would tell any caller whether any two
+/// TIDs on the system were threads of one process, and — via `KCMP_FILE`'s
+/// `EBADF` — enumerate which descriptors an arbitrary process held open. See
+/// `requests/b-a-kcmp-compares-any-two-processes-with-no-authority-check.md`.
+pub fn self_test_kcmp_authority() -> crate::error::KernelResult<()> {
+    use crate::cap::{ResourceType, Rights};
+    use crate::error::KernelError;
+    use crate::serial_println;
+
+    serial_println!("[syscall/linux] Running kcmp authority-gate self-test...");
+
+    let prober = pcb::create("linux-kcmp-prober", 0);
+    let victim = pcb::create("linux-kcmp-victim", 0);
+    let bystander = pcb::create("linux-kcmp-bystander", 0);
+    let cleanup = || {
+        pcb::destroy(prober);
+        pcb::destroy(victim);
+        pcb::destroy(bystander);
+    };
+
+    // A macro would hide which assertion failed in the boot log; a closure
+    // cannot early-return from the enclosing function.  Spell each one out.
+    macro_rules! require {
+        ($cond:expr, $msg:expr) => {
+            if !($cond) {
+                cleanup();
+                serial_println!("[syscall/linux]   FAIL: {}", $msg);
+                return Err(KernelError::InternalError);
+            }
+        };
+    }
+
+    // Self is always permitted: this is the only form real callers use, and
+    // refusing it would break glibc's rwlock self-deadlock detection.
+    require!(
+        kcmp_may_compare(prober, Some(prober), Some(prober)),
+        "kcmp refused a caller comparing its own process with itself"
+    );
+
+    // A stranger is refused with no capability at all.  This is the case that
+    // was open: every probe used to be answered.
+    require!(
+        !kcmp_may_compare(prober, Some(prober), Some(victim)),
+        "kcmp allowed an uncapability'd caller to probe another process"
+    );
+    require!(
+        !kcmp_may_compare(prober, Some(victim), Some(bystander)),
+        "kcmp allowed a caller to probe two processes it has no authority over"
+    );
+
+    // A Process capability *without* DEBUG must not open the gate — the right
+    // is what carries introspection authority, not the resource type.
+    pcb::insert_caps(prober, &[(ResourceType::Process, victim, Rights::READ)])?;
+    require!(
+        !kcmp_may_compare(prober, Some(prober), Some(victim)),
+        "a READ-only Process capability satisfied kcmp's DEBUG gate"
+    );
+
+    // With DEBUG over the victim, comparing self against the victim is allowed.
+    pcb::insert_caps(prober, &[(ResourceType::Process, victim, Rights::DEBUG)])?;
+    require!(
+        kcmp_may_compare(prober, Some(prober), Some(victim)),
+        "a DEBUG capability over the target did not open kcmp's gate"
+    );
+    require!(
+        kcmp_may_compare(prober, Some(victim), Some(victim)),
+        "a DEBUG capability did not authorise comparing the target with itself"
+    );
+
+    // The conjunction is the load-bearing part.  Authority over one side must
+    // not authorise a comparison, because every answer kcmp gives is a relation
+    // *between* the two sides — "is the victim's fd 3 the same object as the
+    // bystander's fd 3" discloses the bystander just as much.
+    require!(
+        !kcmp_may_compare(prober, Some(victim), Some(bystander)),
+        "authority over one target authorised a comparison against another"
+    );
+    require!(
+        !kcmp_may_compare(prober, Some(bystander), Some(victim)),
+        "the conjunction is order-dependent — one argument order was accepted"
+    );
+
+    // A vanished target is refused, never defaulted open.
+    require!(
+        !kcmp_may_compare(prober, Some(prober), None),
+        "kcmp allowed a comparison against a target with no owning process"
+    );
+    require!(
+        !kcmp_may_compare(prober, None, None),
+        "kcmp allowed a comparison with both targets ownerless"
+    );
+
+    // The grant is specific: DEBUG over the victim says nothing about the
+    // bystander, even for a caller that holds a capability of the right shape.
+    require!(
+        !kcmp_may_access(prober, Some(bystander)),
+        "a DEBUG capability leaked to a process it was not granted over"
+    );
+
+    cleanup();
+    serial_println!(
+        "[syscall/linux]   kcmp authority gate (self ok, DEBUG cap required, \
+         conjunction over both targets): OK"
     );
     Ok(())
 }

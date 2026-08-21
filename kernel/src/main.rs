@@ -3783,6 +3783,16 @@ extern "C" fn kernel_main() -> ! {
         );
     }
 
+    // The same capability gate on the other syscall that needed it. `kcmp` had
+    // none until lane B audited it — it would tell any caller whether any two
+    // TIDs belonged to one process, and enumerate an arbitrary process's open
+    // descriptors through `KCMP_FILE`'s EBADF. Unit-level for the same reason
+    // as the test above: `caller_pid()` is `None` here, so the syscall takes
+    // its kernel-context escape and only the predicate is reachable.
+    if let Err(e) = syscall::linux::self_test_kcmp_authority() {
+        serial_println!("WARNING: Linux kcmp authority self-test failed: {:?}", e);
+    }
+
     // The layer underneath that one: `copy_{to,from}_user_as` walk another
     // process's page table by hand, so nothing faults and the two states a
     // fault would have fixed — an untouched committed page and a copy-on-write

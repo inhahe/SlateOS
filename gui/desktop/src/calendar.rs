@@ -20,11 +20,14 @@
 //! let mut cal = CalendarView::new(CalendarConfig::default());
 //! let mut store = EventStore::new();
 //! let mut clock = ClockDisplay::new();
+//! clock.show_date = true;
 //!
-//! // Taskbar renders clock:
-//! let clock_cmds = clock.render(x, y);
+//! // The taskbar draws the reading itself, into its own themed render tree,
+//! // and sizes the tray from `reading_width` so it is never clipped:
+//! let slot = clock.reading_width(font_size);
+//! let reading = clock.format_taskbar(utc_now, &local_zone);
 //!
-//! // Click on clock opens the calendar popup:
+//! // Click on the clock opens the calendar popup:
 //! cal.set_visible(true);
 //!
 //! // Each frame, if visible:
@@ -774,6 +777,10 @@ pub struct ClockDisplay {
     pub use_24h: bool,
     /// Whether to show seconds.
     pub show_seconds: bool,
+    /// Whether the taskbar reading is prefixed with the day of the week.
+    pub show_day_of_week: bool,
+    /// Whether the taskbar reading includes the calendar date.
+    pub show_date: bool,
     /// Additional timezone displays (up to 3).
     pub extra_timezones: Vec<TimezoneEntry>,
 }
@@ -791,10 +798,19 @@ fn local_secs(utc_timestamp: u64, tz: &Tz) -> u64 {
 }
 
 impl ClockDisplay {
+    /// A clock showing nothing but the time of day.
+    ///
+    /// These are the *widget's* defaults, not the desktop's: what the taskbar
+    /// actually ships with lives in `DateTimeSettings::default`, and the shell
+    /// copies all four switches out of it on every read. A caller that builds a
+    /// clock without a settings panel behind it gets a bare `HH:MM`, which is
+    /// the reading that needs no explanation.
     pub fn new() -> Self {
         Self {
             use_24h: true,
             show_seconds: false,
+            show_day_of_week: false,
+            show_date: false,
             extra_timezones: Vec::new(),
         }
     }
@@ -850,13 +866,131 @@ impl ClockDisplay {
         }
     }
 
+    /// The weekday the instant falls on in `tz`, written out: "Monday".
+    pub fn format_day_of_week(&self, utc_timestamp: u64, tz: &Tz) -> &'static str {
+        let (year, month, day, _, _, _) = timestamp_to_date(local_secs(utc_timestamp, tz));
+        day_of_week_name(day_of_week(year, month, day))
+    }
+
+    /// The calendar date **without** the weekday: "January 1, 2024".
+    ///
+    /// Split from [`format_date`](Self::format_date) because the Date & Time
+    /// panel offers the weekday and the date as two independent switches, and a
+    /// single function that emits both joined by a comma can answer neither of
+    /// them on its own. The joined form is still what the popup wants, so it
+    /// stays — as a composition of this and
+    /// [`format_day_of_week`](Self::format_day_of_week), not as a third place
+    /// that knows how a date is spelled.
+    pub fn format_calendar_date(&self, utc_timestamp: u64, tz: &Tz) -> String {
+        let (year, month, day, _, _, _) = timestamp_to_date(local_secs(utc_timestamp, tz));
+        format!("{} {day}, {year}", month_name(month))
+    }
+
     /// Format a date string: "DayOfWeek, Month DD, YYYY".
     pub fn format_date(&self, utc_timestamp: u64, tz: &Tz) -> String {
+        format!(
+            "{}, {}",
+            self.format_day_of_week(utc_timestamp, tz),
+            self.format_calendar_date(utc_timestamp, tz)
+        )
+    }
+
+    /// The single-line taskbar reading, as the Date & Time panel has set it up.
+    ///
+    /// The time is always present — a clock with every switch off is still a
+    /// clock — and the weekday and date are prepended when asked for, in the
+    /// order a person reads them: `"Thu Aug 21 16:30"`.
+    ///
+    /// # Why the short names here and the long ones in `format_date`
+    ///
+    /// The taskbar has about a hundred pixels for this, and the popup has a
+    /// whole panel. Writing "Thursday, August 21, 2026" into the corner of the
+    /// screen would either overrun the display edge or be clipped, and the year
+    /// is the field nobody consults at a glance — so the taskbar drops it and
+    /// abbreviates the two names. Both spellings come from the same
+    /// `guitk::date` tables, so this is a second *presentation* of one calendar
+    /// rather than a second calendar; see design-decisions §492.
+    pub fn format_taskbar(&self, utc_timestamp: u64, tz: &Tz) -> String {
         let (year, month, day, _, _, _) = timestamp_to_date(local_secs(utc_timestamp, tz));
-        let dow = day_of_week(year, month, day);
-        let dow_name = day_of_week_name(dow);
-        let month_str = month_name(month);
-        format!("{dow_name}, {month_str} {day}, {year}")
+        let mut out = String::new();
+        if self.show_day_of_week {
+            let dow = day_of_week(year, month, day);
+            out.push_str(Weekday::from_index(i32::try_from(dow).unwrap_or(0)).short_name());
+            out.push(' ');
+        }
+        if self.show_date {
+            out.push_str(month_name_short(month));
+            out.push(' ');
+            out.push_str(&day.to_string());
+            out.push(' ');
+        }
+        out.push_str(&self.format_time(utc_timestamp, tz));
+        out
+    }
+
+    /// How much horizontal room to reserve for this clock at `font_size`.
+    ///
+    /// Measured over the **widest value each field can take**, never over the
+    /// current instant. A reserve that followed the current reading would change
+    /// width as the minute rolled over — `1` and `8` are not the same width in a
+    /// proportional face, nor are `Fri` and `Wed` — and every tray item laid out
+    /// to the left of the clock would twitch once a minute. The widest reading
+    /// is a fixed string for a given set of switches, so the layout is stable.
+    pub fn reading_width(&self, font_size: f32) -> f32 {
+        text::width(&self.widest_reading(font_size), font_size)
+    }
+
+    /// The widest reading [`format_taskbar`](Self::format_taskbar) can produce.
+    ///
+    /// Assembled from the widest weekday abbreviation, the widest month
+    /// abbreviation and the widest digit rather than from a guess, because
+    /// which of those is widest is a property of the font face and changes when
+    /// the face does.
+    fn widest_reading(&self, font_size: f32) -> String {
+        let widest = |cands: &[&'static str]| -> &'static str {
+            cands.iter().copied().fold("", |best, c| {
+                if text::width(c, font_size) > text::width(best, font_size) {
+                    c
+                } else {
+                    best
+                }
+            })
+        };
+        let digit = widest(&["0", "1", "2", "3", "4", "5", "6", "7", "8", "9"]);
+        // Two of the widest digit is at least as wide as any field the clock
+        // prints: days of the month, hours, minutes and seconds are all one or
+        // two digits.
+        let dd = format!("{digit}{digit}");
+
+        let mut out = String::new();
+        if self.show_day_of_week {
+            let days: [&'static str; 7] = core::array::from_fn(|i| {
+                Weekday::from_index(i32::try_from(i).unwrap_or(0)).short_name()
+            });
+            out.push_str(widest(&days));
+            out.push(' ');
+        }
+        if self.show_date {
+            let months: [&'static str; 12] = core::array::from_fn(|i| {
+                month_name_short(u32::try_from(i).unwrap_or(0).saturating_add(1))
+            });
+            out.push_str(widest(&months));
+            out.push(' ');
+            out.push_str(&dd);
+            out.push(' ');
+        }
+        out.push_str(&dd);
+        out.push(':');
+        out.push_str(&dd);
+        if self.show_seconds {
+            out.push(':');
+            out.push_str(&dd);
+        }
+        if !self.use_24h {
+            out.push(' ');
+            out.push_str(widest(&["AM", "PM"]));
+        }
+        out
     }
 
     /// Render the clock display for the taskbar.
@@ -2024,6 +2158,7 @@ mod tests {
             use_24h: false,
             show_seconds: false,
             extra_timezones: Vec::new(),
+            ..ClockDisplay::new()
         };
         for (hour, h12, ampm) in expected {
             let ts = hour * SECS_PER_HOUR;
@@ -2534,6 +2669,7 @@ mod tests {
             use_24h: true,
             show_seconds: false,
             extra_timezones: Vec::new(),
+            ..ClockDisplay::new()
         };
         // Epoch = midnight UTC.
         assert_eq!(clock.format_time(0, &Tz::UTC), "00:00");
@@ -2548,6 +2684,7 @@ mod tests {
             use_24h: true,
             show_seconds: true,
             extra_timezones: Vec::new(),
+            ..ClockDisplay::new()
         };
         let ts = 13 * 3600 + 45 * 60 + 30;
         assert_eq!(clock.format_time(ts, &Tz::UTC), "13:45:30");
@@ -2559,6 +2696,7 @@ mod tests {
             use_24h: false,
             show_seconds: false,
             extra_timezones: Vec::new(),
+            ..ClockDisplay::new()
         };
         // Midnight.
         assert_eq!(clock.format_time(0, &Tz::UTC), "12:00 AM");
@@ -2576,6 +2714,7 @@ mod tests {
             use_24h: true,
             show_seconds: false,
             extra_timezones: Vec::new(),
+            ..ClockDisplay::new()
         };
         // India: UTC+5:30, and no DST rule — POSIX writes an *east* offset
         // with a minus sign.  At UTC midnight, local time is 05:30.
@@ -2626,6 +2765,108 @@ mod tests {
         let ts = 1704067200;
         let date_str = clock.format_date(ts, &Tz::UTC);
         assert_eq!(date_str, "Monday, January 1, 2024");
+    }
+
+    /// The long form is the two halves joined, not a third spelling of a date.
+    #[test]
+    fn the_long_date_is_its_two_halves_and_nothing_else() {
+        let clock = ClockDisplay::new();
+        for ts in [0_u64, 1_704_067_200, 1_787_070_645, 4_000_000_000] {
+            for zone in [Tz::UTC, tz("EST5EDT,M3.2.0,M11.1.0"), tz("JST-9")] {
+                assert_eq!(
+                    clock.format_date(ts, &zone),
+                    format!(
+                        "{}, {}",
+                        clock.format_day_of_week(ts, &zone),
+                        clock.format_calendar_date(ts, &zone)
+                    )
+                );
+            }
+        }
+    }
+
+    /// The two switches the Date & Time panel drew and nothing read.
+    #[test]
+    fn the_taskbar_reading_follows_the_switches() {
+        let mut clock = ClockDisplay::new();
+        // 2026-08-18 16:30:45 UTC — a Tuesday.
+        let ts = 1_787_070_645;
+
+        assert_eq!(clock.format_taskbar(ts, &Tz::UTC), "16:30");
+        clock.show_day_of_week = true;
+        assert_eq!(clock.format_taskbar(ts, &Tz::UTC), "Tue 16:30");
+        clock.show_date = true;
+        assert_eq!(clock.format_taskbar(ts, &Tz::UTC), "Tue Aug 18 16:30");
+        clock.show_day_of_week = false;
+        assert_eq!(clock.format_taskbar(ts, &Tz::UTC), "Aug 18 16:30");
+        clock.show_seconds = true;
+        assert_eq!(clock.format_taskbar(ts, &Tz::UTC), "Aug 18 16:30:45");
+        clock.use_24h = false;
+        assert_eq!(clock.format_taskbar(ts, &Tz::UTC), "Aug 18 4:30:45 PM");
+    }
+
+    /// The taskbar's date is taken from the same shifted instant as its time.
+    #[test]
+    fn the_taskbar_reading_crosses_midnight_with_the_zone() {
+        let mut clock = ClockDisplay::new();
+        clock.show_day_of_week = true;
+        clock.show_date = true;
+        let ts = 1_787_070_645; // 2026-08-18 16:30:45 UTC, a Tuesday.
+        assert_eq!(clock.format_taskbar(ts, &Tz::UTC), "Tue Aug 18 16:30");
+        assert_eq!(clock.format_taskbar(ts, &tz("JST-9")), "Wed Aug 19 01:30");
+        assert_eq!(
+            clock.format_taskbar(ts, &tz("HST10")),
+            "Tue Aug 18 06:30",
+            "UTC-10 stays on the same day"
+        );
+    }
+
+    /// The reserved width has to be an upper bound on every reading, or the
+    /// clock is clipped at the display edge for part of the year — and nothing
+    /// about a clipped clock says which end was cut.
+    #[test]
+    fn the_reserved_width_covers_every_reading_the_switches_allow() {
+        const SIZE: f32 = 13.0;
+        let mut clock = ClockDisplay::new();
+        for (dow, date, secs, h24) in [
+            (false, false, false, true),
+            (true, true, false, true),
+            (true, true, true, true),
+            (true, true, true, false),
+            (false, true, false, false),
+        ] {
+            clock.show_day_of_week = dow;
+            clock.show_date = date;
+            clock.show_seconds = secs;
+            clock.use_24h = h24;
+            let reserved = clock.reading_width(SIZE);
+            // Three years sampled every 25 hours: every weekday, every month,
+            // every day of the month, and every hour.
+            for step in 0..1100_u64 {
+                let ts = 1_787_070_645 + step * 25 * 3600;
+                let reading = clock.format_taskbar(ts, &Tz::UTC);
+                assert!(
+                    text::width(&reading, SIZE) <= reserved,
+                    "{reading:?} exceeds the reserved {reserved}"
+                );
+            }
+        }
+    }
+
+    /// The reserve must also not be wildly generous — a slot much wider than
+    /// the reading is dead space taken from the window buttons.
+    #[test]
+    fn the_reserved_width_is_close_to_what_a_reading_actually_needs() {
+        const SIZE: f32 = 13.0;
+        let mut clock = ClockDisplay::new();
+        clock.show_day_of_week = true;
+        clock.show_date = true;
+        let reserved = clock.reading_width(SIZE);
+        let real = text::width("Mon Sep 28 22:38", SIZE);
+        assert!(
+            reserved <= real * 1.25,
+            "reserved {reserved} against a real reading of {real}"
+        );
     }
 
     #[test]

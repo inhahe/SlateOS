@@ -147,6 +147,7 @@ use guitk::event::{Key, KeyEvent, Modifiers, MouseButton, MouseEvent, MouseEvent
 use guitk::render::RenderTree;
 use guitk::step;
 use guitk::style::{Border, CornerRadii, Shadow};
+use guitk::text;
 use guitk::wheel;
 use launcher::{AppEntry, Category};
 // The same zone engine the libc's `localtime`, osh's `printf '%(…)T'`, the
@@ -262,12 +263,18 @@ const TASKBAR_BUTTON_GAP: f32 = 4.0;
 const TASKBAR_BUTTON_INSET: f32 = 4.0;
 /// Widest a window button gets, however few windows are open.
 const TASKBAR_BUTTON_MAX_WIDTH: f32 = 160.0;
-/// Where the system tray (clock, desktop indicator) begins, measured from the
-/// right edge.
-const TRAY_WIDTH: f32 = 180.0;
-/// How much room the window buttons leave for the tray. Wider than the tray
-/// itself so the last button does not end flush against the clock.
-const TRAY_RESERVE: f32 = 200.0;
+/// Narrowest the system tray gets, however little is in it.
+///
+/// The tray's real width is *measured* — see
+/// [`DesktopShell::tray_width`] — because the clock's width is a setting.
+/// This floor only stops a bare `16:30` from letting the window buttons run
+/// almost to the display edge.
+const TRAY_MIN_WIDTH: f32 = 120.0;
+/// Gap at the tray's outer edge and between the items inside it.
+const TRAY_PADDING: f32 = 8.0;
+/// Extra room the window buttons leave beyond the tray, so the last button does
+/// not end flush against the desktop indicator.
+const TRAY_RESERVE_GAP: f32 = 20.0;
 
 // --- Start menu ------------------------------------------------------------
 
@@ -1060,10 +1067,10 @@ impl DesktopShell {
         )
     }
 
-    /// Where the system tray begins.
+    /// Where the system tray begins — the left edge of its leftmost item.
     #[must_use]
     pub fn tray_x(&self) -> f32 {
-        self.taskbar_rect().w - self.scale(TRAY_WIDTH)
+        (self.taskbar_rect().w - self.tray_width()).max(0.0)
     }
 
     /// How wide each taskbar window button is.
@@ -1072,8 +1079,11 @@ impl DesktopShell {
     /// in either the renderer or the hit test.
     fn taskbar_button_width(&self) -> f32 {
         let bar = self.taskbar_rect();
-        let available =
-            (bar.w - self.scale(START_BUTTON_WIDTH) - self.scale(TRAY_RESERVE)).max(0.0);
+        let available = (bar.w
+            - self.scale(START_BUTTON_WIDTH)
+            - self.tray_width()
+            - self.scale(TRAY_RESERVE_GAP))
+        .max(0.0);
         let count = self.visible_windows().len().max(1) as f32;
         self.scale(TASKBAR_BUTTON_MAX_WIDTH).min(available / count)
     }
@@ -2275,25 +2285,33 @@ impl DesktopShell {
             );
         }
 
-        // System tray (right side)
+        // System tray (right side). Both items are placed from the display's
+        // right edge inwards, so a wider clock — the date and weekday switches
+        // roughly triple it — pushes the tray left instead of running off the
+        // screen.
         let tray_x = self.tray_x();
+        let padding = self.scale(TRAY_PADDING);
+        let tray_text_y = bar.y + self.scale(12.0);
 
-        // Clock
-        let time_str = self.current_time_string();
+        // The clock sits in a fixed-width slot at the right end, and its text
+        // starts at the slot's left edge. Aligning to the slot rather than to
+        // the reading keeps it still: the slot is sized for the widest reading
+        // these switches can produce, so a narrower one leaves a few pixels of
+        // slack at the end instead of sliding the text sideways every minute.
+        let time_str = self.current_clock_string();
         tree.text(
-            tray_x + self.scale(100.0),
-            bar.y + self.scale(12.0),
+            bar.w - padding - self.clock_width(),
+            tray_text_y,
             &time_str,
             self.theme.taskbar_fg,
             self.font_size(TextRole::Body),
         );
 
-        // Desktop indicator
-        let desk_str = format!("Desktop {}", self.current_desktop_number());
+        // Desktop indicator, at the tray's left edge.
         tree.text(
-            tray_x + self.scale(8.0),
-            bar.y + self.scale(12.0),
-            &desk_str,
+            tray_x + padding,
+            tray_text_y,
+            &self.desktop_indicator_string(),
             self.theme.taskbar_fg,
             self.font_size(TextRole::Caption),
         );
@@ -2637,6 +2655,8 @@ impl DesktopShell {
     fn clock(&self) -> calendar::ClockDisplay {
         let mut clock = calendar::ClockDisplay::new();
         clock.show_seconds = self.datetime.show_seconds;
+        clock.show_day_of_week = self.datetime.show_day_of_week;
+        clock.show_date = self.datetime.show_date;
         clock
     }
 
@@ -2656,23 +2676,62 @@ impl DesktopShell {
     /// design-decisions §469): the shell drawing its own lesser copy of
     /// something the tree already did properly, with the user able to see only
     /// the lesser one.
-    fn current_time_string(&self) -> String {
+    fn current_clock_string(&self) -> String {
         let secs = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs();
-        self.time_string_at(secs)
+        self.clock_string_at(secs)
     }
 
     /// The taskbar clock reading for a given UTC instant.
     ///
-    /// Split from [`current_time_string`](Self::current_time_string) so that
+    /// Split from [`current_clock_string`](Self::current_clock_string) so that
     /// the reading can be asserted at all: everything above reads the wall
     /// clock, and a test of a function that consults `SystemTime::now` can
     /// only ever check its *shape*, never its value — which is exactly the
     /// hole the UTC bug lived in.
-    fn time_string_at(&self, utc_secs: u64) -> String {
-        self.clock().format_time(utc_secs, &self.local_zone())
+    fn clock_string_at(&self, utc_secs: u64) -> String {
+        self.clock().format_taskbar(utc_secs, &self.local_zone())
+    }
+
+    /// How wide the clock's slot in the tray is.
+    ///
+    /// The **widest** reading the current switches can produce, not the current
+    /// one: see [`calendar::ClockDisplay::reading_width`]. Everything else in
+    /// the tray is positioned from this, so a width that followed the current
+    /// second would shuffle the tray once a minute.
+    fn clock_width(&self) -> f32 {
+        self.clock().reading_width(self.font_size(TextRole::Body))
+    }
+
+    /// How wide the virtual-desktop indicator's text is.
+    fn desktop_indicator_width(&self) -> f32 {
+        text::width(
+            &self.desktop_indicator_string(),
+            self.font_size(TextRole::Caption),
+        )
+    }
+
+    /// What the virtual-desktop indicator reads.
+    fn desktop_indicator_string(&self) -> String {
+        format!("Desktop {}", self.current_desktop_number())
+    }
+
+    /// How much of the taskbar's right end the tray occupies.
+    ///
+    /// Derived from what is actually in it rather than fixed at 180 px, because
+    /// the clock's width is a *setting*: turning the date on takes it from
+    /// `16:30` to `Thu Aug 21 16:30`, roughly tripling it. With a constant
+    /// reserve the extra simply ran off the right edge of the display — which
+    /// is how a shipped default of `show_date: true` could have gone unnoticed,
+    /// since nothing about a clipped clock says which end was cut.
+    fn tray_width(&self) -> f32 {
+        let padding = self.scale(TRAY_PADDING);
+        let content = self.clock_width() + self.desktop_indicator_width();
+        // Padding at the right edge, between the two items, and at the left of
+        // the tray.
+        (content + padding * 3.0).max(self.scale(TRAY_MIN_WIDTH))
     }
 }
 
@@ -3118,7 +3177,7 @@ mod window_manager_tests {
         clippy::arithmetic_side_effects
     )]
 
-    use super::{DesktopShell, Key, KeyEvent, Modifiers, WindowId, WindowState};
+    use super::{DesktopShell, Key, KeyEvent, Modifiers, TextRole, WindowId, WindowState, text};
 
     fn shell() -> DesktopShell {
         DesktopShell::new(1920, 1080)
@@ -3862,29 +3921,46 @@ mod window_manager_tests {
     // the Date & Time panel offered three settings that reached nothing.
     // ======================================================================
 
-    /// 2026-08-21 16:30:45 UTC.
+    /// 2026-08-18 16:30:45 UTC — a Tuesday.
+    ///
+    /// The comment used to say 2026-08-21, which this constant has never been:
+    /// nothing asserted on the date, so a wrong date in a doc comment had
+    /// nowhere to show up. The assertions below now name the weekday and the
+    /// day of the month, which is what caught it.
     const INSTANT: u64 = 1_787_070_645;
+
+    /// A shell whose clock shows the time and nothing else.
+    ///
+    /// The shipped default shows the weekday and date too, so a test about the
+    /// *zone* would otherwise be reading three fields to check one. The tests
+    /// that are about the date switches turn them back on explicitly.
+    fn time_only_shell() -> DesktopShell {
+        let mut shell = shell();
+        shell.datetime.show_day_of_week = false;
+        shell.datetime.show_date = false;
+        shell
+    }
 
     #[test]
     fn the_taskbar_clock_reads_in_the_configured_zone_not_utc() {
-        let mut shell = shell();
+        let mut shell = time_only_shell();
 
         assert!(shell.datetime.set_timezone("UTC"));
-        assert_eq!(shell.time_string_at(INSTANT), "16:30");
+        assert_eq!(shell.clock_string_at(INSTANT), "16:30");
 
         // The shipped *default* is New York, which is the whole point: out of
         // the box the corner of the screen used to read 16:30 in a zone where
         // it was half past noon.
         assert!(shell.datetime.set_timezone("America/New_York"));
         assert_eq!(
-            shell.time_string_at(INSTANT),
+            shell.clock_string_at(INSTANT),
             "12:30",
             "August is EDT, UTC-4 — a fixed-offset entry would have said 11:30"
         );
 
         assert!(shell.datetime.set_timezone("Asia/Tokyo"));
         assert_eq!(
-            shell.time_string_at(INSTANT),
+            shell.clock_string_at(INSTANT),
             "01:30",
             "UTC+9 crosses midnight into the next day"
         );
@@ -3894,31 +3970,149 @@ mod window_manager_tests {
     fn the_default_shell_does_not_show_utc() {
         // Nothing here sets a zone: this is the desktop as it first boots.
         let shell = shell();
-        assert_ne!(
-            shell.time_string_at(INSTANT),
-            "16:30",
+        assert!(
+            !shell.clock_string_at(INSTANT).ends_with("16:30"),
             "a fresh desktop must apply its own default zone, not fall to UTC"
         );
     }
 
     #[test]
     fn the_show_seconds_setting_reaches_the_taskbar_clock() {
-        let mut shell = shell();
+        let mut shell = time_only_shell();
         assert!(shell.datetime.set_timezone("Atlantic/Reykjavik"));
 
-        assert_eq!(shell.time_string_at(INSTANT), "16:30");
+        assert_eq!(shell.clock_string_at(INSTANT), "16:30");
         shell.datetime.show_seconds = true;
-        assert_eq!(shell.time_string_at(INSTANT), "16:30:45");
+        assert_eq!(shell.clock_string_at(INSTANT), "16:30:45");
+    }
+
+    /// The two switches the Date & Time panel drew and nothing read.
+    ///
+    /// They were `pub` fields on `DateTimeSettings`, each documented as
+    /// applying "in the taskbar clock", each rendered as a toggle row in the
+    /// settings UI — and the only other reference to either was one test. The
+    /// user could turn them on and off all day and the corner of the screen
+    /// never changed.
+    #[test]
+    fn the_date_and_weekday_switches_reach_the_taskbar_clock() {
+        let mut shell = shell();
+        assert!(shell.datetime.set_timezone("UTC"));
+
+        // Shipped defaults: both on.
+        assert!(shell.datetime.show_day_of_week && shell.datetime.show_date);
+        assert_eq!(shell.clock_string_at(INSTANT), "Tue Aug 18 16:30");
+
+        shell.datetime.show_day_of_week = false;
+        assert_eq!(shell.clock_string_at(INSTANT), "Aug 18 16:30");
+
+        shell.datetime.show_date = false;
+        shell.datetime.show_day_of_week = true;
+        assert_eq!(shell.clock_string_at(INSTANT), "Tue 16:30");
+
+        shell.datetime.show_day_of_week = false;
+        assert_eq!(
+            shell.clock_string_at(INSTANT),
+            "16:30",
+            "with everything off it is still a clock"
+        );
+    }
+
+    /// The date on the taskbar is the date *in the configured zone*, taken from
+    /// the same shifted instant as the time — or a clock reading just after
+    /// local midnight would show yesterday beside today's hour.
+    #[test]
+    fn the_taskbar_date_crosses_midnight_with_the_zone() {
+        let mut shell = shell();
+
+        assert!(shell.datetime.set_timezone("UTC"));
+        assert_eq!(shell.clock_string_at(INSTANT), "Tue Aug 18 16:30");
+
+        // UTC+9: half past one the *next* morning.
+        assert!(shell.datetime.set_timezone("Asia/Tokyo"));
+        assert_eq!(shell.clock_string_at(INSTANT), "Wed Aug 19 01:30");
     }
 
     #[test]
     fn an_unresolvable_zone_falls_back_to_utc_rather_than_inventing_an_offset() {
-        let mut shell = shell();
+        let mut shell = time_only_shell();
         // `set_timezone` validates, so reach past it — this is the state a
         // configuration file naming a zone we do not ship would produce.
         shell.datetime.timezone = "Mars/Olympus_Mons".to_string();
         assert!(shell.datetime.current_timezone().is_none());
-        assert_eq!(shell.time_string_at(INSTANT), "16:30");
+        assert_eq!(shell.clock_string_at(INSTANT), "16:30");
+    }
+
+    /// A clock the tray has no room for is a setting that did not arrive.
+    ///
+    /// The tray used to be a flat 180 px with the clock drawn 100 px into it,
+    /// which is 80 px for the reading — enough for `16:30` and not for
+    /// `Tue Aug 18 16:30`. Nothing about a clipped clock says which end was
+    /// cut, so the shipped default of `show_date: true` could have shown a
+    /// truncated date indefinitely.
+    #[test]
+    fn every_reading_fits_the_slot_the_tray_reserves_for_it() {
+        let mut shell = shell();
+        assert!(shell.datetime.set_timezone("UTC"));
+
+        for (dow, date, secs) in [
+            (false, false, false),
+            (true, false, false),
+            (false, true, false),
+            (true, true, false),
+            (true, true, true),
+        ] {
+            shell.datetime.show_day_of_week = dow;
+            shell.datetime.show_date = date;
+            shell.datetime.show_seconds = secs;
+            let slot = shell.clock_width();
+
+            // Three years of readings sampled every 25 hours, so the sample
+            // walks through every weekday, every month and every day of the
+            // month rather than landing on the same hour each time.
+            for step in 0..1100_u64 {
+                let t = INSTANT + step * 25 * 3600;
+                let reading = shell.clock_string_at(t);
+                let w = text::width(&reading, shell.font_size(TextRole::Body));
+                assert!(
+                    w <= slot,
+                    "{reading:?} is {w} wide but the tray reserves {slot} \
+                     (weekday {dow}, date {date}, seconds {secs})"
+                );
+            }
+        }
+    }
+
+    /// The tray is sized from what is in it, so a wider clock moves the window
+    /// buttons rather than running off the display.
+    #[test]
+    fn turning_the_date_on_widens_the_tray_and_narrows_the_buttons() {
+        let mut shell = shell();
+        // Enough windows that the buttons are sharing the leftover space rather
+        // than sitting at their maximum width, where a narrower taskbar would
+        // change nothing.
+        for i in 0..24 {
+            open(&mut shell, &format!("window {i}"));
+        }
+
+        shell.datetime.show_day_of_week = false;
+        shell.datetime.show_date = false;
+        let narrow_tray = shell.tray_width();
+        let wide_buttons = shell.taskbar_button_width();
+
+        shell.datetime.show_day_of_week = true;
+        shell.datetime.show_date = true;
+        assert!(
+            shell.tray_width() > narrow_tray,
+            "the tray must grow to hold the longer reading"
+        );
+        assert!(
+            shell.taskbar_button_width() < wide_buttons,
+            "and the space has to come from somewhere"
+        );
+        assert!(
+            shell.tray_x() + shell.tray_width() <= shell.taskbar_rect().w + 0.5,
+            "the tray still ends at the display edge"
+        );
     }
 
     #[test]
@@ -3930,10 +4124,19 @@ mod window_manager_tests {
         let mut shell = shell();
         assert!(shell.datetime.set_timezone("Europe/London"));
         let zone = shell.local_zone();
+        // Built here from the settings rather than taken from `shell.clock()`,
+        // so this also checks that `clock()` carries every switch across: a
+        // comparison against the shell's own clock object would agree with
+        // itself no matter which fields it forgot.
+        let mut shared = crate::calendar::ClockDisplay::new();
+        shared.show_seconds = shell.datetime.show_seconds;
+        shared.show_day_of_week = shell.datetime.show_day_of_week;
+        shared.show_date = shell.datetime.show_date;
+
         for t in [0_u64, INSTANT, 1_766_000_000, 4_000_000_000] {
             assert_eq!(
-                shell.time_string_at(t),
-                crate::calendar::ClockDisplay::new().format_time(t, &zone),
+                shell.clock_string_at(t),
+                shared.format_taskbar(t, &zone),
                 "{t} rendered by the shell and by the shared clock"
             );
         }

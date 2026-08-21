@@ -48133,3 +48133,48 @@ make both diffs unreviewable.
 **If never fixed:** the lints stay noisy enough that a genuinely new warning
 in one of these crates is invisible, which is the failure mode that matters
 more than any individual warning.
+
+
+---
+
+## TD-C-CLOCKDISPLAY-RENDER-HAS-NO-CALLER
+
+**In short:** `ClockDisplay` has a second way to put a clock on screen —
+`ClockDisplay::render`, plus the one-line wrapper `CalendarView::render_tray_clock`
+that forwards to it — and nothing calls either one outside a test. The taskbar
+draws its own reading instead. That is one function too many for one job, and
+it is the shape of defect that produced the UTC clock bug in the first place:
+the surface the user sees and the code that looks like it draws that surface
+were different code.
+
+**Where:** `gui/desktop/src/calendar.rs`. `ClockDisplay::render` and
+`CalendarView::render_tray_clock` (which is `clock.render(x, y, utc_now, local)`
+and nothing else). The only reference to either is one test asserting `render`
+emits some commands.
+
+**Why it was not just deleted with the taskbar-clock work (2026-08-21):**
+unlike the three orphaned calendars deleted in `21eb44781`, this one is not a
+duplicate *answer* — it is a different *layout*. It stacks the time, the long
+date and up to three extra-timezone rows vertically, which is an expanded tray
+popup, not the single line the taskbar draws. Deleting it would throw away the
+only rendering the `extra_timezones` list has, and `add_timezone` is a public,
+tested API the Date & Time panel's "additional clocks" feature is meant to feed.
+Wiring the taskbar onto it instead would make the taskbar clock two lines tall
+plus a row per extra zone, which is a visible layout decision, not a cleanup.
+
+**The proper fix:** decide what surface the additional clocks appear on. Two
+candidates, and they are not the same feature:
+
+| Option | What changes |
+|---|---|
+| Extra zones live in the calendar popup | `render` becomes the popup's clock header; the taskbar stays one line. `render_tray_clock` is deleted — its name is then simply wrong. |
+| Extra zones live in the tray, stacked | The taskbar grows to fit; `DesktopShell` renders through `ClockDisplay::render` and the private drawing in `render_taskbar` goes. |
+
+Either way the tree ends with **one** function that turns a `ClockDisplay` into
+pixels. Until then, `reading_width`/`format_taskbar` (the shell's path) and
+`render` (the orphan) both know how a clock is laid out.
+
+**If never fixed:** the orphan is silent — `calendar.rs` is inside a crate whose
+`main.rs` carries no blanket `#![allow(dead_code)]`, but `render` is `pub` on a
+`pub struct`, so `dead_code` does not fire on it either. It will sit there until
+somebody needing a tray clock finds it and gets a two-line one.

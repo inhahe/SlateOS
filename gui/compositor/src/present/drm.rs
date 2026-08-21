@@ -55,7 +55,7 @@ pub mod sys;
 pub mod uapi;
 
 use super::Present;
-use sys::{EAGAIN, EBUSY, EINTR, Errno, KmsSys, Mapped, OutArray};
+use sys::{EAGAIN, EBUSY, EINTR, ENOENT, Errno, KmsSys, Mapped, OutArray};
 use uapi::{
     ModeCardRes, ModeCreateDumb, ModeCrtcPageFlip, ModeDestroyDumb, ModeFbCmd2, ModeGetConnector,
     ModeGetEncoder, ModeMapDumb, ModeModeinfo,
@@ -126,19 +126,81 @@ impl std::error::Error for ScanoutError {}
 
 #[cfg(target_os = "linux")]
 impl DrmScanout<sys::Card> {
-    /// Open the machine's first graphics card and set up scanout on it.
+    /// Find the machine's display and set up scanout on it.
     ///
     /// The one entry point a caller outside this module needs, and the reason
-    /// [`sys::Card`] does not have to be nameable from there.
+    /// [`sys::Card`] does not have to be nameable from there. `wanted` names a
+    /// specific `/dev/dri/cardN` when the user asked for one; `None` searches.
     ///
     /// # Errors
     ///
     /// [`ScanoutError`]. Every variant means "fall back to headless", not
     /// "abort": a display server with no display still serves remote clients.
-    pub fn card0() -> Result<Self, ScanoutError> {
-        let card = sys::Card::open(sys::CARD0).map_err(ScanoutError::Open)?;
-        Self::new(card)
+    pub fn open(wanted: Option<u32>) -> Result<Self, ScanoutError> {
+        open_display(&mut sys::Cards, wanted)
     }
+}
+
+/// Set up scanout on the first card that has a display, or on a named one.
+///
+/// **Why this is not simply `card0`.** A laptop with integrated graphics and a
+/// discrete GPU has `card0` and `card1`, and which one is which is not stable
+/// across boots — it depends on driver probe order. Opening `card0`
+/// unconditionally gives a black screen half the time on exactly the hardware
+/// this is most likely to run on. Searching costs at most
+/// [`MAX_CARDS`](sys::MAX_CARDS) failed `open`s on a machine with no graphics
+/// at all, which is a machine that is about to fall back to headless anyway.
+///
+/// **What "has a display" means here.** [`DrmScanout::new`] already
+/// distinguishes "nothing is plugged into this card" ([`NoConnectedDisplay`])
+/// from every other failure, so the search is exactly "try each, keep the first
+/// that is not that error". A card that *has* a display and fails for some
+/// other reason does not stop the search — a broken first card must not keep a
+/// working second one dark — but the failure is remembered, because that is a
+/// card we were supposed to be able to drive and losing the reason would turn a
+/// diagnosable driver bug into an unexplained black screen.
+///
+/// **What is reported when nothing works.** The first non-`NoConnectedDisplay`
+/// error seen, because that is the one that says something; only if every card
+/// was merely unplugged (or absent) is [`NoConnectedDisplay`] the answer.
+/// Reporting the *last* error instead would mean reporting `ENOENT` on
+/// `/dev/dri/card15` — true, useless, and actively misleading about which card
+/// the real problem was on.
+///
+/// [`NoConnectedDisplay`]: ScanoutError::NoConnectedDisplay
+///
+/// # Errors
+///
+/// [`ScanoutError`], as above.
+pub fn open_display<C: sys::CardSource>(
+    source: &mut C,
+    wanted: Option<u32>,
+) -> Result<DrmScanout<C::Sys>, ScanoutError> {
+    if let Some(index) = wanted {
+        // An explicit request is obeyed exactly, including its failure: a user
+        // who passed `--card 1` wants to know that card 1 did not work, not to
+        // be quietly given card 0 and left wondering why the wrong monitor lit.
+        let card = source.open(index).map_err(ScanoutError::Open)?;
+        return DrmScanout::new(card);
+    }
+    let mut first_real_error = None;
+    for index in 0..sys::MAX_CARDS {
+        let outcome = match source.open(index) {
+            Ok(card) => DrmScanout::new(card),
+            Err(errno) => Err(ScanoutError::Open(errno)),
+        };
+        match outcome {
+            Ok(scanout) => return Ok(scanout),
+            Err(ScanoutError::NoConnectedDisplay) => {}
+            // `ENOENT` past the last card is the ordinary end of the list, not
+            // a fault, so it must not become the reported error — otherwise a
+            // machine whose only card is unplugged would be described as having
+            // no `/dev/dri/card15`.
+            Err(ScanoutError::Open(errno)) if errno == ENOENT => {}
+            Err(other) => first_real_error = first_real_error.or(Some(other)),
+        }
+    }
+    Err(first_real_error.unwrap_or(ScanoutError::NoConnectedDisplay))
 }
 
 /// A dumb buffer, mapped, and registered as a framebuffer.

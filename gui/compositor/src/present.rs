@@ -29,9 +29,10 @@
 //!   [`InputEvent`](crate::InputEvent)s. This is a **development harness**, and
 //!   is described as one in that module: it is how a person can look at the
 //!   desktop this compositor draws, on the machine the tree is developed on.
-//! * [`drm::DrmScanout`] on SlateOS — the real target. It opens
-//!   `/dev/dri/card0`, finds the connected display and the mode it is already
-//!   running, allocates two dumb buffers, and page-flips composited frames onto
+//! * [`drm::DrmScanout`] on SlateOS — the real target. It opens the first
+//!   `/dev/dri/cardN` that has a display attached — or the one `--card` named —
+//!   takes the mode that display is already running, allocates two dumb
+//!   buffers, and page-flips composited frames onto
 //!   the screen. This is what closed `known-issues.md` →
 //!   `TD-COMPOSITOR-HAS-NO-SCANOUT`, and it needed no change to
 //!   [`Server::run_with`](crate::Server::run_with) — which is the claim this

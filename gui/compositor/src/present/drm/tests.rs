@@ -31,12 +31,14 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use super::sys::{EBUSY, ENODEV, Errno, KmsSys, Mapped, OutArray};
+use super::sys::{
+    CardPath, CardSource, EBUSY, ENODEV, ENOENT, Errno, KmsSys, MAX_CARDS, Mapped, OutArray,
+};
 use super::uapi::{
     self, ModeCardRes, ModeCreateDumb, ModeCrtcPageFlip, ModeDestroyDumb, ModeFbCmd2,
     ModeGetConnector, ModeGetEncoder, ModeMapDumb, ModeModeinfo,
 };
-use super::{DrmScanout, Present, ScanoutError, blit};
+use super::{DrmScanout, Present, ScanoutError, blit, open_display};
 
 /// Invalid argument, which is what the kernel says to a malformed request.
 const EINVAL: Errno = 22;
@@ -237,6 +239,19 @@ impl FakeCard {
         Self {
             state: Rc::new(RefCell::new(state)),
         }
+    }
+
+    /// The same machine with the monitor unplugged: a card that opens fine and
+    /// has nothing to show. This is the ordinary state of the *other* card in
+    /// a laptop, which is the whole reason the search exists.
+    fn dark() -> Self {
+        let card = Self::desktop();
+        card.edit(|s| {
+            for c in &mut s.connectors {
+                c.connection = 2;
+            }
+        });
+        card
     }
 
     /// Mutate the card mid-test — to inject a failure, for instance.
@@ -975,6 +990,203 @@ fn a_framebuffer_is_removed_before_its_buffer_is_destroyed() {
             ]
         );
     });
+}
+
+// -------------------------------------------------------- card selection --
+
+/// Permission denied, which is what `/dev/dri/card0` says to a process that is
+/// not in the `video` group — the most likely *real* failure of an `open`.
+const EACCES: Errno = 13;
+
+/// A `/dev/dri` that exists only in memory.
+///
+/// The slots are what each index does when opened, in index order; an index
+/// past the end is `ENOENT`, exactly as a machine with fewer cards behaves.
+/// Every index asked for is recorded, because *which cards were touched* is
+/// half of what these tests are checking — a search that quietly opens card 0
+/// after being told `--card 1` passes every assertion about its return value.
+#[derive(Debug, Default)]
+struct FakeCards {
+    /// What each card index does when opened.
+    slots: Vec<Result<FakeCard, Errno>>,
+    /// Every index [`CardSource::open`] was called with, in order.
+    opened: Vec<u32>,
+}
+
+impl FakeCards {
+    /// A `/dev/dri` holding exactly these cards, numbered from zero.
+    fn holding(slots: Vec<Result<FakeCard, Errno>>) -> Self {
+        Self {
+            slots,
+            opened: Vec::new(),
+        }
+    }
+}
+
+impl CardSource for FakeCards {
+    type Sys = FakeCard;
+
+    fn open(&mut self, index: u32) -> Result<FakeCard, Errno> {
+        self.opened.push(index);
+        match self.slots.get(index as usize) {
+            Some(Ok(card)) => Ok(card.clone()),
+            Some(&Err(errno)) => Err(errno),
+            None => Err(ENOENT),
+        }
+    }
+}
+
+/// Every index the search is expected to try on a machine with no cards.
+fn all_indices() -> Vec<u32> {
+    (0..MAX_CARDS).collect()
+}
+
+#[test]
+fn the_first_card_with_a_display_attached_is_the_one_used() {
+    // The case the whole search exists for: a laptop whose panel is on card 1
+    // this boot. Opening card 0 unconditionally gives a black screen.
+    let mut dri = FakeCards::holding(vec![Ok(FakeCard::dark()), Ok(FakeCard::desktop())]);
+    let scanout = open_display(&mut dri, None).expect("card 1 has the panel");
+    assert_eq!(scanout.size(), (1366, 768));
+    assert_eq!(dri.opened, vec![0, 1], "and it did not keep looking after");
+}
+
+#[test]
+fn the_search_stops_at_the_first_card_that_works() {
+    // Opening a card is not free — it takes a DRM master lease on real
+    // hardware — so a search that carries on past its answer would be taking
+    // out the discrete GPU on every boot for nothing.
+    let mut dri = FakeCards::holding(vec![Ok(FakeCard::desktop()), Ok(FakeCard::desktop())]);
+    open_display(&mut dri, None).unwrap();
+    assert_eq!(dri.opened, vec![0]);
+}
+
+#[test]
+fn a_machine_with_no_graphics_at_all_says_no_display_rather_than_no_such_file() {
+    // Every index is ENOENT. `Open(ENOENT)` on /dev/dri/card15 would be a true
+    // statement and a useless one; the honest report is that there is nothing
+    // to scan out on, which is what makes the caller fall back to headless.
+    let mut dri = FakeCards::default();
+    assert_eq!(
+        open_display(&mut dri, None).map(|_| ()).unwrap_err(),
+        ScanoutError::NoConnectedDisplay
+    );
+    assert_eq!(dri.opened, all_indices(), "and it did look everywhere");
+}
+
+#[test]
+fn a_card_that_is_present_but_unplugged_also_reports_no_display() {
+    let mut dri = FakeCards::holding(vec![Ok(FakeCard::dark())]);
+    assert_eq!(
+        open_display(&mut dri, None).map(|_| ()).unwrap_err(),
+        ScanoutError::NoConnectedDisplay
+    );
+}
+
+#[test]
+fn a_broken_first_card_does_not_keep_a_working_second_one_dark() {
+    // A card we cannot open is a reason to look at the next one, not a reason
+    // to give up: on a machine where the discrete GPU is claimed by something
+    // else, the panel is still on the integrated one and still wants lighting.
+    let mut dri = FakeCards::holding(vec![Err(EACCES), Ok(FakeCard::desktop())]);
+    let scanout = open_display(&mut dri, None).expect("card 1 still works");
+    assert_eq!(scanout.size(), (1366, 768));
+}
+
+#[test]
+fn a_real_failure_is_reported_when_nothing_works_rather_than_being_swallowed() {
+    // Being unable to open the only card is a bug report — a missing group
+    // membership, usually. Reporting `NoConnectedDisplay` for it would send
+    // whoever read it looking behind the monitor.
+    let mut dri = FakeCards::holding(vec![Err(EACCES)]);
+    assert_eq!(
+        open_display(&mut dri, None).map(|_| ()).unwrap_err(),
+        ScanoutError::Open(EACCES)
+    );
+}
+
+#[test]
+fn the_first_real_failure_is_reported_and_not_the_last() {
+    // Two cards fail differently. The first is the one on the machine's own
+    // primary adapter and is far more likely to be the real story; keeping the
+    // last would also mean any later ENOENT overwrote it.
+    let mut dri = FakeCards::holding(vec![Err(EACCES), Err(ENODEV)]);
+    assert_eq!(
+        open_display(&mut dri, None).map(|_| ()).unwrap_err(),
+        ScanoutError::Open(EACCES)
+    );
+}
+
+#[test]
+fn an_unplugged_card_does_not_displace_a_real_failure_from_the_report() {
+    // Order matters here: the unplugged card comes *first*, so an
+    // implementation that simply keeps the most recent non-success would still
+    // pass. One that treats "nothing plugged in" as newsworthy would not.
+    let mut dri = FakeCards::holding(vec![Ok(FakeCard::dark()), Err(EACCES)]);
+    assert_eq!(
+        open_display(&mut dri, None).map(|_| ()).unwrap_err(),
+        ScanoutError::Open(EACCES),
+        "the card we could not open is the one worth talking about"
+    );
+}
+
+#[test]
+fn a_named_card_is_opened_and_nothing_else_is() {
+    // `--card 1` on a machine where card 0 would also have worked. Falling
+    // back would light the wrong monitor and look like the flag was ignored.
+    let mut dri = FakeCards::holding(vec![Ok(FakeCard::desktop()), Ok(FakeCard::desktop())]);
+    open_display(&mut dri, Some(1)).unwrap();
+    assert_eq!(dri.opened, vec![1]);
+}
+
+#[test]
+fn a_named_card_that_cannot_be_opened_is_an_error_and_not_a_search() {
+    let mut dri = FakeCards::holding(vec![Ok(FakeCard::desktop()), Err(EACCES)]);
+    assert_eq!(
+        open_display(&mut dri, Some(1)).map(|_| ()).unwrap_err(),
+        ScanoutError::Open(EACCES)
+    );
+    assert_eq!(dri.opened, vec![1], "card 0 was never touched");
+}
+
+#[test]
+fn a_named_card_with_nothing_plugged_in_is_an_error_and_not_a_search() {
+    let mut dri = FakeCards::holding(vec![Ok(FakeCard::desktop()), Ok(FakeCard::dark())]);
+    assert_eq!(
+        open_display(&mut dri, Some(1)).map(|_| ()).unwrap_err(),
+        ScanoutError::NoConnectedDisplay
+    );
+    assert_eq!(dri.opened, vec![1]);
+}
+
+#[test]
+fn a_card_path_is_the_nul_terminated_name_the_kernel_expects() {
+    // `open` takes a C string: without the terminator it reads past the array.
+    assert_eq!(CardPath::card(0).as_c_bytes(), b"/dev/dri/card0\0");
+    assert_eq!(CardPath::card(0).as_display_bytes(), b"/dev/dri/card0");
+}
+
+#[test]
+fn a_two_digit_card_path_is_built_correctly() {
+    // The last index the search reaches, and the one where a single-digit
+    // formatter would produce `/dev/dri/card1` and silently reopen card 1.
+    let last = MAX_CARDS - 1;
+    assert_eq!(CardPath::card(last).as_display_bytes(), b"/dev/dri/card15");
+    assert_eq!(CardPath::card(last).as_c_bytes().len(), 16);
+    assert_eq!(CardPath::card(9).as_display_bytes(), b"/dev/dri/card9");
+}
+
+#[test]
+fn every_index_the_search_covers_has_a_distinct_path() {
+    // A path buffer one byte short would truncate, and two indices would name
+    // the same file — a search that appeared to work and always used one card.
+    let paths: Vec<Vec<u8>> = (0..MAX_CARDS)
+        .map(|i| CardPath::card(i).as_display_bytes().to_vec())
+        .collect();
+    let mut sorted = paths.clone();
+    sorted.sort();
+    sorted.dedup();
+    assert_eq!(sorted.len(), paths.len(), "{paths:?}");
 }
 
 // ------------------------------------------------------------------- blit --

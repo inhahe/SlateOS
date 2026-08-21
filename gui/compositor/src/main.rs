@@ -61,20 +61,31 @@ struct Options {
     headless: bool,
     /// The framebuffer size, if one was given.
     size: Option<(u32, u32)>,
+    /// Which `/dev/dri/cardN` to drive, if the user named one.
+    ///
+    /// `None` means "search": try each card and take the first with a display.
+    /// Naming one is not merely a shortcut — it is the only way to reach a card
+    /// that has no display attached but is the one the user wants, and the only
+    /// way to override a search that picked the wrong head on a machine with
+    /// two GPUs and a monitor on each.
+    card: Option<u32>,
     /// Whether to print usage and stop.
     help: bool,
 }
 
 /// What to print for `--help`, and on a usage error.
 const USAGE: &str = "\
-usage: compositor [ADDRESS] [--headless] [--size WxH]
+usage: compositor [ADDRESS] [--headless] [--size WxH] [--card N]
 
   ADDRESS       host:port to listen on. Defaults to $SLATE_DISPLAY, then to
                 127.0.0.1:7373.
   --headless    composite without opening a window. The default off Windows,
                 and correct for a display server whose clients are all remote.
   --size WxH    framebuffer size in pixels. Defaults to 1280x800 windowed,
-                1920x1080 headless.
+                1920x1080 headless. Ignored on a real display, whose own mode
+                decides the size.
+  --card N      drive /dev/dri/cardN. By default every card is tried and the
+                first with a display attached is used. Also $SLATE_DRM_CARD.
   --            stop reading options; the next argument is the address.";
 
 /// Parse a `WxH` size.
@@ -96,6 +107,72 @@ fn parse_size(text: &str) -> Result<(u32, u32), String> {
         return Err(format!("a {width}x{height} display has no pixels"));
     }
     Ok((width, height))
+}
+
+/// Parse a `/dev/dri/cardN` index.
+///
+/// Bounded by the same limit the search uses, so `--card 99` is rejected here —
+/// with a message naming the argument — rather than becoming an `open` of a
+/// path that cannot exist and a report about `ENOENT`.
+fn parse_card(text: &str) -> Result<u32, String> {
+    let index: u32 = text
+        .parse()
+        .map_err(|_| format!("`{text}` is not a card number"))?;
+    if index >= compositor::present::drm::sys::MAX_CARDS {
+        return Err(format!(
+            "card {index} is out of range; only /dev/dri/card0..card{} are searched",
+            compositor::present::drm::sys::MAX_CARDS.saturating_sub(1)
+        ));
+    }
+    Ok(index)
+}
+
+/// The card index in `$SLATE_DRM_CARD`, if it holds a usable one.
+///
+/// This exists because the process that starts the compositor at boot is a
+/// service definition, not a person at a shell: changing which card the
+/// desktop comes up on should not require editing and reinstalling a unit
+/// file when an environment variable will do.
+///
+/// A malformed value is a warning and is then ignored, where the same text
+/// passed as `--card` would be a hard error. The asymmetry is deliberate. An
+/// argument is typed by whoever is running the program right now, so failing
+/// loudly puts the message in front of exactly the person who can fix it. An
+/// environment variable is inherited — it may have been set months ago, by
+/// something else entirely, for a machine that has since had its graphics
+/// card changed — and a stale one must not be able to keep the desktop from
+/// starting. Ignoring it falls back to searching every card, which is the
+/// behaviour of an unset variable and is very likely what was wanted.
+///
+/// An empty value counts as unset and says nothing, because `SLATE_DRM_CARD=`
+/// is how a wrapper script clears an inherited setting.
+#[cfg(target_os = "linux")]
+fn card_from_env() -> Option<u32> {
+    card_from_value(std::env::var("SLATE_DRM_CARD").ok().as_deref())
+}
+
+/// The card index a `$SLATE_DRM_CARD` value asks for, warning about a bad one.
+///
+/// Split from [`card_from_env`] so the decisions are testable without touching
+/// the process environment, which is global and — since Rust 2024 — `unsafe` to
+/// write from a test that runs beside other threads.
+///
+/// Only the Linux arm of `run` consults the variable, so on a host build this
+/// exists solely for its tests — the *decisions* are worth testing everywhere
+/// the tests can run, which is the machine the tree is written on.
+#[cfg(any(target_os = "linux", test))]
+fn card_from_value(raw: Option<&str>) -> Option<u32> {
+    let text = raw?.trim();
+    if text.is_empty() {
+        return None;
+    }
+    match parse_card(text) {
+        Ok(index) => Some(index),
+        Err(why) => {
+            eprintln!("compositor: ignoring $SLATE_DRM_CARD: {why}");
+            None
+        }
+    }
 }
 
 /// Read the command line. `args` excludes the program name.
@@ -125,6 +202,15 @@ fn parse_args<I: IntoIterator<Item = String>>(args: I) -> Result<Options, String
             }
             other if other.starts_with("--size=") => {
                 out.size = Some(parse_size(other.trim_start_matches("--size="))?);
+            }
+            "--card" => {
+                let value = args
+                    .next()
+                    .ok_or_else(|| "--card needs a number, as in `--card 1`".to_owned())?;
+                out.card = Some(parse_card(&value)?);
+            }
+            other if other.starts_with("--card=") => {
+                out.card = Some(parse_card(other.trim_start_matches("--card="))?);
             }
             other if other.starts_with('-') && other.len() > 1 => {
                 return Err(format!("unknown option `{other}`"));
@@ -242,7 +328,8 @@ fn run(server: &mut Server, options: &Options) -> std::io::Result<()> {
     if options.headless {
         return run_headless(server, options);
     }
-    match DrmScanout::card0() {
+    let card = options.card.or_else(card_from_env);
+    match DrmScanout::open(card) {
         Ok(mut screen) => {
             let (width, height) = screen.size();
             if let Some(asked) = options.size {
@@ -321,7 +408,7 @@ mod tests {
         clippy::arithmetic_side_effects
     )]
 
-    use super::{Options, parse_args, parse_size};
+    use super::{Options, card_from_value, parse_args, parse_card, parse_size};
 
     fn parse(args: &[&str]) -> Result<Options, String> {
         parse_args(args.iter().map(|s| (*s).to_owned()))
@@ -396,5 +483,68 @@ mod tests {
     fn the_last_address_wins_so_a_wrapper_script_can_append_one() {
         let parsed = parse(&["127.0.0.1:1", "127.0.0.1:2"]).unwrap();
         assert_eq!(parsed.addr.as_deref(), Some("127.0.0.1:2"));
+    }
+
+    #[test]
+    fn a_card_can_be_written_either_way_round() {
+        assert_eq!(parse(&["--card", "1"]).unwrap().card, Some(1));
+        assert_eq!(parse(&["--card=1"]).unwrap().card, Some(1));
+    }
+
+    #[test]
+    fn no_card_argument_means_search_rather_than_card_zero() {
+        // `Some(0)` and `None` are different instructions — the first pins the
+        // display to card 0, which is exactly the behaviour `--card` exists to
+        // escape. A default of `Some(0)` would make the flag do nothing.
+        assert_eq!(parse(&[]).unwrap().card, None);
+    }
+
+    #[test]
+    fn a_card_that_no_search_would_reach_is_refused_at_the_argument() {
+        // Otherwise the report is `ENOENT` on a path nobody typed, which reads
+        // like a missing device rather than a number out of range.
+        let err = parse(&["--card", "99"]).unwrap_err();
+        assert!(err.contains("out of range"), "{err}");
+        assert!(parse(&["--card", "-1"]).is_err());
+        assert!(parse(&["--card", "one"]).is_err());
+    }
+
+    #[test]
+    fn a_card_with_no_value_after_it_says_so() {
+        assert!(parse(&["--card"]).unwrap_err().contains("--card"));
+    }
+
+    #[test]
+    fn the_highest_searched_card_is_accepted_and_the_next_one_is_not() {
+        // The boundary the flag and the search have to agree on: off by one
+        // either way is a card that can be named but never opened, or one that
+        // is opened by the search but rejected when named.
+        let last = compositor::present::drm::sys::MAX_CARDS - 1;
+        assert_eq!(parse_card(&last.to_string()).unwrap(), last);
+        assert!(parse_card(&compositor::present::drm::sys::MAX_CARDS.to_string()).is_err());
+    }
+
+    #[test]
+    fn an_unset_or_empty_environment_variable_leaves_the_search_alone() {
+        assert_eq!(card_from_value(None), None);
+        // `SLATE_DRM_CARD=` is how a wrapper clears an inherited setting.
+        assert_eq!(card_from_value(Some("")), None);
+        assert_eq!(card_from_value(Some("  ")), None);
+    }
+
+    #[test]
+    fn a_good_environment_variable_names_a_card_and_tolerates_stray_space() {
+        assert_eq!(card_from_value(Some("1")), Some(1));
+        // A value out of a YAML unit file can easily carry a trailing newline.
+        assert_eq!(card_from_value(Some(" 2\n")), Some(2));
+    }
+
+    #[test]
+    fn a_bad_environment_variable_is_ignored_rather_than_stopping_the_desktop() {
+        // Deliberately unlike `--card`, which is a hard error. An argument is
+        // typed by whoever is present to fix it; a variable is inherited and
+        // may be years stale, and must not be able to keep the screen dark.
+        assert_eq!(card_from_value(Some("nonsense")), None);
+        assert_eq!(card_from_value(Some("99")), None);
     }
 }

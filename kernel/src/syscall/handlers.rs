@@ -4860,6 +4860,180 @@ pub fn sys_tty_set_termios(args: &SyscallArgs) -> SyscallResult {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Resource limits
+// ---------------------------------------------------------------------------
+
+/// Wire size of one `struct rlimit` on the native ABI: two little-endian
+/// `u64`s, `[rlim_cur, rlim_max]`.
+///
+/// Identical to Linux's `struct rlimit64`, deliberately — libc can memcpy
+/// between the two rather than translating, and the Linux shim's
+/// `prlimit64` uses the same 16-byte layout a few thousand lines away in
+/// `linux.rs`.
+const RLIMIT_BYTES: usize = 16;
+
+/// Resolve an rlimit syscall's `arg0` to the process whose limits it names.
+///
+/// `Ok(Some(pid))` is a live process the caller may touch; `Ok(None)` means
+/// kernel context (a boot self-test calling in with no owning process),
+/// where the answer is [`pcb::DEFAULT_RLIMITS`] and writes are discarded.
+///
+/// The policy is the same one [`sys_prlimit64`](crate::syscall::linux)
+/// applies, restated in native error terms: `0` is self, the caller's own
+/// pid is self, and anything else is refused.  It is refused with
+/// `PermissionDenied` rather than `NoSuchProcess` **even when the pid does
+/// not exist**, which is the deliberate part: answering `NoSuchProcess` for
+/// a dead pid and `PermissionDenied` for a live one turns this syscall into
+/// a process-existence oracle for any process on the system, which is the
+/// side channel `/proc` visibility rules exist to close.  A caller that may
+/// not look cannot tell the difference between "not there" and "not yours".
+///
+/// `NoSuchProcess` is therefore reserved for the one case where it leaks
+/// nothing: the caller named *itself* — explicitly or via `0` — and its own
+/// PCB is gone.
+fn rlimit_target(arg0: u64) -> KernelResult<Option<pcb::ProcessId>> {
+    let me = crate::proc::thread::owner_process(sched::current_task_id());
+    match me {
+        Some(pid) => {
+            if arg0 == 0 || arg0 == pid {
+                Ok(Some(pid))
+            } else {
+                Err(KernelError::PermissionDenied)
+            }
+        }
+        // Kernel context: `0` (self) is the only reachable target, and it
+        // resolves to the compiled-in defaults rather than to a PCB.
+        None if arg0 == 0 => Ok(None),
+        None => Err(KernelError::PermissionDenied),
+    }
+}
+
+/// `SYS_RLIMIT_GET` — read one of a process's Linux resource limits
+/// (`getrlimit(3)`).
+///
+/// `arg0` is the target pid (`0` = self), `arg1` the resource number
+/// (`0..=15`), `arg2` a pointer to a [`RLIMIT_BYTES`]-byte user buffer that
+/// receives `[rlim_cur, rlim_max]`.
+///
+/// Reads the per-process array in the PCB — the same one `linux_fd_install`
+/// enforces `RLIMIT_NOFILE` from and the same one the Linux shim's
+/// `prlimit64` reports.  libc previously answered this from a private
+/// `static mut` table of its own, which had already drifted from the
+/// kernel's on three of sixteen resources; see `SYS_RLIMIT_GET`'s
+/// number doc for the table.
+pub fn sys_rlimit_get(args: &SyscallArgs) -> SyscallResult {
+    if args.arg2 == 0 {
+        return SyscallResult::err(KernelError::InvalidArgument);
+    }
+    #[allow(clippy::cast_possible_truncation)]
+    let resource = args.arg1 as u32;
+    // Check the resource *before* the pid, so a caller probing whether the
+    // syscall understands a resource number gets the same answer whoever
+    // they are.  (`args.arg1 as u32` narrows rather than rejecting, matching
+    // how the x86_64 ABI truncates an `unsigned int` argument — a caller
+    // passing 0x1_0000_0000 means resource 0, exactly as on Linux.)
+    if resource >= pcb::NUM_RLIMITS {
+        return SyscallResult::err(KernelError::InvalidArgument);
+    }
+    let target = match rlimit_target(args.arg0) {
+        Ok(t) => t,
+        Err(e) => return SyscallResult::err(e),
+    };
+    let (cur, max) = match target {
+        Some(pid) => match pcb::get_rlimit(pid, resource) {
+            Some(pair) => pair,
+            // The resource bound is already checked above, so a `None` here
+            // can only mean the PCB vanished between the two lookups.
+            None => return SyscallResult::err(KernelError::NoSuchProcess),
+        },
+        // `get` rather than `[..]`: the bound is already checked above, but a
+        // panic here would take the whole kernel down for an argument the
+        // caller controls, and the const asserts beside `DEFAULT_RLIMITS`
+        // cannot see this call site.
+        None => match pcb::DEFAULT_RLIMITS.get(resource as usize) {
+            Some(&pair) => pair,
+            None => return SyscallResult::err(KernelError::InvalidArgument),
+        },
+    };
+
+    // See `sys_rlimit_set` for why this is `[u64; 2]` and not bytes.
+    let pair = [cur, max];
+    // SAFETY: `pair` is a live, 8-byte-aligned kernel buffer of exactly
+    // RLIMIT_BYTES bytes (2 x u64); copy_to_user validates the destination is
+    // writable user memory and performs the SMAP dance.
+    match unsafe {
+        crate::mm::user::copy_to_user(pair.as_ptr().cast::<u8>(), args.arg2, RLIMIT_BYTES)
+    } {
+        Ok(()) => SyscallResult::ok(0),
+        Err(e) => SyscallResult::err(e),
+    }
+}
+
+/// `SYS_RLIMIT_SET` — install one of a process's Linux resource limits
+/// (`setrlimit(3)`).
+///
+/// `arg0` is the target pid (`0` = self), `arg1` the resource number
+/// (`0..=15`), `arg2` a pointer to a [`RLIMIT_BYTES`]-byte buffer holding
+/// the new `[rlim_cur, rlim_max]`.
+///
+/// Every policy decision belongs to [`pcb::set_rlimit`] and none to this
+/// function, because the Linux shim's `prlimit64` calls the same thing: a
+/// rule enforced here would apply to one ABI and not the other, which is
+/// the class of bug this syscall exists to end.
+///
+/// In kernel context (a boot self-test with no owning process) the
+/// arguments are validated and the write is discarded — there is no PCB to
+/// mutate, and the alternative, editing `DEFAULT_RLIMITS`, would change
+/// every *future* process instead of the caller.
+pub fn sys_rlimit_set(args: &SyscallArgs) -> SyscallResult {
+    if args.arg2 == 0 {
+        return SyscallResult::err(KernelError::InvalidArgument);
+    }
+    #[allow(clippy::cast_possible_truncation)]
+    let resource = args.arg1 as u32;
+    if resource >= pcb::NUM_RLIMITS {
+        return SyscallResult::err(KernelError::InvalidArgument);
+    }
+    let target = match rlimit_target(args.arg0) {
+        Ok(t) => t,
+        Err(e) => return SyscallResult::err(e),
+    };
+
+    // `[u64; 2]` rather than a byte array plus `from_le_bytes`: the target is
+    // little-endian, so the in-memory representation *is* the wire format, and
+    // the Linux shim's `prlimit64` marshals the identical 16 bytes the same
+    // way.  Two spellings of one layout is how layouts drift apart.
+    let mut pair = [0u64; 2];
+    // SAFETY: `pair` is a live, 8-byte-aligned kernel buffer of exactly
+    // RLIMIT_BYTES bytes (2 x u64); copy_from_user validates the source is
+    // readable user memory and performs the SMAP dance.
+    if let Err(e) = unsafe {
+        crate::mm::user::copy_from_user(args.arg2, pair.as_mut_ptr().cast::<u8>(), RLIMIT_BYTES)
+    } {
+        return SyscallResult::err(e);
+    }
+    let [cur, max] = pair;
+
+    match target {
+        Some(pid) => match pcb::set_rlimit(pid, resource, cur, max) {
+            Ok(()) => SyscallResult::ok(0),
+            Err(e) => SyscallResult::err(e),
+        },
+        None => {
+            // Kernel context: no PCB, so run the argument checks that do
+            // not need one and accept.  `cur > max` is universal (Linux
+            // rejects it before any privilege check); the hard-limit and
+            // NOFILE-ceiling rules both compare against per-process state
+            // that does not exist here.
+            if cur > max {
+                return SyscallResult::err(KernelError::InvalidArgument);
+            }
+            SyscallResult::ok(0)
+        }
+    }
+}
+
 /// Install a new console `struct termios` read from user address `arg`,
 /// applying POSIX job control first.
 ///

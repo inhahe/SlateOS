@@ -73,6 +73,7 @@ use super::number::{
     SYS_PTY_CLOSE, SYS_PTY_CREATE, SYS_PTY_DUP, SYS_PTY_GET_TERMIOS, SYS_PTY_GET_WINSIZE,
     SYS_PTY_MASTER_READ, SYS_PTY_MASTER_TRY_READ, SYS_PTY_MASTER_WRITE, SYS_PTY_POLL,
     SYS_PTY_SET_TERMIOS, SYS_PTY_SET_WINSIZE, SYS_PTY_SLAVE_ID, SYS_PTY_SLAVE_WRITE,
+    SYS_RLIMIT_GET, SYS_RLIMIT_SET,
     SYS_SCHED_GET_PROFILE, SYS_SCHED_GET_TIMESLICE, SYS_SCHED_RECONFIGURE, SYS_SCHED_SET_PROFILE,
     SYS_SCHED_SET_TIMESLICE, SYS_SEM_CLOSE, SYS_SEM_CREATE, SYS_SEM_SIGNAL, SYS_SEM_TRY_WAIT,
     SYS_SEM_WAIT, SYS_SEM_WAIT_TIMEOUT, SYS_SERVICE_ACCEPT, SYS_SERVICE_ACCEPT_TIMEOUT,
@@ -453,6 +454,13 @@ const fn build_v1_table() -> SyscallTable {
     handlers[SYS_PTY_SET_WINSIZE as usize] = Some(handlers::sys_pty_set_winsize);
     handlers[SYS_PTY_GET_TERMIOS as usize] = Some(handlers::sys_pty_get_termios);
     handlers[SYS_PTY_SET_TERMIOS as usize] = Some(handlers::sys_pty_set_termios);
+
+    // Resource limits (557–558). The native counterpart of the Linux shim's
+    // `prlimit64`, sharing `pcb::get_rlimit`/`pcb::set_rlimit` with it so the
+    // two ABIs cannot describe the same process differently — which they did,
+    // because libc answered `getrlimit` from a private copy of the table.
+    handlers[SYS_RLIMIT_GET as usize] = Some(handlers::sys_rlimit_get);
+    handlers[SYS_RLIMIT_SET as usize] = Some(handlers::sys_rlimit_set);
 
     // POSIX signal shim (522–526). SYS_SIGNAL_RETURN (524) is a
     // frame-modifying syscall handled specially in syscall_handler_inner,
@@ -878,6 +886,7 @@ pub fn self_test() -> KernelResult<()> {
     test_dispatch_ctty_syscalls()?;
     test_dispatch_termios_syscalls()?;
     test_dispatch_pty_syscalls()?;
+    test_dispatch_rlimit_syscalls()?;
     test_dispatch_tty_job_control()?;
     test_dispatch_wait_process_group_filter()?;
     test_dispatch_signal_stop_self_rejects_non_stop_signals()?;
@@ -1340,6 +1349,105 @@ fn test_dispatch_termios_syscalls() -> KernelResult<()> {
     }
 
     serial_println!("[syscall]   Native termios (541/542) reaches the line discipline: OK");
+    Ok(())
+}
+
+/// Verify the rlimit syscalls (557/558) are registered, gate their arguments
+/// in the documented order, and — the part that is not obvious — do not leak
+/// whether an arbitrary pid exists.
+///
+/// This runs from a kernel task, which owns no process, so `arg0 = 0` resolves
+/// to [`crate::proc::pcb::DEFAULT_RLIMITS`] rather than to a PCB and writes are
+/// discarded.  The semantics that *need* a live process are tested where they
+/// live, in `pcb::self_test`'s `test_rlimits` — including the one that matters
+/// most, that `RLIMIT_NOFILE`'s hard limit can never exceed the fd table's real
+/// capacity.  What only this layer can show is the syscall surface: that both
+/// numbers dispatch at all, that a null buffer is refused before anything is
+/// copied, and that the pid gate answers the same way for a live pid and a dead
+/// one.
+///
+/// That last property is the reason this test exists rather than just the pcb
+/// one.  `rlimit_target` refuses every non-self pid with `PermissionDenied`,
+/// deliberately *including* pids that do not exist: an implementation that
+/// helpfully distinguished them — `NoSuchProcess` for a dead pid,
+/// `PermissionDenied` for a live one — would turn `getrlimit` into a
+/// process-existence oracle callable by anything on the system.  A test that
+/// only probed one of the two would pass against that.
+fn test_dispatch_rlimit_syscalls() -> KernelResult<()> {
+    use crate::proc::pcb;
+
+    fn fail(msg: &str) -> KernelResult<()> {
+        serial_println!("[syscall]   FAIL: rlimit: {}", msg);
+        Err(KernelError::InternalError)
+    }
+
+    let invalid = i64::from(KernelError::InvalidArgument.code());
+    let denied = i64::from(KernelError::PermissionDenied.code());
+
+    // Non-null but deliberately unmapped, as in the pty test: a handler that
+    // reaches the buffer before its argument gates have run fails with
+    // `InvalidAddress`, a verdict distinct from every expected one, instead of
+    // quietly succeeding.
+    const UNMAPPED_USER_PTR: u64 = 0x1000;
+    let args = |pid: u64, resource: u64, buf: u64| SyscallArgs {
+        arg0: pid,
+        arg1: resource,
+        arg2: buf,
+        arg3: 0,
+        arg4: 0,
+        arg5: 0,
+    };
+
+    // (1) A null buffer is InvalidArgument on both, which also proves both
+    //     numbers are registered — an unregistered number reports NotSupported.
+    for (nr, name) in [
+        (SYS_RLIMIT_GET, "SYS_RLIMIT_GET"),
+        (SYS_RLIMIT_SET, "SYS_RLIMIT_SET"),
+    ] {
+        if dispatch(nr, &args(0, 0, 0)).value != invalid {
+            serial_println!("[syscall]     ({} gave an unexpected verdict)", name);
+            return fail("a null rlimit pointer should be InvalidArgument (unregistered?)");
+        }
+    }
+
+    // (2) A resource outside 0..=15 is InvalidArgument, and is checked before
+    //     the pid — so a caller probing whether a resource number is understood
+    //     gets the same answer whoever they are.  Passing a foreign pid *and* a
+    //     bad resource is what distinguishes the two orders.
+    for (nr, name) in [
+        (SYS_RLIMIT_GET, "SYS_RLIMIT_GET"),
+        (SYS_RLIMIT_SET, "SYS_RLIMIT_SET"),
+    ] {
+        let r = dispatch(
+            nr,
+            &args(0xdead_beef, u64::from(pcb::NUM_RLIMITS), UNMAPPED_USER_PTR),
+        );
+        if r.value != invalid {
+            serial_println!("[syscall]     ({} gave {})", name, r.value);
+            return fail("a resource >= NUM_RLIMITS should be InvalidArgument, before the pid gate");
+        }
+    }
+
+    // (3) The pid gate.  From a kernel task every non-zero pid is foreign, so
+    //     both a plausibly-live pid (1, which init holds by this point in boot)
+    //     and a pid that certainly does not exist must give the *same*
+    //     PermissionDenied.  Two probes, not one: a single probe cannot tell an
+    //     existence oracle from a uniform refusal.
+    const CERTAINLY_DEAD_PID: u64 = u64::MAX;
+    for (nr, name) in [
+        (SYS_RLIMIT_GET, "SYS_RLIMIT_GET"),
+        (SYS_RLIMIT_SET, "SYS_RLIMIT_SET"),
+    ] {
+        for pid in [1u64, CERTAINLY_DEAD_PID] {
+            let r = dispatch(nr, &args(pid, 0, UNMAPPED_USER_PTR));
+            if r.value != denied {
+                serial_println!("[syscall]     ({} pid={} gave {})", name, pid, r.value);
+                return fail("a foreign pid should be PermissionDenied, alive or not");
+            }
+        }
+    }
+
+    serial_println!("[syscall]   Resource limits (557/558) registered and gated: OK");
     Ok(())
 }
 

@@ -55973,19 +55973,26 @@ fn self_test_dup3_validation() -> crate::error::KernelResult<()> {
             return Err(KernelError::InternalError);
         }
 
-        // (k) Seed a test PCB with RLIMIT_NOFILE = (8, 4096).
+        // (k) Seed a test PCB with RLIMIT_NOFILE = (8, <default hard limit>).
         //     Verify the lookup the gate uses returns the seeded
         //     value.  This is the predicate the gate evaluates in
         //     the userspace path; pre-batch dup3 simply did not
         //     consult this value at all.
         {
+            // The hard limit is read from the fd table's real capacity, not
+            // written out.  This line used to say `4096`, copied from a
+            // `DEFAULT_RLIMITS` row that had itself drifted away from the
+            // 256-slot table it was supposed to describe; correcting the row
+            // is what turned this test red, because the test had faithfully
+            // preserved the wrong number.  Deriving it means the next change
+            // to `MAX_FDS` cannot leave a stale literal here.
+            const NOFILE_MAX: u64 = crate::proc::linux_fd::MAX_FDS_U64;
             let test_pid = pcb::create("dup3-rlimit-test", 0);
-            // set_rlimit returns Result; rlim_max must not increase
-            // above the default's max (4096) for non-CAP_SYS_RESOURCE
-            // callers, and (8, 4096) lowers cur from the default
-            // 1024 → 8 with max unchanged at 4096, which is a valid
-            // unprivileged-lowering operation.
-            match pcb::set_rlimit(test_pid, 7, 8, 4096) {
+            // `rlim_max` must not increase above the existing hard limit for
+            // non-CAP_SYS_RESOURCE callers, and may never exceed
+            // `MAX_FDS` for any caller.  Leaving max at the default while
+            // lowering cur to 8 is a valid unprivileged-lowering operation.
+            match pcb::set_rlimit(test_pid, pcb::RLIMIT_NOFILE, 8, NOFILE_MAX) {
                 Ok(()) => {}
                 Err(e) => {
                     serial_println!("[syscall/linux]   FAIL: set_rlimit(NOFILE) -> {:?}", e);
@@ -55993,7 +56000,7 @@ fn self_test_dup3_validation() -> crate::error::KernelResult<()> {
                     return Err(KernelError::InternalError);
                 }
             }
-            let (cur, max) = match pcb::get_rlimit(test_pid, 7) {
+            let (cur, max) = match pcb::get_rlimit(test_pid, pcb::RLIMIT_NOFILE) {
                 Some(v) => v,
                 None => {
                     serial_println!("[syscall/linux]   FAIL: get_rlimit(NOFILE) returned None");
@@ -56001,11 +56008,12 @@ fn self_test_dup3_validation() -> crate::error::KernelResult<()> {
                     return Err(KernelError::InternalError);
                 }
             };
-            if cur != 8 || max != 4096 {
+            if cur != 8 || max != NOFILE_MAX {
                 serial_println!(
-                    "[syscall/linux]   FAIL: get_rlimit(NOFILE) -> ({}, {}) (expected (8, 4096))",
+                    "[syscall/linux]   FAIL: get_rlimit(NOFILE) -> ({}, {}) (expected (8, {}))",
                     cur,
-                    max
+                    max,
+                    NOFILE_MAX
                 );
                 pcb::destroy(test_pid);
                 return Err(KernelError::InternalError);
@@ -56343,9 +56351,20 @@ fn self_test_default_rlimits() -> crate::error::KernelResult<()> {
     // Critical defaults programs depend on:
     //   - RLIMIT_STACK (3) cur == 8 MiB so glibc's main-thread sizing
     //     produces a usable stack.
-    //   - RLIMIT_NOFILE (7) cur == 1024 to fit FD_SETSIZE on select().
+    //   - RLIMIT_NOFILE (7) cur == max == the fd table's real capacity.
     //   - RLIMIT_CORE (4) cur == max == 0 (we don't produce cores).
     //   - All others either INFINITY or honestly zero.
+    //
+    // The NOFILE check used to read `cur != 1024 || max != 4096`, with a
+    // comment explaining that 1024 was chosen "to fit FD_SETSIZE on
+    // select()".  Both halves were wrong in the same way: `MAX_FDS` is 256,
+    // so the table could never hand out 1024 descriptors, let alone 4096 —
+    // this test was pinning a promise `open()` broke at fd 256.  (The
+    // FD_SETSIZE concern it cited is about NOFILE being *too large* for
+    // select()'s 1024-bit fd_set; at 256 it is comfortably satisfied, and
+    // was equally satisfied before — by the enforcement, never by this
+    // number.)  Deriving from `MAX_FDS_U64` is what makes the check a test
+    // rather than a second copy of the table.
     {
         let (cur, max) = pcb::DEFAULT_RLIMITS[3]; // RLIMIT_STACK
         if cur != 8 * 1024 * 1024 {
@@ -56362,12 +56381,15 @@ fn self_test_default_rlimits() -> crate::error::KernelResult<()> {
             );
             return Err(KernelError::InternalError);
         }
-        let (cur, max) = pcb::DEFAULT_RLIMITS[7]; // RLIMIT_NOFILE
-        if cur != 1024 || max != 4096 {
+        let (cur, max) = pcb::DEFAULT_RLIMITS[pcb::RLIMIT_NOFILE as usize];
+        let nofile_cap = crate::proc::linux_fd::MAX_FDS_U64;
+        if cur != nofile_cap || max != nofile_cap {
             serial_println!(
-                "[syscall/linux]   FAIL: DEFAULT_RLIMITS[NOFILE] = ({}, {})",
+                "[syscall/linux]   FAIL: DEFAULT_RLIMITS[NOFILE] = ({}, {}) (expected ({}, {}))",
                 cur,
-                max
+                max,
+                nofile_cap,
+                nofile_cap
             );
             return Err(KernelError::InternalError);
         }
@@ -57059,17 +57081,33 @@ pub fn self_test() -> crate::error::KernelResult<()> {
 
             // Direct pcb::set_rlimit / get_rlimit coverage on a dummy
             // process so we exercise the per-process store independent of
-            // the syscall layer.  Create a throwaway process, set
-            // RLIMIT_NOFILE to (256, 512), read it back, then try to raise
-            // the hard limit (-> PermissionDenied) and lower it (Ok).
+            // the syscall layer.  Create a throwaway process, lower
+            // RLIMIT_NOFILE, read it back, then try to raise the hard limit
+            // (-> PermissionDenied) and lower it again (Ok).
+            //
+            // Every number below stays at or under `NOFILE_MAX`, so what is
+            // under test is the *no-raise* rule and not the separate,
+            // absolute `MAX_FDS` ceiling `set_rlimit` also enforces —
+            // conflating the two would let either one's removal pass.  The
+            // ceiling has its own coverage in `pcb::self_test::test_rlimits`.
             {
+                const NOFILE_MAX: u64 = crate::proc::linux_fd::MAX_FDS_U64;
                 let test_pid = pcb::create("rlimit-self-test", 0);
-                // Initial state: DEFAULT_RLIMITS.
-                assert_eq!(pcb::get_rlimit(test_pid, 7), Some((1024, 4096)));
-                pcb::set_rlimit(test_pid, 7, 256, 512).expect("set rlimit");
-                assert_eq!(pcb::get_rlimit(test_pid, 7), Some((256, 512)));
-                // Raise hard limit -> PermissionDenied.
-                match pcb::set_rlimit(test_pid, 7, 256, 1024) {
+                // Initial state: DEFAULT_RLIMITS, whose NOFILE row *is* the
+                // fd table's capacity rather than a literal beside it.
+                assert_eq!(
+                    pcb::get_rlimit(test_pid, pcb::RLIMIT_NOFILE),
+                    Some((NOFILE_MAX, NOFILE_MAX))
+                );
+                pcb::set_rlimit(test_pid, pcb::RLIMIT_NOFILE, 64, 128).expect("set rlimit");
+                assert_eq!(
+                    pcb::get_rlimit(test_pid, pcb::RLIMIT_NOFILE),
+                    Some((64, 128))
+                );
+                // Raise hard limit back toward the default -> PermissionDenied.
+                // `NOFILE_MAX` is *not* above the ceiling, so a refusal here
+                // can only come from the no-raise rule.
+                match pcb::set_rlimit(test_pid, pcb::RLIMIT_NOFILE, 64, NOFILE_MAX) {
                     Err(KernelError::PermissionDenied) => {}
                     other => {
                         serial_println!(
@@ -57079,8 +57117,10 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                         return Err(KernelError::InternalError);
                     }
                 }
-                // cur > max -> InvalidArgument.
-                match pcb::set_rlimit(test_pid, 7, 600, 500) {
+                // cur > max -> InvalidArgument, and it wins over the ceiling:
+                // 600 and 500 are both above `MAX_FDS`, so this also pins the
+                // gate order (cur>max before the NOFILE ceiling).
+                match pcb::set_rlimit(test_pid, pcb::RLIMIT_NOFILE, 600, 500) {
                     Err(KernelError::InvalidArgument) => {}
                     other => {
                         serial_println!(
@@ -57091,10 +57131,10 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                     }
                 }
                 // Lower both -> Ok.
-                pcb::set_rlimit(test_pid, 7, 64, 128).expect("lower rlimit");
-                assert_eq!(pcb::get_rlimit(test_pid, 7), Some((64, 128)));
+                pcb::set_rlimit(test_pid, pcb::RLIMIT_NOFILE, 32, 64).expect("lower rlimit");
+                assert_eq!(pcb::get_rlimit(test_pid, pcb::RLIMIT_NOFILE), Some((32, 64)));
                 // resource out of range -> InvalidArgument.
-                match pcb::set_rlimit(test_pid, 16, 0, 0) {
+                match pcb::set_rlimit(test_pid, pcb::NUM_RLIMITS, 0, 0) {
                     Err(KernelError::InvalidArgument) => {}
                     other => {
                         serial_println!(
@@ -57104,7 +57144,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                         return Err(KernelError::InternalError);
                     }
                 }
-                assert_eq!(pcb::get_rlimit(test_pid, 16), None);
+                assert_eq!(pcb::get_rlimit(test_pid, pcb::NUM_RLIMITS), None);
                 // Clean up so we don't leak the dummy process.
                 pcb::destroy(test_pid);
             }
@@ -57114,14 +57154,17 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             // RLIMIT_NOFILE to a small value, and verify that exceeding
             // the soft limit returns TooManyOpenFiles.
             {
-                use crate::proc::linux_fd::FdEntry;
+                use crate::proc::linux_fd::{FdEntry, MAX_FDS_U64 as NOFILE_MAX};
                 let test_pid = pcb::create("rlimit-nofile-test", 0);
                 pcb::linux_fd_install_stdio(test_pid).expect("install stdio");
-                // Stdio occupies fds 0,1,2.  Default NOFILE is (1024, 4096).
-                // Lower the soft cap to 5 while keeping hard at the default
-                // 4096 — set_rlimit forbids raising hard, so we can later
-                // raise soft back up within [0, 4096].
-                pcb::set_rlimit(test_pid, 7, 5, 4096).expect("set NOFILE=(5, 4096)");
+                // Stdio occupies fds 0,1,2.  The default NOFILE is
+                // (MAX_FDS, MAX_FDS) — the fd table's real capacity, derived
+                // from it rather than restated.  Lower the soft cap to 5 while
+                // leaving hard at the default: `set_rlimit` forbids raising
+                // hard, so we can still raise soft back up within [0, MAX_FDS]
+                // later to test the rollback.
+                pcb::set_rlimit(test_pid, pcb::RLIMIT_NOFILE, 5, NOFILE_MAX)
+                    .expect("set NOFILE=(5, MAX_FDS)");
 
                 // fd 3 — must succeed (3 < 5).
                 let fd3 = pcb::linux_fd_install(test_pid, FdEntry::console(oflags::O_RDONLY), 0)
@@ -57158,10 +57201,11 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                 }
 
                 // Verify the rollback: fd 5 must still be free.  Raise the
-                // soft cap to 100 (allowed: ≤ hard=4096) and re-install —
+                // soft cap to 100 (allowed: ≤ hard = MAX_FDS) and re-install —
                 // the entry must land at fd 5, not 6 (no leftover from the
                 // failed install).
-                pcb::set_rlimit(test_pid, 7, 100, 4096).expect("raise soft to 100");
+                pcb::set_rlimit(test_pid, pcb::RLIMIT_NOFILE, 100, NOFILE_MAX)
+                    .expect("raise soft to 100");
                 let fd5 = pcb::linux_fd_install(test_pid, FdEntry::console(oflags::O_RDONLY), 0)
                     .expect("install fd 5 after raising soft limit");
                 if fd5 != 5 {

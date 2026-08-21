@@ -2646,6 +2646,76 @@ pub const SYS_PTY_GET_TERMIOS: u64 = 555;
 pub const SYS_PTY_SET_TERMIOS: u64 = 556;
 
 // ---------------------------------------------------------------------------
+// Resource limits (557–558)
+// ---------------------------------------------------------------------------
+//
+// The native ABI had no way to reach a process's `rlimits`, so libc kept a
+// private `static mut` copy in `posix/src/resource.rs` and answered
+// `getrlimit`/`setrlimit` from it.  Two tables, one truth — the same shape as
+// the foreground-process-group bug (design-decisions §113) and the `termios`
+// bug that produced `SYS_TTY_GET_TERMIOS` (541).  And as in both of those, the
+// copies had *already* silently diverged on three of sixteen rows by the time
+// anyone looked:
+//
+//   | resource            | kernel                  | libc's copy             |
+//   |---------------------|-------------------------|-------------------------|
+//   | 7  RLIMIT_NOFILE    | 256 / 256 (was 1024/4096)| 256 / 256              |
+//   | 11 RLIMIT_SIGPENDING| 65 536 / 65 536         | INFINITY / INFINITY     |
+//   | 12 RLIMIT_MSGQUEUE  | 819 200 / 819 200       | INFINITY / INFINITY     |
+//
+// A Linux-ABI program and a native-ABI program in the same session therefore
+// described the same process differently, and the native one's `setrlimit`
+// changed nothing the kernel would ever consult: `linux_fd_install` enforces
+// `RLIMIT_NOFILE` from the PCB, which libc's copy could not reach.
+//
+// The pair below is deliberately shaped like `SYS_TTY_GET_TERMIOS` /
+// `SYS_TTY_SET_TERMIOS` rather than like Linux's `prlimit64`: two calls, not
+// one call that both reads and writes, because the native ABI has no need for
+// prlimit64's atomic read-modify-write and every reason to keep each syscall's
+// gate order obvious.  Both land in `pcb::get_rlimit`/`pcb::set_rlimit`, which
+// is also where the Linux shim's `prlimit64` lands, so the two ABIs cannot
+// drift again by construction.
+
+/// Read one of a process's Linux resource limits (`getrlimit(2)`).
+///
+/// `arg0`: target pid; **`0` means the calling process**.  Any other value
+///         must equal the caller's own pid — cross-process limits need a
+///         privilege we do not model yet.
+/// `arg1`: resource number, `0..=15` (`RLIMIT_CPU`..`RLIMIT_RTTIME`, the
+///         Linux numbering, which `pcb::DEFAULT_RLIMITS` is indexed by).
+/// `arg2`: pointer to a 16-byte user buffer, written as
+///         `[rlim_cur: u64, rlim_max: u64]` little-endian.  `u64::MAX` is
+///         `RLIM_INFINITY`.
+///
+/// Reads the same per-process array that `linux_fd_install` enforces and
+/// that `prlimit64` reports, so all three agree about the same process.
+///
+/// Returns: 0 on success; `InvalidArgument` for a null pointer or a
+/// resource outside `0..=15`; `NoSuchProcess` if the pid is not live;
+/// `PermissionDenied` for a live pid that is not the caller; a fault error
+/// if the buffer is not writable user memory.  Chosen number 557.
+pub const SYS_RLIMIT_GET: u64 = 557;
+
+/// Install one of a process's Linux resource limits (`setrlimit(2)`).
+///
+/// `arg0`: target pid; **`0` means the calling process** (same rule as
+///         [`SYS_RLIMIT_GET`]).
+/// `arg1`: resource number, `0..=15`.
+/// `arg2`: pointer to a 16-byte buffer holding the new
+///         `[rlim_cur: u64, rlim_max: u64]` little-endian.
+///
+/// Policy lives in [`crate::proc::pcb::set_rlimit`], not here: `cur > max`
+/// is `InvalidArgument`; raising `max` above the existing hard limit is
+/// `PermissionDenied` (no `CAP_SYS_RESOURCE` equivalent is wired up yet, so
+/// hard limits are one-way downward); and `RLIMIT_NOFILE`'s hard limit is
+/// additionally capped at the fd table's real capacity, permanently.
+///
+/// Returns: 0 on success; `InvalidArgument`, `NoSuchProcess` or
+/// `PermissionDenied` as above; a fault error if the buffer is not readable
+/// user memory.  Chosen number 558.
+pub const SYS_RLIMIT_SET: u64 = 558;
+
+// ---------------------------------------------------------------------------
 // Filesystem syscalls (600–799)
 // ---------------------------------------------------------------------------
 

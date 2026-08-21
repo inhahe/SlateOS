@@ -63,6 +63,12 @@ use osfont::system::{Family, FontCache, Weight};
 
 mod buffer;
 pub use buffer::{BufferFormat, SharedBuffer};
+// The rendering-backend seam. Everything from `compose_frame` down to a
+// primitive is written against `RenderTarget`, so the CPU rasterizer below is a
+// *choice* rather than the only thing the compositor can do — which is what a
+// GPU backend needs in order to exist at all. See the module docs.
+mod render;
+pub use render::{RenderBackend, RenderTarget};
 mod keymap;
 pub use keymap::{ModifierState, key_for_scancode};
 // The front end that turns a byte stream from a client into compositor calls
@@ -1639,6 +1645,338 @@ impl Framebuffer {
         self.front = vec![0xFF_00_00_00; size];
         Ok(())
     }
+
+    /// The inclusive pixel bounds a line may land on: the framebuffer, narrowed
+    /// by the caller's clip rectangle. Deliberately *not* narrowed by the
+    /// framebuffer's own `frame_clip` — `blend_pixel` applies that per pixel,
+    /// and being conservative here only costs a few iterations that were being
+    /// spent anyway.
+    fn line_bounds(&self, clip: Option<&Rect>) -> (i64, i64, i64, i64) {
+        let (mut x_lo, mut y_lo) = (0i64, 0i64);
+        let mut x_hi = i64::from(self.width).saturating_sub(1);
+        let mut y_hi = i64::from(self.height).saturating_sub(1);
+        if let Some(c) = clip {
+            x_lo = x_lo.max(i64::from(c.x));
+            y_lo = y_lo.max(i64::from(c.y));
+            x_hi = x_hi.min(
+                i64::from(c.x)
+                    .saturating_add(i64::from(c.width))
+                    .saturating_sub(1),
+            );
+            y_hi = y_hi.min(
+                i64::from(c.y)
+                    .saturating_add(i64::from(c.height))
+                    .saturating_sub(1),
+            );
+        }
+        (x_lo, x_hi, y_lo, y_hi)
+    }
+
+    /// Blend one line pixel, honouring the draw clip. Coordinates are `i64`
+    /// because the caller works in that width; anything outside `u32` is off
+    /// every framebuffer and is dropped here.
+    fn plot_line_pixel(&mut self, x: i64, y: i64, clip: Option<&Rect>, c: u32, o: f32) {
+        let (Ok(px), Ok(py)) = (u32::try_from(x), u32::try_from(y)) else {
+            return;
+        };
+        if clip.is_some_and(|r| !r.contains(x as i32, y as i32)) {
+            return;
+        }
+        self.blend_pixel(px, py, c, o);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Software rendering backend
+// ---------------------------------------------------------------------------
+
+/// The CPU rasterizer: [`Framebuffer`] as a [`RenderTarget`].
+///
+/// This is the implementation the compositor has always had, restated against
+/// the seam rather than rewritten — every fast path survives intact
+/// (parallel row-band clears, the opaque-blit memcpy, per-row solid fills, the
+/// clipped Bresenham walk). What changed is only that the callers no longer
+/// name it.
+///
+/// Several method names shadow inherent methods of the same name and meaning
+/// (`clear`, `clear_rect`, `clear_except`, `resize`). Inherent methods win
+/// method-call resolution, so an existing `fb.clear(c)` still reaches the
+/// inherent one and the two can never disagree — they are the same code. The
+/// bodies below use fully-qualified `Framebuffer::` paths so that is visible
+/// rather than merely true.
+impl RenderTarget for Framebuffer {
+    #[inline]
+    fn size(&self) -> (u32, u32) {
+        (self.width, self.height)
+    }
+
+    fn resize(&mut self, width: u32, height: u32) -> CompositorResult<()> {
+        Framebuffer::resize(self, width, height)
+    }
+
+    #[inline]
+    fn set_frame_clip(&mut self, clip: Option<Rect>) {
+        Framebuffer::set_frame_clip(self, clip);
+    }
+
+    fn clear(&mut self, color: u32) {
+        Framebuffer::clear(self, color);
+    }
+
+    fn clear_rect(&mut self, rect: &Rect, color: u32) {
+        Framebuffer::clear_rect(self, rect, color);
+    }
+
+    fn clear_except(&mut self, color: u32, covered: &[Rect]) {
+        Framebuffer::clear_except(self, color, covered);
+    }
+
+    /// `rect` arrives already intersected with the client's clip stack, so all
+    /// that is left is to resolve it against the surface and pick a per-row
+    /// path.
+    ///
+    /// OPT (BENCH-COMPOSITOR-SLOW): opaque fills become a single slice memset
+    /// per row; translucent fills hoist the alpha math out of the inner loop,
+    /// instead of blending pixel by pixel.
+    fn fill_rect(&mut self, rect: Rect, color: u32, opacity: f32) {
+        let x_start = rect.x.max(0) as u32;
+        let y_start = rect.y.max(0) as u32;
+        let x_end = rect.right().max(0) as u32;
+        let y_end = rect.bottom().max(0) as u32;
+        if x_end <= x_start || y_end <= y_start {
+            return;
+        }
+
+        // Resolved once (colour alpha scaled by window opacity) rather than per
+        // pixel; a fill that is entirely transparent is not a fill.
+        let src_a = Self::effective_alpha(color, opacity);
+        if src_a == 0 {
+            return;
+        }
+        if src_a == 255 {
+            for row in y_start..y_end {
+                self.fill_row_solid(row, x_start, x_end, color);
+            }
+        } else {
+            for row in y_start..y_end {
+                self.blend_row(row, x_start, x_end, color, src_a);
+            }
+        }
+    }
+
+    /// Bresenham, clipped along its major axis.
+    ///
+    /// The endpoints arrive from a client's [`RenderCommand::Line`] and are not
+    /// the compositor's to trust. The original loop stepped one pixel at a time
+    /// from `(x1, y1)` all the way to `(x2, y2)` no matter where the screen
+    /// was, so a line spanning the coordinate space cost four *billion*
+    /// iterations of a display-server thread — a hang any client could ask for
+    /// — and it computed `x2 - x1`, `.abs()` and `2 * err` in `i32`, each of
+    /// which overflows on that same input (`(-2^31).abs()` panics outright).
+    ///
+    /// So the major-axis step range is intersected with the drawable area up
+    /// front, in `i64`, and only the surviving steps are walked — at most one
+    /// per framebuffer column or row. Every pixel the old code could actually
+    /// have made visible is still visited, in the same order and colour; the
+    /// dropped steps are exactly those whose `blend_pixel` was already a no-op.
+    /// `line_matches_the_unclipped_bresenham_walk` pins that equivalence
+    /// against a transcription of the old loop.
+    ///
+    /// The minor axis keeps Bresenham's incremental form, but is *seeded* at
+    /// the first surviving step from the closed form
+    /// `round(k · minor / major)` — computed once in `u128`, since `k · minor`
+    /// can reach 2^64 — so skipping to the visible part costs one division
+    /// rather than one iteration per skipped pixel.
+    fn draw_line(
+        &mut self,
+        x1: i32,
+        y1: i32,
+        x2: i32,
+        y2: i32,
+        color: u32,
+        opacity: f32,
+        clip: Option<&Rect>,
+    ) {
+        let (x1, y1, x2, y2) = (i64::from(x1), i64::from(y1), i64::from(x2), i64::from(y2));
+
+        let (adx, ady) = (x2.abs_diff(x1), y2.abs_diff(y1));
+        let steps = adx.max(ady);
+        if steps == 0 {
+            self.plot_line_pixel(x1, y1, clip, color, opacity);
+            return;
+        }
+        let sx: i64 = if x2 >= x1 { 1 } else { -1 };
+        let sy: i64 = if y2 >= y1 { 1 } else { -1 };
+
+        // Walk whichever axis moves faster; the other is derived from it.
+        let x_major = adx >= ady;
+        let (bx_lo, bx_hi, by_lo, by_hi) = self.line_bounds(clip);
+        let (major_0, major_dir, minor_0, minor_dir, b_lo, b_hi) = if x_major {
+            (x1, sx, y1, sy, bx_lo, bx_hi)
+        } else {
+            (y1, sy, x1, sx, by_lo, by_hi)
+        };
+
+        // Steps whose major coordinate `major_0 + major_dir·k` lands in bounds.
+        // All four operands are within i32 range, so these differences are far
+        // inside i64 and the saturating forms are exact.
+        let (raw_lo, raw_hi) = if major_dir > 0 {
+            (b_lo.saturating_sub(major_0), b_hi.saturating_sub(major_0))
+        } else {
+            (major_0.saturating_sub(b_hi), major_0.saturating_sub(b_lo))
+        };
+        if raw_hi < 0 {
+            return;
+        }
+        let k_lo = raw_lo.max(0) as u64;
+        let k_hi = (raw_hi as u64).min(steps);
+        if k_lo > k_hi {
+            return;
+        }
+
+        // minor(k) = floor((2·k·minor_len + major_len) / (2·major_len)), i.e.
+        // round-half-up of k·minor_len/major_len, which is what the error
+        // accumulator in the classic loop computes.
+        let (minor_len, major_len) = if x_major { (ady, adx) } else { (adx, ady) };
+        let two_major = u128::from(major_len).saturating_mul(2);
+        let num = u128::from(k_lo)
+            .saturating_mul(2)
+            .saturating_mul(u128::from(minor_len))
+            .saturating_add(u128::from(major_len));
+        // `major_len == steps >= 1` here, so `two_major` is never zero; the
+        // fallbacks are unreachable and exist only because the divisor's
+        // nonzero-ness is an argument rather than a type.
+        let mut q = num.checked_div(two_major).unwrap_or(0) as u64;
+        let mut rem = num.checked_rem(two_major).unwrap_or(0) as u64;
+        // `2·minor_len <= 2·major_len`, so a step can push `rem` past
+        // `two_major` at most once — no inner loop is needed.
+        let (step, wrap) = (minor_len.saturating_mul(2), two_major as u64);
+
+        for k in k_lo..=k_hi {
+            let major = major_0.saturating_add(major_dir.saturating_mul(k as i64));
+            let minor = minor_0.saturating_add(minor_dir.saturating_mul(q as i64));
+            let (px, py) = if x_major {
+                (major, minor)
+            } else {
+                (minor, major)
+            };
+            self.plot_line_pixel(px, py, clip, color, opacity);
+
+            rem = rem.saturating_add(step);
+            if rem >= wrap {
+                rem = rem.saturating_sub(wrap);
+                q = q.saturating_add(1);
+            }
+        }
+    }
+
+    /// Blend one glyph's coverage into the back buffer.
+    ///
+    /// Coverage scales the window's opacity rather than being blended by
+    /// `osfont` itself: the compositor's pixels go through a clip stack and a
+    /// window opacity that `osfont::Target` does not model, so it asks for the
+    /// coverage values and does its own blending — a half-covered pixel of a
+    /// half-transparent window is a quarter opaque, which is what multiplying
+    /// the two gives.
+    fn draw_glyph(
+        &mut self,
+        mask: &GlyphMask,
+        pen: f32,
+        baseline: f32,
+        color: u32,
+        opacity: f32,
+        clip: Option<&Rect>,
+    ) {
+        // The origin comes from another process's layout, so it may be anything
+        // at all; a non-finite one is dropped rather than cast, because `as`
+        // turns NaN into 0 and would stamp the glyph at the top-left of the
+        // screen.
+        let (ox, oy) = (pen + mask.left as f32, baseline + mask.top as f32);
+        if !ox.is_finite() || !oy.is_finite() {
+            return;
+        }
+        let (ox, oy) = (ox.round() as i32, oy.round() as i32);
+
+        for row in 0..mask.height {
+            let fy = oy.saturating_add(row as i32);
+            if fy < 0 {
+                continue;
+            }
+            for col in 0..mask.width {
+                let coverage = mask.at(col, row);
+                if coverage == 0 {
+                    continue;
+                }
+                let fx = ox.saturating_add(col as i32);
+                if fx < 0 {
+                    continue;
+                }
+                if let Some(clip_rect) = clip
+                    && !clip_rect.contains(fx, fy)
+                {
+                    continue;
+                }
+                // `blend_pixel` clamps and discards anything outside the
+                // framebuffer.
+                let alpha = opacity * (coverage as f32 / 255.0);
+                self.blend_pixel(fx as u32, fy as u32, color, alpha);
+            }
+        }
+    }
+
+    /// OPT: when the buffer is opaque (Xrgb) and the window is fully opaque, the
+    /// per-row content is copied straight into the framebuffer
+    /// ([`copy_row`](Framebuffer::copy_row)) instead of running a per-pixel
+    /// float-alpha blend — O(h) row memcpys vs O(w·h) blends. This is the common
+    /// game/video case and the path runs every frame for non-fullscreen
+    /// buffer-backed windows (fullscreen ones bypass blitting via direct
+    /// scanout). The opaque copy is bit-identical to the blend result because
+    /// `blend_pixel` writes `src | 0xFF000000` for opaque pixels and imported
+    /// Xrgb pixels already carry 0xFF alpha.
+    fn blit_buffer(
+        &mut self,
+        buf: &SharedBuffer,
+        x: i32,
+        y: i32,
+        cols: u32,
+        rows: u32,
+        opacity: f32,
+    ) {
+        if opacity >= 1.0 && buf.is_opaque() {
+            // Per-row-independent opaque copies — parallelized across row bands.
+            self.blit_opaque(buf, x, y, cols, rows);
+            return;
+        }
+        for row in 0..rows {
+            let sy = y.saturating_add(row as i32);
+            if sy < 0 {
+                continue;
+            }
+            for col in 0..cols {
+                let sx = x.saturating_add(col as i32);
+                if sx < 0 {
+                    continue;
+                }
+                if let Some(px) = buf.pixel(col, row) {
+                    self.blend_pixel(sx as u32, sy as u32, px, opacity);
+                }
+            }
+        }
+    }
+
+    fn present(&mut self) {
+        self.swap();
+    }
+
+    #[inline]
+    fn presented_pixels(&self) -> &[u32] {
+        &self.front
+    }
+
+    #[inline]
+    fn working_pixels(&self) -> &[u32] {
+        &self.back
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -2294,8 +2632,8 @@ fn family_of(family: FontFamily) -> Family {
 /// alternative is to cut the string per colour and shape the pieces, which is
 /// the bug this parameter exists to fix. See `RenderCommand::RichText`.
 #[allow(clippy::too_many_arguments)]
-fn blit_run(
-    fb: &mut Framebuffer,
+fn blit_run<T: RenderTarget + ?Sized>(
+    fb: &mut T,
     font: &mut osfont::system::SystemFont,
     run: &osfont::shape::ShapedRun,
     pen: &mut f32,
@@ -2327,8 +2665,12 @@ fn blit_run(
         if let Some(mask) = font.glyph_mask(shaped.key) {
             // `offset` is zero except on an attached combining mark, and its
             // `y` points up where the screen's points down.
-            blend_mask(
-                fb,
+            //
+            // The mask goes to the backend rather than being blended here:
+            // shaping is backend-independent (a GPU backend uploads these same
+            // masks to a glyph atlas), so the split falls exactly between
+            // "which coverage, where" and "how it reaches the surface".
+            fb.draw_glyph(
                 mask,
                 *pen + shaped.offset.0,
                 baseline - shaped.offset.1,
@@ -2338,60 +2680,6 @@ fn blit_run(
             );
         }
         *pen += advance;
-    }
-}
-
-/// Blend one glyph's coverage into the framebuffer.
-///
-/// Free rather than a method so it can run while a `&mut SystemFont` borrowed
-/// out of `RenderEngine::text` is still alive — the glyph cache hands out a
-/// reference into itself, so the font stays borrowed for as long as the mask
-/// is being read.
-///
-/// `pen`/`baseline` are the pen position on the baseline, matching `mask.left`
-/// and `mask.top`.
-fn blend_mask(
-    fb: &mut Framebuffer,
-    mask: &GlyphMask,
-    pen: f32,
-    baseline: f32,
-    color: u32,
-    opacity: f32,
-    clip: Option<&Rect>,
-) {
-    // The origin comes from another process's layout, so it may be anything at
-    // all; a non-finite one is dropped rather than cast, because `as` turns
-    // NaN into 0 and would stamp the glyph at the top-left of the screen.
-    let (ox, oy) = (pen + mask.left as f32, baseline + mask.top as f32);
-    if !ox.is_finite() || !oy.is_finite() {
-        return;
-    }
-    let (ox, oy) = (ox.round() as i32, oy.round() as i32);
-
-    for row in 0..mask.height {
-        let fy = oy.saturating_add(row as i32);
-        if fy < 0 {
-            continue;
-        }
-        for col in 0..mask.width {
-            let coverage = mask.at(col, row);
-            if coverage == 0 {
-                continue;
-            }
-            let fx = ox.saturating_add(col as i32);
-            if fx < 0 {
-                continue;
-            }
-            if let Some(clip_rect) = clip
-                && !clip_rect.contains(fx, fy)
-            {
-                continue;
-            }
-            // Coverage scales the window's opacity; `blend_pixel` clamps and
-            // discards anything outside the framebuffer.
-            let alpha = opacity * (coverage as f32 / 255.0);
-            fb.blend_pixel(fx as u32, fy as u32, color, alpha);
-        }
     }
 }
 
@@ -2453,9 +2741,9 @@ impl RenderEngine {
 
     /// Execute a list of render commands, drawing into the framebuffer within
     /// the given window region.
-    fn execute(
+    fn execute<T: RenderTarget + ?Sized>(
         &mut self,
-        fb: &mut Framebuffer,
+        fb: &mut T,
         commands: &[RenderCommand],
         window_x: i32,
         window_y: i32,
@@ -2484,7 +2772,12 @@ impl RenderEngine {
         self.font_stack.clear();
     }
 
-    fn execute_command(&mut self, fb: &mut Framebuffer, cmd: &RenderCommand, opacity: f32) {
+    fn execute_command<T: RenderTarget + ?Sized>(
+        &mut self,
+        fb: &mut T,
+        cmd: &RenderCommand,
+        opacity: f32,
+    ) {
         let (tx, ty) = self.translate_stack.offset();
 
         match cmd {
@@ -2646,10 +2939,16 @@ impl RenderEngine {
         }
     }
 
-    /// Fill a rectangle with bounds checking and clipping.
-    fn fill_rect(
+    /// Resolve a rectangle against the clip stack and hand it to the backend.
+    ///
+    /// The clip intersection happens here rather than below the seam because
+    /// for an axis-aligned quad the intersection *is* the clip — resolving it
+    /// in the caller lets a fully-clipped fill be dropped without the backend
+    /// ever hearing about it, and spares every backend from re-implementing the
+    /// clip stack.
+    fn fill_rect<T: RenderTarget + ?Sized>(
         &self,
-        fb: &mut Framebuffer,
+        fb: &mut T,
         x: i32,
         y: i32,
         width: u32,
@@ -2658,42 +2957,15 @@ impl RenderEngine {
         opacity: f32,
     ) {
         let draw_rect = Rect::new(x, y, width, height);
-        let clipped = match self.effective_clip(&draw_rect) {
-            Some(r) => r,
-            None => return,
-        };
-
-        let x_start = clipped.x.max(0) as u32;
-        let y_start = clipped.y.max(0) as u32;
-        let x_end = clipped.right().max(0) as u32;
-        let y_end = clipped.bottom().max(0) as u32;
-        if x_end <= x_start || y_end <= y_start {
-            return;
-        }
-
-        // Resolve the effective alpha once (color alpha scaled by window opacity)
-        // and pick a per-row fast path instead of blending pixel-by-pixel.
-        // OPT (BENCH-COMPOSITOR-SLOW): opaque fills become a single slice memset
-        // per row; translucent fills hoist the alpha math out of the inner loop.
-        let src_a = Framebuffer::effective_alpha(color, opacity);
-        if src_a == 0 {
-            return;
-        }
-        if src_a == 255 {
-            for row in y_start..y_end {
-                fb.fill_row_solid(row, x_start, x_end, color);
-            }
-        } else {
-            for row in y_start..y_end {
-                fb.blend_row(row, x_start, x_end, color, src_a);
-            }
+        if let Some(clipped) = self.effective_clip(&draw_rect) {
+            fb.fill_rect(clipped, color, opacity);
         }
     }
 
     /// Stroke (outline) a rectangle.
-    fn stroke_rect(
+    fn stroke_rect<T: RenderTarget + ?Sized>(
         &self,
-        fb: &mut Framebuffer,
+        fb: &mut T,
         x: i32,
         y: i32,
         width: u32,
@@ -2744,9 +3016,9 @@ impl RenderEngine {
     /// a half-transparent window is a quarter opaque, which is exactly what
     /// multiplying the two gives.
     #[allow(clippy::too_many_arguments)]
-    fn draw_text(
+    fn draw_text<T: RenderTarget + ?Sized>(
         &mut self,
-        fb: &mut Framebuffer,
+        fb: &mut T,
         x: i32,
         y: i32,
         text: &str,
@@ -2846,71 +3118,16 @@ impl RenderEngine {
         }
     }
 
-    /// The inclusive pixel bounds a line may land on: the framebuffer, narrowed
-    /// by the active clip rectangle. Deliberately *not* narrowed by the
-    /// framebuffer's own `frame_clip` — `blend_pixel` applies that per pixel,
-    /// and being conservative here only costs a few iterations that were being
-    /// spent anyway.
-    fn line_bounds(fb: &Framebuffer, clip: Option<&Rect>) -> (i64, i64, i64, i64) {
-        let (mut x_lo, mut y_lo) = (0i64, 0i64);
-        let mut x_hi = i64::from(fb.width).saturating_sub(1);
-        let mut y_hi = i64::from(fb.height).saturating_sub(1);
-        if let Some(c) = clip {
-            x_lo = x_lo.max(i64::from(c.x));
-            y_lo = y_lo.max(i64::from(c.y));
-            x_hi = x_hi.min(
-                i64::from(c.x)
-                    .saturating_add(i64::from(c.width))
-                    .saturating_sub(1),
-            );
-            y_hi = y_hi.min(
-                i64::from(c.y)
-                    .saturating_add(i64::from(c.height))
-                    .saturating_sub(1),
-            );
-        }
-        (x_lo, x_hi, y_lo, y_hi)
-    }
-
-    /// Blend one line pixel, honouring the clip stack. Coordinates are `i64`
-    /// because the caller works in that width; anything outside `u32` is off
-    /// every framebuffer and is dropped here.
-    fn plot_line_pixel(fb: &mut Framebuffer, x: i64, y: i64, clip: Option<&Rect>, c: u32, o: f32) {
-        let (Ok(px), Ok(py)) = (u32::try_from(x), u32::try_from(y)) else {
-            return;
-        };
-        if clip.is_some_and(|r| !r.contains(x as i32, y as i32)) {
-            return;
-        }
-        fb.blend_pixel(px, py, c, o);
-    }
-
-    /// Draw a line using Bresenham's algorithm, clipped along its major axis.
+    /// Resolve the client's clip stack and hand the line to the backend.
     ///
-    /// The endpoints arrive from a client's [`RenderCommand::Line`] and are not
-    /// the compositor's to trust. The previous loop stepped one pixel at a time
-    /// from `(x1, y1)` all the way to `(x2, y2)` no matter where the screen
-    /// was, so a line spanning the coordinate space cost four *billion*
-    /// iterations of a display-server thread — a hang any client could ask for
-    /// — and it computed `x2 - x1`, `.abs()` and `2 * err` in `i32`, each of
-    /// which overflows on that same input (`(-2^31).abs()` panics outright).
-    ///
-    /// So the major-axis step range is intersected with the drawable area up
-    /// front, in `i64`, and only the surviving steps are walked — at most one
-    /// per framebuffer column or row. Every pixel the old code could actually
-    /// have made visible is still visited, in the same order and colour; the
-    /// dropped steps are exactly those whose `blend_pixel` was already a no-op.
-    /// `line_matches_the_unclipped_bresenham_walk` pins that equivalence
-    /// against a transcription of the old loop.
-    ///
-    /// The minor axis keeps Bresenham's incremental form, but is *seeded* at
-    /// the first surviving step from the closed form
-    /// `round(k · minor / major)` — computed once in `u128`, since `k · minor`
-    /// can reach 2^64 — so skipping to the visible part costs one division
-    /// rather than one iteration per skipped pixel.
-    fn draw_line(
+    /// The whole walk lives below the seam rather than here: a line is a
+    /// primitive a GPU draws directly, so a caller that rasterized it into
+    /// per-pixel blends would be handing the backend the one shape it did not
+    /// need help with. What stays here is the part that is not rasterization —
+    /// which clip rectangle is in force.
+    fn draw_line<T: RenderTarget + ?Sized>(
         &self,
-        fb: &mut Framebuffer,
+        fb: &mut T,
         x1: i32,
         y1: i32,
         x2: i32,
@@ -2919,77 +3136,7 @@ impl RenderEngine {
         opacity: f32,
     ) {
         let clip = self.clip_stack.current().copied();
-        let (x1, y1, x2, y2) = (i64::from(x1), i64::from(y1), i64::from(x2), i64::from(y2));
-
-        let (adx, ady) = (x2.abs_diff(x1), y2.abs_diff(y1));
-        let steps = adx.max(ady);
-        if steps == 0 {
-            Self::plot_line_pixel(fb, x1, y1, clip.as_ref(), color, opacity);
-            return;
-        }
-        let sx: i64 = if x2 >= x1 { 1 } else { -1 };
-        let sy: i64 = if y2 >= y1 { 1 } else { -1 };
-
-        // Walk whichever axis moves faster; the other is derived from it.
-        let x_major = adx >= ady;
-        let (bx_lo, bx_hi, by_lo, by_hi) = Self::line_bounds(fb, clip.as_ref());
-        let (major_0, major_dir, minor_0, minor_dir, b_lo, b_hi) = if x_major {
-            (x1, sx, y1, sy, bx_lo, bx_hi)
-        } else {
-            (y1, sy, x1, sx, by_lo, by_hi)
-        };
-
-        // Steps whose major coordinate `major_0 + major_dir·k` lands in bounds.
-        // All four operands are within i32 range, so these differences are far
-        // inside i64 and the saturating forms are exact.
-        let (raw_lo, raw_hi) = if major_dir > 0 {
-            (b_lo.saturating_sub(major_0), b_hi.saturating_sub(major_0))
-        } else {
-            (major_0.saturating_sub(b_hi), major_0.saturating_sub(b_lo))
-        };
-        if raw_hi < 0 {
-            return;
-        }
-        let k_lo = raw_lo.max(0) as u64;
-        let k_hi = (raw_hi as u64).min(steps);
-        if k_lo > k_hi {
-            return;
-        }
-
-        // minor(k) = floor((2·k·minor_len + major_len) / (2·major_len)), i.e.
-        // round-half-up of k·minor_len/major_len, which is what the error
-        // accumulator in the classic loop computes.
-        let (minor_len, major_len) = if x_major { (ady, adx) } else { (adx, ady) };
-        let two_major = u128::from(major_len).saturating_mul(2);
-        let num = u128::from(k_lo)
-            .saturating_mul(2)
-            .saturating_mul(u128::from(minor_len))
-            .saturating_add(u128::from(major_len));
-        // `major_len == steps >= 1` here, so `two_major` is never zero; the
-        // fallbacks are unreachable and exist only because the divisor's
-        // nonzero-ness is an argument rather than a type.
-        let mut q = num.checked_div(two_major).unwrap_or(0) as u64;
-        let mut rem = num.checked_rem(two_major).unwrap_or(0) as u64;
-        // `2·minor_len <= 2·major_len`, so a step can push `rem` past
-        // `two_major` at most once — no inner loop is needed.
-        let (step, wrap) = (minor_len.saturating_mul(2), two_major as u64);
-
-        for k in k_lo..=k_hi {
-            let major = major_0.saturating_add(major_dir.saturating_mul(k as i64));
-            let minor = minor_0.saturating_add(minor_dir.saturating_mul(q as i64));
-            let (px, py) = if x_major {
-                (major, minor)
-            } else {
-                (minor, major)
-            };
-            Self::plot_line_pixel(fb, px, py, clip.as_ref(), color, opacity);
-
-            rem = rem.saturating_add(step);
-            if rem >= wrap {
-                rem = rem.saturating_sub(wrap);
-                q = q.saturating_add(1);
-            }
-        }
+        fb.draw_line(x1, y1, x2, y2, color, opacity, clip.as_ref());
     }
 
     /// Compute the effective clip rectangle by intersecting the draw area
@@ -3086,8 +3233,12 @@ pub struct Compositor {
     z_stack: Vec<WindowId>,
     /// The currently focused window (receives keyboard input).
     focused_window: Option<WindowId>,
-    /// The framebuffer we composite into.
-    framebuffer: Framebuffer,
+    /// The backend we composite through.
+    ///
+    /// Named for the seam rather than for the surface: nothing in this struct
+    /// may assume the pixels live in local memory, because on a GPU backend
+    /// they will not.
+    backend: RenderBackend,
     /// Display configuration.
     display_manager: DisplayManager,
     /// Damage tracking for the current frame.
@@ -3140,7 +3291,7 @@ pub struct Compositor {
 impl Compositor {
     /// Create a new compositor with the given display dimensions.
     pub fn new(width: u32, height: u32, refresh_rate: u32) -> CompositorResult<Self> {
-        let framebuffer = Framebuffer::new(width, height)?;
+        let backend = RenderBackend::software(width, height)?;
         let display_manager = DisplayManager::new(width, height, refresh_rate);
         let frame_interval = frame_interval_for(refresh_rate);
 
@@ -3148,7 +3299,7 @@ impl Compositor {
             windows: Vec::new(),
             z_stack: Vec::new(),
             focused_window: None,
-            framebuffer,
+            backend,
             display_manager,
             damage: DamageRegion::new(),
             frame_stats: FrameStats::new(frame_interval),
@@ -3439,8 +3590,7 @@ impl Compositor {
     pub fn set_fullscreen(&mut self, window_id: WindowId, enable: bool) -> CompositorResult<()> {
         self.damage_window(window_id);
 
-        let fb_w = self.framebuffer.width;
-        let fb_h = self.framebuffer.height;
+        let (fb_w, fb_h) = self.backend.size();
 
         let resized = {
             let window = self
@@ -3522,16 +3672,16 @@ impl Compositor {
             return None;
         }
         let covers_w =
-            win.x.saturating_add(win.width as i32) as i64 >= self.framebuffer.width as i64;
+            win.x.saturating_add(win.width as i32) as i64 >= self.backend.size().0 as i64;
         let covers_h =
-            win.y.saturating_add(win.height as i32) as i64 >= self.framebuffer.height as i64;
+            win.y.saturating_add(win.height as i32) as i64 >= self.backend.size().1 as i64;
         if !covers_w || !covers_h {
             return None;
         }
         // The attached buffer must match the display exactly for a valid,
         // fully-covering scanout.
         let buf = win.buffer.as_ref()?;
-        if buf.width() == self.framebuffer.width && buf.height() == self.framebuffer.height {
+        if (buf.width(), buf.height()) == self.backend.size() {
             Some(top)
         } else {
             None
@@ -4172,8 +4322,7 @@ impl Compositor {
             // Partial recomposite: only redraw damaged areas.
             let damaged_rects: Vec<Rect> = self.damage.rects().to_vec();
             for rect in &damaged_rects {
-                self.framebuffer
-                    .clear_rect(rect, self.theme.desktop_background);
+                self.backend.clear_rect(rect, self.theme.desktop_background);
             }
             // Re-render windows that overlap with damaged areas.
             self.render_damaged_windows(&damaged_rects);
@@ -4181,7 +4330,7 @@ impl Compositor {
         }
 
         // Swap buffers.
-        self.framebuffer.swap();
+        self.backend.present();
 
         self.frame_stats.end_frame();
         true
@@ -4201,7 +4350,7 @@ impl Compositor {
         // windows that will fully overwrite it with opaque content — that clear
         // is pure overdraw. `clear_except` fills only the uncovered region.
         let covered = self.opaque_cover_rects();
-        self.framebuffer
+        self.backend
             .clear_except(self.theme.desktop_background, &covered);
         self.render_all_windows();
         self.full_recomposite = false;
@@ -4296,7 +4445,7 @@ impl Compositor {
     pub fn bench_full_composite(&mut self) {
         self.full_recomposite = true;
         self.full_recomposite_into_back();
-        self.framebuffer.swap();
+        self.backend.present();
     }
 
     /// Benchmark hook: one full recomposite, reporting the two phases apart.
@@ -4310,7 +4459,7 @@ impl Compositor {
         self.full_recomposite = true;
         let covered = self.opaque_cover_rects();
         let t0 = std::time::Instant::now();
-        self.framebuffer
+        self.backend
             .clear_except(self.theme.desktop_background, &covered);
         let clear_ns = t0.elapsed().as_nanos() as u64;
         let t1 = std::time::Instant::now();
@@ -4318,7 +4467,7 @@ impl Compositor {
         let windows_ns = t1.elapsed().as_nanos() as u64;
         self.full_recomposite = false;
         self.damage.clear();
-        self.framebuffer.swap();
+        self.backend.present();
         (clear_ns, windows_ns)
     }
 
@@ -4390,10 +4539,10 @@ impl Compositor {
                 Some(parts) if parts.is_empty() => {}
                 Some(parts) => {
                     for part in parts {
-                        self.framebuffer.set_frame_clip(Some(part));
+                        self.backend.set_frame_clip(Some(part));
                         self.render_window(window_id);
                     }
-                    self.framebuffer.set_frame_clip(None);
+                    self.backend.set_frame_clip(None);
                 }
                 // Too fragmented to be worth it: draw it whole, as before.
                 None => self.render_window(window_id),
@@ -4512,21 +4661,21 @@ impl Compositor {
         }
 
         if has_buffer {
-            // Shared-buffer (DMA-BUF) path: blit the client's pixels directly.
-            // Disjoint field borrows: `windows` for the buffer, `framebuffer`
-            // for the destination — distinct fields, so this is sound.
+            // Shared-buffer (DMA-BUF) path: hand the client's pixels to the
+            // backend as a textured quad. Disjoint field borrows: `windows` for
+            // the buffer, `backend` for the destination — distinct fields, so
+            // this is sound.
+            //
+            // The overlap of the buffer and the client area is resolved here
+            // rather than below the seam: it is window geometry, which is the
+            // compositor's business, not the rasterizer's.
             if let Some(win) = self.windows.iter_mut().find(|w| w.id == window_id)
                 && let Some(buf) = win.buffer.as_mut()
             {
-                Self::blit_buffer(
-                    &mut self.framebuffer,
-                    buf,
-                    win_x,
-                    win_y,
-                    win_width,
-                    win_height,
-                    opacity,
-                );
+                let cols = buf.width().min(win_width);
+                let rows = buf.height().min(win_height);
+                self.backend
+                    .blit_buffer(buf, win_x, win_y, cols, rows, opacity);
                 // The compositor is done reading this buffer for the frame;
                 // flag it for a wl_buffer.release-style notification.
                 buf.mark_released();
@@ -4548,7 +4697,7 @@ impl Compositor {
                 && !Self::first_command_covers_client(&commands, win_width, win_height, opacity)
             {
                 self.render_engine.fill_rect(
-                    &mut self.framebuffer,
+                    &mut self.backend,
                     win_x,
                     win_y,
                     win_width,
@@ -4560,7 +4709,7 @@ impl Compositor {
 
             // 5. Execute client render commands.
             self.render_engine.execute(
-                &mut self.framebuffer,
+                &mut self.backend,
                 &commands,
                 win_x,
                 win_y,
@@ -4573,57 +4722,6 @@ impl Compositor {
         // Mark window as no longer dirty.
         if let Some(win) = self.window_mut(window_id) {
             win.dirty = false;
-        }
-    }
-
-    /// Blit an attached shared buffer into a window's client area.
-    ///
-    /// The buffer is top-left aligned and clipped to the overlap of the buffer
-    /// dimensions and the client rectangle; pixels are alpha-blended through
-    /// `Framebuffer::blend_pixel` honoring the window opacity, so per-pixel
-    /// alpha (ARGB) and translucent windows both compose correctly. All writes
-    /// are bounds-checked and offscreen (negative) coordinates are skipped.
-    ///
-    /// OPT: when the buffer is opaque (Xrgb) and the window is fully opaque, the
-    /// per-row content is copied straight into the framebuffer
-    /// (`Framebuffer::copy_row`) instead of running a per-pixel float-alpha
-    /// blend — O(h) row memcpys vs O(w*h) blends. This is the common
-    /// game/video case and the path runs every frame for non-fullscreen
-    /// buffer-backed windows (fullscreen ones bypass blitting via direct
-    /// scanout). The opaque copy is bit-identical to the blend result because
-    /// blend_pixel writes `src | 0xFF000000` for opaque pixels and imported
-    /// Xrgb pixels already carry 0xFF alpha.
-    fn blit_buffer(
-        fb: &mut Framebuffer,
-        buf: &SharedBuffer,
-        win_x: i32,
-        win_y: i32,
-        win_width: u32,
-        win_height: u32,
-        opacity: f32,
-    ) {
-        let cols = buf.width().min(win_width);
-        let rows = buf.height().min(win_height);
-        let fast = opacity >= 1.0 && buf.is_opaque();
-        if fast {
-            // Per-row-independent opaque copies — parallelized across row bands.
-            fb.blit_opaque(buf, win_x, win_y, cols, rows);
-            return;
-        }
-        for row in 0..rows {
-            let sy = win_y.saturating_add(row as i32);
-            if sy < 0 {
-                continue;
-            }
-            for col in 0..cols {
-                let sx = win_x.saturating_add(col as i32);
-                if sx < 0 {
-                    continue;
-                }
-                if let Some(px) = buf.pixel(col, row) {
-                    fb.blend_pixel(sx as u32, sy as u32, px, opacity);
-                }
-            }
         }
     }
 
@@ -4645,7 +4743,7 @@ impl Compositor {
             // Only the outline of each layer: the interior is covered by the
             // window itself or by the next layer in.
             self.render_engine.stroke_rect(
-                &mut self.framebuffer,
+                &mut self.backend,
                 ring.x,
                 ring.y,
                 ring.width,
@@ -4673,7 +4771,7 @@ impl Compositor {
             frame.height.saturating_add(BORDER_WIDTH),
         );
         self.render_engine.stroke_rect(
-            &mut self.framebuffer,
+            &mut self.backend,
             border.x,
             border.y,
             border.width,
@@ -4703,7 +4801,7 @@ impl Compositor {
             self.theme.title_bar_unfocused
         };
         self.render_engine.fill_rect(
-            &mut self.framebuffer,
+            &mut self.backend,
             tb_x,
             tb_y,
             tb_width,
@@ -4739,7 +4837,7 @@ impl Compositor {
         let max_text_width =
             tb_width.saturating_sub(buttons.saturating_add(TITLE_TEXT_INSET.saturating_mul(2)));
         self.render_engine.draw_text(
-            &mut self.framebuffer,
+            &mut self.backend,
             text_x,
             text_y,
             title,
@@ -4766,7 +4864,7 @@ impl Compositor {
         ] {
             if let Some(r) = rect {
                 self.render_engine.fill_rect(
-                    &mut self.framebuffer,
+                    &mut self.backend,
                     r.x,
                     r.y,
                     r.width,
@@ -4959,7 +5057,7 @@ impl Compositor {
 
     /// Handle a display resolution change.
     pub fn resize_display(&mut self, width: u32, height: u32) -> CompositorResult<()> {
-        self.framebuffer.resize(width, height)?;
+        self.backend.resize(width, height)?;
 
         // Update the primary display.
         if let Some(display) = self.display_manager.displays.first_mut() {
@@ -5002,7 +5100,7 @@ impl Compositor {
     /// *stale* — use [`present_pixels`](Compositor::present_pixels) for the
     /// pixels actually being displayed.
     pub fn front_buffer(&self) -> &[u32] {
-        self.framebuffer.front_buffer()
+        self.backend.presented_pixels()
     }
 
     /// Get the pixels actually being presented to the display this frame.
@@ -5019,7 +5117,7 @@ impl Compositor {
         {
             return buf.pixels();
         }
-        self.framebuffer.front_buffer()
+        self.backend.presented_pixels()
     }
 
     /// The size of a composited frame, in pixels, as `(width, height)`.
@@ -5031,7 +5129,7 @@ impl Compositor {
     /// framebuffer is what was actually composited into.
     #[must_use]
     pub const fn frame_size(&self) -> (u32, u32) {
-        (self.framebuffer.width, self.framebuffer.height)
+        self.backend.size()
     }
 
     /// How the last presented frame was produced.
@@ -5108,7 +5206,8 @@ impl Compositor {
                 });
             }
         }
-        session.build_frame(self.framebuffer.width, self.framebuffer.height, &snaps)
+        let (fb_w, fb_h) = self.backend.size();
+        session.build_frame(fb_w, fb_h, &snaps)
     }
 
     /// Begin a remote draw-command stream session and return its id. A remote
@@ -5188,6 +5287,23 @@ impl Compositor {
 )]
 mod tests {
     use super::*;
+
+    /// One pixel of the frame currently being composited, by `(x, y)`.
+    ///
+    /// The backend-agnostic form of `Framebuffer::get_pixel`: a test that
+    /// inspects a composite before it is presented has to ask the *backend*,
+    /// because a GPU one has no `Framebuffer` to reach into. Returns `None`
+    /// outside the surface, as `get_pixel` did.
+    fn working_pixel(backend: &RenderBackend, x: u32, y: u32) -> Option<u32> {
+        let (w, h) = backend.size();
+        if x >= w || y >= h {
+            return None;
+        }
+        backend
+            .working_pixels()
+            .get(Framebuffer::pixel_index(w as usize, x as usize, y as usize))
+            .copied()
+    }
 
     /// What `main` used to do, kept because it is a compact tour of the API:
     /// a window, a picture in it, and a composited frame.
@@ -5724,8 +5840,7 @@ mod tests {
     fn test_display_resize() {
         let mut comp = Compositor::new(800, 600, 60).unwrap();
         assert!(comp.resize_display(1920, 1080).is_ok());
-        assert_eq!(comp.framebuffer.width, 1920);
-        assert_eq!(comp.framebuffer.height, 1080);
+        assert_eq!(comp.backend.size(), (1920, 1080));
         assert!(comp.full_recomposite);
     }
 
@@ -5853,7 +5968,7 @@ mod tests {
         let id = comp.create_window_from_spec(&spec, 1);
 
         let bg = comp.theme.desktop_background;
-        comp.framebuffer.clear(bg);
+        comp.backend.clear(bg);
         comp.render_window(id);
 
         let extent = comp
@@ -5862,7 +5977,7 @@ mod tests {
             .expect("window");
         for y in 0..300u32 {
             for x in 0..400u32 {
-                if comp.framebuffer.get_pixel(x, y) == Some(bg) {
+                if working_pixel(&comp.backend, x, y) == Some(bg) {
                     continue;
                 }
                 assert!(
@@ -6874,7 +6989,7 @@ mod tests {
                 .expect("submit_render");
             }
             comp.bench_full_composite();
-            comp.framebuffer.front_buffer().to_vec()
+            comp.backend.presented_pixels().to_vec()
         };
 
         let culled = build(true);
@@ -6928,7 +7043,7 @@ mod tests {
         assert!(comp.compose_frame());
 
         // The 4x4 buffer should have been blitted at the client origin (100,80).
-        let front = comp.framebuffer.front_buffer();
+        let front = comp.backend.presented_pixels();
         let stride = 400usize;
         assert_eq!(front[80 * stride + 100], color, "buffer top-left pixel");
         assert_eq!(front[83 * stride + 103], color, "buffer bottom-right pixel");
@@ -7042,7 +7157,7 @@ mod tests {
         );
         assert!(comp.compose_frame());
 
-        let front = comp.framebuffer.front_buffer();
+        let front = comp.backend.presented_pixels();
         let stride = 400usize;
         // First window's client area lands at (100, 80) by default placement;
         // read via the window's actual client position to stay robust.
@@ -7619,7 +7734,7 @@ mod tests {
 
         // `bench_full_composite` swaps, so the composited result is in front.
         let bg = comp.theme.desktop_background;
-        let front = comp.framebuffer.front_buffer();
+        let front = comp.backend.presented_pixels();
         let stride = 300usize;
         let at = |x: usize, y: usize| front[y * stride + x];
         // A pixel well inside the client area carries the window content.

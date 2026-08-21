@@ -882,7 +882,13 @@ done
 if [ "$FASTPY_COUNT" -gt 0 ]; then
     echo "[rootfs] staged $FASTPY_COUNT fastpy self-test ELF(s) into /tests"
 else
-    echo "[rootfs] WARNING: no services/fastpy-*/*.elf found — fastpy self-tests will self-skip"
+    # Deliberately not a warning any more. `load_test_elf()` returns None for a
+    # fixture that is not on the image and the self-test *self-skips*, so an
+    # empty /tests produces a boot test that runs no ring-3 fastpy test at all
+    # and still reports PASS. That was survivable while the ELFs were committed
+    # (you had to delete them to get here); with them built on demand it is one
+    # forgotten build away, so it is now caught by the completeness gate below.
+    echo "[rootfs] ERROR: no services/fastpy-*/*.elf found — every fastpy self-test would self-skip"
 fi
 if [ "$PROMOTED_COUNT" -gt 0 ]; then
     echo "[rootfs] installed $PROMOTED_COUNT promoted fastpy command(s) into /bin"
@@ -1663,18 +1669,57 @@ STAMP_FAIL=0
 for _cand in python3 python; do
     if command -v "$_cand" >/dev/null 2>&1; then STAMP_PY="$_cand"; break; fi
 done
-if [ -n "$STAMP_PY" ]; then
-    # Record the verdict rather than acting on it: the sysroot gate below is a
-    # *different* question, and a tree that fails both should learn both in one
-    # run.  See the combined exit at the end of this section.
-    "$STAMP_PY" "$ROOT_DIR/scripts/ctest-fixtures.py" check || STAMP_FAIL=1
-else
-    # Not fatal: a host without python can still build an image, and the mtime
-    # gate above still runs.  But say so, because a check that did not execute
-    # must never be mistaken for a check that passed.
-    echo "[rootfs] WARNING: no python3/python found — skipped the fixture content-stamp check"
-    echo "[rootfs]          (mtime gate above still ran, but it cannot see a source/binary"
-    echo "[rootfs]          mismatch; see known-issues.md -> B-THE-TRACKED-FIXTURE-*)"
+# Completeness, not provenance. The question this gate used to ask was "does
+# each committed ELF still match the source committed beside it" -- a provenance
+# question, which only exists while the ELF is a tracked file. It is not one any
+# more (design-decisions.md §355): the ELFs are build outputs now, so an ELF that
+# disagrees with its inputs is simply rebuilt rather than reported.
+#
+# The question that replaces it is the one §355 identifies as the real hazard of
+# building on demand. `load_test_elf()` self-skips a fixture that is not on the
+# image, so a short /tests directory does not fail anything -- it silently
+# subtracts tests and still reports PASS. Under the old arrangement that took a
+# deliberate deletion; now it takes a forgotten build. So the image build counts
+# what the tree defines against what it staged, and refuses to pack a short one.
+#
+# The expected set is the tracked `build.py` recipes, which is a fact of the
+# checkout rather than a list anybody maintains -- a 71st fixture is covered the
+# day it lands, exactly as `fixtures()` globs for the same reason.
+FIXTURE_RECIPES=0
+FIXTURE_MISSING=0
+MISSING_NAMES=""
+for _recipe in "$ROOT_DIR"/services/ctest-*/build.py "$ROOT_DIR"/services/fastpy-*/build.py; do
+    [ -e "$_recipe" ] || continue
+    _dir="$(dirname "$_recipe")"
+    _name="$(basename "$_dir")"
+    FIXTURE_RECIPES=$((FIXTURE_RECIPES + 1))
+    if [ ! -e "$_dir/$_name.elf" ]; then
+        FIXTURE_MISSING=$((FIXTURE_MISSING + 1))
+        MISSING_NAMES="$MISSING_NAMES $_name"
+    fi
+done
+if [ "$FIXTURE_MISSING" -gt 0 ]; then
+    STAMP_FAIL=1
+    echo "[rootfs] ERROR: $FIXTURE_MISSING of $FIXTURE_RECIPES fixture ELFs have not been built here."
+    # Named, not just counted: which ones are missing is the diagnosis. A whole
+    # family missing means the toolchain never ran; one missing means one build
+    # failed, and the difference decides what you go and look at.
+    for _m in $MISSING_NAMES; do
+        echo "[rootfs]        missing: $_m"
+    done
+    echo "[rootfs]        These are build outputs, not tracked files — do NOT commit one."
+    echo "[rootfs]        Build them from Windows (they need fastpy + zig, which do not"
+    echo "[rootfs]        resolve from inside WSL):"
+    echo "[rootfs]          python scripts/ctest-fixtures.py build"
+    echo "[rootfs]        then re-run this script."
+elif [ "$FIXTURE_RECIPES" -gt 0 ]; then
+    echo "[rootfs] fixture set complete: $FIXTURE_RECIPES of $FIXTURE_RECIPES built"
+fi
+if [ -z "$STAMP_PY" ]; then
+    # Kept as a note rather than dropped: the completeness gate above is pure
+    # shell and always runs, but `image-stamp` below is not, and an image packed
+    # without its manifest is one the boot test cannot verify.
+    echo "[rootfs] NOTE: no python3/python found — the image manifest will not be written"
 fi
 
 # --- The third level: the sysroot the other two are measured against ---------
@@ -1696,37 +1741,41 @@ elif [ -n "$SYSROOT_STALE" ]; then
          "continuing because ALLOW_STALE_FIXTURES=1"
 fi
 if [ "$STAMP_FAIL" -ne 0 ] && [ "${ALLOW_STALE_FIXTURES:-0}" != "1" ]; then
-    echo "[rootfs] ERROR: a ctest fixture's ELF does not match the source it is"
-    echo "[rootfs]        committed beside. Rebuild it with the command printed above."
+    echo "[rootfs] ERROR: the fixture set is short (see the list above). An image packed"
+    echo "[rootfs]        now would silently run fewer ring-3 self-tests and still pass."
 elif [ "$STAMP_FAIL" -ne 0 ]; then
-    echo "[rootfs] WARNING: fixture content stamps do not match (see above);" \
+    echo "[rootfs] WARNING: the fixture set is short (see above);" \
          "continuing because ALLOW_STALE_FIXTURES=1"
 fi
 # The deferred mtime verdict (CTEST_STALE, set by the fixture loop above).
 #
-# It is fatal only when the content-stamp gate could not run, i.e. no python on
-# this host.  Then mtime is the only evidence there is, and weak evidence of
-# staleness still beats none.  When the stamp gate DID run, it has already
-# judged these same fixtures by content and its answer supersedes this one in
-# both directions: it fails fixtures whose mtimes look fine (a rebuild nobody
-# committed), and it clears fixtures whose mtimes look stale (a sysroot rebuilt
-# after checkout).  Reporting the mtime finding as an error in that case is how
-# nine provably-current fixtures blocked an image build; reporting it as a
-# warning keeps the signal for a human without letting file order veto a hash.
+# This is now fatal on its own evidence, which is a change of standing that the
+# move to built-on-demand ELFs earns (design-decisions.md §355). It used to be a
+# warning whenever the content-stamp gate had run, because mtime and the stamps
+# disagreed in a specific, known-benign way: git writes files it has not edited,
+# so a `checkout` or `merge` could reorder a *committed* ELF against its inputs
+# with nothing having actually changed. That is how nine provably-current
+# fixtures once blocked an image build, and why the hash was made authoritative.
+#
+# Git no longer writes these files at all. The only thing that can now make an
+# ELF older than its own `build.py` or `libc.a` is that the build step was not
+# re-run after those moved — which is precisely what this gate should stop,
+# because the image would otherwise be packed with a binary testing a libc that
+# is not in the tree. That was incident #2 (2026-08-16), and it is the one the
+# ALLOW_STALE_FIXTURES escape hatch exists for rather than the default.
 CTEST_MTIME_FATAL=0
 if [ "$CTEST_STALE" -gt 0 ]; then
-    if [ -z "$STAMP_PY" ]; then
+    if [ "${ALLOW_STALE_FIXTURES:-0}" != "1" ]; then
         CTEST_MTIME_FATAL=1
         echo "[rootfs] ERROR: $CTEST_STALE of $CTEST_COUNT native C fixtures are older than"
-        echo "[rootfs]        libc.a or their own sources, and with no python here the"
-        echo "[rootfs]        content-stamp check could not run to confirm or clear them."
-        echo "[rootfs]        Rebuild them (commands above)."
-    elif [ "$STAMP_FAIL" -eq 0 ]; then
-        echo "[rootfs] NOTE: $CTEST_STALE of $CTEST_COUNT fixtures are older than libc.a or"
-        echo "[rootfs]       their own sources by mtime, but the content stamps above verify"
-        echo "[rootfs]       every one against those same inputs — so they are current and"
-        echo "[rootfs]       the mtime ordering is an artifact (typically a sysroot rebuilt"
-        echo "[rootfs]       after checkout). Not an error; the stamps are authoritative."
+        echo "[rootfs]        libc.a or their own sources, so the build step has not been"
+        echo "[rootfs]        re-run since those changed. Rebuild them from Windows:"
+        echo "[rootfs]          python scripts/ctest-fixtures.py build"
+        echo "[rootfs]        (it rebuilds only what is behind, and rebuilds the sysroot"
+        echo "[rootfs]        first if libc.a is itself behind posix/src)."
+    else
+        echo "[rootfs] WARNING: $CTEST_STALE of $CTEST_COUNT fixtures are older than libc.a"
+        echo "[rootfs]          or their own sources; continuing because ALLOW_STALE_FIXTURES=1"
     fi
     # If STAMP_FAIL is set the stamp gate is already reporting the real fault
     # above with the file that actually moved; adding an mtime line would only

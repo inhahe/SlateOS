@@ -1,11 +1,22 @@
-# Intermediate objects emitted by each ctest fixture's build.py. Only the
-# linked ELF fixture is tracked, because the boot test needs the ELF on a
-# machine that may have no zig/WSL toolchain to rebuild it with.
+# Intermediate objects emitted by each fixture's build.py.
 #
 # This rule lives here, matched by pattern, rather than as a copy of the same
-# two lines in every services/ctest-*/ directory. Eight of the nine fixtures
-# carried that per-directory copy and ctest-ctty did not — so its main.o was
-# committed and stayed committed, contradicting the very comment its siblings
-# were repeating. A rule replicated per directory is a rule a new directory
-# opts out of by simply not having it.
+# two lines in every fixture directory. Eight of the nine ctest fixtures carried
+# that per-directory copy and ctest-ctty did not — so its main.o was committed
+# and stayed committed, contradicting the very comment its siblings were
+# repeating. A rule replicated per directory is a rule a new directory opts out
+# of by simply not having it.
+#
+# The fastpy fixtures then proved the same point at eleven times the scale: 50
+# of the 61 carried a `prog.o` line in their own .gitignore and 11 did not, so
+# eleven intermediate objects were tracked. Those 50 files are gone and this
+# pattern covers all of them, new directories included.
 ctest-*/main.o
+fastpy-*/prog.o
+
+# The linked ELFs themselves are ignored at the repository root rather than
+# here, next to the note explaining why they stopped being tracked on
+# 2026-08-21 (design-decisions.md §355). They are build outputs now: the boot
+# test builds what is missing rather than relying on a committed copy, because
+# a committed copy links a gitignored libc.a and so goes stale without git
+# being able to see it — which it did, in 60 of these 61 directories at once.

@@ -53,13 +53,18 @@
 # output that must be regenerated per-machine; never commit.
 #
 # This deliberately covers `.sysroot.stamp` too, and that is not an oversight
-# to be "fixed" by tracking it. Unlike the ctest fixture stamps — which sit
-# beside tracked ELFs and must survive a fresh clone — the sysroot stamp
-# describes *this machine's* libc.a. A tracked copy would arrive in a checkout
-# asserting that a libc.a you have not built yet was built from those sources,
-# which is the precise false-green the stamp exists to prevent. Absent stamp =
-# "nobody has built the sysroot here", which is the truth on a fresh clone, and
-# the checker falls back to mtime and says so.
+# to be "fixed" by tracking it. The stamp describes *this machine's* libc.a. A
+# tracked copy would arrive in a checkout asserting that a libc.a you have not
+# built yet was built from those sources, which is the precise false-green the
+# stamp exists to prevent. Absent stamp = "nobody has built the sysroot here",
+# which is the truth on a fresh clone, and the checker falls back to mtime and
+# says so.
+#
+# (This note used to contrast the sysroot stamp with the ctest fixture stamps,
+# "which sit beside tracked ELFs and must survive a fresh clone". Those stamps
+# and those tracked ELFs are both gone — see the fixture-ELF entry below — so
+# the sysroot stamp is now the only one of its kind, and the reasoning stands
+# on its own rather than by contrast.)
 /toolchain/sysroot/
 
 # Orchestrator history (personal)
@@ -145,3 +150,24 @@ __pycache__/
 /gui/font/tools/thai-legacy/
 /gui/font/tools/khmer-probe/
 /gui/font/tools/myanmar-probe/
+
+# Ring-3 self-test fixture binaries, and the per-fixture input stamps that used
+# to police them. Built on demand by `scripts/ctest-fixtures.py build` from the
+# tracked `build.py` beside each one — the same treatment `libc.a` above already
+# gets, and for the same reason.
+#
+# These were tracked until 2026-08-21. The arrangement failed the way storing a
+# compiled artifact next to its source always fails here: the ELFs link
+# `toolchain/sysroot/lib/libc.a`, which is a gitignored build output, so git
+# could not see the dependency and never reported the binaries as behind. Five
+# separate incidents came from that, and measuring it (design-decisions.md §355)
+# found 60 of the 61 unguarded fastpy fixtures stale in the tree at once — the
+# ring-3 self-tests had been proving that binaries ran against a libc that no
+# longer existed, and reporting PASS.
+#
+# Do not "fix" a missing fixture by committing one. A missing fixture is the
+# intended signal that the tree has not been built here yet; `create-ext4-rootfs.sh`
+# builds what is absent and refuses to pack an image that is still short.
+/services/ctest-*/*.elf
+/services/fastpy-*/*.elf
+/services/ctest-*/*.stamp

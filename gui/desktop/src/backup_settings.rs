@@ -5,6 +5,7 @@
 //! policies, and backup history with restore capabilities.
 
 use guitk::color::Color;
+use guitk::idseq::IdSeq;
 use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::style::CornerRadii;
 use guitk::text;
@@ -422,7 +423,7 @@ pub struct BackupSettings {
     pub skip_if_on_battery: bool,
     pub skip_if_metered: bool,
     pub history: Vec<BackupHistoryEntry>,
-    pub next_backup_id: u64,
+    ids: IdSeq,
     pub last_backup_timestamp: Option<u64>,
     pub total_backup_size: u64,
 }
@@ -459,7 +460,7 @@ impl Default for BackupSettings {
             skip_if_on_battery: true,
             skip_if_metered: true,
             history: Vec::new(),
-            next_backup_id: 1,
+            ids: IdSeq::new(),
             last_backup_timestamp: None,
             total_backup_size: 0,
         }
@@ -523,14 +524,22 @@ impl BackupSettings {
         }
     }
 
-    /// Record a completed backup.
-    pub fn record_backup(&mut self, entry: BackupHistoryEntry) {
+    /// Record a completed backup, assigning it a history ID.
+    ///
+    /// The ID on `entry` is overwritten. Before this took its ID from the
+    /// sequence, the counter here was advanced by every call and read by
+    /// none: every caller invented its own ID, and nothing stopped two
+    /// entries sharing one — which would have made `delete`/lookup by ID
+    /// ambiguous the first time it mattered.
+    pub fn record_backup(&mut self, mut entry: BackupHistoryEntry) -> u64 {
+        let id = self.ids.issue_infallible();
+        entry.id = id;
         if entry.status == BackupStatus::Success || entry.status == BackupStatus::PartialSuccess {
             self.last_backup_timestamp = Some(entry.timestamp);
             self.total_backup_size = self.total_backup_size.saturating_add(entry.total_bytes);
         }
         self.history.push(entry);
-        self.next_backup_id += 1;
+        id
     }
 
     /// Get the last successful backup.
@@ -1728,6 +1737,36 @@ mod tests {
 
         assert_eq!(settings.toggle_exclude_rule(&pattern), Some(!was));
         assert!(settings.toggle_exclude_rule("nonexistent").is_none());
+    }
+
+    /// Before `record_backup` took the ID from the sequence, the counter it
+    /// kept was advanced by every call and read by none — so the ID on a
+    /// history entry was whatever the caller happened to put there, and two
+    /// entries could share one. Every entry now gets an ID nothing else has.
+    #[test]
+    fn a_recorded_backup_is_given_an_id_rather_than_trusting_the_callers() {
+        let mut settings = BackupSettings::default();
+        let entry = |id| BackupHistoryEntry {
+            id,
+            timestamp: 100,
+            backup_type: BackupType::Full,
+            status: BackupStatus::Success,
+            files_count: 1,
+            total_bytes: 1,
+            duration_secs: 1,
+            error_message: None,
+            target_path: "/b".to_string(),
+        };
+
+        // Three callers all claiming ID 7.
+        let ids: Vec<u64> = (0..3).map(|_| settings.record_backup(entry(7))).collect();
+
+        assert_eq!(ids, vec![1, 2, 3]);
+        let stored: Vec<u64> = settings.history.iter().map(|e| e.id).collect();
+        assert_eq!(
+            stored, ids,
+            "the stored IDs are the issued ones, not the 7s"
+        );
     }
 
     #[test]

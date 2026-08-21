@@ -14,6 +14,7 @@
 //! - Recording indicator overlay
 
 use guitk::color::Color;
+use guitk::idseq::IdSeq;
 use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::style::CornerRadii;
 
@@ -407,10 +408,16 @@ fn format_bytes(bytes: u64) -> String {
 // Recording history
 // ============================================================================
 
+/// Identifier for a completed recording.
+///
+/// 64 bits rather than 32 so that the sequence handing these out cannot run
+/// out — see [`guitk::idseq`].
+pub type RecordingId = u64;
+
 /// A completed recording in history.
 #[derive(Clone, Debug)]
 pub struct RecordingEntry {
-    pub id: u32,
+    pub id: RecordingId,
     pub filename: String,
     pub timestamp: u64,
     pub duration_ms: u64,
@@ -446,7 +453,7 @@ pub struct ScreenRecorder {
     pub state: RecordingState,
     pub stats: RecordingStats,
     pub history: Vec<RecordingEntry>,
-    next_id: u32,
+    ids: IdSeq<RecordingId>,
 }
 
 impl ScreenRecorder {
@@ -456,7 +463,7 @@ impl ScreenRecorder {
             state: RecordingState::Idle,
             stats: RecordingStats::new(),
             history: Vec::new(),
-            next_id: 1,
+            ids: IdSeq::new(),
         }
     }
 
@@ -546,7 +553,7 @@ impl ScreenRecorder {
     /// Mark processing as complete and add to history.
     pub fn finish_processing(&mut self, filename: &str, file_size: u64, timestamp: u64) {
         let entry = RecordingEntry {
-            id: self.next_id,
+            id: self.ids.issue_infallible(),
             filename: filename.to_string(),
             timestamp,
             duration_ms: self.stats.elapsed_ms,
@@ -555,8 +562,6 @@ impl ScreenRecorder {
             frame_rate: self.config.frame_rate,
             format: self.config.output_format,
         };
-        self.next_id = self.next_id.saturating_add(1);
-
         if self.history.len() >= MAX_HISTORY {
             self.history.remove(0);
         }
@@ -607,7 +612,7 @@ impl ScreenRecorder {
     }
 
     /// Delete a history entry by ID.
-    pub fn delete_history(&mut self, id: u32) -> bool {
+    pub fn delete_history(&mut self, id: RecordingId) -> bool {
         let before = self.history.len();
         self.history.retain(|e| e.id != id);
         self.history.len() < before

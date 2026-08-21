@@ -21,6 +21,7 @@
 //! ```
 
 use guitk::color::Color;
+use guitk::idseq::IdSeq;
 use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::style::CornerRadii;
 use guitk::text;
@@ -89,7 +90,7 @@ const EDGE_PADDING: u32 = 8;
 
 /// Unique identifier for a desktop icon.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub struct IconId(pub u32);
+pub struct IconId(pub u64);
 
 /// The type/category of a desktop icon, determining its visual glyph and behavior.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -337,8 +338,8 @@ impl GridConfig {
 pub struct DesktopIconLayer {
     /// All icons on the desktop.
     icons: Vec<DesktopIcon>,
-    /// Next ID to assign.
-    next_id: u32,
+    /// Source of icon IDs.
+    ids: IdSeq,
     /// Grid configuration.
     pub grid: GridConfig,
     /// Arrangement mode.
@@ -357,7 +358,7 @@ impl DesktopIconLayer {
     pub fn new(screen_width: u32, screen_height: u32, taskbar_height: u32) -> Self {
         Self {
             icons: Vec::new(),
-            next_id: 1,
+            ids: IdSeq::new(),
             grid: GridConfig::default(),
             arrangement: ArrangementMode::FreeWithSnap,
             interaction: InteractionState::Idle,
@@ -385,8 +386,7 @@ impl DesktopIconLayer {
         x: i32,
         y: i32,
     ) -> IconId {
-        let id = IconId(self.next_id);
-        self.next_id = self.next_id.saturating_add(1);
+        let id = IconId(self.ids.issue_infallible());
 
         let (snapped_x, snapped_y) = self.grid.snap(x, y);
 

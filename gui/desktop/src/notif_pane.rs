@@ -32,6 +32,7 @@
 
 use guitk::color::Color;
 use guitk::event::{EventResult, Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
+use guitk::idseq::IdSeq;
 use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::style::CornerRadii;
 use guitk::text;
@@ -479,8 +480,8 @@ pub struct NotificationPane {
     state: PaneState,
     /// Stored notifications (newest first).
     notifications: Vec<Notification>,
-    /// Next notification ID to assign.
-    next_id: u64,
+    /// Source of notification IDs.
+    ids: IdSeq,
     /// Quick settings state.
     quick_settings: QuickSettingsState,
     /// Per-app notification settings.
@@ -515,7 +516,7 @@ impl NotificationPane {
         Self {
             state: PaneState::Hidden,
             notifications: Vec::new(),
-            next_id: 1,
+            ids: IdSeq::new(),
             quick_settings: QuickSettingsState::default(),
             app_settings: Vec::new(),
             scroll_offset: 0.0,
@@ -574,8 +575,7 @@ impl NotificationPane {
     /// If the pane already has `MAX_NOTIFICATIONS`, the oldest is evicted.
     /// Returns the assigned notification ID.
     pub fn push_notification(&mut self, mut notif: Notification) -> u64 {
-        let id = self.next_id;
-        self.next_id += 1;
+        let id = self.ids.issue_infallible();
         notif.id = id;
 
         // Ensure per-app settings exist.

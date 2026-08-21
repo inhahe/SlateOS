@@ -17,6 +17,7 @@
 //! `apply_all` is set, in which case all matching rules are merged).
 
 use guitk::color::Color;
+use guitk::idseq::IdSeq;
 use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::scroll_window;
 use guitk::style::CornerRadii;
@@ -238,11 +239,18 @@ impl Default for RuleActions {
 // Window Rule
 // ============================================================================
 
+/// Identifier for a window rule.
+///
+/// 64 bits rather than 32 so that the sequence handing these out cannot run
+/// out — see [`guitk::idseq`] for why that is a design choice and not an
+/// arbitrary width.
+pub type RuleId = u64;
+
 /// A window rule: a match criterion plus the actions to take.
 #[derive(Clone, Debug)]
 pub struct WindowRule {
     /// Unique rule identifier.
-    pub id: u32,
+    pub id: RuleId,
     /// Human-readable name for this rule.
     pub name: String,
     /// Match criterion.
@@ -261,7 +269,7 @@ pub struct WindowRule {
 
 impl WindowRule {
     /// Create a new rule with the given name and criterion.
-    pub fn new(id: u32, name: &str, criteria: MatchCriteria) -> Self {
+    pub fn new(id: RuleId, name: &str, criteria: MatchCriteria) -> Self {
         Self {
             id,
             name: name.to_string(),
@@ -323,7 +331,7 @@ const MAX_REMEMBERED: usize = 128;
 /// Manages window rules and their evaluation.
 pub struct WindowRulesManager {
     rules: Vec<WindowRule>,
-    next_id: u32,
+    ids: IdSeq<RuleId>,
     eval_mode: EvalMode,
     /// Remembered positions for RememberLast.
     remembered: Vec<RememberedState>,
@@ -336,7 +344,7 @@ impl WindowRulesManager {
     pub fn new() -> Self {
         let mut mgr = Self {
             rules: Vec::new(),
-            next_id: 1,
+            ids: IdSeq::new(),
             eval_mode: EvalMode::FirstMatch,
             remembered: Vec::new(),
             timestamp_counter: 0,
@@ -380,10 +388,8 @@ impl WindowRulesManager {
     }
 
     /// Allocate the next unique rule ID.
-    fn alloc_id(&mut self) -> u32 {
-        let id = self.next_id;
-        self.next_id = self.next_id.saturating_add(1);
-        id
+    fn alloc_id(&mut self) -> RuleId {
+        self.ids.issue_infallible()
     }
 
     /// Set the evaluation mode.
@@ -397,7 +403,7 @@ impl WindowRulesManager {
     }
 
     /// Add a new rule. Returns the rule ID, or None if at capacity.
-    pub fn add_rule(&mut self, mut rule: WindowRule) -> Option<u32> {
+    pub fn add_rule(&mut self, mut rule: WindowRule) -> Option<RuleId> {
         if self.rules.len() >= MAX_RULES {
             return None;
         }
@@ -408,14 +414,14 @@ impl WindowRulesManager {
     }
 
     /// Remove a rule by ID. Returns true if found.
-    pub fn remove_rule(&mut self, id: u32) -> bool {
+    pub fn remove_rule(&mut self, id: RuleId) -> bool {
         let before = self.rules.len();
         self.rules.retain(|r| r.id != id);
         self.rules.len() < before
     }
 
     /// Enable or disable a rule by ID.
-    pub fn set_enabled(&mut self, id: u32, enabled: bool) -> bool {
+    pub fn set_enabled(&mut self, id: RuleId, enabled: bool) -> bool {
         if let Some(r) = self.rules.iter_mut().find(|r| r.id == id) {
             r.enabled = enabled;
             true
@@ -432,12 +438,12 @@ impl WindowRulesManager {
     }
 
     /// Get a rule by ID.
-    pub fn rule_by_id(&self, id: u32) -> Option<&WindowRule> {
+    pub fn rule_by_id(&self, id: RuleId) -> Option<&WindowRule> {
         self.rules.iter().find(|r| r.id == id)
     }
 
     /// Get a mutable rule by ID.
-    pub fn rule_by_id_mut(&mut self, id: u32) -> Option<&mut WindowRule> {
+    pub fn rule_by_id_mut(&mut self, id: RuleId) -> Option<&mut WindowRule> {
         self.rules.iter_mut().find(|r| r.id == id)
     }
 
@@ -481,8 +487,8 @@ impl WindowRulesManager {
         // firing. Collected as ids because the updates below need `self`
         // mutably, and an index would go stale the moment a one-shot rule is
         // removed.
-        let fired: Vec<u32> = matched.iter().map(|r| r.id).collect();
-        let one_shot: Vec<u32> = matched
+        let fired: Vec<RuleId> = matched.iter().map(|r| r.id).collect();
+        let one_shot: Vec<RuleId> = matched
             .iter()
             .filter(|r| r.one_shot)
             .map(|r| r.id)
@@ -597,7 +603,7 @@ impl WindowRulesManager {
     }
 
     /// Move a rule's priority up (increase by 1).
-    pub fn increase_priority(&mut self, id: u32) -> bool {
+    pub fn increase_priority(&mut self, id: RuleId) -> bool {
         if let Some(r) = self.rules.iter_mut().find(|r| r.id == id) {
             r.priority = r.priority.saturating_add(1);
             true
@@ -607,7 +613,7 @@ impl WindowRulesManager {
     }
 
     /// Move a rule's priority down (decrease by 1).
-    pub fn decrease_priority(&mut self, id: u32) -> bool {
+    pub fn decrease_priority(&mut self, id: RuleId) -> bool {
         if let Some(r) = self.rules.iter_mut().find(|r| r.id == id) {
             r.priority = r.priority.saturating_sub(1);
             true
@@ -617,7 +623,7 @@ impl WindowRulesManager {
     }
 
     /// Duplicate a rule with a new ID.
-    pub fn duplicate_rule(&mut self, id: u32) -> Option<u32> {
+    pub fn duplicate_rule(&mut self, id: RuleId) -> Option<RuleId> {
         let rule = self.rules.iter().find(|r| r.id == id)?.clone();
         let new_id = self.alloc_id();
         let mut new_rule = rule;
@@ -732,7 +738,7 @@ impl WindowRulesManager {
         if parts.next()? != "rule" {
             return None;
         }
-        let id: u32 = parts.next()?.parse().ok()?;
+        let id: RuleId = parts.next()?.parse().ok()?;
         let name = parts.next()?.to_string();
         let priority: i32 = parts.next()?.parse().ok()?;
         let enabled = parts.next()? == "on";
@@ -1900,7 +1906,7 @@ mod tests {
         .iter()
         .enumerate()
         {
-            mgr.add_rule(WindowRule::new(i as u32, name, MatchCriteria::Any));
+            mgr.add_rule(WindowRule::new(i as RuleId, name, MatchCriteria::Any));
         }
         let ui = RulesSettingsUI::new();
         let mut cmds = Vec::new();

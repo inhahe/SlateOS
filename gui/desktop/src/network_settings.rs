@@ -6,6 +6,7 @@
 //! stack via IPC for actual configuration changes.
 
 use guitk::color::Color;
+use guitk::idseq::IdSeq;
 use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::style::CornerRadii;
 use guitk::text;
@@ -698,7 +699,7 @@ pub struct FirewallConfig {
     pub log_blocked: bool,
     pub block_icmp: bool,
     pub stealth_mode: bool,
-    pub next_rule_id: u64,
+    pub rule_ids: IdSeq,
 }
 
 impl Default for FirewallConfig {
@@ -711,7 +712,7 @@ impl Default for FirewallConfig {
             log_blocked: true,
             block_icmp: false,
             stealth_mode: false,
-            next_rule_id: 1,
+            rule_ids: IdSeq::new(),
         }
     }
 }
@@ -719,8 +720,7 @@ impl Default for FirewallConfig {
 impl FirewallConfig {
     /// Add a new rule, returning its ID.
     pub fn add_rule(&mut self, mut rule: FirewallRule) -> u64 {
-        let id = self.next_rule_id;
-        self.next_rule_id += 1;
+        let id = self.rule_ids.issue_infallible();
         rule.id = id;
         self.rules.push(rule);
         id

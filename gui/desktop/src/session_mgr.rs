@@ -9,6 +9,7 @@
 
 use guitk::color::Color;
 use guitk::cycle;
+use guitk::idseq::IdSeq;
 use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::style::CornerRadii;
 
@@ -198,8 +199,8 @@ pub struct SessionManager {
     workspaces: Vec<Workspace>,
     /// Current session state (for session restore).
     pub session: SessionState,
-    /// Next workspace ID.
-    next_id: WorkspaceId,
+    /// Source of workspace IDs.
+    ids: IdSeq<WorkspaceId>,
     /// Maximum number of workspaces.
     pub max_workspaces: usize,
     /// Whether session restore is enabled globally.
@@ -213,7 +214,7 @@ impl SessionManager {
         Self {
             workspaces: Vec::new(),
             session: SessionState::new(),
-            next_id: 1,
+            ids: IdSeq::new(),
             max_workspaces: 20,
             session_restore_enabled: true,
             active_workspace: None,
@@ -229,8 +230,7 @@ impl SessionManager {
         if self.workspaces.iter().any(|w| w.name == name) {
             return None;
         }
-        let id = self.next_id;
-        self.next_id += 1;
+        let id = self.ids.issue_infallible();
         self.workspaces.push(Workspace::new(id, name));
         Some(id)
     }

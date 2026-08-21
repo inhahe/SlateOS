@@ -13,6 +13,7 @@
 //! - Rate limit: if a handler takes >200ms, skip it with "loading..." entry.
 
 use guitk::color::Color;
+use guitk::idseq::IdSeq;
 use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::style::CornerRadii;
 
@@ -307,8 +308,8 @@ impl SubMenuItem {
 pub struct ContextMenuExtensionManager {
     /// All registered extensions.
     extensions: Vec<ContextMenuExtension>,
-    /// Next extension ID.
-    next_id: ExtensionId,
+    /// Source of extension IDs.
+    ids: IdSeq<ExtensionId>,
     /// Maximum extensions per app (prevent abuse).
     pub max_per_app: usize,
     /// Global timeout threshold in ms.
@@ -321,7 +322,7 @@ impl ContextMenuExtensionManager {
     pub fn new() -> Self {
         Self {
             extensions: Vec::new(),
-            next_id: 1,
+            ids: IdSeq::new(),
             max_per_app: 10,
             timeout_threshold_ms: 200.0,
             extensions_enabled: true,
@@ -356,8 +357,7 @@ impl ContextMenuExtensionManager {
             return None;
         }
 
-        let id = self.next_id;
-        self.next_id += 1;
+        let id = self.ids.issue()?;
 
         let ext = ContextMenuExtension::new(
             id,

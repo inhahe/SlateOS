@@ -4,6 +4,7 @@
 //! startup delay, impact assessment, and per-app enable/disable control.
 
 use guitk::color::Color;
+use guitk::idseq::IdSeq;
 use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::style::CornerRadii;
 use guitk::text;
@@ -255,8 +256,8 @@ pub struct StartupSettings {
     pub entries: Vec<StartupEntry>,
     /// Boot performance configuration.
     pub boot_config: BootConfig,
-    /// Next ID for new entries.
-    next_id: u64,
+    /// Source of entry IDs.
+    ids: IdSeq,
 }
 
 impl StartupSettings {
@@ -264,7 +265,7 @@ impl StartupSettings {
         Self {
             entries: Vec::new(),
             boot_config: BootConfig::default(),
-            next_id: 1,
+            ids: IdSeq::new(),
         }
     }
 
@@ -275,8 +276,7 @@ impl StartupSettings {
         publisher: impl Into<String>,
         command: impl Into<String>,
     ) -> u64 {
-        let id = self.next_id;
-        self.next_id = self.next_id.wrapping_add(1);
+        let id = self.ids.issue_infallible();
         self.entries
             .push(StartupEntry::new(id, name, publisher, command));
         id

@@ -5,6 +5,7 @@
 //! sound settings, and notification history retention.
 
 use guitk::color::Color;
+use guitk::idseq::IdSeq;
 use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::style::CornerRadii;
 use guitk::text;
@@ -383,8 +384,8 @@ pub struct NotificationSettings {
     pub app_prefs: Vec<AppNotificationPrefs>,
     /// Notification history (most recent first).
     pub history: Vec<NotificationHistoryEntry>,
-    /// ID counter for notifications.
-    next_id: u64,
+    /// Source of notification IDs.
+    ids: IdSeq,
 }
 
 impl NotificationSettings {
@@ -393,7 +394,7 @@ impl NotificationSettings {
             config: NotificationConfig::default(),
             app_prefs: Vec::new(),
             history: Vec::new(),
-            next_id: 1,
+            ids: IdSeq::new(),
         }
     }
 
@@ -467,8 +468,7 @@ impl NotificationSettings {
         priority: NotificationPriority,
         timestamp: u64,
     ) -> u64 {
-        let id = self.next_id;
-        self.next_id = self.next_id.wrapping_add(1);
+        let id = self.ids.issue_infallible();
 
         let app_id_str = app_id.into();
 

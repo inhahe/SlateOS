@@ -48178,3 +48178,81 @@ pixels. Until then, `reading_width`/`format_taskbar` (the shell's path) and
 `main.rs` carries no blanket `#![allow(dead_code)]`, but `render` is `pub` on a
 `pub struct`, so `dead_code` does not fire on it either. It will sit there until
 somebody needing a tray clock finds it and gets a two-line one.
+
+**Fixed 2026-08-21**, on the first of the two options — extra zones live in the
+calendar popup, the taskbar stays one line. Recorded as `design-decisions.md`
+§493, because the alternative was defensible and the choice is user-visible.
+
+The deciding argument was not aesthetic. The tray is already sized for the
+*widest reading its own switches allow* (`clock_width`, held to the drawn text
+by `the_clocks_target_covers_the_reading_that_is_drawn`), and four more zones
+stacked there would push the taskbar's window buttons off the right of the bar
+on a small display. The popup has the room; the bar does not.
+
+What landed:
+
+- `ClockDisplay::render` is now the popup's clock band, reached through
+  `CalendarView::header: Option<ClockHeader>`. It has a real caller.
+- `render_tray_clock` was **not** deleted, contrary to what the table above
+  predicted. It survives as the one-line forwarder it always was, because the
+  popup's band and the tray's reading are now genuinely the same function with
+  the same signature — which is the property the entry was asking for. Its name
+  is the only thing that was wrong, and it now describes what it does.
+- `DesktopShell::popup_clock` builds the band from `datetime.additional_clocks`
+  on **every open**, not once at construction, so a zone added in the Date &
+  Time panel while the popup was shut is in the band when it reopens
+  (`reopening_the_calendar_rewinds_it`).
+- An `additional_clocks` entry whose `tz_id` is not in `available_timezones` is
+  **dropped**, not shown at UTC under its own label. A row reading "Mars
+  22:13" that is really the viewer's own UTC is worse than an absent row.
+  Pinned by `the_extra_clocks_reach_the_calendars_header`.
+
+This also closed the larger half of the defect: `AdditionalClock::visible` had
+been a switch whose only observable effect was printing "Hidden" beside its own
+row in the panel that set it. It now hides a clock.
+
+## TD-C-THE-SHELL-CAN-DRAW-ITSELF-AND-NOBODY-CAN-ASK-IT-TO
+
+**In short:** `DesktopShell` has five public methods that turn the desktop into
+draw commands — the taskbar, the window decorations, the Alt-Tab switcher, the
+start menu and now the calendar popup. Nothing outside the crate calls any of
+them, and nothing outside the crate *can*: `gui/desktop/Cargo.toml` declares no
+`[lib]` target, so `desktop` is a binary and `DesktopShell` is not importable at
+all. Every one of those methods is reached only from the crate's own `main()`
+demo and its own tests.
+
+**Where:** `gui/desktop/src/main.rs` — `render_taskbar` (:2303),
+`render_window_decorations` (:2402), `render_alt_tab` (:2493),
+`render_start_menu` (:2564), `render_calendar` (:2948).
+`gui/desktop/Cargo.toml` — no `[lib]`.
+
+**Why this is logged and not fixed (2026-08-21):** it is the render half of
+`TD-SHELL-HAS-NOWHERE-TO-SEND-A-LAUNCH`, and it has the same single cause —
+the shell has no compositor/IPC event loop yet. That entry covers the outbound
+half (a `ShellAction::Launch` nobody carries out); this one covers the inbound
+half (a `RenderTree` nobody paints). Fixing either one properly means building
+the loop, which is a task, not a cleanup, and adding a `[lib]` target on its own
+would produce an importable type with still no importer.
+
+**Why it is worth having written down anyway.** This is the exact defect the
+round-4 sweep exists to find — "the tree holds one correct answer that callers
+cannot reach, and grows wrong copies of it" — and it is currently invisible,
+because none of the five methods trips `dead_code`: they are `pub` on a `pub`
+type, which suppresses the lint even though the crate is a binary and the
+`pub` therefore reaches nobody. `apps/systray/src/main.rs` already has its own
+`render_calendar_popup` and its own `render_power_menu`, which is the copy-
+growing half of the pattern starting.
+
+**Proper fix:** the same event loop `TD-SHELL-HAS-NOWHERE-TO-SEND-A-LAUNCH`
+waits on. When it lands it composes the five trees in z-order — decorations,
+taskbar, then whichever popups are open — and submits the result to the
+compositor. At that point `desktop` gains a `[lib]` so the loop can live in a
+separate binary and the tests can exercise the composition, and the popup
+render methods stop being the only surfaces in the shell whose output has
+never been on a screen.
+
+**If never fixed:** the shell remains a very well-tested model of a desktop
+that cannot be displayed. Nothing rots — the tests hold the geometry and the
+hit testing to each other — but every surface added to it inherits the same
+condition, and the systray's parallel implementations keep diverging from the
+shell's with nothing to notice that they have.

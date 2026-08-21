@@ -18,10 +18,13 @@
 // drifted pass as one that has not.
 #![allow(clippy::float_cmp)]
 
+use crate::calendar;
+use crate::datetime_settings::AdditionalClock;
 use crate::launcher::{self, Category};
 use crate::{
-    DesktopShell, Hit, MouseButton, MouseEvent, MouseEventKind, Rect, START_MENU_ROW_HEIGHT,
-    ShellAction, TextRole, WindowChrome, WindowId, WindowState, click, scroll, scroll_rows,
+    DesktopShell, Hit, Key, KeyEvent, Modifiers, MouseButton, MouseEvent, MouseEventKind, Rect,
+    START_MENU_ROW_HEIGHT, ShellAction, TextRole, WindowChrome, WindowId, WindowState, click,
+    scroll, scroll_rows,
 };
 use appearance::{AppearanceSettings, WindowCorners};
 use guitk::render::{RenderCommand, RenderTree};
@@ -562,8 +565,390 @@ fn a_taskbar_button_focuses_an_unfocused_window_and_minimizes_a_focused_one() {
 fn the_taskbar_panel_swallows_clicks_that_hit_nothing() {
     let mut shell = shell();
     let bar = shell.taskbar_rect();
-    let action = shell.handle_mouse(&click(bar.w - 40.0, bar.y + bar.h / 2.0));
+    // Between the start button and the tray, where there is nothing at all:
+    // this used to aim 40 px in from the right edge, which the clock's target
+    // now covers, so the test would have gone on passing while measuring the
+    // clock instead of the bare panel.
+    let x = f32::midpoint(shell.start_button_rect().w, shell.tray_x());
+    let y = bar.y + bar.h / 2.0;
+    assert_eq!(shell.hit_test(x, y), Hit::TaskbarPanel);
+    assert_eq!(shell.handle_mouse(&click(x, y)), ShellAction::Consumed);
+}
+
+// ---- the calendar popup ---------------------------------------------------
+
+/// Where the popup's month layout is, given where the shell would place it.
+fn month_layout(shell: &DesktopShell) -> calendar::MonthLayout {
+    let (x, y) = shell.calendar_origin();
+    calendar::MonthLayout::new(&shell.calendar, x, y, shell.calendar_scale())
+}
+
+/// Click the tray clock — which opens the popup, or closes it again.
+fn click_clock(shell: &mut DesktopShell) -> ShellAction {
+    let clock = shell.clock_rect();
+    click_at(shell, clock)
+}
+
+fn click_start(shell: &mut DesktopShell) -> ShellAction {
+    let start = shell.start_button_rect();
+    click_at(shell, start)
+}
+
+/// The clock toggles: a second click on it closes what the first opened.
+///
+/// It is the one target exempt from the shell's dismiss-first rule (see
+/// `swapping_popups_costs_the_click_that_closes_the_first_one`), because it is
+/// the popup's own button — applying the rule there would leave the calendar
+/// impossible to close from the control that opened it.
+#[test]
+fn the_tray_clock_opens_and_closes_the_calendar() {
+    let mut shell = shell();
+    let clock = shell.clock_rect();
+    assert_eq!(shell.hit_test(clock.x + 1.0, clock.y + 1.0), Hit::Clock);
+
+    assert!(!shell.calendar.visible);
+    assert_eq!(click_at(&mut shell, clock), ShellAction::Consumed);
+    assert!(shell.calendar.visible);
+    assert_eq!(click_at(&mut shell, clock), ShellAction::Consumed);
+    assert!(!shell.calendar.visible);
+}
+
+/// The clock's target has to cover the reading the taskbar actually draws.
+///
+/// The two are derived from the same `clock_width`, and this is what holds
+/// them to it: a target measured from a stale width leaves the last few
+/// characters of the clock inert, which reads as "the clock is not clickable"
+/// rather than as an off-by-a-few-pixels rectangle.
+#[test]
+fn the_clocks_target_covers_the_reading_that_is_drawn() {
+    let shell = shell();
+    let target = shell.clock_rect();
+    // The clock is the rightmost thing on the taskbar, so the rightmost text
+    // command is it — the desktop indicator sits at the tray's left edge.
+    let (x, y, size) = shell
+        .render_taskbar()
+        .commands
+        .iter()
+        .filter_map(|c| match c {
+            RenderCommand::Text {
+                x, y, font_size, ..
+            } => Some((*x, *y, *font_size)),
+            _ => None,
+        })
+        .max_by(|a, b| a.0.total_cmp(&b.0))
+        .expect("the taskbar draws a clock");
+
+    // The slot is sized for the *widest* reading the switches allow, so check
+    // that one rather than the current second.
+    let widest = shell.clock_width();
+    assert!(x >= target.x, "the reading starts left of its target");
+    assert!(
+        x + widest <= target.x + target.w + 0.5,
+        "the reading runs past its target"
+    );
+    assert!(y >= target.y && y + size <= target.y + target.h);
+}
+
+#[test]
+fn every_calendar_control_is_clickable_where_it_is_drawn() {
+    let mut shell = shell();
+    click_clock(&mut shell);
+    // Off today's month, so the Today button exists too.
+    shell.calendar.next_month();
+
+    let layout = month_layout(&shell);
+    for (rect, want) in [
+        (layout.prev_arrow(), calendar::CalendarHit::PrevPage),
+        (layout.next_arrow(), calendar::CalendarHit::NextPage),
+        (layout.title(), calendar::CalendarHit::Title),
+        (
+            layout.today_button().expect("off-month shows Today"),
+            calendar::CalendarHit::Today,
+        ),
+    ] {
+        let (x, y) = centre(rect);
+        assert_eq!(
+            shell.hit_test(x, y),
+            Hit::CalendarControl(want),
+            "{want:?} is not clickable where the shell draws it"
+        );
+    }
+    for index in [0_usize, 20, 41] {
+        let (x, y) = centre(layout.cell(index));
+        assert_eq!(
+            shell.hit_test(x, y),
+            Hit::CalendarControl(calendar::CalendarHit::Day(index))
+        );
+    }
+}
+
+#[test]
+fn a_calendar_arrow_pages_the_month_it_is_drawn_beside() {
+    let mut shell = shell();
+    click_clock(&mut shell);
+    let (year, month) = (shell.calendar.view_year, shell.calendar.view_month);
+
+    let next = month_layout(&shell).next_arrow();
+    assert_eq!(click_at(&mut shell, next), ShellAction::Consumed);
+    assert!(shell.calendar.visible, "paging must not close the popup");
+    assert_ne!(
+        (shell.calendar.view_year, shell.calendar.view_month),
+        (year, month)
+    );
+
+    let prev = month_layout(&shell).prev_arrow();
+    click_at(&mut shell, prev);
+    assert_eq!(
+        (shell.calendar.view_year, shell.calendar.view_month),
+        (year, month)
+    );
+}
+
+/// A click on the popup's own margin must not close it.
+///
+/// The popup is wider than its grid, so there is real inert space inside it;
+/// dismissing on a press there is the single most irritating way for a popup
+/// to behave, and the reason the hit test distinguishes "off the popup" from
+/// "on the popup, on nothing".
+#[test]
+fn a_click_on_the_calendars_margin_leaves_it_open() {
+    let mut shell = shell();
+    click_clock(&mut shell);
+    let frame = month_layout(&shell).frame;
+
+    let action = shell.handle_mouse(&click(frame.x + 1.0, frame.y + frame.h - 1.0));
     assert_eq!(action, ShellAction::Consumed);
+    assert!(shell.calendar.visible);
+}
+
+#[test]
+fn a_click_off_the_calendar_closes_it_without_acting() {
+    let mut shell = shell();
+    let id = shell.add_window("Terminal", 100, 100, 400, 300, 1);
+    shell.minimize_window(id);
+    click_clock(&mut shell);
+
+    // On the taskbar button of the minimised window: the click is spent
+    // closing the popup, so the window stays minimised.
+    let button = shell.taskbar_button_rect(0);
+    assert_eq!(click_at(&mut shell, button), ShellAction::Consumed);
+    assert!(!shell.calendar.visible);
+    assert_eq!(shell.windows[&id].state, WindowState::Minimized);
+}
+
+/// One popup at a time — and the click that closes one does not open the other.
+///
+/// The shell's standing rule is that a press outside an open menu is *spent*
+/// dismissing it (see `handle_press`): dismissing is what the user aimed at,
+/// and acting as well would make one click do something they could not see
+/// coming. The clock and the start button are outside each other's popups, so
+/// they obey it like every other target does — the alternative would be two
+/// buttons on one bar that quietly follow a different rule from their
+/// neighbours. It costs a second click to swap popups, which is the price of
+/// the rule and is paid identically by the taskbar's window buttons.
+#[test]
+fn swapping_popups_costs_the_click_that_closes_the_first_one() {
+    let mut shell = shell();
+    click_start(&mut shell);
+    assert!(shell.start_menu_open);
+
+    // First click on the clock: spent closing the start menu.
+    click_clock(&mut shell);
+    assert!(!shell.start_menu_open);
+    assert!(
+        !shell.calendar.visible,
+        "the click that dismissed the start menu must not also open the calendar"
+    );
+
+    // Second click: nothing is open, so it opens the calendar.
+    click_clock(&mut shell);
+    assert!(shell.calendar.visible);
+
+    // And symmetrically, with the calendar open.
+    click_start(&mut shell);
+    assert!(!shell.calendar.visible);
+    assert!(!shell.start_menu_open);
+    click_start(&mut shell);
+    assert!(shell.start_menu_open);
+}
+
+/// Escape closes a popup, and is passed through when there is none.
+///
+/// A shell that claimed Escape unconditionally would be a shell in which no
+/// window could ever close a dialog with it — far more often what the key is
+/// for than closing the start menu.
+#[test]
+fn escape_closes_a_popup_and_is_otherwise_left_alone() {
+    let escape = KeyEvent {
+        key: Key::Escape,
+        pressed: true,
+        modifiers: Modifiers::default(),
+        text: None,
+    };
+
+    let mut shell = shell();
+    assert!(
+        !shell.handle_hotkey(&escape),
+        "Escape with nothing open must reach the focused window"
+    );
+
+    click_clock(&mut shell);
+    assert!(shell.handle_hotkey(&escape));
+    assert!(!shell.calendar.visible);
+    assert!(!shell.handle_hotkey(&escape));
+
+    click_start(&mut shell);
+    assert!(shell.handle_hotkey(&escape));
+    assert!(!shell.start_menu_open);
+}
+
+/// The popup stays on the display, at any scaling and any screen size, and
+/// sits above the taskbar whenever there is room for it.
+///
+/// When there is not — 640×480 at 200% scaling gives 400 px above the bar for
+/// a 480 px popup — it is pinned to the top of the display and overlaps the
+/// bar rather than running off the screen. That is the right way round, and
+/// the test asserts it rather than skipping the case: everything the popup is
+/// steered by lives in its first eighty pixels, so losing the bottom of the
+/// grid leaves it usable while losing the top would not.
+#[test]
+fn the_calendar_is_placed_on_screen_above_the_taskbar() {
+    for percent in [100_u16, 150, 200] {
+        for (w, h) in [(1000_u32, 800_u32), (640, 480), (3840, 2160)] {
+            let mut shell = scaled(percent);
+            shell.screen_width = w;
+            shell.screen_height = h;
+            click_clock(&mut shell);
+            assert!(shell.calendar.visible);
+
+            let frame = month_layout(&shell).frame;
+            let bar = shell.taskbar_rect();
+            assert!(frame.x >= 0.0 && frame.y >= 0.0, "{frame:?} is off screen");
+            assert!(
+                frame.x + frame.w <= shell.screen_width as f32 + 0.5,
+                "{frame:?} runs off the right of a {w}x{h} display"
+            );
+            if frame.h <= bar.y {
+                assert!(
+                    frame.y + frame.h <= bar.y + 0.5,
+                    "{frame:?} overlaps the taskbar with room to spare above it"
+                );
+            } else {
+                assert!(
+                    frame.y <= 0.5,
+                    "{frame:?} is taller than the space above the taskbar, so it \
+                     must be pinned to the top of the display"
+                );
+            }
+        }
+    }
+}
+
+/// The popup is drawn in the shell's pixels, not the toolkit's logical ones.
+#[test]
+fn the_calendar_grows_with_the_display_scaling() {
+    let mut base = shell();
+    click_clock(&mut base);
+    let small = month_layout(&base).frame;
+
+    let mut big = scaled(200);
+    click_clock(&mut big);
+    let large = month_layout(&big).frame;
+
+    assert!((large.w - small.w * 2.0).abs() < 0.01, "{large:?}");
+    assert!((large.h - small.h * 2.0).abs() < 0.01, "{large:?}");
+}
+
+/// The extra clocks the Date & Time panel can add finally reach a surface.
+///
+/// `AdditionalClock` has existed since that panel was written — up to four
+/// zones, each named and each with a `visible` switch — and nothing anywhere
+/// drew one, so `visible` was a flag whose only effect was to print "Hidden"
+/// beside its own row in the panel that set it.
+#[test]
+fn the_extra_clocks_reach_the_calendars_header() {
+    let mut shell = shell();
+    assert!(shell.datetime.add_clock("Europe/London", "London"));
+    assert!(shell.datetime.add_clock("Asia/Tokyo", "Tokyo"));
+    assert!(shell.datetime.add_clock("Europe/Paris", "Paris"));
+    // Hidden ones are configured but not drawn.
+    shell.datetime.additional_clocks[1].visible = false;
+    // A zone the table cannot resolve is dropped rather than shown at UTC
+    // under its own label, which would be a wrong clock presented as a right
+    // one.
+    shell.datetime.additional_clocks.push(AdditionalClock {
+        tz_id: "Mars/Olympus_Mons".to_string(),
+        label: "Mars".to_string(),
+        visible: true,
+    });
+
+    click_clock(&mut shell);
+    let header = shell
+        .calendar
+        .header
+        .as_ref()
+        .expect("the popup has a band");
+    let labels: Vec<&str> = header
+        .clock
+        .extra_timezones
+        .iter()
+        .map(|z| z.label.as_str())
+        .collect();
+    assert_eq!(labels, ["London", "Paris"]);
+
+    // And the band's rows are actually drawn, below the popup's own top edge
+    // and above its month grid.
+    let layout = month_layout(&shell);
+    let band = layout.clock_band().expect("a header band is laid out");
+    let tree = shell.render_calendar().expect("the popup is open");
+    for label in ["London", "Paris"] {
+        assert!(
+            tree.commands.iter().any(|c| matches!(
+                c,
+                RenderCommand::Text { text, y, .. }
+                    if text.starts_with(label) && *y >= band.y && *y <= band.y + band.h
+            )),
+            "{label} is not drawn in the header band"
+        );
+    }
+    assert!(
+        !tree
+            .commands
+            .iter()
+            .any(|c| matches!(c, RenderCommand::Text { text, .. } if text.starts_with("Tokyo"))),
+        "a hidden clock was drawn anyway"
+    );
+}
+
+/// Reopening the popup rewinds it and re-reads the clock settings.
+#[test]
+fn reopening_the_calendar_rewinds_it() {
+    let mut shell = shell();
+    click_clock(&mut shell);
+    let start = (shell.calendar.view_year, shell.calendar.view_month);
+
+    let next = month_layout(&shell).next_arrow();
+    click_at(&mut shell, next);
+    click_clock(&mut shell);
+    assert!(!shell.calendar.visible);
+
+    // A clock added while it was shut is in the band when it reopens, because
+    // the header is rebuilt on every open rather than cached at construction.
+    assert!(shell.datetime.add_clock("Europe/London", "London"));
+    click_clock(&mut shell);
+    assert_eq!(
+        (shell.calendar.view_year, shell.calendar.view_month),
+        start,
+        "the popup reopened where it was left"
+    );
+    assert_eq!(
+        shell
+            .calendar
+            .header
+            .as_ref()
+            .map(|h| h.clock.extra_timezones.len()),
+        Some(1)
+    );
 }
 
 // ---- windows --------------------------------------------------------------

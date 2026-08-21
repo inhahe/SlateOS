@@ -753,6 +753,8 @@ def build_record(serial: Serial | None, verdict: str, args) -> dict:
         rec["experiment"] = args.experiment
     if args.wall_seconds is not None:
         rec["wall_seconds"] = args.wall_seconds
+    if args.build_seconds is not None:
+        rec["build_seconds"] = args.build_seconds
     if serial is not None:
         rec["serial_bytes"] = serial.n_bytes
         rec["serial_lines"] = len(serial.lines)
@@ -932,18 +934,55 @@ def accel_of(rec: dict) -> str:
     return _ACCEL_UNKNOWN if val is None else str(val)
 
 
+#: Third of the three unknown markers, and phrased on the same principle as
+#: `_SAN_UNKNOWN` and `_ACCEL_UNKNOWN`: it sits beside `debug` and `release` in
+#: a printed label and must not be mistakable for either.
+_PROFILE_UNKNOWN = "unknown profile"
+
+
+def profile_of(rec: dict) -> str:
+    """Which build profile a record belongs to.
+
+    The third twin of `sanitizer_of` and `accel_of`, collapsing key-absent and
+    key-null for grouping. Never guesses `debug`: the recorder's *argparse*
+    default is debug, but a record that does not say is a record that does not
+    say, and folding it into the larger population is how a mixture gets
+    presented as a measurement.
+    """
+    if "profile" not in rec:
+        return _PROFILE_UNKNOWN
+    val = rec["profile"]
+    return _PROFILE_UNKNOWN if val is None else str(val)
+
+
 def population_of(rec: dict) -> str:
     """The full label of the population a boot's duration belongs to.
 
-    A wall time is a property of the *pair* (build, accelerator) -- KASAN costs
-    ~3.4x and the accelerator ~1.4x on this host -- and neither factor makes the
-    other irrelevant, so the population is the pair and not either half. Kept as
-    one function rather than composed at each call site so that the printed
-    label and the grouping key cannot drift: a legend that names a different
-    partition from the one the numbers were computed over is worse than no
-    legend, because it is believed.
+    A wall time is a property of the *triple* (profile, sanitizer,
+    accelerator). Measured on this host: release boots ~2.7x faster than debug
+    (395s vs 144s median on QEMU TCG), KASAN costs ~3.4x, and the accelerator
+    ~1.4x. No one of those makes the others irrelevant, so the population is
+    the triple and not any subset. Kept as one function rather than composed at
+    each call site so that the printed label and the grouping key cannot drift:
+    a legend that names a different partition from the one the numbers were
+    computed over is worse than no legend, because it is believed.
+
+    THE PROFILE AXIS WAS MISSING UNTIL 2026-08-21, and unlike the accelerator
+    case it was not a latent risk -- it was already wrong. 100 of the 243
+    records in `bench/boot-history.jsonl` are release boots, and every one of
+    them had been pooled with the debug boots since the day the file was
+    started. The largest population read "155 boot(s), median 331s", which is
+    the median of a 95/60 mixture of a 382s population and a 130s one: a
+    duration no build on this host has ever taken. A smaller population read
+    121s while its three debug boots took 327s, so a reader asking "what does a
+    boot cost" got the release answer under a label that did not say release.
+
+    This is precisely the defect `report_wall`'s docstring was written about,
+    on the axis that docstring forgot -- which is worth stating plainly, because
+    the lesson is that naming a partition is not the same as checking it covers
+    every factor that moves the number.
     """
-    return f"{sanitizer_of(rec)} on {accel_of(rec)}"
+    return f"{profile_of(rec)}/{sanitizer_of(rec)} on {accel_of(rec)}"
 
 
 def _median(values: list[float]) -> float:
@@ -1024,17 +1063,79 @@ def report_wall(records: list[dict]) -> None:
     pops = wall_populations(records)
     if not pops:
         return
-    print("[boot-history] wall time by build and accelerator:")
+    print("[boot-history] wall time by profile, build and accelerator:")
     for name in sorted(pops):
         vals = pops[name]
         print(f"[boot-history]   {name}: {len(vals)} boot(s), "
               f"median {_median(vals):.0f}s, "
               f"range {min(vals):.0f}-{max(vals):.0f}s")
     if len(pops) > 1:
-        print("[boot-history]   (reported separately on purpose: a "
-              "KASAN-instrumented boot runs several times longer and a "
-              "hardware-virtualised one ~40% longer again on this host, so "
-              "one median over the mixture describes no build that exists)")
+        print("[boot-history]   (reported separately on purpose: a debug boot "
+              "runs ~2.7x longer than release, a KASAN-instrumented one "
+              "~3.4x longer again, and a hardware-virtualised one ~40% on top "
+              "of that, so one median over the mixture describes no build that "
+              "exists)")
+
+
+def build_populations(records: list[dict]) -> dict[str, list[float]]:
+    """Build seconds grouped by profile and sanitizer -- NOT by accelerator.
+
+    The partition differs from `wall_populations`' on purpose. What the guest is
+    executed by cannot change how long the host spent compiling, so folding the
+    accelerator in here would split each profile into two or three populations
+    that differ in nothing and shrink every sample for no gain. What *does*
+    change a build's cost is the profile (`opt-level = 3, codegen-units = 1` is
+    not a cheap build) and the sanitizer (KASAN instruments every memory
+    access), so those are the two axes.
+
+    Experiment boots are excluded on the same rule as everywhere else in this
+    file, and runs that never built are absent rather than zero -- see
+    `--build-seconds`.
+    """
+    out: dict[str, list[float]] = {}
+    for rec in records:
+        if is_experiment(rec):
+            continue
+        secs = rec.get("build_seconds")
+        if not isinstance(secs, (int, float)) or isinstance(secs, bool):
+            continue
+        san = sanitizer_of(rec)
+        prof = rec.get("profile") or "unknown"
+        key = prof if san != "kasan-instrumented" else f"{prof} + KASAN"
+        out.setdefault(key, []).append(float(secs))
+    return out
+
+
+def report_build(records: list[dict]) -> None:
+    """Per-profile build-time standing.
+
+    This exists to make one specific claim checkable. `open-questions.md` Q46
+    asks whether the non-bench boot test should build release, and prices the
+    change as "slower build, faster boot". The boot half has always been
+    measured to the second across hundreds of records; the build half was never
+    measured at all, so for the entire life of that question one side of the
+    comparison was evidence and the other was an assertion.
+
+    READ THE RANGE, NOT THE MEDIAN. Unlike the wall-time populations, this one
+    mixes three genuinely different things that the record cannot tell apart: a
+    cold build of the whole dependency graph, an incremental rebuild after a
+    one-line edit, and a no-op rebuild that compiled nothing. A median over that
+    mixture describes no build anyone actually waits for. The bottom of the
+    range is the no-op case and the top is the cold case, and the distance
+    between them is the honest answer to "what does this profile cost me".
+    """
+    pops = build_populations(records)
+    if not pops:
+        return
+    print("[boot-history] build time by profile:")
+    for name in sorted(pops):
+        vals = pops[name]
+        print(f"[boot-history]   {name}: {len(vals)} build(s), "
+              f"median {_median(vals):.0f}s, "
+              f"range {min(vals):.0f}-{max(vals):.0f}s")
+    print("[boot-history]   (read the range, not the median: this mixes cold, "
+          "incremental and no-op rebuilds, which the record cannot tell apart. "
+          "Runs that did not build are absent, not zero.)")
 
 
 def report(records: list[dict], current: dict | None) -> None:
@@ -1071,6 +1172,7 @@ def report(records: list[dict], current: dict | None) -> None:
     print("[boot-history] current consecutive clean streak: "
           f"{tail_clean_streak(records)}")
     report_wall(records)
+    report_build(records)
 
 
 def cmd_streaks(history_path: str) -> int:
@@ -1136,6 +1238,15 @@ def main(argv=None) -> int:
     parser.add_argument("--marker", default="BOOT_OK",
                         help="the marker the harness waited for")
     parser.add_argument("--wall-seconds", type=float, default=None)
+    parser.add_argument("--build-seconds", type=float, default=None,
+                        help="seconds cargo spent in Step 1, or omitted when "
+                             "the run did not build (--no-build/--no-stage). "
+                             "Omitted rather than zero on purpose: a run that "
+                             "never built is not a run that built instantly, "
+                             "and averaging the two would understate every "
+                             "profile's cost. This is the half of "
+                             "open-questions.md Q46's 'slower build, faster "
+                             "boot' tradeoff that had never been measured.")
     parser.add_argument("--label", default="",
                         help="free-form run tag, e.g. 'soak-iter3'")
     parser.add_argument("--experiment", default="",

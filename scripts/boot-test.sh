@@ -124,6 +124,20 @@
 #                                       # unasked.  This is what a fresh
 #                                       # worktree needs; see known-issues.md
 #                                       # A-A-FRESH-CHECKOUT-CANNOT-BOOT-TEST-…
+#   ./scripts/boot-test.sh --usb-image  # build build/slateos-usb.img (real
+#                                       # protective MBR + GPT + FAT32) from the
+#                                       # staged ESP and boot *that*, attached as
+#                                       # a usb-storage device, instead of QEMU's
+#                                       # virtual FAT.  See bare-metal-boot.md.
+#   ./scripts/boot-test.sh --no-rootfs  # do not attach rootfs.ext4, even when it
+#                                       # exists.  This is the shape a real USB
+#                                       # stick has, so it is what --usb-image
+#                                       # runs should be paired with before
+#                                       # trusting the image on hardware.  Tagged
+#                                       # as an experiment in boot-history, since
+#                                       # the Path-Z rungs that read /mnt no-op
+#                                       # and their outcome is therefore not
+#                                       # evidence about the tree.
 
 set -euo pipefail
 
@@ -355,7 +369,15 @@ report_pathz_skips() {
             local n
             n="$(grep -ac '\[spawn\]   SKIP:' "$file")"
             [ "$n" -gt 8 ] && echo "  ... and $((n - 8)) more"
-            echo "  (rebuild the image: wsl -d Ubuntu -- bash scripts/create-ext4-rootfs.sh)"
+            # Two different causes, two different remedies.  Under --no-rootfs
+            # the skips are the point of the run, and telling the reader to
+            # rebuild an image they deliberately unplugged would send them to
+            # fix something that is not broken.
+            if [ "${NO_ROOTFS:-0}" = 1 ]; then
+                echo "  (expected: --no-rootfs was given, so /mnt is empty by design)"
+            else
+                echo "  (rebuild the image: wsl -d Ubuntu -- bash scripts/create-ext4-rootfs.sh)"
+            fi
             ;;
     esac
     return 0
@@ -1231,6 +1253,10 @@ BOOTSTRAP="${BOOT_TEST_BOOTSTRAP:-0}"
 # See the --usb-image case in the arg parser for why this is not the default.
 USB_IMAGE=0
 
+# Suppress the rootfs.ext4 attachment even when the file is present.
+# See the --no-rootfs case in the arg parser.
+NO_ROOTFS=0
+
 # Parse args
 for arg in "$@"; do
     case "$arg" in
@@ -1286,6 +1312,25 @@ for arg in "$@"; do
         # no image rebuild, which is what makes the ordinary edit-boot loop
         # fast, and a soak wants the ESP it already has (see --no-stage).
         --usb-image) USB_IMAGE=1 ;;
+        # --no-rootfs boots without rootfs.ext4, which is the shape a USB stick
+        # actually has.
+        #
+        # Step 3b attaches the rootfs on the file's mere existence -- there was
+        # no way to say "not this time" short of renaming it, which races every
+        # other process in the worktree.  But a flash drive carries one FAT32
+        # ESP and nothing else: there is no second virtio-blk disk for a stick,
+        # so every Path-Z rung that reads /mnt will behave on hardware the way
+        # it behaves here with this flag, and no other way.  Pairing this with
+        # --usb-image is what makes a QEMU run actually rehearse the bare-metal
+        # configuration rather than a strictly more capable one.
+        #
+        # READ THE RESULT CAREFULLY.  Removing the rootfs removes the rungs that
+        # currently fail (the inherited posix_spawn_file_actions_init crashes),
+        # so such a run reads *greener* than the tracking run while testing
+        # strictly less.  That is exactly the confusion the experiment tag
+        # exists to prevent, so record_boot_history() adds one -- the run is
+        # excluded from the consecutive-clean streak in both directions.
+        --no-rootfs) NO_ROOTFS=1 ;;
     esac
 done
 
@@ -1841,8 +1886,24 @@ record_boot_outcome() {
     if [ "${GPU_OVERRIDDEN:-0}" = 1 ]; then
         why="${why:+$why; }SLATE_GPU=$GPU_DEVICE (non-default display device)"
     fi
+    # A --no-rootfs run tests strictly less than a tracking run and therefore
+    # reads greener: the Path-Z rungs that read /mnt no-op instead of failing.
+    # Tagging it keeps a deliberately narrower boot out of the consecutive-clean
+    # streak, which four open kernel issues use as their closure bar -- a streak
+    # extended by removing the failing tests would certify nothing.
+    if [ "${NO_ROOTFS:-0}" = 1 ]; then
+        why="${why:+$why; }--no-rootfs (rootfs.ext4 not attached; /mnt rungs no-op)"
+    fi
     if [ -n "$why" ]; then
         args+=(--experiment "$why")
+    fi
+    # Absent, not zero, when the run did not build: --no-build and --no-stage
+    # skip Step 1 entirely, and recording 0 there would drag every median down
+    # while looking like an implausibly fast build rather than like a run that
+    # never built.  A missing field is a question the reader can answer; a wrong
+    # one is not.
+    if [ -n "${BUILD_SECONDS:-}" ]; then
+        args+=(--build-seconds "$BUILD_SECONDS")
     fi
     if [ -n "${QEMU_START_EPOCH:-}" ]; then
         local wall=$(( ${QEMU_END_EPOCH:-$(date +%s)} - QEMU_START_EPOCH ))
@@ -1991,11 +2052,20 @@ check_prerequisites() {
     # soak boots the image already in the ESP: it compiles nothing and copies
     # nothing, so neither the embedded service binaries nor limine/ can affect
     # it, and refusing such a run for their absence would be refusing a run that
-    # would have worked.  rootfs.ext4 is always in scope — every boot attaches
-    # it, and its absence silently shrinks the suite rather than blocking it.
-    local need="rootfs"
-    [ "$NO_BUILD" -eq 0 ] && need="services,$need"
-    [ "$NO_STAGE" -eq 0 ] && need="limine,$need"
+    # would have worked.  rootfs.ext4 is in scope for every boot that attaches
+    # it — its absence silently shrinks the suite rather than blocking it — but
+    # not for a --no-rootfs run, which has already decided not to attach it.
+    # Asking about it there would report a missing prerequisite for a run that
+    # does not have one, and print "this run tests LESS than a normal one" as
+    # though the tree were at fault rather than the flag.
+    local need=""
+    [ "$NO_ROOTFS" -eq 0 ] && need="rootfs"
+    [ "$NO_BUILD" -eq 0 ] && need="services${need:+,$need}"
+    [ "$NO_STAGE" -eq 0 ] && need="limine${need:+,$need}"
+    if [ -z "$need" ]; then
+        echo "Prerequisites: nothing this run depends on (--no-build --no-stage --no-rootfs)."
+        return 0
+    fi
 
     local report status
     report="$(bash "$boot" --check --need="$need" 2>&1)" && status=0 || status=$?
@@ -2084,8 +2154,26 @@ if [ "$NO_BUILD" -eq 0 ]; then
     if ! command -v "$CARGO" &>/dev/null; then
         CARGO="/c/Users/${USER:-${USERNAME:-$(whoami)}}/.cargo/bin/cargo.exe"
     fi
+    # Timed, and recorded in bench/boot-history.jsonl alongside the QEMU window.
+    #
+    # WHY THIS MATTERS BEYOND CURIOSITY.  open-questions.md Q46 asks whether the
+    # non-bench boot test should build release rather than debug, and its whole
+    # tradeoff is "slower build, faster boot".  We have always measured the boot
+    # half precisely -- wall_seconds and marker_seconds, hundreds of records --
+    # and the build half not at all, so one side of that comparison was an
+    # assertion and the other was evidence.  A cost claim nobody measures is a
+    # cost claim that cannot be checked, and it had gone unmeasured for the
+    # entire life of the question.
+    #
+    # `date +%s` rather than SECONDS: SECONDS counts since the shell started,
+    # which includes the prerequisite and free-space checks, and those are not
+    # part of what a profile choice makes slower.
+    BUILD_START_EPOCH="$(date +%s)"
     (cd "$PROJECT_ROOT" && "$CARGO" build ${CARGO_PROFILE_ARGS[@]+"${CARGO_PROFILE_ARGS[@]}"})
-    echo "Build OK ($BENCH_PROFILE profile)."
+    BUILD_SECONDS=$(( $(date +%s) - BUILD_START_EPOCH ))
+    # Said out loud as well as recorded: a lane deciding Q46 by feel should see
+    # the number on the run in front of them, not only in the history file.
+    echo "Build OK ($BENCH_PROFILE profile, ${BUILD_SECONDS}s)."
 fi
 
 if [ "$NO_STAGE" -eq 0 ] && [ ! -f "$KERNEL_BIN" ]; then
@@ -2261,7 +2349,15 @@ fi
 # so the boot test simply omits it (and the self-test no-ops) when it is absent.
 ROOTFS_IMG="$PROJECT_ROOT/rootfs.ext4"
 ROOTFS_ARGS=()
-if [ -f "$ROOTFS_IMG" ]; then
+if [ "$NO_ROOTFS" -eq 1 ] && [ -f "$ROOTFS_IMG" ]; then
+    # Said out loud, because "the rootfs was not attached" and "the rootfs is
+    # not present" produce identical downstream behaviour and must not produce
+    # identical output: one is a deliberate probe, the other is a fresh
+    # worktree that never packed the image.
+    echo "=== Path-Z glibc rootfs suppressed (--no-rootfs); $ROOTFS_IMG exists but is not attached ==="
+    echo "    Rungs that read /mnt will no-op.  This run is tagged as an experiment."
+fi
+if [ "$NO_ROOTFS" -eq 0 ] && [ -f "$ROOTFS_IMG" ]; then
     # Before QEMU is told to attach it: the image is packed by hand and can be
     # older than the tree, and a stale one produces passing Path-Z rungs that
     # tested nothing current.  See check_rootfs_freshness.

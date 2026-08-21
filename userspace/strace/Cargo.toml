@@ -4,3 +4,12 @@ version = "0.1.0"
 edition = "2024"
 description = "SlateOS strace - system call tracing (strace/ltrace)"
 [dependencies]
+
+# Inherit the workspace lint configuration. This crate had none at all: it was
+# not in the `[lints] workspace = true` set and set no `#![deny]`/`#![warn]` of
+# its own, so `unwrap_used`, `expect_used`, `indexing_slicing` and
+# `arithmetic_side_effects` were silently off over code that
+# decodes syscall arguments out of a traced process's memory.
+# See known-issues.md `TD-B-USERSPACE-CRATES-DO-NOT-INHERIT-THE-WORKSPACE-LINTS`.
+[lints]
+workspace = true

@@ -89,9 +89,9 @@ limine: Loading executable `boot():/boot/kernel`...
 === Kernel booting ===
 ```
 
-That run went all the way: **`BOOT_OK` after 327 s**, against a median of 370 s
-for this build on this host, so booting from a real image over USB costs
-nothing measurable. Its only two failures were the pre-existing
+That run went all the way: **`BOOT_OK` after 327 s**, against a median of 395 s
+for this build on this host (38 debug/uninstrumented boots under TCG), so
+booting from a real image over USB costs nothing measurable. Its only two failures were the pre-existing
 `posix_spawn_file_actions_init` ones inherited from `main`
 (`requests/a-b-posix-spawn-file-actions-init-smashes-the-callers-stack.md`),
 identical to the run before it — the image path introduced no regression.
@@ -187,7 +187,7 @@ USB-TTL adapter on it gives the full log and is worth the five minutes.
 
 | Gap | Consequence | Tracked as |
 |---|---|---|
-| The stick carries no `rootfs.ext4` | Every Path-Z rung that reads `/mnt` fails or skips. In QEMU the rootfs is a separate virtio-blk disk; a stick has no equivalent. | this document |
+| The stick carries no `rootfs.ext4` | 59 Path-Z rungs skip. In QEMU the rootfs is a separate virtio-blk disk; a stick has no equivalent. **Rehearsed — see below.** | this document |
 | The kernel has no USB mass-storage driver | The kernel **cannot read the stick it booted from**. `kernel/src/xhci.rs` binds interface class `0x03` (HID) only; there is no bulk-only transport and no SCSI layer. Firmware read the kernel before `ExitBootServices`, which is why booting works anyway. | this document |
 | No Intel iGPU driver | Only the Limine-provided framebuffer, at whatever mode firmware chose. No mode setting, no acceleration. | §263 |
 | Benchmarks record the accelerator as absent | A bare-metal run's benchmark records are labelled as though no accelerator were in use, which is the *opposite* of the truth. | `known-issues.md` → `TD-A-A-BARE-METAL-RUN-RECORDS-ITS-ACCELERATOR-AS-ABSENT` |
@@ -196,6 +196,40 @@ The first two together mean the honest goal of the first bare-metal boot is
 narrow and worth stating plainly: **does the kernel come up on a real chipset,
 with a real firmware memory map, real ACPI tables, a real APIC and a real PCI
 bus?** Everything that needs storage is a later trip.
+
+### Rehearsing the diskless shape: `--no-rootfs`
+
+Until 2026-08-21 the boot test attached `rootfs.ext4` whenever the file existed,
+with no way to say "not this time" short of renaming it — which races every
+other process in the worktree. So every QEMU run tested a machine strictly more
+capable than the one the stick will produce. `--no-rootfs` closes that:
+
+```bash
+./scripts/boot-test.sh --usb-image --no-rootfs --no-build
+```
+
+Verified 2026-08-21: **`BOOT_OK` after 75 s**, all gates green, 59 Path-Z rungs
+skipped and each one named in the log.
+
+**Read that 75 s correctly — it is not an improvement.** The tracking run's
+395 s median is dominated by the Path-Z rungs, and this run did not execute
+them. For the same reason it is not a *greener* result either, even though it
+shows zero failures where the tracking run shows two: the two failures are the
+inherited `posix_spawn_file_actions_init` crashes, and they live in rungs that
+need `/mnt`. Removing the disk removed the failing tests; it fixed nothing.
+
+That trap is why the run is **tagged as an experiment** in
+`bench/boot-history.jsonl` (`--no-rootfs (rootfs.ext4 not attached; /mnt rungs
+no-op)`) and excluded from the consecutive-clean streak that four open kernel
+issues use as their closure bar. A streak extended by unplugging the disk would
+certify nothing. Two other places learned about the flag at the same time, for
+the same reason: `check_prerequisites` stops asking for a rootfs this run does
+not want, and the skip report stops advising a rebuild of an image you
+deliberately unplugged.
+
+What the run *does* establish is the thing worth establishing: with only a
+FAT32 ESP present and no second block device anywhere, the kernel still boots
+to completion and every gate that does not need storage passes.
 
 ## 7. Recovery
 
@@ -225,6 +259,7 @@ no NVRAM boot entry is added, and the image is confined to the stick. So:
 | Real GPT + FAT32 image built from the staged ESP | **done** — `scripts/build-usb-image.py`, byte-reproducible |
 | Image boots under OVMF as a USB mass-storage device | **done** — verified 2026-08-21: OVMF → Limine 8.7.0 → kernel → `BOOT_OK` in 327 s |
 | Independent reader test over the image structures | **done** — `scripts/test-build-usb-image.py`, 6 groups green |
+| Image boots in the **diskless shape a stick actually has** | **done** — verified 2026-08-21: `--usb-image --no-rootfs` → `BOOT_OK` in 75 s, tagged as an experiment (see §6) |
 | Guarded writer for a physical stick | **done** — `scripts/write-usb-stick.ps1` |
 | On-screen progress channel | **exists**, never exercised outside QEMU |
 | Recovery procedure | **documented above**, never exercised |

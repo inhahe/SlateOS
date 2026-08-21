@@ -49447,3 +49447,95 @@ authentication fix is not read as making the daemon safe to expose. The real
 answer is `sftp` over the now-working `sshd`, which is
 `TD-B-SSHD-RUNS-A-COMMAND-BUT-CANNOT-HOST-A-SESSION`'s neighbour and not yet
 built.
+
+## B-DOAS-COULD-NOT-VERIFY-ANY-PASSWORD-THE-SYSTEM-ACTUALLY-SETS — 2026-08-21 — FIXED
+
+**In short:** `doas` is the program that lets an ordinary user run one command
+as root after typing their password — SlateOS's equivalent of `sudo`. It
+checked that password with arithmetic of its own that no other program in the
+system used, so a password set with `passwd` could never open a `doas` prompt.
+Every attempt printed "authentication failed", which reads to the person typing
+as a forgotten password rather than as a broken program.
+
+Found by asking, after `B-THE-SSH-STACK-AUTHENTICATED-NOBODY`, which *other*
+programs in this tree still answer "is this the user's password?" themselves.
+`doas` was the only one left, and it was the one guarding root.
+
+### What it did
+
+`doas` understood exactly one stored format:
+
+```text
+$sha256$<salt>$<hex digest of sha256(salt || "$" || password)>
+```
+
+and returned `false` for anything else. `passwd` writes `$6$` SHA-crypt through
+`posix::crypt`. The two had nothing in common. The section header above the
+function read `Password hashing / verification (matches passwd utility
+format)` — a claim that was true when it was written, stopped being true when
+`passwd` was centralised (`design-decisions.md` §329), and was checked by
+nothing, because the tests hashed with `hash_password` and verified with
+`verify_password` and so agreed with themselves no matter what the format was.
+
+Three consequences, in descending order of how bad they were:
+
+| | |
+|---|---|
+| **`doas` did not work at all** | Not "worked weakly" — a correctly-typed password was refused, always. The only accounts that could escalate were ones covered by a `nopass` rule, i.e. the ones that never type a password |
+| **`/etc/users.yaml` was invisible to it** | It read `/etc/shadow` directly, so a user in the native database had no entry `doas` would even look for. Same message |
+| **No distinction between a typo and an entry nothing can recompute** | Both printed "authentication failed". The second needs an administrator and will never clear on its own; the first clears on the next attempt |
+
+### Why this is filed as a security defect and not a bug
+
+It failed *closed*, so nobody ever got root they should not have had. The
+danger is the second-order one: a privilege gate that no legitimate user can
+pass does not stay in place. It gets a `permit nopass` rule written around it,
+or it gets removed, and either way the arithmetic that was supposed to protect
+root is gone — this time on purpose, and with a comment explaining that `doas`
+"doesn't work". That is a worse position than the bug, and it is where this was
+heading.
+
+It is also the fifth instance of one root cause. §329 found three programs
+disagreeing about `/etc/shadow` and centralised them into `posix::crypt`; §341
+added `authlib` on top; `sshd` turned out to have a fourth copy while `authlib`
+was being written; `doas` is the fifth. Centralising does nothing for a program
+that never looks, and nothing in the build fails when one does not.
+
+### The fix
+
+`doas` now calls `authlib::Authenticator::authenticate`, which consults
+`/etc/users.yaml` then `/etc/shadow`, hands the stored entry to `crypt` as its
+own *setting* rather than taking it apart to find a salt, and reports `Locked`,
+`NoPassword` and `Unusable` separately from `Rejected`. `main` gates on
+`is_accepted()`, so only `Accepted` admits anyone. The `sha2` dependency existed
+solely for the private hasher and is gone.
+
+Two deliberate choices:
+
+- **The prompt now comes before the lookup.** The old order exited with a
+  distinct message for "no shadow entry" and for "locked" *before* printing a
+  prompt at all. Now every failure says the same thing, except that an entry
+  nothing can recompute additionally says so — that one is a broken system,
+  not a wrong password, and only an administrator can clear it.
+- **An account with no password set is refused.** `login` resolves the same
+  `authlib::Outcome::NoPassword` the *opposite* way, because a deliberately
+  passwordless account at the machine's own keyboard is a long-standing Unix
+  choice. Escalating to root from one is not the same statement, and reading it
+  as consent would turn every passwordless account into a root shell.
+  `nopass` in `/etc/doas.conf` is the only consent that counts here.
+
+### Still open — cross-invocation rate limiting
+
+`authlib`'s failure tally lives in the `Authenticator`, which for `doas` lives
+for one invocation. `sshd` and `ftpd` keep one per daemon, so their tallies
+outlive a connection; `doas` cannot, because it *is* the process. So repeated
+`doas` attempts are not rate-limited relative to each other, which is exactly
+the shape of an attacker who already has a shell as the user and is guessing
+toward root.
+
+The proper fix is on-disk state, and it belongs in `authlib` rather than in
+`doas`, so that `login`, `su` and `doas` share one tally per user instead of
+three. `doas` already keeps per-uid state under `/var/run/doas` for its
+`persist` timestamps, which is the shape the tally would take. Tracked here
+rather than done now because it changes `authlib`'s contract for every caller.
+

@@ -112,8 +112,8 @@ pub use guiremote::window_list::WindowInfo;
 // Same reason again: `Window::snapped` can hold one, and `snap_window_to_zone`
 // takes one. The type belongs to the protocol crate because both ends have to
 // agree on which rectangle a slot names — see `guiremote::zones`.
+use guiremote::zones::{EdgeDrop, SnapZone, WorkArea};
 pub use guiremote::zones::{SnapLayoutPreset, SnapSlot};
-use guiremote::zones::{SnapZone, WorkArea};
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -4526,12 +4526,27 @@ impl Compositor {
         window_id: WindowId,
         slot: SnapSlot,
     ) -> CompositorResult<()> {
-        let area = work_area_of(self.display_manager.virtual_bounds());
+        let area = self.snap_area();
         let zone = slot
             .rect(area)
             .ok_or(CompositorError::ZoneNotInLayout(window_id))?;
 
         self.place_snapped(window_id, zone_rect(zone), SnapTarget::Zone(slot))
+    }
+
+    /// The rectangle tiled windows divide between them.
+    ///
+    /// Derived on every call rather than cached, because it is a function of
+    /// the display arrangement — which a monitor being unplugged changes with
+    /// no notice to anything here. A cached copy would be one hotplug away
+    /// from tiling a screen that no longer exists, and would do it silently.
+    ///
+    /// It is currently the whole display: the compositor has no notion of a
+    /// panel reserving a strip along an edge, so nothing subtracts the
+    /// taskbar's. That is `TD-C-COMPOSITOR-TILES-UNDER-THE-TASKBAR`, and this
+    /// method is the one place a fix for it has to land.
+    fn snap_area(&self) -> WorkArea {
+        work_area_of(self.display_manager.virtual_bounds())
     }
 
     /// Move a window into an already-resolved tile rectangle.
@@ -5101,13 +5116,72 @@ impl Compositor {
         }
     }
 
+    /// What a drag means at the moment the pointer reaches `(x, y)`, or `None`
+    /// if letting go there would just leave the window where it was dropped.
+    ///
+    /// The drag-time preview and the release both ask this, so the outline the
+    /// user is shown cannot promise a placement the drop does not make.
+    ///
+    /// Two things stop it from firing on gestures that are not edge drags:
+    ///
+    /// - **Only a move.** A resize drag reaching an edge is a user sizing a
+    ///   window against that edge by hand. Snapping it would overrule a size
+    ///   they had just finished choosing, and would do it at the exact moment
+    ///   they let go, when it is too late to aim differently.
+    /// - **Only after the pointer has moved.** A press and a release in the
+    ///   same pixel is a click. Without this, clicking the title bar of a
+    ///   window already sitting against the left edge — anywhere in that
+    ///   title bar's leftmost few columns — would tile it, from a gesture the
+    ///   user would describe as "I clicked on it".
+    #[allow(
+        clippy::cast_precision_loss,
+        reason = "display coordinates are far inside f32's exact-integer range"
+    )]
+    fn drop_intent(&self, drag: &DragState, x: i32, y: i32) -> Option<EdgeDrop> {
+        if drag.mode != DragMode::MoveWindow {
+            return None;
+        }
+        if (x, y) == (drag.start_mouse.x, drag.start_mouse.y) {
+            return None;
+        }
+        guiremote::zones::drop_at(x as f32, y as f32, self.snap_area())
+    }
+
+    /// Apply whatever letting go at `(x, y)` means to a drag that is ending.
+    ///
+    /// Routed through [`maximize_window`](Self::maximize_window) and
+    /// [`snap_window_to_zone`](Self::snap_window_to_zone) rather than placing
+    /// the rectangle directly, so an edge drop inherits everything a tiling
+    /// operation already has to get right: refusing a window the client
+    /// declared fixed-size, recording where to restore to without letting a
+    /// second snap overwrite the first one's answer, and telling the client it
+    /// was resized. Placing the rectangle here would be a third copy of that
+    /// bookkeeping, and the one nobody would think to update.
+    fn finish_drag(&mut self, drag: &DragState, x: i32, y: i32) {
+        // Errors are dropped because none of them is actionable at a mouse
+        // release: a non-resizable window declining to be tiled is the correct
+        // outcome of the gesture, and a window that vanished mid-drag has
+        // nothing left to place.
+        match self.drop_intent(drag, x, y) {
+            Some(EdgeDrop::Maximize) => {
+                let _ = self.maximize_window(drag.window_id);
+            }
+            Some(EdgeDrop::Zone(slot)) => {
+                let _ = self.snap_window_to_zone(drag.window_id, slot);
+            }
+            None => {}
+        }
+    }
+
     fn handle_mouse_button(&mut self, button: MouseButton, pressed: bool, x: i32, y: i32) {
         self.cursor_x = x;
         self.cursor_y = y;
 
         // Release ends any active drag.
         if !pressed && button == MouseButton::Left {
-            self.drag = None;
+            if let Some(drag) = self.drag.take() {
+                self.finish_drag(&drag, x, y);
+            }
             return;
         }
 
@@ -12480,5 +12554,273 @@ mod tests {
                 );
             }
         });
+    }
+
+    // ---- drag a window to an edge and let go ------------------------------
+    //
+    // The compositor decides this, not the shell. It already holds the drag
+    // grab, the window geometry and the display bounds, so a shell would have
+    // to be sent the pointer position on every motion event to answer a
+    // question the compositor can answer locally -- putting a socket round trip
+    // inside the highlight, which is the part of the gesture the user watches.
+
+    /// Drag `id` by its title bar until the pointer reaches `(to_x, to_y)`,
+    /// then let go: the whole gesture, in the order a user performs it.
+    fn drag_title_bar_to(comp: &mut Compositor, id: WindowId, to_x: i32, to_y: i32) {
+        let bar = comp
+            .window_ref(id)
+            .expect("window")
+            .title_bar_rect()
+            .expect("a decorated window has a title bar");
+        let from_x = bar.x + 10;
+        let from_y = bar.y + bar.height as i32 / 2;
+        comp.handle_mouse_button(MouseButton::Left, true, from_x, from_y);
+        assert!(comp.drag.is_some(), "the title-bar press started no drag");
+        comp.handle_mouse_move(to_x, to_y);
+        comp.handle_mouse_button(MouseButton::Left, false, to_x, to_y);
+        assert!(comp.drag.is_none(), "the release left the drag running");
+    }
+
+    fn snapped_to(comp: &Compositor, id: WindowId) -> Option<SnapTarget> {
+        comp.window_ref(id).expect("window").snapped
+    }
+
+    /// The slot an edge drop is expected to land in.
+    fn slot(preset: SnapLayoutPreset, zone: u8) -> SnapSlot {
+        SnapSlot::new(preset, zone).expect("a zone the preset has")
+    }
+
+    #[test]
+    fn dropping_a_window_at_an_edge_tiles_it_on_that_side() {
+        // Every snapping edge and corner, driven end to end through the real
+        // input path. Checking `snapped` rather than the rectangle is
+        // deliberate: the stored value is the *intent*, and it is what survives
+        // a resolution change, so a drop that produced the right pixels while
+        // recording the wrong slot would still be wrong.
+        let cases = [
+            (
+                "left",
+                (2, 300),
+                SnapTarget::Zone(slot(SnapLayoutPreset::TwoEqualHalves, 0)),
+            ),
+            (
+                "right",
+                (797, 300),
+                SnapTarget::Zone(slot(SnapLayoutPreset::TwoEqualHalves, 1)),
+            ),
+            (
+                "top-left",
+                (2, 2),
+                SnapTarget::Zone(slot(SnapLayoutPreset::FourQuadrants, 0)),
+            ),
+            (
+                "top-right",
+                (797, 2),
+                SnapTarget::Zone(slot(SnapLayoutPreset::FourQuadrants, 1)),
+            ),
+            (
+                "bottom-left",
+                (2, 597),
+                SnapTarget::Zone(slot(SnapLayoutPreset::FourQuadrants, 2)),
+            ),
+            (
+                "bottom-right",
+                (797, 597),
+                SnapTarget::Zone(slot(SnapLayoutPreset::FourQuadrants, 3)),
+            ),
+        ];
+        for (name, (x, y), want) in cases {
+            let (mut comp, id) = with_one_window();
+            drag_title_bar_to(&mut comp, id, x, y);
+            assert_eq!(
+                snapped_to(&comp, id),
+                Some(want),
+                "dropping at the {name} edge"
+            );
+        }
+    }
+
+    #[test]
+    fn dropping_a_window_at_the_top_maximizes_it() {
+        // The one edge that is not a zone. It goes through `maximize_window`,
+        // so `maximized` is set and `snapped` is not -- the two are
+        // alternatives, and a window that claimed both would be restored twice.
+        let (mut comp, id) = with_one_window();
+        drag_title_bar_to(&mut comp, id, 400, 2);
+        assert!(maximized(&comp, id), "the top edge did not maximize");
+        assert_eq!(snapped_to(&comp, id), None);
+    }
+
+    #[test]
+    fn dropping_a_window_at_the_bottom_leaves_it_where_it_was_dropped() {
+        // The bottom edge deliberately means nothing: no preset is a
+        // bottom-half strip, and inventing one would make the gesture mean
+        // something different from the top edge's mirror image.
+        let (mut comp, id) = with_one_window();
+        drag_title_bar_to(&mut comp, id, 400, 597);
+        assert_eq!(snapped_to(&comp, id), None);
+        assert!(!maximized(&comp, id));
+        let win = comp.window_ref(id).expect("window");
+        assert_eq!(
+            (win.width, win.height),
+            (200, 150),
+            "a drop that snaps nothing must not resize anything either"
+        );
+    }
+
+    #[test]
+    fn a_drag_that_ends_in_open_desktop_only_moves_the_window() {
+        let (mut comp, id) = with_one_window();
+        drag_title_bar_to(&mut comp, id, 400, 300);
+        assert_eq!(snapped_to(&comp, id), None);
+        assert!(!maximized(&comp, id));
+        let win = comp.window_ref(id).expect("window");
+        assert_eq!((win.width, win.height), (200, 150));
+        assert_ne!(
+            (win.x, win.y),
+            (100, 100),
+            "the drag should still have moved the window"
+        );
+    }
+
+    #[test]
+    fn clicking_the_title_bar_of_a_window_at_the_edge_does_not_tile_it() {
+        // The gesture that makes a movement test necessary. This window's title
+        // bar starts at x = 0, so a press in its leftmost columns is inside the
+        // left edge band from the very first event -- and a click is a press
+        // and a release at the same point with no drag between them.
+        let mut comp = Compositor::new(800, 600, 60).expect("compositor");
+        comp.set_double_click_ms(2000);
+        let mut spec = WindowSpec::new("At the edge", 200, 150);
+        spec.position = Some((0, 300));
+        let id = comp.create_window_from_spec(&spec, 1);
+
+        let bar = comp
+            .window_ref(id)
+            .expect("window")
+            .title_bar_rect()
+            .expect("title bar");
+        let (x, y) = (bar.x + 2, bar.y + 2);
+        assert!(
+            guiremote::zones::edge_at(x as f32, y as f32, comp.snap_area()).is_some(),
+            "the test's own press point is not in an edge band, so it proves nothing"
+        );
+        comp.handle_mouse_button(MouseButton::Left, true, x, y);
+        comp.handle_mouse_button(MouseButton::Left, false, x, y);
+
+        assert_eq!(snapped_to(&comp, id), None, "a click tiled the window");
+        assert!(!maximized(&comp, id));
+    }
+
+    #[test]
+    fn a_resize_drag_that_ends_at_an_edge_does_not_tile() {
+        // Dragging the left border to the left edge of the screen is how a user
+        // sizes a window against that edge by hand. Snapping on release would
+        // overrule the size they had just finished choosing, at the one moment
+        // it is too late to aim differently.
+        let (mut comp, id) = with_one_window();
+        let (grab_x, grab_y) = (99, 175);
+        comp.handle_mouse_button(MouseButton::Left, true, grab_x, grab_y);
+        assert_eq!(
+            comp.drag.as_ref().map(|d| d.mode),
+            Some(DragMode::ResizeLeft),
+            "the test grabbed something other than the left border"
+        );
+        comp.handle_mouse_move(2, grab_y);
+        comp.handle_mouse_button(MouseButton::Left, false, 2, grab_y);
+
+        assert_eq!(
+            snapped_to(&comp, id),
+            None,
+            "a resize drag tiled the window"
+        );
+        assert!(!maximized(&comp, id));
+        let win = comp.window_ref(id).expect("window");
+        // 3, not 2: the *left border* follows the pointer and the border is
+        // one pixel outside the client area, which is what the grab point
+        // 99 -- rather than 100 -- reflects.
+        assert_eq!(win.x, 3, "the resize itself should still have happened");
+    }
+
+    #[test]
+    fn an_edge_drop_lands_in_the_rectangle_the_drop_promised() {
+        // The preview drawn during the drag is `EdgeDrop::rect`; the placement
+        // is whatever `maximize_window` or `snap_window_to_zone` works out for
+        // itself. They are separate pieces of arithmetic, so a preview that
+        // lies is a real possibility -- this is what rules it out.
+        let cases = [
+            ("a corner", (797, 2)),
+            ("an edge", (2, 300)),
+            ("the top", (400, 2)),
+        ];
+        for (name, (x, y)) in cases {
+            let (mut comp, id) = with_one_window();
+            let area = comp.snap_area();
+            let promised = guiremote::zones::drop_at(x as f32, y as f32, area)
+                .unwrap_or_else(|| panic!("{name} should snap"))
+                .rect(area)
+                .expect("resolves");
+            drag_title_bar_to(&mut comp, id, x, y);
+            assert_eq!(
+                comp.window_ref(id).expect("window").frame_rect(),
+                zone_rect(promised),
+                "dropping at {name} placed the frame somewhere other than the preview"
+            );
+        }
+    }
+
+    #[test]
+    fn a_window_the_client_declared_fixed_size_is_not_tiled_by_a_drop() {
+        // Tiling is a resize, and a window that said it works at one size means
+        // it. The refusal comes from `place_snapped` rather than from anything
+        // here, which is the point of routing the drop through it.
+        let mut comp = Compositor::new(800, 600, 60).expect("compositor");
+        comp.set_double_click_ms(2000);
+        let mut spec = WindowSpec::new("Fixed", 200, 150);
+        spec.position = Some((100, 100));
+        spec.resizable = false;
+        let id = comp.create_window_from_spec(&spec, 1);
+        drag_title_bar_to(&mut comp, id, 2, 300);
+        assert_eq!(snapped_to(&comp, id), None);
+        let win = comp.window_ref(id).expect("window");
+        assert_eq!((win.width, win.height), (200, 150));
+    }
+
+    #[test]
+    fn a_dropped_window_remembers_the_size_it_had_before_the_drag() {
+        // Routing through `place_snapped` is what earns this: the restore
+        // rectangle is recorded by the same code that records it for a keyboard
+        // snap, so an edge drop is undoable in exactly the way every other
+        // tiling operation is.
+        let (mut comp, id) = with_one_window();
+        drag_title_bar_to(&mut comp, id, 2, 300);
+        assert!(snapped_to(&comp, id).is_some());
+        comp.restore_window(id).expect("restore");
+        let win = comp.window_ref(id).expect("window");
+        assert_eq!((win.width, win.height), (200, 150));
+        assert_eq!(win.snapped, None);
+    }
+
+    #[test]
+    fn re_tiling_an_already_tiled_window_still_restores_to_its_own_size() {
+        // Two drops in a row. The second must not record the first one's
+        // half-screen geometry as the place to come back to.
+        let (mut comp, id) = with_one_window();
+        drag_title_bar_to(&mut comp, id, 2, 300);
+        // Two title-bar presses on one window inside the double-click interval
+        // are a double click, which maximizes rather than dragging. A press on
+        // the desktop between them is what says the user went somewhere else
+        // and came back -- the same thing that stops a real user's two slow
+        // drags from being read as one fast double click.
+        comp.handle_mouse_button(MouseButton::Left, true, 700, 300);
+        comp.handle_mouse_button(MouseButton::Left, false, 700, 300);
+        drag_title_bar_to(&mut comp, id, 797, 300);
+        assert_eq!(
+            snapped_to(&comp, id),
+            Some(SnapTarget::Zone(slot(SnapLayoutPreset::TwoEqualHalves, 1)))
+        );
+        comp.restore_window(id).expect("restore");
+        let win = comp.window_ref(id).expect("window");
+        assert_eq!((win.width, win.height), (200, 150));
     }
 }

@@ -492,7 +492,7 @@ impl TabView {
     ///
     /// The old form widened the index to `i32` to hold `current - 1` before
     /// `rem_euclid` brought it back -- a value out of range in between, proved
-    /// back in range by a later statement. `cycle` does the wrap in modular
+    /// back in range by a later statement. `step` does the wrap in modular
     /// arithmetic on `usize`, where it never leaves the range at all, and the
     /// empty-bar case then needs no guard of its own: index 0 of no tabs is
     /// `None`, which is the answer.
@@ -502,9 +502,9 @@ impl TabView {
             .and_then(|aid| self.tabs.iter().position(|t| t.id == aid))
             .unwrap_or(0);
         let next = if forward {
-            crate::cycle::after(self.tabs.len(), current)
+            crate::step::wrapping_after(self.tabs.len(), current)
         } else {
-            crate::cycle::before(self.tabs.len(), current)
+            crate::step::wrapping_before(self.tabs.len(), current)
         };
 
         let new_id = self.tabs.get(next)?.id;

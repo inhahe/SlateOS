@@ -36,6 +36,7 @@ use guitk::color::Color;
 use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 #[allow(unused_imports)]
 use guitk::style::CornerRadii;
+use guitk::date;
 use guitk::scroll_window;
 use guitk::text;
 
@@ -1003,22 +1004,32 @@ fn decompose_timestamp(ts: u64) -> DecomposedTime {
     }
 }
 
-/// Convert days since epoch to (year, month, day).
-/// All values are 1-based for month and day.
+/// Convert days since the Unix epoch to (year, month, day), both 1-based.
+///
+/// Was a local transcription of Howard Hinnant's `civil_from_days` — one of
+/// four in `apps/`, spelled over three different integer types, of which the
+/// file manager's had been quietly wrong for every date before 2000-03-01.
+/// This one was right, which is the point: four spellings of one algorithm is
+/// four things to check, and a reader has no way to tell the right ones from
+/// the wrong one without redoing the derivation. `guitk::date` reaches the
+/// same algorithm through `tzrules`, which is what the libc's `localtime` and
+/// the taskbar clock render dates through.
+///
+/// A task's next-run time is arithmetic on a user-entered schedule, so
+/// `days_since_epoch` is not bounded by anything checked here. Saturating at
+/// `i32::MAX` days lands in the year 5 881 580, which is where a nonsense
+/// schedule belongs in a list sorted by next run.
 fn days_to_ymd(days_since_epoch: u64) -> (u64, u64, u64) {
-    // Algorithm adapted from Howard Hinnant's `civil_from_days`.
-    let z = days_since_epoch as i64 + 719468;
-    let era = if z >= 0 { z } else { z - 146096 } / 146097;
-    let doe = (z - era * 146097) as u64; // day of era [0, 146096]
-    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365; // year of era
-    let y = yoe as i64 + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100); // day of year
-    let mp = (5 * doy + 2) / 153; // month progress
-    let d = doy - (153 * mp + 2) / 5 + 1;
-    let m = if mp < 10 { mp + 3 } else { mp - 9 };
-    let y = if m <= 2 { y + 1 } else { y };
-
-    (y as u64, m, d)
+    let (year, month, day) =
+        date::Date::from_days_since_epoch(i32::try_from(days_since_epoch).unwrap_or(i32::MAX))
+            .ymd();
+    // The year cannot be negative: `days_since_epoch` is unsigned and the
+    // epoch is 1970.
+    (
+        u64::try_from(year).unwrap_or(0),
+        u64::from(month),
+        u64::from(day),
+    )
 }
 
 // ============================================================================

@@ -11,7 +11,9 @@
 //! - Test patterns for calibration (grayscale, color bars, gradient)
 
 use guitk::color::Color;
+use guitk::daywindow::DailyWindow;
 use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
+use guitk::step;
 use guitk::style::CornerRadii;
 
 // ============================================================================
@@ -110,16 +112,14 @@ pub enum NightLightSchedule {
     /// On between sunset and sunrise (auto-detected from timezone/location).
     SunsetToSunrise,
     /// On between custom start and end times.
-    Custom {
-        /// Start hour (0-23).
-        start_hour: u8,
-        /// Start minute (0-59).
-        start_minute: u8,
-        /// End hour (0-23).
-        end_hour: u8,
-        /// End minute (0-59).
-        end_minute: u8,
-    },
+    ///
+    /// A [`DailyWindow`] rather than four `u8`s: the four fields were public
+    /// and validated nowhere, so a start hour of 25 became a minute count past
+    /// the end of the day, which compared as an overnight window and then
+    /// never opened. Night light would simply stop happening. The same four
+    /// fields shipped that bug in the notification daemon; the window type is
+    /// the fix, made once.
+    Custom(DailyWindow),
 }
 
 impl NightLightSchedule {
@@ -133,24 +133,7 @@ impl NightLightSchedule {
                 // Approximate: 7 PM to 7 AM
                 !(7..19).contains(&hour)
             }
-            Self::Custom {
-                start_hour,
-                start_minute,
-                end_hour,
-                end_minute,
-            } => {
-                let now = (hour as u32) * 60 + (minute as u32);
-                let start = (*start_hour as u32) * 60 + (*start_minute as u32);
-                let end = (*end_hour as u32) * 60 + (*end_minute as u32);
-
-                if start <= end {
-                    // Same-day range (e.g., 14:00 to 18:00)
-                    now >= start && now < end
-                } else {
-                    // Overnight range (e.g., 22:00 to 06:00)
-                    now >= start || now < end
-                }
-            }
+            Self::Custom(window) => window.contains_hm(hour, minute),
         }
     }
 
@@ -368,8 +351,13 @@ impl TestPattern {
         let steps = 16u32;
         let step_width = width / steps as f32;
         let mut cmds = Vec::with_capacity(steps as usize);
+        // The ramp spans the ends inclusively, so it is divided by the number
+        // of *gaps* between steps rather than the number of steps. `steps` is
+        // a literal 16 here; the saturating form keeps that from being the
+        // reason this is correct.
+        let gaps = steps.saturating_sub(1).max(1);
         for i in 0..steps {
-            let gray = (i * 255 / (steps - 1).max(1)) as u8;
+            let gray = i.saturating_mul(255).checked_div(gaps).unwrap_or(0) as u8;
             cmds.push(RenderCommand::FillRect {
                 x: x + i as f32 * step_width,
                 y,
@@ -431,10 +419,12 @@ impl TestPattern {
         let cell_size = 20.0_f32;
         let cols = (width / cell_size).ceil() as u32;
         let rows = (height / cell_size).ceil() as u32;
-        let mut cmds = Vec::with_capacity((cols * rows) as usize);
+        let mut cmds = Vec::with_capacity(cols.saturating_mul(rows) as usize);
         for row in 0..rows {
             for col in 0..cols {
-                let is_white = (row + col) % 2 == 0;
+                // Parity of the sum, so a wrap would invert the whole board
+                // from that point on rather than merely miscolour one cell.
+                let is_white = row.saturating_add(col) % 2 == 0;
                 let color = if is_white {
                     Color::rgb(255, 255, 255)
                 } else {
@@ -638,9 +628,7 @@ impl DisplaySettingsManager {
 
     /// Select the next display (wrapping).
     pub fn select_next_display(&mut self) {
-        if !self.displays.is_empty() {
-            self.selected_display = (self.selected_display + 1) % self.displays.len();
-        }
+        self.selected_display = step::wrapping_after(self.displays.len(), self.selected_display);
     }
 
     /// Set brightness for the selected display.
@@ -746,14 +734,12 @@ impl DisplaySettingsManager {
             NightLightSchedule::Off => "off".to_string(),
             NightLightSchedule::AlwaysOn => "always".to_string(),
             NightLightSchedule::SunsetToSunrise => "sunset".to_string(),
-            NightLightSchedule::Custom {
-                start_hour,
-                start_minute,
-                end_hour,
-                end_minute,
-            } => format!(
+            NightLightSchedule::Custom(w) => format!(
                 "custom:{:02}:{:02}-{:02}:{:02}",
-                start_hour, start_minute, end_hour, end_minute
+                w.start().hour(),
+                w.start().minute(),
+                w.end().hour(),
+                w.end().minute(),
             ),
         };
         out.push_str(&format!("night_light_schedule={}\n", sched_str));
@@ -1389,12 +1375,7 @@ mod tests {
 
     #[test]
     fn test_schedule_custom_same_day() {
-        let s = NightLightSchedule::Custom {
-            start_hour: 14,
-            start_minute: 0,
-            end_hour: 18,
-            end_minute: 0,
-        };
+        let s = NightLightSchedule::Custom(DailyWindow::from_hm(14, 0, 18, 0).unwrap());
         assert!(s.is_active(15, 0));
         assert!(!s.is_active(12, 0));
         assert!(!s.is_active(20, 0));
@@ -1402,12 +1383,7 @@ mod tests {
 
     #[test]
     fn test_schedule_custom_overnight() {
-        let s = NightLightSchedule::Custom {
-            start_hour: 22,
-            start_minute: 0,
-            end_hour: 6,
-            end_minute: 0,
-        };
+        let s = NightLightSchedule::Custom(DailyWindow::from_hm(22, 0, 6, 0).unwrap());
         assert!(s.is_active(23, 0));
         assert!(s.is_active(3, 0));
         assert!(!s.is_active(12, 0));

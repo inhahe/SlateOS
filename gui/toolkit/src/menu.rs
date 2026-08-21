@@ -6,10 +6,10 @@
 //! use the Catppuccin Mocha dark theme.
 
 use crate::color::Color;
-use crate::cycle;
 use crate::event::{Key, KeyEvent};
 use crate::render::{FontWeightHint, RenderCommand, TextOverflow};
 use crate::row_strip::RowStrip;
+use crate::step;
 use crate::style::CornerRadii;
 
 // ─── Catppuccin Mocha palette ───────────────────────────────────────────────
@@ -875,22 +875,22 @@ impl ContextMenu {
     fn move_hover(&mut self, forward: bool) {
         let len = self.items.len();
         // The current row is not a candidate for its own successor, so the walk
-        // starts at its neighbour — `cycle::indices` visits its start first. It
+        // starts at its neighbour — `step::indices` visits its start first. It
         // still comes back round to the current row last, which is what makes a
         // menu with exactly one selectable row keep it under repeated presses.
         let start = match self.hover_index {
             Some(idx) => {
                 if forward {
-                    cycle::after(len, idx)
+                    step::wrapping_after(len, idx)
                 } else {
-                    cycle::before(len, idx)
+                    step::wrapping_before(len, idx)
                 }
             }
             None if forward => 0,
             None => len.saturating_sub(1),
         };
 
-        let landed = cycle::indices(len, start, forward).find(|&idx| {
+        let landed = step::indices(len, start, forward).find(|&idx| {
             matches!(
                 self.items.get(idx),
                 Some(MenuItem::Action { enabled: true, .. })

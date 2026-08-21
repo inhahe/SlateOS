@@ -393,13 +393,20 @@ pub struct MemoryInfo {
 }
 
 /// Partition information.
+///
+/// Sizes are raw byte counts, not pre-scaled gigabytes. They used to be
+/// `f32` fields named `*_gb` holding values divided by 1024³ and displayed
+/// with a `GB` label — a 2 TB disk read `1863.0 GB`, which is neither its
+/// capacity in GB (2000) nor a unit anyone sells. Keeping bytes and scaling
+/// at the point of display means the divisor and the unit name are chosen
+/// together, by `guitk::bytes`. See design-decisions.md §489.
 #[derive(Clone, Debug)]
 pub struct PartitionInfo {
     pub label: String,
     pub filesystem: String,
-    pub capacity_gb: f32,
-    pub used_gb: f32,
-    pub free_gb: f32,
+    pub capacity_bytes: u64,
+    pub used_bytes: u64,
+    pub free_bytes: u64,
     pub mount_point: String,
 }
 
@@ -407,7 +414,8 @@ pub struct PartitionInfo {
 #[derive(Clone, Debug)]
 pub struct DiskInfo {
     pub model: String,
-    pub capacity_gb: f32,
+    /// Raw byte count; see [`PartitionInfo`] for why this is not pre-scaled.
+    pub capacity_bytes: u64,
     pub interface: String,
     pub serial: String,
     pub smart_status: String,
@@ -724,9 +732,13 @@ impl SysInfoState {
 
     fn populate_storage() -> Vec<DiskInfo> {
         vec![
+            // Byte counts as a drive actually reports them: a "2 TB" NVMe is
+            // 2.0×10¹² bytes, which is 1.82 TiB. The partitions below sum
+            // exactly to the disk's capacity, which the pre-scaled gigabyte
+            // figures they replaced did not.
             DiskInfo {
                 model: "Samsung 990 Pro 2TB".to_string(),
-                capacity_gb: 1863.0,
+                capacity_bytes: 2_000_398_934_016,
                 interface: "NVMe".to_string(),
                 serial: "S6Z2NF0W123456".to_string(),
                 smart_status: "Healthy".to_string(),
@@ -734,41 +746,41 @@ impl SysInfoState {
                     PartitionInfo {
                         label: "EFI System".to_string(),
                         filesystem: "FAT32".to_string(),
-                        capacity_gb: 0.5,
-                        used_gb: 0.1,
-                        free_gb: 0.4,
+                        capacity_bytes: 536_870_912,
+                        used_bytes: 115_343_360,
+                        free_bytes: 421_527_552,
                         mount_point: "/boot/efi".to_string(),
                     },
                     PartitionInfo {
                         label: "Slate OS Root".to_string(),
                         filesystem: "ext4".to_string(),
-                        capacity_gb: 500.0,
-                        used_gb: 127.3,
-                        free_gb: 372.7,
+                        capacity_bytes: 536_870_912_000,
+                        used_bytes: 136_667_299_840,
+                        free_bytes: 400_203_612_160,
                         mount_point: "/".to_string(),
                     },
                     PartitionInfo {
                         label: "Home".to_string(),
                         filesystem: "ext4".to_string(),
-                        capacity_gb: 1362.0,
-                        used_gb: 843.5,
-                        free_gb: 518.5,
+                        capacity_bytes: 1_462_991_191_104,
+                        used_bytes: 905_000_000_000,
+                        free_bytes: 557_991_191_104,
                         mount_point: "/home".to_string(),
                     },
                 ],
             },
             DiskInfo {
                 model: "WD Blue SN580 1TB".to_string(),
-                capacity_gb: 931.0,
+                capacity_bytes: 1_000_204_886_016,
                 interface: "NVMe".to_string(),
                 serial: "WD-WX32A0987654".to_string(),
                 smart_status: "Healthy".to_string(),
                 partitions: vec![PartitionInfo {
                     label: "Data".to_string(),
                     filesystem: "ext4".to_string(),
-                    capacity_gb: 931.0,
-                    used_gb: 412.8,
-                    free_gb: 518.2,
+                    capacity_bytes: 1_000_204_886_016,
+                    used_bytes: 443_000_000_000,
+                    free_bytes: 557_204_886_016,
                     mount_point: "/mnt/data".to_string(),
                 }],
             },
@@ -1470,7 +1482,7 @@ impl SysInfoState {
             props.push(Property::new("Model", &disk.model));
             props.push(Property::new(
                 "Capacity",
-                &format!("{:.1} GB", disk.capacity_gb),
+                &guitk::bytes::iec(disk.capacity_bytes),
             ));
             props.push(Property::new("Interface", &disk.interface));
             props.push(Property::new("Serial", &disk.serial));
@@ -1481,10 +1493,10 @@ impl SysInfoState {
                 props.push(Property::new("  Filesystem", &part.filesystem));
                 props.push(Property::new(
                     "  Capacity",
-                    &format!("{:.1} GB", part.capacity_gb),
+                    &guitk::bytes::iec(part.capacity_bytes),
                 ));
-                props.push(Property::new("  Used", &format!("{:.1} GB", part.used_gb)));
-                props.push(Property::new("  Free", &format!("{:.1} GB", part.free_gb)));
+                props.push(Property::new("  Used", &guitk::bytes::iec(part.used_bytes)));
+                props.push(Property::new("  Free", &guitk::bytes::iec(part.free_bytes)));
                 props.push(Property::new("  Mount", &part.mount_point));
             }
         }
@@ -2739,19 +2751,7 @@ impl SysInfoState {
 
 /// Format a byte count in human-readable form.
 fn format_bytes(bytes: u64) -> String {
-    const KIB: u64 = 1024;
-    const MIB: u64 = 1024 * KIB;
-    const GIB: u64 = 1024 * MIB;
-
-    if bytes >= GIB {
-        format!("{:.2} GiB", bytes as f64 / GIB as f64)
-    } else if bytes >= MIB {
-        format!("{:.2} MiB", bytes as f64 / MIB as f64)
-    } else if bytes >= KIB {
-        format!("{:.2} KiB", bytes as f64 / KIB as f64)
-    } else {
-        format!("{} B", bytes)
-    }
+    guitk::bytes::iec(bytes)
 }
 
 // ============================================================================

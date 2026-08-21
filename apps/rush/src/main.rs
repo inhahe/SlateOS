@@ -423,9 +423,10 @@ fn can_move(vehicles: &[Vehicle], index: usize, delta: i32) -> bool {
                 for s in 1..=steps {
                     let check_col = v.col - s;
                     if let Some(occ) = occupancy[v.row][check_col]
-                        && occ != index {
-                            return false;
-                        }
+                        && occ != index
+                    {
+                        return false;
+                    }
                 }
             } else {
                 // Moving right
@@ -436,9 +437,10 @@ fn can_move(vehicles: &[Vehicle], index: usize, delta: i32) -> bool {
                 for s in 1..=steps {
                     let check_col = v.col + v.length - 1 + s;
                     if let Some(occ) = occupancy[v.row][check_col]
-                        && occ != index {
-                            return false;
-                        }
+                        && occ != index
+                    {
+                        return false;
+                    }
                 }
             }
             true
@@ -453,9 +455,10 @@ fn can_move(vehicles: &[Vehicle], index: usize, delta: i32) -> bool {
                 for s in 1..=steps {
                     let check_row = v.row - s;
                     if let Some(occ) = occupancy[check_row][v.col]
-                        && occ != index {
-                            return false;
-                        }
+                        && occ != index
+                    {
+                        return false;
+                    }
                 }
             } else {
                 // Moving down
@@ -466,9 +469,10 @@ fn can_move(vehicles: &[Vehicle], index: usize, delta: i32) -> bool {
                 for s in 1..=steps {
                     let check_row = v.row + v.length - 1 + s;
                     if let Some(occ) = occupancy[check_row][v.col]
-                        && occ != index {
-                            return false;
-                        }
+                        && occ != index
+                    {
+                        return false;
+                    }
                 }
             }
             true
@@ -512,41 +516,78 @@ fn max_slide(vehicles: &[Vehicle], index: usize, direction: i32) -> usize {
     steps
 }
 
-// ── Grid pixel math ─────────────────────────────────────────────────
-/// Total pixel size of the grid area.
-fn grid_pixel_size() -> f32 {
-    GRID_SIZE as f32 * CELL_SIZE + (GRID_SIZE as f32 - 1.0) * CELL_GAP
+// ── Board geometry ──────────────────────────────────────────────────
+//
+// Every pixel this app paints, and every pixel it reads back from the
+// mouse, comes from the four functions below. That is deliberate: before
+// this section existed, `cell_pixel_pos` returned coordinates *relative to
+// the grid origin*, so all five drawing sites and the click handler each
+// carried their own `gx + cx` fixup, and the span formula
+// `n * CELL_SIZE + (n - 1) * CELL_GAP` was spelled out three separate
+// times (once for the board, twice for vehicle lengths). Each restatement
+// is a place the picture can drift away from what the state believes -- the
+// fault this codebase has now collapsed fourteen times over; see
+// design-decisions.md §475-§487. `cell_origin` returns *window* pixels so
+// nothing downstream has to add an offset, and `cell_at_point` is its
+// exact inverse.
+
+/// The pixel span of `n` cells laid side by side, interior gaps included.
+///
+/// Used for both the board (`n = GRID_SIZE`) and a vehicle's body
+/// (`n = v.length`): a car covering three cells covers the two gaps
+/// between them too, which is why its body is longer than `3 * CELL_SIZE`.
+fn span(n: usize) -> f32 {
+    n as f32 * CELL_SIZE + (n as f32 - 1.0) * CELL_GAP
 }
 
-/// Top-left pixel position of cell (row, col) relative to grid origin.
-fn cell_pixel_pos(row: usize, col: usize) -> (f32, f32) {
-    let x = col as f32 * (CELL_SIZE + CELL_GAP);
-    let y = row as f32 * (CELL_SIZE + CELL_GAP);
+/// Total pixel size of the grid area.
+fn grid_pixel_size() -> f32 {
+    span(GRID_SIZE)
+}
+
+/// Top-left pixel of cell (row, col), in *window* coordinates.
+fn cell_origin(row: usize, col: usize) -> (f32, f32) {
+    let x = PADDING + col as f32 * (CELL_SIZE + CELL_GAP);
+    let y = PADDING + HEADER_HEIGHT + row as f32 * (CELL_SIZE + CELL_GAP);
     (x, y)
 }
 
-/// Grid origin (top-left pixel of cell 0,0) in absolute coordinates.
+/// Grid origin (top-left pixel of cell 0,0) in window coordinates.
 fn grid_origin() -> (f32, f32) {
-    (PADDING, PADDING + HEADER_HEIGHT)
+    cell_origin(0, 0)
 }
 
-/// Convert a pixel coordinate (relative to grid origin) to a grid cell.
-/// Returns None if outside the grid.
-fn pixel_to_cell(px: f32, py: f32) -> Option<(usize, usize)> {
-    if px < 0.0 || py < 0.0 {
-        return None;
-    }
+/// The grid cell containing the window point (x, y), or `None` if the
+/// point is off the board.
+///
+/// Each interior gap is split down the middle, so a click that lands in
+/// the crack between two cells goes to the nearer one. The old rule gave
+/// the *whole* gap to the cell above/left of it, which made every cell's
+/// right and bottom edge three pixels more forgiving than its left and
+/// top -- invisible in a screenshot, but a real asymmetry under the
+/// cursor. The board's outer edge takes no slop at all: outside the
+/// painted board is outside the board.
+fn cell_at_point(x: f32, y: f32) -> Option<(usize, usize)> {
+    let (gx, gy) = grid_origin();
+    let (rx, ry) = (x - gx, y - gy);
     let total = grid_pixel_size();
-    if px >= total || py >= total {
+    if rx < 0.0 || ry < 0.0 || rx >= total || ry >= total {
         return None;
     }
-    let col = (px / (CELL_SIZE + CELL_GAP)) as usize;
-    let row = (py / (CELL_SIZE + CELL_GAP)) as usize;
-    if row < GRID_SIZE && col < GRID_SIZE {
-        Some((row, col))
-    } else {
-        None
-    }
+    let pitch = CELL_SIZE + CELL_GAP;
+    let col = ((rx + CELL_GAP / 2.0) / pitch) as usize;
+    let row = ((ry + CELL_GAP / 2.0) / pitch) as usize;
+    Some((row.min(GRID_SIZE - 1), col.min(GRID_SIZE - 1)))
+}
+
+/// Width of the window the app draws into.
+fn window_width() -> f32 {
+    grid_pixel_size() + PADDING * 2.0 + EXIT_MARKER_WIDTH
+}
+
+/// Height of the window the app draws into.
+fn window_height() -> f32 {
+    HEADER_HEIGHT + grid_pixel_size() + FOOTER_HEIGHT + PADDING * 2.0
 }
 
 // ── Load puzzle ─────────────────────────────────────────────────────
@@ -753,46 +794,54 @@ impl RushHour {
             Key::Tab if key_event.modifiers.shift => self.select_prev(),
 
             // Movement
-            Key::Left if key_event.modifiers == Modifiers::NONE
-                && self.selected < self.vehicles.len() => {
-                    let v = &self.vehicles[self.selected];
-                    match v.orientation {
-                        Orientation::Horizontal => {
-                            self.move_selected(-1);
-                        }
-                        Orientation::Vertical => {} // can't move horizontally
+            Key::Left
+                if key_event.modifiers == Modifiers::NONE
+                    && self.selected < self.vehicles.len() =>
+            {
+                let v = &self.vehicles[self.selected];
+                match v.orientation {
+                    Orientation::Horizontal => {
+                        self.move_selected(-1);
                     }
+                    Orientation::Vertical => {} // can't move horizontally
                 }
-            Key::Right if key_event.modifiers == Modifiers::NONE
-                && self.selected < self.vehicles.len() => {
-                    let v = &self.vehicles[self.selected];
-                    match v.orientation {
-                        Orientation::Horizontal => {
-                            self.move_selected(1);
-                        }
-                        Orientation::Vertical => {}
+            }
+            Key::Right
+                if key_event.modifiers == Modifiers::NONE
+                    && self.selected < self.vehicles.len() =>
+            {
+                let v = &self.vehicles[self.selected];
+                match v.orientation {
+                    Orientation::Horizontal => {
+                        self.move_selected(1);
                     }
+                    Orientation::Vertical => {}
                 }
-            Key::Up if key_event.modifiers == Modifiers::NONE
-                && self.selected < self.vehicles.len() => {
-                    let v = &self.vehicles[self.selected];
-                    match v.orientation {
-                        Orientation::Vertical => {
-                            self.move_selected(-1);
-                        }
-                        Orientation::Horizontal => {}
+            }
+            Key::Up
+                if key_event.modifiers == Modifiers::NONE
+                    && self.selected < self.vehicles.len() =>
+            {
+                let v = &self.vehicles[self.selected];
+                match v.orientation {
+                    Orientation::Vertical => {
+                        self.move_selected(-1);
                     }
+                    Orientation::Horizontal => {}
                 }
-            Key::Down if key_event.modifiers == Modifiers::NONE
-                && self.selected < self.vehicles.len() => {
-                    let v = &self.vehicles[self.selected];
-                    match v.orientation {
-                        Orientation::Vertical => {
-                            self.move_selected(1);
-                        }
-                        Orientation::Horizontal => {}
+            }
+            Key::Down
+                if key_event.modifiers == Modifiers::NONE
+                    && self.selected < self.vehicles.len() =>
+            {
+                let v = &self.vehicles[self.selected];
+                match v.orientation {
+                    Orientation::Vertical => {
+                        self.move_selected(1);
                     }
+                    Orientation::Horizontal => {}
                 }
+            }
 
             // Undo
             Key::Z if key_event.modifiers == Modifiers::NONE => self.undo(),
@@ -806,14 +855,12 @@ impl RushHour {
             Key::Escape => {
                 self.selecting_puzzle = false;
             }
-            Key::Up
-                if self.puzzle_select_cursor > 0 => {
-                    self.puzzle_select_cursor -= 1;
-                }
-            Key::Down
-                if self.puzzle_select_cursor < PUZZLES.len() - 1 => {
-                    self.puzzle_select_cursor += 1;
-                }
+            Key::Up if self.puzzle_select_cursor > 0 => {
+                self.puzzle_select_cursor -= 1;
+            }
+            Key::Down if self.puzzle_select_cursor < PUZZLES.len() - 1 => {
+                self.puzzle_select_cursor += 1;
+            }
             Key::Enter => {
                 self.load_puzzle_at(self.puzzle_select_cursor);
             }
@@ -834,11 +881,7 @@ impl RushHour {
             if self.selecting_puzzle || self.status == GameStatus::Won {
                 return;
             }
-            let (gx_origin, gy_origin) = grid_origin();
-            let gx = mouse_event.x - gx_origin;
-            let gy = mouse_event.y - gy_origin;
-
-            if let Some((row, col)) = pixel_to_cell(gx, gy) {
+            if let Some((row, col)) = cell_at_point(mouse_event.x, mouse_event.y) {
                 self.select_at_cell(row, col);
             }
         }
@@ -850,8 +893,8 @@ impl RushHour {
         let mut cmds = Vec::new();
 
         let grid_px = grid_pixel_size();
-        let total_width = grid_px + PADDING * 2.0 + EXIT_MARKER_WIDTH;
-        let total_height = HEADER_HEIGHT + grid_px + FOOTER_HEIGHT + PADDING * 2.0;
+        let total_width = window_width();
+        let total_height = window_height();
 
         let _ = (width, height); // use layout params if needed
 
@@ -975,13 +1018,12 @@ impl RushHour {
     }
 
     fn render_grid_cells(&self, cmds: &mut Vec<RenderCommand>) {
-        let (gx, gy) = grid_origin();
         for row in 0..GRID_SIZE {
             for col in 0..GRID_SIZE {
-                let (cx, cy) = cell_pixel_pos(row, col);
+                let (cx, cy) = cell_origin(row, col);
                 cmds.push(RenderCommand::FillRect {
-                    x: gx + cx,
-                    y: gy + cy,
+                    x: cx,
+                    y: cy,
                     width: CELL_SIZE,
                     height: CELL_SIZE,
                     color: SURFACE0,
@@ -992,15 +1034,14 @@ impl RushHour {
     }
 
     fn render_exit_marker(&self, cmds: &mut Vec<RenderCommand>) {
-        let (gx, gy) = grid_origin();
         // Exit is at row 2, right side of the grid
-        let (_, exit_y) = cell_pixel_pos(2, 0);
+        let (gx, exit_y) = cell_origin(2, 0);
         let exit_x = gx + grid_pixel_size() + 2.0;
 
         // Arrow / exit indicator
         cmds.push(RenderCommand::FillRect {
             x: exit_x,
-            y: gy + exit_y + 10.0,
+            y: exit_y + 10.0,
             width: EXIT_MARKER_WIDTH - 4.0,
             height: CELL_SIZE - 20.0,
             color: RED,
@@ -1010,7 +1051,7 @@ impl RushHour {
         // Arrow text
         cmds.push(RenderCommand::Text {
             x: exit_x + 1.0,
-            y: gy + exit_y + CELL_SIZE / 2.0 - 8.0,
+            y: exit_y + CELL_SIZE / 2.0 - 8.0,
             text: ">".to_string(),
             color: CRUST,
             font_size: VEHICLE_FONT_SIZE,
@@ -1021,22 +1062,17 @@ impl RushHour {
     }
 
     fn render_vehicles(&self, cmds: &mut Vec<RenderCommand>) {
-        let (gx, gy) = grid_origin();
-
         for (vi, v) in self.vehicles.iter().enumerate() {
-            let (cx, cy) = cell_pixel_pos(v.row, v.col);
+            let (cx, cy) = cell_origin(v.row, v.col);
             let is_selected = vi == self.selected && self.status == GameStatus::Playing;
 
-            // Vehicle dimensions
+            // A vehicle covers `length` cells *and* the gaps between them,
+            // which is the same measurement the board itself uses -- hence
+            // `span`, not a second copy of the formula.
+            let body = span(v.length);
             let (vw, vh) = match v.orientation {
-                Orientation::Horizontal => {
-                    let w = v.length as f32 * CELL_SIZE + (v.length as f32 - 1.0) * CELL_GAP;
-                    (w, CELL_SIZE)
-                }
-                Orientation::Vertical => {
-                    let h = v.length as f32 * CELL_SIZE + (v.length as f32 - 1.0) * CELL_GAP;
-                    (CELL_SIZE, h)
-                }
+                Orientation::Horizontal => (body, CELL_SIZE),
+                Orientation::Vertical => (CELL_SIZE, body),
             };
 
             let base_color = VEHICLE_COLORS[v.color_index % VEHICLE_COLORS.len()];
@@ -1044,8 +1080,8 @@ impl RushHour {
             // Selection highlight (slightly larger background)
             if is_selected {
                 cmds.push(RenderCommand::FillRect {
-                    x: gx + cx - 3.0,
-                    y: gy + cy - 3.0,
+                    x: cx - 3.0,
+                    y: cy - 3.0,
                     width: vw + 6.0,
                     height: vh + 6.0,
                     color: TEXT_COLOR,
@@ -1055,8 +1091,8 @@ impl RushHour {
 
             // Vehicle body
             cmds.push(RenderCommand::FillRect {
-                x: gx + cx,
-                y: gy + cy,
+                x: cx,
+                y: cy,
                 width: vw,
                 height: vh,
                 color: base_color,
@@ -1064,8 +1100,8 @@ impl RushHour {
             });
 
             // Vehicle label (centered)
-            let label_x = gx + cx + vw / 2.0 - 5.0;
-            let label_y = gy + cy + vh / 2.0 - 9.0;
+            let label_x = cx + vw / 2.0 - 5.0;
+            let label_y = cy + vh / 2.0 - 9.0;
             cmds.push(RenderCommand::Text {
                 x: label_x,
                 y: label_y,
@@ -1274,6 +1310,14 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
+    // Indexing and unchecked arithmetic are how a test *asserts*: a fixture
+    // that indexes past the end of the board, or a subtraction that wraps,
+    // is a broken test and should fail loudly right there rather than be
+    // laundered through a `?` into a green run. CLAUDE.md allows both lints
+    // inside `#[cfg(test)]` for exactly this reason; production code above
+    // this line still denies them.
+    #![allow(clippy::indexing_slicing, clippy::arithmetic_side_effects)]
+
     use super::*;
 
     // ── Helper: create key event ────────────────────────────────────
@@ -1946,72 +1990,307 @@ mod tests {
         assert_eq!(max_slide(&vehicles, 0, -1), 3); // can go from row 3 to row 0
     }
 
-    // ── Grid pixel math ─────────────────────────────────────────────
+    // ── Board geometry ──────────────────────────────────────────────
+    //
+    // These tests are written against the *picture* -- the rectangles
+    // `render` actually emits -- rather than against restatements of the
+    // arithmetic in `cell_origin`. A test that spells out
+    // `PADDING + col * (CELL_SIZE + CELL_GAP)` and compares it to
+    // `cell_origin` is comparing the formula with itself and passes for
+    // every value of every constant in it; three of the tests replaced
+    // here did exactly that. See design-decisions.md §487.
 
-    #[test]
-    fn test_grid_pixel_size() {
-        let expected = GRID_SIZE as f32 * CELL_SIZE + (GRID_SIZE as f32 - 1.0) * CELL_GAP;
-        assert!((grid_pixel_size() - expected).abs() < 0.001);
+    /// Every `FillRect` the renderer emits, as (x, y, w, h).
+    fn painted_rects(app: &RushHour) -> Vec<(f32, f32, f32, f32)> {
+        app.render(window_width(), window_height())
+            .into_iter()
+            .filter_map(|c| match c {
+                RenderCommand::FillRect {
+                    x,
+                    y,
+                    width,
+                    height,
+                    ..
+                } => Some((x, y, width, height)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The `GRID_SIZE * GRID_SIZE` empty-cell squares, in paint order.
+    fn painted_cells(app: &RushHour) -> Vec<(f32, f32, f32, f32)> {
+        painted_rects(app)
+            .into_iter()
+            .filter(|&(_, _, w, h)| (w - CELL_SIZE).abs() < 0.001 && (h - CELL_SIZE).abs() < 0.001)
+            .collect()
+    }
+
+    fn close(a: f32, b: f32) -> bool {
+        (a - b).abs() < 0.001
     }
 
     #[test]
-    fn test_cell_pixel_pos_origin() {
-        let (x, y) = cell_pixel_pos(0, 0);
-        assert!((x - 0.0).abs() < 0.001);
-        assert!((y - 0.0).abs() < 0.001);
+    fn the_painted_cells_form_a_square_even_lattice() {
+        let app = RushHour::new();
+        let cells = painted_cells(&app);
+        assert!(
+            cells.len() >= GRID_SIZE * GRID_SIZE,
+            "expected at least one square per cell, painted {}",
+            cells.len()
+        );
+
+        // Take the first GRID_SIZE^2 -- those are the empty-cell squares,
+        // painted before any vehicle.
+        for row in 0..GRID_SIZE {
+            for col in 0..GRID_SIZE {
+                let (x, y, _, _) = cells[row * GRID_SIZE + col];
+                let (ex, ey) = cell_origin(row, col);
+                assert!(
+                    close(x, ex) && close(y, ey),
+                    "cell ({row},{col}) painted at ({x},{y}), \
+                     but cell_origin says ({ex},{ey})"
+                );
+            }
+        }
+
+        // Even pitch along both axes, and the same pitch on each.
+        let pitch_x = cells[1].0 - cells[0].0;
+        let pitch_y = cells[GRID_SIZE].1 - cells[0].1;
+        assert!(
+            close(pitch_x, pitch_y),
+            "columns are {pitch_x} apart but rows are {pitch_y} apart -- \
+             the board is not square"
+        );
+        for i in 1..GRID_SIZE {
+            let (x, _, _, _) = cells[i];
+            let (px, _, _, _) = cells[i - 1];
+            assert!(
+                close(x - px, pitch_x),
+                "column {i} sits {} from column {}, not {pitch_x}",
+                x - px,
+                i - 1
+            );
+        }
     }
 
     #[test]
-    fn test_cell_pixel_pos_second_cell() {
-        let (x, _y) = cell_pixel_pos(0, 1);
-        let expected = CELL_SIZE + CELL_GAP;
-        assert!((x - expected).abs() < 0.001);
+    fn the_board_sits_one_padding_from_the_top_and_left() {
+        // Stated as a margin of the painted board, not as a copy of
+        // `PADDING + HEADER_HEIGHT`: the point is where the player sees
+        // the board, and a restatement of the formula cannot notice a
+        // board that is drawn somewhere else.
+        let app = RushHour::new();
+        let cells = painted_cells(&app);
+        let (left, top, _, _) = cells[0];
+        assert!(
+            close(left, PADDING),
+            "left margin is {left}, want {PADDING}"
+        );
+        assert!(
+            close(top - HEADER_HEIGHT, PADDING),
+            "the board starts {} below the header, want {PADDING}",
+            top - HEADER_HEIGHT
+        );
+
+        // Bottom margin: the footer is flush to the window's bottom, so
+        // the gap between the last row and the footer must also be one
+        // PADDING. This is the assertion that would have caught dots'
+        // off-centre board (design-decisions.md §487).
+        let (_, last_y, _, last_h) = cells[GRID_SIZE * GRID_SIZE - 1];
+        let bottom_gap = window_height() - FOOTER_HEIGHT - (last_y + last_h);
+        assert!(
+            close(bottom_gap, PADDING),
+            "the board ends {bottom_gap} above the footer, want {PADDING}"
+        );
     }
 
     #[test]
-    fn test_cell_pixel_pos_row() {
-        let (_x, y) = cell_pixel_pos(1, 0);
-        let expected = CELL_SIZE + CELL_GAP;
-        assert!((y - expected).abs() < 0.001);
+    fn every_cell_is_clickable_over_its_whole_painted_square() {
+        // Not just the centre: every corner and edge midpoint of the
+        // square the player can see must select that same cell.
+        let app = RushHour::new();
+        let cells = painted_cells(&app);
+        let e = 0.5_f32;
+        for row in 0..GRID_SIZE {
+            for col in 0..GRID_SIZE {
+                let (x, y, w, h) = cells[row * GRID_SIZE + col];
+                for (px, py) in [
+                    (x + e, y + e),
+                    (x + w - e, y + e),
+                    (x + e, y + h - e),
+                    (x + w - e, y + h - e),
+                    (x + w / 2.0, y + e),
+                    (x + w / 2.0, y + h - e),
+                    (x + e, y + h / 2.0),
+                    (x + w - e, y + h / 2.0),
+                    (x + w / 2.0, y + h / 2.0),
+                ] {
+                    assert_eq!(
+                        cell_at_point(px, py),
+                        Some((row, col)),
+                        "({px},{py}) is inside the square painted for \
+                         cell ({row},{col}) but does not select it"
+                    );
+                }
+            }
+        }
     }
 
     #[test]
-    fn test_pixel_to_cell_origin() {
-        let result = pixel_to_cell(5.0, 5.0);
-        assert_eq!(result, Some((0, 0)));
+    fn a_gap_between_two_cells_is_split_evenly_between_them() {
+        // The old rule handed the whole gap to the cell above/left, so
+        // each cell's right edge was CELL_GAP more forgiving than its
+        // left. Assert the symmetry directly.
+        let app = RushHour::new();
+        let cells = painted_cells(&app);
+        let (x0, y0, w, h) = cells[0];
+        let (x1, y1, _, _) = cells[1];
+        let mid_x = f32::midpoint(x0 + w, x1);
+        assert_eq!(
+            cell_at_point(mid_x - 0.05, y0 + h / 2.0),
+            Some((0, 0)),
+            "the near half of the gap should belong to the left cell"
+        );
+        assert_eq!(
+            cell_at_point(mid_x + 0.05, y0 + h / 2.0),
+            Some((0, 1)),
+            "the far half of the gap should belong to the right cell"
+        );
+
+        let (_, y_below, _, _) = cells[GRID_SIZE];
+        let mid_y = f32::midpoint(y0 + h, y_below);
+        assert_eq!(cell_at_point(x0 + w / 2.0, mid_y - 0.05), Some((0, 0)));
+        assert_eq!(cell_at_point(x0 + w / 2.0, mid_y + 0.05), Some((1, 0)));
+        let _ = y1;
     }
 
     #[test]
-    fn test_pixel_to_cell_second() {
-        let x = CELL_SIZE + CELL_GAP + 5.0;
-        let result = pixel_to_cell(x, 5.0);
-        assert_eq!(result, Some((0, 1)));
+    fn nothing_outside_the_painted_board_selects_a_cell() {
+        let app = RushHour::new();
+        let cells = painted_cells(&app);
+        let (left, top, _, _) = cells[0];
+        let (last_x, last_y, w, h) = cells[GRID_SIZE * GRID_SIZE - 1];
+        let (right, bottom) = (last_x + w, last_y + h);
+        let mid_x = f32::midpoint(left, right);
+        let mid_y = f32::midpoint(top, bottom);
+
+        for d in [0.05_f32, 1.0, 10.0, 100.0, 10_000.0] {
+            assert_eq!(cell_at_point(left - d, mid_y), None, "left by {d}");
+            assert_eq!(cell_at_point(right + d, mid_y), None, "right by {d}");
+            assert_eq!(cell_at_point(mid_x, top - d), None, "above by {d}");
+            assert_eq!(cell_at_point(mid_x, bottom + d), None, "below by {d}");
+        }
     }
 
     #[test]
-    fn test_pixel_to_cell_last() {
-        let pos = 5.0 * (CELL_SIZE + CELL_GAP) + 5.0;
-        let result = pixel_to_cell(pos, pos);
-        assert_eq!(result, Some((5, 5)));
+    fn a_vehicle_is_painted_over_exactly_the_cells_it_occupies() {
+        // A car of length 3 covers three cells *and* the two gaps between
+        // them; if its body were `3 * CELL_SIZE` it would stop short of
+        // the last cell it is standing on.
+        let app = RushHour::new();
+        let cells = painted_cells(&app);
+        let rects = painted_rects(&app);
+        for v in &app.vehicles {
+            let (fx, fy, _, _) = cells[v.row * GRID_SIZE + v.col];
+            let (lr, lc) = match v.orientation {
+                Orientation::Horizontal => (v.row, v.col + v.length - 1),
+                Orientation::Vertical => (v.row + v.length - 1, v.col),
+            };
+            let (lx, ly, lw, lh) = cells[lr * GRID_SIZE + lc];
+            let (want_w, want_h) = match v.orientation {
+                Orientation::Horizontal => (lx + lw - fx, CELL_SIZE),
+                Orientation::Vertical => (CELL_SIZE, ly + lh - fy),
+            };
+            assert!(
+                rects.iter().any(|&(x, y, w, h)| close(x, fx)
+                    && close(y, fy)
+                    && close(w, want_w)
+                    && close(h, want_h)),
+                "vehicle '{}' at ({},{}) length {} should be painted as \
+                 {want_w}x{want_h} at ({fx},{fy}) -- spanning from its \
+                 first cell to its last -- but no such rect was emitted",
+                v.label,
+                v.row,
+                v.col,
+                v.length
+            );
+        }
     }
 
     #[test]
-    fn test_pixel_to_cell_negative() {
-        assert_eq!(pixel_to_cell(-1.0, 5.0), None);
-        assert_eq!(pixel_to_cell(5.0, -1.0), None);
+    fn clicking_a_vehicle_anywhere_on_its_body_selects_it() {
+        let app = RushHour::new();
+        for (vi, v) in app.vehicles.iter().enumerate() {
+            for step in 0..v.length {
+                let (row, col) = match v.orientation {
+                    Orientation::Horizontal => (v.row, v.col + step),
+                    Orientation::Vertical => (v.row + step, v.col),
+                };
+                let (x, y) = cell_origin(row, col);
+                let mut a = RushHour::new();
+                a.selected = usize::MAX;
+                a.handle_event(&mouse_click(x + CELL_SIZE / 2.0, y + CELL_SIZE / 2.0));
+                assert_eq!(
+                    a.selected, vi,
+                    "clicking cell ({row},{col}) -- part of vehicle '{}' -- \
+                     selected {} instead",
+                    v.label, a.selected
+                );
+            }
+        }
     }
 
     #[test]
-    fn test_pixel_to_cell_out_of_bounds() {
-        let too_far = grid_pixel_size() + 10.0;
-        assert_eq!(pixel_to_cell(too_far, 5.0), None);
+    fn the_window_is_exactly_big_enough_for_what_is_painted() {
+        // Every painted rectangle fits, *and* the extreme ones sit where
+        // the layout says they should -- containment alone is satisfied
+        // by an infinite family of wrong layouts (§487).
+        let app = RushHour::new();
+        for (x, y, w, h) in painted_rects(&app) {
+            assert!(
+                x >= -0.001 && y >= -0.001,
+                "a rect starts off-window at ({x},{y})"
+            );
+            assert!(
+                x + w <= window_width() + 0.001 && y + h <= window_height() + 0.001,
+                "a rect at ({x},{y}) size {w}x{h} overflows the \
+                 {}x{} window",
+                window_width(),
+                window_height()
+            );
+        }
+        // The exit marker is the rightmost thing on the board, and the
+        // window reserves EXIT_MARKER_WIDTH plus a PADDING for it.
+        let cells = painted_cells(&app);
+        let (last_x, _, w, _) = cells[GRID_SIZE * GRID_SIZE - 1];
+        let right_of_board = window_width() - (last_x + w);
+        assert!(
+            close(right_of_board, PADDING + EXIT_MARKER_WIDTH),
+            "there is {right_of_board} to the right of the board, but the \
+             exit marker plus its padding needs {}",
+            PADDING + EXIT_MARKER_WIDTH
+        );
     }
 
     #[test]
-    fn test_grid_origin() {
-        let (gx, gy) = grid_origin();
-        assert!((gx - PADDING).abs() < 0.001);
-        assert!((gy - (PADDING + HEADER_HEIGHT)).abs() < 0.001);
+    fn a_vehicle_body_covers_its_cells_and_the_gaps_between_them() {
+        assert!(close(span(1), CELL_SIZE), "one cell is just a cell");
+        for n in 2..=GRID_SIZE {
+            let s = span(n);
+            assert!(
+                s > n as f32 * CELL_SIZE,
+                "{n} cells span {s}, which does not include the {} gaps \
+                 between them",
+                n - 1
+            );
+            assert!(
+                close(s - span(n - 1), CELL_SIZE + CELL_GAP),
+                "going from {} cells to {n} should add one cell and one \
+                 gap, but adds {}",
+                n - 1,
+                s - span(n - 1)
+            );
+        }
     }
 
     // ── Load puzzle ─────────────────────────────────────────────────
@@ -2541,10 +2820,9 @@ mod tests {
     fn test_mouse_click_selects_vehicle() {
         let mut app = RushHour::new();
         app.selected = 999; // Invalid to prove click works
-        let (gx, gy) = grid_origin();
         let player = &app.vehicles[0];
-        let (cx, cy) = cell_pixel_pos(player.row, player.col);
-        let click = mouse_click(gx + cx + CELL_SIZE / 2.0, gy + cy + CELL_SIZE / 2.0);
+        let (cx, cy) = cell_origin(player.row, player.col);
+        let click = mouse_click(cx + CELL_SIZE / 2.0, cy + CELL_SIZE / 2.0);
         app.handle_event(&click);
         assert_eq!(app.selected, 0);
     }
@@ -2554,13 +2832,11 @@ mod tests {
         let mut app = RushHour::new();
         app.selected = 0;
         let occ = build_occupancy(&app.vehicles);
-        let (gx, gy) = grid_origin();
         for (r, row) in occ.iter().enumerate().take(GRID_SIZE) {
             for (c, cell) in row.iter().enumerate().take(GRID_SIZE) {
                 if cell.is_none() {
-                    let (cx, cy) = cell_pixel_pos(r, c);
-                    let click =
-                        mouse_click(gx + cx + CELL_SIZE / 2.0, gy + cy + CELL_SIZE / 2.0);
+                    let (cx, cy) = cell_origin(r, c);
+                    let click = mouse_click(cx + CELL_SIZE / 2.0, cy + CELL_SIZE / 2.0);
                     app.handle_event(&click);
                     assert_eq!(app.selected, 0); // unchanged
                     return;
@@ -2583,12 +2859,11 @@ mod tests {
         let mut app = RushHour::new();
         app.status = GameStatus::Won;
         app.selected = 0;
-        let (gx, gy) = grid_origin();
         // Click on second vehicle
         if app.vehicles.len() > 1 {
             let v = &app.vehicles[1];
-            let (cx, cy) = cell_pixel_pos(v.row, v.col);
-            let click = mouse_click(gx + cx + CELL_SIZE / 2.0, gy + cy + CELL_SIZE / 2.0);
+            let (cx, cy) = cell_origin(v.row, v.col);
+            let click = mouse_click(cx + CELL_SIZE / 2.0, cy + CELL_SIZE / 2.0);
             app.handle_event(&click);
             assert_eq!(app.selected, 0); // unchanged
         }
@@ -2599,11 +2874,10 @@ mod tests {
         let mut app = RushHour::new();
         app.selecting_puzzle = true;
         app.selected = 0;
-        let (gx, gy) = grid_origin();
         if app.vehicles.len() > 1 {
             let v = &app.vehicles[1];
-            let (cx, cy) = cell_pixel_pos(v.row, v.col);
-            let click = mouse_click(gx + cx + CELL_SIZE / 2.0, gy + cy + CELL_SIZE / 2.0);
+            let (cx, cy) = cell_origin(v.row, v.col);
+            let click = mouse_click(cx + CELL_SIZE / 2.0, cy + CELL_SIZE / 2.0);
             app.handle_event(&click);
             assert_eq!(app.selected, 0);
         }
@@ -2962,10 +3236,7 @@ mod tests {
                 }
             }
             let expected: usize = vehicles.iter().map(|v| v.length).sum();
-            assert_eq!(
-                cell_count, expected,
-                "Puzzle {i} has overlapping vehicles"
-            );
+            assert_eq!(cell_count, expected, "Puzzle {i} has overlapping vehicles");
         }
     }
 
@@ -2995,19 +3266,11 @@ mod tests {
     }
 
     #[test]
-    fn test_cell_pixel_pos_last_cell() {
-        let (x, y) = cell_pixel_pos(5, 5);
-        let expected = 5.0 * (CELL_SIZE + CELL_GAP);
-        assert!((x - expected).abs() < 0.001);
-        assert!((y - expected).abs() < 0.001);
-    }
-
-    #[test]
-    fn test_pixel_to_cell_each_cell() {
+    fn cell_at_point_is_the_exact_inverse_of_cell_origin() {
         for r in 0..GRID_SIZE {
             for c in 0..GRID_SIZE {
-                let (px, py) = cell_pixel_pos(r, c);
-                let result = pixel_to_cell(px + CELL_SIZE / 2.0, py + CELL_SIZE / 2.0);
+                let (px, py) = cell_origin(r, c);
+                let result = cell_at_point(px + CELL_SIZE / 2.0, py + CELL_SIZE / 2.0);
                 assert_eq!(result, Some((r, c)), "Failed for cell ({r}, {c})");
             }
         }

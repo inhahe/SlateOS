@@ -31,8 +31,10 @@
 use guitk::color::Color;
 use guitk::event::{Key, KeyEvent};
 use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
+use guitk::step;
 use guitk::style::CornerRadii;
 use guitk::text;
+use guitk::text::TextCursor;
 
 // ============================================================================
 // Theme — Catppuccin Mocha palette
@@ -315,18 +317,17 @@ impl LauncherState {
                 return self.launch_selected();
             }
 
+            // Clamped, not wrapping: the results are a *ranking*, so running
+            // off the end of it and landing back on the best match would be
+            // saying something the list does not mean. `step` names the
+            // choice; see its module docs for the other one.
             Key::Up => {
-                if self.selected_index > 0 {
-                    self.selected_index -= 1;
-                }
+                self.selected_index = step::clamped_before(self.results.len(), self.selected_index);
                 return LauncherAction::None;
             }
 
             Key::Down => {
-                let max_idx = self.results.len().saturating_sub(1);
-                if self.selected_index < max_idx {
-                    self.selected_index += 1;
-                }
+                self.selected_index = step::clamped_after(self.results.len(), self.selected_index);
                 return LauncherAction::None;
             }
 
@@ -341,16 +342,17 @@ impl LauncherState {
                 return LauncherAction::None;
             }
 
+            // The four arms below all asked the same question — "where is the
+            // caret stop next to this one" — and each answered it by slicing
+            // the query and stepping `char_indices`, a slice that panics on an
+            // offset which has drifted off a character boundary. `TextCursor`
+            // answers it once, for every field in the toolkit.
             Key::Backspace => {
-                if !self.query.is_empty() && self.cursor > 0 {
-                    let remove_at = self.query[..self.cursor]
-                        .char_indices()
-                        .next_back()
-                        .map(|(i, _)| i);
-                    if let Some(idx) = remove_at {
-                        self.query.remove(idx);
-                        self.cursor = idx;
-                    }
+                let at = TextCursor::from(self.cursor);
+                if let Some(prev) = at.prev_in(&self.query) {
+                    self.query
+                        .replace_range(prev.byte()..at.snapped_in(&self.query).byte(), "");
+                    self.cursor = prev.byte();
                     self.selected_index = 0;
                     self.update_results();
                 }
@@ -358,8 +360,13 @@ impl LauncherState {
             }
 
             Key::Delete => {
-                if self.cursor < self.query.len() {
-                    self.query.remove(self.cursor);
+                // Delete removes the character the caret sits *on*: the span
+                // from this caret stop to the next one. `String::remove` took
+                // a byte offset and a character's worth of faith.
+                let at = TextCursor::from(self.cursor).snapped_in(&self.query);
+                if let Some(next) = at.next_in(&self.query) {
+                    self.query.replace_range(at.byte()..next.byte(), "");
+                    self.cursor = at.byte();
                     self.selected_index = 0;
                     self.update_results();
                 }
@@ -367,25 +374,15 @@ impl LauncherState {
             }
 
             Key::Left => {
-                if self.cursor > 0 {
-                    let prev = self.query[..self.cursor]
-                        .char_indices()
-                        .next_back()
-                        .map(|(i, _)| i)
-                        .unwrap_or(0);
-                    self.cursor = prev;
+                if let Some(prev) = TextCursor::from(self.cursor).prev_in(&self.query) {
+                    self.cursor = prev.byte();
                 }
                 return LauncherAction::None;
             }
 
             Key::Right => {
-                if self.cursor < self.query.len() {
-                    let next = self.query[self.cursor..]
-                        .char_indices()
-                        .nth(1)
-                        .map(|(i, _)| self.cursor + i)
-                        .unwrap_or(self.query.len());
-                    self.cursor = next;
+                if let Some(next) = TextCursor::from(self.cursor).next_in(&self.query) {
+                    self.cursor = next.byte();
                 }
                 return LauncherAction::None;
             }
@@ -435,7 +432,7 @@ impl LauncherState {
             && !ch.is_control()
         {
             self.query.insert(self.cursor, ch);
-            self.cursor += ch.len_utf8();
+            self.cursor = self.cursor.saturating_add(ch.len_utf8());
             self.selected_index = 0;
             self.update_results();
         }
@@ -1054,6 +1051,71 @@ mod tests {
         state.query = "é".to_owned();
         state.cursor = 1;
         assert!(!state.render().is_empty());
+    }
+
+    /// Editing must move by characters, not bytes. A byte-stepping caret puts
+    /// three of the four characters below out of reach and panics on the way,
+    /// and every ASCII test in this file passes throughout that bug's life.
+    #[test]
+    fn editing_walks_characters_of_every_width_rather_than_bytes() {
+        let mut state = LauncherState::new(1280.0, 800.0);
+        state.visible = true;
+        for ch in "aé€🔒".chars() {
+            state.handle_key(&type_char(ch));
+        }
+        assert_eq!(state.query, "aé€🔒");
+        assert_eq!(state.cursor, 10);
+
+        // Four Lefts reach the start — one per keystroke typed, not one per
+        // byte, of which there are ten.
+        for _ in 0..4 {
+            state.handle_key(&press(Key::Left));
+        }
+        assert_eq!(state.cursor, 0);
+        // And Left at the start stays put rather than underflowing.
+        state.handle_key(&press(Key::Left));
+        assert_eq!(state.cursor, 0);
+
+        // Delete removes whole characters from the front.
+        state.handle_key(&press(Key::Delete));
+        assert_eq!(state.query, "é€🔒");
+        state.handle_key(&press(Key::Delete));
+        assert_eq!(state.query, "€🔒");
+
+        // Right walks to the end and stops there.
+        for _ in 0..5 {
+            state.handle_key(&press(Key::Right));
+        }
+        assert_eq!(state.cursor, state.query.len());
+
+        // Backspace erases one keystroke's worth each time, not one byte.
+        state.handle_key(&press(Key::Backspace));
+        assert_eq!(state.query, "€");
+        state.handle_key(&press(Key::Backspace));
+        assert_eq!(state.query, "");
+        state.handle_key(&press(Key::Backspace));
+        assert_eq!(state.query, "");
+        assert_eq!(state.cursor, 0);
+    }
+
+    /// The companion to the render test above: a caret that has drifted inside
+    /// a character must be *repaired* by the next edit, not carried into
+    /// `String::remove`, which panics on exactly that offset.
+    #[test]
+    fn an_edit_repairs_a_caret_that_has_drifted_inside_a_character() {
+        for key in [Key::Backspace, Key::Delete, Key::Left, Key::Right] {
+            let mut state = LauncherState::new(1280.0, 800.0);
+            state.visible = true;
+            state.query = "né".to_owned();
+            state.cursor = 2; // inside the two-byte 'é'
+            state.handle_key(&press(key));
+            assert!(
+                state.query.is_char_boundary(state.cursor),
+                "{key:?} left the caret at byte {} of {:?}",
+                state.cursor,
+                state.query,
+            );
+        }
     }
 
     fn press(key: Key) -> KeyEvent {

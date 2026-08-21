@@ -546,24 +546,58 @@ impl Note {
         self.body = parse_rich_text(text);
     }
 
-    /// Insert a character at a specific line/column position.
+    /// The byte offset at or before `col` in `text` that is a character
+    /// boundary, and never past the end.
+    ///
+    /// `col` throughout this type is a **byte** offset, because `String::insert`
+    /// and `String::remove` index by bytes — and both *panic* rather than
+    /// rounding when the offset is inside a multi-byte character. Clamping to
+    /// `len()`, which is what the two callers below used to do, stops the
+    /// offset running off the end but says nothing about the boundary, so any
+    /// note containing an accent, Cyrillic, CJK or an emoji had a crash one
+    /// call away.
+    ///
+    /// Moving *back* to the boundary rather than forward keeps the edit on the
+    /// character the caller was pointing into, which is what
+    /// `apps/editor::snap_to_boundary` and `apps/markdowneditor::clamp_col`
+    /// also chose. See `GUI-TEXT-INPUT-CURSORS-STEP-BY-BYTES` in
+    /// `known-issues.md` for the widgets where this class of bug was live.
+    fn snap_col(text: &str, col: usize) -> usize {
+        let mut col = col.min(text.len());
+        // Terminates: offset 0 is always a boundary.
+        while !text.is_char_boundary(col) {
+            col = col.saturating_sub(1);
+        }
+        col
+    }
+
+    /// Insert a character at a specific line/byte-column position.
+    ///
+    /// `col` is clamped to the line's length and snapped back to a character
+    /// boundary, so no offset a caller can supply panics.
     pub fn insert_char(&mut self, line: usize, col: usize, ch: char) {
         if let Some(rich_line) = self.body.get_mut(line)
             && let Some(span) = rich_line.spans.first_mut()
         {
-            let col = col.min(span.text.len());
+            let col = Self::snap_col(&span.text, col);
             span.text.insert(col, ch);
             self.undo_history
                 .push(EditAction::InsertChar { line, col, ch });
         }
     }
 
-    /// Delete a character at a specific line/column position.
+    /// Delete the character at a specific line/byte-column position.
+    ///
+    /// Returns the whole character removed, not a byte of one: `col` is snapped
+    /// back to a character boundary first, so pointing into the middle of a
+    /// multi-byte character deletes that character rather than aborting.
+    /// Returns `None` at or past the end of the line.
     pub fn delete_char(&mut self, line: usize, col: usize) -> Option<char> {
         if let Some(rich_line) = self.body.get_mut(line)
             && let Some(span) = rich_line.spans.first_mut()
             && col < span.text.len()
         {
+            let col = Self::snap_col(&span.text, col);
             let ch = span.text.remove(col);
             self.undo_history
                 .push(EditAction::DeleteChar { line, col, ch });
@@ -1958,6 +1992,34 @@ mod tests {
         let ch = note.delete_char(0, 1);
         assert_eq!(ch, Some('e'));
         assert_eq!(note.body[0].plain_text(), "hllo");
+    }
+
+    /// `col` is a byte offset, so a note with an accent in it puts offsets
+    /// inside characters within easy reach of any caller. Both methods used to
+    /// clamp to `len()` and no further, and `String::insert`/`remove` panic
+    /// rather than rounding on such an offset.
+    #[test]
+    fn a_column_inside_a_multibyte_character_edits_that_character() {
+        // "café" — the é starts at byte 3 and is two bytes wide, so 4 is inside
+        // it and 5 is the end of the string.
+        let mut note = Note::new(1, 0.0, 0.0);
+        note.body = vec![RichLine::plain("café")];
+        assert_eq!(note.delete_char(0, 4), Some('é'));
+        assert_eq!(note.body[0].plain_text(), "caf");
+
+        // Inserting at an interior offset lands before the character, not
+        // inside it, so the text stays valid UTF-8 and reads sensibly.
+        let mut note = Note::new(1, 0.0, 0.0);
+        note.body = vec![RichLine::plain("café")];
+        note.insert_char(0, 4, 'x');
+        assert_eq!(note.body[0].plain_text(), "cafxé");
+
+        // Wider characters, and a column past the end of the line.
+        let mut note = Note::new(1, 0.0, 0.0);
+        note.body = vec![RichLine::plain("日本")];
+        assert_eq!(note.delete_char(0, 5), Some('本'));
+        note.insert_char(0, 99, '!');
+        assert_eq!(note.body[0].plain_text(), "日!");
     }
 
     #[test]

@@ -13,6 +13,7 @@
 //! - Rate limit: if a handler takes >200ms, skip it with "loading..." entry.
 
 use guitk::color::Color;
+use guitk::idseq::IdSeq;
 use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::style::CornerRadii;
 
@@ -246,7 +247,7 @@ impl ContextMenuExtension {
 
     /// Record an invocation time for rate-limiting tracking.
     pub fn record_invocation(&mut self, duration_ms: f64) {
-        self.invocation_count += 1;
+        self.invocation_count = self.invocation_count.saturating_add(1);
         // Exponential moving average.
         let alpha = 0.3;
         self.response_time_avg_ms = alpha * duration_ms + (1.0 - alpha) * self.response_time_avg_ms;
@@ -307,8 +308,8 @@ impl SubMenuItem {
 pub struct ContextMenuExtensionManager {
     /// All registered extensions.
     extensions: Vec<ContextMenuExtension>,
-    /// Next extension ID.
-    next_id: ExtensionId,
+    /// Source of extension IDs.
+    ids: IdSeq<ExtensionId>,
     /// Maximum extensions per app (prevent abuse).
     pub max_per_app: usize,
     /// Global timeout threshold in ms.
@@ -321,7 +322,7 @@ impl ContextMenuExtensionManager {
     pub fn new() -> Self {
         Self {
             extensions: Vec::new(),
-            next_id: 1,
+            ids: IdSeq::new(),
             max_per_app: 10,
             timeout_threshold_ms: 200.0,
             extensions_enabled: true,
@@ -356,8 +357,7 @@ impl ContextMenuExtensionManager {
             return None;
         }
 
-        let id = self.next_id;
-        self.next_id += 1;
+        let id = self.ids.issue()?;
 
         let ext = ContextMenuExtension::new(
             id,
@@ -382,7 +382,10 @@ impl ContextMenuExtensionManager {
     pub fn unregister_app(&mut self, app_name: &str) -> usize {
         let len_before = self.extensions.len();
         self.extensions.retain(|e| e.app_name != app_name);
-        len_before - self.extensions.len()
+        // `retain` only ever shrinks, so this cannot go negative — written
+        // saturating so that is a property of the expression rather than of
+        // the reader's memory of what `retain` does.
+        len_before.saturating_sub(self.extensions.len())
     }
 
     /// Enable or disable a specific extension.
@@ -432,7 +435,7 @@ impl ContextMenuExtensionManager {
                 .iter_mut()
                 .find(|(name, _)| name == &ext.app_name)
             {
-                entry.1 += 1;
+                entry.1 = entry.1.saturating_add(1);
             } else {
                 app_counts.push((ext.app_name.clone(), 1));
             }

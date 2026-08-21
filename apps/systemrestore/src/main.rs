@@ -25,6 +25,7 @@
 #[allow(unused_imports)]
 use guitk::color::Color;
 #[allow(unused_imports)]
+use guitk::ratio;
 use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 #[allow(unused_imports)]
 use guitk::style::CornerRadii;
@@ -1760,14 +1761,15 @@ impl OperationProgress {
     }
 
     /// Progress fraction (0.0 to 1.0).
+    ///
+    /// Measured in bytes where there are bytes to measure, in steps where
+    /// there are not, and reported complete when there is neither — a restore
+    /// of an empty snapshot has nothing left to do.
+    #[must_use]
     pub fn fraction(&self) -> f32 {
-        if self.total_bytes == 0 {
-            if self.total_steps == 0 {
-                return 1.0;
-            }
-            return self.step_index as f32 / self.total_steps as f32;
-        }
-        (self.bytes_processed as f64 / self.total_bytes as f64) as f32
+        ratio::fraction(self.bytes_processed, self.total_bytes)
+            .or_else(|| ratio::fraction(self.step_index, self.total_steps))
+            .unwrap_or(1.0) as f32
     }
 
     /// Progress percentage (0 to 100).
@@ -4206,22 +4208,7 @@ impl Default for SystemRestoreUI {
 
 /// Format bytes to a human-readable string.
 fn format_bytes(bytes: u64) -> String {
-    const KB: u64 = 1024;
-    const MB: u64 = 1024 * KB;
-    const GB: u64 = 1024 * MB;
-    const TB: u64 = 1024 * GB;
-
-    if bytes >= TB {
-        format!("{:.1} TB", bytes as f64 / TB as f64)
-    } else if bytes >= GB {
-        format!("{:.1} GB", bytes as f64 / GB as f64)
-    } else if bytes >= MB {
-        format!("{:.1} MB", bytes as f64 / MB as f64)
-    } else if bytes >= KB {
-        format!("{:.1} KB", bytes as f64 / KB as f64)
-    } else {
-        format!("{} B", bytes)
-    }
+    guitk::bytes::iec(bytes)
 }
 
 /// Format a duration in seconds to a short human-readable string.
@@ -4573,7 +4560,7 @@ mod tests {
             None,
         );
         let display = snap.size_display();
-        assert!(display.contains("GB") || display.contains("MB"));
+        assert!(display.contains("GiB") || display.contains("MiB"));
     }
 
     #[test]
@@ -5541,10 +5528,10 @@ mod tests {
     fn test_format_bytes() {
         assert_eq!(format_bytes(0), "0 B");
         assert_eq!(format_bytes(500), "500 B");
-        assert_eq!(format_bytes(1024), "1.0 KB");
-        assert_eq!(format_bytes(1_048_576), "1.0 MB");
-        assert_eq!(format_bytes(1_073_741_824), "1.0 GB");
-        assert_eq!(format_bytes(1_099_511_627_776), "1.0 TB");
+        assert_eq!(format_bytes(1024), "1.0 KiB");
+        assert_eq!(format_bytes(1_048_576), "1.0 MiB");
+        assert_eq!(format_bytes(1_073_741_824), "1.0 GiB");
+        assert_eq!(format_bytes(1_099_511_627_776), "1.0 TiB");
     }
 
     #[test]
@@ -6168,7 +6155,12 @@ mod tests {
         let inc2 = ids
             .iter()
             .copied()
-            .find(|&id| restored.tree.get_snapshot(id).is_some_and(|s| s.name == "Inc2"))
+            .find(|&id| {
+                restored
+                    .tree
+                    .get_snapshot(id)
+                    .is_some_and(|s| s.name == "Inc2")
+            })
             .expect("Inc2 was not imported");
         let snap = restored.tree.get_snapshot(inc2).unwrap();
         assert!(snap.locked, "the lock was lost on import");

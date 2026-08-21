@@ -5,6 +5,7 @@
 //! reclamation policies.
 
 use guitk::color::Color;
+use guitk::ratio;
 use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::style::CornerRadii;
 
@@ -147,11 +148,11 @@ impl DriveInfo {
         self.total_bytes.saturating_sub(self.used_bytes)
     }
 
+    /// Used space as a percentage. A volume of unknown size is at 0%, so it
+    /// is not reported as low on space by [`Self::is_low_space`].
+    #[must_use]
     pub fn used_pct(&self) -> u32 {
-        if self.total_bytes == 0 {
-            return 0;
-        }
-        ((self.used_bytes as f64 / self.total_bytes as f64) * 100.0) as u32
+        ratio::percent_whole(self.used_bytes, self.total_bytes).unwrap_or(0)
     }
 
     pub fn is_low_space(&self) -> bool {
@@ -422,17 +423,7 @@ impl StorageSettings {
 
 /// Format bytes as human-readable.
 fn format_bytes(bytes: u64) -> String {
-    if bytes >= 1_000_000_000_000 {
-        format!("{:.1} TB", bytes as f64 / 1_000_000_000_000.0)
-    } else if bytes >= 1_000_000_000 {
-        format!("{:.1} GB", bytes as f64 / 1_000_000_000.0)
-    } else if bytes >= 1_000_000 {
-        format!("{:.1} MB", bytes as f64 / 1_000_000.0)
-    } else if bytes >= 1_000 {
-        format!("{:.0} KB", bytes as f64 / 1_000.0)
-    } else {
-        format!("{} B", bytes)
-    }
+    guitk::bytes::si(bytes)
 }
 
 /// UI state for the storage settings panel.
@@ -991,11 +982,13 @@ mod tests {
 
     #[test]
     fn format_bytes_units() {
-        assert!(format_bytes(500).contains('B'));
-        assert!(format_bytes(1_500).contains("KB"));
-        assert!(format_bytes(1_500_000).contains("MB"));
-        assert!(format_bytes(1_500_000_000).contains("GB"));
-        assert!(format_bytes(1_500_000_000_000).contains("TB"));
+        // Decimal: a drive's advertised capacity is what this column shows.
+        // Lowercase `k` is the SI prefix -- uppercase `K` is kelvin.
+        assert_eq!(format_bytes(500), "500 B");
+        assert_eq!(format_bytes(1_500), "1.5 kB");
+        assert_eq!(format_bytes(1_500_000), "1.5 MB");
+        assert_eq!(format_bytes(1_500_000_000), "1.5 GB");
+        assert_eq!(format_bytes(1_500_000_000_000), "1.5 TB");
     }
 
     #[test]

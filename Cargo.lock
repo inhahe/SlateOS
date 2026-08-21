@@ -664,6 +664,7 @@ version = "0.1.0"
 dependencies = [
  "safeio",
  "sha2",
+ "textfmt",
 ]
 
 [[package]]
@@ -4669,6 +4670,7 @@ version = "0.1.0"
 dependencies = [
  "embed-manifest",
  "safeio",
+ "textfmt",
 ]
 
 [[package]]

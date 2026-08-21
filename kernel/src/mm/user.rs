@@ -410,7 +410,28 @@ pub unsafe fn copy_to_user(kernel_src: *const u8, user_dst: u64, len: usize) -> 
 /// writable.
 ///
 /// Returns the full physical address (including the page offset).
+///
+/// A first failure is not final. Two perfectly ordinary states make the raw
+/// page walk fail on an address the owning process would have had no trouble
+/// with — an absent page that is committed but not yet populated, and a
+/// present-but-read-only page whose `COW` bit means "copy me on write". Both
+/// are what the hardware fault handler exists to fix, and neither can fix
+/// itself here, because nothing is going to fault: this walk reads the page
+/// table by hand through the HHDM. So on failure we ask the owning process's
+/// resolver to do what the fault would have done, then walk once more. See
+/// [`try_resolve_remote`] for why one retry is the right number.
 fn user_page_phys(pml4: u64, va: u64, need_writable: bool) -> KernelResult<u64> {
+    if let Ok(phys) = user_page_phys_once(pml4, va, need_writable) {
+        return Ok(phys);
+    }
+    if !try_resolve_remote(pml4, va, need_writable) {
+        return Err(KernelError::InvalidAddress);
+    }
+    user_page_phys_once(pml4, va, need_writable)
+}
+
+/// One raw page-table walk, with no attempt to resolve what it finds.
+fn user_page_phys_once(pml4: u64, va: u64, need_writable: bool) -> KernelResult<u64> {
     let virt = VirtAddr::new(va);
     if need_writable {
         let flags = page_table::translate_flags(pml4, virt).ok_or(KernelError::InvalidAddress)?;
@@ -419,6 +440,59 @@ fn user_page_phys(pml4: u64, va: u64, need_writable: bool) -> KernelResult<u64> 
         }
     }
     page_table::translate(pml4, virt).ok_or(KernelError::InvalidAddress)
+}
+
+/// Ask the process owning `pml4` to resolve a fault at `va`, as though the
+/// hardware had raised one for the access we are about to perform by hand.
+///
+/// This is the cross-address-space counterpart of [`try_fault_in_user_page`],
+/// and the reason it can exist at all is that
+/// [`crate::proc::pcb::try_resolve_fault`] takes the pid explicitly and works
+/// entirely on *that* process's `pml4_phys` and VMA list — it never consults
+/// `CR3`. So the resolver was always usable from here; it simply was never
+/// called, which is why `process_vm_writev` into a freshly-forked target failed
+/// on every page. Right after `fork` the entire address space is CoW, so the
+/// case that looks exotic is in fact the default one.
+///
+/// # The present bit is the whole decision
+///
+/// `try_resolve_fault` branches on the synthesized error code: `present &&
+/// write` selects the CoW break, `!present` selects demand paging, and nothing
+/// else is resolvable. So the bit must describe the page we actually found, not
+/// the access we want. [`try_fault_in_user_page`] hard-codes it to zero, which
+/// is correct there only because it is called solely after `translate` returned
+/// `None`; copying that convention here would silently turn every CoW page into
+/// an unresolvable demand-page request.
+///
+/// # Why one retry, not a loop
+///
+/// Each of the two resolvable states is cleared outright by its resolver — a
+/// populated page is present, a broken CoW page is writable and no longer `COW`
+/// — so a second failure means the address is genuinely unusable (an unmapped
+/// hole, or a read-only VMA), and retrying would spin rather than converge.
+fn try_resolve_remote(pml4: u64, va: u64, need_writable: bool) -> bool {
+    let Some(pid) = crate::proc::pcb::pid_for_pml4(pml4) else {
+        // No live process owns this address space: a self-test's throwaway page
+        // table, or a target that exited while we were copying. Nothing to ask.
+        return false;
+    };
+    let present = page_table::translate(pml4, VirtAddr::new(va)).is_some();
+    if present && !need_writable {
+        // A present page we only want to read needs no resolution, and there is
+        // none to be had — `try_resolve_fault` treats a present read fault as
+        // unresolvable. Reaching here means the walk failed for a reason the
+        // resolver cannot address.
+        return false;
+    }
+    // x86 page-fault error code: bit 0 present, bit 1 write, bit 2 user.
+    let mut error_code: u64 = 1 << 2;
+    if need_writable {
+        error_code |= 1 << 1;
+    }
+    if present {
+        error_code |= 1;
+    }
+    crate::proc::pcb::try_resolve_fault(pid, va, error_code)
 }
 
 /// Copy `dst.len()` bytes from the user range starting at `user_src`, in the
@@ -436,10 +510,14 @@ fn user_page_phys(pml4: u64, va: u64, need_writable: bool) -> KernelResult<u64> 
 /// In a real syscall, pass the caller's PML4
 /// (`cr3_to_pml4(read_cr3())`), which is exactly the address space being read.
 ///
+/// A page that is absent but committed is populated first, exactly as a real
+/// read fault by the owning process would have populated it — see
+/// [`user_page_phys`].
+///
 /// # Errors
 ///
 /// [`KernelError::InvalidAddress`] if any part of the range is null, wraps,
-/// escapes user space, or is not mapped in `pml4`.
+/// escapes user space, or is not mapped in `pml4` and cannot be resolved.
 //
 // Arithmetic here is bounded page-walk index math (page offsets are `<
 // PAGE_SIZE`, `copied < len`); overflow is the failure condition, not a bug,
@@ -492,10 +570,18 @@ pub fn copy_from_user_as(pml4: u64, user_src: u64, dst: &mut [u8]) -> KernelResu
 /// page must be present *and* writable in `pml4`, and bytes are written
 /// through the HHDM physical mapping (no STAC/CLAC window).
 ///
+/// "Must be" in the sense of `get_user_pages(FOLL_WRITE)`, not in the sense of
+/// a precondition the caller has to arrange: a destination page that is absent
+/// but committed is populated, and one that is present-but-CoW has its CoW
+/// broken, before the write — see [`user_page_phys`]. A target that has just
+/// forked has an entirely CoW address space, so without that this would fail on
+/// every page of the most ordinary case there is.
+///
 /// # Errors
 ///
 /// [`KernelError::InvalidAddress`] if any part of the range is null, wraps,
-/// escapes user space, or is not mapped writable in `pml4`.
+/// escapes user space, or is not writable in `pml4` and cannot be made so
+/// (an unmapped hole, or a genuinely read-only mapping).
 //
 // See `copy_from_user_as` for the arithmetic justification.
 #[allow(clippy::arithmetic_side_effects)]
@@ -1112,4 +1198,339 @@ pub fn self_test() -> KernelResult<()> {
 
     crate::serial_println!("[user] User memory validation self-test PASSED");
     Ok(())
+}
+
+/// Self-test for cross-address-space fault resolution.
+///
+/// [`copy_to_user_as`] / [`copy_from_user_as`] reach into *another* process's
+/// address space by hand, walking its page table through the HHDM. Nothing
+/// faults during such a walk, so the two states that a hardware fault would
+/// have fixed have to be fixed explicitly — and for a long time they were not,
+/// which made `process_vm_writev` into a freshly-forked target fail on every
+/// page even though the target could have written those pages itself.
+///
+/// The existing `process_vm` self-test could not have caught that: it
+/// pre-faults its target page with an explicit
+/// [`crate::proc::pcb::try_resolve_fault`] call before copying, and only ever
+/// uses a plain writable anonymous page. It tests the transfer once the page is
+/// already there. This one tests getting the page there:
+///
+/// 1. **Demand paging.** A committed VMA the target has never touched must be
+///    populated by the copy itself, in both directions.
+/// 2. **Read-only mappings still fail.** Resolution must not become a way to
+///    write through a mapping the target itself could not write — tested both
+///    while the page is absent (the VMA-permission check) and once it is
+///    present (the not-a-CoW-page check).
+/// 3. **Copy-on-write.** A genuinely shared page (refcount 2, present,
+///    read-only, `COW` set) must be broken by the write, giving the target a
+///    private frame carrying the copied contents — and leaving the address
+///    space it was sharing with untouched. This is the case that matters most,
+///    because immediately after `fork` it describes the *entire* address space.
+///
+/// ## Errors
+///
+/// [`KernelError::InternalError`] if any assertion fails, or the underlying
+/// error if the scaffolding (process creation, VMA insertion, address-space
+/// clone) could not be set up.
+pub fn self_test_cross_as_resolution() -> KernelResult<()> {
+    use crate::proc::pcb;
+
+    crate::serial_println!("[user] Running cross-address-space fault-resolution self-test...");
+
+    let target = pcb::create("user-crossas-target", 0);
+    let result = cross_as_tests(target);
+    pcb::destroy(target);
+
+    result?;
+    crate::serial_println!("[user] Cross-address-space fault-resolution self-test PASSED");
+    Ok(())
+}
+
+/// Bases for the four scratch regions the cross-AS self-test maps into its
+/// target. 192 GiB up, clear of every heap/mmap/stack window, and spaced
+/// 256 KiB apart so no two can be coalesced into one VMA.
+const CROSS_AS_BASE: u64 = 0x0000_0030_0000_0000;
+const CROSS_AS_STRIDE: u64 = 0x0004_0000;
+
+/// The 16 recognizable bytes the cross-AS self-test stamps into its
+/// copy-on-write scratch page before forking the address space, kept as the two
+/// 8-byte halves the test checks separately: the first is overwritten by the
+/// poke that breaks the CoW, the second must survive it. A private copy comes
+/// back carrying the second half; a fresh zero page would not.
+const CROSS_AS_STAMP_HEAD: [u8; 8] = [0xA0, 0xA1, 0xA2, 0xA3, 0xA4, 0xA5, 0xA6, 0xA7];
+/// Second half of the cross-AS self-test's stamp. See [`CROSS_AS_STAMP_HEAD`].
+const CROSS_AS_STAMP_TAIL: [u8; 8] = [0xA8, 0xA9, 0xAA, 0xAB, 0xAC, 0xAD, 0xAE, 0xAF];
+
+/// Body of [`self_test_cross_as_resolution`], split out so the caller can
+/// destroy the throwaway process on every exit path.
+#[allow(clippy::too_many_lines)]
+fn cross_as_tests(target: crate::proc::pcb::ProcessId) -> KernelResult<()> {
+    use crate::mm::frame::FRAME_SIZE;
+    use crate::mm::vma::{Vma, VmaKind};
+    use crate::proc::pcb;
+
+    let frame_size = FRAME_SIZE as u64;
+    let hhdm = page_table::hhdm().ok_or(KernelError::NotSupported)?;
+    let Some(target_pml4) = pcb::get_pml4(target).filter(|&p| p != 0) else {
+        crate::serial_println!("[user]   FAIL: target process has no PML4");
+        return Err(KernelError::InternalError);
+    };
+
+    let rw = PageFlags::PRESENT
+        | PageFlags::WRITABLE
+        | PageFlags::USER_ACCESSIBLE
+        | PageFlags::NO_EXECUTE;
+    let ro = PageFlags::PRESENT | PageFlags::USER_ACCESSIBLE | PageFlags::NO_EXECUTE;
+
+    // Four one-frame regions: write-into-untouched, read-from-untouched,
+    // read-only, and the copy-on-write case.
+    let base_of = |i: u64| CROSS_AS_BASE.wrapping_add(i.wrapping_mul(CROSS_AS_STRIDE));
+    for (i, flags) in [rw, rw, ro, rw].into_iter().enumerate() {
+        let start = base_of(i as u64);
+        pcb::add_vma(
+            target,
+            Vma {
+                start,
+                end: start.wrapping_add(frame_size),
+                kind: VmaKind::Anonymous,
+                flags,
+            },
+        )?;
+    }
+
+    // --- Test 1: writing into a committed page the target never touched ------
+    // The VMA exists; no frame does. Before the fix this was a hard EFAULT,
+    // even though the target writing the same address would have been served.
+    let untouched_w = base_of(0);
+    const POKE: [u8; 8] = [0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88];
+    if page_table::translate(target_pml4, VirtAddr::new(untouched_w)).is_some() {
+        crate::serial_println!("[user]   FAIL: scratch page was already mapped");
+        return Err(KernelError::InternalError);
+    }
+    // Negative control. `user_page_phys_once` *is* the pre-fix code path, so
+    // asserting it fails here is what makes the success below mean something:
+    // without it, a page that happened to be mapped for some other reason would
+    // let this test pass while resolution did nothing.
+    if user_page_phys_once(target_pml4, untouched_w, true).is_ok() {
+        crate::serial_println!("[user]   FAIL: unresolved walk succeeded on an absent page");
+        return Err(KernelError::InternalError);
+    }
+    copy_to_user_as(target_pml4, untouched_w, &POKE).map_err(|e| {
+        crate::serial_println!("[user]   FAIL: write to untouched page: {:?}", e);
+        KernelError::InternalError
+    })?;
+    let Some(phys) = page_table::translate(target_pml4, VirtAddr::new(untouched_w)) else {
+        crate::serial_println!("[user]   FAIL: page still absent after resolved write");
+        return Err(KernelError::InternalError);
+    };
+    if read_frame_bytes(phys, hhdm, 8) != POKE {
+        crate::serial_println!("[user]   FAIL: write to untouched page did not land");
+        return Err(KernelError::InternalError);
+    }
+
+    // --- Test 2: reading a committed page the target never touched -----------
+    // Demand paging an anonymous VMA yields a zero page, which is exactly what
+    // the target would read. A resolver that refused would report EFAULT for a
+    // perfectly valid address.
+    let untouched_r = base_of(1);
+    if user_page_phys_once(target_pml4, untouched_r, false).is_ok() {
+        crate::serial_println!("[user]   FAIL: unresolved walk succeeded on an absent page");
+        return Err(KernelError::InternalError);
+    }
+    // Pre-filled with 0xFF so a copy that silently did nothing cannot pass the
+    // zero check below.
+    let mut got = [0xFFu8; 8];
+    copy_from_user_as(target_pml4, untouched_r, &mut got).map_err(|e| {
+        crate::serial_println!("[user]   FAIL: read of untouched page: {:?}", e);
+        KernelError::InternalError
+    })?;
+    if got != [0u8; 8] {
+        crate::serial_println!("[user]   FAIL: demand-paged read gave {:x?}, want zeros", got);
+        return Err(KernelError::InternalError);
+    }
+
+    // --- Test 3: a read-only mapping must stay read-only ---------------------
+    // Resolution exists to do what a fault would have done — and a write fault
+    // on a read-only VMA is not resolvable. Checked in both of its two forms.
+    let readonly = base_of(2);
+    // (a) Page absent: `try_resolve_fault`'s VMA permission check must refuse.
+    if copy_to_user_as(target_pml4, readonly, &POKE).is_ok() {
+        crate::serial_println!("[user]   FAIL: wrote through an absent read-only mapping");
+        return Err(KernelError::InternalError);
+    }
+    // Reading it is fine, and makes it present for (b).
+    copy_from_user_as(target_pml4, readonly, &mut got).map_err(|e| {
+        crate::serial_println!("[user]   FAIL: read of read-only page: {:?}", e);
+        KernelError::InternalError
+    })?;
+    // (b) Page present, read-only, and *not* CoW: `resolve_cow_fault` must
+    // refuse. Without this the CoW arm would be a universal write override.
+    if copy_to_user_as(target_pml4, readonly, &POKE).is_ok() {
+        crate::serial_println!("[user]   FAIL: wrote through a present read-only mapping");
+        return Err(KernelError::InternalError);
+    }
+
+    // --- Test 4: copy-on-write ------------------------------------------------
+    let cow_va = base_of(3);
+    // Populate and stamp 16 recognizable bytes, so the post-break check can
+    // tell a real copy from a fresh zero page.
+    if !pcb::try_resolve_fault(target, cow_va, 1 << 2) {
+        crate::serial_println!("[user]   FAIL: could not populate the CoW scratch page");
+        return Err(KernelError::InternalError);
+    }
+    let Some(orig_phys) = page_table::translate(target_pml4, VirtAddr::new(cow_va)) else {
+        crate::serial_println!("[user]   FAIL: CoW scratch page absent after populate");
+        return Err(KernelError::InternalError);
+    };
+    for (i, b) in CROSS_AS_STAMP_HEAD
+        .iter()
+        .chain(CROSS_AS_STAMP_TAIL.iter())
+        .enumerate()
+    {
+        // SAFETY: HHDM alias of a freshly populated, target-owned, writable
+        // frame; 16 bytes at its start are well within the 16 KiB frame.
+        unsafe {
+            (orig_phys.wrapping_add(hhdm).wrapping_add(i as u64) as *mut u8).write_volatile(*b);
+        }
+    }
+
+    // Fork the address space for real: this is what makes the page shared.
+    // SAFETY: `target_pml4` is a live PML4 owned by a process that has never
+    // run — nothing can be mutating its page tables concurrently.
+    let child_pml4 = unsafe { crate::mm::cow::clone_address_space_cow(target_pml4)? };
+    let verdict = cross_as_cow_test(target_pml4, child_pml4, cow_va, orig_phys, hhdm);
+    // SAFETY: `child_pml4` came from `clone_address_space_cow`, is loaded in no
+    // CR3, and belongs to no process — nothing else can be using it.
+    unsafe {
+        page_table::destroy_user_address_space(child_pml4);
+    }
+    verdict
+}
+
+/// The copy-on-write half of the cross-AS self-test, split out so the caller
+/// tears down the cloned address space whether it passes or fails.
+///
+/// `orig_phys` is the frame the target mapped at `cow_va` *before* the clone;
+/// after the clone both address spaces share it, read-only and `COW`-marked.
+fn cross_as_cow_test(
+    target_pml4: u64,
+    child_pml4: u64,
+    cow_va: u64,
+    orig_phys: u64,
+    hhdm: u64,
+) -> KernelResult<()> {
+    use crate::mm::frame::{self, FRAME_SIZE, PhysFrame};
+
+    const POKE: [u8; 8] = [0xCA, 0xFE, 0xBA, 0xBE, 0x89, 0xAB, 0xCD, 0xEF];
+    let virt = VirtAddr::new(cow_va);
+
+    // Precondition: the clone really did produce a shared CoW page. If it did
+    // not, everything below would pass for the wrong reason.
+    let Some(flags) = page_table::translate_flags(target_pml4, virt) else {
+        crate::serial_println!("[user]   FAIL: CoW page vanished from the target");
+        return Err(KernelError::InternalError);
+    };
+    if !flags.contains(PageFlags::COW) || flags.contains(PageFlags::WRITABLE) {
+        crate::serial_println!(
+            "[user]   FAIL: post-fork page is not CoW (flags {:#x})",
+            flags.bits()
+        );
+        return Err(KernelError::InternalError);
+    }
+    let frame_base = orig_phys & !(FRAME_SIZE as u64 - 1);
+    let Some(shared) = PhysFrame::from_addr(frame_base) else {
+        crate::serial_println!("[user]   FAIL: CoW frame address is not frame-aligned");
+        return Err(KernelError::InternalError);
+    };
+    if frame::refcount(shared) < 2 {
+        crate::serial_println!(
+            "[user]   FAIL: post-fork refcount is {}, want >= 2",
+            frame::refcount(shared)
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    // Negative control, as in test 1: the unresolved walk — the pre-fix code
+    // path — must fail on this page, so that the write succeeding below can
+    // only be the CoW break doing its job.
+    if user_page_phys_once(target_pml4, cow_va, true).is_ok() {
+        crate::serial_println!("[user]   FAIL: unresolved walk succeeded on a CoW page");
+        return Err(KernelError::InternalError);
+    }
+
+    // The write must break the CoW rather than report EFAULT. This is the case
+    // that describes an entire address space immediately after `fork`.
+    copy_to_user_as(target_pml4, cow_va, &POKE).map_err(|e| {
+        crate::serial_println!("[user]   FAIL: write to a CoW page: {:?}", e);
+        KernelError::InternalError
+    })?;
+
+    // The target must now own a *different*, writable frame.
+    let Some(new_phys) = page_table::translate(target_pml4, virt) else {
+        crate::serial_println!("[user]   FAIL: CoW page absent after break");
+        return Err(KernelError::InternalError);
+    };
+    if new_phys == orig_phys {
+        crate::serial_println!("[user]   FAIL: CoW break reused the shared frame");
+        return Err(KernelError::InternalError);
+    }
+    match page_table::translate_flags(target_pml4, virt) {
+        Some(f) if f.contains(PageFlags::WRITABLE) && !f.contains(PageFlags::COW) => {}
+        other => {
+            crate::serial_println!("[user]   FAIL: broken page still not writable: {:?}", other);
+            return Err(KernelError::InternalError);
+        }
+    }
+
+    // The private copy carries the poke *and* the bytes that were not written —
+    // a zero page would pass the first check and fail the second.
+    let head = read_frame_bytes(new_phys, hhdm, 8);
+    if head != POKE {
+        crate::serial_println!("[user]   FAIL: poke missing from the private copy");
+        return Err(KernelError::InternalError);
+    }
+    let tail = read_frame_bytes(new_phys.wrapping_add(8), hhdm, 8);
+    if tail != CROSS_AS_STAMP_TAIL {
+        crate::serial_println!(
+            "[user]   FAIL: private copy lost the untouched bytes: {:x?} != {:x?}",
+            tail,
+            CROSS_AS_STAMP_TAIL
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    // And the address space we forked from must not have seen the write — the
+    // whole point of breaking the sharing rather than writing through it.
+    if page_table::translate(child_pml4, virt) != Some(orig_phys) {
+        crate::serial_println!("[user]   FAIL: the fork's mapping moved");
+        return Err(KernelError::InternalError);
+    }
+    let sibling = read_frame_bytes(orig_phys, hhdm, 8);
+    if sibling != CROSS_AS_STAMP_HEAD {
+        crate::serial_println!(
+            "[user]   FAIL: the fork's page was modified: {:x?} != {:x?}",
+            sibling,
+            CROSS_AS_STAMP_HEAD
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    Ok(())
+}
+
+/// Read `n` (≤ 8) bytes from physical address `phys` through the HHDM.
+///
+/// Used only by the cross-AS self-test to inspect a target's frames without
+/// going through the very copy routines under test.
+fn read_frame_bytes(phys: u64, hhdm: u64, n: usize) -> [u8; 8] {
+    let mut out = [0u8; 8];
+    for (i, slot) in out.iter_mut().enumerate().take(n.min(8)) {
+        // SAFETY: `phys` is a live frame the caller obtained from a successful
+        // page-table translation, and the HHDM maps all of physical memory; the
+        // at-most-8 bytes read start within that frame.
+        *slot = unsafe {
+            (phys.wrapping_add(hhdm).wrapping_add(i as u64) as *const u8).read_volatile()
+        };
+    }
+    out
 }

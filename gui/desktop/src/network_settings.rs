@@ -6,6 +6,7 @@
 //! stack via IPC for actual configuration changes.
 
 use guitk::color::Color;
+use guitk::idseq::IdSeq;
 use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::style::CornerRadii;
 use guitk::text;
@@ -136,15 +137,26 @@ impl Ipv4Addr {
 
     /// Parse from dotted decimal string.
     pub fn parse(s: &str) -> Option<Self> {
-        let parts: Vec<&str> = s.split('.').collect();
-        if parts.len() != 4 {
+        let mut parts = s.split('.');
+        // Pulling exactly four fields out of the iterator makes "an address
+        // has four octets" a property of this expression, rather than a
+        // length check standing three lines away from the indexing it
+        // justifies — and it drops the intermediate `Vec` allocation that
+        // collecting only existed to count. `split` yields at least one
+        // field, so a short address fails on a missing part's `?`; the
+        // trailing `next` is what rejects a fifth.
+        let (a, b, c, d) = (parts.next()?, parts.next()?, parts.next()?, parts.next()?);
+        if parts.next().is_some() {
             return None;
         }
-        let mut octets = [0u8; 4];
-        for (i, part) in parts.iter().enumerate() {
-            octets[i] = part.parse().ok()?;
-        }
-        Some(Self { octets })
+        Some(Self {
+            octets: [
+                a.parse().ok()?,
+                b.parse().ok()?,
+                c.parse().ok()?,
+                d.parse().ok()?,
+            ],
+        })
     }
 
     /// Check if this is a private address.
@@ -687,7 +699,7 @@ pub struct FirewallConfig {
     pub log_blocked: bool,
     pub block_icmp: bool,
     pub stealth_mode: bool,
-    pub next_rule_id: u64,
+    pub rule_ids: IdSeq,
 }
 
 impl Default for FirewallConfig {
@@ -700,7 +712,7 @@ impl Default for FirewallConfig {
             log_blocked: true,
             block_icmp: false,
             stealth_mode: false,
-            next_rule_id: 1,
+            rule_ids: IdSeq::new(),
         }
     }
 }
@@ -708,8 +720,7 @@ impl Default for FirewallConfig {
 impl FirewallConfig {
     /// Add a new rule, returning its ID.
     pub fn add_rule(&mut self, mut rule: FirewallRule) -> u64 {
-        let id = self.next_rule_id;
-        self.next_rule_id += 1;
+        let id = self.rule_ids.issue_infallible();
         rule.id = id;
         self.rules.push(rule);
         id
@@ -814,15 +825,7 @@ impl NetworkInterface {
 
     /// Format transfer amount.
     pub fn format_bytes(bytes: u64) -> String {
-        if bytes >= 1_073_741_824 {
-            format!("{:.1} GB", bytes as f64 / 1_073_741_824.0)
-        } else if bytes >= 1_048_576 {
-            format!("{:.1} MB", bytes as f64 / 1_048_576.0)
-        } else if bytes >= 1024 {
-            format!("{:.1} KB", bytes as f64 / 1024.0)
-        } else {
-            format!("{bytes} B")
-        }
+        guitk::bytes::si(bytes)
     }
 
     /// Get a summary string for this interface.
@@ -2511,6 +2514,40 @@ mod tests {
 
     use super::*;
 
+    /// An address has exactly four fields. The count and the reads used to be
+    /// separate statements; these are the inputs that tell them apart.
+    #[test]
+    fn an_address_is_four_fields_and_a_field_is_one_octet() {
+        assert_eq!(
+            Ipv4Addr::parse("192.168.1.1").map(|a| a.octets),
+            Some([192, 168, 1, 1]),
+        );
+        assert_eq!(Ipv4Addr::parse("0.0.0.0").map(|a| a.octets), Some([0; 4]));
+        assert_eq!(
+            Ipv4Addr::parse("255.255.255.255").map(|a| a.octets),
+            Some([255; 4]),
+        );
+
+        for bad in [
+            "",                  // no fields at all
+            "1",                 // one
+            "1.2.3",             // three
+            "1.2.3.4.5",         // five
+            "1.2.3.",            // four, the last empty
+            ".1.2.3",            // four, the first empty
+            "1.2.3.256",         // in range for the parse, not for a u8
+            "1.2.3.-1",          // signed
+            "1.2.3.4 ",          // trailing space is not whitespace-tolerated
+            "1.2.3.0x4",         // not decimal
+            "192.168.1.1.1.1.1", // seven
+        ] {
+            assert!(
+                Ipv4Addr::parse(bad).is_none(),
+                "{bad:?} parsed as an address",
+            );
+        }
+    }
+
     // IPv4 tests
     #[test]
     fn test_ipv4_new() {
@@ -2871,9 +2908,9 @@ mod tests {
     #[test]
     fn test_format_bytes() {
         assert_eq!(NetworkInterface::format_bytes(500), "500 B");
-        assert_eq!(NetworkInterface::format_bytes(1500), "1.5 KB");
-        assert_eq!(NetworkInterface::format_bytes(1_500_000), "1.4 MB");
-        assert_eq!(NetworkInterface::format_bytes(2_000_000_000), "1.9 GB");
+        assert_eq!(NetworkInterface::format_bytes(1500), "1.5 kB");
+        assert_eq!(NetworkInterface::format_bytes(1_500_000), "1.5 MB");
+        assert_eq!(NetworkInterface::format_bytes(2_000_000_000), "2.0 GB");
     }
 
     // NetworkSettings tests

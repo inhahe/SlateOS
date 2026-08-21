@@ -14,6 +14,8 @@
 //! - Recording indicator overlay
 
 use guitk::color::Color;
+use guitk::idseq::IdSeq;
+use guitk::ratio;
 use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::style::CornerRadii;
 
@@ -81,14 +83,18 @@ impl CaptureRegion {
         }
     }
 
-    /// Calculate the total pixel count.
+    /// Total pixel count. Cannot overflow: two `u32` dimensions widened to
+    /// `u64` multiply to at most 2^64, and a capture region is bounded by the
+    /// display long before that.
+    #[must_use]
     pub fn pixel_count(&self) -> u64 {
-        self.width as u64 * self.height as u64
+        u64::from(self.width).saturating_mul(u64::from(self.height))
     }
 
     /// Estimate raw frame size in bytes (BGRA = 4 bytes per pixel).
+    #[must_use]
     pub fn frame_size_bytes(&self) -> u64 {
-        self.pixel_count() * 4
+        self.pixel_count().saturating_mul(4)
     }
 
     /// Check if the region is valid (non-zero dimensions).
@@ -369,13 +375,11 @@ impl RecordingStats {
         (self.frames_captured as f64 * 1000.0) / self.elapsed_ms as f64
     }
 
-    /// Drop rate as percentage.
+    /// Drop rate as a percentage of the frames the recorder saw at all.
+    #[must_use]
     pub fn drop_rate_pct(&self) -> f64 {
-        let total = self.frames_captured + self.dropped_frames;
-        if total == 0 {
-            return 0.0;
-        }
-        (self.dropped_frames as f64 / total as f64) * 100.0
+        let total = self.frames_captured.saturating_add(self.dropped_frames);
+        ratio::percent(self.dropped_frames, total).unwrap_or(0.0)
     }
 
     /// Format bytes_written as human-readable.
@@ -392,25 +396,23 @@ impl Default for RecordingStats {
 
 /// Format a byte count into human-readable form.
 fn format_bytes(bytes: u64) -> String {
-    if bytes < 1024 {
-        format!("{} B", bytes)
-    } else if bytes < 1024 * 1024 {
-        format!("{:.1} KB", bytes as f64 / 1024.0)
-    } else if bytes < 1024 * 1024 * 1024 {
-        format!("{:.1} MB", bytes as f64 / (1024.0 * 1024.0))
-    } else {
-        format!("{:.2} GB", bytes as f64 / (1024.0 * 1024.0 * 1024.0))
-    }
+    guitk::bytes::iec(bytes)
 }
 
 // ============================================================================
 // Recording history
 // ============================================================================
 
+/// Identifier for a completed recording.
+///
+/// 64 bits rather than 32 so that the sequence handing these out cannot run
+/// out — see [`guitk::idseq`].
+pub type RecordingId = u64;
+
 /// A completed recording in history.
 #[derive(Clone, Debug)]
 pub struct RecordingEntry {
-    pub id: u32,
+    pub id: RecordingId,
     pub filename: String,
     pub timestamp: u64,
     pub duration_ms: u64,
@@ -446,7 +448,7 @@ pub struct ScreenRecorder {
     pub state: RecordingState,
     pub stats: RecordingStats,
     pub history: Vec<RecordingEntry>,
-    next_id: u32,
+    ids: IdSeq<RecordingId>,
 }
 
 impl ScreenRecorder {
@@ -456,7 +458,7 @@ impl ScreenRecorder {
             state: RecordingState::Idle,
             stats: RecordingStats::new(),
             history: Vec::new(),
-            next_id: 1,
+            ids: IdSeq::new(),
         }
     }
 
@@ -491,7 +493,9 @@ impl ScreenRecorder {
                 return true;
             }
             self.state = RecordingState::Countdown {
-                remaining_secs: remaining_secs - 1,
+                // Saturating so that the countdown's floor is a property of
+                // this expression rather than of the branch above it.
+                remaining_secs: remaining_secs.saturating_sub(1),
             };
         }
         false
@@ -546,7 +550,7 @@ impl ScreenRecorder {
     /// Mark processing as complete and add to history.
     pub fn finish_processing(&mut self, filename: &str, file_size: u64, timestamp: u64) {
         let entry = RecordingEntry {
-            id: self.next_id,
+            id: self.ids.issue_infallible(),
             filename: filename.to_string(),
             timestamp,
             duration_ms: self.stats.elapsed_ms,
@@ -555,8 +559,6 @@ impl ScreenRecorder {
             frame_rate: self.config.frame_rate,
             format: self.config.output_format,
         };
-        self.next_id = self.next_id.saturating_add(1);
-
         if self.history.len() >= MAX_HISTORY {
             self.history.remove(0);
         }
@@ -600,14 +602,15 @@ impl ScreenRecorder {
         self.stats.bytes_written = bytes;
     }
 
-    /// Check if max duration reached.
+    /// Check if max duration reached. A limit of zero is no limit.
     pub fn is_duration_exceeded(&self) -> bool {
         self.config.max_duration_secs > 0
-            && self.stats.elapsed_ms >= self.config.max_duration_secs as u64 * 1000
+            && self.stats.elapsed_ms
+                >= u64::from(self.config.max_duration_secs).saturating_mul(1000)
     }
 
     /// Delete a history entry by ID.
-    pub fn delete_history(&mut self, id: u32) -> bool {
+    pub fn delete_history(&mut self, id: RecordingId) -> bool {
         let before = self.history.len();
         self.history.retain(|e| e.id != id);
         self.history.len() < before
@@ -1044,9 +1047,9 @@ mod tests {
         s.bytes_written = 500;
         assert_eq!(s.size_display(), "500 B");
         s.bytes_written = 2048;
-        assert_eq!(s.size_display(), "2.0 KB");
+        assert_eq!(s.size_display(), "2.0 KiB");
         s.bytes_written = 5 * 1024 * 1024;
-        assert_eq!(s.size_display(), "5.0 MB");
+        assert_eq!(s.size_display(), "5.0 MiB");
     }
 
     // --- RecordingEntry ---
@@ -1310,10 +1313,10 @@ mod tests {
     fn test_format_bytes() {
         assert_eq!(format_bytes(0), "0 B");
         assert_eq!(format_bytes(512), "512 B");
-        assert_eq!(format_bytes(1024), "1.0 KB");
-        assert_eq!(format_bytes(1536), "1.5 KB");
-        assert_eq!(format_bytes(1048576), "1.0 MB");
-        assert_eq!(format_bytes(1073741824), "1.00 GB");
+        assert_eq!(format_bytes(1024), "1.0 KiB");
+        assert_eq!(format_bytes(1536), "1.5 KiB");
+        assert_eq!(format_bytes(1048576), "1.0 MiB");
+        assert_eq!(format_bytes(1073741824), "1.0 GiB");
     }
 
     // --- Config ---

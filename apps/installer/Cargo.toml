@@ -9,6 +9,13 @@ description = "SlateOS Installer — unattended and interactive installation"
 # the custom-script directory go through the crash-safe write-and-rename path.
 safeio = { path = "../safeio" }
 
+# Byte sizes for the partition and progress displays. The installer is headless,
+# so it cannot link `guitk` -- which is exactly why the shared formatter lives in
+# a dependency-free crate. Before it did, this file wrote its own, as did
+# forty-one others, and twenty-four of those divided by 1024 while labelling the
+# result `KB`.
+textfmt = { path = "../../textfmt" }
+
 # The same crate again with its `audit` counters on, so the tests can prove
 # both GRUB writes really went through `safeio` and did not quietly regress to
 # `std::fs::write`. Cargo unifies this with the dependency above when building

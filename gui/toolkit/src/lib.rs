@@ -27,8 +27,8 @@ pub mod canvas;
 pub mod color;
 pub mod colorpicker;
 pub mod context_ext;
-pub mod cycle;
 pub mod date;
+pub mod daywindow;
 pub mod dialog;
 pub mod disabled;
 pub mod dnd;
@@ -37,12 +37,14 @@ pub mod filetypes;
 pub mod fontdb;
 pub mod grid;
 pub mod history;
+pub mod idseq;
 pub mod layout;
 pub mod listview;
 pub mod menu;
 pub mod menubar;
 pub mod modal;
 pub mod pathbar;
+pub mod ratio;
 pub mod render;
 /// Random numbers — see [`randrange`] for the whole story.
 ///
@@ -58,6 +60,7 @@ pub mod row_strip;
 pub mod scaling;
 pub mod scroll_window;
 pub mod signal;
+pub mod step;
 pub mod style;
 pub mod svg;
 pub mod table;
@@ -74,7 +77,10 @@ pub mod widget;
 // library. It is re-exported here under its original paths: `guitk::csv` and
 // `guitk::escape` are what 137 applications already say, and moving the code
 // is not a reason to touch all of them.
-pub use textfmt::{csv, escape, fold, kv};
+// `bytes` is here for the same reason and joined them for the same one: the
+// forty-seven hand-written `format_size`/`format_bytes` copies included the
+// backup tool and the installer, neither of which can reach `guitk`.
+pub use textfmt::{bytes, csv, escape, fold, kv};
 
 // Case-insensitive substring search lives in `textfind` for the same reason:
 // the headless components search text too, and the applications that need it

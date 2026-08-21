@@ -6,6 +6,7 @@
 //! after a configurable timeout.
 
 use guitk::color::Color;
+use guitk::idseq::IdSeq;
 use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::style::CornerRadii;
 use guitk::text;
@@ -315,8 +316,8 @@ pub struct OsdManager {
     /// Screen dimensions.
     pub screen_width: f32,
     pub screen_height: f32,
-    /// Next overlay ID.
-    next_id: u64,
+    /// Source of overlay IDs.
+    ids: IdSeq,
     /// Maximum number of simultaneous overlays.
     pub max_overlays: usize,
 }
@@ -328,7 +329,7 @@ impl OsdManager {
             config: OsdConfig::default(),
             screen_width,
             screen_height,
-            next_id: 1,
+            ids: IdSeq::new(),
             max_overlays: 3,
         }
     }
@@ -365,8 +366,7 @@ impl OsdManager {
             }
         }
 
-        let id = self.next_id;
-        self.next_id += 1;
+        let id = self.ids.issue_infallible();
         self.overlays.push(OsdOverlay::new(kind, now_ms, id));
     }
 

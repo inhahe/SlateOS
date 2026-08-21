@@ -575,7 +575,7 @@ impl PeekPopup {
             return Vec::new();
         }
 
-        let mut cmds = Vec::with_capacity(self.slots.len() * 6 + 4);
+        let mut cmds = Vec::with_capacity(self.slots.len().saturating_mul(6).saturating_add(4));
         let alpha = self.opacity;
 
         // Shadow

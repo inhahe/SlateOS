@@ -5,6 +5,7 @@
 //! Integrates with the gui/clipboard service.
 
 use guitk::color::Color;
+use guitk::idseq::IdSeq;
 use guitk::listview::ListViewport;
 use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::style::CornerRadii;
@@ -208,13 +209,7 @@ impl ClipEntry {
 
     /// Format the size for display.
     pub fn size_display(&self) -> String {
-        if self.size_bytes < 1024 {
-            format!("{} B", self.size_bytes)
-        } else if self.size_bytes < 1024 * 1024 {
-            format!("{:.1} KB", self.size_bytes as f64 / 1024.0)
-        } else {
-            format!("{:.1} MB", self.size_bytes as f64 / (1024.0 * 1024.0))
-        }
+        guitk::bytes::iec(u64::try_from(self.size_bytes).unwrap_or(u64::MAX))
     }
 
     /// Format the age for display.
@@ -240,7 +235,7 @@ impl ClipEntry {
 pub struct ClipboardHistory {
     entries: Vec<ClipEntry>,
     max_entries: usize,
-    next_id: u64,
+    ids: IdSeq,
 }
 
 impl ClipboardHistory {
@@ -249,7 +244,7 @@ impl ClipboardHistory {
         Self {
             entries: Vec::new(),
             max_entries: 50,
-            next_id: 1,
+            ids: IdSeq::new(),
         }
     }
 
@@ -258,14 +253,13 @@ impl ClipboardHistory {
         Self {
             entries: Vec::new(),
             max_entries: max.max(5),
-            next_id: 1,
+            ids: IdSeq::new(),
         }
     }
 
     /// Add a new text entry. Returns the assigned ID.
     pub fn push_text(&mut self, content: &str, timestamp: u64) -> u64 {
-        let id = self.next_id;
-        self.next_id = self.next_id.saturating_add(1);
+        let id = self.ids.issue_infallible();
         let entry = ClipEntry::text(id, content, timestamp);
         self.push_entry(entry);
         id
@@ -273,8 +267,7 @@ impl ClipboardHistory {
 
     /// Add a new image entry.
     pub fn push_image(&mut self, w: u32, h: u32, size: usize, timestamp: u64) -> u64 {
-        let id = self.next_id;
-        self.next_id = self.next_id.saturating_add(1);
+        let id = self.ids.issue_infallible();
         let entry = ClipEntry::image(id, w, h, size, timestamp);
         self.push_entry(entry);
         id
@@ -282,8 +275,7 @@ impl ClipboardHistory {
 
     /// Add a new file paths entry.
     pub fn push_files(&mut self, paths: &[&str], timestamp: u64) -> u64 {
-        let id = self.next_id;
-        self.next_id = self.next_id.saturating_add(1);
+        let id = self.ids.issue_infallible();
         let entry = ClipEntry::files(id, paths, timestamp);
         self.push_entry(entry);
         id
@@ -930,14 +922,14 @@ mod tests {
     fn test_size_display_kb() {
         let mut e = ClipEntry::text(1, "hi", 100);
         e.size_bytes = 2048;
-        assert_eq!(e.size_display(), "2.0 KB");
+        assert_eq!(e.size_display(), "2.0 KiB");
     }
 
     #[test]
     fn test_size_display_mb() {
         let mut e = ClipEntry::text(1, "hi", 100);
         e.size_bytes = 1024 * 1024 * 5;
-        assert_eq!(e.size_display(), "5.0 MB");
+        assert_eq!(e.size_display(), "5.0 MiB");
     }
 
     #[test]

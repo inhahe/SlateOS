@@ -34,6 +34,7 @@ use guitk::event::{EventResult, Key, KeyEvent, MouseButton, MouseEvent, MouseEve
 use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::style::CornerRadii;
 use guitk::text;
+use guitk::text::TextCursor;
 // The candidate ranking is shared with both launchers. It used to be a third
 // copy of the same routine here, under a comment saying it "uses the same
 // algorithm as the application launcher for consistency" — a promise with no
@@ -185,30 +186,23 @@ impl TextInput {
     /// primitives below all pass their offsets through here, so a stale or
     /// mid-character offset shortens an edit instead of panicking inside
     /// `String::replace_range`.
+    /// The answer lives in the toolkit: one implementation of "where is the
+    /// nearest caret stop" for every text field in the system, rather than one
+    /// per field, each free to drift from the others.
     fn floor_boundary(&self, at: usize) -> usize {
-        let mut at = at.min(self.text.len());
-        while !self.text.is_char_boundary(at) {
-            at = at.saturating_sub(1);
-        }
-        at
+        TextCursor::from(at).snapped_in(&self.text).byte()
     }
 
     /// The byte offset of the character before `at`, or `at` at the start.
     fn prev_boundary(&self, at: usize) -> usize {
-        let at = self.floor_boundary(at);
-        self.text
-            .get(..at)
-            .and_then(|before| before.chars().next_back())
-            .map_or(at, |ch| at.saturating_sub(ch.len_utf8()))
+        let at = TextCursor::from(at).snapped_in(&self.text);
+        at.prev_in(&self.text).unwrap_or(at).byte()
     }
 
     /// The byte offset just past the character at `at`, or `at` at the end.
     fn next_boundary(&self, at: usize) -> usize {
-        let at = self.floor_boundary(at);
-        self.text
-            .get(at..)
-            .and_then(|after| after.chars().next())
-            .map_or(at, |ch| at.saturating_add(ch.len_utf8()))
+        let at = TextCursor::from(at).snapped_in(&self.text);
+        at.next_in(&self.text).unwrap_or(at).byte()
     }
 
     /// Replace the bytes in `start..end` with `with`, leaving the cursor just
@@ -792,11 +786,14 @@ impl RunDialog {
 
         // Selection highlight (if any).
         if self.input.has_selection() {
-            let (start, end) = self.input.selection_range();
-            let text_before_start = &self.input.text[..start];
-            let text_selection = &self.input.text[start..end];
+            let (start, _) = self.input.selection_range();
+            // These are byte offsets that `floor_boundary` keeps on character
+            // boundaries — but a render pass is the wrong place to find out
+            // that one of them isn't, so it tolerates a bad offset the same
+            // way `selected_text` already does rather than panicking mid-frame.
+            let text_before_start = self.input.text.get(..start).unwrap_or("");
             let start_px = text::width(text_before_start, INPUT_FONT_SIZE);
-            let sel_width = text::width(text_selection, INPUT_FONT_SIZE);
+            let sel_width = text::width(self.input.selected_text(), INPUT_FONT_SIZE);
             cmds.push(RenderCommand::FillRect {
                 x: input_x + 4.0 + start_px,
                 y: y + INPUT_Y_OFFSET + 3.0,

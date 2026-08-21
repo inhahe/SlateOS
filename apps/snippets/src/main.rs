@@ -2165,13 +2165,7 @@ impl App {
 }
 
 fn format_size(bytes: usize) -> String {
-    if bytes < 1024 {
-        format!("{bytes} B")
-    } else if bytes < 1024 * 1024 {
-        format!("{:.1} KB", bytes as f64 / 1024.0)
-    } else {
-        format!("{:.1} MB", bytes as f64 / (1024.0 * 1024.0))
-    }
+    guitk::bytes::iec(u64::try_from(bytes).unwrap_or(u64::MAX))
 }
 
 // ============================================================================
@@ -2610,13 +2604,13 @@ mod tests {
     #[test]
     fn test_format_size_kb() {
         let result = format_size(2048);
-        assert!(result.contains("KB"));
+        assert!(result.contains("KiB"));
     }
 
     #[test]
     fn test_format_size_mb() {
         let result = format_size(2 * 1024 * 1024);
-        assert!(result.contains("MB"));
+        assert!(result.contains("MiB"));
     }
 
     #[test]

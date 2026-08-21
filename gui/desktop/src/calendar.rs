@@ -38,6 +38,7 @@ use guitk::color::Color;
 // which derives them from the same `tzrules` era arithmetic the libc's
 // `localtime` and the shell's `%(…)T` render through.
 use guitk::date::{self, Date, Weekday};
+use guitk::idseq::IdSeq;
 use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::style::CornerRadii;
 use guitk::text;
@@ -289,14 +290,14 @@ impl CalendarEvent {
 /// In-memory storage for calendar events.
 pub struct EventStore {
     events: Vec<CalendarEvent>,
-    next_id: u64,
+    ids: IdSeq,
 }
 
 impl EventStore {
     pub fn new() -> Self {
         Self {
             events: Vec::new(),
-            next_id: 1,
+            ids: IdSeq::new(),
         }
     }
 
@@ -309,8 +310,7 @@ impl EventStore {
     /// `update_event`, `ReminderManager` -- is by ID, so the two events
     /// would thereafter be one event to every caller.
     pub fn add_event(&mut self, mut event: CalendarEvent) -> Option<u64> {
-        let id = self.next_id;
-        self.next_id = self.next_id.checked_add(1)?;
+        let id = self.ids.issue()?;
         event.id = id;
         self.events.push(event);
         Some(id)

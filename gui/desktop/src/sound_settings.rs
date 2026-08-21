@@ -5,6 +5,7 @@
 //! sub-page of the desktop's Settings application.
 
 use guitk::color::Color;
+use guitk::idseq::IdSeq;
 use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::style::CornerRadii;
 
@@ -30,6 +31,14 @@ const OVERLAY0: Color = Color::from_hex(0x6C7086);
 // Audio device
 // ============================================================================
 
+/// Identifier for an audio endpoint.
+///
+/// 64 bits rather than 32 so that [`IdSeq::issue_infallible`] is available:
+/// the sequence that hands these out cannot then run out, so there is no
+/// error path for `add_device` to invent and no caller left holding a
+/// `None` it has nothing useful to do with.
+pub type DeviceId = u64;
+
 /// Kind of audio device.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DeviceKind {
@@ -40,7 +49,7 @@ pub enum DeviceKind {
 /// Audio endpoint device (speaker, headphones, microphone, etc.).
 #[derive(Clone, Debug)]
 pub struct AudioDevice {
-    pub id: u32,
+    pub id: DeviceId,
     pub name: String,
     pub kind: DeviceKind,
     /// Whether this device is currently the system default.
@@ -60,7 +69,7 @@ pub struct AudioDevice {
 }
 
 impl AudioDevice {
-    pub fn new(id: u32, name: &str, kind: DeviceKind) -> Self {
+    pub fn new(id: DeviceId, name: &str, kind: DeviceKind) -> Self {
         Self {
             id,
             name: name.into(),
@@ -215,7 +224,7 @@ pub struct AppVolumeEntry {
     /// Whether this app is individually muted.
     pub muted: bool,
     /// Which output device this app uses, or `None` for system default.
-    pub output_device_id: Option<u32>,
+    pub output_device_id: Option<DeviceId>,
 }
 
 impl AppVolumeEntry {
@@ -300,8 +309,8 @@ pub struct SoundSettings {
     pub system_sounds_enabled: bool,
     /// Microphone configuration.
     pub mic: MicConfig,
-    /// Next device ID.
-    next_id: u32,
+    /// Source of device IDs.
+    ids: IdSeq<DeviceId>,
 }
 
 impl SoundSettings {
@@ -315,7 +324,7 @@ impl SoundSettings {
             spatial_mode: SpatialAudioMode::Off,
             system_sounds_enabled: true,
             mic: MicConfig::default(),
-            next_id: 1,
+            ids: IdSeq::new(),
         };
         // Populate default system sounds.
         for event in SystemSoundEvent::ALL {
@@ -340,24 +349,23 @@ impl SoundSettings {
     // Device management
     // ------------------------------------------------------------------
 
-    pub fn add_device(&mut self, name: &str, kind: DeviceKind) -> u32 {
-        let id = self.next_id;
-        self.next_id = self.next_id.wrapping_add(1);
+    pub fn add_device(&mut self, name: &str, kind: DeviceKind) -> DeviceId {
+        let id = self.ids.issue_infallible();
         self.devices.push(AudioDevice::new(id, name, kind));
         id
     }
 
-    pub fn remove_device(&mut self, id: u32) -> bool {
+    pub fn remove_device(&mut self, id: DeviceId) -> bool {
         let before = self.devices.len();
         self.devices.retain(|d| d.id != id);
         self.devices.len() < before
     }
 
-    pub fn get_device(&self, id: u32) -> Option<&AudioDevice> {
+    pub fn get_device(&self, id: DeviceId) -> Option<&AudioDevice> {
         self.devices.iter().find(|d| d.id == id)
     }
 
-    pub fn get_device_mut(&mut self, id: u32) -> Option<&mut AudioDevice> {
+    pub fn get_device_mut(&mut self, id: DeviceId) -> Option<&mut AudioDevice> {
         self.devices.iter_mut().find(|d| d.id == id)
     }
 
@@ -375,7 +383,7 @@ impl SoundSettings {
             .collect()
     }
 
-    pub fn set_default_device(&mut self, id: u32) {
+    pub fn set_default_device(&mut self, id: DeviceId) {
         if let Some(dev) = self.devices.iter().find(|d| d.id == id) {
             let kind = dev.kind;
             for d in &mut self.devices {
@@ -398,19 +406,25 @@ impl SoundSettings {
             .find(|d| d.kind == DeviceKind::Input && d.is_default)
     }
 
-    pub fn set_device_volume(&mut self, id: u32, vol: u32) {
+    pub fn set_device_volume(&mut self, id: DeviceId, vol: u32) {
         if let Some(d) = self.get_device_mut(id) {
             d.set_volume(vol);
         }
     }
 
-    pub fn set_device_muted(&mut self, id: u32, muted: bool) {
+    pub fn set_device_muted(&mut self, id: DeviceId, muted: bool) {
         if let Some(d) = self.get_device_mut(id) {
             d.muted = muted;
         }
     }
 
-    pub fn set_device_format(&mut self, id: u32, sample_rate: u32, bit_depth: u32, channels: u32) {
+    pub fn set_device_format(
+        &mut self,
+        id: DeviceId,
+        sample_rate: u32,
+        bit_depth: u32,
+        channels: u32,
+    ) {
         if let Some(d) = self.get_device_mut(id) {
             d.sample_rate = sample_rate;
             d.bit_depth = bit_depth;
@@ -427,7 +441,7 @@ impl SoundSettings {
     }
 
     /// Effective volume for a device: device_vol * master_vol / 100.
-    pub fn effective_volume(&self, device_id: u32) -> u32 {
+    pub fn effective_volume(&self, device_id: DeviceId) -> u32 {
         if self.master_muted {
             return 0;
         }
@@ -457,7 +471,7 @@ impl SoundSettings {
         }
     }
 
-    pub fn set_app_device(&mut self, app_id: &str, device_id: Option<u32>) {
+    pub fn set_app_device(&mut self, app_id: &str, device_id: Option<DeviceId>) {
         if let Some(entry) = self.app_volumes.iter_mut().find(|e| e.app_id == app_id) {
             entry.output_device_id = device_id;
         }

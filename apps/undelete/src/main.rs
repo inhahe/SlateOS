@@ -3564,22 +3564,7 @@ impl UndeleteApp {
 
 /// Format a byte count as a human-readable string.
 pub fn format_size(bytes: u64) -> String {
-    const KB: u64 = 1024;
-    const MB: u64 = 1024 * 1024;
-    const GB: u64 = 1024 * 1024 * 1024;
-    const TB: u64 = 1024 * 1024 * 1024 * 1024;
-
-    if bytes >= TB {
-        format!("{:.1} TB", (bytes as f64) / (TB as f64))
-    } else if bytes >= GB {
-        format!("{:.1} GB", (bytes as f64) / (GB as f64))
-    } else if bytes >= MB {
-        format!("{:.1} MB", (bytes as f64) / (MB as f64))
-    } else if bytes >= KB {
-        format!("{:.1} KB", (bytes as f64) / (KB as f64))
-    } else {
-        format!("{bytes} B")
-    }
+    guitk::bytes::iec(bytes)
 }
 
 /// Format a unix timestamp as a human-readable date string.
@@ -4569,23 +4554,23 @@ mod tests {
 
     #[test]
     fn test_format_size_kb() {
-        assert_eq!(format_size(1024), "1.0 KB");
-        assert_eq!(format_size(2048), "2.0 KB");
+        assert_eq!(format_size(1024), "1.0 KiB");
+        assert_eq!(format_size(2048), "2.0 KiB");
     }
 
     #[test]
     fn test_format_size_mb() {
-        assert_eq!(format_size(1_048_576), "1.0 MB");
+        assert_eq!(format_size(1_048_576), "1.0 MiB");
     }
 
     #[test]
     fn test_format_size_gb() {
-        assert_eq!(format_size(1_073_741_824), "1.0 GB");
+        assert_eq!(format_size(1_073_741_824), "1.0 GiB");
     }
 
     #[test]
     fn test_format_size_tb() {
-        assert_eq!(format_size(1_099_511_627_776), "1.0 TB");
+        assert_eq!(format_size(1_099_511_627_776), "1.0 TiB");
     }
 
     #[test]
@@ -4760,7 +4745,7 @@ mod tests {
     #[test]
     fn test_recoverable_file_size_display() {
         let file = RecoverableFile::from_signature(1, FileSignatureKind::Jpeg, 0, 1_048_576);
-        assert_eq!(file.size_display(), "1.0 MB");
+        assert_eq!(file.size_display(), "1.0 MiB");
     }
 
     #[test]

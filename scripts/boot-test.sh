@@ -443,36 +443,218 @@ check_rootfs_freshness() {
 # "Performance-Critical Subsystems" table.  A change under any of these is a
 # change that CLAUDE.md requires benchmarking, so it is the trigger for
 # nagging about a stale benchmark record.
-# Each entry is annotated with the benchmarks it actually guards.  Keep that
-# mapping accurate: this list is only useful if it covers everything the suite
-# measures, and the failure mode when it does not is SILENT -- an unwatched
-# path reports "no perf-critical changes", which is exactly the false negative
-# this whole mechanism exists to prevent.
+# This list answers only "is this file worth asking about?".  It does NOT say
+# a benchmark exists for it -- BENCH_COVERAGE below is the single source of
+# truth for that, and these entries are deliberately left unannotated so there
+# is no second copy of that mapping to drift out of agreement with the first.
 #
-# The first version of this list was derived from CLAUDE.md's perf-critical
-# table read as *directories*, and it missed more than half the suite: 30+ of
-# the 63 benchmarks measured code in idt.rs, fs/, net/ and crypto.rs, none of
-# which were listed.  Cross-check against `python scripts/bench-history.py
-# --list` / the recorded entry names when adding a benchmark.
+# It is only useful if it covers everything the suite measures, and the failure
+# mode when it does not is SILENT -- an unwatched path reports "no perf-critical
+# changes", which is exactly the false negative this whole mechanism exists to
+# prevent.  The first version of this list was derived from CLAUDE.md's
+# perf-critical table read as *directories*, and it missed more than half the
+# suite: 30+ of the 63 benchmarks measured code in idt.rs, fs/, net/ and
+# crypto.rs, none of which were listed.  Cross-check against `python
+# scripts/bench-history.py --list` / the recorded entry names when adding a
+# benchmark.
 BENCH_CRITICAL_PATHS=(
-    "kernel/src/mm"           # page_alloc_free, heap_alloc_free_64
-    "kernel/src/sched"        # context_switch, pick_next, sched_pick_next
-    "kernel/src/ipc"          # ipc_*, futex_wake_empty, shm_*, cp_*,
-                              #   io_ring_nop, service_connect
-    "kernel/src/syscall"      # syscall_dispatch
+    "kernel/src/mm"
+    "kernel/src/sched"
+    "kernel/src/ipc"
+    "kernel/src/syscall"
     "kernel/src/smp.rs"       # cross-CPU paths behind the above
-    "kernel/src/idt.rs"       # isr_latency, page_fault -- CLAUDE.md lists both
-                              #   "interrupt dispatch" and "page fault
-                              #   handling"; the handlers live here, not in mm/
-    "kernel/src/fs"           # vfs_read_256, vfs_write_256, vfs_readdir,
-                              #   vfs_stat_{root,3comp,deep},
-                              #   vfs_throughput_16k_{read,write}
-    "kernel/src/net"          # net_*, tcp_checksum_*, dns_build_query,
-                              #   firewall_check, and http_*/dashboard_api_*
-                              #   (net/http.rs, net/dashboard.rs)
-    "kernel/src/crypto.rs"    # crypto_* (sha256/sha512/hmac/chacha20/poly1305/
-                              #   aead/ed25519/x25519)
+    "kernel/src/idt.rs"       # CLAUDE.md's "interrupt dispatch" and "page
+                              #   fault handling" enter through here
+    "kernel/src/fs"
+    "kernel/src/net"
+    "kernel/src/crypto.rs"
+    "kernel/src/apic.rs"      # handle_timer_irq -- the only code isr_latency
+                              #   actually times, and it was not being watched
 )
+
+# --- Which benchmark, if any, actually measures a given file ----------------
+#
+# BENCH_CRITICAL_PATHS above is a list of DIRECTORIES, and a directory is a
+# claim about every file beneath it.  That claim is mostly false.  Counted
+# 2026-08-20: kernel/src/fs is 467 tracked .rs files and the suite reaches
+# three of them; kernel/src/mm is 47 and the suite reaches five.  So
+# "Performance-critical code changed ... CLAUDE.md requires benchmarking
+# these" was, for most files it printed, an instruction that running --bench
+# cannot carry out -- the suite has no number for them and comes back green
+# whatever the change did.
+#
+# Worse than coarse: the directory annotations named benchmarks that measure a
+# *copy* of the code rather than the code itself.
+#
+#   net_checksum     -> bench.rs's own internet_checksum()       (bench.rs:6395)
+#   tcp_checksum_v4  -> bench.rs's own tcp_checksum_bench()      (bench.rs:6451)
+#   tcp_checksum_v6  -> bench.rs's own tcp_checksum_v6_bench()   (bench.rs:6520)
+#   dns_build_query  -> bench.rs's own build_dns_query_bench()   (bench.rs:6664)
+#
+# Four of the 86 recorded benchmarks measure no kernel file at all -- they
+# measure bench.rs.  Make net/dns.rs's real label encoder ten times slower and
+# every one of them stays green.  Two more were cited for files they never
+# enter: isr_latency's measurement window opens at apic.rs:1059, inside
+# handle_timer_irq and well past the idt.rs stub, and page_fault hand-rolls
+# map/unmap through page_table with the CPU exception explicitly excluded
+# (bench.rs:5450) -- so neither measures kernel/src/idt.rs, and neither
+# measures mm/fault.rs, the actual #PF handler.
+#
+# Hence this map: per-FILE, and read out of bench.rs's call sites rather than
+# inferred from a directory name.  The default for anything not listed is "no
+# benchmark is known to cover this".  That under-claims -- a file may well be
+# exercised incidentally by a benchmark aimed elsewhere -- and under-claiming
+# is the correct direction when the documented failure mode of this entire
+# mechanism is FALSE ASSURANCE.  A file wrongly listed as uncovered costs one
+# line of noise; a file wrongly implied covered costs an unnoticed regression.
+#
+# Format: "<path prefix>|<space-separated benchmark names>".  Longest matching
+# prefix wins, so a directory-wide rule may be added later with per-file
+# exceptions.  Every name here is checked against the newest recorded run by
+# report_bench_coverage_rot() below: a rule citing a benchmark the suite no
+# longer produces is precisely the false assurance this map exists to remove.
+BENCH_COVERAGE=(
+    # -- mm: 4 of 47 files -------------------------------------------------
+    "kernel/src/mm/frame.rs|page_alloc_free page_alloc_zeroed_free page_alloc_zeroed_pool"
+    "kernel/src/mm/heap.rs|heap_alloc_free_64 heap_raw_alloc_free_512 heap_raw_alloc_free_4096"
+    "kernel/src/mm/compress.rs|compress_zero_page compress_repeating"
+    "kernel/src/mm/page_table.rs|page_fault"
+    # NOT covered, and deliberately absent: mm/fault.rs (page_fault reproduces
+    # the sequence rather than taking a fault), mm/user.rs (nothing in bench.rs
+    # calls copy_to_user/copy_from_user), mm/cow.rs, mm/swap.rs, mm/vma.rs, ...
+    # mm/frame_owner.rs is absent for a subtler reason: bench.rs does A/B its
+    # tagging overhead, but through `timed()`/`ab_interleaved()`, which print
+    # and record nothing.  An unrecorded measurement cannot detect a
+    # regression, so it is not coverage.
+
+    # -- sched: 4 of 18 files ----------------------------------------------
+    "kernel/src/sched/mod.rs|context_switch"
+    "kernel/src/sched/context.rs|context_switch"
+    "kernel/src/sched/backend.rs|context_switch pick_next sched_pick_next"
+    "kernel/src/sched/priority_rr.rs|context_switch pick_next sched_pick_next sched_pick_next_d1 sched_pick_next_d8 sched_pick_next_d64 sched_pick_next_d256"
+    # priority_rr.rs earns `context_switch` as well as its own pick_next
+    # numbers: PerCpuScheduler::pick_next_local lives there and is on the
+    # yield path, dispatching through backend::SchedulerBackend.
+    # sched/eevdf.rs is opt-in (BACKEND_EEVDF); the default boot runs
+    # PriorityRoundRobin, so no recorded number describes it.  sched/task.rs is
+    # absent: the switch reads its types, but the timed work is elsewhere.
+
+    # -- ipc: 10 of 22 files -----------------------------------------------
+    "kernel/src/ipc/channel.rs|ipc_channel ipc_channel_sync ipc_channel_roundtrip_64k"
+    "kernel/src/ipc/pipe.rs|ipc_pipe"
+    "kernel/src/ipc/eventfd.rs|ipc_eventfd"
+    "kernel/src/ipc/semaphore.rs|ipc_semaphore"
+    "kernel/src/ipc/futex.rs|futex_wake_empty futex_wait_mismatch"
+    "kernel/src/ipc/shm.rs|shm_create_close shm_rw_64bytes"
+    "kernel/src/ipc/service.rs|service_connect"
+    "kernel/src/ipc/completion.rs|cp_try_wait_empty cp_notify_wait_rt"
+    "kernel/src/ipc/io_ring.rs|io_ring_nop"
+    "kernel/src/ipc/namespace.rs|vfs_stat_breakdown_ns"
+    # namespace.rs's rule is thin and knowingly so: vfs_stat_breakdown_ns times
+    # namespace::resolve_path, which on the NS_FEATURES_ACTIVE fast path is an
+    # atomic load and a return.  It would catch that fast path regressing and
+    # nothing else.
+
+    # -- syscall: 2 of 9 files ---------------------------------------------
+    "kernel/src/syscall/dispatch.rs|syscall_dispatch"
+    "kernel/src/syscall/handlers.rs|syscall_dispatch"
+    # syscall/number.rs is absent: SYS_TASK_ID is a compile-time constant, so
+    # no instruction from that file is inside the measured window.
+
+    # -- fs: 3 of 467 files ------------------------------------------------
+    "kernel/src/fs/vfs.rs|vfs_read_256 vfs_write_256 vfs_readdir vfs_stat_root vfs_stat_3comp vfs_stat_deep vfs_throughput_16k_read vfs_throughput_16k_write vfs_stat_breakdown_full vfs_stat_breakdown_prologue vfs_stat_breakdown_resolve vfs_stat_breakdown_resolved"
+    "kernel/src/fs/path.rs|vfs_stat_breakdown_prologue vfs_stat_breakdown_resolve"
+    "kernel/src/fs/compress.rs|http_gzip_1KiB http_gzip_8KiB http_build_response_gzip_1KiB"
+    # fs/ext4, fs/zfs, fs/btrfs, fs/f2fs, fs/ntfs and the other ~460 files have
+    # no benchmark at all -- see known-issues.md, "The bench gate names fs/zfs
+    # as perf-critical, but no benchmark can see it".
+
+    # -- net: 9 of 49 files ------------------------------------------------
+    "kernel/src/net/arp.rs|net_arp_lookup net_ns_arp_lookup"
+    "kernel/src/net/ethernet.rs|net_ethernet_parse"
+    "kernel/src/net/ipv4.rs|net_ipv4_parse"
+    "kernel/src/net/ipv6.rs|net_ipv6_parse"
+    "kernel/src/net/tcp.rs|net_tcp_conn_lookup"
+    "kernel/src/net/firewall.rs|firewall_check"
+    "kernel/src/net/veth.rs|net_veth_send net_veth_recv net_veth_roundtrip"
+    "kernel/src/net/dashboard.rs|dashboard_api_health dashboard_api_metrics dashboard_api_status"
+    "kernel/src/net/httpd.rs|http_parse_request http_build_response_1KiB http_build_response_gzip_1KiB http_mime_type http_percent_decode http_etag_4KiB http_gzip_1KiB http_gzip_8KiB"
+    # net/dns.rs is NOT here: dns_build_query measures bench.rs's copy.  Nor is
+    # net/http.rs, which the old annotation named -- the http_* benchmarks all
+    # call crate::net::httpd.  tcp.rs is listed only for the connection-table
+    # scan; its checksum is measured through a bench-local duplicate.  Nor is
+    # net/interface.rs, which four benchmarks name but only to construct an
+    # Ipv4Addr *outside* the timed closure -- appearing in a benchmark's source
+    # is not the same as being inside its measurement.
+    # net_ns_arp_lookup is credited to arp.rs and not to netns.rs: the
+    # namespace is created and destroyed either side of the closure, which
+    # times arp::ns_lookup alone.
+
+    # -- single files ------------------------------------------------------
+    "kernel/src/crypto.rs|crypto_sha256_64B crypto_sha256_1KiB crypto_sha512_64B crypto_hmac_sha256 crypto_chacha20_1KiB crypto_poly1305_1KiB crypto_aead_1KiB crypto_ed25519_sign crypto_ed25519_verify crypto_x25519 crypto_crc32_4KiB crypto_crc32c_4KiB"
+    "kernel/src/apic.rs|isr_latency"
+)
+
+# Longest-prefix lookup: print the benchmarks known to measure $1, or nothing.
+bench_coverage_for() {
+    local path="$1" best="" best_len=0 rule prefix names
+    for rule in "${BENCH_COVERAGE[@]}"; do
+        prefix="${rule%%|*}"
+        names="${rule#*|}"
+        case "$path" in
+            "$prefix" | "$prefix"/*)
+                if [ "${#prefix}" -gt "$best_len" ]; then
+                    best_len="${#prefix}"
+                    best="$names"
+                fi
+                ;;
+        esac
+    done
+    printf '%s' "$best"
+}
+
+# Check the map against reality: every benchmark BENCH_COVERAGE claims must
+# still be produced by the suite.
+#
+# Without this the map rots in the one direction that matters.  A benchmark
+# that is deleted, renamed, or silently SKIPped at runtime (several print
+# "SKIP" and record nothing) leaves its rule behind, and the rule then answers
+# "yes, covered" for a file nothing measures -- the same false assurance in a
+# new costume.  Checking against the recorded run rather than against bench.rs
+# catches the SKIP case too, which a source grep cannot see.
+#
+# The row is matched as text: it is one line of JSON whose entry keys are the
+# quoted benchmark names, so a substring test needs no parser.
+report_bench_coverage_rot() {
+    local hist="$PROJECT_ROOT/bench/history.jsonl"
+    [ -f "$hist" ] || return 0
+    local last_row
+    last_row="$(grep -a '"commit"' "$hist" | tail -1 || true)"
+    [ -n "$last_row" ] || return 0
+
+    local rule names name stale=""
+    for rule in "${BENCH_COVERAGE[@]}"; do
+        names="${rule#*|}"
+        for name in $names; do
+            case "$last_row" in
+                *"\"$name\""*) ;;
+                *) case " $stale " in
+                       *" $name "*) ;;
+                       *) stale="$stale $name" ;;
+                   esac ;;
+            esac
+        done
+    done
+
+    if [ -n "$stale" ]; then
+        echo "  !! The benchmark-coverage map in scripts/boot-test.sh cites"
+        echo "     benchmarks the last recorded run did not produce:"
+        printf '       %s\n' $stale
+        echo "     Each one makes the map claim coverage that no number backs."
+        echo "     Fix BENCH_COVERAGE, or find out why the benchmark stopped"
+        echo "     being recorded (several print SKIP and record nothing)."
+    fi
+}
 
 # Say — out loud — that this boot produced NO benchmark numbers.
 #
@@ -542,22 +724,125 @@ report_bench_absence() {
         return 0
     fi
 
-    local changed
-    changed="$(git -C "$PROJECT_ROOT" diff --name-only "$last_commit" HEAD -- \
-        "${BENCH_CRITICAL_PATHS[@]}" 2>/dev/null)"
+    # Compare against the WORKING TREE, not HEAD.
+    #
+    # `git diff A HEAD` compares two *commits*, so every uncommitted change is
+    # invisible to it -- and edit, boot-test, then commit is the normal workflow
+    # here, which makes an unbenchmarked change to a listed path most likely to
+    # be uncommitted at exactly the moment this gate runs.  So the blind spot was
+    # not a corner case; it was the common one.
+    #
+    # Observed 2026-08-20, with the two halves of the proof one commit apart: a
+    # run whose kernel was built from a tree containing a modified
+    # kernel/src/mm/user.rs -- a path listed above -- printed "No perf-critical
+    # changes since the last benchmarked commit", and the byte-identical tree
+    # printed "!! Performance-critical code changed ... kernel/src/mm/user.rs"
+    # on the next run, once the file had been committed.  Same code, opposite
+    # verdicts, decided by nothing but `git add`.  This is the SILENT false
+    # negative the comment on BENCH_CRITICAL_PATHS warns about, arriving through
+    # the one door that comment was not watching: not a missing path, a missing
+    # *revision*.  The banner at the top of this script already prints
+    # `+uncommitted` for this very tree; the gate simply never asked.
+    #
+    # `git diff <commit> -- <paths>` with no second rev diffs the commit against
+    # the working tree, covering committed and uncommitted changes alike.
+    # Untracked files need their own query: a brand-new file under a benchmarked
+    # path is code the suite has *never* measured, which is the strongest reason
+    # to escalate rather than the weakest.
+    local changed untracked
+    untracked="$(git -C "$PROJECT_ROOT" ls-files --others --exclude-standard -- \
+        "${BENCH_CRITICAL_PATHS[@]}" 2>/dev/null || true)"
+    changed="$(
+        {
+            git -C "$PROJECT_ROOT" diff --name-only "$last_commit" -- \
+                "${BENCH_CRITICAL_PATHS[@]}" 2>/dev/null || true
+            printf '%s\n' "$untracked"
+        } | grep -a . | sort -u || true
+    )"
 
     if [ -n "$changed" ]; then
-        echo "  !! Performance-critical code changed since the last benchmarked commit"
-        echo "     ($last_commit). CLAUDE.md requires benchmarking these:"
-        echo "$changed" | head -8 | sed 's/^/       /'
-        local n
-        n="$(echo "$changed" | grep -c .)"
-        [ "$n" -gt 8 ] && echo "       ... and $((n - 8)) more"
+        # Split the list by whether the suite can actually see the file.
+        #
+        # Printing one undifferentiated list was this gate's other dishonesty.
+        # "CLAUDE.md requires benchmarking these ... Run: --bench" reads as an
+        # instruction that can be carried out, and for most of the list it
+        # cannot: the suite holds no number for those files, so --bench comes
+        # back green regardless of what the change did.  Demonstrated on this
+        # very tree 2026-08-20 -- the gate named kernel/src/mm/user.rs, the
+        # 21-minute --bench cycle it asked for was duly run, and all 86
+        # benchmarks completed without once calling copy_to_user or
+        # copy_from_user.  A request that cannot be satisfied is worse than no
+        # request: it spends the run and hands back an assurance nothing
+        # measured.
+        local covered="" uncovered="" f names
+        while IFS= read -r f; do
+            [ -n "$f" ] || continue
+            names="$(bench_coverage_for "$f")"
+            if [ -n "$names" ]; then
+                covered="${covered}${f}  ->  ${names}
+"
+            else
+                uncovered="${uncovered}${f}
+"
+            fi
+        done <<EOF
+$changed
+EOF
+
+        echo "  !! Performance-critical code changed since the last benchmarked"
+        echo "     commit ($last_commit)."
+        if [ -n "$covered" ]; then
+            local n_cov
+            n_cov="$(printf '%s' "$covered" | grep -ac . || true)"
+            echo "     $n_cov measured by the suite -- run --bench to compare:"
+            printf '%s' "$covered" | head -6 | sed 's/^/       /'
+            if [ "$n_cov" -gt 6 ]; then
+                echo "       ... and $((n_cov - 6)) more"
+            fi
+        fi
+        if [ -n "$uncovered" ]; then
+            local n_unc verb
+            n_unc="$(printf '%s' "$uncovered" | grep -ac . || true)"
+            verb="are"
+            [ "$n_unc" -eq 1 ] && verb="is"
+            echo "     $n_unc $verb covered by NO benchmark. Running --bench will not"
+            echo "     tell you whether these got slower:"
+            printf '%s' "$uncovered" | head -6 | sed 's/^/       /'
+            if [ "$n_unc" -gt 6 ]; then
+                echo "       ... and $((n_unc - 6)) more"
+            fi
+        fi
+        # Say how many are not in any commit.  It changes what the reader should
+        # do: an uncommitted one will not be attributable later, because
+        # bench/history.jsonl stamps rows with a commit hash.
+        local n_dirty
+        n_dirty="$(
+            {
+                git -C "$PROJECT_ROOT" diff --name-only HEAD -- \
+                    "${BENCH_CRITICAL_PATHS[@]}" 2>/dev/null || true
+                printf '%s\n' "$untracked"
+            } | grep -ac . || true
+        )"
+        if [ "$n_dirty" -gt 0 ]; then
+            local is_are="are"
+            [ "$n_dirty" -eq 1 ] && is_are="is"
+            echo "     ($n_dirty of these $is_are uncommitted in the tree just built, so a"
+            echo "      bench row recorded now would be stamped with an ancestor commit.)"
+        fi
         if [ -n "$last_dirty" ]; then
             echo "     (That run measured $last_commit plus uncommitted changes, so some"
             echo "      of the files above may already have been benchmarked.)"
         fi
-        echo "     Run: ./scripts/boot-test.sh --bench"
+        # Only ask for the run when the run can answer something.  Recommending
+        # a 20-minute --bench cycle for a change no benchmark observes is how
+        # this gate came to certify work it had not looked at.
+        if [ -n "$covered" ]; then
+            echo "     Run: ./scripts/boot-test.sh --bench"
+        else
+            echo "     Nothing here would be measured by --bench. If these paths"
+            echo "     matter for performance, the missing piece is a benchmark,"
+            echo "     not a run -- add one and list it in BENCH_COVERAGE above."
+        fi
     else
         echo "  No perf-critical changes since the last benchmarked commit ($last_commit),"
         echo "  so skipping the suite is reasonable here."
@@ -1488,6 +1773,13 @@ finish_pass() {
     else
         report_bench_absence "$file"
     fi
+    # Both branches, and after print_bench_results so a --bench run checks the
+    # map against the row it has just written rather than the previous one.
+    # The map is what decides whether a changed file gets called covered, so a
+    # rule that has quietly stopped being true is the same false assurance the
+    # map was added to remove -- it must be checked on every green boot, not
+    # only on the ones that skip the suite.
+    report_bench_coverage_rot
     report_pathz_skips "$file"
 
     # A green run whose rootfs could not be verified is still green -- the

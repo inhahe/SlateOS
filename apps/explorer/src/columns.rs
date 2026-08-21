@@ -30,6 +30,7 @@
 #![allow(dead_code)]
 
 use guitk::color::Color;
+use guitk::date;
 use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::style::CornerRadii;
 use guitk::text;
@@ -205,7 +206,7 @@ pub enum ColumnValue {
     Text(String),
     /// Integer value displayed as-is.
     Number(i64),
-    /// Byte count formatted as "1.2 MB".
+    /// Byte count formatted as "1.2 MiB".
     Size(u64),
     /// Unix-epoch seconds formatted as a date/time string.
     DateTime(u64),
@@ -1463,15 +1464,7 @@ fn path_extension(path: &str) -> String {
 
 /// Format a byte count as a human-readable size string.
 fn format_size(bytes: u64) -> String {
-    if bytes < 1024 {
-        format!("{bytes} B")
-    } else if bytes < 1024 * 1024 {
-        format!("{:.1} KB", bytes as f64 / 1024.0)
-    } else if bytes < 1024 * 1024 * 1024 {
-        format!("{:.1} MB", bytes as f64 / (1024.0 * 1024.0))
-    } else {
-        format!("{:.2} GB", bytes as f64 / (1024.0 * 1024.0 * 1024.0))
-    }
+    guitk::bytes::iec(bytes)
 }
 
 /// Format an integer with thousand separators.
@@ -1493,53 +1486,37 @@ fn format_number(n: i64) -> String {
     result.chars().rev().collect()
 }
 
-/// Format a Unix-epoch timestamp as "YYYY-MM-DD HH:MM".
+/// Format a Unix-epoch timestamp as "YYYY-MM-DD HH:MM", in UTC.
 ///
-/// Uses a simplified calculation (no timezone, no leap-second
-/// correction) suitable for display purposes.
+/// This is the Date Modified column, so it is the number the user compares
+/// against `ls -l` and against the same file's date in the file dialog. All
+/// three now derive it from [`guitk::date`], which derives it from `tzrules`
+/// — the same era arithmetic the libc's `localtime` and the taskbar clock use.
+///
+/// This function used to carry its own calendar, and that calendar was wrong
+/// for every file older than 2000-03-01. It shifted the epoch to 2000-03-01 to
+/// "simplify leap-year handling" and then, for anything before that, returned a
+/// **fabricated** date: `1970 + days / 365`, month `day_of_year / 30 + 1`,
+/// clamped to at most the 12th month and the 28th day. A file last touched on
+/// 1985-07-04 was listed as 1985-07-09; one from 1999-06-15 as 1999-06-23; and
+/// 2000-02-29, a real leap day, as 2000-03-07. The error grew with the file's
+/// age, and no clamp could have caught it, because every value it produced was
+/// in range — just not the right one. Old files are exactly the ones a user
+/// sorts by date to find.
 fn format_datetime(epoch_secs: u64) -> String {
-    // Simplified date calculation from epoch seconds.
-    let secs = epoch_secs;
-    let days = secs / 86400;
-    let time_of_day = secs % 86400;
+    let days = epoch_secs / 86400;
+    let time_of_day = epoch_secs % 86400;
     let hours = time_of_day / 3600;
     let minutes = (time_of_day % 3600) / 60;
 
-    // Days since 1970-01-01 to date (simplified, ignoring leap seconds).
-    let (year, month, day) = days_to_ymd(days);
+    // A timestamp comes off the filesystem, so it is bounded by nothing this
+    // program controls. Saturating lands in the year 5 881 580 rather than
+    // wrapping into the past, which is the failure a reader would notice: a
+    // file dated before the epoch sorts to the top of a list ordered by date.
+    let (year, month, day) =
+        date::Date::from_days_since_epoch(i32::try_from(days).unwrap_or(i32::MAX)).ymd();
 
     format!("{year:04}-{month:02}-{day:02} {hours:02}:{minutes:02}")
-}
-
-/// Convert days since 1970-01-01 to (year, month, day).
-fn days_to_ymd(mut days: u64) -> (u64, u64, u64) {
-    // Shift epoch from 1970 to 2000-03-01 to simplify leap-year handling.
-    let days_1970_to_2000_03_01: u64 = 11017;
-    let shifted = days as i64 - days_1970_to_2000_03_01 as i64;
-
-    if shifted < 0 {
-        // Before 2000-03-01 — fall back to a rough estimate.
-        let approx_year = 1970 + days / 365;
-        let approx_day = days % 365;
-        let approx_month = approx_day / 30 + 1;
-        let approx_mday = approx_day % 30 + 1;
-        return (approx_year, approx_month.min(12), approx_mday.min(28));
-    }
-
-    days = shifted as u64;
-
-    // 400-year, 100-year, 4-year, 1-year cycles.
-    let era = days / 146097;
-    let doe = days % 146097;
-    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
-    let y = yoe + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = doy - (153 * mp + 2) / 5 + 1;
-    let m = if mp < 10 { mp + 3 } else { mp - 9 };
-    let year = if m <= 2 { y + 2000 + 1 } else { y + 2000 };
-
-    (year, m.clamp(1, 12), d.clamp(1, 31))
 }
 
 /// Format seconds as "m:ss" or "h:mm:ss".
@@ -1653,21 +1630,21 @@ mod tests {
 
     #[test]
     fn test_format_size_kilobytes() {
-        assert_eq!(format_size(1024), "1.0 KB");
-        assert_eq!(format_size(1536), "1.5 KB");
-        assert_eq!(format_size(1024 * 100), "100.0 KB");
+        assert_eq!(format_size(1024), "1.0 KiB");
+        assert_eq!(format_size(1536), "1.5 KiB");
+        assert_eq!(format_size(1024 * 100), "100.0 KiB");
     }
 
     #[test]
     fn test_format_size_megabytes() {
-        assert_eq!(format_size(1024 * 1024), "1.0 MB");
-        assert_eq!(format_size(1024 * 1024 + 512 * 1024), "1.5 MB");
+        assert_eq!(format_size(1024 * 1024), "1.0 MiB");
+        assert_eq!(format_size(1024 * 1024 + 512 * 1024), "1.5 MiB");
     }
 
     #[test]
     fn test_format_size_gigabytes() {
-        assert_eq!(format_size(1024 * 1024 * 1024), "1.00 GB");
-        assert_eq!(format_size(2 * 1024 * 1024 * 1024), "2.00 GB");
+        assert_eq!(format_size(1024 * 1024 * 1024), "1.0 GiB");
+        assert_eq!(format_size(2 * 1024 * 1024 * 1024), "2.0 GiB");
     }
 
     #[test]
@@ -1727,6 +1704,40 @@ mod tests {
         assert!(s.starts_with("2024-01-01"), "got: {s}");
     }
 
+    /// The old calendar was right after 2000-03-01 and fabricated a date
+    /// before it, so a test that only sampled a recent timestamp — which is
+    /// what the one above did, alone, for the whole life of the bug — could
+    /// not have caught it. These are the dates it got wrong, and the comment
+    /// records what it used to say so a regression is recognisable on sight.
+    #[test]
+    fn dates_before_2000_03_01_are_the_real_ones_not_an_estimate() {
+        // Was 1970-01-01 — the one pre-2000 date the estimate got right.
+        assert_eq!(format_datetime(0), "1970-01-01 00:00");
+        // Was 1985-07-09.
+        assert_eq!(format_datetime(489_328_200), "1985-07-04 12:30");
+        // Was 1999-06-23.
+        assert_eq!(format_datetime(929_433_900), "1999-06-15 08:05");
+        // Was 2000-03-07 — a real leap day, reported a week late.
+        assert_eq!(format_datetime(951_868_740), "2000-02-29 23:59");
+        // The old seam itself, which was already correct and stays so.
+        assert_eq!(format_datetime(951_868_800), "2000-03-01 00:00");
+    }
+
+    /// A timestamp far past what a `Date` can hold saturates into the distant
+    /// future rather than wrapping into the past. `u64::MAX` seconds is not a
+    /// date anyone means, but it is a date a corrupt inode can produce, and
+    /// the answer must not sort *before* every real file.
+    #[test]
+    fn an_impossible_timestamp_saturates_forward() {
+        let s = format_datetime(u64::MAX);
+        let year: i64 = s
+            .split('-')
+            .next()
+            .and_then(|y| y.parse().ok())
+            .expect("the format starts with a year");
+        assert!(year > 2024, "got: {s}");
+    }
+
     // ------------------------------------------------------------------
     // ColumnValue display
     // ------------------------------------------------------------------
@@ -1735,7 +1746,7 @@ mod tests {
     fn test_column_value_display() {
         assert_eq!(ColumnValue::Text("hello".into()).display(), "hello");
         assert_eq!(ColumnValue::Number(42).display(), "42");
-        assert_eq!(ColumnValue::Size(1024).display(), "1.0 KB");
+        assert_eq!(ColumnValue::Size(1024).display(), "1.0 KiB");
         assert_eq!(ColumnValue::Duration(222).display(), "3:42");
         assert_eq!(ColumnValue::Percentage(0.85).display(), "85%");
         assert_eq!(ColumnValue::Empty.display(), "");

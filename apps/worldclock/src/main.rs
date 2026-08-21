@@ -797,8 +797,15 @@ impl WorldClockApp {
 
     fn render_grid(&self, cmds: &mut Vec<RenderCommand>) {
         let start_y = Self::HEADER_H + 12.0 - self.scroll_offset;
-        let cols =
-            ((self.width - Self::CARD_GAP) / (Self::CARD_W + Self::CARD_GAP)).max(1.0) as usize;
+        // `(width - GAP) / (CARD_W + GAP)`, which is `columns_across` over the
+        // room left after the margin on each side. The floor of one lives in
+        // the return type now rather than in a `.max(1.0)` this site happened
+        // to write and `apps/colorpicker` happened not to.
+        let cols = guitk::grid::columns_across(
+            self.width - 2.0 * Self::CARD_GAP,
+            Self::CARD_W,
+            Self::CARD_GAP,
+        );
 
         for (i, entry) in self.clocks.iter().enumerate() {
             let col = i % cols;

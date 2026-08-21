@@ -6,6 +6,7 @@
 
 use guitk::color::Color;
 use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
+use guitk::step;
 use guitk::style::CornerRadii;
 
 // ============================================================================
@@ -203,29 +204,16 @@ pub struct TransferRates {
 
 impl TransferRates {
     /// Format a byte rate as human-readable (e.g. "1.5 MB/s").
+    ///
+    /// Decimal, matching the counters below and the resource monitor's network
+    /// graph. See design-decisions.md §489.
     pub fn format_rate(bytes_per_sec: u64) -> String {
-        if bytes_per_sec >= 1_000_000_000 {
-            format!("{:.1} GB/s", bytes_per_sec as f64 / 1_000_000_000.0)
-        } else if bytes_per_sec >= 1_000_000 {
-            format!("{:.1} MB/s", bytes_per_sec as f64 / 1_000_000.0)
-        } else if bytes_per_sec >= 1_000 {
-            format!("{:.1} KB/s", bytes_per_sec as f64 / 1_000.0)
-        } else {
-            format!("{} B/s", bytes_per_sec)
-        }
+        guitk::bytes::si_rate(bytes_per_sec)
     }
 
     /// Format total bytes.
     pub fn format_bytes(bytes: u64) -> String {
-        if bytes >= 1_000_000_000 {
-            format!("{:.2} GB", bytes as f64 / 1_000_000_000.0)
-        } else if bytes >= 1_000_000 {
-            format!("{:.1} MB", bytes as f64 / 1_000_000.0)
-        } else if bytes >= 1_000 {
-            format!("{:.0} KB", bytes as f64 / 1_000.0)
-        } else {
-            format!("{} B", bytes)
-        }
+        guitk::bytes::si(bytes)
     }
 
     pub fn rx_formatted(&self) -> String {
@@ -429,26 +417,35 @@ impl NetworkIndicator {
         self.state.airplane_mode = !self.state.airplane_mode;
     }
 
+    /// Move the highlight to the next network, wrapping past the last.
+    ///
+    /// Wrapping, unlike the launcher's clamped list: this is a short menu of
+    /// nearby networks with no meaningful order, so thumbing off the bottom
+    /// and round to the top is what a user expects. The empty-list guard
+    /// stays because "no networks" must leave the selection *absent*, which
+    /// is a different thing from selecting the zeroth of nothing.
     pub fn select_next(&mut self) {
         if self.wifi_networks.is_empty() {
             return;
         }
-        let max = self.wifi_networks.len().saturating_sub(1);
+        let len = self.wifi_networks.len();
         self.selected_index = Some(match self.selected_index {
-            Some(i) if i < max => i + 1,
-            _ => 0,
+            Some(i) => step::wrapping_after(len, i),
+            // Nothing selected yet: the first network, not the one after it.
+            None => 0,
         });
     }
 
+    /// Move the highlight to the previous network, wrapping past the first.
     pub fn select_prev(&mut self) {
         if self.wifi_networks.is_empty() {
             return;
         }
-        let max = self.wifi_networks.len().saturating_sub(1);
-        self.selected_index = Some(match self.selected_index {
-            Some(0) | None => max,
-            Some(i) => i - 1,
-        });
+        let len = self.wifi_networks.len();
+        // With nothing selected, stepping back enters the list at the end —
+        // which is exactly where wrapping back from the first one lands.
+        let from = self.selected_index.unwrap_or(0);
+        self.selected_index = Some(step::wrapping_before(len, from));
     }
 
     pub fn selected_index(&self) -> Option<usize> {
@@ -785,7 +782,7 @@ mod tests {
     #[test]
     fn transfer_rate_format() {
         assert_eq!(TransferRates::format_rate(500), "500 B/s");
-        assert_eq!(TransferRates::format_rate(1500), "1.5 KB/s");
+        assert_eq!(TransferRates::format_rate(1500), "1.5 kB/s");
         assert_eq!(TransferRates::format_rate(1_500_000), "1.5 MB/s");
         assert_eq!(TransferRates::format_rate(1_500_000_000), "1.5 GB/s");
     }

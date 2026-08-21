@@ -590,11 +590,24 @@ on an invariant maintained by four other methods. All three are now a single
 
 ## The same broken reduction is copy-pasted into 27 crates, and `randrange` now exists to replace it (lane C)
 
-**Status: OPEN 2026-08-16 — fourteen of 27 crates fixed** (`simon`,
-`battleship`, `sliding`, `asteroids`, `yahtzee`, `hearts`, `solitaire`,
-`freecell`, `minesweeper`, `flood`, `snake`, `wordsearch`, `pacman`,
-`breakout`); the shared crate that the rest should move to is written and
-green.
+**Status: CLOSED 2026-08-20 — the sweep finished; no private copy remains.**
+The status line below sat at "fourteen of 27" from 2026-08-16 while the
+migration actually ran to completion (`7d147cb83` retired the last three
+private `Lcg`s), so the entry was stale rather than open. Verified two ways on
+2026-08-20: `build/scratch/lcg_scan.py` — the scan that produced the 27-crate
+figure in the first place — now prints **nothing** across `apps/**` and
+`gui/**`, and a plain grep for the LCG multiplier over `apps`, `gui`, `net*`
+and `pkg` finds exactly **one** hit, inside `apps/breakout`'s `#[cfg(test)]`
+`opening_angle_lattice_points`, which *deliberately* reimplements the old
+`Lcg::next_u64` so the new generator can be compared against the old one on a
+single lattice. That is a regression test *about* the defect, not a surviving
+instance of it, and it should stay. 16 crates now depend on `randrange`.
+
+Original status line, kept for the record: *OPEN 2026-08-16 — fourteen of 27
+crates fixed (`simon`, `battleship`, `sliding`, `asteroids`, `yahtzee`,
+`hearts`, `solitaire`, `freecell`, `minesweeper`, `flood`, `snake`,
+`wordsearch`, `pacman`, `breakout`); the shared crate that the rest should
+move to is written and green.*
 
 The defect above is not `simon`'s. A scan of the tree
 (`build/scratch/lcg_scan.py`) finds the same LCG constants in **~36 places** and
@@ -13647,6 +13660,33 @@ page tables on a path already committed to `halt_loop()` with interrupts
 disabled. Same tactic as the bytes-at-RIP dump added for
 `B-PTHREAD-TEARDOWN-PF`: when a bug is rare and unreproducible, the
 actionable work is to guarantee the *next* occurrence is self-explaining.
+
+**[A] 2026-08-20 — the audit this entry asks for was done, and found a real
+instance in a place this entry does not cover.** The "proper fix if it recurs"
+above says to hunt for kernel paths that write through a user pointer without
+pre-validating. That hunt does not need a repro, so it was run. It found one —
+but not a ring-0 fault path, because the path in question can never fault at
+all: `mm::user::copy_to_user_as` / `copy_from_user_as` walk *another* process's
+page tables through the HHDM, so no access they perform faults against the
+address space they are reading. They were returning a hard `EFAULT` for both an
+untouched-but-committed page and a present CoW page — and immediately after
+`fork` an address space is entirely CoW, so `process_vm_writev` into a
+just-forked target failed on every page. Fixed by resolving explicitly (see
+design-decisions §249), with a self-test covering demand paging, CoW breaks, and
+read-only mappings in both their absent and present forms.
+
+Two consequences for *this* entry. First, its scope is narrower than its title
+suggests: the entry is about the **same-address-space, ring-0 fault** case, and
+the cross-address-space case was never in view because there is no fault there
+to route. Second, it does **not** make this entry reproducible — the fixed path
+is one that could not have raised the `error=0x3` signature described above, so
+the WATCH stands unchanged and the diagnostic added on 2026-08-14 is still the
+mechanism that will identify a genuine recurrence.
+
+Still unaudited, and the natural continuation: every *other* kernel path that
+writes through a user pointer in the current address space without calling
+`validate_user_write` first. `copy_to_user` itself pre-validates, so the
+candidates are paths that bypass it and touch a user address directly.
 
 ### B-ABI1. A *bare* static Linux ELF (no OSABI/PT_INTERP/PT_GNU_PROPERTY) is misclassified as Native-ABI on `exec` — KNOWN LIMITATION (escalated as open-questions.md Q9)
 
@@ -31969,7 +32009,7 @@ been worth defining before the driver exists. This entry therefore stays open,
 and the sentence in `TD-NO-APP-CONNECTS-TO-THE-COMPOSITOR` calling this the last
 link to a photon stays true of SlateOS, not of the harness.
 
-## TD-GUI-CRATES-OPT-OUT-OF-THE-WORKSPACE-LINTS (lane C, 2026-08-17)
+## TD-GUI-CRATES-OPT-OUT-OF-THE-WORKSPACE-LINTS (lane C, 2026-08-17) - **fixed**
 
 **What.** `CLAUDE.md` requires every crate to enable `clippy::all` +
 `clippy::pedantic` and five defensive lints (`unwrap_used`, `expect_used`,
@@ -32289,6 +32329,116 @@ were one hand-rolled tokeniser cursor, and `textview`'s ANSI parser was
 hand-decoding UTF-8 it had already been handed decoded. Before fixing a group,
 check whether the group is one shape — the repeated *source line* is the tell,
 and `scripts/clippy-sites.py --sites` prints it.
+
+
+### 2026-08-20 — `gui/desktop`, the tenth and last crate. Sweep complete.
+
+**Correcting the figure in this entry.** The 1561 recorded for `gui/desktop`
+was measured with `cargo clippy -p desktop -- -W clippy::…`, which is not what
+that crate is graded on: the flags leak into every dependency, and they bypass
+the workspace `[workspace.lints.clippy]` table rather than adding to it.
+`gui/desktop` had *already* opted in with `[lints] workspace = true`. Built
+alone, with `--message-format=json`, filtered to `gui/desktop/src`, and
+deduplicated by `(file, line, column, lint)`, the real backlog was **66**.
+
+The methodology matters more than the number, so state it plainly: **never
+quote a raw total from a `-W`-flagged run.** Measure the crate as configured,
+filter to its own files, and deduplicate — the same site reported once per
+target (lib, bin, test) triples a count for free.
+
+Note also that `clippy::arithmetic_side_effects` **does not lint
+floating-point arithmetic**, so none of desktop's f32 layout code fires. Every
+site in this crate was integer arithmetic. That is worth knowing before
+budgeting a sweep of a rendering crate.
+
+**Three more abstractions the crate had re-derived**, each found the same way —
+a lint firing many times turned out to be one shape repeated, and *the copies
+disagreed with one another*. The disagreement is the finding; the lint was only
+what pointed at it.
+
+| Copies | What they disagreed about | Written once as |
+|---|---|---|
+| 14 id counters | What happens at the top of the range: `+= 1` (6), `saturating_add` (6), `wrapping_add` (3), `checked_add` (2) — **four answers** | `guitk::idseq` |
+| 15 percentages | What "percent of nothing" is: `0`, `0.0`, `100`, `100.0` — **four answers**; and only one of the fifteen clamped | `guitk::ratio` |
+| 3 quiet-hours windows | Nothing — but all three shared one hole, and one shipped it | `guitk::daywindow` |
+| 22 index steps | What happens at the end of the list: 13 wrapped, 9 clamped — **and no call site said which it meant** | `guitk::step` |
+
+Each of those is worth reading as a separate lesson:
+
+- **`idseq`.** Wrapping is the worst of the four answers, and three of the
+  fourteen chose it. The ids it reuses first are the *lowest*, which in a shell
+  that has been up long enough to wrap are overwhelmingly the ones still alive
+  — the first workspace, the pinned window, the tray notification sitting there
+  since boot. A duplicate id is not a crash; it is one object answering to
+  another's name, which is how a dismissal dismisses the wrong notification.
+  The module offers `issue() -> Option<T>` universally and
+  `issue_infallible() -> T` **only** for `T: Inexhaustible` (u64/u128), so the
+  shortcut is gated by the compiler rather than by a comment. The four 32-bit
+  sequences were *widened* rather than given an error path no caller could act
+  on: `IconId`, `DeviceId`, `RuleId`, `RecordingId`.
+- **`ratio`.** Each of the four zero-case answers was right for its own caller,
+  which is exactly why it is not a decision a shared helper should make for
+  them. `percent` returns `Option`, so `.unwrap_or(0.0)` puts each caller's
+  answer in the same expression as the division. An empty disk is 0% used; a
+  battery with no recorded design capacity is assumed healthy at 100%.
+- **`step`** (renamed from `cycle`, which had owned only the wrapping half).
+  This one is a fault *one level up* from the rest of the sweep: not arithmetic
+  without a proof, but **behaviour without a decision**. The launcher stops at
+  the last result; the Wi-Fi list wraps to the first network. Both are right —
+  a ranking has no meaningful "after the worst match", a short menu of networks
+  is a ring you thumb through — but no call site stated which it had chosen, so
+  the answer was settled by whoever typed the loop. The policy is now in the
+  name (`wrapping_after` / `clamped_after`) and neither is the default.
+
+**Live defects found.**
+
+- `backup_settings::record_backup` advanced a `next_backup_id` counter that
+  **nothing ever read**. Every caller invented its own id, and all the tests
+  passed `id: 1`, so nothing stopped two history entries sharing one — which
+  would have made delete-by-id ambiguous the first time it mattered. The
+  function now assigns the id and returns it.
+- `notif_pane` aged notifications with bare subtraction behind an
+  `if now < timestamp` guard. A clock moved backwards — NTP correction, DST
+  fix, or a stamp from a process whose clock ran ahead — leaves timestamps in
+  the future; without the guard those age to near `u64::MAX`, i.e. sorted
+  `Older` and dated half a trillion years ago. ~18 sites elsewhere in the tree
+  already used `saturating_sub`; these two were the outliers.
+- `security_dialog::truncate_str` was the **fifth** copy of the char-boundary
+  walk `TextCursor::snapped_in` was extracted to own, and its doc comment said
+  `max` was in characters. It has always been bytes — a name like that is how a
+  caller sizes a field in characters and gets a third of it for text that is
+  not ASCII.
+- `resmon`'s sparkline indexed `i` and `i - 1` with a `.unwrap_or(0.0)` on each
+  end, so a missing sample would have been drawn as a spike down to the floor —
+  a fabricated reading in a graph of real ones. It walks `windows(2)` now, and
+  the pair is always real.
+- `login_screen`'s lockout expiry could wrap *behind* `now_ms` and clear the
+  lockout on the next tick. It saturates in the safe direction now: an
+  unrepresentable expiry is a lockout that does not end.
+
+**`.get()` throws the proof away.** The last two sites in the crate were
+`icons::GridConfig::columns_in`/`rows_in`, still firing after the cell size had
+been moved to `NonZeroU32`, because they divided by `self.cell_width.get()`.
+The lint is right to fire: `.get()` hands the compiler a plain `u32`, so the
+division one expression later is by a value with no non-zero proof attached.
+Dividing by the `NonZeroU32` itself uses `Div<NonZeroU32> for u32`, which
+cannot panic. The cost is `const`, since operator impls are not const — no
+caller wanted it. Worth remembering as the general shape: **reach for `.get()`
+last, not first**, or the type you introduced to carry a fact stops carrying it
+at the first call site.
+
+**One shape deliberately left alone.** `let before = v.len(); v.retain(…);
+v.len() < before` appears **27 times** across `gui/` and `apps/` — by count the
+largest duplicated shape in the sweep. It was *not* extracted, because it fails
+the test the other four passed: the copies do not disagree, and none of them is
+wrong. 25 return the boolean, 2 return a count, and both are correct APIs.
+Extraction here would buy two fewer lines per site at the cost of an
+indirection over an idiom every Rust reader already knows. Recorded here so the
+next sweep does not re-discover it and reach a different conclusion by
+accident: **duplication alone is not the warrant — divergence is.**
+
+**`gui/desktop` is at 0 sites.** All ten `gui/` crates are now clean under the
+full workspace lint set.
 
 ## C-TEXT-WAS-CUT-BY-COUNTING-CHARACTERS-INSTEAD-OF-MEASURING-IT (lane C, 2026-08-17) - **fixed**
 
@@ -46457,3 +46607,703 @@ deserve unrelated budgets — but the first is what any run should do today.
 **Workaround until then.** `python scripts/run-timeout.py --poll 60 2700
 ./scripts/boot-test.sh`, backgrounded via the Bash tool's `run_in_background`,
 with no pipe on the command.
+
+## `[A]` The bench gate names `fs/zfs` as perf-critical, but no benchmark can see it
+
+**Status:** OPEN (2026-08-20)
+
+**What happens.** `boot-test.sh` compares the changed file list against its
+perf-critical path rule and, on a match, prints "Performance-critical code
+changed since the last benchmarked commit … CLAUDE.md requires benchmarking
+these" and names the files. On 2026-08-20 it named all three of
+`kernel/src/fs/zfs/{dmu,mod,tests}.rs` after the gang-block change. The
+requested `./scripts/boot-test.sh --bench` run then came back **RUN CLEAN**, 86
+benchmarks, nothing outside its own range.
+
+**Why that is worth an entry.** The suite has **no ZFS benchmark**. Its 86
+entries include sixteen `vfs_*`/`crypto_*` ones, and none of them reaches the
+ZFS reader — it is not mounted at boot and is exercised only by its in-memory
+self-test. So the clean verdict is true and also uninformative: the instrument
+that was asked to check the change is structurally incapable of observing it.
+This is the same failure shape as the 2026-08-19 "zero KASAN reports"
+correction, where the check used a matcher the kernel never emits and therefore
+could not have failed. A gate that always passes teaches the next session to
+stop reading it.
+
+**Two defensible fixes, and they are not equivalent.**
+
+1. *Give the gate something to measure.* Add a ZFS read benchmark — block read
+   with checksum verify (fletcher4 and sha256), indirect-block walk, and gang
+   reassembly are all real per-block costs, and the last is new. This makes the
+   existing rule honest and is the better answer if ZFS is ever mounted for
+   real.
+2. *Make the gate admit what it does not cover.* Have the perf-critical rule
+   report which changed paths have **no** covering benchmark, so the message
+   reads "no benchmark covers this" instead of silently implying one does.
+
+(2) is the more general fix — the same blind spot presumably exists for other
+paths in the rule, and nobody has checked which. (1) is worth doing regardless.
+Neither is urgent: nothing is wrong with the ZFS code, and the risk is one of
+false assurance, not of a missed regression that a *working* instrument would
+have caught.
+
+**Where.** The rule and its message live in `scripts/boot-test.sh`; the
+benchmark registry is under `bench/`.
+
+**[A] 2026-08-20 — a *second*, different defect in the same rule, found and
+fixed.** While reading the rule for fix (2) above, its revision comparison
+turned out to be `git diff --name-only "$last_commit" HEAD`, i.e. a diff between
+two **commits**. Every uncommitted change was therefore invisible to it — and
+since the workflow here is edit, boot-test, then commit, an unbenchmarked change
+to a listed path is *most likely to be uncommitted at exactly the moment the
+gate runs*. The blind spot was the common case, not a corner one.
+
+The proof arrived in two halves one commit apart, with no code change between
+them: a run built from a tree containing a modified `kernel/src/mm/user.rs` (a
+listed path) printed "No perf-critical changes since the last benchmarked
+commit", and the byte-identical tree printed "!! Performance-critical code
+changed … kernel/src/mm/user.rs" on the next run, once the file had been
+committed. Same code, opposite verdicts, decided by nothing but `git add`.
+
+Fixed by diffing the **working tree** (`git diff <commit> -- <paths>`, no second
+rev) and querying untracked files separately — a new file under a benchmarked
+path is code the suite has never measured, which is the strongest reason to
+escalate. The message now also says how many of the named files are uncommitted,
+because `bench/history.jsonl` stamps rows with a commit hash and a row recorded
+from a dirty tree names only an ancestor of what was measured. Verified against
+all three cases (uncommitted modification, new untracked file, committed-only)
+by extracting the function and running it against deliberately dirtied trees.
+
+This does **not** close this entry. It was a missing *revision*; the entry above
+is about a missing *benchmark*, and the gate can now correctly name a path that
+still nothing measures. If anything it raises the priority of fix (2), since the
+rule will now fire in strictly more situations.
+
+**`[A]` 2026-08-20 — fix (2) is now done, and the audit it required found the
+defect underneath both of them.** The gate no longer implies coverage it does
+not have: `scripts/boot-test.sh` carries a per-file `BENCH_COVERAGE` map, and
+its report is split into files the suite measures and files headed "covered by
+NO benchmark. Running --bench will not tell you whether these got slower". The
+default for anything not written down is *uncovered*, so silence is never read
+as coverage. Rationale and the noise-vs-false-assurance tradeoff: design-decisions
+§250.
+
+Building that map required going through all 86 recorded benchmarks and reading
+which module each one actually calls, and that turned up three things worse than
+coarse granularity:
+
+- **Four benchmarks measure a copy of the code rather than the code.**
+  `net_checksum`, `tcp_checksum_v4`, `tcp_checksum_v6` and `dns_build_query` all
+  time private reimplementations living in `bench.rs` (lines 6395, 6451, 6520,
+  6664); one says so in its own doc comment. They cover no kernel file at all.
+  Make the real label encoder in `net/dns.rs` ten times slower and every one of
+  them stays green — and the old `BENCH_CRITICAL_PATHS` annotation cited them by
+  name as the benchmarks `kernel/src/net` "actually guards".
+- **`kernel/src/idt.rs` is measured by neither benchmark cited for it.**
+  `isr_latency`'s window opens at `apic.rs:1059`, inside `handle_timer_irq` and
+  past the IDT stub; `page_fault` hand-rolls map/unmap through `page_table` with
+  the CPU exception explicitly excluded (`bench.rs:5450`). The same two facts
+  mean **`mm/fault.rs`, the actual `#PF` handler, is unbenchmarked** despite
+  "page fault handling" being a row in CLAUDE.md's perf-critical table.
+- **`kernel/src/apic.rs` was not watched at all**, despite holding the only code
+  `isr_latency` times. Added to `BENCH_CRITICAL_PATHS`.
+
+The per-path benchmark annotations on `BENCH_CRITICAL_PATHS` were deleted rather
+than corrected: they were a second copy of a mapping that now lives in
+`BENCH_COVERAGE`, and a second copy is a second thing to be wrong. A
+`report_bench_coverage_rot()` check runs on every green boot and fails the map
+if it cites a benchmark the newest `bench/history.jsonl` row does not contain —
+which catches renames, deletions, and the several benchmarks that print `SKIP`
+and record nothing, the last of which a source grep cannot see.
+
+**Confirmed first-hand the same day.** The `--bench` run this gate demanded for
+`kernel/src/mm/user.rs` completed — PASSED, 86 benchmarks recorded, boot streak
+33 — and observed nothing about the change, because no benchmark calls
+`copy_to_user` or `copy_from_user`. That run was flagged `RUN CONTAMINATED` by
+its own instruments (wall time 212 s against a median of 144 s; lane-B held the
+boot lock for the preceding 300 s), so its one `REGRESSED, UNREPLICATED` line —
+`net_veth_roundtrip` 875 ns → 1334 ns, inside its own 635–1326 ns range at the
+top end — is not attributable to any code change and is logged here rather than
+chased. Under the new report, that same `mm/user.rs` change would have been told
+"nothing here would be measured by --bench", which is both true and 21 minutes
+cheaper.
+
+**Still open:** fix (1), a ZFS read benchmark. Also now visible as consequences
+of the audit: `mm/fault.rs` and `net/dns.rs` have no honest benchmark, and four
+existing benchmarks should either be pointed at the real implementations or
+renamed to admit they are microbenchmarks of `bench.rs`. Pointing them at the
+real code is the correct fix — the reason given for duplicating
+(`tcp_checksum_bench`: "to avoid depending on tcp module internals") is a reason
+to widen the module's public surface, not a reason to measure something else.
+
+**`[A]` 2026-08-20 (follow-up) — the map's own first draft over-claimed six
+times.** Auditing `BENCH_COVERAGE` entry by entry against `bench.rs` before
+trusting it removed `mm/frame_owner.rs` (A/B-tested only via
+`timed()`/`ab_interleaved()`, recorded nowhere — an unrecorded measurement
+cannot detect a regression), `syscall/number.rs` (a compile-time constant),
+`net/interface.rs` (named by four benchmarks, but only to build an `Ipv4Addr`
+outside the timed closure) and `sched/task.rs`; re-pointed `fs/path.rs` from
+`vfs_stat_breakdown_ns` (an atomic load on the namespace fast path) to
+`_prologue`/`_resolve`, which really do run `validate_path`/`normalize_path`
+over its types; and added the missing `context_switch` to
+`sched/priority_rr.rs`, where `PerCpuScheduler::pick_next_local` lives. Corrected
+totals: mm 4 of 47, sched 4 of 18, syscall 2 of 9, net 9 of 49.
+
+Five of the six were over-claims, committed while writing the fix for
+over-claiming. The lesson is in design-decisions §250: "this benchmark mentions
+this file" is an easy question, "this benchmark would notice this file getting
+slower" is the real one, and the first is habitually mistaken for the second.
+Treat `report_bench_coverage_rot()` as load-bearing, and when adding a rule,
+check that the call is inside the `run(...)` closure and that the benchmark is
+`score`d or `track`ed rather than `run_diagnostic`'d.
+
+Validated on a real boot: PASSED, streak 34, with the rot check running silently
+on the live `finish_pass` path under `set -euo pipefail`.
+
+---
+
+## `apps/**` bug-hunt sweep, round 1: five live defects and two latent (lane C)
+**Status:** FIXED 2026-08-20 — `5b4dd7731` (calendar), `80dd0a5f3` (slices),
+`c989b21d0` (clipboard preview), `e1390abb1` (sticky-note columns),
+`d5a1e7eb8` + `ae3946e33` (grid column counts), `253478bd3` (QR block structure).
+
+The roadmap asks lane C to run bug-hunt sweeps over `apps/**` between
+features; ~200 crates there have never had a systematic audit. This is the
+first round's findings, filed closed because all five were fixed in the same
+sitting. They are recorded rather than merely committed because the *shape* of
+each recurs, and the next sweep should start by grepping for it.
+
+### The shape, again: a proof that lives in a different statement than the code it justifies
+
+All five are the same fault the `gui/**` lint sweep kept finding. A value is
+checked in one statement and used in another, and in between, something makes
+the check not mean what it looks like it means.
+
+### 1. `apps/explorer` listed a fabricated date for every file older than 2000-03-01
+
+`columns.rs::format_datetime` — the Date Modified column — carried a local
+civil calendar that shifted the epoch to 2000-03-01 "to simplify leap-year
+handling", and then, for anything *before* that epoch, did not compute a date
+at all. It estimated one:
+
+| | |
+|---|---|
+| year | `1970 + days / 365` |
+| month | `day_of_year / 30 + 1`, clamped to ≤ 12 |
+| day | clamped to ≤ 28 |
+
+| Real date | Shown as |
+|---|---|
+| 1985-07-04 | 1985-07-09 |
+| 1999-06-15 | 1999-06-23 |
+| 2000-02-29 (a real leap day) | 2000-03-07 |
+| 1970-01-01 | 1970-01-01 (the one it got right) |
+
+**Why nothing caught it.** Every value it produced was *in range* — a plausible
+month, a plausible day — so no clamp, assertion, or type could have flagged it.
+The error grew with the file's age, and old files are exactly the ones a user
+sorts by date to find. The crate's single `test_format_datetime` sampled a 2024
+timestamp, which is on the correct side of the seam; the whole bug lived in a
+branch no test entered.
+
+The post-2000 path was arithmetically identical to Hinnant's, which is why the
+damage was confined: `719468 + 11017 = 5 × 146097`, so 2000-03-01 is an exact
+era boundary and the shifted form degenerates to the standard one above it.
+
+### 2 & 3. `starts_with(q) && ends_with(q)` is not a bounds proof
+
+A string of a *single* `q` starts with it and ends with it — the same byte
+answering both tests. The guard passes at `len == 1`, and the `&s[1..s.len() -
+1]` that follows becomes `1..0`, which panics.
+
+| Crate | Trigger | Reachable by |
+|---|---|---|
+| `apps/ircclient` `CtcpMessage::parse` | `"\x01"` | a PRIVMSG trailing parameter, i.e. anything the server sends — a one-line remote client kill |
+| `apps/installer` YAML scalar parser | a lone `"` or `'` | a typo in a hand-edited install manifest |
+
+The installer's had a `wrapping_sub()` in it, which is the interesting part:
+somebody silenced `clippy::arithmetic_side_effects` at the subtraction instead
+of asking why it fired. That made the underflow *silent but not harmless* — it
+produced `usize::MAX` and the slice panicked anyway, one line later and less
+legibly. **A suppression that moves a panic rather than removing it is worse
+than the warning was.**
+
+Both now `strip_prefix`/`strip_suffix` in sequence, which structurally cannot
+make the mistake: after the prefix is removed, the suffix is looked for in what
+is *left*, and an empty string has no delimiter to end with. Grep
+`starts_with(.*).*&&.*ends_with(` before believing any similar guard; as of
+this sweep the remaining lane-C hits are all `filter`/`any` predicates that
+never slice.
+
+### `is_action` vs `parse`: two recognisers for one grammar
+
+`CtcpMessage` had a second, independent ACTION parser (`starts_with("\x01ACTION")`
+plus `&text[8..text.len() - 1]`). It disagreed with `parse()` three ways, all
+reachable from the wire:
+
+| Input | `action_text` said | `parse` said |
+|---|---|---|
+| `"\x01ACTION\x01"` | *panic* (sliced `8..7`) | `Action("")` |
+| `"\x01ACTIONfoo\x01"` | `Action("oo")` — the hard-coded `8` assumed a space nobody checked for | `Unknown("ACTIONFOO", "")` |
+| `"\x01ACTIONé \x01"` | *panic* — index 8 fell inside the `é` | `Unknown(…)` |
+
+Fixed by defining `action_text` in terms of the same framing and verb split
+`parse` uses, and `is_action` in terms of `action_text`. `parse` also folds case
+with ASCII rules rather than `to_uppercase`, so the two cannot drift on
+`"actıon"` (dotless i, which *does* uppercase to `ACTION`).
+
+### 4 & 5. `String::truncate`/`insert`/`remove` panic off a character boundary
+
+The byte/character confusion again, in the standard library's most
+panic-prone corner. Found by grepping for `String` mutators that take an
+offset, after `String::truncate` turned one up.
+
+**`apps/clipmanager::ClipEntry::preview` — live, and a crash in a render
+path.** Documented as "`PREVIEW_MAX_CHARS` total characters", implemented
+entirely in bytes: it compared `out.len()` against the limit and cut with
+`out.truncate(120)`. The clipboard holds whatever the user copied, so copying
+a couple of sentences of Greek, Cyrillic, Hebrew, Arabic, CJK or emoji took the
+clipboard manager down *while drawing its own list* — and because the entry was
+already in the history, it recurred on every restart until the entry aged out.
+Counting bytes was wrong even when it did not crash: 120 bytes of Japanese is
+40 characters, so a preview that filled a row in English was cut to a third of
+it. The one existing test used `"a".repeat(200)`; ASCII is exactly the input
+that cannot fail, the same blind spot that let `apps/explorer`'s date bug live
+behind a test that only sampled 2024.
+
+**`apps/stickynotes::Note::insert_char`/`delete_char` — latent.** Both take a
+byte offset and clamped it to the line's length and no further. Clamping stops
+an offset running off the *end*; it says nothing about the *boundary*. Nothing
+outside the tests calls either today, which is why the 2026-08-16 audit
+recorded in `GUI-TEXT-INPUT-CURSORS-STEP-BY-BYTES` missed them: that sweep
+looked for `cursor ± 1` and these have no cursor field, only a parameter whose
+signature never said whether it meant bytes or characters. Now snapped back to
+the boundary, matching `apps/editor::snap_to_boundary` and
+`apps/markdowneditor::clamp_col`, and the unit is stated.
+
+**Everything else in that class was checked and is correct**, mostly by having
+already been fixed on 2026-08-16: `apps/editor` (`snap_to_boundary`),
+`apps/markdowneditor` (`clamp_col`, `len_utf8` steps), `apps/paint` (scans for
+the adjacent character), `apps/launcher` and `apps/jsonviewer` and
+`apps/spreadsheet` (caret counts characters, converted at each use),
+`apps/calculator` (`len() - last.len_utf8()`, which is a boundary by
+construction), `apps/dbviewer` (a `Vec<String>`, so `Vec::truncate`),
+`apps/netscan` (`char_indices().nth`), `apps/unitconverter` (ASCII-only input
+filter, invariant documented at the site).
+
+### A test-design trap worth remembering: 120 is divisible by 2, 3 and 4
+
+The first draft of the clipmanager regression test used `"日".repeat(200)` and
+friends — and **passed against the broken code**. `PREVIEW_MAX_CHARS` is 120,
+which is a multiple of every UTF-8 width, so byte 120 of a solid run of
+2-, 3- or 4-byte characters lands on a boundary by accident. A test of a
+boundary bug has to *shift the grid*: the cases are now a single ASCII prefix
+followed by a run, and each asserts `!is_char_boundary(PREVIEW_MAX_CHARS)` up
+front so it cannot quietly stop testing the bug if the constant changes.
+
+Generally: **a regression test for a "lands inside a character" bug must assert
+that its input actually lands inside a character.** Otherwise the alignment is
+a coincidence, and coincidences are not stable under refactoring.
+
+### (6) `apps/colorpicker` divided by zero in one grid and not in its twin
+
+`ColorPickerApp::render_history` computed how many swatches fit across the
+window and then indexed its cells with `i % cells_per_row` over a loop bounded
+by **the number of colors in the history**, not by `cells_per_row`. A window
+narrower than one 28px swatch plus its padding makes that count zero and the
+modulo panics.
+
+`render_palette`, **sixty lines below in the same file**, computes the same
+quantity and writes `.max(1)` at *both* of its divisions. The author knew — in
+one of the two places — and neither site says why. Same shape as everything
+above: a proof that lives in a different statement from the code it justifies.
+
+Latent rather than live today, and only by accident: `self.width` is assigned
+`WINDOW_WIDTH` once in `create()` and there is no `Resize` handler yet, so
+`cells_per_row` is 18 forever. It goes live the moment resize lands.
+
+Fixed in `d5a1e7eb8`, then folded into (7). Verified regressive: with the old
+body restored, the new test panics at the modulo rather than merely failing an
+assertion.
+
+### (7) …and five other spellings of the same guard, one crate away from the answer
+
+Finding (6) is not one site, it is the sixth transcription of one piece of
+arithmetic. Every place in lane C's tree that asks "how many `cell`-wide
+columns fit across this width":
+
+| Where | Guard against zero |
+|---|---|
+| `gui/toolkit/src/grid.rs` `LayoutCache::compute` | `NonZeroUsize`, with the reasoning written out |
+| `apps/worldclock` `render_grid` | `.max(1.0)` before the cast |
+| `apps/charmap` `render_grid` | `.max(1.0)` before the cast |
+| `apps/slides` sorter grid | `.max(1.0)`, **plus an `#[allow(arithmetic_side_effects)]` at each division** vouching for it from twenty lines away |
+| `apps/charmap` recent/favorites strip | **none** — safe only because the cap is `cols * 3`, so zero columns made both loops `take(0)` |
+| `apps/defrag` block map | `if cols > 0 { … checked_div … }` |
+| `apps/colorpicker` `render_history` | **none at all** — finding (6) |
+
+Seven sites, five spellings, one outright missing and one present-by-accident.
+The toolkit already had the right answer — `NonZeroUsize`, with a comment
+explaining exactly why the floor is one — and **kept it private**, so every app
+wrote its own. That is the same asymmetry as the `tzrules` request filed the
+same day (`requests/c-b-year-of-day-computes-the-month-and-day-and-throws-them-away.md`):
+export one direction of a piece of arithmetic and the tree grows transcriptions
+of the other, and one of them will be wrong.
+
+`ae3946e33` adds `guitk::grid::columns_across(avail, cell, gap) -> NonZeroUsize`,
+makes `LayoutCache::compute` call it, and routes colorpicker (both grids),
+charmap (both grids), worldclock and slides through it. The floor of one is now
+in the return type, so `i % columns` uses the `Rem<NonZeroUsize> for usize` impl
+that *cannot* divide by zero — slides drops both `#[allow]`s and charmap drops a
+`checked_div` and a `.max(1)`.
+
+Each migration is an **exact identity**, deliberately, not a re-derivation:
+worldclock's and slides' `(w - gap) / (cell + gap)` is
+`columns_across(w - 2*gap, cell, gap)`, and charmap's gapless grids pass
+`gap = 0.0`. The single visible change is charmap's recent strip, which now
+shows one clipped column where it previously showed none — which is the
+toolkit's documented floor, and the more useful rendering.
+
+Two subtleties worth keeping:
+
+- **The degenerate case is keyed off `cell`, not off the pitch.** A zero-width
+  cell separated by an 8px gap would otherwise "fit" once per gap, counting the
+  separators as though they were content. `LayoutCache` had this right
+  (`if cell_width <= 0.0`) and the first draft of `columns_across` did not;
+  the `columns_across_agrees_with_the_layout_cache` test is what pins it.
+- **`inf as usize` saturates, it does not wrap**, so a zero pitch would have
+  produced `usize::MAX` columns rather than a panic — non-zero, so no
+  zero-check would have caught it, and a grid of `usize::MAX` columns is not an
+  answer anyone wants.
+
+**Not migrated: `apps/defrag`.** Its `if cols > 0` skips the whole block map
+rather than clipping it — a different contract, and correct as it stands.
+Migrating it would change what the user sees for no defect. Same rule as the
+`(i + 1) % len()` sites below: divergence in *correctness* is the warrant for
+extraction; divergence in *spelling*, over code that is already right, is not.
+
+### (8) `apps/qrcode` generated unscannable codes for 16 of its 40 version/EC pairs
+
+The worst of the round, and the one that shows the doctrine at full strength.
+
+`get_version_info` returns a row of a transcribed spec table that **states the
+same fact twice**: `data_capacity_bytes` is the published byte-mode capacity,
+and `total_codewords`, `num_blocks` and `ec_codewords_per_block` imply it.
+Nothing compared the two. Sixteen of the forty rows disagreed:
+
+| Rows | Table said | Capacity implies |
+|---|---|---|
+| v5-Q, v5-H, v6-Q, v6-H, v8-M, v10-L | 2 or 3 blocks | 4 |
+| v7-H, v9-M, v10-M | 2 or 3 | 5 |
+| v7-Q, v8-Q, v8-H | 2 | 6 |
+| v9-Q, v9-H, v10-Q, v10-H | 3 | 8 |
+
+Every implied count comes out an **exact integer**, which is what identifies
+the block column as the wrong one rather than the capacity column — had the
+capacity been the typo, the implied block counts would have come out
+fractional. The corrected values also match ISO/IEC 18004's own block table,
+derived independently.
+
+**Why nothing caught it.** This is not a panic and not a length error.
+`encode_data_bits` padded to `total_codewords - ec_per_block * num_blocks` —
+98 data codewords for v5-Q instead of 62 — and `apply_error_correction` then
+added exactly enough EC to reach `total_codewords`, because the two errors are
+the same quantity with opposite signs. **The symbol filled the matrix and
+rendered correctly.** It was simply not the codeword layout any conforming
+decoder de-interleaves, so it did not scan. Two of the three tests written for
+this fix pass against the *broken* table; only the one comparing the table to
+itself fails. Nothing short of a second opinion could have found it — there was
+no crash, no overflow, no out-of-range value, and the rendered image looked
+exactly like a QR code.
+
+Reachable with the default EC level (M) at 123 bytes of payload and up, and
+from **47 bytes at Q** — an ordinary URL.
+
+Fixed in `253478bd3`: the sixteen counts corrected; `byte_mode_capacity()`
+derives the payload size from the block structure and a test asserts it equals
+every row's stated capacity; both halves of the encoder read the data codeword
+count from one `data_codewords()` instead of each spelling out the subtraction.
+
+**A lint suppression whose justification did not cover the case that bit.**
+`apps/qrcode` allows `arithmetic_side_effects` and `indexing_slicing`
+file-wide, with a comment explaining that "indices are computed from QR-version
+metadata, all bounded by the matrix dimension." That is true of the matrix
+pokes and Galois-field lookups it was written for, and was never true of
+`total_data / num_blocks`, which divides by a *table column*. A file-wide
+allow inherits the reasoning of the sites the author had in mind and extends
+it silently to every site added afterwards — the same defect as finding (2)'s
+`wrapping_sub`, one scope larger. `num_blocks` is now a `NonZeroUsize` and the
+function returns `None` on a zero row rather than dividing.
+
+### Deliberately not changed: the ~15 `(i + 1) % len()` sites
+
+Every wrapping-index step in `apps/**` that divides by a runtime length was
+checked, and **every one is guarded** — always in a different statement from the
+division, which is the shape above, but the guard is genuinely there each time.
+`startupmanager::field_count()` and `life`'s `Grid` dimensions look unguarded
+but are constants behind a method and a constructor.
+
+They were left alone on the sweep's own rule: **duplication alone is not the
+warrant for extraction — divergence is.** These ~15 do not disagree with each
+other; they all wrap a stale index by `%`. They *do* disagree with
+`guitk::step::wrapping_after`, which clamps first (`step::wrapping_after(3, 9)`
+is `0`; `(9 + 1) % 3` is `1`) — as does `apps/filediff`'s local
+`wrap_next`/`wrap_prev`. So a migration to `guitk::step` would not be removing
+a divergence, it would be *introducing* one into fifteen call sites at once, to
+delete a `%`. Not done. If `guitk::step` ever grows a mod-wrap variant, that
+changes; until then this note is why nobody should "tidy" these.
+
+### Remaining backlog
+
+`apps/**` opts into the workspace lints (all 142 crates do), but the defensive
+five are `warn`, not `deny`, so a warning backlog accumulates uncounted — the
+installer's `wrapping_sub` and `apps/backup`'s `days + 719_468` were both
+firing silently for months.
+
+**Measured 2026-08-21** (`cargo clippy --workspace --exclude kernel
+--all-targets --keep-going --target x86_64-pc-windows-gnu`, counted with
+`scripts/clippy-sites.py`, deduplicated by `(file, line, column, lint)`):
+
+| Tree | Distinct sites |
+|---|---|
+| `apps/**` | **4986** |
+| `net*/**` | 87 |
+| `gui/**` | 1 |
+| `textfmt` | 0 |
+
+Within `apps/**` the defensive five are 4872 of the 4986 — **97.7%**:
+`indexing_slicing` 2195, `arithmetic_side_effects` 1887, `unwrap_used` 617,
+`expect_used` 117, `panic` 56. The remaining 114 are ordinary style lints.
+Worst files: `indexer` 196, `terminal/pty.rs` 162, `unitconverter` 159,
+`markdowneditor` 155, `paint` 136.
+
+The shape of that table is the finding, not the total. The shared code — the
+toolkit, the desktop, the extracted crates — is essentially clean, and the
+200 application crates hold effectively all of it. That is not because the
+apps are worse code; it is because **the shared crates are the only ones
+anything ever pointed a linter at.** `gui/**` was audited during the
+extractions that produced `guitk::grid`, `guitk::date` and `textfmt`;
+`apps/**` has never had a pass at all.
+
+Two cautions before anyone treats 4986 as a defect count:
+
+- **It is an upper bound on suspicion, not a bug count.** Most
+  `indexing_slicing` sites index a literal-sized array with a bounded loop
+  counter. The sweep's five real defects were each found by *reasoning about
+  a duplicated shape*, not by walking a lint list — none of the five would
+  have been top of this ranking.
+- **It includes test code, which is where the lints are least meaningful**
+  (panicking on bad data is the point of a test). The workspace lint table
+  allows the defensive five under `#[cfg(test)]` by convention, but that is a
+  convention applied by hand, not a `cfg` in the table, so test sites are
+  counted here. Splitting the figure by target is worth doing before using it
+  to prioritise.
+
+## apps/** bug-hunt sweep, round 2: twenty-nine programs divided by 1024 and called it KB (lane C)
+
+**Filed:** 2026-08-21 by Lane C.
+**Status:** FIXED — `textfmt::bytes` plus a 52-call-site migration across 45 files.
+See design-decisions.md §489 for the units policy this settles.
+
+### The defect
+
+Forty-four functions in the tree turned a byte count into text for a person to
+read: `format_size`, `format_bytes`, `human_size`, `human_file_size`. **Twenty-
+seven of them divided by 1024 and labelled the result `KB`, `MB`, `GB`.** Three
+more formatted bytes *per second* and split the same way, two of them wrong, so
+the final tally is forty-seven hand-written implementations and twenty-nine
+mislabellings.
+
+That is not a style quibble. `KB` is 1000 bytes; `KiB` is 1024. The two differ
+by 2.4% at kilobytes and by 10% at terabytes, so the number shown to the user
+was simply not the quantity the label named:
+
+| Real size | What it said | What that label means |
+|---|---|---|
+| 1 GiB file (`apps/explorer`) | `1.00 GB` | 1.07 GB |
+| 4 TiB disk (`apps/diskimager`) | `4096.00 GB` | 4.40 TB, and not in gigabytes |
+| 1 500 000 B of traffic (`network_settings`) | `1.4 MB` | 1.5 MB |
+
+The last row is the one that proves it was drift rather than a considered
+choice: **`gui/desktop` displayed the same network byte counters in two units
+on one screen.** The tray indicator (`network_indicator.rs`) divided by 1000 and
+said `MB`; the settings page (`network_settings.rs`) divided by 1024 and also
+said `MB`. Same subsystem, same counter, two different numbers, and at most one
+of them right.
+
+The tally across all forty-four size formatters (the counts below are recomputed
+from the migration diff itself, not from the first grep, which under-counted):
+
+| | Count |
+|---|---|
+| base 1024, IEC names (`KiB`) — correct | 14 |
+| base 1000, SI names (`KB`) — correct | 3 |
+| **base 1024, SI names — wrong** | **27** |
+
+### The second defect, present in forty-three of the forty-four
+
+Every copy but one chose its unit from the *unrounded* byte count and rounded
+afterwards, so the printed mantissa could reach the base while keeping the
+smaller unit's name. 1 048 575 bytes is one byte under 1 MiB, so the `KiB`
+branch was taken, and `1048575 / 1024 = 1023.999…` printed as **`1024.0 KiB`** —
+a quantity that cannot exist, since the entire point of the unit is that there
+are 1024 of them.
+
+The exception is `apps/partmanager`, which was the most careful of the forty-four
+in every respect: pure integer arithmetic, no floats, and it even suppressed a
+trailing `.00`. It truncated rather than rounded, which is why it alone never
+printed a full base.
+
+A third, milder problem: several stopped at `GB` or `TB`, so large volumes were
+described in thousands of the wrong unit.
+
+### The third defect: the same mistake again, in rate form
+
+Three more functions formatted bytes *per second*, and they reproduced the
+split exactly:
+
+| | Divides by | Prints |
+|---|---|---|
+| `gui/desktop/network_indicator.rs` `format_rate` | 1000 | `MB/s` — correct |
+| `gui/desktop/resmon.rs` `format_bytes_per_sec` | 1024 | `MB/s` — wrong |
+| `apps/diskimager` `speed_display` | 1024 | `MB/s` — wrong |
+
+The first two are the *same quantity* — a network link's throughput — rendered
+by the tray indicator and by the resource monitor's network graph, which a user
+can have open side by side. They disagreed by 2.4% while claiming the same
+unit. `resmon`'s copy is reached only from `ResourceType::Network`, so there
+was never a domain difference to justify it; it was drift.
+
+`textfmt::bytes` therefore also exports `iec_rate`/`si_rate`, which are `scale`
+plus a `/s`. A rate now cannot disagree with the size it is a rate of, and the
+suffix is spelled in one place rather than six.
+
+One more instance was not a function at all: `apps/archivemanager` refused a
+split-volume size below `65536` with the message *"Volume size must be at least
+64 KB"* — a hand-written label with the same 1024-vs-1000 error, and a test
+asserting it. Both now say `64 KiB`.
+
+### The fourth defect: the scaling had moved upstream, into the interface
+
+`apps/sysinfo` had no wrong formatter — it had wrong *data*. `DiskInfo` and
+`PartitionInfo` stored `capacity_gb`/`used_gb`/`free_gb` as `f32`, already
+divided by 1024³, and four display sites printed them with `format!("{:.1} GB")`.
+So the "Samsung 990 Pro 2TB" read **`1863.0 GB`**, which is its capacity in
+neither unit — 2000 GB, or 1863 GiB — and the disk's own figure did not equal
+the sum of its partitions'.
+
+The important part is where the division lived. `apps/sysinfo/src/hwquery.rs`
+parses `/sys/hardware/block`, and the *node's own keys* were `capacity_gb`,
+`used_gb`, `free_gb` — floats. A reader of that interface cannot tell whether
+the producer divided by 1000 or 1024, and this one did not have to guess only
+because the same crate wrote both halves. Linux publishes `/sys/block/*/size`
+as a raw sector count for exactly this reason. The keys are now
+`capacity_bytes`/`used_bytes`/`free_bytes`, integers, and nothing in the tree
+produces the node yet, so the rename costs nothing today and stops a driver
+from baking a divisor into an ABI tomorrow.
+
+Both structs now hold `u64` byte counts and scale at the point of display. The
+mock data was re-derived so the partitions sum exactly to the disk (2 TB =
+2 000 398 934 016 B = EFI + root + home), which the pre-scaled gigabyte figures
+did not.
+
+This is the shape a `fn format_*` grep cannot find, and it is the most dangerous
+of the four: the other three put the mistake in a function that could be
+replaced, while this one put it in a field name and a wire format.
+
+### Why this is finding 9 and not a style cleanup
+
+It is the sweep's recurring shape in its clearest form yet. The two halves of
+the answer — **what to divide by** and **what to call the result** — were
+written as two *independent statements* in each of forty-seven places. Nothing
+tied them together, so they could disagree; across enough copies they did, and
+a majority of the copies ended up on the wrong side.
+
+Note what could not have caught it. Every output was a plausible string. No
+value was out of range, nothing overflowed, no test failed, and the number was
+never absurd enough to look wrong — `1.00 GB` for a 1 GiB file is off by 7%,
+which is invisible unless you already know the answer. As with the QR
+codeword tables in round 1, **only the table compared against itself** found it.
+
+### The fix
+
+`textfmt::bytes`, a new module in the dependency-free crate:
+
+- `iec(bytes)` → `1.5 MiB` (base 1024), `si(bytes)` → `1.5 MB` (base 1000),
+  and `scale(bytes, Unit)` for callers choosing at run time.
+- **The base and the unit names are one table**, chosen together by `Unit`. A
+  caller selects a family, never a divisor, so 1024-with-`KB` is now unspellable.
+- Rounds to tenths *first* and promotes afterwards, so the mantissa is always
+  below the base — `iec(1_048_575)` is `1.0 MiB`, not `1024.0 KiB`.
+- Runs to `EiB`/`EB`, past `u64::MAX`, so nothing saturates.
+- All-integer `u128` arithmetic with a `NonZeroU128` divisor: no float rounding
+  in the decision, and the division cannot be by zero.
+
+Re-exported as `guitk::bytes` for the GUI callers. The three headless crates —
+`apps/backup`, `apps/indexer`, `apps/installer` — depend on `textfmt`
+directly, which is exactly the three the crate's own module doc predicted would
+need it. That is the layering argument in
+`requests/c-b-year-of-day-computes-the-month-and-day-and-throws-them-away.md`,
+holding for a second primitive.
+
+All 52 call sites across 45 files now delegate — 42 `iec`, 7 `si`, 1 `iec_rate`,
+2 `si_rate`. That is five more sites than the forty-seven implementations
+replaced, because `apps/remotedesktop`'s single formatter became two (see below)
+and `apps/sysinfo`'s pre-scaled `capacity_gb` field became four display-site
+calls.
+
+### Which family, decided once instead of forty-seven times
+
+The rule §489 records, and the reason the SI set grew from 4 to 9: **bytes
+*moved over a link* are decimal; bytes *occupying storage* are binary.** It is
+stated that way so it can be applied to the next call site without re-deriving
+it from first principles, which is what forty-seven authors each failed to do.
+
+The consequences worth knowing:
+
+- `netmanager` and `vpnmanager` report interface/tunnel `rx_bytes`/`tx_bytes`
+  counters — the same counters the tray indicator and the network settings page
+  show — so they became SI. They had been base-1024-labelled-`KB`, i.e. wrong
+  under either reading.
+- `apps/remotedesktop` had one formatter serving both a *file transfer's* size
+  and the *session's* link counters. It now has two named functions, because
+  the answer genuinely differs: the file is the same file the explorer lists.
+- `apps/torrent` stayed binary throughout, including `downloaded`/`uploaded`.
+  Those count bytes of file content, not link traffic, and every torrent client
+  in existence quotes piece lengths in MiB.
+
+### What did not change
+
+The **numbers**, almost everywhere. All 29 broken sites were already
+*computing* base-1024 values, so correcting them to IEC names changed only
+text. Numbers moved only where a display was reclassified as decimal:
+`network_settings` (1.4 → 1.5 MB), `resmon`'s network graph, `netmanager` and
+`vpnmanager`. In every one of those cases the number moved *into* agreement
+with another window showing the same counter.
+
+### The same conflation, in the inverse direction — not fixed
+
+Two places *parse* a size suffix rather than print one, and both map `KB`/`MB`/
+`GB` to binary multipliers:
+
+- `apps/installer/src/lib.rs:1211` — the partition-size parser. A config saying
+  `size = "500 GB"` requests 537 GB, so a partition table written from a drive's
+  advertised capacity does not fit on that drive.
+- `apps/archivemanager/src/main.rs:258` — the same table, in a test fixture.
+
+This was deliberately **not** changed with the display side. Printing a number
+under a label that means something else is unambiguously false; *reading* a
+suffix is an input convention, and the surrounding ecosystem genuinely splits
+(`fdisk` and `parted` treat every suffix as binary). Changing it would silently
+resize partitions described by existing config files. Filed as
+`open-questions.md` **Q55** with three options, because it is a user-visible
+policy with no obviously-correct answer.
+
+### Related
+
+The formatter is the third primitive extracted by this sweep for the same
+reason, after `guitk::grid::columns_across` (round 1, finding 7) and the
+`tzrules::civil_from_days` request still open with lane B. In all three the
+tree held one correct answer that callers could not reach, and grew wrong
+copies of it. Whether that is worth generalising — an audit for *any* small
+computation restated more than three times — is the natural round-3 question.

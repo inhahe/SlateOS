@@ -9,9 +9,9 @@
 //! and the host provides completions via `set_completions()`.
 
 use crate::color::Color;
-use crate::cycle;
 use crate::event::{EventResult, Key, KeyEvent, MouseEvent, MouseEventKind};
 use crate::render::{FontWeightHint, RenderCommand, TextOverflow};
+use crate::step;
 use crate::style::CornerRadii;
 use crate::text::TextCursor;
 
@@ -562,7 +562,7 @@ impl PathBar {
         }
         let len = self.completions.len();
         self.completion_index = Some(match self.completion_index {
-            Some(i) => cycle::before(len, i),
+            Some(i) => step::wrapping_before(len, i),
             // Nothing selected: Up enters the list from the bottom.
             None => len.saturating_sub(1),
         });
@@ -575,7 +575,7 @@ impl PathBar {
         }
         let len = self.completions.len();
         self.completion_index = Some(match self.completion_index {
-            Some(i) => cycle::after(len, i),
+            Some(i) => step::wrapping_after(len, i),
             // Nothing selected: Down enters the list from the top.
             None => 0,
         });

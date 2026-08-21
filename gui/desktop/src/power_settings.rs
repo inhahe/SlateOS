@@ -5,6 +5,7 @@
 //! health overview with charge history and estimated remaining time.
 
 use guitk::color::Color;
+use guitk::ratio;
 use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::style::CornerRadii;
 
@@ -199,14 +200,13 @@ impl BatteryInfo {
     }
 
     /// Health percentage: full_charge / design × 100.
+    /// Battery health as a percentage of its design capacity.
+    ///
+    /// A battery that does not report a design capacity is assumed healthy —
+    /// the alternative is telling the user their new laptop battery is at 0%.
+    #[must_use]
     pub fn health_pct(&self) -> u32 {
-        if self.design_capacity_mwh == 0 {
-            return 100;
-        }
-        (self.full_charge_capacity_mwh.saturating_mul(100))
-            .checked_div(self.design_capacity_mwh)
-            .unwrap_or(100)
-            .min(100)
+        ratio::percent_whole(self.full_charge_capacity_mwh, self.design_capacity_mwh).unwrap_or(100)
     }
 
     /// Format remaining time as "Xh Ym" or "—".

@@ -68,6 +68,7 @@ use guitk::event::{Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::style::CornerRadii;
 use guitk::text;
+use guitk::text::TextCursor;
 
 // ============================================================================
 // Theme — Catppuccin Mocha palette
@@ -1360,18 +1361,22 @@ impl SecurityDialog {
 // Utility
 // ============================================================================
 
-/// Truncate a string to at most `max` characters, appending "…" if truncated.
+/// Truncate `s` to at most `max` *bytes*, cutting on a character boundary.
+///
+/// The old doc comment here said "characters", which it never did — `max` has
+/// always been a byte budget, and a name that says otherwise is how a caller
+/// ends up sizing a field in characters and getting a third of it for text
+/// that is not ASCII. The callers pass display budgets for process names and
+/// permission reasons, so bytes is the right unit; it is now the stated one.
+///
+/// The boundary walk this used to do by hand — `while end > 0 &&
+/// !s.is_char_boundary(end) { end -= 1 }` — is the fifth copy of the shape
+/// [`TextCursor::snapped_in`] was extracted to own, and had the same defect
+/// as its siblings: a subtraction whose safety lives in a `> 0` test in
+/// another statement.
 fn truncate_str(s: &str, max: usize) -> &str {
-    if s.len() <= max {
-        s
-    } else {
-        // Find last char boundary at or before max
-        let mut end = max;
-        while end > 0 && !s.is_char_boundary(end) {
-            end -= 1;
-        }
-        &s[..end]
-    }
+    let end = TextCursor::from(max).snapped_in(s).byte;
+    s.get(..end).unwrap_or(s)
 }
 
 // ============================================================================

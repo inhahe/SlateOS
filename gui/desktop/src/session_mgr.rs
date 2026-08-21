@@ -8,7 +8,9 @@
 //! which apps were open and where they were placed.
 
 use guitk::color::Color;
+use guitk::idseq::IdSeq;
 use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
+use guitk::step;
 use guitk::style::CornerRadii;
 
 // ============================================================================
@@ -197,8 +199,8 @@ pub struct SessionManager {
     workspaces: Vec<Workspace>,
     /// Current session state (for session restore).
     pub session: SessionState,
-    /// Next workspace ID.
-    next_id: WorkspaceId,
+    /// Source of workspace IDs.
+    ids: IdSeq<WorkspaceId>,
     /// Maximum number of workspaces.
     pub max_workspaces: usize,
     /// Whether session restore is enabled globally.
@@ -212,7 +214,7 @@ impl SessionManager {
         Self {
             workspaces: Vec::new(),
             session: SessionState::new(),
-            next_id: 1,
+            ids: IdSeq::new(),
             max_workspaces: 20,
             session_restore_enabled: true,
             active_workspace: None,
@@ -228,8 +230,7 @@ impl SessionManager {
         if self.workspaces.iter().any(|w| w.name == name) {
             return None;
         }
-        let id = self.next_id;
-        self.next_id += 1;
+        let id = self.ids.issue_infallible();
         self.workspaces.push(Workspace::new(id, name));
         Some(id)
     }
@@ -449,19 +450,11 @@ impl WorkspacePicker {
 
     /// Navigate selection.
     pub fn select_next(&mut self, count: usize) {
-        if count > 0 {
-            self.selected_index = (self.selected_index + 1) % count;
-        }
+        self.selected_index = step::wrapping_after(count, self.selected_index);
     }
 
     pub fn select_prev(&mut self, count: usize) {
-        if count > 0 {
-            self.selected_index = if self.selected_index == 0 {
-                count - 1
-            } else {
-                self.selected_index - 1
-            };
-        }
+        self.selected_index = step::wrapping_before(count, self.selected_index);
     }
 
     /// Render the picker overlay.

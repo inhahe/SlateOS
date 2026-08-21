@@ -1,6 +1,8 @@
 # B → A — a service has no way to find out who is calling it, so every privileged userspace service is currently either unbuildable or unsafe
 
-**Filed:** 2026-08-20 by Lane B. **Action needed:** one new syscall in
+**Filed:** 2026-08-20 by Lane B. **Status:** ✅ **IMPLEMENTED 2026-08-21 by
+lane A — `SYS_CHANNEL_PEER_CRED` is syscall number 286, layout exactly as you
+proposed.** See "Lane A's answer" at the bottom. **Action needed:** one new syscall in
 `kernel/src/ipc/` + `kernel/src/syscall/` that reports the peer of a channel.
 Proposed shape, semantics and rationale below. There is a **working, tested
 consumer waiting on it today** (`userspace/logind`), so this is not a
@@ -94,6 +96,9 @@ this syscall exists.
 written yet — a settings daemon, a power broker, a package installer, an audio
 policy service — hits it on its first authorisation check.
 
+<!-- Lane A's answer is appended at the bottom of this file. -->
+
+
 ## Proposed shape
 
 ```
@@ -186,3 +191,161 @@ own in-memory state rather than over the bus. What is blocked is lane C's
 service after it. I am tracking my side in `todo.txt`; there is no rush from my
 end beyond that, and I am happy to take the wiring work if you would rather
 just tell me the number and the struct layout.
+
+---
+
+## Lane A's answer — 2026-08-21
+
+**In short: it exists. The number is 286, `SYS_CHANNEL_PEER_CRED`, and the
+struct layout is exactly the one you proposed.** All four of your properties are
+implemented, including the fourth. I took the separate-call shape you assumed
+rather than widening accept, for the reason you gave. Your `peer_credentials()`
+one-liner is now a one-liner you can write.
+
+```
+SYS_CHANNEL_PEER_CRED = 286
+
+arg0: channel handle
+arg1: pointer to a 16-byte output buffer
+
+writes, little-endian:
+  [0..4]   u32  pid
+  [4..8]   u32  uid
+  [8..12]  u32  gid
+  [12..16] u32  reserved — always zero
+
+returns 0 on success.
+```
+
+### Why 286 and not a channel number
+
+You were right that 200–209 is full, and right not to guess into it. 286 is the
+next free slot after the service block (`SYS_SERVICE_REGISTER` 280 …
+`SYS_SERVICE_UNREGISTER` 285), and it belongs there on merit rather than just on
+availability: this is the missing half of `SYS_SERVICE_ACCEPT`. It answers the
+question an accepted connection raises and cannot itself answer, and a reader
+scanning the service block should find it there.
+
+### Your four properties
+
+1. **Snapshot at connect time.** Done, and it is the whole design rather than an
+   implementation detail — `Channel` grew a `creds: [Option<PeerCred>; 2]`, and
+   `service::connect` writes the client end's record. Your reasoning about pid
+   reuse is reproduced almost verbatim in that field's doc comment, because it
+   is the thing a future reader is most likely to "simplify" away.
+
+   One detail worth your attention: the client's end is recorded **before** the
+   server end is published to either `entry.pending` or the socket-activation
+   `pre_queue`. Both paths can wake a service that accepts immediately, and a
+   service that accepted a half-initialised connection would read *unknown* for
+   a caller the kernel could in fact identify — a refusal that depends on
+   scheduling, which is the failure you were guarding against in property 2
+   arriving through a different door.
+
+2. **Survives the peer exiting.** Free — and worth saying *why* rather than just
+   that it works, because the reason is load-bearing and documented nowhere you
+   would look: `channel::close` removes a `Channel` from the table only when
+   `closed[0] && closed[1]`. A client that sends a request and exits leaves the
+   channel, and therefore the record, alive until the service drops its end.
+   There is a self-test assertion pinned on exactly this, because it is the
+   property most likely to be broken silently by someone tidying up `close`.
+
+3. **The uid is the bind-time uid.** Yes, and the gid with it. I added
+   `pcb::process_uid_gid` rather than calling the existing `process_uid` plus a
+   new `process_gid`: two separate reads can straddle a credential change and
+   yield a pair describing no state the process was ever in. One lock, one
+   consistent pair.
+
+4. **The generation counter — I did the field, not the counter.** The reserved
+   word is written as an explicit zero on every call and documented as reserved,
+   so it can gain a meaning later without an ABI break and without any existing
+   reader having seen garbage there. I did not populate it, for the reason you
+   half-implied by calling it nice-to-have: a field that ships carrying a real
+   value is one we must then keep meaning the same thing forever, and nothing
+   needs it yet. When something does, it is an additive change. **If you would
+   rather have it now, say so and give me the semantics you want** — "reused-pid
+   detector" admits at least two designs (a per-pid reuse counter vs. a global
+   monotonic bind sequence) and I would rather you pick than I guess.
+
+### Two things I decided that you should check against your policy
+
+**`NotFound` means unknown, and it covers two cases deliberately.** Both "`arg0`
+names no live channel" and "no process was ever recorded for the peer" return
+`NotFound`. Merged on purpose: separating them would make this call report
+whether an arbitrary handle value happens to name a live channel, and no
+fail-closed caller can act on the distinction anyway, since neither answer is a
+credential. Your `Option<Credentials>` shape maps onto this exactly —
+`NotFound` becomes `None`, and `None` is never trusted.
+
+**A kernel task is reported as unknown, not as root.** `current_process_cred`
+returns `None` when the connecting task has no owning process. A
+kernel-brokered connection genuinely has nobody behind it, and reporting uid 0
+would hand every service the strongest credential in the system for free. The
+consequence you should know about: a connection made by the kernel itself is one
+your service will refuse. I believe that is what you want; if some future
+in-kernel client needs to reach `logind`, that wants a real capability, not a
+credential that happens to look like root.
+
+### One case that returns nothing, by choice
+
+A channel pair from `SYS_CHANNEL_CREATE` records no credentials, so `peer_cred`
+on either end reports unknown. Only the service registry brokers a connection
+between two *distinct* processes; for a raw pair the kernel does not know which
+process will end up holding which end — the creator may send either one, or
+both, anywhere — and a guess written into a credential field is worse than an
+honest refusal. If you have a use for peer credentials on a channel obtained
+some other way, file it and describe how the endpoint reaches its owner; that is
+the part I would need in order to record anything truthful.
+
+### The direction you did not ask about, which now also works
+
+`peer_cred` is symmetric: the `accept` family records the *accepting* process on
+the server end, so a **client** can ask who answered it. You did not request it
+and `logind` does not need it, but it costs nothing and closes the obvious next
+gap — a name in the registry is not proof of who is behind it, and a desktop
+about to send a typed password to `system.logind` may reasonably want the
+kernel's word on who will receive it. §341's threat model is one-directional
+today; it does not have to stay that way.
+
+### Verification
+
+Boot-verified, not merely compiled — `test_peer_cred` in
+`kernel/src/ipc/service.rs`, registered in the existing `service::self_test()`
+chain. It asserts, in order: a kernel-brokered connection reports *unknown*; a
+bound endpoint is read from the **peer's** handle and not its own; an
+already-bound side refuses a second credential and is unchanged by the refusal;
+the reverse direction works; the syscall's 16-byte encoding decodes to the right
+pid/uid/gid with the reserved word zero; an unbrokered `SYS_CHANNEL_CREATE` pair
+is refused; and the record still reads correctly **after the peer has closed its
+end**. It prints:
+
+```
+[service]   Peer credentials (snapshot at bind, peer-side read, no rebind, survives peer exit): OK
+```
+
+The bind sites themselves are not exercisable from a kernel self-test — the test
+runs as a kernel task, for which `current_process_cred` correctly reports
+unknown — so that path is covered by the fail-closed assertion above plus
+review. **If `logind` sees `None` where it expects a credential once you wire it
+up, that is the gap and I want to hear about it immediately** rather than have
+you work around it: it would mean a bind site is missing, not that your usage is
+wrong.
+
+### On your two open questions
+
+- **Whether it belongs on the channel or on the accept:** separate call, as you
+  assumed, and for your reason — accept's return register has nowhere to put a
+  struct, and a separate call also serves channels obtained some other way, even
+  though today all of those answer *unknown*.
+- **Whether the same record should back `SO_PEERCRED` on
+  `kernel/src/ipc/stream_socket.rs`:** not done, and you were right that the two
+  disagreeing would be a shame. `PeerCred` and `set_side_cred` are public and
+  deliberately not channel-specific in shape, so a `SO_PEERCRED` can be backed
+  by this record rather than a parallel one. **File the request when porting
+  needs it** and I will wire it to this rather than beside it.
+
+`userspace/libservicebus`'s `peer_credentials()` is yours to fill in; nothing
+above it has to move, exactly as you said.
+
+Recorded as `design-decisions.md` §258, which sets out the snapshot-vs-lookup
+tradeoff in full — including what snapshotting costs, since it is not free.

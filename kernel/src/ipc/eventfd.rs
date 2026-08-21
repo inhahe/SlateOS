@@ -43,9 +43,11 @@
 //!
 //! `EVENTFD_TABLE` → `SCHED` (read/write may call `sched::wake()`).
 
-use super::waiters::{WaiterSet, wake_all};
+use super::waiters::{
+    WaiterSet, current_user_pid, deliverable_signal_pending, park_interruptible, wake_all,
+};
 use crate::error::{KernelError, KernelResult};
-use crate::sched::{self, task::TaskId};
+use crate::sched;
 use crate::serial_println;
 use crate::sync::PreemptSpinMutex as Mutex;
 use alloc::collections::BTreeMap;
@@ -152,58 +154,6 @@ impl EventFd {
 static EVENTFD_TABLE: Mutex<BTreeMap<EventFdId, EventFd>> = Mutex::new(BTreeMap::new());
 
 // ---------------------------------------------------------------------------
-// Signal-interruptible blocking helpers
-// ---------------------------------------------------------------------------
-//
-// An eventfd is a slow object: a blocking `read`/`write` that is interrupted
-// by a deliverable signal must wake and return so the signal's handler can run
-// (mapped to ERESTARTSYS at the Linux syscall layer).  Without this a Linux
-// process blocked on an empty/full eventfd could never be interrupted —
-// exactly the hang-bug class fixed for pipes and stream sockets.  These
-// mirror the helpers in `ipc/pipe.rs`.
-
-/// The owning user process id of the current task, or `0` for a kernel task.
-///
-/// Eventfd waits are interruptible by signals only for user processes; kernel
-/// tasks (`pid == 0`) have no signal state and park uninterruptibly, as before.
-fn current_user_pid() -> u64 {
-    crate::proc::thread::owner_process(sched::current_task_id()).unwrap_or(0)
-}
-
-/// `true` if a deliverable (unblocked) signal is pending for `pid`.
-///
-/// Always `false` for `pid == 0` (kernel task — no signal context).
-fn deliverable_signal_pending(pid: u64) -> bool {
-    pid != 0 && crate::proc::signal::has_pending_in_mask(pid, !crate::proc::signal::blocked(pid))
-}
-
-/// Park the current task for an eventfd wait, interruptibly for user processes.
-///
-/// For a user process this registers a signal-waiter (so `set_pending` wakes the
-/// park when a deliverable signal arrives) using the register-then-recheck idiom
-/// to close the post-before-park race, blocks, then deregisters.  Kernel tasks
-/// park uninterruptibly.  The caller's surrounding loop must, after this
-/// returns, re-acquire the table lock and re-evaluate both the eventfd state and
-/// [`deliverable_signal_pending`] — a signal wake is reported by the latter, not
-/// by this function.
-fn park_for_eventfd(pid: u64, task: TaskId) {
-    if pid == 0 {
-        sched::block_current();
-        return;
-    }
-    let deliverable = !crate::proc::signal::blocked(pid);
-    crate::proc::signal::register_signalfd_waiter(pid, task, deliverable);
-    if crate::proc::signal::has_pending_in_mask(pid, deliverable) {
-        // A signal arrived between enqueue and registration — don't block; the
-        // caller's loop will observe the pending signal and return Interrupted.
-        crate::proc::signal::deregister_signalfd_waiter(pid, task);
-        return;
-    }
-    sched::block_current();
-    crate::proc::signal::deregister_signalfd_waiter(pid, task);
-}
-
-// ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
 
@@ -298,7 +248,7 @@ pub fn write(handle: EventFdHandle, value: u64) -> KernelResult<()> {
             efd.writer_waiters.insert(task);
         }
 
-        park_for_eventfd(pid, task);
+        park_interruptible(pid, task);
     }
 }
 
@@ -460,7 +410,7 @@ pub fn write_timeout(handle: EventFdHandle, value: u64, timeout_ns: u64) -> Kern
             efd.writer_waiters.insert(task);
         }
 
-        park_for_eventfd(pid, task);
+        park_interruptible(pid, task);
     }
 }
 
@@ -526,7 +476,7 @@ pub fn read(handle: EventFdHandle) -> KernelResult<u64> {
             efd.reader_waiters.insert(task);
         }
 
-        park_for_eventfd(pid, task);
+        park_interruptible(pid, task);
     }
 }
 
@@ -684,7 +634,7 @@ pub fn read_timeout(handle: EventFdHandle, timeout_ns: u64) -> KernelResult<u64>
             efd.reader_waiters.insert(task);
         }
 
-        park_for_eventfd(pid, task);
+        park_interruptible(pid, task);
     }
 }
 

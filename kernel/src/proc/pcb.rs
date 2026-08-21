@@ -2569,23 +2569,42 @@ pub fn get_sid(pid: ProcessId) -> Option<ProcessId> {
 //
 // ## Which terminal
 //
-// There is exactly one terminal (the console), so a session either has it or
-// has none, and no terminal *identity* needs storing.  When a second terminal
-// ever exists — a pty, a second console — this map's value grows a terminal
-// id and the acquisition rule below becomes "the terminal you opened" rather
-// than "the console".  Nothing outside this module depends on the current
-// value being just a pgid.
+// Terminals are now plural — the console is terminal 0 and each pseudo-terminal
+// pair is a further id — so the value records *which* terminal the session
+// holds alongside the foreground group, and acquisition is "the terminal you
+// opened" rather than "the console".  This is the growth this comment
+// predicted while only the console existed; the rules below did not otherwise
+// change, because none of them ever depended on there being one terminal
+// except the "is it free?" test, which was `map.is_empty()` and is now a
+// lookup for that terminal id.
+//
+// Why the terminal id has to be *here* rather than on the tty device: the
+// association is per session, and a pty slave's foreground group must be
+// readable by the pty's master end, which is a different process in a
+// different session. A copy on the device would be a second source of truth
+// for the same fact — the exact defect the `FOREGROUND_PGID` atomic was (see
+// `ctty_fg_pgrp`'s doc).
+
+/// One session's controlling-terminal association.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CttyState {
+    /// Which terminal this session holds: `0` is the console, higher ids are
+    /// pseudo-terminal slaves (see `crate::tty::TtyId`).
+    pub tty: u32,
+    /// That terminal's foreground process group.
+    pub fg_pgrp: ProcessId,
+}
 
 /// Per-session controlling-terminal state, keyed by session id.
 ///
 /// An entry's presence means "this session has a controlling terminal"; the
-/// value is that terminal's foreground process group.
+/// value names the terminal and its foreground process group.
 ///
 /// Locking order: this must never be taken while [`PROCESS_TABLE`] is held.
 /// Every function below that needs both reads what it needs from the process
 /// table, drops that lock, and only then touches this one — so the two can
 /// never deadlock against each other regardless of caller.
-static CTTY_FG_PGRP: Mutex<BTreeMap<ProcessId, ProcessId>> = Mutex::new(BTreeMap::new());
+static CTTY_FG_PGRP: Mutex<BTreeMap<ProcessId, CttyState>> = Mutex::new(BTreeMap::new());
 
 /// Drop session `sid`'s controlling terminal, if it had one.
 ///
@@ -2596,18 +2615,30 @@ pub fn ctty_detach(sid: ProcessId) -> bool {
     CTTY_FG_PGRP.lock().remove(&sid).is_some()
 }
 
-/// `TIOCSCTTY`: claim the console as `pid`'s session's controlling terminal.
+/// `TIOCSCTTY`: claim terminal `tty` as `pid`'s session's controlling terminal.
+///
+/// `tty` is `0` for the console and a pty slave id otherwise. Claiming a *pty*
+/// is what makes a shell under a terminal emulator job-control that pty rather
+/// than the physical console — without it, `^C` in the emulator would kill
+/// whatever was running on the real screen.
 ///
 /// Two rules, both load-bearing:
 ///   - **Only a session leader may claim.** A non-leader claiming would give
 ///     the terminal to a session whose leader never asked for it.
-///   - **Only if no other session holds the console.** Otherwise any process
-///     could take the terminal away from the session currently using it.
+///   - **Only if no other session holds *that* terminal.** Otherwise any
+///     process could take the terminal away from the session using it.
 ///
 /// Claiming a terminal the caller's session *already* holds is a no-op that
 /// succeeds, and specifically does **not** reset the foreground group: a
 /// program that calls `ioctl(TIOCSCTTY)` defensively at startup must not
 /// yank the terminal back from a job the shell foregrounded.
+///
+/// A session that holds terminal *A* and claims terminal *B* is rejected
+/// rather than silently migrated. POSIX gives a session at most one
+/// controlling terminal, and a silent migration would strand terminal A's
+/// foreground job with no session able to hand the terminal back to it — the
+/// same wedge `ctty_set_fg_pgrp` refuses to create. The caller must
+/// `TIOCNOTTY` first, which is what `login_tty` does via `setsid`.
 ///
 /// On a successful first claim the foreground group is the claimant's own
 /// group — a session leader that has just taken the terminal is by
@@ -2615,9 +2646,10 @@ pub fn ctty_detach(sid: ProcessId) -> bool {
 ///
 /// # Errors
 /// - [`KernelError::NoSuchProcess`] if `pid` does not exist.
-/// - [`KernelError::PermissionDenied`] if `pid` is not a session leader, or
-///   another session already holds the console.
-pub fn ctty_acquire(pid: ProcessId) -> KernelResult<()> {
+/// - [`KernelError::PermissionDenied`] if `pid` is not a session leader,
+///   another session already holds `tty`, or `pid`'s session already holds a
+///   *different* terminal.
+pub fn ctty_acquire(pid: ProcessId, tty: u32) -> KernelResult<()> {
     // Read what we need and drop the process table before taking the ctty
     // lock — see the locking-order note on CTTY_FG_PGRP.
     let (sid, pgid) = {
@@ -2630,17 +2662,24 @@ pub fn ctty_acquire(pid: ProcessId) -> KernelResult<()> {
     }
 
     let mut map = CTTY_FG_PGRP.lock();
-    if map.contains_key(&sid) {
-        // Already ours — idempotent, and the foreground group is left alone.
-        return Ok(());
-    }
-    // With exactly one console, "some session holds the console" is exactly
-    // "the map is non-empty". When a second terminal exists this becomes a
-    // lookup by terminal id and the rest of this function is unchanged.
-    if !map.is_empty() {
+    if let Some(held) = map.get(&sid) {
+        if held.tty == tty {
+            // Already ours — idempotent, and the foreground group is left alone.
+            return Ok(());
+        }
+        // Holding a different terminal: see the doc comment.
         return Err(KernelError::PermissionDenied);
     }
-    map.insert(sid, pgid);
+    if map.values().any(|s| s.tty == tty) {
+        return Err(KernelError::PermissionDenied);
+    }
+    map.insert(
+        sid,
+        CttyState {
+            tty,
+            fg_pgrp: pgid,
+        },
+    );
     Ok(())
 }
 
@@ -2668,6 +2707,7 @@ pub fn ctty_release(pid: ProcessId) -> KernelResult<ProcessId> {
     CTTY_FG_PGRP
         .lock()
         .remove(&sid)
+        .map(|s| s.fg_pgrp)
         .ok_or(KernelError::NotSupported)
 }
 
@@ -2685,8 +2725,21 @@ pub fn ctty_get_fg_pgrp(pid: ProcessId) -> KernelResult<ProcessId> {
     CTTY_FG_PGRP
         .lock()
         .get(&sid)
-        .copied()
+        .map(|s| s.fg_pgrp)
         .ok_or(KernelError::NotSupported)
+}
+
+/// Which terminal `pid`'s session holds, or `None` if it holds none.
+///
+/// This is what turns a *process's* terminal operation into a *device*
+/// operation: `SYS_TTY_ACQUIRE_CTTY`-adjacent calls that took no device
+/// argument when the console was the only terminal (`tcgetattr` on "the
+/// terminal", a `^C` routed to "the foreground group") resolve the device
+/// through here instead of assuming zero.
+#[must_use]
+pub fn ctty_tty_of(pid: ProcessId) -> Option<u32> {
+    let sid = get_sid(pid)?;
+    CTTY_FG_PGRP.lock().get(&sid).map(|s| s.tty)
 }
 
 /// Set the foreground process group of `pid`'s controlling terminal
@@ -2731,28 +2784,60 @@ pub fn ctty_set_fg_pgrp(pid: ProcessId, pgid: ProcessId) -> KernelResult<()> {
     if !group_ok {
         return Err(KernelError::PermissionDenied);
     }
-    *slot = pgid;
+    slot.fg_pgrp = pgid;
     Ok(())
 }
 
-/// The console's foreground process group, whoever owns it — or `None` if
-/// no session currently holds the console.
+/// Terminal `tty`'s foreground process group, whoever owns it — or `None` if
+/// no session currently holds that terminal.
 ///
-/// This is the *terminal's* view rather than a process's: the console
-/// driver needs to know which group a typed `^C` belongs to, and it has no
-/// caller process to ask on behalf of.  With exactly one terminal there is
-/// at most one entry in the map, so "the console's foreground group" and
-/// "the only entry's value" are the same thing; when a second terminal
-/// exists this takes a terminal id instead of scanning.
+/// This is the *terminal's* view rather than a process's: a tty device needs
+/// to know which group a typed `^C` belongs to, and it has no caller process
+/// to ask on behalf of — the byte may have arrived from an interrupt handler
+/// or from a pty master in an unrelated session.
 ///
-/// This exists so the console keeps **no separate copy**.  It used to: a
-/// `tty::FOREGROUND_PGID` atomic held the group `^C` was delivered to while
-/// the Linux shim's `TIOCSPGRP` wrote only there and libc's `tcsetpgrp`
-/// wrote only to the userspace static, so the group that received `^C` and
-/// the group userspace believed was foreground were two unrelated values.
+/// This exists so a terminal keeps **no separate copy**.  The console used
+/// to: a `tty::FOREGROUND_PGID` atomic held the group `^C` was delivered to
+/// while the Linux shim's `TIOCSPGRP` wrote only there and libc's
+/// `tcsetpgrp` wrote only to the userspace static, so the group that received
+/// `^C` and the group userspace believed was foreground were two unrelated
+/// values.  That argument is *stronger* with ptys, not weaker: the master end
+/// and the slave's shell are different processes, so a device-local copy
+/// would be wrong in one of them by construction.
 #[must_use]
-pub fn ctty_console_fg_pgrp() -> Option<ProcessId> {
-    CTTY_FG_PGRP.lock().values().next().copied()
+pub fn ctty_fg_pgrp(tty: u32) -> Option<ProcessId> {
+    CTTY_FG_PGRP
+        .lock()
+        .values()
+        .find(|s| s.tty == tty)
+        .map(|s| s.fg_pgrp)
+}
+
+/// The set of sessions holding terminal `tty`, with their foreground groups.
+///
+/// A pty hangup must reach every session that made the slave its controlling
+/// terminal, and the association is stored per session, so the device cannot
+/// answer "who do I hang up?" without this scan.  Returned as an owned list
+/// because the caller must send signals, and signal delivery takes the
+/// process table — which this map's locking order forbids holding together
+/// with (see [`CTTY_FG_PGRP`]).
+#[must_use]
+pub fn ctty_sessions_on(tty: u32) -> alloc::vec::Vec<(ProcessId, ProcessId)> {
+    CTTY_FG_PGRP
+        .lock()
+        .iter()
+        .filter(|(_, s)| s.tty == tty)
+        .map(|(sid, s)| (*sid, s.fg_pgrp))
+        .collect()
+}
+
+/// Drop every session's association with terminal `tty`.
+///
+/// Called when a pty is destroyed: an association naming a terminal that no
+/// longer exists would let the *next* pty to reuse that id inherit a session
+/// that never opened it.
+pub fn ctty_detach_tty(tty: u32) {
+    CTTY_FG_PGRP.lock().retain(|_, s| s.tty != tty);
 }
 
 /// Whether `pid` is running in the **background** with respect to its
@@ -2770,7 +2855,7 @@ pub fn ctty_is_background(pid: ProcessId) -> bool {
         return false;
     };
     match CTTY_FG_PGRP.lock().get(&sid) {
-        Some(&fg) => fg != pgid,
+        Some(s) => s.fg_pgrp != pgid,
         None => false,
     }
 }
@@ -4383,6 +4468,22 @@ pub fn process_uid(pid: ProcessId) -> Option<u32> {
     PROCESS_TABLE.lock().get(&pid).map(|p| p.credentials.uid)
 }
 
+/// Read a process's real UID *and* primary GID together, or `None` if the
+/// PID is unknown.
+///
+/// One lookup rather than [`process_uid`] plus a second call, because the
+/// caller is snapshotting an identity for `SYS_CHANNEL_PEER_CRED` and two
+/// separate reads can straddle a credential change — producing a pair that
+/// describes no state the process was ever in.  A service authorising on a
+/// half-updated identity is exactly what the snapshot exists to prevent.
+#[must_use]
+pub fn process_uid_gid(pid: ProcessId) -> Option<(u32, u32)> {
+    PROCESS_TABLE
+        .lock()
+        .get(&pid)
+        .map(|p| (p.credentials.uid, p.credentials.gid))
+}
+
 /// Mark a process as "ready" (fully initialized and accepting requests).
 ///
 /// Called by the process itself via `SYS_NOTIFY_READY`.  The parent
@@ -5893,6 +5994,33 @@ pub fn deregister_ipc_handle(pid: ProcessId, resource_type: ResourceType, handle
             proc.ipc_handles.swap_remove(pos);
         }
     }
+}
+
+/// Does `pid` hold this exact `(resource_type, handle_raw)`?
+///
+/// Most IPC handle values in this kernel are treated as self-authorising — the
+/// handle *is* the capability — which is sound when the value is unguessable.
+/// It is not sound for a [`ResourceType::Pty`] handle, whose raw form is
+/// `(tty_id << 1) | end` and therefore trivially enumerable: without this check
+/// any process could write to `(2 << 1)` and inject keystrokes into whatever
+/// shell happens to be running on pty 2, which is a shell prompt with arbitrary
+/// input, not a data leak. So the pty syscalls check ownership rather than
+/// trusting the value, and this is the query they use.
+///
+/// It is deliberately a *membership* test rather than a lookup returning the
+/// entry: the caller already knows what it asked for, and an API that hands
+/// back an owned handle invites storing it past the lifetime of the check.
+///
+/// Returns `false` if `pid` is not in the process table, which is the safe
+/// answer for a caller that vanished mid-syscall.
+#[must_use]
+pub fn owns_ipc_handle(pid: ProcessId, resource_type: ResourceType, handle_raw: u64) -> bool {
+    let table = PROCESS_TABLE.lock();
+    table.get(&pid).is_some_and(|proc| {
+        proc.ipc_handles
+            .iter()
+            .any(|&(rt, h)| rt == resource_type && h == handle_raw)
+    })
 }
 
 /// Snapshot a process's tracked IPC handles for `fork()`.
@@ -7422,7 +7550,7 @@ fn test_controlling_terminal() -> KernelResult<()> {
     // (2) Claim the console (`TIOCSCTTY`). The shell is its own session
     //     leader and the console is free, so this succeeds and makes the
     //     shell's own group the foreground one.
-    ctty_acquire(shell)?;
+    ctty_acquire(shell, crate::tty::CONSOLE)?;
     if ctty_get_fg_pgrp(shell) != Ok(shell) {
         return fail(
             "tcgetpgrp did not report the claimed foreground group",
@@ -7510,7 +7638,7 @@ fn test_controlling_terminal() -> KernelResult<()> {
     }
     // Nor may the stranger simply claim the console out from under us, even
     // though it is a session leader in good standing: the console is taken.
-    if ctty_acquire(stranger) != Err(KernelError::PermissionDenied) {
+    if ctty_acquire(stranger, crate::tty::CONSOLE) != Err(KernelError::PermissionDenied) {
         return fail(
             "a second session claimed the console",
             &[shell, job, stranger],
@@ -7518,7 +7646,7 @@ fn test_controlling_terminal() -> KernelResult<()> {
     }
     // And a non-leader may not claim at all. `job` is in the shell's session
     // (sid == shell), so it fails the leader test rather than the free test.
-    if ctty_acquire(job) != Err(KernelError::PermissionDenied) {
+    if ctty_acquire(job, crate::tty::CONSOLE) != Err(KernelError::PermissionDenied) {
         return fail(
             "a non-session-leader claimed the console",
             &[shell, job, stranger],
@@ -7527,7 +7655,7 @@ fn test_controlling_terminal() -> KernelResult<()> {
     // Re-claiming a terminal our session already holds succeeds and must NOT
     // reset the foreground group — a program calling TIOCSCTTY defensively
     // at startup must not yank the terminal back from the foreground job.
-    ctty_acquire(shell)?;
+    ctty_acquire(shell, crate::tty::CONSOLE)?;
     if ctty_get_fg_pgrp(shell) != Ok(job) {
         return fail(
             "a redundant TIOCSCTTY reset the foreground group",
@@ -7605,7 +7733,7 @@ fn test_controlling_terminal() -> KernelResult<()> {
         );
     }
     // Released means free: another session may now claim it.
-    ctty_acquire(stranger)?;
+    ctty_acquire(stranger, crate::tty::CONSOLE)?;
     if ctty_get_fg_pgrp(stranger) != Ok(stranger) {
         return fail(
             "the console was not reclaimable after TIOCNOTTY",

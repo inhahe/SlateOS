@@ -158,7 +158,9 @@ impl PipeEnd {
 // have several tasks parked on it at once: `dup()` and process spawn hand the
 // same end to multiple processes, and `wait_readable` (the `tee` primitive)
 // parks on the read end without consuming, alongside a real reader.
-use super::waiters::{WaiterSet, wake_all};
+use super::waiters::{
+    WaiterSet, current_user_pid, deliverable_signal_pending, park_interruptible, wake_all,
+};
 
 /// A kernel pipe: a ring buffer with reader/writer state.
 struct Pipe {
@@ -318,52 +320,6 @@ impl Pipe {
 static PIPES: Mutex<BTreeMap<PipeId, Pipe>> = Mutex::new(BTreeMap::new());
 
 // ---------------------------------------------------------------------------
-// Signal-interruptible blocking helpers
-// ---------------------------------------------------------------------------
-
-/// The owning user process id of the current task, or `0` for a kernel task.
-///
-/// Pipe waits are interruptible by signals only for user processes; kernel
-/// tasks (`pid == 0`) have no signal state and park uninterruptibly, exactly as
-/// before.
-fn current_user_pid() -> u64 {
-    crate::proc::thread::owner_process(sched::current_task_id()).unwrap_or(0)
-}
-
-/// `true` if a deliverable (unblocked) signal is pending for `pid`.
-///
-/// Always `false` for `pid == 0` (kernel task — no signal context).
-fn deliverable_signal_pending(pid: u64) -> bool {
-    pid != 0 && crate::proc::signal::has_pending_in_mask(pid, !crate::proc::signal::blocked(pid))
-}
-
-/// Park the current task for a pipe wait, interruptibly for user processes.
-///
-/// For a user process this registers a signal-waiter (so `set_pending` wakes the
-/// park when a deliverable signal arrives) using the register-then-recheck idiom
-/// to close the post-before-park race, blocks, then deregisters.  Kernel tasks
-/// park uninterruptibly.  The caller's surrounding loop must, after this
-/// returns, re-acquire the pipe lock and re-evaluate both the pipe state and
-/// [`deliverable_signal_pending`] — a signal wake is reported by the latter, not
-/// by this function.
-fn park_for_pipe(pid: u64, task: u64) {
-    if pid == 0 {
-        sched::block_current();
-        return;
-    }
-    let deliverable = !crate::proc::signal::blocked(pid);
-    crate::proc::signal::register_signalfd_waiter(pid, task, deliverable);
-    if crate::proc::signal::has_pending_in_mask(pid, deliverable) {
-        // A signal arrived between enqueue and registration — don't block; the
-        // caller's loop will observe the pending signal and return Interrupted.
-        crate::proc::signal::deregister_signalfd_waiter(pid, task);
-        return;
-    }
-    sched::block_current();
-    crate::proc::signal::deregister_signalfd_waiter(pid, task);
-}
-
-// ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
 
@@ -457,7 +413,7 @@ pub fn write(handle: PipeHandle, data: &[u8]) -> KernelResult<usize> {
         // Block (interruptibly for user processes).  The reader wakes us when it
         // drains data; a signal wakes us via the registered signal-waiter.
         super::stats::pipe_write_block();
-        park_for_pipe(pid, task);
+        park_interruptible(pid, task);
 
         // Re-check on wake (loop back to top).
     }
@@ -579,7 +535,7 @@ pub fn read(handle: PipeHandle, buf: &mut [u8]) -> KernelResult<usize> {
         // Block (interruptibly for user processes).  The writer wakes us when it
         // writes data; a signal wakes us via the registered signal-waiter.
         super::stats::pipe_read_block();
-        park_for_pipe(pid, task);
+        park_interruptible(pid, task);
     }
 }
 
@@ -699,7 +655,7 @@ pub fn wait_readable(handle: PipeHandle) -> KernelResult<bool> {
             pipe.reader_waiters.insert(task);
         }
         super::stats::pipe_read_block();
-        park_for_pipe(pid, task);
+        park_interruptible(pid, task);
     }
 }
 
@@ -812,7 +768,7 @@ pub fn read_timeout(handle: PipeHandle, buf: &mut [u8], timeout_ns: u64) -> Kern
         }
 
         super::stats::pipe_read_block();
-        park_for_pipe(pid, task);
+        park_interruptible(pid, task);
     }
 }
 
@@ -923,7 +879,7 @@ pub fn write_timeout(handle: PipeHandle, data: &[u8], timeout_ns: u64) -> Kernel
         }
 
         super::stats::pipe_write_block();
-        park_for_pipe(pid, task);
+        park_interruptible(pid, task);
     }
 }
 

@@ -3457,7 +3457,59 @@ pub fn dispatch_linux(nr: u64, args: &SyscallArgs) -> SyscallResult {
         _ => linux_err(errno::ENOSYS),
     };
     account_io_syscall(nr, result.value);
+    log_stat_family_anomaly(nr, args, result.value);
     result
+}
+
+/// Log a stat-family syscall that failed with anything other than `ENOENT`.
+///
+/// [`stat_meta_for_path`] already logs an anomalous *VFS lookup* result, and
+/// that was not enough: `make` reports `stat: /Makefile: Permission denied` on
+/// every boot with no `[stat]` line to match it, which proves the `EACCES` is
+/// produced somewhere in these handlers **other than** the lookup —
+/// `resolve_at_path`, a user-buffer gate, or the copy-out. Instrumenting one
+/// stage and concluding "not that stage, therefore mysterious" is how the bug
+/// survived two rounds of investigation; a check on the syscall's own return
+/// value cannot have that gap, because there is only one value to look at.
+///
+/// `ENOENT` stays silent for the reason it always did: every `$PATH` probe and
+/// every implicit-rule search is a failed stat, and a line each would bury the
+/// interesting one. Everything else is rare enough to be worth a line, and a
+/// program that mistranslates a failed stat into "does not exist" — which GNU
+/// make does, by design — will otherwise fail thousands of lines later with a
+/// message naming neither stat nor a permission problem.
+fn log_stat_family_anomaly(nr: u64, args: &SyscallArgs, value: i64) {
+    // The path argument is arg0 for stat/lstat/access and arg1 for the *at
+    // forms, which take a dirfd first. Anything else has no path to name.
+    let path_ptr = match nr {
+        nr::STAT | nr::LSTAT | nr::ACCESS => args.arg0,
+        nr::NEWFSTATAT | nr::STATX | nr::FACCESSAT | nr::FACCESSAT2 => args.arg1,
+        _ => return,
+    };
+    if value >= 0 || value == -i64::from(errno::ENOENT) {
+        return;
+    }
+    // Only a *process* has a path here. A kernel-context caller — every
+    // fidelity self-test — passes a bare sentinel like `0x1000` as its "path"
+    // to observe a gate, so there is nothing to name, and this hook runs on the
+    // dispatch tail after every handler including the ones that returned before
+    // reading a byte. (It also used to be fatal: chasing that sentinel through
+    // `read_user_cstr` faulted the kernel, because in kernel context the
+    // validator bypasses. `mm::user` now rejects the copy instead of faulting,
+    // but a diagnostic that logs an empty path for every gate test is still
+    // noise, so leave before doing any of it.)
+    if caller_pid().is_none() {
+        return;
+    }
+    // Best-effort: the pointer was validated by the handler that just ran, but
+    // it may name a path that handler never got far enough to read.
+    let name = read_user_cstr(path_ptr, 256).unwrap_or_default();
+    crate::serial_println!(
+        "[stat] syscall {} on '{}' returned errno {} (not ENOENT)",
+        nr,
+        crate::fs::path::Path::new(name.as_slice()).display(),
+        -value,
+    );
 }
 
 /// Per-process I/O accounting hook, run after every Linux syscall
@@ -4177,7 +4229,7 @@ fn dispatch_eventfd_read(entry: FdEntry, buf: u64, cap: u64) -> SyscallResult {
 ///
 /// In canonical mode this blocks until a full line is available and returns up
 /// to `cap` bytes of it; in raw mode it honours `VMIN`.  A `^D` on an empty
-/// canonical line returns `0` (end of file).  See [`crate::tty::console_read`].
+/// canonical line returns `0` (end of file).  See [`crate::tty::read`].
 /// A background caller is stopped with `SIGTTIN` (or gets `EIO`) before any
 /// of that — see `handlers::tty_job_control_check`.
 fn dispatch_console_read(buf: u64, cap: u64) -> SyscallResult {
@@ -8683,7 +8735,7 @@ pub mod ioctl_cmd {
     pub const TIOCNOTTY: u32 = 0x5422;
 }
 
-/// Handle the terminal-control ioctls on a console (tty) fd.
+/// Handle the terminal-control ioctls on a terminal (tty) fd.
 ///
 /// The caller (`sys_ioctl`) has already verified the fd is a `Console`-kind
 /// handle.  `arg` is the userspace pointer to the `struct termios`
@@ -8691,23 +8743,34 @@ pub mod ioctl_cmd {
 /// `TCSETSW`/`TCSETSF` behave as `TCSETS` because we have no kernel-side
 /// output/input queue to drain or flush yet.
 ///
-/// `pid` is the calling process.  The job-control requests
-/// (`TIOCGPGRP`/`TIOCSPGRP`/`TIOCSCTTY`/`TIOCNOTTY`) need it because the
-/// foreground process group and the controlling terminal are per-*session*
-/// state in `pcb`, not properties of the console device: the answer depends
-/// on who is asking.
+/// `pid` is the calling process, and it decides *both* halves of the answer:
+///
+/// - The job-control requests (`TIOCGPGRP`/`TIOCSPGRP`/`TIOCSCTTY`/
+///   `TIOCNOTTY`) need it because the foreground process group and the
+///   controlling terminal are per-*session* state in `pcb`, not properties of
+///   a device: the answer depends on who is asking.
+/// - The device requests (`TCGETS`/`TCSETS*`/`TIOC*WINSZ`) need it because
+///   there is now more than one terminal.  They act on the caller's
+///   controlling terminal via [`super::handlers::caller_tty`], so a shell
+///   running under a pty configures its own pty and not the console's shared
+///   line discipline.
 fn console_terminal_ioctl(
     pid: crate::proc::pcb::ProcessId,
     request: u32,
     arg: u64,
 ) -> SyscallResult {
     use crate::tty;
+    // Every request below that names a *device* acts on the caller's
+    // controlling terminal, not on the console: once a shell runs under a pty
+    // its `TCGETS` must see the pty's termios, or it would configure the
+    // console's line discipline and read back settings it never made.
+    let tty_id = super::handlers::caller_tty(pid);
     match request {
         ioctl_cmd::TCGETS => {
             if arg == 0 {
                 return linux_err(errno::EFAULT);
             }
-            let bytes = tty::get_termios().to_bytes();
+            let bytes = tty::get_termios(tty_id).to_bytes();
             // SAFETY: copy_to_user validates the user range is mapped and
             // writable and does the STAC/CLAC SMAP dance; `bytes` is a live
             // kernel buffer of exactly `bytes.len()` bytes.
@@ -8722,7 +8785,7 @@ fn console_terminal_ioctl(
             }
             // Shared with the native `SYS_TTY_SET_TERMIOS`, so the SIGTTOU
             // job-control rule is written once rather than once per ABI.
-            match super::handlers::tty_set_termios_from_user(arg) {
+            match super::handlers::tty_set_termios_from_user(tty_id, arg) {
                 super::handlers::TtyCtlOutcome::Done => SyscallResult::ok(0),
                 super::handlers::TtyCtlOutcome::Restart(r) => r,
                 super::handlers::TtyCtlOutcome::Fail(e) => linux_err(linux_errno_for(e)),
@@ -8732,7 +8795,7 @@ fn console_terminal_ioctl(
             if arg == 0 {
                 return linux_err(errno::EFAULT);
             }
-            let bytes = tty::get_winsize().to_bytes();
+            let bytes = tty::get_winsize(tty_id).to_bytes();
             // SAFETY: see TCGETS above; `bytes` is a live 8-byte kernel buffer.
             match unsafe { crate::mm::user::copy_to_user(bytes.as_ptr(), arg, bytes.len()) } {
                 Ok(()) => SyscallResult::ok(0),
@@ -8750,7 +8813,21 @@ fn console_terminal_ioctl(
             {
                 return linux_err(linux_errno_for(e));
             }
-            tty::set_winsize(tty::WinSize::from_bytes(&bytes));
+            // A resize — and only a real resize — raises `SIGWINCH` for the
+            // foreground group, which is how a full-screen program learns to
+            // redraw.  `set_winsize` reports whether the size actually changed
+            // precisely so that a `TIOCSWINSZ` re-setting the same dimensions
+            // (which shells do on every prompt) does not wake every editor on
+            // the terminal to redraw an unchanged screen.  This is the reason
+            // a terminal emulator on the master end can resize its slave at
+            // all: without the signal, resizing is invisible to the program.
+            if tty::set_winsize(tty_id, tty::WinSize::from_bytes(&bytes)) {
+                #[allow(clippy::cast_possible_truncation)]
+                super::handlers::signal_foreground_group(
+                    tty_id,
+                    crate::proc::signal::SIGWINCH as u8,
+                );
+            }
             SyscallResult::ok(0)
         }
         ioctl_cmd::TIOCGPGRP => {
@@ -8808,7 +8885,14 @@ fn console_terminal_ioctl(
                 super::handlers::TtyCtlOutcome::Fail(e) => linux_err(linux_errno_for(e)),
             }
         }
-        ioctl_cmd::TIOCSCTTY => match crate::proc::pcb::ctty_acquire(pid) {
+        // `tty_id` here is "the terminal this fd names", which we can only
+        // approximate as the caller's current one until fds carry a tty id
+        // (the `SYS_PTY_*` family adds that).  For a session leader with no
+        // controlling terminal — the only caller for which `TIOCSCTTY` does
+        // anything — that approximation is `CONSOLE`, which is exactly the
+        // device the only kind of fd routed here refers to.  A pty slave fd
+        // will name its own device and this becomes non-circular.
+        ioctl_cmd::TIOCSCTTY => match crate::proc::pcb::ctty_acquire(pid, tty_id) {
             Ok(()) => SyscallResult::ok(0),
             Err(e) => linux_err(linux_errno_for(e)),
         },
@@ -19037,7 +19121,31 @@ fn stat_meta_for_path(path: &Path, follow: bool) -> Result<crate::fs::FileMeta, 
     };
     r.map_err(|e| match e {
         KernelError::NotFound => linux_err(errno::ENOENT),
-        other => linux_err(linux_errno_for(other)),
+        other => {
+            // `NotFound` is the overwhelmingly common failure here — every
+            // `$PATH` probe, every `make` implicit-rule search — so it stays
+            // silent. Anything *else* is an anomaly worth a line: the caller
+            // sees only an errno, and programs routinely mistranslate a failed
+            // stat into "does not exist" and then fail somewhere unrelated.
+            //
+            // That is not hypothetical. GNU make's `f_mtime` maps any stat
+            // failure to `NONEXISTENT_MTIME`, so an EACCES on a makefile it had
+            // just read successfully surfaced three thousand lines later as
+            // "No rule to make target '/Makefile'" — a message that names
+            // neither stat nor a permission problem. Lane B narrowed that to
+            // this exact return by elimination, from outside `kernel/**`,
+            // because there was nothing to read. See
+            // `requests/b-a-path-z-real-make-fails-because-stat-of-Makefile-
+            // returns-eacces.md`.
+            crate::serial_println!(
+                "[stat] {} '{}' failed: {:?} (errno {})",
+                if follow { "stat" } else { "lstat" },
+                path.display(),
+                other,
+                linux_errno_for(other),
+            );
+            linux_err(linux_errno_for(other))
+        }
     })
 }
 
@@ -33386,9 +33494,15 @@ fn sys_landlock_restrict_self(args: &SyscallArgs) -> SyscallResult {
 ///     contract (`idx2` is a 16-byte `kcmp_epoll_slot`) and answer 3
 ///     ("not comparable") because no epoll fds exist.
 ///   * Negative or too-large pid (truncates to negative i32) → `ESRCH`.
+///   * Authority: the caller must be able to introspect **both**
+///     targets — each target's owning process must be the caller's
+///     own, or the caller must hold a `Process` capability over it
+///     with [`Rights::DEBUG`](crate::cap::Rights::DEBUG).  Otherwise
+///     `EPERM`, undifferentiated between the two targets.  This is
+///     Linux's `ptrace_may_access` step, expressed in capabilities.
 ///   * Kernel-context callers (`caller_pid()` is `None`) skip the
-///     TID-liveness gate so the self-test can exercise the
-///     comparator paths; comparison then falls back to the raw
+///     TID-liveness and authority gates so the self-test can exercise
+///     the comparator paths; comparison then falls back to the raw
 ///     `(pid, idx)` tuples.
 ///
 /// Limitations: we don't model partial sharing (`CLONE_VM` without
@@ -33447,6 +33561,50 @@ fn sys_kcmp(args: &SyscallArgs) -> SyscallResult {
     // self-test exercise the comparator paths.
     if !kernel_ctx && (owner1.is_none() || owner2.is_none()) {
         return linux_err(errno::ESRCH);
+    }
+
+    // Linux gate step 2: `ptrace_may_access` on *both* targets.
+    //
+    // This was in the comment above and missing from the code until lane B's
+    // audit (`requests/b-a-kcmp-compares-any-two-processes-with-no-authority-
+    // check.md`) noticed the function contained no `EPERM` path at all, so no
+    // caller could ever be refused.  Two things leaked:
+    //
+    //   * types 1..=6 all collapse to "do these two TIDs belong to one
+    //     process?", i.e. the private thread layout of anybody's program; and
+    //   * `KCMP_FILE` resolves `idx1`/`idx2` in the *target's* fd table and
+    //     answers `EBADF` when either is absent, which is an fd-presence
+    //     oracle over an arbitrary process — walk `idx1` and watch `EBADF`
+    //     turn into `0`/`1`/`2`.  When both resolve, the ordering further
+    //     discloses `handle_kind_ord`, so the caller learns whether the
+    //     target's fd 7 is a socket or a file.  Linux requires
+    //     `ptrace_may_access` for exactly this.
+    //
+    // The gate is the one `sys_process_vm_readv` already uses: a `Process`
+    // capability over the target's owning process carrying `DEBUG`, never
+    // ambient PID authority — plus the caller's own process, which
+    // `ptrace_may_access` also always permits and which is the only form real
+    // callers (glibc's rwlock self-deadlock check, `kcmp(getpid(), getpid())`)
+    // use.
+    //
+    // Placed between the `ESRCH` liveness gate and the `type` range gate so
+    // the errno discriminator still matches Linux: `(pid=-1, type=99)` sees
+    // `ESRCH`, and an unauthorised probe with a bad type sees `EPERM` rather
+    // than `EINVAL`.
+    //
+    // Not a KASLR oracle, and worth saying so once so nobody re-derives it:
+    // the ordering here is over `handle_kind_ord` and a handle-table index,
+    // never a kernel address, so Linux's `kptr_obfuscate()` cookie has no
+    // analogue to add.  This is an authority bug only.
+    if !kernel_ctx {
+        // `kernel_ctx` is `caller_pid().is_none()`, so this is `Some`.  Refuse
+        // rather than assume if that ever stops being true.
+        let Some(caller) = caller_pid() else {
+            return linux_err(errno::EPERM);
+        };
+        if !kcmp_may_compare(caller, owner1, owner2) {
+            return linux_err(errno::EPERM);
+        }
     }
 
     // Linux's `int type` truncates to i32 before the switch; a sentinel
@@ -33543,6 +33701,49 @@ fn sys_kcmp(args: &SyscallArgs) -> SyscallResult {
     } else {
         SyscallResult::ok(2)
     }
+}
+
+/// May `caller` introspect the process owning one `kcmp` target?
+///
+/// True for the caller's own process — `ptrace_may_access` always permits
+/// self, and `kcmp(getpid(), getpid(), …)` is the only form real callers use
+/// (glibc's `pthread_rwlock` self-deadlock check) — or when the caller holds a
+/// `Process` capability over that process carrying [`Rights::DEBUG`]. Never by
+/// ambient PID authority; this is the same gate `sys_process_vm_readv` uses.
+///
+/// A target with no owning process is refused rather than allowed: by the time
+/// this runs, `sys_kcmp`'s liveness gate has already answered `ESRCH` for that
+/// case, so reaching here with `None` means the thread vanished mid-call.
+///
+/// [`Rights::DEBUG`]: crate::cap::Rights::DEBUG
+fn kcmp_may_access(caller: u64, owner: Option<u64>) -> bool {
+    owner.is_some_and(|o| {
+        o == caller
+            || crate::proc::pcb::has_capability_for(
+                caller,
+                crate::cap::ResourceType::Process,
+                o,
+                crate::cap::Rights::DEBUG,
+            )
+    })
+}
+
+/// May `caller` run a `kcmp` comparison across *both* targets?
+///
+/// Linux's gate is `ptrace_may_access(task1) && ptrace_may_access(task2)`, and
+/// the conjunction is the whole point: a caller entitled to introspect one side
+/// learns nothing it is entitled to about the other, since every answer this
+/// syscall gives is a relation *between* the two.
+///
+/// Both sides are evaluated unconditionally. `&&` would short-circuit on the
+/// first failing target, and since the refusal is deliberately a single
+/// undifferentiated `EPERM` — so the caller cannot learn *which* target it
+/// lacked authority over — leaving a timing difference in would hand back the
+/// same bit through the side door.
+fn kcmp_may_compare(caller: u64, owner1: Option<u64>, owner2: Option<u64>) -> bool {
+    let ok1 = kcmp_may_access(caller, owner1);
+    let ok2 = kcmp_may_access(caller, owner2);
+    ok1 && ok2
 }
 
 /// Stable ordering for [`HandleKind`] used by `kcmp(KCMP_FILE)`.
@@ -49084,6 +49285,124 @@ pub fn self_test_madvise_dontneed() -> crate::error::KernelResult<()> {
     pcb::destroy(pid);
     serial_println!(
         "[syscall/linux]   madvise(MADV_DONTNEED): frames freed + VMA persists + zero-refault: OK"
+    );
+    Ok(())
+}
+
+/// Self-test for `kcmp`'s authority gate — Linux's `ptrace_may_access` step,
+/// expressed in capabilities.
+///
+/// Unit-level, for the same reason `self_test_process_vm_cross_as` is:
+/// `caller_pid()` is `None` in kernel context, so `sys_kcmp` takes the
+/// `kernel_ctx` escape and the gated arm is unreachable from here. What is
+/// testable — and what the bug actually was — is the predicate itself, so this
+/// drives [`kcmp_may_compare`] directly against real PCBs and real capability
+/// grants.
+///
+/// The gate this covers did not exist until lane B's audit found `sys_kcmp`
+/// contained no `EPERM` path at all: it would tell any caller whether any two
+/// TIDs on the system were threads of one process, and — via `KCMP_FILE`'s
+/// `EBADF` — enumerate which descriptors an arbitrary process held open. See
+/// `requests/b-a-kcmp-compares-any-two-processes-with-no-authority-check.md`.
+pub fn self_test_kcmp_authority() -> crate::error::KernelResult<()> {
+    use crate::cap::{ResourceType, Rights};
+    use crate::error::KernelError;
+    use crate::serial_println;
+
+    serial_println!("[syscall/linux] Running kcmp authority-gate self-test...");
+
+    let prober = pcb::create("linux-kcmp-prober", 0);
+    let victim = pcb::create("linux-kcmp-victim", 0);
+    let bystander = pcb::create("linux-kcmp-bystander", 0);
+    let cleanup = || {
+        pcb::destroy(prober);
+        pcb::destroy(victim);
+        pcb::destroy(bystander);
+    };
+
+    // A macro would hide which assertion failed in the boot log; a closure
+    // cannot early-return from the enclosing function.  Spell each one out.
+    macro_rules! require {
+        ($cond:expr, $msg:expr) => {
+            if !($cond) {
+                cleanup();
+                serial_println!("[syscall/linux]   FAIL: {}", $msg);
+                return Err(KernelError::InternalError);
+            }
+        };
+    }
+
+    // Self is always permitted: this is the only form real callers use, and
+    // refusing it would break glibc's rwlock self-deadlock detection.
+    require!(
+        kcmp_may_compare(prober, Some(prober), Some(prober)),
+        "kcmp refused a caller comparing its own process with itself"
+    );
+
+    // A stranger is refused with no capability at all.  This is the case that
+    // was open: every probe used to be answered.
+    require!(
+        !kcmp_may_compare(prober, Some(prober), Some(victim)),
+        "kcmp allowed an uncapability'd caller to probe another process"
+    );
+    require!(
+        !kcmp_may_compare(prober, Some(victim), Some(bystander)),
+        "kcmp allowed a caller to probe two processes it has no authority over"
+    );
+
+    // A Process capability *without* DEBUG must not open the gate — the right
+    // is what carries introspection authority, not the resource type.
+    pcb::insert_caps(prober, &[(ResourceType::Process, victim, Rights::READ)])?;
+    require!(
+        !kcmp_may_compare(prober, Some(prober), Some(victim)),
+        "a READ-only Process capability satisfied kcmp's DEBUG gate"
+    );
+
+    // With DEBUG over the victim, comparing self against the victim is allowed.
+    pcb::insert_caps(prober, &[(ResourceType::Process, victim, Rights::DEBUG)])?;
+    require!(
+        kcmp_may_compare(prober, Some(prober), Some(victim)),
+        "a DEBUG capability over the target did not open kcmp's gate"
+    );
+    require!(
+        kcmp_may_compare(prober, Some(victim), Some(victim)),
+        "a DEBUG capability did not authorise comparing the target with itself"
+    );
+
+    // The conjunction is the load-bearing part.  Authority over one side must
+    // not authorise a comparison, because every answer kcmp gives is a relation
+    // *between* the two sides — "is the victim's fd 3 the same object as the
+    // bystander's fd 3" discloses the bystander just as much.
+    require!(
+        !kcmp_may_compare(prober, Some(victim), Some(bystander)),
+        "authority over one target authorised a comparison against another"
+    );
+    require!(
+        !kcmp_may_compare(prober, Some(bystander), Some(victim)),
+        "the conjunction is order-dependent — one argument order was accepted"
+    );
+
+    // A vanished target is refused, never defaulted open.
+    require!(
+        !kcmp_may_compare(prober, Some(prober), None),
+        "kcmp allowed a comparison against a target with no owning process"
+    );
+    require!(
+        !kcmp_may_compare(prober, None, None),
+        "kcmp allowed a comparison with both targets ownerless"
+    );
+
+    // The grant is specific: DEBUG over the victim says nothing about the
+    // bystander, even for a caller that holds a capability of the right shape.
+    require!(
+        !kcmp_may_access(prober, Some(bystander)),
+        "a DEBUG capability leaked to a process it was not granted over"
+    );
+
+    cleanup();
+    serial_println!(
+        "[syscall/linux]   kcmp authority gate (self ok, DEBUG cap required, \
+         conjunction over both targets): OK"
     );
     Ok(())
 }

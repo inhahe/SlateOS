@@ -479,6 +479,11 @@ impl Authenticator {
     /// unreadable or unwritable file is not an error: the in-memory tally still
     /// applies, and refusing to authenticate anyone because `/var/run` is full
     /// would be a worse failure than losing the shared count.
+    ///
+    /// The file and its directory are created if absent, owner-only (0600 and
+    /// 0700). The caller is expected to be privileged at the point it
+    /// authenticates; one that is not simply loses the shared count, which is
+    /// the same degradation as an unwritable file.
     #[must_use]
     pub fn with_faillock(mut self, path: &Path) -> Self {
         self.faillock = Some(path.to_path_buf());

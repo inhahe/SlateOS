@@ -211,8 +211,17 @@ impl Table {
         let Some(dir) = path.parent() else {
             return false;
         };
-        if !dir.as_os_str().is_empty() && std::fs::create_dir_all(dir).is_err() {
-            return false;
+        if !dir.as_os_str().is_empty() {
+            if std::fs::create_dir_all(dir).is_err() {
+                return false;
+            }
+            // The directory matters as much as the file. `create_dir_all` uses
+            // the process umask, and a setuid program inherits the umask of
+            // whoever ran it -- so a user with `umask 0` who is first to
+            // trigger a write would get a world-writable `/var/run/authlib`,
+            // and could then rename their own file over the tally and clear
+            // their failures. Mode is forced rather than inherited.
+            restrict_dir(dir);
         }
         // Written beside the target and renamed over it, so a reader never sees
         // a half-written table and a crash mid-write leaves the old one intact.
@@ -250,10 +259,28 @@ fn restrict(path: &Path) {
     ));
 }
 
-/// No-op off Unix. The real target is `target-family = ["unix"]`; this arm
-/// exists because the tests run on the Windows build host.
+/// Make a directory enterable and writable only by its owner.
+///
+/// Separate from [`restrict`] because the bit that matters is different: 0700
+/// on the directory is what stops a user *replacing* the tally by renaming
+/// their own file over it, which no permission on the file itself can prevent.
+#[cfg(unix)]
+fn restrict_dir(path: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+    // Best effort, for the same reason as `restrict`.
+    drop(std::fs::set_permissions(
+        path,
+        std::fs::Permissions::from_mode(0o700),
+    ));
+}
+
+/// No-op off Unix. The real target is `target-family = ["unix"]`; these arms
+/// exist because the tests run on the Windows build host.
 #[cfg(not(unix))]
 fn restrict(_path: &Path) {}
+
+#[cfg(not(unix))]
+fn restrict_dir(_path: &Path) {}
 
 /// Lowercase hex, two characters per byte.
 fn hex_encode(bytes: &[u8]) -> String {
@@ -462,5 +489,36 @@ mod tests {
         assert!(!tmp.exists(), "scratch file survived a successful store");
 
         drop(std::fs::remove_file(&path));
+    }
+
+    /// The default path is `/var/run/authlib/tally`, and nothing else creates
+    /// that directory — so a `store` that cannot make its own parent would make
+    /// the whole shared tally silently do nothing on a real system, which is
+    /// indistinguishable from not having written it.
+    #[test]
+    fn storing_creates_a_missing_parent_directory_and_locks_it_down() {
+        let root = std::env::temp_dir().join(format!("authlib-dir-{}", std::process::id()));
+        let dir = root.join("nested");
+        let path = dir.join("tally");
+        drop(std::fs::remove_dir_all(&root));
+        assert!(!dir.exists(), "fixture directory was not clean");
+
+        let mut table = Table::default();
+        table.set("alice", once(1));
+        assert!(table.store(&path), "store did not create its parent");
+        assert_eq!(Table::load(&path).get("alice").unwrap().failures, 1);
+
+        // The permission half only means anything on the real target; the test
+        // host has no Unix modes. Asserted rather than skipped so that the
+        // check exists the moment the suite runs there.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = |p: &Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode(&dir), 0o700, "tally directory is not owner-only");
+            assert_eq!(mode(&path), 0o600, "tally file is not owner-only");
+        }
+
+        drop(std::fs::remove_dir_all(&root));
     }
 }

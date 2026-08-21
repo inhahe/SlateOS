@@ -28836,6 +28836,14 @@ memory would let a fresh process ignore what another program recorded a second
 ago. Field-wise maximum has the property that matters: neither half can
 *shorten* the other's delay, only lengthen it.
 
+**The directory's mode is forced, not inherited.** `create_dir_all` applies
+the process umask, and a setuid program inherits the umask of whoever ran it —
+so a user with `umask 0` who happened to be the first to trigger a write would
+get a world-writable `/var/run/authlib`, and could then rename their own file
+over the tally to clear their failures. No permission on the *file* can prevent
+that; the directory is what has to be 0700, and it is set explicitly rather
+than left to whatever the caller's environment happened to be.
+
 **A failed write is ignored.** `write_shared` discards the error, which is the
 kind of thing this project normally forbids. The justification is that the
 in-memory tally still limits the running process, so an unwritable `/var/run`

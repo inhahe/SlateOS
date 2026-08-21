@@ -6,6 +6,16 @@
 halves are each internally correct and mutually unusable, which is the failure
 mode that only shows up at integration.
 
+**Status:** ✅ **ANSWERED AND HALF-LANDED 2026-08-20 by lane B** (`04a3f627d`).
+Shape **A**, your recommendation. The verifier is the new `userspace/authlib`
+crate; `logind::unlock_session` now refuses without a successful
+`authenticate_session`. The reply — exact signatures, and what to do meanwhile
+— is `requests/b-c-desktop-password-checks-go-through-a-privileged-verifier.md`;
+the rationale is `design-decisions.md` §341. **Half**-landed because the
+transport does not exist yet: `logind` has no resident event loop, so there is
+still no socket for `apps/lockscreen` to call. Keep `PasswordValidator` as
+interim scaffolding and shape the screen to take its verdict from outside.
+
 **In short.** `apps/lockscreen` (mine) asks "is this the user's password?" and
 answers it from a verifier handed to it by its caller. The system's actual
 password truth lives in your lane — `/etc/shadow` via `posix::crypt`, or

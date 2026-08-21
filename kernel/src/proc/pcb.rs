@@ -5996,6 +5996,33 @@ pub fn deregister_ipc_handle(pid: ProcessId, resource_type: ResourceType, handle
     }
 }
 
+/// Does `pid` hold this exact `(resource_type, handle_raw)`?
+///
+/// Most IPC handle values in this kernel are treated as self-authorising — the
+/// handle *is* the capability — which is sound when the value is unguessable.
+/// It is not sound for a [`ResourceType::Pty`] handle, whose raw form is
+/// `(tty_id << 1) | end` and therefore trivially enumerable: without this check
+/// any process could write to `(2 << 1)` and inject keystrokes into whatever
+/// shell happens to be running on pty 2, which is a shell prompt with arbitrary
+/// input, not a data leak. So the pty syscalls check ownership rather than
+/// trusting the value, and this is the query they use.
+///
+/// It is deliberately a *membership* test rather than a lookup returning the
+/// entry: the caller already knows what it asked for, and an API that hands
+/// back an owned handle invites storing it past the lifetime of the check.
+///
+/// Returns `false` if `pid` is not in the process table, which is the safe
+/// answer for a caller that vanished mid-syscall.
+#[must_use]
+pub fn owns_ipc_handle(pid: ProcessId, resource_type: ResourceType, handle_raw: u64) -> bool {
+    let table = PROCESS_TABLE.lock();
+    table.get(&pid).is_some_and(|proc| {
+        proc.ipc_handles
+            .iter()
+            .any(|&(rt, h)| rt == resource_type && h == handle_raw)
+    })
+}
+
 /// Snapshot a process's tracked IPC handles for `fork()`.
 ///
 /// Returns a clone of the `(resource_type, handle_raw)` list so the

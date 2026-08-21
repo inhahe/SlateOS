@@ -2400,6 +2400,252 @@ pub const SYS_TTY_SET_TERMIOS: u64 = 542;
 pub const SYS_TTY_READ: u64 = 543;
 
 // ---------------------------------------------------------------------------
+// Pseudo-terminal syscalls (544–556)
+// ---------------------------------------------------------------------------
+//
+// Modelled on the `SYS_SOCKETPAIR_*` family (300–310): one create that returns
+// both ends, then per-end operations keyed by an opaque handle.  A pty is the
+// same *shape* of object — two ends of one buffer pair, created together — with
+// a line discipline in the middle.
+//
+// # How these syscalls name a terminal
+//
+// Every one of them, plus the handle-taking forms of `SYS_TTY_GET_TERMIOS`,
+// `SYS_TTY_SET_TERMIOS` and `SYS_TTY_ACQUIRE_CTTY`, uses one convention:
+//
+// | Argument | Means |
+// |---|---|
+// | `0` | *the caller's controlling terminal* — the console for a process that has not been re-parented onto a pty, so this is exactly the pre-pty behaviour |
+// | ≥ 2 | a `PtyHandle` raw value the caller must own |
+// | `1` | invalid; it would decode as "the slave end of tty 0", and tty 0 is the console, which is not a pty |
+//
+// The zero case is what lets a program written before ptys existed keep
+// working unchanged *and* do the right thing once it is running under one: a
+// shell calling `tcgetattr` gets its own terminal's settings, whichever
+// terminal that turns out to be, rather than the console's.  Handles are ≥ 2
+// because pty ids start at 1 and the raw form is `(id << 1) | end`, so the
+// sentinel does not have to be carved out of the handle space.
+//
+// **Ownership is checked**, unlike the socketpair family: a raw pty handle is
+// enumerable and a master handle is the authority to type into someone's
+// shell.  See [`crate::cap::ResourceType::Pty`].
+
+/// Create a pseudo-terminal, returning **both** ends.
+///
+/// Takes no arguments.  Returns the master handle in the primary result and
+/// the slave handle in the secondary one (`SyscallResult::ok2`, the same
+/// two-value return `SYS_SOCKETPAIR_CREATE` uses).
+///
+/// # Why both, when Linux returns only the master
+///
+/// Linux gives you the master from `/dev/ptmx` and makes you find the slave by
+/// name (`ptsname`) and open it (`/dev/pts/N`).  That shape is forced by the
+/// slave being a *filesystem path* some unrelated process might open, which is
+/// what requires `TIOCSPTLCK`, `unlockpt` and the "has this been opened at
+/// least once" state that `grantpt` exists to paper over: the window between
+/// creating the pty and the intended user opening it is a window in which
+/// somebody else can open it instead.
+///
+/// Nothing here needs a third party to open the slave by name, so returning
+/// the pair closes that window rather than guarding it — it removes the entire
+/// state machine instead of reproducing it.  [`SYS_PTY_SLAVE_ID`] still exists
+/// because `ptsname` must answer *something*; it reports a name rather than
+/// being the only way to obtain the end.
+///
+/// Returns: master in `rax`, slave in `rdx`; `OutOfMemory` if the pty id space
+/// is exhausted.  Chosen number 544.
+pub const SYS_PTY_CREATE: u64 = 544;
+
+/// Write "keystrokes" into a pty: bytes its slave's line discipline will see
+/// as terminal *input*.
+///
+/// `arg0`: master handle.
+/// `arg1`: pointer to the bytes.
+/// `arg2`: length.
+///
+/// Blocks while the input ring is full, which is what gives a paste into a
+/// slow program back-pressure instead of a silent truncation.  The count
+/// returned may be short; the caller must resume from it.
+///
+/// Returns: bytes accepted; `InvalidHandle` if the handle is not an owned
+/// master; `ChannelClosed` (EPIPE) if the slave end is closed, because nothing
+/// will ever read these bytes; the restart sentinel if a signal arrived before
+/// any byte was written.  Chosen number 545.
+pub const SYS_PTY_MASTER_WRITE: u64 = 545;
+
+/// Read program output from a pty's master end (blocking).
+///
+/// `arg0`: master handle.
+/// `arg1`: destination buffer.
+/// `arg2`: buffer capacity.
+///
+/// This is what a terminal emulator draws.  Bytes have already been through
+/// output post-processing, so a `\n` written by the program arrives as CRLF
+/// under `ONLCR`.
+///
+/// **When the last slave closes this returns `IoError` (EIO), not 0** — see
+/// `design-decisions.md` §259.  Buffered output is delivered first, so a
+/// program's final line before exiting is not swallowed.  A libc that
+/// "helpfully" converts the EIO to a zero-length read breaks every emulator
+/// ported from Linux, which reads `0` as "nothing right now, retry" and spins.
+///
+/// Returns: bytes read; `InvalidHandle`; `IoError` at hangup; the restart
+/// sentinel on a signal.  Chosen number 546.
+pub const SYS_PTY_MASTER_READ: u64 = 546;
+
+/// Non-blocking [`SYS_PTY_MASTER_READ`].
+///
+/// Returns `WouldBlock` (EAGAIN) rather than parking when the output ring is
+/// empty and the slave is still open.  Chosen number 547.
+pub const SYS_PTY_MASTER_TRY_READ: u64 = 547;
+
+/// Write program output into a pty from its slave end.
+///
+/// `arg0`: slave handle, or 0 for the caller's controlling terminal.
+/// `arg1`: pointer to the bytes.
+/// `arg2`: length.
+///
+/// The counterpart of [`SYS_TTY_READ`]: a program running *on* a pty reads its
+/// terminal with 543 and writes it with this.  Output post-processing
+/// (`OPOST`/`ONLCR`) is applied here rather than by the caller, because it is a
+/// property of the terminal and only the terminal knows that a line break is
+/// two bytes.
+///
+/// The returned count is in the caller's bytes, not the expanded bytes, so a
+/// short write can be resumed from it without re-sending half a CRLF.
+///
+/// Returns: bytes accepted; `InvalidHandle`; `IoError` if the master is closed
+/// (the terminal has been unplugged); the restart sentinel on a signal.
+/// Chosen number 548.
+pub const SYS_PTY_SLAVE_WRITE: u64 = 548;
+
+/// Drop one reference to a pty end.
+///
+/// `arg0`: the handle to close.
+///
+/// When the last *master* reference goes, the slave's readers see end-of-file,
+/// its writers get `IoError`, and every session holding it as a controlling
+/// terminal has its foreground group hung up (`SIGHUP` then `SIGCONT`, in that
+/// order and across the whole group — a member with a `SIGHUP` handler survives
+/// and must still be continued).  When the last *slave* reference goes, the
+/// master drains and then reports `IoError`.  When both are gone the device is
+/// destroyed and any controlling-terminal association detached.
+///
+/// Returns: 0; `InvalidHandle` if the caller does not own the handle.  Closing
+/// is idempotent only in the sense that a second close of the same value fails
+/// the ownership check — the reference was already given up.  Chosen number
+/// 549.
+pub const SYS_PTY_CLOSE: u64 = 549;
+
+/// Take another reference to a pty end.
+///
+/// `arg0`: the handle to duplicate.
+///
+/// Returns the *same* raw value, with the end's reference count bumped: a pty
+/// end has one identity, and two names for it would make "the last close"
+/// ambiguous.  This is what a shell about to `fork` uses so that the child's
+/// exit does not hang up the parent.
+///
+/// Returns: the handle; `InvalidHandle`.  Chosen number 550.
+pub const SYS_PTY_DUP: u64 = 550;
+
+/// Report the terminal id behind a pty handle, for `ptsname(3)`.
+///
+/// `arg0`: either end's handle.
+///
+/// Returns the `TtyId`, which libc formats as `/dev/pts/<id>`.  This is a
+/// *name*, not a way to obtain the slave end — see [`SYS_PTY_CREATE`] for why
+/// there is deliberately no `OPEN_SLAVE`.
+///
+/// Returns: the tty id; `InvalidHandle`.  Chosen number 551.
+pub const SYS_PTY_SLAVE_ID: u64 = 551;
+
+/// Report whether a pty end would read or write without blocking.
+///
+/// `arg0`: the handle.
+///
+/// Returns a bitmask: bit 0 = readable, bit 1 = writable.  Hangup counts as
+/// readable, because a read at hangup returns immediately (with EOF on the
+/// slave, `IoError` on the master) and a poller that treated it as "not ready"
+/// would never notice the terminal had gone.  This is the same rule Linux's
+/// `poll` uses when it sets `POLLHUP` alongside `POLLIN`.
+///
+/// Returns: the mask; `InvalidHandle`.  Chosen number 552.
+pub const SYS_PTY_POLL: u64 = 552;
+
+/// Read a terminal's window size (`ioctl(fd, TIOCGWINSZ)`).
+///
+/// `arg0`: terminal, under the family's naming convention (`0` = the caller's
+/// controlling terminal, `>= 2` = an owned pty handle).
+/// `arg1`: pointer to a [`crate::tty::WINSIZE_BYTES`]-byte `struct winsize`.
+///
+/// Returns: 0; `InvalidHandle`, `InvalidArgument`, or a copy-out fault.
+/// Chosen number 553.
+pub const SYS_PTY_GET_WINSIZE: u64 = 553;
+
+/// Set a terminal's window size, raising `SIGWINCH` on a real change
+/// (`ioctl(fd, TIOCSWINSZ)`).
+///
+/// `arg0`: terminal, as for [`SYS_PTY_GET_WINSIZE`].
+/// `arg1`: pointer to a [`crate::tty::WINSIZE_BYTES`]-byte `struct winsize`.
+///
+/// # Why the master end needs this at all
+///
+/// The Linux-ABI `TIOCSWINSZ` acts on the caller's *controlling* terminal,
+/// which is the right answer for the shell but the wrong one for the terminal
+/// emulator: the emulator owns the master end of a pty that is emphatically not
+/// its own controlling terminal, and it is the party that knows the window was
+/// resized. Without a handle form, dragging a window's corner could not reach
+/// the program inside it — the resize would be invisible, which is the one thing
+/// `SIGWINCH` exists to prevent.
+///
+/// The signal goes to the *slave's* foreground process group, not to the caller,
+/// which is why setting the size and delivering the signal are one operation
+/// rather than two syscalls a careless emulator could get out of step.
+///
+/// Returns: 0; `InvalidHandle`, `InvalidArgument`, or a copy-in fault.
+/// Chosen number 554.
+pub const SYS_PTY_SET_WINSIZE: u64 = 554;
+
+/// Read a terminal's `termios` by handle (`tcgetattr` on a pty the caller owns).
+///
+/// `arg0`: terminal, under the family's naming convention (`0` = the caller's
+/// controlling terminal, `>= 2` = an owned pty handle).
+/// `arg1`: pointer to a [`crate::tty::TERMIOS_BYTES`]-byte `struct termios`.
+///
+/// # Why this is a new number rather than an argument on 541
+///
+/// [`SYS_TTY_GET_TERMIOS`] (541) acts on the caller's own controlling terminal
+/// and takes only a buffer. Widening it to take a terminal first would break
+/// every caller already compiled against it — for a caller that could equally
+/// well use a new number. An ABI break buys something only when the old shape
+/// is *wrong*, and 541's shape is exactly right for the overwhelmingly common
+/// case: a program asking about its own terminal.
+///
+/// Returns: 0; `InvalidHandle`, `InvalidArgument`, or a copy-out fault.
+/// Chosen number 555.
+pub const SYS_PTY_GET_TERMIOS: u64 = 555;
+
+/// Set a terminal's `termios` by handle (`tcsetattr` on a pty the caller owns).
+///
+/// `arg0`: terminal, as for [`SYS_PTY_GET_TERMIOS`].
+/// `arg1`: pointer to a [`crate::tty::TERMIOS_BYTES`]-byte `struct termios`.
+///
+/// # Why the handle form is required and not merely convenient
+///
+/// `openpty(3)` sets the slave's `termios` *before* forking — at which point the
+/// slave is nobody's controlling terminal, so [`SYS_TTY_SET_TERMIOS`] (542),
+/// which acts on the caller's own terminal, cannot express the operation at all.
+/// Deferring it until after the fork does not fix it either: that is a race the
+/// child can lose by reading a line first, and the line it reads is then edited
+/// under the wrong discipline — the classic "the password prompt echoed the
+/// password" bug.
+///
+/// Returns: 0; `InvalidHandle`, `InvalidArgument`, or a copy-in fault.
+/// Chosen number 556.
+pub const SYS_PTY_SET_TERMIOS: u64 = 556;
+
+// ---------------------------------------------------------------------------
 // Filesystem syscalls (600–799)
 // ---------------------------------------------------------------------------
 

@@ -114,6 +114,19 @@ pub fn cleanup_handles(handles: &[(ResourceType, u64)]) {
                 // exit-cleanup context (kernel thread, no locks held here).
                 crate::net::socket::close(crate::net::socket::SocketHandle::from_raw(handle_raw));
             }
+            ResourceType::Pty => {
+                // Closing the last *master* is what hangs up a shell whose
+                // terminal emulator just died, which is precisely the case this
+                // path exists for.  It routes through the syscall layer's
+                // helper rather than `pty::close` directly because `pty::close`
+                // deliberately only *reports* which groups are owed a SIGHUP —
+                // signal delivery lives one layer up, and a second copy of the
+                // SIGHUP-then-SIGCONT rule here would be one more place for it
+                // to drift.
+                crate::syscall::handlers::close_pty_handle(crate::tty::pty::PtyHandle::from_raw(
+                    handle_raw,
+                ));
+            }
             ResourceType::File => {
                 // Open file handles are refcounted in the open-file table;
                 // closing here drops this process's single reference.  A

@@ -130,14 +130,30 @@ impl PtyEnd {
 pub struct PtyHandle(u64);
 
 impl PtyHandle {
-    fn new(id: TtyId, end: PtyEnd) -> Self {
-        Self((u64::from(id) << 1) | end.as_bit())
+    // `as` rather than `u64::from` only because `From` is not usable in a const
+    // fn; `TtyId` is a `u32`, so the widening cannot lose anything.
+    #[allow(clippy::cast_lossless)]
+    const fn new(id: TtyId, end: PtyEnd) -> Self {
+        Self(((id as u64) << 1) | end.as_bit())
     }
 
     /// Reconstruct a handle from its raw userspace representation.
     #[must_use]
     pub const fn from_raw(raw: u64) -> Self {
         Self(raw)
+    }
+
+    /// The slave handle for a terminal id.
+    ///
+    /// For the syscall layer, where a slave is addressed by *terminal* — a
+    /// shell inherited its slave across `execve` and holds no handle, so
+    /// `SYS_PTY_SLAVE_WRITE` resolves "my controlling terminal" to an id and
+    /// needs a handle for it. Constructing one grants no authority the caller
+    /// did not already have: the id came from the caller's own controlling
+    /// terminal or from a handle it was proven to own.
+    #[must_use]
+    pub const fn new_slave(id: TtyId) -> Self {
+        Self::new(id, PtyEnd::Slave)
     }
 
     /// The raw value handed to userspace.
@@ -890,6 +906,22 @@ pub fn self_test() {
     let n = master_read(m, &mut got).expect("master read output");
     assert_eq!(got.get(..n), Some(&b"out\r\n"[..]), "ONLCR expanded output");
 
+    // --- the unified write path reaches the same place ----------------------
+    // `tty::write` is what `SYS_CONSOLE_WRITE` and the Linux `write(1, …)` now
+    // go through, and the whole point of it is that a program need not know
+    // which backend is behind its terminal.  If this ever stops routing to the
+    // pty, a shell under a terminal emulator prints on the physical screen
+    // instead of in its window — a failure that is invisible in a headless
+    // boot, which is exactly why it is asserted here.
+    let n = tty::write(id, b"via tty\n").expect("tty::write to a pty");
+    assert_eq!(n, 8, "tty::write reports caller bytes, not expanded bytes");
+    let n = master_read(m, &mut got).expect("master read tty::write output");
+    assert_eq!(
+        got.get(..n),
+        Some(&b"via tty\r\n"[..]),
+        "tty::write applied the pty backend's ONLCR"
+    );
+
     // --- an interrupt character generates a signal, not data ---------------
     let _ = master_write(m, b"\x03").expect("master write ^C");
     match tty::read(id, &mut buf) {
@@ -899,6 +931,22 @@ pub fn self_test() {
     // ...and Linux echoes it, so the emulator shows `^C`.
     let n = master_read(m, &mut got).expect("master read ^C echo");
     assert_eq!(got.get(..n), Some(&b"^C"[..]), "^C is echoed as caret-C");
+
+    // --- window size is per-device, and a resize is distinguishable ---------
+    // `SYS_PTY_SET_WINSIZE` raises SIGWINCH only when `set_winsize` reports a
+    // real change; a shell re-setting the same size on every prompt must not
+    // wake every full-screen program on the terminal to redraw an unchanged
+    // screen.  That "only on a change" is the contract being pinned here.
+    let ws = tty::WinSize {
+        ws_row: 40,
+        ws_col: 100,
+        ws_xpixel: 0,
+        ws_ypixel: 0,
+    };
+    assert!(tty::set_winsize(id, ws), "a new size is a change");
+    assert!(!tty::set_winsize(id, ws), "the same size is not a change");
+    assert_eq!(tty::get_winsize(id).ws_row, 40, "rows stuck");
+    assert_eq!(tty::get_winsize(id).ws_col, 100, "cols stuck");
 
     // --- wrong end is a wrong handle, not a transposition ------------------
     assert!(

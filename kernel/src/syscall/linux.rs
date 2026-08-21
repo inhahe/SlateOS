@@ -3457,7 +3457,59 @@ pub fn dispatch_linux(nr: u64, args: &SyscallArgs) -> SyscallResult {
         _ => linux_err(errno::ENOSYS),
     };
     account_io_syscall(nr, result.value);
+    log_stat_family_anomaly(nr, args, result.value);
     result
+}
+
+/// Log a stat-family syscall that failed with anything other than `ENOENT`.
+///
+/// [`stat_meta_for_path`] already logs an anomalous *VFS lookup* result, and
+/// that was not enough: `make` reports `stat: /Makefile: Permission denied` on
+/// every boot with no `[stat]` line to match it, which proves the `EACCES` is
+/// produced somewhere in these handlers **other than** the lookup —
+/// `resolve_at_path`, a user-buffer gate, or the copy-out. Instrumenting one
+/// stage and concluding "not that stage, therefore mysterious" is how the bug
+/// survived two rounds of investigation; a check on the syscall's own return
+/// value cannot have that gap, because there is only one value to look at.
+///
+/// `ENOENT` stays silent for the reason it always did: every `$PATH` probe and
+/// every implicit-rule search is a failed stat, and a line each would bury the
+/// interesting one. Everything else is rare enough to be worth a line, and a
+/// program that mistranslates a failed stat into "does not exist" — which GNU
+/// make does, by design — will otherwise fail thousands of lines later with a
+/// message naming neither stat nor a permission problem.
+fn log_stat_family_anomaly(nr: u64, args: &SyscallArgs, value: i64) {
+    // The path argument is arg0 for stat/lstat/access and arg1 for the *at
+    // forms, which take a dirfd first. Anything else has no path to name.
+    let path_ptr = match nr {
+        nr::STAT | nr::LSTAT | nr::ACCESS => args.arg0,
+        nr::NEWFSTATAT | nr::STATX | nr::FACCESSAT | nr::FACCESSAT2 => args.arg1,
+        _ => return,
+    };
+    if value >= 0 || value == -i64::from(errno::ENOENT) {
+        return;
+    }
+    // Only a *process* has a path here. A kernel-context caller — every
+    // fidelity self-test — passes a bare sentinel like `0x1000` as its "path"
+    // to observe a gate, so there is nothing to name, and this hook runs on the
+    // dispatch tail after every handler including the ones that returned before
+    // reading a byte. (It also used to be fatal: chasing that sentinel through
+    // `read_user_cstr` faulted the kernel, because in kernel context the
+    // validator bypasses. `mm::user` now rejects the copy instead of faulting,
+    // but a diagnostic that logs an empty path for every gate test is still
+    // noise, so leave before doing any of it.)
+    if caller_pid().is_none() {
+        return;
+    }
+    // Best-effort: the pointer was validated by the handler that just ran, but
+    // it may name a path that handler never got far enough to read.
+    let name = read_user_cstr(path_ptr, 256).unwrap_or_default();
+    crate::serial_println!(
+        "[stat] syscall {} on '{}' returned errno {} (not ENOENT)",
+        nr,
+        crate::fs::path::Path::new(name.as_slice()).display(),
+        -value,
+    );
 }
 
 /// Per-process I/O accounting hook, run after every Linux syscall
@@ -8733,7 +8785,7 @@ fn console_terminal_ioctl(
             }
             // Shared with the native `SYS_TTY_SET_TERMIOS`, so the SIGTTOU
             // job-control rule is written once rather than once per ABI.
-            match super::handlers::tty_set_termios_from_user(arg) {
+            match super::handlers::tty_set_termios_from_user(tty_id, arg) {
                 super::handlers::TtyCtlOutcome::Done => SyscallResult::ok(0),
                 super::handlers::TtyCtlOutcome::Restart(r) => r,
                 super::handlers::TtyCtlOutcome::Fail(e) => linux_err(linux_errno_for(e)),

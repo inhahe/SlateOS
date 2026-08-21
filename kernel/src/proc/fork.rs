@@ -309,6 +309,16 @@ fn dup_one(rtype: ResourceType, id: u64) -> KernelResult<Option<(ResourceType, u
             crate::ipc::inotify::dup(crate::ipc::inotify::InotifyHandle::from_raw(id))?;
             Ok(Some((rtype, id)))
         }
+        ResourceType::Pty => {
+            // Bump the end's refcount so parent and child each own one
+            // reference to the same end of the same terminal — same id, since
+            // the handle *is* the end.  This is what makes the usual
+            // `fork(); dup2(slave, 0/1/2); exec()` shape work: the child
+            // inherits the slave, and the parent's later close of its own copy
+            // does not hang up the child.
+            crate::tty::pty::dup(crate::tty::pty::PtyHandle::from_raw(id))?;
+            Ok(Some((rtype, id)))
+        }
         ResourceType::AlsaPcm => {
             // Bump the PCM-substream instance refcount so parent and child each
             // own one reference to the same open substream (shared state and
@@ -398,6 +408,18 @@ fn close_one(rtype: ResourceType, id: u64) {
         }
         ResourceType::Inotify => {
             crate::ipc::inotify::close(crate::ipc::inotify::InotifyHandle::from_raw(id));
+        }
+        ResourceType::Pty => {
+            // Rollback of a `dup_one` that succeeded before a later handle
+            // failed, so this can only be dropping the *second* reference to an
+            // end the parent still holds — it can never be the last-master
+            // close that would owe a SIGHUP.  `pty::close` is therefore called
+            // directly; its `Hangup` is empty by construction here.
+            let hangup = crate::tty::pty::close(crate::tty::pty::PtyHandle::from_raw(id));
+            debug_assert!(
+                hangup.is_empty(),
+                "fork rollback closed the last master of pty {id}"
+            );
         }
         ResourceType::AlsaPcm => {
             crate::ipc::alsa_pcm::close(crate::ipc::alsa_pcm::AlsaPcmHandle::from_raw(id));

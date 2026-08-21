@@ -277,6 +277,25 @@ pub enum ResourceType {
     ///
     /// [`Socket`]: ResourceType::Socket
     NetSocket = 25,
+    /// One end of a pseudo-terminal (`SYS_PTY_CREATE`).
+    ///
+    /// A refcounted reference into [`crate::tty::pty`]; no capability is
+    /// required to create a pty — creating one grants authority over nothing
+    /// that existed before it, as with [`Pipe`] and [`StreamSocket`].  Tracked
+    /// per-process so the end is closed when an owning process dies, which is
+    /// what hangs up a shell whose terminal emulator was killed, and so
+    /// `fork()` knows to bump the refcount in the child.
+    ///
+    /// **Unlike the other handle types here, ownership is actually checked.**
+    /// The raw value is `(tty_id << 1) | end`, so it is enumerable, and a
+    /// master handle is the authority to *type* into whatever shell is on the
+    /// other end — a shell prompt with attacker-chosen input, not a data leak.
+    /// Every pty syscall therefore consults
+    /// [`crate::proc::pcb::owns_ipc_handle`]; see its doc comment.
+    ///
+    /// [`Pipe`]: ResourceType::Pipe
+    /// [`StreamSocket`]: ResourceType::StreamSocket
+    Pty = 26,
 }
 
 // ---------------------------------------------------------------------------

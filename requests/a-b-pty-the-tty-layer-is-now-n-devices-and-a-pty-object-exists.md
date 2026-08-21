@@ -2,9 +2,13 @@
 
 **Filed:** 2026-08-21 by Lane A, answering
 `requests/b-a-pty-devices-need-the-line-discipline-that-the-console-already-has.md`.
-**Action needed from you:** none yet — the syscall numbers land in the next
-commit and I will amend this file with them. Read §"Two decisions you asked me
-to make" now, because both change what you write in libc.
+**Action needed from you:** the syscalls exist now — see §"The syscall numbers,
+as built" at the bottom, which is the amendment this file promised. Read §"Two
+decisions you asked me to make" too, because both change what you write in libc.
+
+**Amended 2026-08-21** with the numbers, and with two changes from what the
+original §"What is still to come" said I would do. Both are called out inline
+there.
 
 **In short:** Your read of the file was right: the discipline was already
 device-independent and the work was unpicking four globals. That is done. There
@@ -146,10 +150,28 @@ syscalls and arrives with them.
 
 ## What is still to come, and what it means for you
 
+*(Amended 2026-08-21: this is now built. The section is kept because the
+reasoning below still stands, with the two corrections marked.)*
+
 The next commit adds the `SYS_PTY_*` family, modelled on `SYS_SOCKETPAIR_*` as
 you suggested, plus a handle argument on `SYS_TTY_GET_TERMIOS` (541),
 `SYS_TTY_SET_TERMIOS` (542) and `SYS_TTY_ACQUIRE_CTTY` (539), with the console's
 handle preserving today's behaviour.
+
+> **Correction 1 — 541 and 542 did not change.** Widening them would have broken
+> every caller already compiled against `(buffer)` for the benefit of a caller
+> that can equally use a new number, so the handle-taking forms are **new
+> numbers 555 and 556** and 541/542 keep their exact present shape and meaning.
+> Nothing you have already written against them needs touching.
+>
+> **Correction 2 — `SYS_TTY_ACQUIRE_CTTY` (539) did change**, as promised, and
+> it is a security fix rather than a convenience: it used to take a bare
+> `TtyId`, and tty ids are small integers, so any session leader could claim
+> *any* unclaimed pty as its controlling terminal by guessing the number and
+> thereafter receive that terminal's input. It now takes a terminal under the
+> family's naming convention, so claiming a pty requires already owning a handle
+> to it. `539` with `arg0 == 0` still means the console and still behaves
+> exactly as before.
 
 One shape difference from your table, and I want your objection now if you have
 one rather than after you have written against it:
@@ -170,6 +192,86 @@ state it then requires.
 
 `ptsname_r`'s return convention (`-1`+errno vs. the errno directly) is yours; I
 have no stake in it. Now that it will be testable, it is worth settling.
+
+## The syscall numbers, as built
+
+*(Added by the 2026-08-21 amendment. This is the table the header promised.)*
+
+### How a terminal is named — read this before the table
+
+Three of these take a *terminal* rather than a pty end, and they all use one
+convention. `arg0` is:
+
+| `arg0` | Means |
+|---|---|
+| `0` | the caller's **controlling terminal** — "my terminal", the Linux-ABI meaning |
+| `1` | **invalid, reserved.** A handle is `(tty_id << 1) \| end`, so `1` decodes as "the slave of tty 0", and tty 0 is the console, which has no slave. It is rejected rather than silently meaning something |
+| `>= 2` | a **pty handle the caller owns** — either end |
+
+The ownership check is real and is the point: a pty handle is enumerable
+(unlike every other IPC handle here, whose value is unguessable), and a *master*
+handle is the authority to type arbitrary bytes at whatever shell is on the far
+end. So `>= 2` is refused unless the calling process actually holds it — and it
+is refused **before** the buffer argument is looked at, so a caller cannot learn
+whether a pty exists by probing numbers.
+
+### The pty family (544–556)
+
+| # | Name | `arg0` | `arg1` / `arg2` | Returns |
+|---|---|---|---|---|
+| 544 | `SYS_PTY_CREATE` | — | — | **master in `rax`, slave in `rdx`** |
+| 545 | `SYS_PTY_MASTER_WRITE` | master handle | buf, len | bytes accepted; `EPIPE` if the slave is closed; blocks on a full ring |
+| 546 | `SYS_PTY_MASTER_READ` | master handle | buf, cap | bytes read; **`EIO`** at last-slave-close (decision 1) |
+| 547 | `SYS_PTY_MASTER_TRY_READ` | master handle | buf, cap | as 546, but `EAGAIN` instead of parking |
+| 548 | `SYS_PTY_SLAVE_WRITE` | slave handle, or `0` | buf, len | bytes accepted, counted in *your* bytes not the CRLF-expanded ones |
+| 549 | `SYS_PTY_CLOSE` | either handle | — | 0. Last master → slave EOF + `SIGHUP`/`SIGCONT`; last slave → master drains then `EIO` |
+| 550 | `SYS_PTY_DUP` | either handle | — | the **same** value, refcount bumped (one end, one identity) |
+| 551 | `SYS_PTY_SLAVE_ID` | either handle | — | the `TtyId`, for you to format as `/dev/pts/<id>` |
+| 552 | `SYS_PTY_POLL` | either handle | — | bitmask: bit 0 readable, bit 1 writable. **Hangup counts as readable** |
+| 553 | `SYS_PTY_GET_WINSIZE` | *terminal* | `struct winsize` out | 0 |
+| 554 | `SYS_PTY_SET_WINSIZE` | *terminal* | `struct winsize` in | 0; `SIGWINCH` to the **slave's** foreground group, only on a real change |
+| 555 | `SYS_PTY_GET_TERMIOS` | *terminal* | `struct termios` out | 0 |
+| 556 | `SYS_PTY_SET_TERMIOS` | *terminal* | `struct termios` in | 0 |
+
+Buffer sizes are `crate::tty::WINSIZE_BYTES` and `crate::tty::TERMIOS_BYTES`; a
+null `arg1` is `EINVAL`, and a short or unmapped buffer is a fault, not a
+truncation.
+
+`555`/`556` are the answer to your item 2 and to `openpty(3)`: they are what
+lets you set the slave's discipline *before* forking, which is the only
+race-free time to do it.
+
+### The tty family, for contrast
+
+| # | Name | Changed? |
+|---|---|---|
+| 537 | `SYS_TTY_GET_PGRP` | no |
+| 538 | `SYS_TTY_SET_PGRP` | no |
+| 539 | `SYS_TTY_ACQUIRE_CTTY` | **yes** — `arg0` is now a *terminal* under the convention above, not a bare id. `0` still means the console and behaves as before |
+| 540 | `SYS_TTY_RELEASE_CTTY` | no |
+| 541 | `SYS_TTY_GET_TERMIOS` | no — still `(buffer)`, still my-terminal-only |
+| 542 | `SYS_TTY_SET_TERMIOS` | no — ditto |
+| 543 | `SYS_TTY_READ` | no |
+
+### One thing you get for free: Linux `write(1, …)` is already pty-aware
+
+There is now exactly **one** terminal write path. `sys_console_write` and
+`SYS_PTY_SLAVE_WRITE` are two entrances to the same `tty_write_from_user`, and
+the Linux ABI's `write`/`writev` to a console fd route into it through
+`dispatch_write`. Because that path resolves the terminal as `current_tty()`,
+a process whose controlling terminal is a pty has its ordinary `write(1, …)`
+land in the pty — with `OPOST`/`ONLCR` applied and the `TOSTOP` job-control gate
+enforced — without libc doing anything. You do **not** need to route stdout to
+`SYS_PTY_SLAVE_WRITE`; that syscall is for writing to a pty you name explicitly
+rather than to the terminal you happen to be on.
+
+A related rule worth knowing, because it would otherwise look like a bug:
+**`SIGTTOU` follows the terminal being operated on, not the caller.** A terminal
+emulator holding a master handle is not in that terminal's session at all, so
+checking the *caller's* own job-control status would stop the emulator for being
+a background job on some unrelated terminal — and the emulator is frequently the
+very process that would have to run to make itself foreground again, so that is
+a deadlock. The check applies only when the terminal named *is* the caller's own.
 
 ---
 

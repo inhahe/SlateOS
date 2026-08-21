@@ -67,6 +67,8 @@ use alloc::boxed::Box;
 use alloc::collections::BTreeMap;
 use spin::Mutex;
 
+use crate::error::{KernelError, KernelResult};
+
 pub mod pty;
 
 /// Number of control characters in the Linux *kernel* `struct termios`
@@ -1310,6 +1312,72 @@ fn raw_read(id: TtyId, backend: Backend, t: &Termios, out: &mut [u8]) -> Console
         }
     }
     ConsoleRead::Data(n)
+}
+
+// ---------------------------------------------------------------------------
+// Output
+// ---------------------------------------------------------------------------
+
+/// Write program output to terminal `id`.
+///
+/// The output counterpart of [`read`], and it exists for the same reason: a
+/// program does not know, and must not have to know, which backend is behind
+/// its terminal. Before this existed the read path was already device-aware
+/// (`tty_read_into_user` resolves the caller's controlling terminal) while the
+/// write path went straight to the physical console — so a shell started on a
+/// pty would have taken its input from the pty and printed its output on the
+/// screen behind the terminal emulator. Every write to a terminal goes through
+/// here.
+///
+/// # Why OPOST lives behind the backend split rather than here
+///
+/// `ONLCR` exists to turn the line discipline's `\n` into whatever the thing on
+/// the other end considers a line break. For a pty that is CRLF, because the
+/// other end is a terminal emulator; [`pty::slave_write`] applies it. For our
+/// framebuffer console the other end is a `putchar` that already treats `\n` as
+/// a line break, so applying ONLCR would emit a stray CR. The transformation is
+/// therefore a property of the backend, not of the caller, which is exactly why
+/// it belongs on this side of the dispatch — a caller that had to know would be
+/// back to knowing which backend it is on.
+///
+/// # Errors
+///
+/// * `IoError` — the terminal no longer exists, or a pty whose master has
+///   closed (the terminal was unplugged).
+/// * `Interrupted` — a deliverable signal arrived before any byte was written.
+pub fn write(id: TtyId, data: &[u8]) -> KernelResult<usize> {
+    if data.is_empty() {
+        return Ok(0);
+    }
+    // The backend, then drop the table: the pty path blocks on the output ring,
+    // and holding the device table across a park would deadlock against the
+    // master read that frees the space.
+    let Some(backend) = with_device(id, |d| d.backend) else {
+        return Err(KernelError::IoError);
+    };
+    match backend {
+        Backend::Console => {
+            console_write_bytes(data);
+            Ok(data.len())
+        }
+        Backend::Pty => pty::slave_write(pty::PtyHandle::new_slave(id), data),
+    }
+}
+
+/// Push bytes at the framebuffer/serial console.
+///
+/// `write_str` when the whole buffer is valid UTF-8, because that path reaches
+/// both the framebuffer and the serial log; otherwise byte-at-a-time, since
+/// `putchar` takes a byte and the serial mirror can only note the size.
+fn console_write_bytes(bytes: &[u8]) {
+    if let Ok(s) = core::str::from_utf8(bytes) {
+        crate::console::write_str(s);
+    } else {
+        for &b in bytes {
+            crate::console::putchar(b);
+        }
+        crate::serial_print!("<{} bytes>", bytes.len());
+    }
 }
 
 // ---------------------------------------------------------------------------

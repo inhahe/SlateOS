@@ -665,6 +665,7 @@ dependencies = [
  "safeio",
  "sha2",
  "textfmt",
+ "tzrules",
 ]
 
 [[package]]

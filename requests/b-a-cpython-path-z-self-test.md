@@ -173,8 +173,26 @@ this is the first time any of these paths carry a load like this:
 | `init_fs_encoding` fatal error | The zip was not staged, or `PYTHONHOME` is wrong. Not a kernel bug. |
 | `No module named 'zlib'` from `<frozen zipimport>` | The zip got repacked compressed. `create-ext4-rootfs.sh` asserts against this, so it would mean the assert was bypassed. Not a kernel bug. |
 | Hang partway through startup | Our `mmap`, `read` or `lseek` on a 20 MB file through the ext4 driver — CPython seeks around the zip's central directory rather than reading it linearly. |
-| Crash in `Py_Initialize` | A `getrandom` interaction (CPython seeds its hash randomisation at startup) or a TLS/thread-state issue. |
+| Crash in `Py_Initialize` | A `getrandom` interaction — CPython seeds its hash randomisation at startup. **Not TLS; see below.** |
 | Wrong output, correct exit code | A libc function that returns plausibly rather than correctly. This is the failure the specific expected lines above exist to catch. |
+
+### Two things I checked so you don't have to rule them out
+
+Both were on my own suspect list; both are measured away, so a failure here is
+almost certainly *not* one of these.
+
+- **Segment alignment is not a new case.** CPython's five `PT_LOAD` segments
+  are `p_align = 0x1000`, byte-for-byte the same shape as `bash-slateos.elf`,
+  which already runs. Our 16 KiB pages are not a fresh problem for this binary.
+- **`PT_TLS` is the best-tested thing on the image, not a risk.** CPython has a
+  `PT_TLS` segment and bash does not, which is what put TLS on my list. But
+  **63 of the 75 staged ELFs already carry one** — every `fastpy-*` binary, plus
+  `ctest-tls-thread`, which exists to test exactly this. And CPython's TLS block
+  is **16 bytes**, against `fastpy-hello`'s 111 KB. It is the smallest
+  meaningful demand on the image, not the largest.
+
+So if `Py_Initialize` dies, look at `getrandom` first, and treat the thread
+state as innocent until the cheaper explanation is eliminated.
 
 ## Call sites
 

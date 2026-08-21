@@ -51961,7 +51961,7 @@ unconditionally under a mask -- i.e. writing a constant-time bignum library by
 hand, unreviewed, which is the exact category of code that is famously got
 wrong. The better answer is to delete the requirement:
 
-1. Implement **X25519 (RFC 7748)** in `posix/`, beside the existing `ed25519`.
+1. Get an **X25519 (RFC 7748)** into the tree, beside the existing `ed25519`.
    The Montgomery ladder is naturally constant-time -- it performs the same
    operations for every scalar bit and selects between them with arithmetic
    rather than a branch -- the scalar is a fixed 32 bytes so there is no
@@ -51975,10 +51975,23 @@ That removes the hand-rolled 2048-bit modexp from the handshake entirely. The
 `BigUint` code would remain only for the fallback path (and could then be
 dropped altogether if the fallback is dropped).
 
+**Step 1 is a *port*, not an implementation -- decided 2026-08-21.** This entry
+was first written saying "implement X25519 in `posix/`". The operator answered
+C-Q5 the same day with **option C: vendor the cryptographic primitives, keep our
+own glue** (`design-decisions.md`, lane C's band). X25519 is a primitive by any
+reading, and it is a primitive whose *entire* value here is a property no test
+can check -- so hand-writing it would reproduce, in new code, precisely the
+defect this entry is about. Vendor a vetted implementation (RustCrypto's
+`curve25519-dalek`, or BearSSL's `c25519` if a C port is preferred) and keep the
+SSH-side plumbing ours. That also means step 1 is no longer lane B's to write
+alone: which implementation gets vendored, and where it lands, is the same
+decision C-Q5 set in motion for the vault and the password hash, and should be
+made once for all three consumers rather than three times.
+
 **Checked 2026-08-21:** `posix/src` has no X25519 today. Grepping
 `x25519|curve25519` there matches only Linux uapi *type definitions*
 (`linux_wireguard*.rs`, `linux_crypto_kpp*.rs`) -- names in an ABI, not an
-implementation. So step 1 is genuinely new code, not a wiring job.
+implementation. So there is nothing in the tree to wire up yet either way.
 
 **If never fixed:** no regression -- this is how the client has behaved since it
 was written, and the 350x speedup neither introduced nor worsened it. It does

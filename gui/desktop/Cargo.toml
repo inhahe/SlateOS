@@ -36,6 +36,14 @@ guitk = { path = "../toolkit" }
 # which this crate already has.
 guiremote = { path = "../remote" }
 
+# The client side of that protocol — a connection, windows, an event loop.
+# `session::ShellSession` is built on it: the shell's three surfaces are
+# ordinary compositor windows, and the taskbar's intents go out as ordinary
+# requests. Depending on it does not make the rest of the crate need a
+# compositor — `DesktopShell` still renders and hit-tests with no connection at
+# all, which is what keeps every test in here offline.
+oswindow = { path = "../window" }
+
 # The POSIX `TZ`-rule engine, shared with the libc (`posix`) and the shell
 # (`userspace/oils`). The taskbar clock is the most-looked-at rendering of local
 # time on the machine, so if it carried its own notion of a zone it would be the

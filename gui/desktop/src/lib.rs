@@ -12,28 +12,38 @@
 //! paint. This crate is a library so that something else can exist: the binary
 //! beside it is a scripted demonstration, not the shell.
 //!
+//! # The two halves, and which one you want
+//!
+//! [`DesktopShell`] is the shell's *model and appearance*: it decides what the
+//! desktop looks like and what a click on it means, and it does that with no
+//! connection, no display and no window system — which is what keeps every test
+//! around it offline. It is *told* what windows exist
+//! ([`DesktopShell::apply_window_list`]) rather than keeping its own answer, and
+//! a taskbar click comes back out as [`ShellAction::Control`] — a request to be
+//! sent on, not a change already made.
+//!
+//! [`session::ShellSession`] is the loop that does the sending: it opens the
+//! shell's three compositor surfaces, feeds input in, submits the render trees
+//! out, and forwards the intents. That is the piece that used to be missing —
+//! five public render methods whose only caller was this crate's own demo.
+//! It is deliberately the only part of the crate that needs a compositor.
+//!
 //! # What this crate does not do yet
 //!
-//! Two things a reader would reasonably assume from the list above, stated
-//! plainly because assuming them is how wrong code gets written against this.
-//! Both replace doc claims that used to be here and were not true.
+//! Stated plainly, because assuming otherwise is how wrong code gets written
+//! against this.
 //!
-//! - **It does not talk to the compositor — it only speaks its language.**
-//!   There is no connection, no event loop, and nothing that submits a rendered
-//!   tree to a surface. What there now is: the shell is written *as if* there
-//!   were one. [`DesktopShell::apply_window_list`] takes the compositor's
-//!   window list and is the authority on what windows exist, and a taskbar
-//!   click produces [`ShellAction::Control`] — a request to be sent on, not a
-//!   change already made. So the missing piece is genuinely the loop and
-//!   nothing else, where it used to be the loop *and* a shell that kept its own
-//!   private answers. See `known-issues.md`
-//!   `TD-C-THE-SHELL-CAN-DRAW-ITSELF-AND-NOBODY-CAN-ASK-IT-TO`.
-//!
-//!   One remnant: [`DesktopShell::add_window`] and the geometry methods around
-//!   it ([`snap_window`](DesktopShell::snap_window),
-//!   [`toggle_maximize`](DesktopShell::toggle_maximize)) are the old private
-//!   window manager. They are used only by the demo and the tests, which have
-//!   no compositor to be told by, and should go when the loop lands.
+//! - **A launch has nowhere to go.** [`ShellAction::Launch`] names a program and
+//!   [`session::ShellSession`] queues it, but nothing starts a process: policy
+//!   about *how* a program starts belongs to the process server, not to the
+//!   window manager. See `known-issues.md`
+//!   `TD-SHELL-HAS-NOWHERE-TO-SEND-A-LAUNCH`.
+//! - **The old private window manager is still here.**
+//!   [`DesktopShell::add_window`] and the geometry methods around it
+//!   ([`snap_window`](DesktopShell::snap_window),
+//!   [`toggle_maximize`](DesktopShell::toggle_maximize)) predate
+//!   `apply_window_list`, and are now used only by the demo and by tests, which
+//!   have no compositor to be told by. They should go.
 //! - **Theme support reaches five surfaces, not the desktop.** The appearance
 //!   settings are read and honoured by [`DesktopShell`]'s own render methods.
 //!   The 49 modules beside it — every settings page, dialog and OSD — each hold
@@ -96,6 +106,7 @@ pub mod resmon;
 pub mod run_dialog;
 pub mod screen_capture;
 pub mod security_dialog;
+pub mod session;
 pub mod session_mgr;
 pub mod snap;
 pub mod sound_settings;
@@ -2642,6 +2653,31 @@ impl DesktopShell {
         self.datetime
             .current_timezone()
             .map_or_else(Tz::utc, |tz| tz.rule)
+    }
+
+    /// How far into the local day a UTC instant is, in seconds.
+    ///
+    /// For anything that changes with the *time of day* rather than with the
+    /// clock reading — [`wallpaper::WallpaperMode::Dynamic`], which fades a
+    /// palette from dawn to night, is the one caller today.
+    ///
+    /// It exists rather than letting each such caller write `utc_secs % 86_400`
+    /// because that expression is the exact bug
+    /// [`current_clock_string`](Self::current_clock_string) documents: it is
+    /// UTC, so on the shipped default zone the desktop would turn to its
+    /// evening colours five hours early while the clock beside it read the
+    /// correct local time. One zone answer, asked in one place.
+    ///
+    /// Saturates rather than wrapping on a pre-1970 instant, which cannot
+    /// arrive from `SystemTime::now` and would be a nonsense time of day if it
+    /// did.
+    #[must_use]
+    pub fn seconds_since_local_midnight(&self, utc_secs: u64) -> u64 {
+        let utc = i64::try_from(utc_secs).unwrap_or(i64::MAX);
+        let local = utc.saturating_add(i64::from(self.local_zone().lookup(utc).gmtoff));
+        // `rem_euclid`, not `%`: a negative local instant with `%` yields a
+        // negative remainder, which is not a time of day at all.
+        u64::try_from(local.rem_euclid(86_400)).unwrap_or(0)
     }
 
     /// The clock as the Date & Time panel has configured it.

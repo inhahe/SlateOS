@@ -2304,6 +2304,7 @@ dependencies = [
  "appearance",
  "guiremote",
  "guitk",
+ "oswindow",
  "tzrules",
  "yamldoc",
 ]

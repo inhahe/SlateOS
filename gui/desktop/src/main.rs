@@ -2,13 +2,21 @@
 //!
 //! Drives [`desktop::DesktopShell`] through a scripted session — open windows,
 //! render the taskbar, walk the start menu, page the calendar, snap and switch
-//! desktops — printing what each step produced. It is a way to exercise the
-//! shell without a compositor, and the reason the shell's surfaces have output
-//! that can be looked at at all.
+//! desktops — printing what each step produced. It is a way to look at what the
+//! shell's surfaces render with no compositor to submit them to.
 //!
-//! It is **not** the shell. The shell is the library beside it, which is what a
-//! real session runs; keeping this here as a `[[bin]]` is what stops the
-//! library's only caller from being its own tests.
+//! It is **not** the shell, and it is no longer the only thing that drives one:
+//! [`desktop::session::ShellSession`] is the real loop, and it is what a live
+//! session runs. This binary stays because a library whose only caller is its
+//! own test suite is one refactor away from drifting from what a real session
+//! does — it is a second caller, going through the public API.
+//!
+//! It is also the last caller of [`desktop::DesktopShell::add_window`] and the
+//! geometry methods around it — the old private window manager, which a real
+//! session does not use because the compositor tells it what windows exist. The
+//! `-- taskbar --` section below builds a *fresh* `DesktopShell` and feeds it
+//! `apply_window_list` for exactly that reason: ids the shell minted and ids the
+//! compositor assigned must not be mixed.
 
 use desktop::{DesktopShell, ShellAction, WindowInfo, calendar, click};
 use guitk::event::{Key, KeyEvent, Modifiers};

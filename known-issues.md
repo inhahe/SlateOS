@@ -19291,6 +19291,28 @@ creation, not to the shell.
 **Where.** `gui/desktop/src/main.rs` — `ShellAction` and `handle_mouse`;
 `gui/desktop/src/launcher.rs` — `LauncherAction::Launch`.
 
+**Progress 2026-08-21 — narrowed: the loop exists and collects launches, so the
+missing edge is now the process server alone.** "There is no real event loop" is
+no longer true — `gui/desktop/src/session.rs` (`TD-C-THE-SHELL-CAN-DRAW-ITSELF-
+AND-NOBODY-CAN-ASK-IT-TO`, resolved) pumps input, and
+`ShellSession::pointer` answers `ShellAction::Launch(path)` by pushing it onto a
+queue that `take_launches()` drains. A start-menu click therefore produces a
+named program in a caller's hands, under test
+(`a_start_menu_row_comes_out_as_a_program_to_start`, plus
+`an_ordinary_press_produces_no_launch` to hold the negative).
+
+The session deliberately does **not** spawn it, for the reason "Proper fix"
+already gives: the queue is the shell doing its whole job and stopping. What
+remains is one edge and no longer a subsystem — a channel to whatever owns
+process creation, which lane C does not own. When that service exists, the
+change is confined to whoever drives `ShellSession::run`; nothing in
+`gui/desktop` needs to move.
+
+**Where (updated).** `gui/desktop/src/lib.rs` — `ShellAction` and `handle_mouse`
+(the file was `main.rs` when this was written); `gui/desktop/src/session.rs` —
+`ShellSession::pointer` and `take_launches`; `gui/desktop/src/launcher.rs` —
+`LauncherAction::Launch`, which still has the same dangling end.
+
 ## TD-FOUR-APPEARANCE-SETTINGS-THE-SHELL-STILL-IGNORES
 
 **What.** `AppearanceSettings` has fifteen fields. The shell now honours eleven
@@ -48435,7 +48457,7 @@ This also closed the larger half of the defect: `AdditionalClock::visible` had
 been a switch whose only observable effect was printing "Hidden" beside its own
 row in the panel that set it. It now hides a clock.
 
-## TD-C-THE-SHELL-CAN-DRAW-ITSELF-AND-NOBODY-CAN-ASK-IT-TO
+## TD-C-THE-SHELL-CAN-DRAW-ITSELF-AND-NOBODY-CAN-ASK-IT-TO — RESOLVED 2026-08-21 (see the final note)
 
 **In short:** `DesktopShell` has five public methods that turn the desktop into
 draw commands — the taskbar, the window decorations, the Alt-Tab switcher, the
@@ -48676,6 +48698,72 @@ by, but they are a second answer to questions the compositor already answers and
 should go when the loop lands. `main.rs` demonstrates the honest path in its
 `-- taskbar --` section and builds a *fresh* `DesktopShell` to do it, precisely
 because ids from the two regimes must not be mixed.
+
+**RESOLVED 2026-08-21 — the loop exists.** `gui/desktop/src/session.rs`,
+`ShellSession<T: ConnectionTransport>`: it opens the three banded surfaces,
+subscribes to the window list, pumps input, and submits every tree the shell
+renders. The four render methods now have a caller that is not the demo, and a
+taskbar click reaches the compositor as a `ShellControl` request. 21 tests in
+`session/tests.rs` run it end to end against `oswindow::testing::desktop()` —
+no compositor, no display; **all 16 reintroducible defects listed below were
+reintroduced one at a time and each produced a deterministic failure naming its
+own test.** Full crate suite: 2493 pass.
+
+The design questions this entry raised before the loop was written were all
+answered as the entry specified, which is the argument for having written them
+down first — none was discovered mid-build:
+
+- *Per-surface origin, both directions, one abstraction.* `Surface { window,
+  origin }` with exactly two methods: `to_screen` (input, `+origin`) and
+  `localize` (output, `−origin`). They are the only two places either
+  translation is written. The entry's own acceptance test —
+  "a point that hit-tests to a given element must be a point that element was
+  drawn at" — is `a_point_that_hits_an_element_is_a_point_that_element_was_
+  drawn_at`, and it was verified to catch *both* asymmetric bugs
+  (`render-translated-the-wrong-way` and `input-translated-the-wrong-way`),
+  which is the failure an ordinary suite would miss.
+- *The shell's rects were not re-based.* `taskbar_rect` still answers in screen
+  space and `hit_test`'s ordering still compares popup rects against it.
+- *The overlay is full-screen and unmapped while nothing is open*, exactly as
+  the click-outside-to-dismiss paragraph above requires. `popups_shown` starts
+  `true` because the compositor maps a new window, so the first `paint_chrome`
+  is what performs the initial unmap.
+- *`Hit::WindowContent` / `Hit::Desktop` are not special-cased.* The loop never
+  sees them and does not pretend to.
+
+Two implementation choices the entry did not anticipate, both documented at
+their definitions:
+
+- **The output translation is `PushTranslate`/`PopTranslate`, not a coordinate
+  rewrite.** `RenderCommand` has a dozen variants carrying positions in
+  different shapes; a rewriter would need extending for each new one and would
+  silently draw in the wrong place until somebody noticed. It is applied
+  unconditionally, even for origin `(0,0)`, because a "skip when it is a no-op"
+  branch would send the identity surfaces down a path the translated one never
+  takes — which is how the two directions get to disagree unnoticed.
+  `a_surface_at_the_screens_origin_is_translated_the_same_way_as_any_other`
+  holds that.
+- **Input is dispatched before the new window list is folded in.**
+  `EventLoop::poll` is also what reads the list off the wire, so by dispatch
+  time the connection may already hold a newer desktop than the taskbar the
+  user clicked was drawn from. Folding it in first renumbers
+  `visible_windows()` underneath a click aimed at the old numbering — the click
+  would minimise whichever window inherited the slot.
+  `a_window_list_arriving_with_a_click_is_folded_in_after_it`.
+
+**Still open, and now tracked only in its own entries, not here:**
+
+- `DesktopShell::add_window`, `focus_window`, `minimize_window`, `snap_window*`,
+  `toggle_maximize` and `take_window_id` — the geometry half of the old private
+  window manager — survive, now used *only* by the demo and by tests. The loop
+  has landed, so the condition this entry attached to their removal is met and
+  they should go next.
+- `ShellAction::Launch` is queued by the session and handed back from
+  `take_launches()`; nothing starts a process. That is
+  `TD-SHELL-HAS-NOWHERE-TO-SEND-A-LAUNCH`, which is narrowed rather than closed
+  — see its own progress note.
+- `require_shell` still checks nothing, so the subscription the loop depends on
+  is open to any client: `TD-C-ANY-CLIENT-CAN-READ-EVERY-WINDOW-TITLE`, below.
 
 ## TD-C-ANY-CLIENT-CAN-READ-EVERY-WINDOW-TITLE
 

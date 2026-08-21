@@ -50604,21 +50604,34 @@ still collide the way the original bug did.
 | Fixed name, no pid and no counter | `crond2` (`crond2_test_anacron`, `…2`, `…3`, `…_ts`), `du` (`du_test_walk`, `du_test_apparent`, `du_test_exclude`), `firejail` (eight `firejail_test_*`), `wc` (`wc-width-<pid>`) | Not between tests of one run (the names differ), but **yes between two concurrent runs** of the suite — e.g. the workspace gate and a `cargo test -p du` in another window |
 | Clock **and** counter | `coreutils/src/bin/touch.rs`, `coreutils/src/bin/realpath.rs`, `oils/src/interp.rs:64490` | No — the counter already makes these correct. They leak on a panicking test, and the clock in the name is dead weight, but neither is a correctness bug |
 
-`oils` additionally has its own `ScratchDir` type (`interp.rs` ~68606, ~93419)
-which is a fourth partial reimplementation of the same idea.
+**`oils` already has the fix and its seven sites simply do not use it.**
+`interp.rs:68598` defines a local `ScratchDir` with a local `uniq_name`
+(`:68577`) that is *correct*: pid + a process-wide `AtomicU64` sequence, a
+`Drop` that removes the tree, and a clock stamp kept only so a leftover
+directory's age is readable — never as the uniqueness. It was written for
+`TD-OILS-TEST-SCRATCH-NAME-COLLISION`, the same bug under a different name, and
+it even uses `create_dir` rather than `create_dir_all` so a collision would fail
+loudly instead of silently sharing. The seven sites in the table above are
+hand-rolled clock paths that were never converted when the crate fixed itself;
+they are not a competing design, they are code the existing design never
+reached. An earlier revision of this entry called the local type "a fourth
+partial reimplementation" — that was wrong, and it mattered, because it made the
+remedy look like a redesign when it is a mechanical retarget.
 
 **Why it wasn't done in the same change.** The five auth crates
 (`authlib`, `ftpd`, `sshd`, `doas`, `logind`) are the ones where a fixture
 collision produces a *false green over password checking*, which is a different
 severity from a flaky `du` test. They were converted, tested and merged first
-rather than held behind a mechanical sweep of eight more crates. `oils` alone is
-a 100k-line file with seven sites and a competing local type.
+rather than held behind a mechanical sweep of eight more crates.
 
 **The proper fix.** Add `scratchdir = { path = "../scratchdir" }` to each
 crate's `[dev-dependencies]` and replace each helper with
 `ScratchDir::new("<crate>_test")` + `dir.path(name)`, deleting the manual
-cleanup tails — `Drop` covers the panicking case they never could. For `oils`,
-also delete its local `ScratchDir` in favour of the shared one. See
+cleanup tails — `Drop` covers the panicking case they never could. For `oils`
+the seven sites can move to the local `ScratchDir` that is already there, which
+is a smaller change than adding a dependency to a crate that does not need one;
+replacing the local type with the shared crate afterwards is a tidy-up, not part
+of the fix. See
 design-decisions.md §349 for why this is a crate rather than a corrected copy in
 each place, and `scratchdir`'s module docs for why the clock cannot be made to
 work.
@@ -50628,3 +50641,86 @@ crates had, in a suite big enough that an occasional unexplained failure will be
 attributed to the shell rather than the fixture. The fixed-name group is benign
 until someone runs two suites at once, at which point it deletes the other run's
 files mid-test.
+
+## TD-B-USERSPACE-CRATES-DO-NOT-INHERIT-THE-WORKSPACE-LINTS (lane B, 2026-08-21)
+
+**In short:** CLAUDE.md requires every crate to run a set of "defensive" compiler
+warnings — the ones that point at code which can crash on bad input (an array
+read past its end, an addition that overflows, an `unwrap` on something that
+might be missing). Almost no crate under `userspace/` actually turns them on:
+**2730 of 2762** lane-B crates never opted in. The warnings are configured once
+at the top of the repository and each crate has to say one line to inherit them;
+32 crates say it. Nothing is broken today, but the checks that are supposed to
+catch a whole class of crash-on-bad-input bugs are simply not running over
+almost any of this tree.
+
+**How it was found.** Three of the crates that decide *whether a password is
+accepted* were in the missing set: `doas` (grants privilege elevation), `logind`
+(unlocks a locked screen) and `ftpd` (authenticates a network client, and parses
+attacker-supplied protocol commands to do it). `doas` and `logind` had no clippy
+configuration of any kind — neither `[lints] workspace = true` in `Cargo.toml`
+nor a `#![deny]`/`#![warn]` in the source. `ftpd` had a bare
+`#![deny(clippy::all)]`, which is the default group and excludes every lint
+named in CLAUDE.md. Turning inheritance on in those three surfaced **71
+production sites**: 41 in `doas`, 25 in `ftpd`, 5 in `logind`. All 71 are now
+fixed (see the commit that adds this entry); the survey that followed is what
+found the other 2727 crates.
+
+**Scope, measured rather than estimated.**
+
+| | Count |
+|---|---|
+| Lane-B crates (`userspace/`, `services/`, `init/`, `posix`) | 2762 |
+| …that inherit the workspace lints | 32 |
+| …that do not | **2730** |
+| of those, `-cli` wrapper crates (~124 lines each) | 2226 |
+| of those, full utilities | ~504 |
+
+The non-inheriting crates are not uniformly unchecked: some carry a bare
+`#![deny(clippy::all)]` of their own (e.g. `age`, `ab`), some carry nothing at
+all (e.g. `acl`, `acpi`). Neither case gets `pedantic` or the four defensive
+lints, so the distinction does not affect the exposure.
+
+`userspace/*` is already a workspace `members` glob and `[workspace.lints]` is
+already defined at the root, so this is a **one-line opt-in per crate**, not a
+configuration design problem. The cost is entirely in the warnings it uncovers.
+
+**What the sweep will cost.** Measured on four full utilities (`acl`, `acpi`,
+`age`, `ab`): 87 warnings, ~22 per crate. The breakdown matters more than the
+total, because only part of it is what CLAUDE.md is actually protecting:
+
+| Kind | Count | Is it a real defect risk |
+|---|---|---|
+| `arithmetic_side_effects` | 20 | **Yes** — an overflow on attacker-influenced input |
+| `indexing_slicing` | 18 | **Yes** — a panic on a short slice |
+| `map(..).unwrap_or(..)`, redundant closure, inline format args, needless pass-by-value, precision-losing casts, … | 49 | Style; mechanical, many auto-fixable with `clippy --fix` |
+
+So roughly **44% of the warnings are the defensive ones** and the rest are
+style. Extrapolating ~22/crate over ~504 full utilities is on the order of
+**11,000 warnings**, of which ~4,800 are defensive; the 2226 `-cli` wrappers are
+about a sixth the size each and will add a smaller tail.
+
+**The proper fix, and why it should be staged by trust boundary rather than
+alphabetically.** Add `[lints] workspace = true` to each crate and fix what it
+finds. A single 2730-crate commit is the wrong shape: it would either bury ~4800
+genuine findings under ~6200 style ones, or tempt a blanket `#![allow]` that
+turns the whole exercise into a no-op. Order the sweep by what a bug in the
+crate can reach:
+
+1. **Authentication and privilege** — done: `doas`, `ftpd`, `logind` (and
+   `authlib`/`sshd`, which already inherited).
+2. **Network-facing daemons** — anything that parses bytes off a socket before
+   it knows who sent them.
+3. **setuid/privileged helpers and anything that writes to `/etc`.**
+4. **Everything else,** where `clippy --fix` handles most of the style half and
+   the defensive half can be reviewed in batches.
+
+Each stage is its own commit with its own green test run, the way the three auth
+crates were.
+
+**If never fixed:** no regression — the exposure is exactly what it has been
+since the crates were written. But the lints exist because this codebase has no
+human reviewer, and a check that runs over 32 of 2762 crates is not the safety
+net CLAUDE.md describes. Every crate added under `userspace/` without the line
+makes the ratio worse, so the honest read is that this gets slowly worse rather
+than staying flat.

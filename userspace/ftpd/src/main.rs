@@ -54,6 +54,7 @@ use std::env;
 use std::fmt;
 use std::fs::{self, File, Metadata, OpenOptions};
 use std::io::{self, Read, Write};
+use std::num::NonZeroU64;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -164,34 +165,58 @@ fn tcp_send(handle: u64, data: &[u8]) -> Result<usize, FtpdError> {
 
 /// Send all bytes, looping until the entire buffer is transmitted.
 fn tcp_send_all(handle: u64, data: &[u8]) -> Result<(), FtpdError> {
-    let mut offset = 0;
-    while offset < data.len() {
-        let sent = tcp_send(handle, &data[offset..])?;
+    // Advance a subslice rather than an index, so the remaining-bytes
+    // calculation is the slice API's rather than ours. That also gives the
+    // over-report case somewhere to go: `sent` comes back from a syscall this
+    // function does not control, and a count larger than the buffer we handed
+    // over is a broken kernel, not a state to keep transmitting from.
+    let mut rest = data;
+    while !rest.is_empty() {
+        let sent = tcp_send(handle, rest)?;
         if sent == 0 {
             return Err(FtpdError::Network("tcp_send returned 0".into()));
         }
-        offset = offset.saturating_add(sent);
+        rest = match rest.get(sent..) {
+            Some(r) => r,
+            None => {
+                return Err(FtpdError::Network(
+                    "tcp_send reported sending more than it was given".into(),
+                ));
+            }
+        };
     }
     Ok(())
 }
 
-/// Receive data from a TCP connection. Returns 0 on EOF.
-fn tcp_recv(handle: u64, buf: &mut [u8]) -> Result<usize, FtpdError> {
+/// Receive data from a TCP connection.
+///
+/// Returns the bytes actually received, as a prefix of `buf`; an empty slice
+/// means the peer closed the connection.
+///
+/// Returning the slice rather than a count is deliberate. The count and the
+/// buffer are only meaningful together, and every caller has to re-pair them
+/// with a `&buf[..n]` whose bound nothing checks. Handing back the filled
+/// prefix makes the pairing the callee's job, done once, where the count came
+/// from — and makes an out-of-range count an *error* rather than a panic in
+/// whichever caller happened to receive it.
+fn tcp_recv(handle: u64, buf: &mut [u8]) -> Result<&[u8], FtpdError> {
+    let cap = buf.len();
     // SAFETY: handle is valid. buf pointer and capacity are derived from
     // a valid mutable Rust slice.
-    let ret = unsafe {
-        syscall3(
-            SYS_TCP_RECV,
-            handle,
-            buf.as_mut_ptr() as u64,
-            buf.len() as u64,
-        )
-    };
+    let ret = unsafe { syscall3(SYS_TCP_RECV, handle, buf.as_mut_ptr() as u64, cap as u64) };
     if ret < 0 {
-        Err(FtpdError::Network(format!("tcp_recv failed: {ret}")))
-    } else {
-        Ok(ret as usize)
+        return Err(FtpdError::Network(format!("tcp_recv failed: {ret}")));
     }
+    let n = ret as usize;
+    // Reject rather than clamp. A count larger than the buffer we handed over
+    // means the kernel either wrote past our allocation or is misreporting;
+    // clamping would quietly hand the caller a prefix of whatever is there and
+    // let the session carry on as though it were data the peer sent.
+    buf.get(..n).ok_or_else(|| {
+        FtpdError::Network(format!(
+            "tcp_recv reported {n} bytes into a {cap}-byte buffer"
+        ))
+    })
 }
 
 /// Close a TCP connection handle.
@@ -505,15 +530,19 @@ fn parse_bool(s: &str) -> Option<bool> {
 
 /// Parse an IPv4 address string "a.b.c.d" into a network-byte-order u32.
 fn parse_ip_str(s: &str) -> Option<u32> {
+    // A slice pattern rather than a length check followed by four indexes: the
+    // arity is then checked by the compiler at the point it is relied on,
+    // instead of by an `if` several lines earlier that a later edit could move.
     let parts: Vec<&str> = s.split('.').collect();
-    if parts.len() != 4 {
+    let [a, b, c, d] = parts.as_slice() else {
         return None;
-    }
-    let a: u8 = parts[0].parse().ok()?;
-    let b: u8 = parts[1].parse().ok()?;
-    let c: u8 = parts[2].parse().ok()?;
-    let d: u8 = parts[3].parse().ok()?;
-    Some(u32::from_be_bytes([a, b, c, d]))
+    };
+    Some(u32::from_be_bytes([
+        a.parse().ok()?,
+        b.parse().ok()?,
+        c.parse().ok()?,
+        d.parse().ok()?,
+    ]))
 }
 
 /// Format a network-byte-order u32 IP as "a.b.c.d".
@@ -545,8 +574,10 @@ fn parse_cli() -> Result<CliArgs, FtpdError> {
     };
 
     let mut idx = 1;
-    while idx < args.len() {
-        match args[idx].as_str() {
+    // `while let Some(..)` rather than `while idx < len` + index: the bound
+    // check and the access become one operation, so they cannot disagree.
+    while let Some(arg) = args.get(idx) {
+        match arg.as_str() {
             "-h" | "--help" => {
                 result.show_help = true;
                 return Ok(result);
@@ -623,16 +654,21 @@ struct UserEntry {
 /// Parse a single /etc/passwd line:
 /// `username:x:uid:gid:gecos:home:shell`
 fn parse_passwd_line(line: &str) -> Option<UserEntry> {
+    // Naming the seven fields in a slice pattern does the arity check and the
+    // documentation at once: the two `_` are `passwd` and `gecos`, which this
+    // reader has no use for, and a `/etc/passwd` line with too few fields
+    // simply does not match. `..` keeps a trailing-colon line acceptable, as
+    // the format allows.
     let fields: Vec<&str> = line.split(':').collect();
-    if fields.len() < 7 {
+    let [username, _passwd, uid, gid, _gecos, home, shell, ..] = fields.as_slice() else {
         return None;
-    }
+    };
     Some(UserEntry {
-        username: fields[0].to_string(),
-        uid: fields[2].parse().ok()?,
-        gid: fields[3].parse().ok()?,
-        home: fields[5].to_string(),
-        shell: fields[6].to_string(),
+        username: (*username).to_string(),
+        uid: uid.parse().ok()?,
+        gid: gid.parse().ok()?,
+        home: (*home).to_string(),
+        shell: (*shell).to_string(),
     })
 }
 
@@ -984,8 +1020,15 @@ fn format_mdtm(unix_secs: u64) -> String {
 
 /// Tracks transfer progress for rate limiting.
 struct RateLimiter {
-    /// Maximum bytes per second (0 = unlimited).
-    max_bps: u64,
+    /// The limit in bytes per second, or `None` for unlimited.
+    ///
+    /// The config spells "unlimited" as `rate_limit = 0`, and this field used
+    /// to store that 0 as-is — which put a zero one `if` away from two `/`
+    /// operators. `NonZeroU64` moves the guarantee from that `if` into the
+    /// type: there is no longer a value of this field that could divide by
+    /// zero, so no future edit can reorder or drop the check and reintroduce
+    /// one.
+    max_bps: Option<NonZeroU64>,
     /// Bytes transferred in the current window.
     window_bytes: u64,
     /// Start time of the current window (unix secs).
@@ -993,9 +1036,10 @@ struct RateLimiter {
 }
 
 impl RateLimiter {
+    /// `max_bps` is the raw config value, in which 0 means unlimited.
     fn new(max_bps: u64) -> Self {
         Self {
-            max_bps,
+            max_bps: NonZeroU64::new(max_bps),
             window_bytes: 0,
             window_start: now_secs(),
         }
@@ -1004,17 +1048,19 @@ impl RateLimiter {
     /// Record that `n` bytes were transferred. If the rate limit is exceeded,
     /// sleep to throttle.
     fn record(&mut self, n: u64) {
-        if self.max_bps == 0 {
+        let Some(max_bps) = self.max_bps else {
             return;
-        }
+        };
         self.window_bytes = self.window_bytes.saturating_add(n);
         let now = now_secs();
+        // At least one second, so the division below has a non-zero divisor
+        // even when the whole transfer happens inside a single clock tick.
         let elapsed = now.saturating_sub(self.window_start).max(1);
 
-        let current_rate = self.window_bytes / elapsed;
-        if current_rate > self.max_bps {
+        let current_rate = self.window_bytes.checked_div(elapsed).unwrap_or(0);
+        if current_rate > max_bps.get() {
             // Sleep enough to bring the rate below the limit
-            let needed_secs = self.window_bytes / self.max_bps;
+            let needed_secs = self.window_bytes / max_bps;
             let sleep_secs = needed_secs.saturating_sub(elapsed);
             if sleep_secs > 0 {
                 sleep_ms(sleep_secs.saturating_mul(1000));
@@ -1219,13 +1265,14 @@ impl<'a> FtpSession<'a> {
             }
 
             // Need more data
-            let n = tcp_recv(self.control_handle, &mut self.read_buf)?;
-            if n == 0 {
+            let received = tcp_recv(self.control_handle, &mut self.read_buf)?;
+            if received.is_empty() {
                 return Ok(None); // Connection closed
             }
 
-            // Convert bytes to string, rejecting invalid UTF-8 gracefully
-            let chunk = String::from_utf8_lossy(&self.read_buf[..n]);
+            // Convert bytes to string, rejecting invalid UTF-8 gracefully.
+            // Owned before the buffer borrow is needed again for `line_buf`.
+            let chunk = String::from_utf8_lossy(received).into_owned();
             self.line_buf.push_str(&chunk);
 
             // Prevent buffer overflow from malicious clients
@@ -1534,36 +1581,27 @@ impl<'a> FtpSession<'a> {
 
     fn cmd_port(&mut self, arg: &str) -> Result<(), FtpdError> {
         // PORT h1,h2,h3,h4,p1,p2
+        // The six fields are matched by shape rather than counted and then
+        // indexed, so a PORT line of the wrong arity cannot reach the parsing
+        // below at all. This argument is attacker-supplied — it is whatever the
+        // client typed — which is why it is worth the check being structural.
         let parts: Vec<&str> = arg.split(',').collect();
-        if parts.len() != 6 {
+        let [h1, h2, h3, h4, p1, p2] = parts.as_slice() else {
             return self.send_response(501, "Invalid PORT command.");
-        }
+        };
 
         let parse_part = |s: &str| -> Option<u8> { s.trim().parse().ok() };
 
-        let h1 = match parse_part(parts[0]) {
-            Some(v) => v,
-            None => return self.send_response(501, "Invalid PORT address."),
+        let (Some(h1), Some(h2), Some(h3), Some(h4)) = (
+            parse_part(h1),
+            parse_part(h2),
+            parse_part(h3),
+            parse_part(h4),
+        ) else {
+            return self.send_response(501, "Invalid PORT address.");
         };
-        let h2 = match parse_part(parts[1]) {
-            Some(v) => v,
-            None => return self.send_response(501, "Invalid PORT address."),
-        };
-        let h3 = match parse_part(parts[2]) {
-            Some(v) => v,
-            None => return self.send_response(501, "Invalid PORT address."),
-        };
-        let h4 = match parse_part(parts[3]) {
-            Some(v) => v,
-            None => return self.send_response(501, "Invalid PORT address."),
-        };
-        let p1 = match parse_part(parts[4]) {
-            Some(v) => v,
-            None => return self.send_response(501, "Invalid PORT port."),
-        };
-        let p2 = match parse_part(parts[5]) {
-            Some(v) => v,
-            None => return self.send_response(501, "Invalid PORT port."),
+        let (Some(p1), Some(p2)) = (parse_part(p1), parse_part(p2)) else {
+            return self.send_response(501, "Invalid PORT port.");
         };
 
         let ip = u32::from_be_bytes([h1, h2, h3, h4]);
@@ -1593,13 +1631,12 @@ impl<'a> FtpSession<'a> {
 
         for _ in 0..range_size {
             let try_port = self.next_pasv_port();
-            match tcp_bind(try_port) {
-                Ok(l) => {
-                    listener = Some(l);
-                    bound_port = try_port;
-                    break;
-                }
-                Err(_) => continue,
+            // A port already in use is the ordinary case here, not a failure:
+            // the loop exists to walk past them.
+            if let Ok(l) = tcp_bind(try_port) {
+                listener = Some(l);
+                bound_port = try_port;
+                break;
             }
         }
 
@@ -1825,11 +1862,18 @@ impl<'a> FtpSession<'a> {
                 }
             };
 
+            // `Read::read` promises `n <= buf.len()`; a reader that breaks that
+            // promise is not one we can go on transferring from, and the
+            // existing failure path says so without panicking.
+            let Some(chunk) = buf.get(..n) else {
+                transfer_ok = false;
+                break;
+            };
             let data = if self.transfer_type == TransferType::Ascii {
                 // In ASCII mode, convert LF to CRLF
-                ascii_to_network(&buf[..n])
+                ascii_to_network(chunk)
             } else {
-                buf[..n].to_vec()
+                chunk.to_vec()
             };
 
             if tcp_send_all(data_handle, &data).is_err() {
@@ -1921,9 +1965,9 @@ impl<'a> FtpSession<'a> {
         let mut transfer_ok = true;
 
         loop {
-            let n = match tcp_recv(data_handle, &mut buf) {
-                Ok(0) => break, // EOF
-                Ok(n) => n,
+            let received = match tcp_recv(data_handle, &mut buf) {
+                Ok([]) => break, // EOF
+                Ok(r) => r,
                 Err(_) => {
                     transfer_ok = false;
                     break;
@@ -1932,9 +1976,9 @@ impl<'a> FtpSession<'a> {
 
             let data = if self.transfer_type == TransferType::Ascii {
                 // In ASCII mode, convert CRLF to LF
-                network_to_ascii(&buf[..n])
+                network_to_ascii(received)
             } else {
-                buf[..n].to_vec()
+                received.to_vec()
             };
 
             if file.write_all(&data).is_err() {
@@ -2456,7 +2500,17 @@ pub extern "C" fn main(_argc: i32, _argv: *const *const u8) -> i32 {
 // Tests
 // ============================================================================
 
+// Panicking on bad data is what a test is *for*: an `unwrap` that fires is a
+// failure report, not a crash in someone's session. CLAUDE.md scopes the four
+// defensive lints to non-test code for exactly this reason.
 #[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects
+)]
 mod tests {
     use super::*;
 
@@ -2948,7 +3002,7 @@ mod tests {
     #[test]
     fn test_rate_limiter_creation() {
         let rl = RateLimiter::new(1024);
-        assert_eq!(rl.max_bps, 1024);
+        assert_eq!(rl.max_bps.map(NonZeroU64::get), Some(1024));
         assert_eq!(rl.window_bytes, 0);
     }
 

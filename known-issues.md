@@ -50768,3 +50768,63 @@ crates had, in a suite big enough that an occasional unexplained failure will be
 attributed to the shell rather than the fixture. The fixed-name group is benign
 until someone runs two suites at once, at which point it deletes the other run's
 files mid-test.
+
+---
+
+## TD-C-ZONE-SNAPPING-HAS-NO-PATH-TO-A-WINDOW (lane C, 2026-08-21)
+
+**In short:** The desktop shell contains a complete, tested implementation of
+multi-window tiling layouts — halves, thirds, quadrants, a six-cell grid —
+computing exactly where each window in a layout goes. Nothing calls it, and
+nothing can: the only tiling the shell can actually ask the compositor for is
+"left half" or "right half". A user cannot reach the other five layouts, because
+there is no message that would carry the request.
+
+**Where.** `gui/desktop/src/snap.rs` (2293 lines) holds the layouts
+(`SnapLayoutPreset::{TwoEqualHalves, ThreeColumns, TwoThirdsLeft, TwoThirdsRight,
+FourQuadrants, ThreeLeftTwoRight, SixGrid}`, `snap.rs:143`), the gap policy (`ZONE_GAP = 6.0`,
+dropped when a zone would be too small for it), the snap history (record /
+restore / remove), and the overlay and zone-picker render trees. It has its own
+test module, which is why the deletion of the shell's private window manager
+took the *shell-level* snap tests with it and left this module intact: its
+properties are still pinned, they are just pinned in a library with no caller.
+
+The gap is on the wire. `ShellControlAction` (`gui/remote/src/control.rs:257`)
+offers `SnapLeft` and `SnapRight` and nothing else, deliberately: its doc
+records that the two are separate variants rather than `Snap(Edge)` so that the
+wire encoding stays one byte per action with no payload. The compositor
+implements those two at `gui/compositor/src/lib.rs:4390` (`snap_window(window_id,
+SnapEdge)`), dispatched at 6200–6201, against its own two-variant `SnapEdge`
+(`compositor/src/lib.rs:546` — `Left`, `Right`). So even if the shell picked a
+zone, it could not name it, and adding a zone verb means deciding what to do
+about the one-byte-per-action rule.
+
+**Why it wasn't done in the same change.** The change that exposed this was the
+deletion of the shell's private window-manager geometry — the shell keeping its
+own window rectangles, which `apply_window_list` overwrote unread on the next
+compositor snapshot. Teaching the compositor a zone vocabulary is a protocol
+change plus a compositor feature, in two different lanes' trees, and folding it
+into a deletion would have made a clean removal unreviewable. Deleting `snap.rs`
+instead was rejected: it is correct, tested geometry that the feature will want
+verbatim, and re-deriving the gap policy later would be strictly worse than
+keeping it.
+
+**The proper fix,** in order:
+
+1. Extend `ShellControlAction` with a zone verb — `SnapToZone { preset, zone }`
+   or equivalent — in `gui/remote` (lane C).
+2. Teach `gui/compositor`'s `snap_window` to resolve a preset + zone index into
+   a rectangle against its own display bounds, reusing `snap.rs`'s arithmetic
+   rather than restating it. The compositor is the only party that knows the
+   bounds, so the *rectangle* must be computed there; `snap.rs` should be
+   factored so the layout math is callable from both (lane C owns both trees).
+3. Wire the shell's zone picker (`snap.rs`'s overlay/picker render trees) to
+   emit that request from `handle_mouse`/`handle_hotkey`, and drop the
+   snap-history bookkeeping from the shell — restoring a snapped window is
+   already the compositor's (`restoring_a_snapped_window_returns_it_to_where_it_was`).
+
+**If never fixed:** no user-visible breakage — the two-half snap works and is
+the one most people use — but 2293 lines of tested code stay unreachable, which
+invites the next reader to assume the feature exists because the tests are
+green. `design.txt` does not mandate zone presets, so this is a feature the
+project chose to build and has not yet connected, not a spec violation.

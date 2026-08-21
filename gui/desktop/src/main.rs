@@ -1,25 +1,34 @@
 //! The desktop shell's demonstration binary.
 //!
-//! Drives [`desktop::DesktopShell`] through a scripted session — open windows,
-//! render the taskbar, walk the start menu, page the calendar, snap and switch
-//! desktops — printing what each step produced. It is a way to look at what the
-//! shell's surfaces render with no compositor to submit them to.
+//! Drives [`desktop::DesktopShell`] through a scripted session — take a window
+//! list from the compositor, render the taskbar, walk the start menu, page the
+//! calendar, tile and switch desktops — printing what each step produced. It is
+//! a way to look at what the shell's surfaces render with no compositor to
+//! submit them to.
 //!
-//! It is **not** the shell, and it is no longer the only thing that drives one:
+//! It is **not** the shell, and it is not the only thing that drives one:
 //! [`desktop::session::ShellSession`] is the real loop, and it is what a live
 //! session runs. This binary stays because a library whose only caller is its
 //! own test suite is one refactor away from drifting from what a real session
 //! does — it is a second caller, going through the public API.
 //!
-//! It is also the last caller of [`desktop::DesktopShell::add_window`] and the
-//! geometry methods around it — the old private window manager, which a real
-//! session does not use because the compositor tells it what windows exist. The
-//! `-- taskbar --` section below builds a *fresh* `DesktopShell` and feeds it
-//! `apply_window_list` for exactly that reason: ids the shell minted and ids the
-//! compositor assigned must not be mixed.
+//! Everything below therefore goes through the one door a live session uses:
+//! [`desktop::DesktopShell::apply_window_list`] to learn what exists, and a
+//! *request* — printed here, since there is nothing to send it to — for
+//! everything the shell wants changed. It used to open its windows with an
+//! `add_window` that no live session had, and act on them with a private window
+//! manager whose edits the next list from the compositor threw away; the demo
+//! showed a snapped window at a rectangle no user would ever have seen.
 
 use desktop::{DesktopShell, ShellAction, WindowInfo, calendar, click};
 use guitk::event::{Key, KeyEvent, Modifiers};
+
+/// A window as the compositor would describe it. Nothing here has geometry:
+/// where the window is is not something the shell is told, because it is not
+/// something the shell decides.
+fn window(id: u64, pid: u64, title: &str) -> WindowInfo {
+    WindowInfo::new(id, pid, title)
+}
 
 fn main() {
     let mut desktop = DesktopShell::new(1920, 1080);
@@ -40,10 +49,20 @@ fn main() {
         desktop.appearance.fonts.ui_size,
     );
 
-    // Simulate some windows
-    let w1 = desktop.add_window("Terminal", 100, 100, 800, 600, 1001);
-    let w2 = desktop.add_window("File Explorer", 200, 150, 700, 500, 1002);
-    let _w3 = desktop.add_window("Text Editor", 300, 200, 900, 650, 1003);
+    // The compositor says what is on the desktop. The list is bottom-to-top, so
+    // the editor is the topmost window, and it is the one holding focus.
+    let mut editor = window(3, 1003, "Text Editor");
+    editor.focused = true;
+    desktop.apply_window_list(&[
+        window(1, 1001, "Terminal"),
+        window(2, 1002, "File Explorer"),
+        editor,
+    ]);
+    println!(
+        "Compositor says {} windows, focused {:?}",
+        desktop.visible_windows().len(),
+        desktop.focused_window
+    );
 
     // Render taskbar
     let taskbar = desktop.render_taskbar();
@@ -124,51 +143,28 @@ fn main() {
         desktop.calendar.visible
     );
 
-    // Test window snapping
-    desktop.snap_window(w1, true);
-    desktop.snap_window(w2, false);
-    if let Some(w) = desktop.windows.get(&w1) {
-        println!(
-            "Window 1 snapped left: {}x{} at ({},{})",
-            w.width, w.height, w.x, w.y
-        );
-    }
-
-    // Test virtual desktop switching. Which desktop is showing is the shell's
-    // own; which window then has the keyboard is not, so the switch hands back a
-    // request the same way a click does.
-    let raise = desktop.switch_desktop(1);
+    // Tiling. The shortcut names an *edge*; which pixels that edge turns into is
+    // worked out by the compositor from its own bounds, and this demo has no
+    // rectangle to print because the shell never computes one.
+    let snap_left = KeyEvent {
+        key: Key::Left,
+        pressed: true,
+        modifiers: Modifiers {
+            super_key: true,
+            ..Modifiers::NONE
+        },
+        text: None,
+    };
     println!(
-        "Switched to desktop {}: {} visible windows, raise {raise:?}",
-        desktop.current_desktop_number(),
-        desktop.visible_windows().len()
+        "Super+Left asked the compositor for {:?}",
+        desktop.handle_hotkey(&snap_left).requests
     );
 
-    // The taskbar the way a live session drives it, which is the one path in
-    // this file that does not go through the shell's own bookkeeping: the
-    // compositor says what exists, a click produces a *request*, and the only
-    // thing that moves the shell is the next list. Standing in for the
-    // compositor here is this function, which is why the request is printed
-    // rather than sent — but the shape is the real one, and the demo would stop
-    // agreeing with itself if the shell ever went back to acting on its own.
-    //
-    // A shell of its own for this, deliberately. The session above opened its
-    // windows with `add_window` and moved them between virtual desktops, and
-    // ids from that regime would collide with the compositor's — which is
-    // itself the point: the two ways of learning what exists are not meant to
-    // be mixed, and a live shell only ever uses the second.
+    // A taskbar click, which is the same shape as the keystrokes above: the
+    // compositor says what exists, the click produces a *request*, and the only
+    // thing that moves the shell is the next list.
     println!("\n-- taskbar --");
-    let mut desktop = DesktopShell::new(1920, 1080);
-    let mut editor = WindowInfo::new(1, 1001, "notes.txt");
-    editor.focused = true;
-    desktop.apply_window_list(&[WindowInfo::new(0, 1000, "Terminal"), editor]);
-    println!(
-        "Compositor says {} windows, focused {:?}",
-        desktop.visible_windows().len(),
-        desktop.focused_window
-    );
-
-    let button = desktop.taskbar_button_rect(1);
+    let button = desktop.taskbar_button_rect(2);
     match desktop.handle_mouse(&click(button.x + button.w / 2.0, button.y + button.h / 2.0)) {
         ShellAction::Control(request) => {
             println!(
@@ -185,13 +181,28 @@ fn main() {
 
     // The compositor did as it was asked, and the shell finds out the only way
     // it can.
-    let mut away = WindowInfo::new(1, 1001, "notes.txt");
+    let mut away = window(3, 1003, "Text Editor");
     away.minimized = true;
-    desktop.apply_window_list(&[WindowInfo::new(0, 1000, "Terminal"), away]);
+    desktop.apply_window_list(&[
+        window(1, 1001, "Terminal"),
+        window(2, 1002, "File Explorer"),
+        away,
+    ]);
     println!(
         "After the next list: {} windows, focused {:?}",
         desktop.visible_windows().len(),
         desktop.focused_window
+    );
+
+    // Test virtual desktop switching. Which desktop is showing is the shell's
+    // own — the compositor has no notion of desktops — but which window then has
+    // the keyboard is not, so the switch hands back a request the same way a
+    // click does.
+    let raise = desktop.switch_desktop(1);
+    println!(
+        "Switched to desktop {}: {} visible windows, raise {raise:?}",
+        desktop.current_desktop_number(),
+        desktop.visible_windows().len()
     );
 
     println!("\nDesktop shell initialized successfully.");

@@ -22,9 +22,9 @@ use crate::calendar;
 use crate::datetime_settings::AdditionalClock;
 use crate::launcher::{self, Category};
 use crate::{
-    DesktopShell, Hit, Key, KeyEvent, Layer, Modifiers, MouseButton, MouseEvent, MouseEventKind,
-    Rect, START_MENU_ROW_HEIGHT, ShellAction, ShellControlAction, TextRole, WindowId, WindowInfo,
-    WindowRequest, WindowState, click, scroll, scroll_rows,
+    DesktopShell, Hit, Key, KeyEvent, Layer, ManagedWindow, Modifiers, MouseButton, MouseEvent,
+    MouseEventKind, Rect, START_MENU_ROW_HEIGHT, ShellAction, ShellControlAction, TextRole,
+    WindowId, WindowInfo, WindowRequest, WindowState, click, scroll, scroll_rows,
 };
 use appearance::{AppearanceSettings, WindowCorners};
 use guitk::render::{RenderCommand, RenderTree};
@@ -45,10 +45,66 @@ fn click_at(shell: &mut DesktopShell, rect: Rect) -> ShellAction {
     shell.handle_mouse(&click(x, y))
 }
 
-/// Where a window is. The shell knows this much — the taskbar and the hit test
-/// both need it — but not what its frame looks like; that is the compositor's.
-fn frame(shell: &DesktopShell, id: WindowId) -> Rect {
-    shell.windows[&id].frame_rect()
+/// An ordinary application window as the compositor would describe it. Nothing
+/// here has geometry: where a window is is not something the shell is told,
+/// because it is not something the shell decides.
+fn app(id: u64, title: &str) -> WindowInfo {
+    WindowInfo::new(id, id, title)
+}
+
+/// What the shell currently believes, in the compositor's own bottom-to-top
+/// order, ready to be handed back with one thing changed.
+///
+/// Every helper below builds on this rather than calling a method on the shell:
+/// there is no longer a method to call, and a live session never had one. A
+/// window list is the only thing that moves the shell's idea of the desktop.
+fn as_list(shell: &DesktopShell) -> Vec<WindowInfo> {
+    let mut windows: Vec<&ManagedWindow> = shell.windows.values().collect();
+    windows.sort_by_key(|window| window.z_order);
+    windows
+        .into_iter()
+        .map(|window| {
+            let mut info = app(window.id.0, &window.title);
+            info.minimized = window.state == WindowState::Minimized;
+            info.maximized = window.state == WindowState::Maximized;
+            info.focused = window.focused;
+            info
+        })
+        .collect()
+}
+
+/// A window opens: one more entry in the next list, on top and holding the
+/// focus, which is what a newly-mapped window is. The id is the compositor's to
+/// choose; this stands in for it by taking the next one the shell has not seen.
+fn open(shell: &mut DesktopShell, title: &str) -> WindowId {
+    let id = shell
+        .windows
+        .keys()
+        .map(|id| id.0)
+        .max()
+        .map_or(1, |top| top + 1);
+    let mut list = as_list(shell);
+    for other in &mut list {
+        other.focused = false;
+    }
+    let mut fresh = app(id, title);
+    fresh.focused = true;
+    list.push(fresh);
+    shell.apply_window_list(&list);
+    WindowId(id)
+}
+
+/// The compositor minimized a window — the shell finds out the only way it
+/// can, which is the next list.
+fn minimize(shell: &mut DesktopShell, id: WindowId) {
+    let mut list = as_list(shell);
+    for info in &mut list {
+        if info.id == id.0 {
+            info.minimized = true;
+            info.focused = false;
+        }
+    }
+    shell.apply_window_list(&list);
 }
 
 // ---- the start menu -------------------------------------------------------
@@ -253,14 +309,18 @@ fn reopening_the_menu_rewinds_the_list() {
 #[test]
 fn a_click_outside_an_open_menu_dismisses_it_and_is_spent() {
     let mut shell = shell();
-    let id = shell.add_window("Terminal", 400, 100, 500, 400, 1);
     shell.toggle_start_menu();
 
-    let (x, y) = centre(frame(&shell, id));
+    // Somewhere the shell draws nothing: the top-right of a 1000x800 screen,
+    // with the taskbar along the bottom and the menu above the start button at
+    // the left. Whatever is there belongs to somebody else — which is the
+    // point, since the rule under test is that the click never reaches them.
+    let (x, y) = (900.0, 40.0);
+    assert_eq!(shell.hit_test(x, y), Hit::Desktop);
     assert_eq!(shell.handle_mouse(&click(x, y)), ShellAction::Consumed);
     assert!(!shell.start_menu_open);
-    // Spent means spent: the window under it must not also have seen the click
-    // that closed the menu.
+    // Spent means spent: with the menu shut, the same click is passed straight
+    // through, so the one that closed it was withheld deliberately.
     assert_eq!(shell.handle_mouse(&click(x, y)), ShellAction::Pass);
 }
 
@@ -529,9 +589,9 @@ fn the_power_menu_follows_the_theme_and_the_corner_setting() {
 #[test]
 fn a_taskbar_button_is_clickable_where_it_is_drawn() {
     let mut shell = shell();
-    shell.add_window("A", 0, 0, 100, 100, 1);
-    shell.add_window("B", 0, 0, 100, 100, 2);
-    shell.add_window("C", 0, 0, 100, 100, 3);
+    open(&mut shell, "A");
+    open(&mut shell, "B");
+    open(&mut shell, "C");
 
     for index in 0..shell.visible_windows().len() {
         let (x, y) = centre(shell.taskbar_button_rect(index));
@@ -547,12 +607,12 @@ fn a_taskbar_button_asks_to_activate_an_unfocused_window_and_to_minimize_a_focus
     // itself, because the compositor owns whether a window is minimised and a
     // shell that decided for itself would hold a second answer.
     let mut shell = shell();
-    let a = shell.add_window("A", 0, 0, 100, 100, 1);
-    let b = shell.add_window("B", 0, 0, 100, 100, 2);
+    let a = open(&mut shell, "A");
+    let b = open(&mut shell, "B");
     assert_eq!(shell.focused_window, Some(b));
 
-    // A is at index 0 — `visible_windows` is in Z order, and B was raised when
-    // it was added.
+    // A is at index 0: `visible_windows` is in the compositor's order, and B
+    // arrived above it.
     let first = shell.taskbar_button_rect(0);
     assert_eq!(
         click_at(&mut shell, first),
@@ -593,7 +653,7 @@ fn a_taskbar_button_whose_window_has_gone_swallows_the_click() {
     // press. Nothing to ask for — but the click landed on the taskbar, and a
     // taskbar that let it through would raise whatever happened to be behind.
     let mut shell = shell();
-    shell.add_window("A", 0, 0, 100, 100, 1);
+    open(&mut shell, "A");
     let button = shell.taskbar_button_rect(0);
     shell.apply_window_list(&[]);
 
@@ -601,11 +661,6 @@ fn a_taskbar_button_whose_window_has_gone_swallows_the_click() {
 }
 
 // ---- the window list the taskbar is drawn from ----------------------------
-
-/// An ordinary application window as the compositor would describe it.
-fn app(id: u64, title: &str) -> WindowInfo {
-    WindowInfo::new(id, u64::from(u32::try_from(id).unwrap()), title)
-}
 
 #[test]
 fn the_window_list_replaces_what_the_shell_believed_rather_than_adding_to_it() {
@@ -633,7 +688,11 @@ fn the_window_list_replaces_what_the_shell_believed_rather_than_adding_to_it() {
         .iter()
         .map(|w| w.title.as_str())
         .collect();
-    assert_eq!(titles, ["Terminal", "Editor"], "in the order sent, bottom up");
+    assert_eq!(
+        titles,
+        ["Terminal", "Editor"],
+        "in the order sent, bottom up"
+    );
     assert_eq!(shell.focused_window, Some(WindowId(2)));
     assert_eq!(
         shell.visible_windows().last().map(|w| w.id),
@@ -739,7 +798,10 @@ fn the_window_list_is_the_only_thing_that_grows_the_shells_idea_of_the_desktop()
     let action = click_at(&mut shell, button);
     assert_eq!(
         action,
-        ShellAction::Control(WindowRequest::new(WindowId(1), ShellControlAction::Minimize))
+        ShellAction::Control(WindowRequest::new(
+            WindowId(1),
+            ShellControlAction::Minimize
+        ))
     );
     assert!(
         shell.visible_windows().len() == 1,
@@ -806,40 +868,65 @@ fn the_tray_clock_opens_and_closes_the_calendar() {
     assert!(!shell.calendar.visible);
 }
 
-/// The clock's target has to cover the reading the taskbar actually draws.
+/// The clock's target has to cover the reading the taskbar actually draws, at
+/// every display scaling.
 ///
-/// The two are derived from the same `clock_width`, and this is what holds
-/// them to it: a target measured from a stale width leaves the last few
-/// characters of the clock inert, which reads as "the clock is not clickable"
-/// rather than as an off-by-a-few-pixels rectangle.
+/// This is the one control on the taskbar whose drawn position and whose
+/// clickable target are computed *independently*: `clock_rect` right-aligns a
+/// slot to the display edge, and `render_taskbar` right-aligns the text to the
+/// same edge with its own arithmetic. Every other control is drawn from the
+/// very accessor `hit_test` resolves against, so asserting those two agree
+/// would assert nothing at all — which is exactly what a first draft of a
+/// scaling test here did, and it passed with the scaling deleted from the
+/// taskbar's button spacing.
+///
+/// Both halves scale, and they must scale together. A target measured with one
+/// unscaled term leaves the last few characters of the clock inert, which reads
+/// as "the clock is not clickable" rather than as an off-by-a-few-pixels
+/// rectangle — and at 100%, where everyone develops, the error is zero.
 #[test]
-fn the_clocks_target_covers_the_reading_that_is_drawn() {
-    let shell = shell();
-    let target = shell.clock_rect();
-    // The clock is the rightmost thing on the taskbar, so the rightmost text
-    // command is it — the desktop indicator sits at the tray's left edge.
-    let (x, y, size) = shell
-        .render_taskbar()
-        .commands
-        .iter()
-        .filter_map(|c| match c {
-            RenderCommand::Text {
-                x, y, font_size, ..
-            } => Some((*x, *y, *font_size)),
-            _ => None,
-        })
-        .max_by(|a, b| a.0.total_cmp(&b.0))
-        .expect("the taskbar draws a clock");
+fn the_clocks_target_covers_the_reading_that_is_drawn_at_every_scaling() {
+    for percent in [100, 125, 150, 200] {
+        let shell = scaled(percent);
+        let target = shell.clock_rect();
+        // The clock is the rightmost thing on the taskbar, so the rightmost
+        // text command is it — the desktop indicator sits at the tray's left
+        // edge.
+        let (x, y, size) = shell
+            .render_taskbar()
+            .commands
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text {
+                    x, y, font_size, ..
+                } => Some((*x, *y, *font_size)),
+                _ => None,
+            })
+            .max_by(|a, b| a.0.total_cmp(&b.0))
+            .expect("the taskbar draws a clock");
 
-    // The slot is sized for the *widest* reading the switches allow, so check
-    // that one rather than the current second.
-    let widest = shell.clock_width();
-    assert!(x >= target.x, "the reading starts left of its target");
-    assert!(
-        x + widest <= target.x + target.w + 0.5,
-        "the reading runs past its target"
-    );
-    assert!(y >= target.y && y + size <= target.y + target.h);
+        // The slot is sized for the *widest* reading the switches allow, so
+        // check that one rather than the current second.
+        let widest = shell.clock_width();
+        assert!(
+            x >= target.x,
+            "at {percent}% the reading starts left of its target"
+        );
+        assert!(
+            x + widest <= target.x + target.w + 0.5,
+            "at {percent}% the reading runs past its target"
+        );
+        assert!(
+            y >= target.y && y + size <= target.y + target.h,
+            "at {percent}% the reading is drawn outside its target vertically"
+        );
+        // And the pixel it is drawn on is the pixel that opens the calendar.
+        assert_eq!(
+            shell.hit_test(x, y + size / 2.0),
+            Hit::Clock,
+            "at {percent}% the clock is drawn somewhere it cannot be clicked"
+        );
+    }
 }
 
 #[test]
@@ -917,8 +1004,8 @@ fn a_click_on_the_calendars_margin_leaves_it_open() {
 #[test]
 fn a_click_off_the_calendar_closes_it_without_acting() {
     let mut shell = shell();
-    let id = shell.add_window("Terminal", 100, 100, 400, 300, 1);
-    shell.minimize_window(id);
+    let id = open(&mut shell, "Terminal");
+    minimize(&mut shell, id);
     click_clock(&mut shell);
 
     // On the taskbar button of the minimised window: the click is spent
@@ -1146,73 +1233,18 @@ fn reopening_the_calendar_rewinds_it() {
 
 // ---- windows --------------------------------------------------------------
 
-/// Restoring has to put the window back where it was. Before the geometry was
-/// remembered, "restore" only changed the state flag and left the window
-/// filling the screen — a button that looked broken.
-///
-/// Driven through `toggle_maximize` rather than through a click on a maximize
-/// button, because the shell has no maximize button: the compositor draws and
-/// hit-tests the title bar. What survives here is the state machine the
-/// compositor drives, and that is what this asserts.
-#[test]
-fn maximizing_and_restoring_returns_the_window_to_where_it_was() {
-    let mut shell = shell();
-    let id = shell.add_window("A", 120, 90, 400, 300, 1);
-
-    shell.toggle_maximize(id);
-    let (_, _, work_w, work_h) = shell.work_area();
-    assert_eq!(shell.windows[&id].state, WindowState::Maximized);
-    assert_eq!(shell.windows[&id].width, work_w);
-    assert_eq!(shell.windows[&id].height, work_h);
-
-    shell.toggle_maximize(id);
-    let window = &shell.windows[&id];
-    assert_eq!(window.state, WindowState::Normal);
-    assert_eq!((window.x, window.y), (120, 90));
-    assert_eq!((window.width, window.height), (400, 300));
-}
-
-/// Maximizing twice must not record the maximized geometry as the one to spring
-/// back to.
-#[test]
-fn maximizing_an_already_maximized_window_keeps_the_original_geometry() {
-    let mut shell = shell();
-    let id = shell.add_window("A", 120, 90, 400, 300, 1);
-    shell.maximize_window(id);
-    shell.maximize_window(id);
-    shell.restore_window(id);
-    let window = &shell.windows[&id];
-    assert_eq!(
-        (window.x, window.y, window.width, window.height),
-        (120, 90, 400, 300)
-    );
-}
-
-/// Once the user has placed the window themselves there is nothing to spring
-/// back to, and springing back would move a window they just put where they
-/// wanted it.
-#[test]
-fn moving_a_maximized_window_forgets_where_it_came_from() {
-    let mut shell = shell();
-    let id = shell.add_window("A", 120, 90, 400, 300, 1);
-    shell.maximize_window(id);
-    shell.move_window(id, 10, 10);
-    shell.restore_window(id);
-    let window = &shell.windows[&id];
-    assert_eq!((window.x, window.y), (10, 10));
-}
-
-/// A double-click is not the shell's gesture any more — the compositor owns the
-/// title bar and resolves the timing itself — so the shell must treat the two
-/// alike rather than keep a second, divergent answer for one of them.
+/// A double-click is not the shell's gesture — the compositor owns the title
+/// bar and resolves the timing itself — so the shell must treat the two alike
+/// rather than keep a second, divergent answer for one of them.
 ///
 /// "Alike" is asserted as *doing the same thing*, not as declining to do the old
 /// thing. A `DoubleClick` arm that quietly returned `Pass` without dispatching
 /// would satisfy "it no longer maximizes" perfectly while silently dropping
-/// click-to-focus and every menu the shell opens on a press — the first draft of
-/// this test asserted exactly that and caught exactly nothing. So each half
-/// below checks an effect the do-nothing arm loses, on both kinds of surface the
-/// shell hit-tests: a window, and its own chrome.
+/// every menu the shell opens on a press and every request its taskbar makes —
+/// the first draft of this test asserted exactly that and caught exactly
+/// nothing. So each half below checks an effect the do-nothing arm loses, on
+/// both kinds of control the shell hit-tests: one that asks the compositor for
+/// something, and one that only moves the shell's own state.
 #[test]
 fn a_double_click_is_the_same_event_to_this_shell_as_a_single_one() {
     let doubled = |x: f32, y: f32| MouseEvent {
@@ -1221,18 +1253,16 @@ fn a_double_click_is_the_same_event_to_this_shell_as_a_single_one() {
         kind: MouseEventKind::DoubleClick(MouseButton::Left),
     };
 
-    // On a window: it focuses, and it still does not maximize.
+    // On a taskbar button: the same request a single click makes.
     let mut shell = shell();
-    let a = shell.add_window("A", 120, 90, 400, 300, 1);
-    let b = shell.add_window("B", 700, 90, 400, 300, 2);
+    let a = open(&mut shell, "A");
+    let b = open(&mut shell, "B");
     assert_eq!(shell.focused_window, Some(b));
-    let (x, y) = centre(frame(&shell, a));
-    assert_eq!(shell.handle_mouse(&doubled(x, y)), ShellAction::Pass);
-    assert_eq!(shell.focused_window, Some(a), "double-click did not focus");
+    let (x, y) = centre(shell.taskbar_button_rect(0));
     assert_eq!(
-        shell.windows[&a].state,
-        WindowState::Normal,
-        "double-click maximized — that gesture is the compositor's now"
+        shell.handle_mouse(&doubled(x, y)),
+        ShellAction::Control(WindowRequest::new(a, ShellControlAction::Activate)),
+        "double-click on a taskbar button asked for nothing"
     );
 
     // On the shell's own chrome: it opens the menu a press opens.
@@ -1249,40 +1279,6 @@ fn a_double_click_is_the_same_event_to_this_shell_as_a_single_one() {
     // what a double-click opened.
     shell.handle_mouse(&click(sx, sy));
     assert!(!shell.start_menu_open);
-}
-
-/// Click-to-focus raises the window and still lets the click reach it, so that
-/// the first click on a background window presses what it landed on.
-#[test]
-fn a_click_in_a_window_focuses_it_and_is_passed_on() {
-    let mut shell = shell();
-    let a = shell.add_window("A", 0, 0, 400, 300, 1);
-    let b = shell.add_window("B", 500, 0, 400, 300, 2);
-    assert_eq!(shell.focused_window, Some(b));
-
-    let (x, y) = centre(frame(&shell, a));
-    assert_eq!(shell.handle_mouse(&click(x, y)), ShellAction::Pass);
-    assert_eq!(shell.focused_window, Some(a));
-}
-
-#[test]
-fn the_topmost_window_takes_an_overlapping_click() {
-    let mut shell = shell();
-    let a = shell.add_window("A", 100, 100, 400, 300, 1);
-    let b = shell.add_window("B", 150, 150, 400, 300, 2);
-    // A point inside both.
-    assert_eq!(shell.hit_test(300.0, 300.0), Hit::WindowContent(b));
-    shell.focus_window(a);
-    assert_eq!(shell.hit_test(300.0, 300.0), Hit::WindowContent(a));
-}
-
-#[test]
-fn a_minimized_window_is_not_under_the_pointer() {
-    let mut shell = shell();
-    let id = shell.add_window("A", 100, 100, 400, 300, 1);
-    assert_eq!(shell.hit_test(300.0, 300.0), Hit::WindowContent(id));
-    shell.minimize_window(id);
-    assert_eq!(shell.hit_test(300.0, 300.0), Hit::Desktop);
 }
 
 #[test]
@@ -1376,19 +1372,6 @@ fn a_screen_smaller_than_the_taskbar_does_not_invert_the_geometry() {
     assert_eq!(shell.start_menu_visible_rows(), 0);
 }
 
-/// A window can be any size the compositor gives it, including one too small to
-/// have held the title bar the shell used to draw. It is still a window, and a
-/// point on it still belongs to it.
-#[test]
-fn a_window_smaller_than_any_decoration_is_still_hit() {
-    let mut shell = shell();
-    let id = shell.add_window("A", 100, 100, 200, 10, 1);
-    let rect = frame(&shell, id);
-    assert_eq!(rect.h, 10.0);
-    let (x, y) = centre(rect);
-    assert_eq!(shell.hit_test(x, y), Hit::WindowContent(id));
-}
-
 // ---- display scaling ------------------------------------------------------
 
 /// A shell whose user has chosen a display scaling.
@@ -1398,30 +1381,6 @@ fn scaled(percent: u16) -> DesktopShell {
     appearance.scaling_percent = percent;
     shell.set_appearance(appearance);
     shell
-}
-
-/// The shell's own chrome is authored in logical pixels and drawn in physical
-/// ones. A window is the compositor's and arrives already physical, so it is
-/// the one measurement that must *not* be scaled again — a shell that scaled it
-/// would hit-test a window somewhere other than where it is.
-#[test]
-fn the_display_scaling_moves_the_shells_chrome_and_leaves_the_windows_alone() {
-    let mut hundred = shell();
-    let a = hundred.add_window("A", 100, 100, 400, 300, 1);
-    let mut two_hundred = scaled(200);
-    let b = two_hundred.add_window("A", 100, 100, 400, 300, 1);
-
-    assert_eq!(frame(&hundred, a), frame(&two_hundred, b));
-    for percent in [100, 125, 150, 200] {
-        let mut shell = scaled(percent);
-        let id = shell.add_window("A", 100, 100, 600, 400, 1);
-        let (x, y) = centre(frame(&shell, id));
-        assert_eq!(
-            shell.hit_test(x, y),
-            Hit::WindowContent(id),
-            "at {percent}% the window moved out from under itself"
-        );
-    }
 }
 
 /// A taskbar that stayed its logical height while the buttons on it doubled
@@ -1555,7 +1514,7 @@ fn the_corner_setting_reaches_the_surfaces_the_shell_draws() {
 #[test]
 fn the_corner_setting_reaches_the_start_menu_and_the_taskbar_buttons() {
     let mut shell = with_corners(WindowCorners::ExtraRounded);
-    shell.add_window("A", 100, 100, 400, 300, 1);
+    open(&mut shell, "A");
     shell.toggle_start_menu();
 
     let menu = shell.render_start_menu().expect("the menu is open");
@@ -1640,7 +1599,7 @@ fn text_grows_with_both_the_font_size_and_the_display_scaling() {
 #[test]
 fn every_drawn_string_follows_the_users_font_size() {
     let render = |shell: &mut DesktopShell| {
-        shell.add_window("Terminal", 100, 100, 400, 300, 1);
+        open(shell, "Terminal");
         shell.start_menu_open = true;
         shell.power_menu_open = true;
         shell.alt_tab_active = true;

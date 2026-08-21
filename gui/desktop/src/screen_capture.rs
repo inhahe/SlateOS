@@ -25,11 +25,9 @@ use guitk::style::CornerRadii;
 
 const MOCHA_BASE: Color = Color::from_hex(0x1E1E2E);
 const MOCHA_MANTLE: Color = Color::from_hex(0x181825);
-const MOCHA_SURFACE0: Color = Color::from_hex(0x313244);
 const MOCHA_SURFACE1: Color = Color::from_hex(0x45475A);
 const MOCHA_TEXT: Color = Color::from_hex(0xCDD6F4);
 const MOCHA_SUBTEXT0: Color = Color::from_hex(0xA6ADC8);
-const MOCHA_BLUE: Color = Color::from_hex(0x89B4FA);
 const MOCHA_GREEN: Color = Color::from_hex(0xA6E3A1);
 const MOCHA_RED: Color = Color::from_hex(0xF38BA8);
 const MOCHA_YELLOW: Color = Color::from_hex(0xF9E2AF);

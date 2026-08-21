@@ -25,7 +25,6 @@ const SURFACE1: Color = Color::from_hex(0x45475A);
 const SURFACE2: Color = Color::from_hex(0x585B70);
 const TEXT: Color = Color::from_hex(0xCDD6F4);
 const SUBTEXT0: Color = Color::from_hex(0xA6ADC8);
-const SUBTEXT1: Color = Color::from_hex(0xBAC2DE);
 const BLUE: Color = Color::from_hex(0x89B4FA);
 const GREEN: Color = Color::from_hex(0xA6E3A1);
 const RED: Color = Color::from_hex(0xF38BA8);
@@ -1138,6 +1137,12 @@ impl DateTimeSettingsUI {
             max_width: Some(width * 0.55),
             overflow: TextOverflow::Ellipsis,
         });
+    }
+}
+
+impl Default for DateTimeSettingsUI {
+    fn default() -> Self {
+        Self::new()
     }
 }
 

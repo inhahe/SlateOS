@@ -602,6 +602,12 @@ impl AnimationManager {
     }
 }
 
+impl Default for AnimationManager {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 // ============================================================================
 // Fade overlay helper
 // ============================================================================

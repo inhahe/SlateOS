@@ -36,9 +36,6 @@ mod palette {
     use guitk::color::Color;
 
     pub const BASE: Color = Color::from_hex(0x1E1E2E);
-    pub const SURFACE0: Color = Color::from_hex(0x313244);
-    pub const BLUE: Color = Color::from_hex(0x89B4FA);
-    pub const LAVENDER: Color = Color::from_hex(0xB4BEFE);
 }
 
 // ============================================================================

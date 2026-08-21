@@ -28,9 +28,7 @@ const MOCHA_SUBTEXT0: Color = Color::from_hex(0xA6ADC8);
 const MOCHA_BLUE: Color = Color::from_hex(0x89B4FA);
 const MOCHA_LAVENDER: Color = Color::from_hex(0xB4BEFE);
 const MOCHA_RED: Color = Color::from_hex(0xF38BA8);
-const MOCHA_GREEN: Color = Color::from_hex(0xA6E3A1);
 const MOCHA_YELLOW: Color = Color::from_hex(0xF9E2AF);
-const MOCHA_PEACH: Color = Color::from_hex(0xFAB387);
 const MOCHA_OVERLAY0: Color = Color::from_hex(0x6C7086);
 const MOCHA_MANTLE: Color = Color::from_hex(0x181825);
 
@@ -198,6 +196,12 @@ impl OverviewState {
     pub fn search_backspace(&mut self) {
         self.search_query.pop();
         self.update_search();
+    }
+}
+
+impl Default for OverviewState {
+    fn default() -> Self {
+        Self::new()
     }
 }
 

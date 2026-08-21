@@ -19,7 +19,6 @@ const BODY_INSET: f32 = 48.0;
 // ============================================================================
 
 const BASE: Color = Color::from_hex(0x1E1E2E);
-const MANTLE: Color = Color::from_hex(0x181825);
 const CRUST: Color = Color::from_hex(0x11111B);
 const SURFACE0: Color = Color::from_hex(0x313244);
 const SURFACE1: Color = Color::from_hex(0x45475A);
@@ -31,7 +30,6 @@ const BLUE: Color = Color::from_hex(0x89B4FA);
 const GREEN: Color = Color::from_hex(0xA6E3A1);
 const RED: Color = Color::from_hex(0xF38BA8);
 const YELLOW: Color = Color::from_hex(0xF9E2AF);
-const PEACH: Color = Color::from_hex(0xFAB387);
 const LAVENDER: Color = Color::from_hex(0xB4BEFE);
 const OVERLAY0: Color = Color::from_hex(0x6C7086);
 
@@ -630,6 +628,12 @@ impl NotificationSettings {
     }
 }
 
+impl Default for NotificationSettings {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 // ============================================================================
 // UI: Notification settings panel
 // ============================================================================
@@ -826,7 +830,13 @@ impl NotificationSettingsUI {
             "Default Style",
             cfg.default_banner_style.label(),
         );
-        cy += 36.0;
+        cy += 18.0;
+        // The one setting on this page whose options are not self-explanatory:
+        // "Compact" says nothing about *what* it leaves out. Each variant
+        // carries a `description` written for exactly this, and it had no
+        // caller — so the answer was in the crate and not on the screen.
+        self.render_hint(cmds, x, cy, width, cfg.default_banner_style.description());
+        cy += 26.0;
 
         // Auto-dismiss delay
         self.render_label_value(
@@ -1360,6 +1370,24 @@ impl NotificationSettingsUI {
         });
     }
 
+    /// A secondary line under a setting, explaining what the chosen value does.
+    ///
+    /// Smaller than the setting itself, and elided against the full width
+    /// rather than the half a value gets: a hint cut off mid-word explains less
+    /// than no hint at all.
+    fn render_hint(&self, cmds: &mut Vec<RenderCommand>, x: f32, y: f32, width: f32, hint: &str) {
+        cmds.push(RenderCommand::Text {
+            x,
+            y,
+            text: hint.into(),
+            font_size: 11.0,
+            color: SUBTEXT0,
+            font_weight: FontWeightHint::Regular,
+            max_width: Some(width),
+            overflow: TextOverflow::Ellipsis,
+        });
+    }
+
     fn render_label_value(
         &self,
         cmds: &mut Vec<RenderCommand>,
@@ -1389,6 +1417,12 @@ impl NotificationSettingsUI {
             max_width: Some(width * 0.45),
             overflow: TextOverflow::Ellipsis,
         });
+    }
+}
+
+impl Default for NotificationSettingsUI {
+    fn default() -> Self {
+        Self::new()
     }
 }
 

@@ -21,7 +21,6 @@ const SUBTEXT0: Color = Color::from_hex(0xA6ADC8);
 const BLUE: Color = Color::from_hex(0x89B4FA);
 const GREEN: Color = Color::from_hex(0xA6E3A1);
 const RED: Color = Color::from_hex(0xF38BA8);
-const YELLOW: Color = Color::from_hex(0xF9E2AF);
 const LAVENDER: Color = Color::from_hex(0xB4BEFE);
 const OVERLAY0: Color = Color::from_hex(0x6C7086);
 
@@ -374,6 +373,12 @@ impl PrivacySettings {
             .iter()
             .filter(|p| p.kind == kind && p.state == PermissionState::Allowed)
             .count()
+    }
+}
+
+impl Default for PrivacySettings {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -850,6 +855,12 @@ impl PrivacySettingsUI {
             color: TEXT,
             corner_radii: CornerRadii::all(8.0),
         });
+    }
+}
+
+impl Default for PrivacySettingsUI {
+    fn default() -> Self {
+        Self::new()
     }
 }
 

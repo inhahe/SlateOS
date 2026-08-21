@@ -55,10 +55,6 @@ mod theme {
     pub const SUBTEXT0: Color = Color::from_hex(0xA6ADC8);
     pub const SUBTEXT1: Color = Color::from_hex(0xBAC2DE);
     pub const OVERLAY0: Color = Color::from_hex(0x6C7086);
-    pub const BLUE: Color = Color::from_hex(0x89B4FA);
-    pub const RED: Color = Color::from_hex(0xF38BA8);
-    pub const GREEN: Color = Color::from_hex(0xA6E3A1);
-    pub const PEACH: Color = Color::from_hex(0xFAB387);
     pub const SHADOW: Color = Color::rgba(0, 0, 0, 100);
 }
 

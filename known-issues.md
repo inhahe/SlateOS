@@ -48088,6 +48088,39 @@ than leaving it file-wide.
 tooling reports, and every future consolidation like round 4 has to find its
 own orphans by hand.
 
+**Progress 2026-08-21 — `gui/desktop` cleared, and the prediction above was an
+understatement.** Making the shell a library removed all **54** module-level
+`#[allow(dead_code)]` in `gui/desktop`. The crate had been reporting zero
+warnings for its entire life; it immediately reported **119**.
+
+The entry above argued that a file-wide allow hides orphaned code. What the
+119 actually contained is worse than orphans:
+
+- **115 were dead palette constants** — and pulling on them exposed
+  `TD-C-FORTY-NINE-SHELL-MODULES-CARRY-THEIR-OWN-COPY-OF-THE-PALETTE`: 549
+  surviving constants, 33 distinct values, an entire settings page that the
+  desktop ignores. The unused-constant warning was the *only* signal that
+  duplication existed, and it had been suppressed 54 times.
+- **Three were live defects, not dead code:**
+  - `RememberedDecision::recorded_at_ms` was written and never read — a
+    security prompt answered "allow, remember this" was remembered for the
+    whole session with no expiry and no revocation UI. Fixed here (grants
+    expire after 8h, denials never; see `design-decisions.md` §496).
+  - `BannerStyle::description` had no caller — the notification settings page
+    offered a choice of banner styles and never showed what any of them did.
+    Fixed by rendering it as a hint line.
+  - `calendar::days_in_month` was a private identity wrapper over
+    `date::days_in_month`, justified by a doc comment claiming the toolkit
+    took `(month, year)`. `gui/toolkit/src/date.rs:402` takes `(year, month)`.
+    The wrapper was a second answer defended by a false statement about the
+    first. Deleted; 20 call sites requalified.
+
+**The lesson for the remaining ~66 files:** treat the warning burst as a
+*defect report*, not a cleanup list. The instinct on seeing 119 unused items
+is to delete all 119; three of these would have been deleted along with the
+bug they were evidence of. Read each one for *why* nothing calls it before
+deciding that nothing should.
+
 ---
 
 ### TD-C-ROUND-4-CRATES-CARRY-316-PRE-EXISTING-CLIPPY-WARNINGS (lane C, 2026-08-21)
@@ -48389,6 +48422,27 @@ popups) through `oswindow`, calls `watch_desktop(true)`, and on each
 `desktop_revision` change re-renders the five trees and submits them. Both
 named blockers are gone; nothing is waiting on another lane.
 
+**Progress 2026-08-21 (3) — `desktop` is a library.** The `[lib]` above now
+exists: `src/main.rs` became `src/lib.rs`, the crate declares both a `[lib]`
+and a `[[bin]]`, and the scripted demo that used to *be* the crate is now a
+135-line binary beside it. `DesktopShell` is reachable by name from outside for
+the first time. Removing the 54 module-level `#[allow(dead_code)]` this
+required surfaced 119 concealed warnings and, in them, three live defects and
+one very large one — see `TD-C-DEAD-CODE-IS-ALLOWED-WHOLESALE` (progress note)
+and `TD-C-FORTY-NINE-SHELL-MODULES-CARRY-THEIR-OWN-COPY-OF-THE-PALETTE`.
+
+**The one design question the loop still has to answer**, noted here so it is
+not discovered halfway through: `DesktopShell.windows` is a
+`BTreeMap<WindowId, ManagedWindow>` the shell maintains itself, with ids it
+mints itself in `take_window_id` — while `WindowId`'s own doc says the id is
+"assigned by compositor". That is two answers to one question, which is the
+shape this whole sweep exists to remove. The loop must not paper over it by
+keeping both and mapping between them. The shell's map has to become a
+*projection* of `desktop_windows()`, retaining only state that is genuinely the
+shell's own (virtual-desktop assignment being the real one). Doing that first
+is what stops the loop from being written against a model that disagrees with
+the compositor.
+
 ## TD-C-ANY-CLIENT-CAN-READ-EVERY-WINDOW-TITLE
 
 **In short:** Any program connected to the compositor can ask to be sent the
@@ -48440,3 +48494,73 @@ the feature is not near enough to specify an interface against.
 **If never fixed:** every window title on the desktop is readable by every
 program the user runs, silently and continuously. The desktop works; the
 privacy property a user would assume it has is simply absent.
+
+## TD-C-FORTY-NINE-SHELL-MODULES-CARRY-THEIR-OWN-COPY-OF-THE-PALETTE
+
+**In short:** The desktop has a settings page where the user picks light or
+dark mode, an accent colour, and how transparent panels should be. Almost
+nothing obeys it. 49 of the shell's modules — every settings page, every
+dialog, the taskbar, the launcher, the login screen, the on-screen displays —
+each declare their own private list of colour constants and paint with those.
+The user can set the desktop to Light and watch the whole of it stay dark
+except the five surfaces `DesktopShell` renders itself. The setting is real,
+it is saved to disk, it is read back correctly, and then it is ignored.
+
+**Where:** `gui/desktop/src/*.rs` — 549 `const NAME: Color = …` declarations
+spread over 49 modules. They collapse to **33 distinct values**: `TEXT` is
+declared 31 times, `BLUE` 29, `BASE` 28, `SUBTEXT0` 28, `SURFACE0` and
+`SURFACE1` 27 each. `Color::from_hex(0x89B4FA)` is written out 47 separate
+times. The canonical answer lives in `gui/appearance/src/lib.rs`
+(`ThemeMode::is_light`, `AccentColor::color`/`color_light`,
+`TransparencyLevel::panel_alpha`, `AppearanceSettings::effective_accent`).
+
+**Reproduce:** set `theme.mode: light` in the appearance config and start the
+shell. `DesktopShell`'s own five render methods respond. Open any settings
+page, the launcher, or a dialog: unchanged, still Catppuccin Mocha. Same for
+a non-default accent — `effective_accent()` reaches nothing that draws.
+
+**Why it shipped:** every one of these 49 modules was behind
+`#[allow(dead_code)]` for the life of the crate (see
+`TD-C-DEAD-CODE-IS-ALLOWED-WHOLESALE`). The single symptom rustc could have
+shown — an unused constant — was suppressed 54 times over, so the duplication
+grew module by module with nothing to object. Removing those allows is what
+surfaced it: 119 warnings appeared at once in a crate that had been reporting
+zero.
+
+**This is the sweep's recurring shape, at its largest scale so far:** the tree
+held one correct answer that callers could not reach, so it grew wrong copies
+of it — 549 of them. The copies are not *wrong* today, because they agree with
+what the dark theme happens to be. They are wrong the moment the user changes
+anything.
+
+**Proper fix, in two parts — the second is the easy one:**
+
+1. **`gui/appearance` cannot currently answer the question.** It resolves
+   *accents* for both schemes (`color` / `color_light`) but the base, surface,
+   overlay and text colours exist only as the hardcoded dark values. Nothing in
+   the tree knows what a window background is in light mode. So the fix starts
+   by adding a resolved palette — a struct carrying the ~33 roles the shell
+   actually uses, built from a `ThemeMode` + `AccentColor` +
+   `TransparencyLevel` (Catppuccin Latte for light, Mocha for dark, which is
+   what the existing constants already are). Until that type exists there is
+   nothing to thread.
+2. Then thread `&Palette` through the render functions of the 49 modules and
+   delete the 549 constants. Mechanical, large, and safe: a module that no
+   longer declares a colour cannot disagree about one.
+
+Do **not** do part 2 without part 1 — threading a struct whose light variant
+does not exist yet just relocates the hardcoding into the struct's
+constructor.
+
+**Trigger:** this is not blocked on anything. It is sequenced after the shell
+event loop (`TD-C-THE-SHELL-CAN-DRAW-ITSELF-AND-NOBODY-CAN-ASK-IT-TO`) only
+because a shell that cannot be driven cannot demonstrate a theme change
+either — with the loop in place, changing the mode and watching the desktop
+repaint is the test that proves this fixed. It also subsumes
+`TD-FOUR-APPEARANCE-SETTINGS-THE-SHELL-STILL-IGNORES`, which is the same
+defect observed from the settings end.
+
+**If never fixed:** the appearance settings page stays decorative. A user who
+picks Light gets a desktop that is light in five places and dark in every
+other, which reads as a broken theme rather than an unimplemented one — worse
+than having no setting at all.

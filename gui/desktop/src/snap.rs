@@ -42,7 +42,6 @@ use std::num::NonZeroUsize;
 mod theme {
     use guitk::color::Color;
 
-    pub const BASE: Color = Color::from_hex(0x1E1E2E);
     pub const SURFACE0: Color = Color::from_hex(0x313244);
     pub const BLUE: Color = Color::from_hex(0x89B4FA);
     pub const LAVENDER: Color = Color::from_hex(0xB4BEFE);
@@ -83,8 +82,6 @@ const TOP_PICKER_THRESHOLD: f32 = 16.0;
 
 /// Width of the layout picker popup.
 const PICKER_WIDTH: f32 = 340.0;
-/// Height of the layout picker popup.
-const PICKER_HEIGHT: f32 = 190.0;
 /// Padding inside the picker.
 const PICKER_PADDING: f32 = 12.0;
 /// Size of a single layout thumbnail in the picker.

@@ -17,14 +17,10 @@ const BASE: Color = Color::from_hex(0x1E1E2E);
 const CRUST: Color = Color::from_hex(0x11111B);
 const SURFACE0: Color = Color::from_hex(0x313244);
 const SURFACE1: Color = Color::from_hex(0x45475A);
-const SURFACE2: Color = Color::from_hex(0x585B70);
 const TEXT: Color = Color::from_hex(0xCDD6F4);
 const SUBTEXT0: Color = Color::from_hex(0xA6ADC8);
 const SUBTEXT1: Color = Color::from_hex(0xBAC2DE);
 const BLUE: Color = Color::from_hex(0x89B4FA);
-const GREEN: Color = Color::from_hex(0xA6E3A1);
-const RED: Color = Color::from_hex(0xF38BA8);
-const YELLOW: Color = Color::from_hex(0xF9E2AF);
 const PEACH: Color = Color::from_hex(0xFAB387);
 const LAVENDER: Color = Color::from_hex(0xB4BEFE);
 const OVERLAY0: Color = Color::from_hex(0x6C7086);
@@ -1208,6 +1204,12 @@ impl DefaultAppsUI {
 
             row_y += 64.0;
         }
+    }
+}
+
+impl Default for DefaultAppsUI {
+    fn default() -> Self {
+        Self::new()
     }
 }
 

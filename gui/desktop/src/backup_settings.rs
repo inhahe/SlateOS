@@ -27,7 +27,6 @@ const BLUE: Color = Color::from_hex(0x89B4FA);
 const GREEN: Color = Color::from_hex(0xA6E3A1);
 const RED: Color = Color::from_hex(0xF38BA8);
 const YELLOW: Color = Color::from_hex(0xF9E2AF);
-const PEACH: Color = Color::from_hex(0xFAB387);
 const LAVENDER: Color = Color::from_hex(0xB4BEFE);
 const OVERLAY0: Color = Color::from_hex(0x6C7086);
 
@@ -1567,6 +1566,12 @@ impl BackupSettingsUI {
                 row_y += 62.0;
             }
         }
+    }
+}
+
+impl Default for BackupSettingsUI {
+    fn default() -> Self {
+        Self::new()
     }
 }
 

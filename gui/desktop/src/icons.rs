@@ -34,9 +34,6 @@ use guitk::text;
 mod theme {
     use guitk::color::Color;
 
-    pub const BASE: Color = Color::from_hex(0x1E1E2E);
-    pub const SURFACE0: Color = Color::from_hex(0x313244);
-    pub const SURFACE1: Color = Color::from_hex(0x45475A);
     pub const TEXT: Color = Color::from_hex(0xCDD6F4);
     pub const SUBTEXT0: Color = Color::from_hex(0xA6ADC8);
     pub const BLUE: Color = Color::from_hex(0x89B4FA);

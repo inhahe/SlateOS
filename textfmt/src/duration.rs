@@ -32,6 +32,7 @@
 //! | tracking a position in media, or watching a timer run | [`clock`] | `01:05`, `01:01:01` |
 //! | the same, but the milliseconds matter (a lap, a stopwatch) | [`clock_ms`] | `01:05.250` |
 //! | reading a finished span exactly (a job took *how* long?) | [`units`] | `2d 3h 4m 5s` |
+//! | the same, for something that may be quicker than a second | [`units_ms`] | `450ms`, `5.2s`, `2m 30s` |
 //! | glancing at a *measured* span (uptime, a transfer ETA) | [`coarse`] | `2d 3h`, `1h 1m`, `1m 30s` |
 //! | glancing at an *estimate*, which is not accurate to the second | [`coarse_minutes`] | `2d 3h`, `1h 1m`, `45m` |
 //! | asking how long ago something happened | [`relative`] | `just now`, `5m ago`, `yesterday` |
@@ -195,6 +196,52 @@ pub fn units(secs: u64) -> String {
     }
 }
 
+/// [`units`] extended below a second: `450ms`, `5.2s`, `2m 30s`, `1h 0m 0s`.
+///
+/// For a span that was *measured* and might be shorter than a second — how
+/// long an automation step ran, how long a scheduled task took, how long a
+/// startup entry waits. Rendering 450 ms as `0s` throws away the whole
+/// measurement, which is why these call sites all grew their own formatter
+/// rather than using a seconds-based one.
+///
+/// The tenths are **truncated, not rounded**, and that is not a style choice.
+/// `format!("{:.1}", ms as f64 / 1000.0)` — which is what two of the three
+/// hand-written copies did — renders 59 960 ms as `60.0s`: a string naming a
+/// quantity that its own branch has already excluded, since a full minute
+/// belongs to the `2m 30s` shape. Integer truncation cannot produce a value
+/// outside the range it was selected for.
+///
+/// Above a minute this *is* [`units`], sub-second precision dropped: a span
+/// measured in minutes is not reported to the millisecond, and both original
+/// copies already agreed on that much.
+///
+/// ```
+/// # use textfmt::duration::units_ms;
+/// assert_eq!(units_ms(0), "0ms");
+/// assert_eq!(units_ms(450), "450ms");
+/// assert_eq!(units_ms(999), "999ms");
+/// assert_eq!(units_ms(1_000), "1.0s");
+/// assert_eq!(units_ms(5_250), "5.2s");
+/// // Truncated: not "60.0s", which would name a minute in the seconds shape.
+/// assert_eq!(units_ms(59_960), "59.9s");
+/// assert_eq!(units_ms(150_000), "2m 30s");
+/// assert_eq!(units_ms(5_400_000), "1h 30m 0s");
+/// ```
+#[must_use]
+pub fn units_ms(total_ms: u64) -> String {
+    /// Milliseconds in a tenth of a second.
+    const TENTH: NonZeroU64 = nz(100);
+
+    if total_ms < THOUSAND.get() {
+        return format!("{total_ms}ms");
+    }
+    let secs = total_ms / THOUSAND;
+    if secs < MINUTE.get() {
+        return format!("{}.{}s", secs, (total_ms % THOUSAND) / TENTH);
+    }
+    units(secs)
+}
+
 /// The two most significant components: `2d 3h`, `1h 1m`, `1m 1s`, `5s`.
 ///
 /// Use this where the span is context rather than content — an uptime readout,
@@ -312,7 +359,7 @@ pub fn relative(elapsed_secs: u64) -> String {
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::panic, reason = "test code")]
 mod tests {
-    use super::{clock, clock_ms, coarse, coarse_minutes, relative, units, Parts};
+    use super::{clock, clock_ms, coarse, coarse_minutes, relative, units, units_ms, Parts};
     use alloc::format;
 
     // --- the regression this module was written for ---
@@ -443,6 +490,44 @@ mod tests {
             let u = units(secs);
             assert!(c.split_whitespace().count() <= u.split_whitespace().count(),
                     "coarse({secs}) = {c} is longer than units({secs}) = {u}");
+        }
+    }
+
+    // --- units_ms ---
+
+    #[test]
+    fn units_ms_never_names_a_quantity_outside_its_own_branch() {
+        // The bug in `format!("{:.1}", ms as f64 / 1000.0)`: rounding can
+        // carry a sub-minute span into "60.0s", which is a minute rendered
+        // in the shape reserved for things shorter than one.
+        for ms in 59_900..60_000_u64 {
+            let s = units_ms(ms);
+            assert!(
+                s.starts_with("59."),
+                "units_ms({ms}) = {s} left the seconds range"
+            );
+        }
+        // The same edge one rank down: 999 ms must not become "1.0s".
+        assert_eq!(units_ms(999), "999ms");
+    }
+
+    #[test]
+    fn units_ms_is_units_above_a_minute() {
+        for secs in (60..200_000_u64).step_by(613) {
+            // Any sub-second remainder must be discarded, not carried.
+            for extra_ms in [0_u64, 1, 499, 500, 999] {
+                let ms = secs.saturating_mul(1_000).saturating_add(extra_ms);
+                assert_eq!(units_ms(ms), units(secs), "at {ms} ms");
+            }
+        }
+    }
+
+    #[test]
+    fn units_ms_keeps_the_measurement_below_a_second() {
+        // The reason these call sites did not use a seconds formatter: it
+        // would render every one of these as "0s".
+        for ms in [0_u64, 1, 7, 450, 999] {
+            assert_eq!(units_ms(ms), format!("{ms}ms"));
         }
     }
 

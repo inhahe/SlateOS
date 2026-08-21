@@ -2740,21 +2740,13 @@ impl Default for AutomatorApp {
 // ============================================================================
 
 /// Format a millisecond duration as a human-readable string.
+///
+/// Automator and Task Scheduler both report how long a step took, and both
+/// had a copy of this. They rendered 5 250 ms as `5.250s` and `5.3s`
+/// respectively — three decimals of a wall-clock measurement against one —
+/// and neither had an hours field, so a 90-minute automation read `90m 0s`.
 fn format_duration_ms(ms: u64) -> String {
-    if ms < 1000 {
-        return format!("{ms}ms");
-    }
-    let secs = ms / 1000;
-    let rem_ms = ms % 1000;
-    if secs < 60 {
-        if rem_ms > 0 {
-            return format!("{secs}.{rem_ms:03}s");
-        }
-        return format!("{secs}s");
-    }
-    let mins = secs / 60;
-    let rem_secs = secs % 60;
-    format!("{mins}m {rem_secs}s")
+    guitk::duration::units_ms(ms)
 }
 
 // ============================================================================
@@ -3691,12 +3683,23 @@ mod tests {
 
     #[test]
     fn test_format_duration_ms_seconds() {
-        assert_eq!(format_duration_ms(3000), "3s");
+        // Was "3s". A whole second now keeps its tenths place, so that a row
+        // of run durations lines up instead of alternating "3s" and "3.5s".
+        assert_eq!(format_duration_ms(3000), "3.0s");
     }
 
     #[test]
     fn test_format_duration_ms_seconds_with_millis() {
-        assert_eq!(format_duration_ms(3500), "3.500s");
+        // Was "3.500s" — three decimal places on a figure the scheduler's own
+        // list rendered as "3.5s". Tenths is what a run duration can support.
+        assert_eq!(format_duration_ms(3500), "3.5s");
+    }
+
+    #[test]
+    fn test_format_duration_ms_has_an_hours_field() {
+        // Regression: the old ladder stopped at minutes, so a 90-minute
+        // automation reported "90m 0s".
+        assert_eq!(format_duration_ms(5_400_000), "1h 30m 0s");
     }
 
     #[test]

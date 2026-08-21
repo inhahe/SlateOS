@@ -542,7 +542,7 @@ def main(argv: list[str] | None = None) -> int:
                   file=sys.stderr)
             print("the replaceable function in its own `mod gnu_<name> { ... }` block, as",
                   file=sys.stderr)
-            print("posix/src/string.rs does. See design-decisions.md S340 and S341.",
+            print("posix/src/string.rs does. See design-decisions.md S340 and S348.",
                   file=sys.stderr)
         else:
             print("The usual cause is that `-C codegen-units=4096` has been dropped from",

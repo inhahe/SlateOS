@@ -626,6 +626,20 @@ Roadmap:
   **Still not run on SlateOS**; the ring-3 rung lives in lane A's tree and is
   requested in `requests/b-a-cpython-path-z-self-test.md`. A real pty layer
   remains ahead.
+  **coreutils half measured and closed 2026-08-21:** all **107** binaries of
+  GNU coreutils 9.5, unmodified, link against our `libc.a` with zero missing
+  symbols and zero duplicates (`scripts/coreutils-spike/README.md`). The first
+  run failed 106 of 107 — nineteen absent functions (`__fpending`, the
+  `stdio_ext.h` set, eight `_unlocked` stdio variants, `execl`/`execlp`,
+  `qsort_r`, `strtod_l`/`strtold_l`, `timespec_get`) plus one duplicate
+  (`wmempcpy`, §340's archive-member defect in a member the guard could not
+  see). All fixed. `check-libc-shape.py` gained **CHECK 3** (design-decisions.md
+  §348), which found and forced the split of two further latent hazards nothing
+  had yet tripped: `mkstemp`'s family riding with `atoi`, and `timegm`/`strptime`
+  riding with `clock_gettime`. Implementing `qsort_r` also replaced our `qsort`,
+  which was an O(n²) insertion sort that silently left the array unsorted when
+  its `mmap` failed, with an allocation-free introsort.
+  Linking, not running — same caveat as CPython. The rootfs rung is next.
 - `[B]` **Pseudo-terminals — scoped 2026-08-21, blocked on lane A.** The libc
   half is already written and composed over the primitives
   (`posix/src/pty.rs`: `openpty`/`forkpty`/`login_tty`), so it starts working

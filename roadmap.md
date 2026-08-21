@@ -516,6 +516,51 @@ assigned. Pick the top unclaimed item in your own lane.
 
 Roadmap:
 
+- `[A]` **Boot SlateOS on bare metal from a USB stick** — new 2026-08-21, the
+  prerequisite half of `design-decisions.md` §263. There was no roadmap item
+  for this before; §263's measured finding that "no roadmap item exists for it"
+  is what created this one. The OS has only ever run under QEMU, and §263
+  settled that the Intel iGPU driver will be written against the real chip,
+  which is unreachable until the machine boots at all. Everything below the
+  operator's own step is lane A's.
+  - [x] A real disk image: protective MBR + primary/backup GPT + an EFI System
+        Partition holding FAT32, built from the staged `build/esp` tree.
+        `scripts/build-usb-image.py`, stdlib-Python only (this machine has no
+        `xorriso`, `mtools`, `mkfs.vfat` or `sgdisk`, and adding those as
+        prerequisites would recreate the fresh-clone failure that the boot
+        test's prerequisite gate exists to prevent). Byte-reproducible: pinned
+        timestamps, content-derived GUIDs and volume serial.
+  - [x] `./scripts/boot-test.sh --usb-image` boots that image attached as a
+        `usb-storage` device rather than QEMU's `fat:rw:` virtual FAT — so the
+        partition table, BPB and directory entries are ours and are actually
+        parsed. **Verified 2026-08-21:** OVMF passed over the NVMe and virtio
+        disks, chose `UEFI QEMU QEMU USB HARDDRIVE`, ran Limine 8.7.0, and
+        Limine loaded `boot():/boot/kernel`. Two independent GPT+FAT32
+        implementations, neither of them ours.
+  - [x] `scripts/test-build-usb-image.py` — an independently-written reader
+        that walks the image the way firmware does (MBR, both GPT CRCs, BPB,
+        FAT chains, LFN entries, `.`/`..`, file bytes). 6 groups, all green.
+        The cases that matter are the ones a small tree would miss: a
+        multi-cluster file, a name needing a long filename entry
+        (`limine.conf` — `conf` is four characters and 8.3 allows three), a
+        nested `EFI/BOOT/BOOTX64.EFI`, and colliding `~N` short names.
+  - [x] A guarded writer for the physical stick, `scripts/write-usb-stick.ps1`
+        — USB-bus-only, refuses the system/boot disk, size-capped, and requires
+        the target's model name to be retyped. Writing the stick is the one
+        genuinely irreversible step in the whole path, so it gets the guards
+        rather than a warning in prose.
+  - [x] `bare-metal-boot.md` — build, verify, write, firmware settings
+        (**Secure Boot must be off**: Limine's `BOOTX64.EFI` is unsigned), what
+        to expect on screen, the known gaps, and the recovery procedure.
+  - [ ] **Operator step — waiting on the operator being at the machine.**
+        Write the stick, disable Secure Boot, pick it from the one-time boot
+        menu. Nothing is installed to the internal disk; recovery is "power
+        off, remove the stick, power on".
+  - [ ] Verify the image boots with **no rootfs attached**, which is the real
+        bare-metal shape — the boot test currently always attaches
+        `rootfs.ext4` as a second virtio-blk disk and a stick has no equivalent.
+  - [ ] Then, and only then, §263's second half: enable the iGPU in firmware,
+        move the monitor cable, and write the Intel driver against the chip.
 - ~~`[A]` Ada/SPARK FFI bridge for kernel-space drivers~~ (line ~1206) —
   **done 2026-08-16.** Cross-GNAT via Alire, ZFP runtime, prebuilt `.o` +
   stamp so the toolchain is not a build prerequisite (`design-decisions.md`

@@ -50426,19 +50426,44 @@ The secondary defect — a panicking test leaking its file, because
 unwind goes straight past it — is fixed by the same change, since `Drop` runs
 during unwind. All nineteen manual cleanup tails are deleted.
 
-**Two regression tests, in each crate**, because the original defect was
-detectable only statistically and that is what let it live:
+**Regression tests, split between the shared crate and its consumers**, because
+the original defect was detectable only statistically and that is what let it
+live. `scratchdir` owns the properties that are the same everywhere; each
+consumer keeps one test of its own *wiring*, which is the half a shared crate
+cannot check for it:
 
-- `two_fixtures_never_share_a_shadow_file` — creates twenty fixtures, holds all
-  twenty alive at once, and asserts both that the paths are distinct *and* that
-  each file still contains its own line. Distinct paths alone would not be
-  enough: a later `TempDir` clearing an earlier one's directory would produce
-  the same read-someone-else's-data symptom.
-- `the_temp_dir_is_removed_even_when_the_test_panics` — panics inside
-  `catch_unwind` carrying the path as the payload, then asserts the file is
-  gone. This pins the case the old cleanup tail structurally could not reach.
+- In `scratchdir`:
+  - `two_scratch_dirs_alive_at_once_never_share_a_path` — sixty-four guards held
+    alive at once, asserting both that the paths are distinct *and* that each
+    file still holds its own bytes. Distinct paths alone would not be enough: a
+    later guard clearing an earlier one's directory would produce the same
+    read-someone-else's-data symptom.
+  - `concurrent_threads_never_share_a_path` — eight threads building 200 guards
+    each, all 1600 paths distinct. This is lane C's collision probe turned into
+    an assertion; it is the exact experiment that fails 13% of the time against
+    the code it replaces.
+  - `the_directory_is_removed_even_when_the_test_panics` — panics inside
+    `catch_unwind` carrying the path as the payload, then asserts the directory
+    is gone. This pins the case the old cleanup tail structurally could not
+    reach.
+  - `a_path_is_not_created_until_the_caller_writes_it`, because several fixtures
+    specifically need an *absent* path, and
+    `the_directory_and_its_contents_go_together`.
+- In each of `ftpd`, `sshd`, `doas` and `logind`:
+  `twenty_fixtures_alive_at_once_each_authenticate_their_own_user` — twenty
+  fixtures held alive simultaneously, each authenticating **its own** user. A
+  fixture that returned the path and let the guard drop would compile, read
+  fine, and leave every test in the suite checking against a file that no longer
+  exists; this is what catches that. `logind`'s copy is
+  `twenty_daemons_alive_at_once_each_read_their_own_store`, and matters more
+  there because the daemon re-reads its store at every `authenticate_session`
+  rather than once at construction.
+- In `authlib`: `tmp_gives_each_thread_its_own_directory_but_repeats_within_one`
+  — its fixture is a `thread_local!`, precisely because cargo gives each
+  `#[test]` its own thread, and repeated calls inside one test must return the
+  same path.
 
-Neither is load-dependent, which is the point: the property is now checked
+None of them is load-dependent, which is the point: the property is now checked
 directly rather than inferred from the absence of a red.
 
 **The rate limiter itself was cleared of the second charge.** Lane C asked

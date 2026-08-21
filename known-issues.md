@@ -51598,7 +51598,7 @@ files mid-test.
 
 ---
 
-## TD-C-ZONE-SNAPPING-HAS-NO-PATH-TO-A-WINDOW (lane C, 2026-08-21)
+## TD-C-ZONE-SNAPPING-HAS-NO-PATH-TO-A-WINDOW (lane C, 2026-08-21) — RESOLVED 2026-08-21
 
 **In short:** The desktop shell contains a complete, tested implementation of
 multi-window tiling layouts — halves, thirds, quadrants, a six-cell grid —
@@ -51680,6 +51680,88 @@ the one most people use — but 2293 lines of tested code stay unreachable, whic
 invites the next reader to assume the feature exists because the tests are
 green. `design.txt` does not mandate zone presets, so this is a feature the
 project chose to build and has not yet connected, not a spec violation.
+
+**RESOLVED 2026-08-21.** All four steps done, in three commits:
+
+| Step | Commit | What landed |
+|---|---|---|
+| 1, 3 | `d17ef6149` | `SnapSlot` (`gui/remote/src/zones.rs`) and the `SnapToZone` wire verb. The one-byte rule is **kept, not bent**: the 22 (preset, zone) pairs occupy bytes above the existing actions, so the byte still fully determines the action. |
+| 2 | `d04192fc5` | The compositor's `SnapTarget` / `snap_window_to_zone` / `place_snapped` / `zone_rect`, resolving a slot against `display_manager.virtual_bounds()` — the bounds only it has. |
+| 4 | `7d138bb51` | Super+Z opens the chooser; a press on a zone emits `ShellControlAction::SnapToZone(slot)` for the window focused now. The snap history is gone from the shell, as the step said. |
+
+**The open fork in step 2 was resolved into `gui/remote`**, not a new
+`gui/zones` crate — see `design-decisions.md` §507 for the argument (a zone
+table *is* protocol: `SnapSlot`'s index ranges and the geometry those indices
+name are the same fact stated twice, and the one place they cannot drift is the
+same file). The `String` label objection was answered by the type carrying a
+`&'static str`.
+
+Eight new tests in `gui/desktop/src/pointer_tests.rs`, each proved to bite by
+reintroducing the defect it names (twelve defects, twelve deterministic
+failures naming the test back): hit-test order, work-area staleness, the
+empty-desktop guard, the zone id, the focused window, the dismissal, the
+visibility gate, the hover, the thumbnail grid, and all three close paths.
+
+**What did not land with it:** the *other* way desktops offer this — drag a
+window to an edge and drop — still has no drag to fire on. See
+`TD-C-EDGE-DRAG-TILING-HAS-NO-DRAG-TO-FIRE-ON` below.
+
+---
+
+## TD-C-EDGE-DRAG-TILING-HAS-NO-DRAG-TO-FIRE-ON (lane C, 2026-08-21) — OPEN
+
+**In short:** There are two ways every desktop lets you tile a window: press a
+keyboard shortcut and pick a slot from a menu, or drag the window to the edge
+of the screen and let go. The first now works (Super+Z). The second does not,
+and not because the tiling is missing — the code that says "a drop against the
+left edge means the left half" is written and tested. What is missing is anyone
+to tell the shell that a drag is happening. The shell never sees a window being
+moved; the compositor does that by itself and does not mention it.
+
+**Where.** `gui/desktop/src/snap.rs`: `SnapManager::action_for_edge(x, y)`
+turns a cursor position near an edge or corner into the
+`ShellControlAction` that drop should send, and `edge_snap_hit` is the other
+half — the overlay preview drawn while the cursor is there. Both are public,
+both are covered by the module's own tests
+(`an_edge_drop_asks_for_the_tile_that_edge_means`,
+`an_edge_drop_ignores_the_layout_the_picker_has_selected`), and **neither has a
+caller anywhere in the tree.**
+
+The reason is structural, not an oversight: the shell has no window dragging at
+all. `grep` for a drag-start/drag-move/drag-end in `gui/desktop` finds nothing,
+because interactive moves are the compositor's — it owns the pointer grab and
+the window geometry, and `gui/remote`'s event stream carries no "the user is
+moving window N, the pointer is at (x, y)" message for the shell to hook.
+
+**Why it was kept rather than deleted.** It is the correct half of a gesture
+whose other half is a protocol addition in the same lane's tree. Deleting it
+would mean re-deriving the edge/corner thresholds and the deliberate rule that
+an edge drop ignores the layout the picker has selected (dragging left means
+*the left half*, whatever grid is chosen — see `design-decisions.md`), which is
+exactly the "re-writing it later would be strictly worse" argument that §506
+already made about `snap.rs` as a whole.
+
+**The proper fix:**
+
+1. Add an interactive-move notification to `gui/remote`'s event stream — the
+   window id and the pointer position, sent while the compositor has a move
+   grab, plus the drop. The compositor is the sender; this is lane C's tree on
+   both ends.
+2. Have the shell show the overlay on move-start, call `edge_snap_hit` per
+   motion to draw the preview, and `action_for_edge` on drop to emit the
+   request. Both functions already return exactly what those three moments
+   need.
+3. Decide whether the *zone* overlay (not just the edge preview) should appear
+   during a drag, as Windows' FancyZones does. That is a user-visible policy
+   call and belongs in `open-questions.md` if it is not obvious when the time
+   comes.
+
+**If never fixed:** no breakage and no regression — Super+Z reaches every zone
+of every layout, so the feature is usable. What remains is a discoverability
+gap (edge-drag is the gesture most users try first) and two tested public
+functions with no caller, which is the same stale-code smell §506 named,
+narrowed from a whole module to two functions. It does not get worse with time.
+
 
 ---
 

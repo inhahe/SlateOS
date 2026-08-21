@@ -35,11 +35,98 @@
 //!
 //! The header is 16 bytes (aligned to 16 for ABI compliance).
 
+#[cfg(target_os = "none")]
 use crate::mman;
 
 /// Header size: 16 bytes (u64 mmap_base + u64 total_size).
 /// Placed immediately before the user pointer.
 const HEADER_SIZE: usize = 16;
+
+// ---------------------------------------------------------------------------
+// Backing store
+// ---------------------------------------------------------------------------
+//
+// Every allocation below is one region obtained here and released by `free`.
+// The two implementations differ only in where the bytes come from; both must
+// return memory that is **zeroed** (`calloc` leans on it) and aligned to
+// `REGION_ALIGN` (`valloc`/`pvalloc` hand the base straight back as
+// "page-aligned", and `aligned_alloc_impl` rounds up from it).
+
+/// Alignment every region is anchored on: our page size.
+const REGION_ALIGN: usize = 16 * 1024;
+
+/// Map `total` bytes of zeroed, writable anonymous memory; NULL on failure.
+#[cfg(target_os = "none")]
+fn map_region(total: usize) -> *mut u8 {
+    let ptr = mman::mmap(
+        core::ptr::null_mut(),
+        total,
+        mman::PROT_READ | mman::PROT_WRITE,
+        mman::MAP_PRIVATE | mman::MAP_ANONYMOUS,
+        -1,
+        0,
+    );
+    if ptr == mman::MAP_FAILED {
+        return core::ptr::null_mut();
+    }
+    ptr.cast::<u8>()
+}
+
+/// Release a region obtained from `map_region`.
+///
+/// # Safety
+/// `base`/`total` must be exactly the pair a `map_region` call returned and
+/// recorded, and the region must not have been released already.
+#[cfg(target_os = "none")]
+unsafe fn unmap_region(base: *mut u8, total: usize) {
+    let _ = mman::munmap(base.cast::<core::ffi::c_void>(), total);
+}
+
+/// Host-build backing, so `cargo test` exercises this allocator instead of
+/// silently skipping it.
+///
+/// `syscallN()` returns `-ENOSYS` on host builds — deliberately, see
+/// syscall.rs's "Host-build safety gate" — so `mman::mmap` fails there and
+/// **every `malloc` on the host used to return NULL**.  That is not a harmless
+/// difference between the two builds: it un-tests, without saying so, every
+/// libc function that allocates, and the `free`/`realloc`/`malloc_usable_size`
+/// header logic in this file along with them.  Nothing reported it because a
+/// NULL return is a legal `malloc` result, so the callers' error paths simply
+/// took over and their tests passed on the wrong branch.
+///
+/// What finally said it out loud was `posix_spawn`'s file-actions array moving
+/// to the heap (see spawn.rs): eleven tests turned into `ENOMEM` at once.
+/// Backing the region here — the same shape as `syscall.rs`'s `host_clock`
+/// shim — fixes those eleven and un-skips the rest.
+#[cfg(not(target_os = "none"))]
+fn map_region(total: usize) -> *mut u8 {
+    extern crate std;
+    let Ok(layout) = std::alloc::Layout::from_size_align(total, REGION_ALIGN) else {
+        return core::ptr::null_mut();
+    };
+    // SAFETY: `layout` has non-zero size — every caller checks `size == 0`
+    // first and adds `HEADER_SIZE` — which is `alloc_zeroed`'s one
+    // requirement.  Zeroed, because `calloc` documents that it relies on the
+    // backing store already being zero.
+    unsafe { std::alloc::alloc_zeroed(layout) }
+}
+
+/// Release a region obtained from `map_region`.
+///
+/// # Safety
+/// `base`/`total` must be exactly the pair a `map_region` call returned and
+/// recorded, and the region must not have been released already.
+#[cfg(not(target_os = "none"))]
+unsafe fn unmap_region(base: *mut u8, total: usize) {
+    extern crate std;
+    let Ok(layout) = std::alloc::Layout::from_size_align(total, REGION_ALIGN) else {
+        return;
+    };
+    // SAFETY: the caller guarantees `base`/`total` name a live region from
+    // `map_region`, and `Layout::from_size_align` is deterministic, so this
+    // layout is the one it was allocated with.
+    unsafe { std::alloc::dealloc(base, layout) };
+}
 
 /// Allocate `size` bytes of memory.
 ///
@@ -58,22 +145,13 @@ pub extern "C" fn malloc(size: usize) -> *mut u8 {
         return core::ptr::null_mut();
     };
 
-    let ptr = mman::mmap(
-        core::ptr::null_mut(),
-        total,
-        mman::PROT_READ | mman::PROT_WRITE,
-        mman::MAP_PRIVATE | mman::MAP_ANONYMOUS,
-        -1,
-        0,
-    );
-
-    if ptr == mman::MAP_FAILED {
+    let base = map_region(total);
+    if base.is_null() {
         return core::ptr::null_mut();
     }
 
     // Write the header: [mmap_base_addr, total_region_size].
-    // SAFETY: mmap returned valid memory of at least `total` bytes.
-    let base = ptr.cast::<u8>();
+    // SAFETY: map_region returned valid memory of at least `total` bytes.
     unsafe {
         // Store the mmap base address (= ptr itself for standard malloc).
         core::ptr::write_unaligned(base.cast::<u64>(), base as u64);
@@ -192,7 +270,10 @@ pub unsafe extern "C" fn free(ptr: *mut u8) {
     // Unmap the entire region using the stored base address.
     // For standard malloc, mmap_base == header.  For aligned allocations,
     // mmap_base points to the original mmap start (before alignment padding).
-    let _ = mman::munmap(mmap_base as *mut core::ffi::c_void, total);
+    // SAFETY: the header was written by `malloc`/`aligned_alloc_impl` from the
+    // `map_region` call that produced this block, and `ptr` has not been freed
+    // (the caller's contract, restated in the doc comment above).
+    unsafe { unmap_region(mmap_base as *mut u8, total) };
 }
 
 /// Query the usable size of an allocated block (GNU extension).
@@ -375,21 +456,13 @@ fn aligned_alloc_impl(alignment: usize, size: usize) -> *mut u8 {
         return core::ptr::null_mut();
     };
 
-    let ptr = mman::mmap(
-        core::ptr::null_mut(),
-        total,
-        mman::PROT_READ | mman::PROT_WRITE,
-        mman::MAP_PRIVATE | mman::MAP_ANONYMOUS,
-        -1,
-        0,
-    );
-
-    if ptr == mman::MAP_FAILED {
+    let region = map_region(total);
+    if region.is_null() {
         crate::errno::set_errno(crate::errno::ENOMEM);
         return core::ptr::null_mut();
     }
 
-    let base = ptr as usize;
+    let base = region as usize;
     // The user pointer must be aligned AND have HEADER_SIZE bytes before
     // it for the [mmap_base, total_size] header.
     let min_user = base.wrapping_add(HEADER_SIZE);
@@ -760,13 +833,22 @@ mod tests {
         assert!(ptr.is_null());
     }
 
+    /// `reallocarray(NULL, n, m)` is `malloc(n * m)`, so this is the third
+    /// test that asserted the host allocator's failure rather than its
+    /// behaviour — see `malloc_small_round_trips` for why all three were
+    /// wrong. It now checks the multiplication it exists to check.
     #[test]
-    fn reallocarray_one_one_null() {
-        // realloc(NULL, 1) would try mmap, which returns MAP_FAILED in test.
-        // Just verify it doesn't crash.
+    fn reallocarray_one_one_allocates() {
         let ptr = reallocarray(core::ptr::null_mut(), 1, 1);
-        // mmap fails in test mode, so this should be null
-        assert!(ptr.is_null());
+        assert!(!ptr.is_null(), "reallocarray(NULL, 1, 1) is malloc(1)");
+        assert!(unsafe { malloc_usable_size(ptr) } >= 1);
+        unsafe { free(ptr) };
+
+        // The product, not either factor, sizes the allocation.
+        let ptr = reallocarray(core::ptr::null_mut(), 7, 9);
+        assert!(!ptr.is_null());
+        assert!(unsafe { malloc_usable_size(ptr) } >= 63);
+        unsafe { free(ptr) };
     }
 
     // -----------------------------------------------------------------------
@@ -796,20 +878,46 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // malloc: small sizes don't crash (they just fail because no mmap)
+    // malloc: a real allocation, on the host too
     // -----------------------------------------------------------------------
 
+    /// These two replace `malloc_small_returns_null_in_test` and
+    /// `malloc_page_size_returns_null_in_test`, which asserted that `malloc`
+    /// returns NULL on the host.
+    ///
+    /// That was true, and it was the bug: `syscallN` returns `-ENOSYS` off
+    /// target (syscall.rs, "Host-build safety gate"), so `mman::mmap` failed
+    /// and **every host `malloc` returned NULL**. A NULL return is a legal
+    /// `malloc` result, so nothing looked wrong — every allocating function's
+    /// tests quietly ran their out-of-memory path and passed on it, and
+    /// `free`/`realloc`/`malloc_usable_size` were never reached at all.
+    /// Writing that down as the *expected* result is what made a broken
+    /// allocator look like a tested one for as long as it did.
+    ///
+    /// `map_region` now falls back to the Rust global allocator on the host,
+    /// so these can assert what the function is actually for.
     #[test]
-    fn malloc_small_returns_null_in_test() {
-        // mmap is not available in test mode, so malloc should return NULL
+    fn malloc_small_round_trips() {
         let ptr = malloc(1);
-        assert!(ptr.is_null());
+        assert!(!ptr.is_null(), "malloc(1) must succeed");
+        // Writable, and the header behind it survives the write.
+        unsafe { ptr.write(0xab) };
+        assert_eq!(unsafe { ptr.read() }, 0xab);
+        assert!(unsafe { malloc_usable_size(ptr) } >= 1);
+        unsafe { free(ptr) };
     }
 
     #[test]
-    fn malloc_page_size_returns_null_in_test() {
+    fn malloc_page_size_round_trips() {
         let ptr = malloc(16384);
-        assert!(ptr.is_null());
+        assert!(!ptr.is_null(), "malloc(16384) must succeed");
+        // Touch both ends: a short mapping would fault or corrupt the header.
+        unsafe { ptr.write(1) };
+        unsafe { ptr.add(16383).write(2) };
+        assert_eq!(unsafe { ptr.read() }, 1);
+        assert_eq!(unsafe { ptr.add(16383).read() }, 2);
+        assert!(unsafe { malloc_usable_size(ptr) } >= 16384);
+        unsafe { free(ptr) };
     }
 
     // -----------------------------------------------------------------------

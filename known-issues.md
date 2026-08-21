@@ -48864,9 +48864,15 @@ the first, which is how this was found.
 | Title bar height | `TITLE_BAR_HEIGHT = 30` | `TITLE_BAR_HEIGHT = 30.0` |
 | Display scaling | none | every dimension via `self.scale(…)` |
 | Rounded corners | none | `corner_radii()`, from the user's `WindowCorners` setting |
-| Drop shadow | none | yes |
+| Drop shadow | `render_shadow`, `SHADOW_SIZE = 8`, 8 layers | yes, its own |
 | Colours | `self.theme.title_bar_focused` / `close_button` / … | its own constants |
 | Is it on screen? | **yes** | no — no caller but the demo |
+
+*(Corrected: an earlier revision of this table claimed the compositor drew no
+shadow. It does — `Window::shadow_extent` and `Compositor::render_shadow`. The
+error is worth leaving visible here because it was made the same way the bugs
+in this entry were: by reading one side carefully and asserting something about
+the other without checking.)*
 
 **This is the sweep's recurring shape once more**, and the third instance
 found in two days: the tree held one correct answer that callers could not
@@ -48885,21 +48891,36 @@ tracking, and fullscreen's decoration suppression. Moving those to the shell
 would mean moving input routing to the shell, which contradicts the
 architecture. The shell's copy is the one to delete.
 
-**But deleting it plainly would lose three real features**, which is the actual
+**But deleting it plainly would lose two real features**, which is the actual
 work in this entry:
 
 1. **Display scaling.** The shell scales every decoration dimension by the
-   user's scale factor; the compositor hardcodes pixels. On a HiDPI display the
-   compositor's title bar is 30 physical pixels — a sliver. The scale factor
-   lives in `AppearanceSettings` and has to reach the compositor.
-2. **Corner radius.** The user's `WindowCorners` setting (`Square`/`Rounded`/…)
-   is honoured only by the shell's version.
-3. **Shadows.**
+   user's scale factor; the compositor hardcodes pixels. On a 2× display the
+   compositor's title bar is 30 physical pixels — half the height it should be,
+   with 20px buttons inside it.
 
-So the sequence is: teach the compositor the two settings it is missing, port
-the shadow, *then* delete `render_window_decorations` and `window_chrome` and
-the geometry fields on `ManagedWindow` that exist only to feed them. Not the
-other order — deleting first ships a visible regression on every HiDPI display.
+   The sharp part: **the compositor already knows the scale factor and does not
+   use it.** `Display::scale_factor` exists, is set per display, and is reported
+   out to clients over the wire (`wire.rs:357`) — and the only reads in the
+   whole crate are that report. The compositor tells every client how to scale
+   and then does not scale itself. So this is not "thread a setting in from the
+   shell"; the value is already in the struct next to the code that ignores it.
+
+   There is one chokepoint to change, which is why this is tractable:
+   `Window::frame_insets` is documented as the single place the geometry derives
+   from, precisely so decoration cannot be right in one place and wrong in
+   another — "hit testing, damage and drag detection included". Scaling there
+   carries the whole system. The one piece of design needed is how a `Window`
+   learns *which* display it is on, since `frame_insets` takes only `&self`.
+2. **Corner radius.** The user's `WindowCorners` setting (`Square`/`Rounded`/…)
+   is honoured only by the shell's version. Unlike the scale factor this genuinely
+   is not in the compositor yet and has to arrive from `AppearanceSettings`.
+
+So the sequence is: scale the compositor's decorations off the value it already
+holds, bring the corner-radius setting across, *then* delete
+`render_window_decorations` and `window_chrome` and the geometry fields on
+`ManagedWindow` that exist only to feed them. Not the other order — deleting
+first ships a visible regression on every HiDPI display.
 
 **Why this blocks the event loop** (`TD-C-THE-SHELL-CAN-DRAW-ITSELF-AND-NOBODY-CAN-ASK-IT-TO`):
 that entry says the loop should "re-render the five trees and submit them". Four

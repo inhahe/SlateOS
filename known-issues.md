@@ -49250,6 +49250,43 @@ what it does. Two findings, both the same shape as everything else here:
    rewritten to call the API directly rather than deleted, because the
    behaviour survives and only its trigger moves.
 
+**Progress 2026-08-21 — prerequisites 3, 4 and 5 are done; only the deletion is
+left.** ✅ `gui/appearance` now owns `DecorationColors`: eleven resolved frame
+colours with `for_mode(light)` and `from_settings`. Both renderers read it —
+`DesktopTheme::window_fields_from` takes the shell's six window fields from it,
+and the compositor's `DecorationTheme` is now `from_settings` plus the ARGB
+packing, its twelve hardcoded Catppuccin-ish constants gone along with the
+`#[allow(dead_code)]` that had been hiding a field nothing read. The
+compositor's title font follows `appearance.fonts.ui_size` instead of a
+constant 16. See `design-decisions.md` §501.
+
+So a user in light mode, a user with accented title bars and a user who
+enlarged the interface font now get the same frame from the compositor that the
+shell's duplicate has been drawing all along — which is precisely the condition
+this entry set for the duplicate to be removable without shipping a regression.
+
+Two notes for whoever does the deletion:
+
+- **`the_shells_window_colours_are_the_compositors_window_colours`
+  (`gui/desktop/src/lib.rs`) is a scaffold, not a keeper.** It exists to fail
+  the moment someone recolours a window in `DesktopTheme`, which is the natural
+  place to do it and the wrong one. It is meaningful only while the shell has a
+  decorator at all; delete it with the decorator.
+
+- **`fonts.ui_font` is still unreachable and is not a sixth prerequisite.**
+  `osfont::Family` is `Ui` or `Mono` with no lookup by name, so no renderer in
+  this tree honours a font *family* — the shell's decorator does not either, and
+  `RenderTree::text` takes no family argument. Deleting the duplicate therefore
+  loses nothing on this axis. Tracked as a missing capability rather than a
+  missing wire.
+
+What remains for this entry is the deletion itself, exactly as scoped in the
+correction above: `render_window_decorations`, `window_chrome`, `WindowChrome`,
+the four `Hit::Window{Close,Maximize,Minimize,TitleBar}` variants and their
+`handle_mouse` arms, the `gui/desktop/src/main.rs:45` demo caller, and the
+`pointer_tests.rs` tests that assert the duplicate. `ManagedWindow::frame_rect`
+stays.
+
 ## B-SSHD-EXEC-REPLIED-WITH-THE-COMMAND-INSTEAD-OF-RUNNING-IT — 2026-08-21 — FIXED
 
 **In short:** `ssh host 'cat /etc/passwd'` used to come back with the text

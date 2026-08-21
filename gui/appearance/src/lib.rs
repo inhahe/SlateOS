@@ -280,10 +280,20 @@ impl AccentColor {
     /// All preset (non-custom) accent colors.
     pub fn presets() -> &'static [AccentColor] {
         &[
-            Self::Blue, Self::Lavender, Self::Teal, Self::Green,
-            Self::Yellow, Self::Peach, Self::Pink, Self::Mauve,
-            Self::Red, Self::Rosewater, Self::Flamingo, Self::Maroon,
-            Self::Sky, Self::Sapphire,
+            Self::Blue,
+            Self::Lavender,
+            Self::Teal,
+            Self::Green,
+            Self::Yellow,
+            Self::Peach,
+            Self::Pink,
+            Self::Mauve,
+            Self::Red,
+            Self::Rosewater,
+            Self::Flamingo,
+            Self::Maroon,
+            Self::Sky,
+            Self::Sapphire,
         ]
     }
 }
@@ -696,6 +706,164 @@ impl AppearanceSettings {
 }
 
 // ============================================================================
+// Window decoration colours
+// ============================================================================
+
+/// Black-ish or white-ish, whichever can be read on `bg`.
+///
+/// The endpoints are the palettes' own extremes rather than pure `#000`/`#fff`
+/// so that accented surfaces still look like part of this desktop. Perceived
+/// brightness uses the usual luma weights: the eye is far more sensitive to
+/// green than to blue, so an average of the channels would call a saturated
+/// blue "bright" and put black text on it.
+///
+/// Deliberately not [`guitk::theme::contrast_text`], which answers the same
+/// question with pure black and pure white. That is the right answer for a
+/// widget that may be drawn on any background; this is the right answer for a
+/// surface that belongs to a specific palette.
+#[must_use]
+pub fn readable_on(bg: Color) -> Color {
+    let luma = 0.299 * f32::from(bg.r) + 0.587 * f32::from(bg.g) + 0.114 * f32::from(bg.b);
+    if luma > 140.0 {
+        Color::from_hex(0x11111B)
+    } else {
+        Color::from_hex(0xEFF1F5)
+    }
+}
+
+/// A visibly different shade of `color`, for the pressed state of a control
+/// whose resting state is already `color`.
+///
+/// Moves away from whichever extreme `color` is nearer, so the emphasis is
+/// visible on both a pale and a deep accent instead of vanishing at one end.
+#[must_use]
+pub fn emphasized(color: Color) -> Color {
+    let toward = readable_on(color);
+    color.lerp(toward, 0.25)
+}
+
+/// Every colour used to draw a window's frame, and the emptiness behind it.
+///
+/// This type exists because two processes draw the same frame. The compositor
+/// owns the real one — it is the process holding the framebuffer — and the
+/// desktop shell has historically drawn its own copy. While that duplicate
+/// survives, both must agree, and the only way two renderers agree about a
+/// colour is if neither of them decides it. So neither does: they both read
+/// this.
+///
+/// The desktop background is here for the same reason the borders are. It is
+/// not part of a frame, but it is the surface a frame is seen against, it is
+/// painted by the same process, and it comes from the same palette — putting it
+/// anywhere else would mean a caller had to find two answers to assemble one
+/// screen.
+///
+/// The fields are resolved colours, not settings: a renderer that consulted
+/// [`AppearanceSettings`] directly would re-derive the accent at every frame,
+/// and would be free to derive it slightly differently in each place a frame is
+/// drawn.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DecorationColors {
+    /// Title bar background on the focused window.
+    pub title_focused_bg: Color,
+    /// Title text on the focused window.
+    pub title_focused_fg: Color,
+    /// Title bar background on every other window.
+    pub title_unfocused_bg: Color,
+    /// Title text on every other window.
+    ///
+    /// Carried separately from [`title_focused_fg`](Self::title_focused_fg)
+    /// because with accented title bars the two backgrounds differ by more than
+    /// a shade, and one shared text colour would then be unreadable on one of
+    /// them.
+    pub title_unfocused_fg: Color,
+    /// The one-pixel outline around the focused window.
+    pub border_focused: Color,
+    /// The outline around every other window — dimmer, so that focus is legible
+    /// from the frame alone when the title bars are the same colour.
+    pub border_unfocused: Color,
+    /// The close button.
+    pub close_button: Color,
+    /// The maximize/restore button.
+    pub maximize_button: Color,
+    /// The minimize button.
+    pub minimize_button: Color,
+    /// The drop shadow beneath a floating window, alpha included.
+    pub shadow: Color,
+    /// The desktop itself, where no window covers it.
+    pub desktop_bg: Color,
+}
+
+impl DecorationColors {
+    /// The palette for a mode, before any of the user's other choices apply.
+    ///
+    /// Surface for surface the two modes are the same structure — base,
+    /// surface0, surface1, surface2, crust — so that a setting applied on top
+    /// lands on the same role in either one.
+    #[must_use]
+    pub fn for_mode(light: bool) -> Self {
+        if light {
+            // Catppuccin Latte.
+            Self {
+                title_focused_bg: Color::from_hex(0xCCD0DA),
+                title_focused_fg: Color::from_hex(0x4C4F69),
+                title_unfocused_bg: Color::from_hex(0xEFF1F5),
+                title_unfocused_fg: Color::from_hex(0x6C6F85),
+                border_focused: Color::from_hex(0xACB0BE),
+                border_unfocused: Color::from_hex(0xBCC0CC),
+                close_button: Color::from_hex(0xD20F39),
+                maximize_button: Color::from_hex(0x40A02B),
+                minimize_button: Color::from_hex(0xDF8E1D),
+                shadow: SHADOW,
+                desktop_bg: Color::from_hex(0xDCE0E8),
+            }
+        } else {
+            // Catppuccin Mocha.
+            Self {
+                title_focused_bg: Color::from_hex(0x313244),
+                title_focused_fg: Color::from_hex(0xCDD6F4),
+                title_unfocused_bg: Color::from_hex(0x1E1E2E),
+                title_unfocused_fg: Color::from_hex(0xA6ADC8),
+                border_focused: Color::from_hex(0x585B70),
+                border_unfocused: Color::from_hex(0x45475A),
+                close_button: Color::from_hex(0xF38BA8),
+                maximize_button: Color::from_hex(0xA6E3A1),
+                minimize_button: Color::from_hex(0xF9E2AF),
+                shadow: SHADOW,
+                desktop_bg: Color::from_hex(0x11111B),
+            }
+        }
+    }
+
+    /// Resolve the frame colours from what the user chose.
+    #[must_use]
+    pub fn from_settings(settings: &AppearanceSettings) -> Self {
+        let mut colors = Self::for_mode(settings.theme_mode.is_light());
+
+        if settings.accent_titlebars {
+            let accent = settings.effective_accent();
+            colors.title_focused_bg = accent;
+            colors.title_focused_fg = readable_on(accent);
+            // The *unfocused* bar deliberately keeps the base palette: an
+            // accent that marks every window marks none of them, and telling
+            // the focused window apart is the title bar's first job.
+        }
+
+        colors
+    }
+}
+
+/// The drop shadow, in both modes.
+///
+/// A shadow is an absence of light rather than a colour of its own, so it is
+/// the same black in either palette; what changes between them is the surface
+/// it falls on, which is already lighter or darker.
+///
+/// The alpha is the shadow at its *strongest*, immediately outside the frame.
+/// A renderer that fades it outward — which is what makes a hard rectangle look
+/// like a shadow — starts here and falls to nothing.
+const SHADOW: Color = Color::rgba(0, 0, 0, 40);
+
+// ============================================================================
 // Configuration file
 // ============================================================================
 
@@ -922,7 +1090,10 @@ impl AppearanceSettings {
     pub fn write_into(&self, doc: &mut Document) {
         doc.set_str(&["theme", "mode"], self.theme_mode.yaml_name());
         doc.set_str(&["theme", "accent"], self.accent_color.yaml_name());
-        doc.set_str(&["theme", "custom_accent"], &color_to_hex(self.custom_accent));
+        doc.set_str(
+            &["theme", "custom_accent"],
+            &color_to_hex(self.custom_accent),
+        );
         doc.set_str(&["theme", "transparency"], self.transparency.yaml_name());
 
         doc.set_str(&["fonts", "ui_font"], &self.fonts.ui_font);
@@ -1323,7 +1494,11 @@ mod tests {
         // A typo in one `yaml_name` arm would otherwise only show up as one
         // user's setting quietly resetting itself.
         let mut settings = AppearanceSettings::default();
-        for accent in AccentColor::presets().iter().copied().chain([AccentColor::Custom]) {
+        for accent in AccentColor::presets()
+            .iter()
+            .copied()
+            .chain([AccentColor::Custom])
+        {
             settings.accent_color = accent;
             for theme in [ThemeMode::Dark, ThemeMode::Light, ThemeMode::System] {
                 settings.theme_mode = theme;
@@ -1465,11 +1640,185 @@ mod tests {
     fn test_config_colors_use_css_hex() {
         assert_eq!(color_to_hex(Color::rgb(0x89, 0xB4, 0xFA)), "#89b4fa");
         assert_eq!(color_to_hex(Color::rgba(1, 2, 3, 4)), "#01020304");
-        assert_eq!(color_from_hex("#89b4fa"), Some(Color::rgb(0x89, 0xB4, 0xFA)));
-        assert_eq!(color_from_hex("#89B4FA"), Some(Color::rgb(0x89, 0xB4, 0xFA)));
+        assert_eq!(
+            color_from_hex("#89b4fa"),
+            Some(Color::rgb(0x89, 0xB4, 0xFA))
+        );
+        assert_eq!(
+            color_from_hex("#89B4FA"),
+            Some(Color::rgb(0x89, 0xB4, 0xFA))
+        );
         assert_eq!(color_from_hex("#01020304"), Some(Color::rgba(1, 2, 3, 4)));
         for bad in ["89b4fa", "#89b4f", "#gggggg", "#", "", "#89b4fa00ff"] {
             assert_eq!(color_from_hex(bad), None, "{bad} should not parse");
+        }
+    }
+
+    // ---- DecorationColors ----
+
+    #[test]
+    fn the_two_modes_disagree_about_every_colour_a_frame_is_drawn_with() {
+        // Not a style opinion — a guard on a mistake with a specific shape. A
+        // palette assembled by copying the other one and editing it is easy to
+        // leave a line short, and the symptom is a single element that stays
+        // dark in light mode: dark title text on a dark bar, or a border that
+        // vanishes. Every field genuinely differs between Mocha and Latte
+        // except the shadow, which is deliberately the same black.
+        let dark = DecorationColors::for_mode(false);
+        let light = DecorationColors::for_mode(true);
+        let pairs: [(&str, Color, Color); 10] = [
+            (
+                "title_focused_bg",
+                dark.title_focused_bg,
+                light.title_focused_bg,
+            ),
+            (
+                "title_focused_fg",
+                dark.title_focused_fg,
+                light.title_focused_fg,
+            ),
+            (
+                "title_unfocused_bg",
+                dark.title_unfocused_bg,
+                light.title_unfocused_bg,
+            ),
+            (
+                "title_unfocused_fg",
+                dark.title_unfocused_fg,
+                light.title_unfocused_fg,
+            ),
+            ("border_focused", dark.border_focused, light.border_focused),
+            (
+                "border_unfocused",
+                dark.border_unfocused,
+                light.border_unfocused,
+            ),
+            ("close_button", dark.close_button, light.close_button),
+            (
+                "maximize_button",
+                dark.maximize_button,
+                light.maximize_button,
+            ),
+            (
+                "minimize_button",
+                dark.minimize_button,
+                light.minimize_button,
+            ),
+            ("desktop_bg", dark.desktop_bg, light.desktop_bg),
+        ];
+        for (field, d, l) in pairs {
+            assert_ne!(d, l, "{field} is the same colour in both modes");
+        }
+        assert_eq!(
+            dark.shadow, light.shadow,
+            "the shadow is meant to be the same black in both modes"
+        );
+    }
+
+    #[test]
+    fn a_focused_bar_is_legible_against_whatever_accent_it_was_given() {
+        // The point of resolving the foreground alongside the background rather
+        // than letting a renderer pick one. A yellow accent needs dark title
+        // text and a maroon one needs light; a single foreground would make one
+        // of the fourteen accents unreadable, and nobody would find out until a
+        // user picked it.
+        for accent in [
+            AccentColor::Yellow,
+            AccentColor::Peach,
+            AccentColor::Maroon,
+            AccentColor::Blue,
+            AccentColor::Teal,
+        ] {
+            let settings = AppearanceSettings {
+                accent_titlebars: true,
+                accent_color: accent,
+                ..AppearanceSettings::default()
+            };
+            let colors = DecorationColors::from_settings(&settings);
+            assert_eq!(
+                colors.title_focused_bg,
+                settings.effective_accent(),
+                "{accent:?} did not reach the focused title bar"
+            );
+            assert_eq!(
+                colors.title_focused_fg,
+                readable_on(settings.effective_accent()),
+                "{accent:?} got a title colour that was not chosen for it"
+            );
+        }
+    }
+
+    #[test]
+    fn accented_title_bars_leave_the_unfocused_windows_in_the_base_palette() {
+        // Deliberate: an accent that marks every window marks none of them.
+        let settings = AppearanceSettings {
+            accent_titlebars: true,
+            accent_color: AccentColor::Red,
+            ..AppearanceSettings::default()
+        };
+        let accented = DecorationColors::from_settings(&settings);
+        let base = DecorationColors::for_mode(false);
+
+        assert_eq!(accented.title_unfocused_bg, base.title_unfocused_bg);
+        assert_eq!(accented.title_unfocused_fg, base.title_unfocused_fg);
+        assert_ne!(
+            accented.title_focused_bg, base.title_focused_bg,
+            "the setting did nothing at all — the assertions above would then \
+             hold for the wrong reason"
+        );
+    }
+
+    #[test]
+    fn the_mode_still_decides_the_palette_when_the_accent_is_off() {
+        // `from_settings` with nothing accented must be exactly `for_mode`, or
+        // the two ways of asking the same question have started to drift.
+        for (mode, light) in [(ThemeMode::Dark, false), (ThemeMode::Light, true)] {
+            let settings = AppearanceSettings {
+                theme_mode: mode,
+                accent_titlebars: false,
+                ..AppearanceSettings::default()
+            };
+            assert_eq!(
+                DecorationColors::from_settings(&settings),
+                DecorationColors::for_mode(light),
+                "{mode:?} did not resolve to its own palette"
+            );
+        }
+    }
+
+    #[test]
+    fn readable_on_answers_with_the_palettes_own_extremes() {
+        // Not pure black and white: an accented title bar with `#000` text
+        // beside a taskbar with `#11111B` text is two different blacks a few
+        // pixels apart, which reads as a rendering fault rather than a style.
+        assert_eq!(
+            readable_on(Color::from_hex(0xF9E2AF)),
+            Color::from_hex(0x11111B)
+        );
+        assert_eq!(
+            readable_on(Color::from_hex(0x1E1E2E)),
+            Color::from_hex(0xEFF1F5)
+        );
+        // A saturated blue is dark to the eye however bright its one channel
+        // is; averaging the channels instead of weighting them would call this
+        // one light and put black text on it.
+        assert_eq!(
+            readable_on(Color::from_hex(0x0000FF)),
+            Color::from_hex(0xEFF1F5)
+        );
+    }
+
+    #[test]
+    fn emphasis_stays_visible_at_both_ends_of_the_range() {
+        // A pressed state derived by "darken by 25%" disappears on an accent
+        // that is already black. This moves away from whichever extreme the
+        // colour is nearer, so both ends move.
+        for base in [Color::from_hex(0x000000), Color::from_hex(0xFFFFFF)] {
+            assert_ne!(
+                emphasized(base),
+                base,
+                "{base:?} pressed looks exactly like {base:?} at rest"
+            );
         }
     }
 }

@@ -106,13 +106,16 @@ pub mod window_rules;
 mod pointer_tests;
 
 use appearance::config;
-use appearance::{AppearanceSettings, TaskbarStyle, TransparencyLevel};
+use appearance::{
+    AppearanceSettings, DecorationColors, TaskbarStyle, TransparencyLevel, emphasized, readable_on,
+};
 use guitk::color::Color;
 use guitk::event::{Key, KeyEvent, Modifiers, MouseButton, MouseEvent, MouseEventKind};
 use guitk::render::RenderTree;
 use guitk::step;
 use guitk::style::{Border, CornerRadii, Shadow};
 use guitk::text;
+use guitk::theme::with_alpha;
 use guitk::wheel;
 use launcher::{AppEntry, Category};
 // The same zone engine the libc's `localtime`, osh's `printf '%(…)T'`, the
@@ -687,19 +690,23 @@ impl Default for DesktopTheme {
 
 impl DesktopTheme {
     /// The dark palette (Catppuccin Mocha), before any setting is applied.
+    ///
+    /// The window and desktop fields are not this crate's to choose — see
+    /// [`window_fields_from`](Self::window_fields_from).
     #[must_use]
     pub fn dark() -> Self {
+        let frame = DecorationColors::for_mode(false);
         Self {
             taskbar_bg: Color::from_hex(0x1E1E2E),
             taskbar_fg: Color::from_hex(0xCDD6F4),
             taskbar_active_bg: Color::from_hex(0x45475A),
             taskbar_accent: Color::from_hex(0x89B4FA),
-            window_border_color: Color::from_hex(0x585B70),
-            window_title_bg: Color::from_hex(0x313244),
-            window_title_fg: Color::from_hex(0xCDD6F4),
-            window_title_inactive_bg: Color::from_hex(0x1E1E2E),
-            window_title_inactive_fg: Color::from_hex(0xA6ADC8),
-            desktop_bg: Color::from_hex(0x11111B),
+            window_border_color: frame.border_focused,
+            window_title_bg: frame.title_focused_bg,
+            window_title_fg: frame.title_focused_fg,
+            window_title_inactive_bg: frame.title_unfocused_bg,
+            window_title_inactive_fg: frame.title_unfocused_fg,
+            desktop_bg: frame.desktop_bg,
             accent_color: Color::from_hex(0x89B4FA),
             start_menu_bg: Color::from_hex(0x1E1E2E),
             start_menu_fg: Color::from_hex(0xCDD6F4),
@@ -716,17 +723,18 @@ impl DesktopTheme {
     /// on top lands on the same role in either mode.
     #[must_use]
     pub fn light() -> Self {
+        let frame = DecorationColors::for_mode(true);
         Self {
             taskbar_bg: Color::from_hex(0xEFF1F5),
             taskbar_fg: Color::from_hex(0x4C4F69),
             taskbar_active_bg: Color::from_hex(0xBCC0CC),
             taskbar_accent: Color::from_hex(0x1E66F5),
-            window_border_color: Color::from_hex(0xACB0BE),
-            window_title_bg: Color::from_hex(0xCCD0DA),
-            window_title_fg: Color::from_hex(0x4C4F69),
-            window_title_inactive_bg: Color::from_hex(0xEFF1F5),
-            window_title_inactive_fg: Color::from_hex(0x6C6F85),
-            desktop_bg: Color::from_hex(0xDCE0E8),
+            window_border_color: frame.border_focused,
+            window_title_bg: frame.title_focused_bg,
+            window_title_fg: frame.title_focused_fg,
+            window_title_inactive_bg: frame.title_unfocused_bg,
+            window_title_inactive_fg: frame.title_unfocused_fg,
+            desktop_bg: frame.desktop_bg,
             accent_color: Color::from_hex(0x1E66F5),
             start_menu_bg: Color::from_hex(0xEFF1F5),
             start_menu_fg: Color::from_hex(0x4C4F69),
@@ -734,6 +742,26 @@ impl DesktopTheme {
             overlay_fg: Color::from_hex(0x4C4F69),
             overlay_selected_bg: Color::from_hex(0xBCC0CC),
         }
+    }
+
+    /// Take every window and desktop colour from `frame`, leaving the panel
+    /// colours alone.
+    ///
+    /// The window colours are not the shell's to choose. The compositor draws
+    /// the real frames — it is the process holding the framebuffer — and while
+    /// [`render_window_decorations`] still draws a second copy of them the two
+    /// have to match. Both sides therefore read [`DecorationColors`] and
+    /// neither decides. Everything else in the theme — the taskbar, the start
+    /// menu, the overlays — is drawn by this process alone and stays here.
+    ///
+    /// [`render_window_decorations`]: DesktopShell::render_window_decorations
+    fn window_fields_from(&mut self, frame: DecorationColors) {
+        self.window_border_color = frame.border_focused;
+        self.window_title_bg = frame.title_focused_bg;
+        self.window_title_fg = frame.title_focused_fg;
+        self.window_title_inactive_bg = frame.title_unfocused_bg;
+        self.window_title_inactive_fg = frame.title_unfocused_fg;
+        self.desktop_bg = frame.desktop_bg;
     }
 
     /// Resolve a full palette from what the user chose.
@@ -763,13 +791,11 @@ impl DesktopTheme {
             theme.taskbar_accent = readable_on(accent);
         }
 
-        if settings.accent_titlebars {
-            theme.window_title_bg = accent;
-            theme.window_title_fg = readable_on(accent);
-            // The *inactive* bar deliberately keeps the base palette: an
-            // accent that marks every window marks none of them, and telling
-            // the focused window apart is the title bar's first job.
-        }
+        // Not derived here. `accent_titlebars` recolours a window frame, and a
+        // window frame is drawn by the compositor as well as by this process;
+        // deriving it twice is how the two come to disagree. See
+        // [`DesktopTheme::window_fields_from`].
+        theme.window_fields_from(DecorationColors::from_settings(settings));
 
         theme.taskbar_bg = with_alpha(theme.taskbar_bg, taskbar_alpha(settings));
         let overlay = settings.transparency.panel_alpha();
@@ -778,37 +804,6 @@ impl DesktopTheme {
 
         theme
     }
-}
-
-/// Black-ish or white-ish, whichever can be read on `bg`.
-///
-/// The endpoints are the palettes' own extremes rather than pure `#000`/`#fff`
-/// so that accented surfaces still look like part of this desktop. Perceived
-/// brightness uses the usual luma weights: the eye is far more sensitive to
-/// green than to blue, so an average of the channels would call a saturated
-/// blue "bright" and put black text on it.
-fn readable_on(bg: Color) -> Color {
-    let luma = 0.299 * f32::from(bg.r) + 0.587 * f32::from(bg.g) + 0.114 * f32::from(bg.b);
-    if luma > 140.0 {
-        Color::from_hex(0x11111B)
-    } else {
-        Color::from_hex(0xEFF1F5)
-    }
-}
-
-/// A visibly different shade of `color`, for the pressed state of a control
-/// whose resting state is already `color`.
-///
-/// Moves away from whichever extreme `color` is nearer, so the emphasis is
-/// visible on both a pale and a deep accent instead of vanishing at one end.
-fn emphasized(color: Color) -> Color {
-    let toward = readable_on(color);
-    color.lerp(toward, 0.25)
-}
-
-/// `color` at a given opacity.
-fn with_alpha(color: Color, alpha: u8) -> Color {
-    Color::rgba(color.r, color.g, color.b, alpha)
 }
 
 /// How opaque the taskbar's own panel is.
@@ -3124,6 +3119,46 @@ mod theme_tests {
                     inactive >= 3.0,
                     "{mode:?} {accent:?}: inactive title {inactive:.2}"
                 );
+            }
+        }
+    }
+
+    /// Every window colour this shell draws with is the one the compositor
+    /// draws with.
+    ///
+    /// Two processes paint the same window frame — the compositor for real, and
+    /// [`DesktopShell::render_window_decorations`] as a duplicate that has not
+    /// been deleted yet. While both exist they have to match, and the only way
+    /// two renderers match is if neither of them decides. This test is what
+    /// says so: it fails the moment someone recolours a title bar *here*,
+    /// which is the natural place to do it and the wrong one.
+    #[test]
+    fn the_shells_window_colours_are_the_compositors_window_colours() {
+        for &accent in AccentColor::presets() {
+            for mode in [ThemeMode::Dark, ThemeMode::Light] {
+                for accent_titlebars in [false, true] {
+                    let mut s = settings();
+                    s.theme_mode = mode;
+                    s.accent_color = accent;
+                    s.accent_titlebars = accent_titlebars;
+
+                    let theme = DesktopTheme::from_settings(&s);
+                    let frame = DecorationColors::from_settings(&s);
+                    let what = format!("{mode:?} {accent:?} accent_titlebars={accent_titlebars}");
+
+                    assert_eq!(theme.window_title_bg, frame.title_focused_bg, "{what}");
+                    assert_eq!(theme.window_title_fg, frame.title_focused_fg, "{what}");
+                    assert_eq!(
+                        theme.window_title_inactive_bg, frame.title_unfocused_bg,
+                        "{what}"
+                    );
+                    assert_eq!(
+                        theme.window_title_inactive_fg, frame.title_unfocused_fg,
+                        "{what}"
+                    );
+                    assert_eq!(theme.window_border_color, frame.border_focused, "{what}");
+                    assert_eq!(theme.desktop_bg, frame.desktop_bg, "{what}");
+                }
             }
         }
     }

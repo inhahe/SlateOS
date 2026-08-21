@@ -1222,7 +1222,7 @@ mod tests {
         mgr.add_discovered_device(sample_device("AA:BB", "Test"));
         mgr.pair("AA:BB");
         mgr.complete_pairing("AA:BB", true);
-        assert!(mgr.connected_devices().len() == 1);
+        assert_eq!(mgr.connected_devices().len(), 1);
 
         mgr.set_powered(false);
         assert!(!mgr.adapter.powered);

@@ -157,10 +157,6 @@ const fn frame_interval_for(refresh_rate: u32) -> Duration {
 /// [`MIN_WINDOW_WIDTH`].
 const MIN_WINDOW_HEIGHT: u32 = 50;
 
-/// Size, in pixels, for text the compositor draws itself — window titles and
-/// the like. Text inside a window carries its own size in the render command.
-const DEFAULT_FONT_SIZE: f32 = 16.0;
-
 /// Maximum framebuffer width supported.
 const MAX_FB_WIDTH: u32 = 7680;
 
@@ -3785,8 +3781,19 @@ fn color_to_argb(color: &Color) -> u32 {
 // Theme colors for window decorations
 // ---------------------------------------------------------------------------
 
-/// Colors used for window decoration rendering.
-#[allow(dead_code)]
+/// Colors used for window decoration rendering, in the framebuffer's own ARGB.
+///
+/// This is [`appearance::DecorationColors`] with the channel packing already
+/// done. It is a separate type rather than the settings' own because the
+/// conversion is per-colour arithmetic and the alternative is doing it at every
+/// blit: a frame draws a title bar, a border and three buttons per window, and
+/// the colours only change when the user changes them.
+///
+/// Which is also why there is no constructor that invents a palette. The
+/// twelve hardcoded constants that used to live here were a fourth opinion
+/// about what a title bar looks like, and the visible symptom was that a user
+/// in light mode got a dark-navy desktop and a dark blue-gray title bar from
+/// the process that actually draws them.
 struct DecorationTheme {
     /// Title bar background when focused.
     title_bar_focused: u32,
@@ -3798,8 +3805,6 @@ struct DecorationTheme {
     title_text_unfocused: u32,
     /// Close button color.
     close_button: u32,
-    /// Close button hover color.
-    close_button_hover: u32,
     /// Maximize button color.
     maximize_button: u32,
     /// Minimize button color.
@@ -3814,22 +3819,36 @@ struct DecorationTheme {
     desktop_background: u32,
 }
 
-impl Default for DecorationTheme {
-    fn default() -> Self {
+impl DecorationTheme {
+    /// Resolve the frame colours from the user's settings, packed for the
+    /// framebuffer.
+    fn from_settings(settings: &AppearanceSettings) -> Self {
+        let colors = appearance::DecorationColors::from_settings(settings);
         Self {
-            title_bar_focused: 0xFF_2B_2B_3D,    // Dark blue-gray
-            title_bar_unfocused: 0xFF_3C_3C_4A,  // Lighter gray
-            title_text_focused: 0xFF_FF_FF_FF,   // White
-            title_text_unfocused: 0xFF_A0_A0_A0, // Gray text
-            close_button: 0xFF_E8_4D_4D,         // Red
-            close_button_hover: 0xFF_FF_60_60,   // Bright red
-            maximize_button: 0xFF_4D_C8_4D,      // Green
-            minimize_button: 0xFF_E8_C8_4D,      // Yellow
-            border_focused: 0xFF_50_50_70,       // Subtle border
-            border_unfocused: 0xFF_40_40_50,     // Dimmer border
-            shadow_color: 0x40_00_00_00,         // Semi-transparent black
-            desktop_background: 0xFF_1A_1A_2E,   // Dark navy
+            title_bar_focused: color_to_argb(&colors.title_focused_bg),
+            title_bar_unfocused: color_to_argb(&colors.title_unfocused_bg),
+            title_text_focused: color_to_argb(&colors.title_focused_fg),
+            title_text_unfocused: color_to_argb(&colors.title_unfocused_fg),
+            close_button: color_to_argb(&colors.close_button),
+            maximize_button: color_to_argb(&colors.maximize_button),
+            minimize_button: color_to_argb(&colors.minimize_button),
+            border_focused: color_to_argb(&colors.border_focused),
+            border_unfocused: color_to_argb(&colors.border_unfocused),
+            shadow_color: color_to_argb(&colors.shadow),
+            desktop_background: color_to_argb(&colors.desktop_bg),
         }
+    }
+}
+
+impl Default for DecorationTheme {
+    /// The palette for the default settings.
+    ///
+    /// Deferring to [`AppearanceSettings::default`] rather than restating a
+    /// palette is what makes a compositor that has never loaded a settings file
+    /// look identical to one that loaded a file saying nothing unusual — the
+    /// two used to differ, and the difference was only ever visible on screen.
+    fn default() -> Self {
+        Self::from_settings(&AppearanceSettings::default())
     }
 }
 
@@ -3988,6 +4007,9 @@ impl Compositor {
             return;
         }
         self.appearance = settings;
+        // Resolved once here rather than per frame: the packing is arithmetic
+        // on eleven colours, and they change only when this is called.
+        self.theme = DecorationTheme::from_settings(&self.appearance);
         self.full_recomposite = true;
     }
 
@@ -5559,9 +5581,13 @@ impl Compositor {
     fn render_shadow(&mut self, frame: Rect, scale: f32, opacity: f32) {
         /// How far down and right the shadow is cast from the frame, at 1×.
         const SHADOW_OFFSET: u32 = 3;
-        /// Alpha of the innermost shadow layer, falling off to nothing at the
-        /// outermost.
-        const SHADOW_ALPHA: u32 = 40;
+
+        // Colour and peak alpha both from the palette rather than from a local
+        // constant, so that the one place that says what a shadow looks like is
+        // the same place that says what a title bar looks like. The alpha is
+        // the innermost layer's; it falls off to nothing at the outermost.
+        let shadow_rgb = self.theme.shadow_color & 0x00FF_FFFF;
+        let shadow_alpha = self.theme.shadow_color >> 24;
 
         let extent = scale_dimension(SHADOW_SIZE, scale);
         let offset = scale_dimension(SHADOW_OFFSET, scale);
@@ -5577,7 +5603,7 @@ impl Compositor {
         // already guarantees a non-zero extent for a non-zero constant, but a
         // guard is a second place that has to keep agreeing with the first. The
         // fallback value is unreachable anyway — a zero extent runs no layers.
-        let falloff = SHADOW_ALPHA.checked_div(extent).unwrap_or(SHADOW_ALPHA);
+        let falloff = shadow_alpha.checked_div(extent).unwrap_or(shadow_alpha);
 
         #[allow(
             clippy::cast_possible_wrap,
@@ -5586,7 +5612,7 @@ impl Compositor {
         let base = frame.offset(offset as i32, offset as i32);
         let radius = self.decoration_radius(scale);
         for layer in 0..extent {
-            let alpha = SHADOW_ALPHA
+            let alpha = shadow_alpha
                 .saturating_sub(layer.saturating_mul(falloff))
                 .min(255);
             let ring = base.inflate(layer);
@@ -5607,7 +5633,7 @@ impl Compositor {
                 ring.height,
                 1,
                 &radii,
-                alpha << 24,
+                (alpha << 24) | shadow_rgb,
                 opacity,
             );
         }
@@ -5689,11 +5715,15 @@ impl Compositor {
         /// Gap between the left edge of the title bar and the title text, at 1×.
         const TITLE_TEXT_INSET: u32 = 8;
         let inset = scale_dimension(TITLE_TEXT_INSET, bar.scale);
-        // A 16px title inside a 60px bar is the visible half of an unscaled
-        // title bar: the frame grows and the writing on it does not, which
-        // reads as a bug long before anyone measures the pixels. `max` keeps a
-        // fractional scale from producing a font size of zero.
-        let font_size = (DEFAULT_FONT_SIZE * bar.scale).max(1.0);
+        // The user's UI size, not a constant: a title bar is interface text,
+        // and someone who enlarged the interface font because they cannot read
+        // 13pt has said something about window titles too. Scaled on top of
+        // that, because a title that stayed 13px inside a bar that grew with
+        // the display is the visible half of an unscaled title bar — the frame
+        // grows and the writing on it does not, which reads as a bug long
+        // before anyone measures the pixels. `max` keeps a fractional scale, or
+        // a font size a config file made tiny, from producing zero.
+        let font_size = (self.appearance.fonts.ui_size * bar.scale).max(1.0);
         let text_x = tb_x.saturating_add(inset as i32);
         // Centred on the font's own line height rather than a hardcoded cell
         // size, so the title stays centred if the title-bar font ever changes.
@@ -10920,6 +10950,207 @@ mod tests {
         assert!(
             comp.compose_frame(),
             "the corner setting changed and nothing was redrawn"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // The user's colours and title font reaching the decorations
+    //
+    // Corners and shadows arrived first because they are *shapes*; the colours
+    // stayed behind in twelve constants at the top of this file, and the title
+    // font in one. So a user in light mode got a dark-navy desktop and a
+    // blue-gray title bar from the process that actually draws them, a user
+    // with accented title bars got the same blue-gray, and a user who enlarged
+    // the interface font because they could not read it got window titles at
+    // 16px regardless. Each of those is a difference the desktop shell's own
+    // (duplicate) decorator got right, which is what made the divergence
+    // visible: the two renderers disagreed about the same window.
+    //
+    // These tests take their expected values from `appearance`, never from
+    // `comp.theme` — reading the answer back out of the thing under test is
+    // exactly what the old hardcoded palette would also have passed.
+    // -----------------------------------------------------------------------
+
+    /// Settings that differ from the defaults only in their theme mode.
+    fn with_mode(mode: appearance::ThemeMode) -> AppearanceSettings {
+        AppearanceSettings {
+            theme_mode: mode,
+            ..AppearanceSettings::default()
+        }
+    }
+
+    #[test]
+    fn the_users_theme_mode_reaches_the_desktop_behind_the_windows() {
+        // The clearest single pixel in the whole increment: the desktop, where
+        // nothing covers it. It was `0xFF1A1A2E` — a dark navy that appears in
+        // neither palette — in light mode and in dark mode alike.
+        let painted = |mode| {
+            let (comp, _) = decorated(with_mode(mode));
+            // Top-left, far from the window at (120, 100) and outside its
+            // shadow.
+            working_pixel(&comp.backend, 4, 4)
+        };
+        let expected = |light| {
+            Some(color_to_argb(
+                &appearance::DecorationColors::for_mode(light).desktop_bg,
+            ))
+        };
+
+        assert_eq!(
+            painted(appearance::ThemeMode::Light),
+            expected(true),
+            "a user in light mode got a desktop colour that is not the light \
+             palette's"
+        );
+        assert_eq!(
+            painted(appearance::ThemeMode::Dark),
+            expected(false),
+            "a user in dark mode got a desktop colour that is not the dark \
+             palette's"
+        );
+        assert_ne!(
+            painted(appearance::ThemeMode::Light),
+            painted(appearance::ThemeMode::Dark),
+            "both modes produced the same desktop — a compositor that ignores \
+             the mode passes the two assertions above only if the palettes are \
+             equal, which they are not"
+        );
+    }
+
+    #[test]
+    fn the_users_accent_reaches_the_title_bar_it_asked_for() {
+        // `accent_titlebars` is a checkbox in the Settings app that, for the
+        // process drawing the title bars, did nothing whatsoever.
+        let settings = AppearanceSettings {
+            accent_titlebars: true,
+            accent_color: appearance::AccentColor::Red,
+            ..AppearanceSettings::default()
+        };
+        let accent = color_to_argb(&settings.effective_accent());
+        let (comp, id) = decorated(settings);
+
+        // Sampled at the vertical middle of the bar and to the right of the
+        // title text but left of the buttons, so the only thing that can be
+        // painted there is the bar's own background.
+        let bar = comp
+            .window_ref(id)
+            .expect("window")
+            .title_bar_layout()
+            .expect("a decorated window has a title bar")
+            .bar;
+        #[allow(
+            clippy::cast_sign_loss,
+            reason = "the window is placed well inside the 400x300 buffer"
+        )]
+        let (x, y) = (
+            (bar.x + bar.width as i32 / 2) as u32,
+            (bar.y + bar.height as i32 / 2) as u32,
+        );
+
+        assert_eq!(
+            working_pixel(&comp.backend, x, y),
+            Some(accent),
+            "the user asked for accent-coloured title bars and the focused \
+             window's bar is not the accent colour"
+        );
+    }
+
+    #[test]
+    fn an_accent_title_bar_leaves_every_other_window_alone() {
+        // The unfocused bar keeps the base palette on purpose: an accent that
+        // marks every window marks none of them, and telling the focused window
+        // apart is the title bar's first job. Stated as a test because it is a
+        // one-line difference in `DecorationColors::from_settings` that a later
+        // "apply the accent consistently" tidy-up would quietly remove.
+        let plain = AppearanceSettings::default();
+        let accented = AppearanceSettings {
+            accent_titlebars: true,
+            accent_color: appearance::AccentColor::Red,
+            ..AppearanceSettings::default()
+        };
+        let accent = color_to_argb(&accented.effective_accent());
+
+        let with = DecorationTheme::from_settings(&accented);
+        let without = DecorationTheme::from_settings(&plain);
+
+        assert_eq!(
+            with.title_bar_unfocused, without.title_bar_unfocused,
+            "turning on accented title bars recoloured the unfocused ones too"
+        );
+        assert_ne!(
+            with.title_bar_focused, without.title_bar_focused,
+            "turning on accented title bars did nothing to the focused one — \
+             the assertion above would then hold for the wrong reason"
+        );
+        assert_eq!(
+            with.title_bar_focused, accent,
+            "the focused bar changed to something that is not the accent"
+        );
+    }
+
+    #[test]
+    fn the_users_interface_font_size_reaches_the_window_title() {
+        // The title was drawn at a constant 16px. Someone who enlarged the UI
+        // font — the one setting a person with poor eyesight is most likely to
+        // reach for — got every part of the desktop bigger except the titles.
+        //
+        // Counted rather than probed: where a glyph's ink lands depends on the
+        // font, but *how much* of it there is has to grow with the size. What
+        // is counted is every pixel of the bar that is not the bar's own
+        // background — glyphs are antialiased, so their edge pixels are blends
+        // and matching the text colour exactly would find almost none of them.
+        // The buttons and the rounded corners are counted too, but they do not
+        // move with the font size, which is why comparing two counts is sound
+        // and asserting an absolute one is not.
+        let bar_ink = |title: &str, ui_size: f32| {
+            let mut settings = AppearanceSettings::default();
+            settings.fonts.ui_size = ui_size;
+            let mut comp = Compositor::new(DECOR_W, DECOR_H, 60).expect("compositor");
+            comp.set_appearance(settings);
+            let mut spec = WindowSpec::new(title, 160, 120);
+            spec.position = Some((120, 100));
+            let id = comp.create_window_from_spec(&spec, 1);
+            comp.refresh_window_scales();
+            comp.backend.clear(comp.theme.desktop_background);
+            comp.render_window(id);
+
+            let bar = comp
+                .window_ref(id)
+                .expect("window")
+                .title_bar_layout()
+                .expect("a decorated window has a title bar")
+                .bar;
+            let bg = comp.theme.title_bar_focused;
+            let mut count: u32 = 0;
+            for dy in 0..bar.height {
+                for dx in 0..bar.width {
+                    #[allow(
+                        clippy::cast_sign_loss,
+                        reason = "the window is placed well inside the 400x300 buffer"
+                    )]
+                    let (x, y) = ((bar.x + dx as i32) as u32, (bar.y + dy as i32) as u32);
+                    if working_pixel(&comp.backend, x, y) != Some(bg) {
+                        count = count.saturating_add(1);
+                    }
+                }
+            }
+            count
+        };
+
+        // The same bar with nothing written on it, to establish that what grows
+        // below is the writing and not the furniture around it.
+        let blank = bar_ink("", 8.0);
+        let small = bar_ink("Framed", 8.0);
+        let large = bar_ink("Framed", 24.0);
+        assert!(
+            small > blank,
+            "an empty title and a six-letter one inked the same {small} pixels — \
+             this test is measuring the buttons, not the text"
+        );
+        assert!(
+            large > small,
+            "the user tripled the interface font size and the window title went \
+             from {small} inked pixels to {large}"
         );
     }
 

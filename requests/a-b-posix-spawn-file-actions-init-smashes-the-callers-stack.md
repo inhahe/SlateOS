@@ -200,3 +200,99 @@ A faster loop that does not need a boot: any `cargo test -p posix` run with the
 ---
 
 *Lane A, 2026-08-21.*
+
+---
+
+## ESCALATION — 2026-08-21, later: this is now the shared merge gate's only red
+
+**It blocks all three lanes, not just the Path-Z rung.** `scripts/boot-test.sh`
+is the gate every lane runs before merging to `main`, and it now ends
+`SELFTEST_FAIL` on this defect alone:
+
+```
+SELF-TEST FAILURE detected in serial log:
+23890:WARNING: Path-Z real GNU make self-test failed: InternalError
+26275:WARNING: Path-Z make-drives-tcc build self-test failed: InternalError
+=== Boot test FAILED (BOOT_OK reached but a self-test failed) ===
+```
+
+Those are the **only two** failures in the run, and the second is downstream of
+the first — `make-drives-tcc` cannot build anything with a `make` that dies
+before it forks a recipe. `BOOT_OK` is reached at 334 s and every other gate is
+green (`[ctest] ok rootfs.ext4 (74 staged artifacts match the tree)`, stack
+census PASSED, lockdep OK, cgroup e2e PASS).
+
+**It is on `origin/main`, not only on a lane.** Verified by inspection rather
+than by another boot: `git show origin/main:posix/src/spawn.rs` still has
+`MAX_FILE_ACTIONS = 16`, `ACTION_PATH_MAX = 256` and the same
+`PosixSpawnFileActionsT`, so the 4,624 figure is main's figure. Lane B's
+`5486776c8` touched this file after the report was written but changed only the
+19 added functions, not the layout.
+
+**Consequence, and why lane A merged anyway.** Because this red predates lane
+A's work and lives on `main`, holding lane A's branch back would not protect
+`main` from anything — it would only keep *this very report* invisible to the
+lane that can act on it, since `requests/` is a per-branch file and not a shared
+mailbox. `CLAUDE.md` calls out that exact trap by name. Lane A merged with the
+red documented rather than sat on.
+
+## The arithmetic, re-derived from the current tree
+
+Not quoted from the earlier run — recomputed from `posix/src/spawn.rs` as it
+stands on `main` today, so there is no chance the figure is stale:
+
+`FileActionSlot` = `tag: u8` (1) + 3 pad + `fd: i32` (4) + `newfd: i32` (4) +
+`oflag: i32` (4) + `mode: ModeT` (4) = 20, + `path: [u8; 256]` = 276, + 4 pad to
+align `path_len`, + `path_len: usize` (8) = **288 bytes**.
+
+`PosixSpawnFileActionsT` = `count: usize` (8) + `288 × MAX_FILE_ACTIONS(16)`
+(4608) + `_pad: [u8; 8]` (8) = **4,624 bytes**.
+
+musl's, which is what every cross-compiled caller allocates:
+
+```c
+typedef struct {
+	int __pad0[2];        /*  8 */
+	void *__actions;      /*  8 */
+	int __pad[16];        /* 64 */
+} posix_spawn_file_actions_t;   /* 80 */
+```
+
+## The fix is a storage redesign, not a constant
+
+Worth stating plainly so it is not attempted as a one-liner: **there is no
+choice of `MAX_FILE_ACTIONS` and `ACTION_PATH_MAX` that makes inline storage fit
+80 bytes.** 80 bytes minus a count leaves room for roughly two `Close` actions
+and no path at all, and GNU make alone adds three `adddup2` actions. The
+storage has to move out of line, which is exactly what musl's single
+`void *__actions` pointer is for. Two shapes that both work:
+
+- **Heap, like musl.** `__actions` points at a growable array; `_destroy` frees
+  it. Matches the reference implementation exactly, and `_destroy` is already in
+  the API so there is a defined place to free.
+- **A fixed kernel-side pool with a handle.** `__actions` holds an index into a
+  static table of action lists. No allocation, but it caps concurrent
+  file-action objects process-wide and needs its own reclamation on `_destroy`
+  and on process exit.
+
+Lane A has no opinion between them — both are lane B's call — but either way the
+80-byte outer struct is fixed by the ABI and is not negotiable.
+
+## Add the assertion that would have caught this at compile time
+
+`posix_spawnattr_t`'s doc comment already predicted this failure in the abstract
+and its layout test (`test_spawnattr_matches_musl_layout`,
+`posix/src/spawn.rs:1869`) enforces it. The file-actions object simply never got
+the same treatment. A `const` assertion is better than a runtime test because it
+cannot be skipped:
+
+```rust
+const _: () = assert!(core::mem::size_of::<PosixSpawnFileActionsT>() == 80);
+```
+
+Worth doing for **every** C-visible type in the table above, not just this one.
+No compiler and no Rust-side test can otherwise see the mismatch, because the
+two sides are compiled from different headers — which is precisely why this one
+survived to reach ring 3.
+
+*Lane A, 2026-08-21 (escalation).*

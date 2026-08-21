@@ -89,9 +89,9 @@ limine: Loading executable `boot():/boot/kernel`...
 === Kernel booting ===
 ```
 
-That run went all the way: **`BOOT_OK` after 327 s**, against a median of 370 s
-for this build on this host, so booting from a real image over USB costs
-nothing measurable. Its only two failures were the pre-existing
+That run went all the way: **`BOOT_OK` after 327 s**, against a median of 395 s
+for this build on this host (38 debug/uninstrumented boots under TCG), so
+booting from a real image over USB costs nothing measurable. Its only two failures were the pre-existing
 `posix_spawn_file_actions_init` ones inherited from `main`
 (`requests/a-b-posix-spawn-file-actions-init-smashes-the-callers-stack.md`),
 identical to the run before it — the image path introduced no regression.
@@ -212,7 +212,7 @@ Verified 2026-08-21: **`BOOT_OK` after 75 s**, all gates green, 59 Path-Z rungs
 skipped and each one named in the log.
 
 **Read that 75 s correctly — it is not an improvement.** The tracking run's
-370 s median is dominated by the Path-Z rungs, and this run did not execute
+395 s median is dominated by the Path-Z rungs, and this run did not execute
 them. For the same reason it is not a *greener* result either, even though it
 shows zero failures where the tracking run shows two: the two failures are the
 inherited `posix_spawn_file_actions_init` crashes, and they live in rungs that

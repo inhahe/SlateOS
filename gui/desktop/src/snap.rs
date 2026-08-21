@@ -1,11 +1,17 @@
 //! Window snap zones -- Windows 11-style snap layouts for the desktop shell.
 //!
-//! Provides a zone-based window snapping system that activates when users drag
-//! windows near screen edges or corners, or invoke a zone picker via the top
-//! edge. Each [`SnapLayout`] defines a set of non-overlapping [`SnapZone`]s
-//! covering the work area; the [`SnapManager`] tracks the active layout,
-//! performs hit-testing, renders overlays, and turns a chosen zone into the
-//! [`ShellControlAction`] that asks the compositor to tile the window there.
+//! Provides a zone-based window snapping system that the user invokes through
+//! the zone picker at the top edge. Each [`SnapLayout`] defines a set of
+//! non-overlapping [`SnapZone`]s covering the work area; the [`SnapManager`]
+//! tracks the active layout, performs hit-testing, renders overlays, and turns
+//! a chosen zone into the [`SnapSlot`] a `ShellControlAction` carries to ask
+//! the compositor to tile the window there.
+//!
+//! The *other* way to reach the same layouts — drag a window to a screen edge
+//! and drop it — is not here and never fires through this module. It belongs
+//! to the compositor, which holds the drag grab and can answer on every motion
+//! event without a socket round trip inside the part of the gesture the user
+//! watches. Its rules are [`guiremote::zones::drop_at`].
 //!
 //! # What is here, and what is in `guiremote`
 //!
@@ -18,9 +24,9 @@
 //! their own.
 //!
 //! What stays here is everything that is the *shell's* rather than the
-//! protocol's: the drag overlay and layout picker (render trees), edge
-//! detection at the cursor, and the translation from "the user aimed here" to
-//! "ask for that slot".
+//! protocol's or the compositor's: the zone overlay and layout picker (render
+//! trees), the hit-testing over them, and the translation from "the user
+//! clicked that zone" to "ask for that slot".
 //!
 //! # The shell names a tile; it never places one
 //!
@@ -28,8 +34,8 @@
 //! point. The shell has no window geometry — `apply_window_list` overwrites
 //! whatever it thought it knew on the compositor's next snapshot — so a shell
 //! that computed a placement would be computing a number it cannot use and the
-//! compositor will not read. What it produces instead is a
-//! [`ShellControlAction`], and the compositor resolves it against the display
+//! compositor will not read. What it produces instead is a [`SnapSlot`] inside
+//! a `ShellControlAction`, and the compositor resolves it against the display
 //! bounds only the compositor has.
 //!
 //! # Usage from the desktop shell
@@ -68,8 +74,6 @@ pub use guiremote::zones::{
     SnapLayout, SnapLayoutPreset, SnapSlot, SnapZone, WorkArea, ZONE_GAP, ZoneId,
 };
 
-use guiremote::control::ShellControlAction;
-
 // ============================================================================
 // Theme -- Catppuccin Mocha palette
 // ============================================================================
@@ -100,10 +104,6 @@ mod theme {
 // Constants
 // ============================================================================
 
-/// How close (pixels) the cursor must be to a screen edge to trigger
-/// edge/corner snap detection.
-const EDGE_THRESHOLD: f32 = 8.0;
-
 /// Distance from top of screen to trigger the zone layout picker.
 const TOP_PICKER_THRESHOLD: f32 = 16.0;
 
@@ -115,91 +115,6 @@ const PICKER_PADDING: f32 = 12.0;
 const THUMB_SIZE: f32 = 72.0;
 /// Gap between thumbnails.
 const THUMB_GAP: f32 = 10.0;
-
-// ============================================================================
-// Edge & corner detection
-// ============================================================================
-
-/// Result of detecting which screen edge or corner the cursor is near.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum SnapEdge {
-    Left,
-    Right,
-    Top,
-    Bottom,
-    TopLeft,
-    TopRight,
-    BottomLeft,
-    BottomRight,
-}
-
-/// Detect which edge or corner of the work area the cursor is near.
-/// Returns `None` if the cursor is not near any edge.
-///
-/// Measured against the **work area**, not the screen. Against the screen, the
-/// bottom edge and both bottom corners sat inside the taskbar's strip: the
-/// cursor does travel there during a drag, but it is over the taskbar, and a
-/// drag onto the taskbar is a taskbar interaction, not a snap. So the bottom
-/// three regions were simultaneously unreachable as snaps and stealing input
-/// from the bar. Against the work area they sit just above it, where a user
-/// aiming at "the bottom of my desktop" actually points.
-pub fn detect_edge(cursor_x: f32, cursor_y: f32, area: WorkArea) -> Option<SnapEdge> {
-    let near_left = cursor_x >= area.x && cursor_x < area.x + EDGE_THRESHOLD;
-    let near_right = cursor_x < area.right() && cursor_x >= area.right() - EDGE_THRESHOLD;
-    let near_top = cursor_y >= area.y && cursor_y < area.y + EDGE_THRESHOLD;
-    let near_bottom = cursor_y < area.bottom() && cursor_y >= area.bottom() - EDGE_THRESHOLD;
-
-    match (near_left, near_right, near_top, near_bottom) {
-        (true, _, true, _) => Some(SnapEdge::TopLeft),
-        (true, _, _, true) => Some(SnapEdge::BottomLeft),
-        (_, true, true, _) => Some(SnapEdge::TopRight),
-        (_, true, _, true) => Some(SnapEdge::BottomRight),
-        (true, _, _, _) => Some(SnapEdge::Left),
-        (_, true, _, _) => Some(SnapEdge::Right),
-        (_, _, true, _) => Some(SnapEdge::Top),
-        (_, _, _, true) => Some(SnapEdge::Bottom),
-        _ => None,
-    }
-}
-
-/// What dropping a window at a given edge or corner should do.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum EdgeSnap {
-    /// Fill the whole work area.
-    Maximize,
-    /// Occupy one zone of a preset layout.
-    Zone(SnapLayoutPreset, ZoneId),
-}
-
-/// Map a detected edge or corner to what dropping there should do.
-///
-/// `None` means "no snap" — the drop is an ordinary window move.
-///
-/// # What this replaced
-///
-/// The previous mapping sent the *vertical* edges to the *horizontal* halves:
-/// `Top` to the left half (commented "maximize hint", which it was not) and
-/// `Bottom` to the right half. So dragging a window to the top of the screen
-/// moved it to the left, and dragging it to the bottom moved it to the right —
-/// with no relationship between the direction the user dragged and the place
-/// the window went. The existing test could not see it: it asserted only that
-/// each edge maps to a zone that *exists*.
-///
-/// Top now maximizes, which is what every desktop this imitates does, and
-/// Bottom does nothing — also matching, and the honest answer given that a
-/// half-height bottom strip is not one of the presets.
-fn edge_to_default_snap(edge: SnapEdge) -> Option<EdgeSnap> {
-    match edge {
-        SnapEdge::Left => Some(EdgeSnap::Zone(SnapLayoutPreset::TwoEqualHalves, 0)),
-        SnapEdge::Right => Some(EdgeSnap::Zone(SnapLayoutPreset::TwoEqualHalves, 1)),
-        SnapEdge::Top => Some(EdgeSnap::Maximize),
-        SnapEdge::Bottom => None,
-        SnapEdge::TopLeft => Some(EdgeSnap::Zone(SnapLayoutPreset::FourQuadrants, 0)),
-        SnapEdge::TopRight => Some(EdgeSnap::Zone(SnapLayoutPreset::FourQuadrants, 1)),
-        SnapEdge::BottomLeft => Some(EdgeSnap::Zone(SnapLayoutPreset::FourQuadrants, 2)),
-        SnapEdge::BottomRight => Some(EdgeSnap::Zone(SnapLayoutPreset::FourQuadrants, 3)),
-    }
-}
 
 // ============================================================================
 // SnapManager
@@ -349,28 +264,6 @@ impl SnapManager {
         self.layout.zones.iter().find(|z| z.id == zone_id)
     }
 
-    /// Detect edge/corner proximity and return the matching zone from
-    /// an appropriate layout (using the implicit edge-snap rules).
-    pub fn edge_snap_hit(&self, cursor_x: f32, cursor_y: f32) -> Option<(SnapEdge, SnapZone)> {
-        let edge = detect_edge(cursor_x, cursor_y, self.area)?;
-        let zone = match edge_to_default_snap(edge)? {
-            EdgeSnap::Maximize => SnapZone {
-                id: 0,
-                x: self.area.x,
-                y: self.area.y,
-                width: self.area.width,
-                height: self.area.height,
-                label: "Maximize",
-            },
-            EdgeSnap::Zone(preset, zone_id) => preset
-                .build(self.area)
-                .zones
-                .into_iter()
-                .find(|z| z.id == zone_id)?,
-        };
-        Some((edge, zone))
-    }
-
     /// Detect whether the cursor is in the top-edge region that
     /// triggers the layout picker.
     ///
@@ -378,9 +271,10 @@ impl SnapManager {
     /// bottom taskbar and stop coinciding the moment the bar moves to the top,
     /// where the trigger band would otherwise sit behind it.
     ///
-    /// Bounded below as well as above, for the same reason [`detect_edge`] is:
-    /// an unbounded `cursor_y < top + THRESHOLD` also matches everything
-    /// *above* the work area, which is exactly the strip the taskbar occupies.
+    /// Bounded below as well as above, for the same reason
+    /// [`guiremote::zones::edge_at`] is: an unbounded
+    /// `cursor_y < top + THRESHOLD` also matches everything *above* the work
+    /// area, which is exactly the strip the taskbar occupies.
     pub fn is_in_picker_trigger(&self, _cursor_x: f32, cursor_y: f32) -> bool {
         cursor_y >= self.area.y && cursor_y < self.area.y + TOP_PICKER_THRESHOLD
     }
@@ -459,22 +353,6 @@ impl SnapManager {
     pub fn slot_for_zone(&self, zone_id: ZoneId) -> Option<SnapSlot> {
         let zone = u8::try_from(zone_id).ok()?;
         SnapSlot::new(self.active_preset, zone)
-    }
-
-    /// What dropping a window at `(cursor_x, cursor_y)` should ask for, using
-    /// the implicit edge and corner rules rather than the layout overlay.
-    ///
-    /// `None` when the cursor is not near an edge, so the drop is an ordinary
-    /// move and nothing should be asked for at all.
-    #[must_use]
-    pub fn action_for_edge(&self, cursor_x: f32, cursor_y: f32) -> Option<ShellControlAction> {
-        let edge = detect_edge(cursor_x, cursor_y, self.area)?;
-        Some(match edge_to_default_snap(edge)? {
-            EdgeSnap::Maximize => ShellControlAction::Maximize,
-            EdgeSnap::Zone(preset, zone_id) => {
-                ShellControlAction::SnapToZone(SnapSlot::new(preset, u8::try_from(zone_id).ok()?)?)
-            }
-        })
     }
 
     // ======================================================================
@@ -851,39 +729,6 @@ mod tests {
     /// catch a zone builder that ignores it.
     const TOP_BAR_DESK: WorkArea = WorkArea::new(0.0, 48.0, 1920.0, 1032.0);
 
-    /// The same screen with a 64 px dock down the *left* side and a 64 px
-    /// sidebar down the right.
-    ///
-    /// Present because `TOP_BAR_DESK` alone is not enough: it offsets only the
-    /// `y` origin, so a test written against it is blind to code that drops
-    /// the `x` one. Verified — reintroducing "`detect_edge` has no left bound"
-    /// into a suite whose fixtures all had `x = 0` failed *nothing*.
-    ///
-    /// Inset on *both* sides deliberately. With only the left inset its
-    /// `right()` came to 1920, the screen width, so a right bound measured
-    /// against the screen was still indistinguishable from a correct one —
-    /// which the same reintroduce-the-defect check duly caught.
-    const SIDE_BAR_DESK: WorkArea = WorkArea::new(64.0, 0.0, 1792.0, 1080.0);
-
-    /// Every variant of [`SnapEdge`].
-    ///
-    /// `edge_to_default_snap`'s match is exhaustive, so a new variant cannot
-    /// be added without someone deciding what it does — but it *can* be added
-    /// without being listed here, which would silently narrow every test that
-    /// iterates this. Keep the two in step.
-    const ALL_EDGES: [SnapEdge; 8] = [
-        SnapEdge::Left,
-        SnapEdge::Right,
-        SnapEdge::Top,
-        SnapEdge::Bottom,
-        SnapEdge::TopLeft,
-        SnapEdge::TopRight,
-        SnapEdge::BottomLeft,
-        SnapEdge::BottomRight,
-    ];
-
-    use std::cmp::Ordering;
-
     // --- zone label centring ---
 
     #[test]
@@ -906,112 +751,6 @@ mod tests {
                 x + w
             );
         }
-    }
-
-    // ======================================================================
-    // Edge detection
-    // ======================================================================
-
-    #[test]
-    fn detect_edge_left() {
-        assert_eq!(detect_edge(2.0, 500.0, SCREEN), Some(SnapEdge::Left));
-    }
-
-    #[test]
-    fn detect_edge_right() {
-        assert_eq!(detect_edge(1916.0, 500.0, SCREEN), Some(SnapEdge::Right));
-    }
-
-    #[test]
-    fn detect_edge_top() {
-        assert_eq!(detect_edge(960.0, 3.0, SCREEN), Some(SnapEdge::Top));
-    }
-
-    #[test]
-    fn detect_edge_bottom() {
-        assert_eq!(detect_edge(960.0, 1076.0, SCREEN), Some(SnapEdge::Bottom));
-    }
-
-    #[test]
-    fn detect_edge_top_left_corner() {
-        assert_eq!(detect_edge(2.0, 3.0, SCREEN), Some(SnapEdge::TopLeft));
-    }
-
-    #[test]
-    fn detect_edge_bottom_right_corner() {
-        assert_eq!(
-            detect_edge(1916.0, 1076.0, SCREEN),
-            Some(SnapEdge::BottomRight)
-        );
-    }
-
-    #[test]
-    fn detect_edge_none_in_centre() {
-        assert_eq!(detect_edge(960.0, 540.0, SCREEN), None);
-    }
-
-    #[test]
-    fn edges_are_measured_from_the_work_area_not_the_screen() {
-        // With the taskbar at the top, the work area's top edge is 48 px down
-        // the screen. A screen-relative `detect_edge` finds the top edge at
-        // y=0..8 — behind the taskbar, where a drag is a taskbar interaction
-        // and never reaches the snap code — and finds nothing at all where the
-        // desktop actually begins.
-        assert_eq!(
-            detect_edge(960.0, TOP_BAR_DESK.y + 2.0, TOP_BAR_DESK),
-            Some(SnapEdge::Top),
-            "the top of the work area should be the top edge"
-        );
-        assert_eq!(
-            detect_edge(960.0, 2.0, TOP_BAR_DESK),
-            None,
-            "y=2 is inside the taskbar, above the work area — not an edge"
-        );
-        assert_eq!(
-            detect_edge(2.0, TOP_BAR_DESK.y + 2.0, TOP_BAR_DESK),
-            Some(SnapEdge::TopLeft)
-        );
-    }
-
-    #[test]
-    fn the_left_edge_sits_right_of_a_left_hand_taskbar() {
-        // The `x` half of the property above. It needs its own fixture: every
-        // other work area in this module starts at x = 0, where a missing
-        // left bound (`cursor_x < area.x + THRESHOLD`, with no `>=`) behaves
-        // identically to a correct one. That gap was found by reintroducing
-        // the defect and watching the whole suite stay green.
-        assert_eq!(
-            detect_edge(SIDE_BAR_DESK.x + 2.0, 540.0, SIDE_BAR_DESK),
-            Some(SnapEdge::Left),
-            "the left of the work area should be the left edge"
-        );
-        assert_eq!(
-            detect_edge(2.0, 540.0, SIDE_BAR_DESK),
-            None,
-            "x=2 is inside the taskbar, left of the work area — not an edge"
-        );
-        assert_eq!(
-            detect_edge(SIDE_BAR_DESK.right() - 2.0, 540.0, SIDE_BAR_DESK),
-            Some(SnapEdge::Right)
-        );
-    }
-
-    #[test]
-    fn the_bottom_edge_sits_above_a_bottom_taskbar() {
-        // The mirror of the above, and the case that motivated the change: the
-        // screen's bottom 48 px belong to the taskbar, so measuring the bottom
-        // edge against the screen put it — and both bottom corners — inside
-        // the bar. Three of the eight edges were simultaneously unreachable as
-        // snaps and stealing input from the bar.
-        assert_eq!(
-            detect_edge(960.0, DESK.bottom() - 2.0, DESK),
-            Some(SnapEdge::Bottom)
-        );
-        assert_eq!(
-            detect_edge(960.0, 1078.0, DESK),
-            None,
-            "y=1078 is inside the taskbar, below the work area — not an edge"
-        );
     }
 
     #[test]
@@ -1191,80 +930,6 @@ mod tests {
         }
     }
 
-    /// Dropping at an edge asks for a tile, and at a corner for a quadrant.
-    /// The top edge is the exception the rules make on purpose: it maximizes,
-    /// which is a different verb and not a zone at all.
-    #[test]
-    fn an_edge_drop_asks_for_the_tile_that_edge_means() {
-        let mgr = make_manager();
-
-        assert_eq!(
-            mgr.action_for_edge(2.0, 540.0),
-            SnapSlot::new(SnapLayoutPreset::TwoEqualHalves, 0).map(ShellControlAction::SnapToZone),
-            "the left edge"
-        );
-        assert_eq!(
-            mgr.action_for_edge(1916.0, 3.0),
-            SnapSlot::new(SnapLayoutPreset::FourQuadrants, 1).map(ShellControlAction::SnapToZone),
-            "the top-right corner"
-        );
-        assert_eq!(
-            mgr.action_for_edge(960.0, 3.0),
-            Some(ShellControlAction::Maximize),
-            "the top edge maximizes rather than tiling"
-        );
-    }
-
-    /// A drop away from every edge asks for nothing. Returning some default
-    /// tile here would snap a window the user was merely moving.
-    #[test]
-    fn a_drop_in_open_space_asks_for_nothing() {
-        let mgr = make_manager();
-        assert_eq!(mgr.action_for_edge(960.0, 540.0), None);
-    }
-
-    /// The edge rules are the *implicit* ones and do not follow the picker:
-    /// dragging to the left edge means the left half whatever layout happens
-    /// to be selected, which is what makes the gesture predictable.
-    #[test]
-    fn an_edge_drop_ignores_the_layout_the_picker_has_selected() {
-        let mut mgr = make_manager();
-        mgr.set_layout(SnapLayoutPreset::SixGrid);
-        assert_eq!(
-            mgr.action_for_edge(2.0, 540.0),
-            SnapSlot::new(SnapLayoutPreset::TwoEqualHalves, 0).map(ShellControlAction::SnapToZone),
-        );
-    }
-
-    // ======================================================================
-    // SnapManager -- edge_snap_hit
-    // ======================================================================
-
-    #[test]
-    fn edge_snap_hit_left_edge() {
-        let mgr = make_manager();
-        let result = mgr.edge_snap_hit(2.0, 540.0);
-        assert!(result.is_some());
-        let (edge, zone) = result.expect("already checked");
-        assert_eq!(edge, SnapEdge::Left);
-        assert_eq!(zone.id, 0);
-    }
-
-    #[test]
-    fn edge_snap_hit_top_right_corner() {
-        let mgr = make_manager();
-        let result = mgr.edge_snap_hit(1916.0, 3.0);
-        assert!(result.is_some());
-        let (edge, _zone) = result.expect("already checked");
-        assert_eq!(edge, SnapEdge::TopRight);
-    }
-
-    #[test]
-    fn edge_snap_hit_centre_returns_none() {
-        let mgr = make_manager();
-        assert!(mgr.edge_snap_hit(960.0, 540.0).is_none());
-    }
-
     // ======================================================================
     // Rendering -- overlay
     // ======================================================================
@@ -1392,127 +1057,6 @@ mod tests {
     fn zone_by_id_not_found() {
         let mgr = make_manager();
         assert!(mgr.zone_by_id(99).is_none());
-    }
-
-    // ======================================================================
-    // Edge-to-zone mapping completeness
-    // ======================================================================
-
-    #[test]
-    fn all_edges_map_to_zones_that_exist() {
-        for edge in ALL_EDGES {
-            match edge_to_default_snap(edge) {
-                None | Some(EdgeSnap::Maximize) => {}
-                Some(EdgeSnap::Zone(preset, zone_id)) => {
-                    let layout = preset.build(SCREEN);
-                    assert!(
-                        layout.zones.iter().any(|z| z.id == zone_id),
-                        "edge {edge:?} mapped to nonexistent zone {zone_id} in preset {preset:?}"
-                    );
-                }
-            }
-        }
-    }
-
-    #[test]
-    fn a_window_dragged_to_an_edge_lands_on_that_side() {
-        // The property the old test was missing entirely. It asserted only
-        // that each edge mapped to a zone that *exists*, which is true of
-        // every mapping including the one that was actually in the file:
-        // `Top` sent the window to the left half and `Bottom` sent it to the
-        // right half. Both zones exist. Neither is where the user dragged.
-        //
-        // Each expectation below is a *sign* — which side of the work area's
-        // centre the resulting zone's centre must fall on — so it holds for
-        // any work area and any zone sizes, and cannot be satisfied by a
-        // mapping that points the wrong way.
-        let mgr = SnapManager::new(TOP_BAR_DESK);
-        let (mid_x, mid_y) = (
-            TOP_BAR_DESK.x + TOP_BAR_DESK.width / 2.0,
-            TOP_BAR_DESK.y + TOP_BAR_DESK.height / 2.0,
-        );
-
-        // (edge, expected horizontal side, expected vertical side); `None`
-        // means the zone should straddle the centre on that axis.
-        let cases: [(SnapEdge, Option<Ordering>, Option<Ordering>); 6] = [
-            (SnapEdge::Left, Some(Ordering::Less), None),
-            (SnapEdge::Right, Some(Ordering::Greater), None),
-            (
-                SnapEdge::TopLeft,
-                Some(Ordering::Less),
-                Some(Ordering::Less),
-            ),
-            (
-                SnapEdge::TopRight,
-                Some(Ordering::Greater),
-                Some(Ordering::Less),
-            ),
-            (
-                SnapEdge::BottomLeft,
-                Some(Ordering::Less),
-                Some(Ordering::Greater),
-            ),
-            (
-                SnapEdge::BottomRight,
-                Some(Ordering::Greater),
-                Some(Ordering::Greater),
-            ),
-        ];
-
-        for (edge, want_x, want_y) in cases {
-            let snap = edge_to_default_snap(edge)
-                .unwrap_or_else(|| panic!("{edge:?} should map to a snap"));
-            let EdgeSnap::Zone(preset, zone_id) = snap else {
-                panic!("{edge:?} should map to a zone, not {snap:?}");
-            };
-            let zone = preset
-                .build(mgr.work_area())
-                .zones
-                .into_iter()
-                .find(|z| z.id == zone_id)
-                .unwrap_or_else(|| panic!("{edge:?} mapped to a missing zone"));
-            let (cx, cy) = zone.center();
-
-            if let Some(want) = want_x {
-                assert_eq!(
-                    cx.partial_cmp(&mid_x),
-                    Some(want),
-                    "{edge:?}: zone centre x={cx} is on the wrong side of {mid_x}"
-                );
-            }
-            if let Some(want) = want_y {
-                assert_eq!(
-                    cy.partial_cmp(&mid_y),
-                    Some(want),
-                    "{edge:?}: zone centre y={cy} is on the wrong side of {mid_y}"
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn the_top_edge_maximizes_and_the_bottom_edge_does_nothing() {
-        // Stated as its own test because these two are the ones that changed
-        // meaning, and because "does nothing" is a result no `Ordering` test
-        // above can express. A bottom-edge drop is an ordinary window move:
-        // there is no half-height bottom strip among the presets to snap to,
-        // and inventing one to fill the gap would be a worse answer than
-        // leaving the drag alone.
-        assert_eq!(
-            edge_to_default_snap(SnapEdge::Top),
-            Some(EdgeSnap::Maximize)
-        );
-        assert_eq!(edge_to_default_snap(SnapEdge::Bottom), None);
-
-        let mgr = SnapManager::new(TOP_BAR_DESK);
-        let (edge, zone) = mgr
-            .edge_snap_hit(960.0, TOP_BAR_DESK.y + 2.0)
-            .expect("the top edge of the work area should snap");
-        assert_eq!(edge, SnapEdge::Top);
-        assert!((zone.x - TOP_BAR_DESK.x).abs() < 0.01);
-        assert!((zone.y - TOP_BAR_DESK.y).abs() < 0.01);
-        assert!((zone.width - TOP_BAR_DESK.width).abs() < 0.01);
-        assert!((zone.height - TOP_BAR_DESK.height).abs() < 0.01);
     }
 
     // ======================================================================

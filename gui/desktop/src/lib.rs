@@ -42,13 +42,13 @@
 //!   about *how* a program starts belongs to the process server, not to the
 //!   window manager. See `known-issues.md`
 //!   `TD-SHELL-HAS-NOWHERE-TO-SEND-A-LAUNCH`.
-//! - **Edge-drag tiling has no drag to fire on.** Super+Z opens the zone
-//!   chooser and a click in it tiles the focused window, but the *other* way
-//!   every desktop offers the same thing — drag a window to an edge and drop —
-//!   needs the compositor to tell the shell where an interactive move is, and
-//!   it does not. [`snap::SnapManager::action_for_edge`] and
-//!   [`snap::SnapManager::edge_snap_hit`] are the two halves waiting for it.
-//!   See `known-issues.md` `TD-C-EDGE-DRAG-TILING-HAS-NO-DRAG-TO-FIRE-ON`.
+//! - **Edge-drag tiling is not this crate's.** Super+Z opens the zone chooser
+//!   and a click in it tiles the focused window; the *other* way every desktop
+//!   offers the same thing — drag a window to an edge and drop — lives in the
+//!   compositor, which owns the drag grab and can answer on every motion event
+//!   without a round trip. The rules are `guiremote::zones::drop_at`, shared by
+//!   both. The shell used to carry its own copy of them with no drag to fire on
+//!   and no caller; it was deleted rather than kept as a second opinion.
 //! - **Virtual desktops are a taskbar filter and nothing more.** Switching
 //!   desktop changes which windows the shell *lists*, but the compositor has no
 //!   notion of desktops and nothing unmaps the windows of the one being left, so

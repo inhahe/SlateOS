@@ -981,7 +981,7 @@ mod tests {
 
     #[test]
     fn six_grid_ids_run_row_major_and_match_their_labels() {
-        // The id is what `edge_to_default_snap` and the caller's persisted
+        // The id is what `drop_at_edge` and the caller's persisted
         // window state refer to, and it is now the label array's index rather
         // than a separately-computed `row * 3 + col`. Pin the correspondence:
         // renumbering these silently sends every remembered window to a

@@ -48560,6 +48560,70 @@ shell's own (virtual-desktop assignment being the real one). Doing that first
 is what stops the loop from being written against a model that disagrees with
 the compositor.
 
+**Progress 2026-08-21 (4) — the second design question the loop has to answer,
+found by reading rather than by writing the loop and hitting it: the shell
+hit-tests in screen coordinates, and a client is only ever told window-local
+ones.** Three facts, each checked in the code rather than assumed:
+
+- *The shell's rects are screen-space.* `taskbar_rect` (`gui/desktop/src/lib.rs`
+  :979) computes its `y` as `(self.screen_height as f32 - height).max(0.0)`, and
+  `start_button_rect` (:1001) and `clock_rect` (:2592) both derive from it. On a
+  1080-tall screen the start button is at y ≈ 1040.
+- *A client is told window-local ones.* `guiremote::InputEvent`'s own doc
+  (`gui/remote/src/input.rs`:71-73): "Mouse coordinates inside `event` are
+  already window-local, so the client needs no knowledge of where it sits on
+  screen to interpret them." The compositor subtracts the client rect's origin
+  before it sends (`gui/compositor/src/lib.rs`:4881, and `wire_event` at :2499
+  only widens `i32`→`f32`). A press on the start button arrives at y ≈ 8.
+- *So a naive loop mis-routes every click it receives.* Feeding the delivered
+  coordinates straight into `DesktopShell::hit_test` tests y ≈ 8 against a
+  taskbar that believes it starts at y ≈ 1040, falls through every chrome arm,
+  and lands on `Hit::Desktop`. The discrepancy is exactly
+  `screen_height - taskbar_height`, i.e. it is invisible on a screen the same
+  height as the taskbar and grows with the display — the shape of bug that
+  passes every test written on a small fixture.
+
+**The fix is an explicit per-surface origin, applied in *both* directions, and
+it is symmetric — which is the reason to state it before writing either half.**
+The loop places the surfaces, so it alone knows each origin. Input needs
+`+origin` on the way in (window-local → screen) before `hit_test` sees it;
+rendering needs `−origin` on the way out (screen → window-local) before the
+tree is submitted, because `render_taskbar` emits its commands at y ≈ 1040
+while the taskbar surface's own buffer starts at 0. Getting one direction right
+and the other wrong yields a desktop that draws correctly and responds to
+clicks in the wrong place, or vice versa, so the two belong to one abstraction
+and one test: a point that hit-tests to a given element must be a point that
+element was drawn at.
+
+**Do not fix it by re-basing the shell's rects per surface.** That would make
+`taskbar_rect` return `y = 0` and put the shell back to two answers for where
+the taskbar is — the thing this entry exists to remove — and it would break the
+hit-test ordering in `hit_test`, which relies on all the chrome rects living in
+one comparable space (start button before taskbar panel before window, :1313-
+1341).
+
+**A related consequence worth deciding before the loop, not during it: two of
+`Hit`'s variants become unreachable, and one popup behaviour stops working on
+its own.**
+
+- `Hit::WindowContent` and `Hit::Desktop` cannot be produced in production once
+  the shell is a client. The compositor routes a press to the topmost window
+  whose *client* rect contains it (`Compositor::window_at`, :4974), so a click
+  on another application's window is delivered to that application and never
+  reaches the shell at all. They stay reachable — and useful — from the shell's
+  own tests, which drive `hit_test` directly over a whole screen; but the loop
+  must not be written as though it will see them.
+- *Click-outside-to-dismiss.* The start menu and the calendar close when the
+  user clicks away from them. If each popup is its own small window, the click
+  that should dismiss it lands on somebody else's window and the shell is never
+  told, so the menu stays open under the window the user just clicked. The
+  answer is the one every real desktop uses: while a popup is open, the shell's
+  `Overlay` surface covers the whole screen and is the popup's dismiss layer,
+  and is unmapped when no popup is open so ordinary clicks pass through. That
+  makes the overlay's origin `(0, 0)` — screen space, no translation — which is
+  why the offset abstraction above must be per-surface rather than one global
+  constant.
+
 ## TD-C-ANY-CLIENT-CAN-READ-EVERY-WINDOW-TITLE
 
 **In short:** Any program connected to the compositor can ask to be sent the

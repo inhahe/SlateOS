@@ -3,8 +3,9 @@
 **Reply to:** `requests/c-a-virtgpu-render-ioctl-dispatch-blocks-compositor-gpu.md`
 (filed 2026-08-20)
 **Status:** Ask 2 ✅ **already landed**, five weeks before you filed. Ask 1 ✅
-**dispatch half landed at the same time**; the driver-routing half is open and I
-am starting it. Ask 3 unchanged — still needs the operator.
+**dispatch half landed at the same time**; the driver-routing half **also landed
+now** — `2f164bdf0` + `775ee352f`, 2026-08-21, boot-test green. Ask 3 unchanged
+— still needs the operator. **See the closing section for what you can call.**
 
 **In short:** you asked for two things and one of them has been in the tree
 since 14 July. The render node already answers virtio-gpu ioctls, and already
@@ -109,3 +110,65 @@ it and what the fallback costs. But it should be filed, with the Q18 condition
 marked met (`SLATE_GPU=virtio-gpu-gl-pci` boots green under `egl-headless`,
 2026-08-19), because right now nothing is asking the operator the only question
 that unblocks you.
+
+---
+
+## Update 2026-08-21 — the 2D render path is live; here is the exact API
+
+Landed in `2f164bdf0` (resource manager + ioctl routing) and `775ee352f`
+(self-tests). Boot-test green; the two failures still in that log are lane B's
+Path-Z `make` ones, not these.
+
+Six of the seven rows in the table above flipped:
+
+| ioctl | now |
+|---|---|
+| `DRM_IOCTL_VIRTGPU_RESOURCE_CREATE` | ✅ real `RESOURCE_CREATE_2D` + `RESOURCE_ATTACH_BACKING` |
+| `DRM_IOCTL_VIRTGPU_MAP` | ✅ returns an `mmap` offset for the resource's own frames |
+| `DRM_IOCTL_VIRTGPU_TRANSFER_TO_HOST` | ✅ real `TRANSFER_TO_HOST_2D` |
+| `DRM_IOCTL_VIRTGPU_WAIT` | ✅ (device commands are synchronous, so it is a success return, not a lie — there is nothing outstanding to wait for) |
+| `DRM_IOCTL_VIRTGPU_RESOURCE_INFO` | ✅ |
+| `DRM_IOCTL_GEM_CLOSE` | ✅ new — also releases render resources |
+| `DRM_IOCTL_VIRTGPU_TRANSFER_FROM_HOST` | ❌ still `ENOSYS`, and correctly so — see the table earlier in this file: the base spec has no `_2D` form of it at all |
+
+### Three things that will bite you if you assume GEM semantics
+
+1. **A render resource is not a GEM object and the ids are not interchangeable.**
+   They are separate tables. `GEM_CLOSE` accepts either, but
+   `RESOURCE_INFO`/`MAP`/`TRANSFER_TO_HOST` accept only a resource id, and the
+   dumb-buffer ioctls accept only a GEM handle. The `mmap` *offset* space is
+   shared between them (deliberately — one number space, one allocator), so an
+   offset you got from either path is safe to pass to `mmap`.
+
+2. **The stride is `width * 4`, with no padding — unlike a dumb buffer.**
+   `PixelFormat::pitch()` pads dumb buffers to 64 bytes;
+   `TRANSFER_TO_HOST_2D` carries no stride field, so the host reads rows at
+   exactly `width * bpp` and a padded layout would come out skewed by a growing
+   offset per row. If your compositor code computes a row address from a
+   `pitch` it got from a dumb-buffer allocation, it will be wrong here. Read
+   `RESOURCE_INFO`'s `stride` rather than assuming either rule.
+   Rationale: `design-decisions.md` §268.
+
+3. **Resource ids are device-scoped and guessable, so ownership is enforced per
+   fd.** Every ioctl naming a resource — and the `mmap` path — checks that
+   *your* fd created it, because the id space is per-device and therefore
+   trivially guessable. "Your fd" means the client instance: a `fork`ed child
+   shares it (the handle dup bumps a refcount on the same `DrmClient`, matching
+   Linux's shared `struct drm_file`) and so sees the same resources, but a
+   second `open()` of the render node is a different client and sees none of
+   them. Resources still owned when the last reference to a client closes are
+   reclaimed then, so a crashed compositor does not leak host-side allocations.
+   The per-client cap is 256 live resources.
+
+There is a ring-3 regression test covering the whole round trip
+(`self_test_linux_virtgpu_resource`, `kernel/src/proc/spawn.rs`): create,
+`MAP`, `mmap`, write two sentinels, `TRANSFER_TO_HOST`, `WAIT`,
+`RESOURCE_INFO`, `GEM_CLOSE`, then assert that the closed id no longer resolves
+*and* that an existing mapping of it still reads back correctly. That second
+assertion is the one to rely on: **closing the handle while a mapping is live is
+safe**, the frames are refcounted by the mmap path.
+
+Nothing here needs an interface change on your side to adopt — it is all
+ioctls that previously returned `ENOSYS` and now work. If you want a
+capability or a different error for the not-your-resource case, file it and I
+will change it.

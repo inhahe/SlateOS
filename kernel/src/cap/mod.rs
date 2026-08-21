@@ -296,6 +296,49 @@ pub enum ResourceType {
     /// [`Pipe`]: ResourceType::Pipe
     /// [`StreamSocket`]: ResourceType::StreamSocket
     Pty = 26,
+
+    /// The system clock, as an object.
+    ///
+    /// There is exactly one, so `resource_id` is reserved and is 0.  A process
+    /// needs this type with `Rights::WRITE` to set the absolute time
+    /// (`clock_settime`, `settimeofday`) or to slew it (`adjtimex`).  Reading
+    /// the clock needs nothing and never will.
+    ///
+    /// Unlike most types here this names no per-open instance: it exists so
+    /// that "may set the time" is derived from a held object rather than
+    /// asserted.  §312 projects `CAP_SYS_TIME` from it; see design-decisions.md
+    /// §269 for why this is its own type, and §350 for the projection (lane B's
+    /// request `b-a-three-resource-types-for-clock-ports-and-rlimits`).
+    SystemClock = 27,
+
+    /// Authority to bind a local port that the system reserves.
+    ///
+    /// `resource_id` is a specific port number, or **0 for the class** — the
+    /// `resource_id == 0` convention this file documents for
+    /// [`Process`](ResourceType::Process)/[`Thread`](ResourceType::Thread).
+    /// Port 0 is "pick one for me" in the sockets API and is never a bindable
+    /// address, so the two readings cannot collide, exactly as PIDs starting
+    /// at 1 keeps `Process` unambiguous.
+    ///
+    /// The per-port form is what makes this worth having over a boolean — a
+    /// web server should hold port 80 and not port 22 — even though the class
+    /// grant is what `init` uses today, because a daemon that reads its port
+    /// from a config file does not know it at spawn time.  Keeping
+    /// `resource_id` *meaning* the port from the start makes the fine-grained
+    /// form a grant change later rather than an ABI change.  §312 projects
+    /// `CAP_NET_BIND_SERVICE` from it.
+    PrivilegedPort = 28,
+
+    /// A process's own resource limits.
+    ///
+    /// `resource_id` is the target PID, or 0 for the class.  Needed with
+    /// `Rights::WRITE` to raise a *hard* limit; lowering a soft limit is
+    /// unprivileged and is not gated.  With
+    /// [`Rights::MEMORY_LOCK`](crate::cap::Rights::MEMORY_LOCK) it is also the
+    /// preimage of `CAP_IPC_LOCK` — locking memory past the per-process quota,
+    /// which is not a write to anything and so does not fit `WRITE`.  §312
+    /// projects `CAP_SYS_RESOURCE` and `CAP_IPC_LOCK` from it.
+    ResourceLimit = 29,
 }
 
 // ---------------------------------------------------------------------------
@@ -448,9 +491,16 @@ fn test_cap_entry_info_abi() -> KernelResult<()> {
     }
 
     // The discriminant is the wire value; a renumbering of ResourceType would
-    // silently repoint every caller's decode table, so spot-check both ends of
-    // the range actually used.
-    if ResourceType::Channel as u16 != 1 || ResourceType::NetSocket as u16 != 25 {
+    // silently repoint every caller's decode table, so pin both ends of the
+    // range actually used plus one interior anchor.  The *last* variant is
+    // pinned deliberately: a new type appended without updating this line is
+    // exactly the change that would go unnoticed, and lane B mirrors these
+    // numbers by hand in `posix/src/sys_capability.rs`.
+    if ResourceType::Channel as u16 != 1
+        || ResourceType::NetSocket as u16 != 25
+        || ResourceType::SystemClock as u16 != 27
+        || ResourceType::ResourceLimit as u16 != 29
+    {
         serial_println!("[cap]   FAIL: ResourceType discriminants moved");
         return Err(KernelError::InternalError);
     }

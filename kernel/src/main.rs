@@ -6282,6 +6282,39 @@ extern "C" fn kernel_main() -> ! {
         (cap::ResourceType::Socket, 0, cap::Rights::ALL),
         // Process management: spawn and manage children.
         (cap::ResourceType::Process, 0, cap::Rights::ALL),
+        // The three objects §312's capability projection derives the
+        // remaining privileged POSIX operations from (§269 for the object
+        // design, §350 for the projection).  All are
+        // class-wide (`resource_id == 0`): a token nobody holds is
+        // indistinguishable from leaving the operation denied, which is the
+        // outcome the operator rejected in Q48.
+        //
+        // `TRANSFER` is included even though **nothing reads that bit today** —
+        // a child's capabilities come from an explicit list its spawner builds,
+        // not from narrowing the parent's table, so there is no delegation path
+        // for it to gate.  It is here because init's whole role for these three
+        // is to hand narrowed copies down (a time daemon gets the clock, a web
+        // server gets its port), so when that path exists init must already be
+        // allowed to use it; the alternative is a delegation that silently
+        // fails for PID 1 and gets debugged from scratch.  If the bit ever
+        // acquires a *different* meaning, this grant must be revisited.
+        (
+            cap::ResourceType::SystemClock,
+            0,
+            cap::Rights::WRITE.union(cap::Rights::TRANSFER),
+        ),
+        (
+            cap::ResourceType::PrivilegedPort,
+            0,
+            cap::Rights::WRITE.union(cap::Rights::TRANSFER),
+        ),
+        (
+            cap::ResourceType::ResourceLimit,
+            0,
+            cap::Rights::WRITE
+                .union(cap::Rights::MEMORY_LOCK)
+                .union(cap::Rights::TRANSFER),
+        ),
     ];
     let spawn_opts = proc::spawn::SpawnOptions {
         name: "init",

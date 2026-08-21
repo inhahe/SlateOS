@@ -753,6 +753,10 @@ class _Args:
     label = ""
     profile = "debug"
     wall_seconds = None
+    # None is the ordinary case: a --no-build/--no-stage run never enters Step 1
+    # and boot-test.sh omits the flag, so the key must stay out of the record
+    # rather than land as a 0 that reads like an instant build.
+    build_seconds = None
     # Empty, as argparse leaves them when boot-test.sh does not pass them, so
     # build_record() takes the git fallback -- which is the path these tests
     # were written against.
@@ -1065,6 +1069,100 @@ def test_wall_populations_ignore_rows_without_a_duration(bh):
     check("only the row with a duration counts",
           bh.wall_populations(records)[f"none on {bh._ACCEL_UNKNOWN}"],
           [300.0])
+
+
+def test_build_populations_split_by_profile_not_by_accelerator(bh):
+    """Build time is a fact about the host compiler, not about the emulator.
+
+    Folding the accelerator into this key -- which is right for wall time and
+    wrong here -- would split each profile into populations that differ in
+    nothing, shrinking every sample for no gain. These four records are two
+    profiles across two accelerators and must come out as exactly two groups.
+    """
+    records = [
+        {"verdict": "PASS", "sanitizer": "none", "profile": "debug",
+         "build_seconds": 100.0, "accelerator": "QEMU TCG"},
+        {"verdict": "PASS", "sanitizer": "none", "profile": "debug",
+         "build_seconds": 140.0, "accelerator": "Hyper-V/WHPX"},
+        {"verdict": "PASS", "sanitizer": "none", "profile": "release",
+         "build_seconds": 600.0, "accelerator": "QEMU TCG"},
+        {"verdict": "PASS", "sanitizer": "none", "profile": "release",
+         "build_seconds": 700.0, "accelerator": "Hyper-V/WHPX"},
+    ]
+    pops = bh.build_populations(records)
+    check("two populations, one per profile", sorted(pops), ["debug", "release"])
+    check("debug median", bh._median(pops["debug"]), 120.0)
+    check("release median", bh._median(pops["release"]), 650.0)
+
+
+def test_build_populations_keep_kasan_apart(bh):
+    """KASAN instruments every memory access, so it is a different build cost
+    and not a slow instance of the same one."""
+    records = [
+        {"verdict": "PASS", "sanitizer": "none", "profile": "debug",
+         "build_seconds": 100.0},
+        {"verdict": "PASS", "sanitizer": "kasan-instrumented",
+         "profile": "debug", "build_seconds": 400.0},
+    ]
+    check("split by sanitizer as well as profile",
+          sorted(bh.build_populations(records)), ["debug", "debug + KASAN"])
+
+
+def test_build_populations_ignore_runs_that_did_not_build(bh):
+    """A --no-build run has no `build_seconds` at all, and must not be counted
+    as a zero-second build -- that would understate every profile's cost while
+    looking like an implausibly fast compile rather than like an absent one."""
+    records = [{"verdict": "PASS", "profile": "debug"},
+               {"verdict": "PASS", "profile": "debug", "build_seconds": None},
+               {"verdict": "PASS", "profile": "debug", "build_seconds": 90.0}]
+    check("only the row that built counts",
+          bh.build_populations(records)["debug"], [90.0])
+
+
+def test_build_populations_skip_experiments(bh):
+    """Same rule as everywhere else in this file: a probe is not a boot of the
+    tree, and its build is not a build of the tree either."""
+    records = [
+        {"verdict": "PASS", "profile": "debug", "build_seconds": 90.0},
+        {"verdict": "PASS", "profile": "debug", "build_seconds": 9000.0,
+         "experiment": "hand-patched Cargo.toml"},
+    ]
+    check("the probe's build is excluded",
+          bh.build_populations(records)["debug"], [90.0])
+
+
+def test_report_prints_build_time_and_warns_about_the_mixture(bh):
+    import contextlib
+    import io
+    records = [
+        {"verdict": "PASS", "sanitizer": "none", "profile": "debug",
+         "wall_seconds": 330.0, "build_seconds": 3.0},
+        {"verdict": "PASS", "sanitizer": "none", "profile": "debug",
+         "wall_seconds": 340.0, "build_seconds": 900.0},
+    ]
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        bh.report(records, None)
+    out = buf.getvalue()
+    check_true("build time is reported at all", "build time by profile" in out)
+    check_true("the range spans no-op to cold", "3-900s" in out)
+    # The caveat is load-bearing, not decoration: a median over a mixture of
+    # cold, incremental and no-op rebuilds describes no build anyone waits for,
+    # so a reader who takes it at face value is worse off than before.
+    check_true("and the reader is told to read the range",
+               "read the range" in out)
+
+
+def test_report_omits_build_section_when_nothing_built(bh):
+    """Printing an empty section would suggest the data exists and is boring;
+    every record predating --build-seconds lacks the field entirely."""
+    import contextlib
+    import io
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        bh.report([{"verdict": "PASS", "wall_seconds": 330.0}], None)
+    check("no build section without build data",
+          "build time by profile" in buf.getvalue(), False)
 
 
 def test_report_prints_each_build_separately_and_no_combined_figure(bh):

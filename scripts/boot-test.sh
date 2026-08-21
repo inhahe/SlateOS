@@ -1897,6 +1897,14 @@ record_boot_outcome() {
     if [ -n "$why" ]; then
         args+=(--experiment "$why")
     fi
+    # Absent, not zero, when the run did not build: --no-build and --no-stage
+    # skip Step 1 entirely, and recording 0 there would drag every median down
+    # while looking like an implausibly fast build rather than like a run that
+    # never built.  A missing field is a question the reader can answer; a wrong
+    # one is not.
+    if [ -n "${BUILD_SECONDS:-}" ]; then
+        args+=(--build-seconds "$BUILD_SECONDS")
+    fi
     if [ -n "${QEMU_START_EPOCH:-}" ]; then
         local wall=$(( ${QEMU_END_EPOCH:-$(date +%s)} - QEMU_START_EPOCH ))
         if [ "$wall" -ge 0 ]; then
@@ -2146,8 +2154,26 @@ if [ "$NO_BUILD" -eq 0 ]; then
     if ! command -v "$CARGO" &>/dev/null; then
         CARGO="/c/Users/${USER:-${USERNAME:-$(whoami)}}/.cargo/bin/cargo.exe"
     fi
+    # Timed, and recorded in bench/boot-history.jsonl alongside the QEMU window.
+    #
+    # WHY THIS MATTERS BEYOND CURIOSITY.  open-questions.md Q46 asks whether the
+    # non-bench boot test should build release rather than debug, and its whole
+    # tradeoff is "slower build, faster boot".  We have always measured the boot
+    # half precisely -- wall_seconds and marker_seconds, hundreds of records --
+    # and the build half not at all, so one side of that comparison was an
+    # assertion and the other was evidence.  A cost claim nobody measures is a
+    # cost claim that cannot be checked, and it had gone unmeasured for the
+    # entire life of the question.
+    #
+    # `date +%s` rather than SECONDS: SECONDS counts since the shell started,
+    # which includes the prerequisite and free-space checks, and those are not
+    # part of what a profile choice makes slower.
+    BUILD_START_EPOCH="$(date +%s)"
     (cd "$PROJECT_ROOT" && "$CARGO" build ${CARGO_PROFILE_ARGS[@]+"${CARGO_PROFILE_ARGS[@]}"})
-    echo "Build OK ($BENCH_PROFILE profile)."
+    BUILD_SECONDS=$(( $(date +%s) - BUILD_START_EPOCH ))
+    # Said out loud as well as recorded: a lane deciding Q46 by feel should see
+    # the number on the run in front of them, not only in the history file.
+    echo "Build OK ($BENCH_PROFILE profile, ${BUILD_SECONDS}s)."
 fi
 
 if [ "$NO_STAGE" -eq 0 ] && [ ! -f "$KERNEL_BIN" ]; then

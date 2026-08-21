@@ -46337,3 +46337,120 @@ deserve unrelated budgets — but the first is what any run should do today.
 **Workaround until then.** `python scripts/run-timeout.py --poll 60 2700
 ./scripts/boot-test.sh`, backgrounded via the Bash tool's `run_in_background`,
 with no pipe on the command.
+
+---
+
+## `apps/**` bug-hunt sweep, round 1: three live defects (lane C)
+**Status:** FIXED 2026-08-20 — `5b4dd7731` (calendar), `80dd0a5f3` (slices).
+
+The roadmap asks lane C to run bug-hunt sweeps over `apps/**` between
+features; ~200 crates there have never had a systematic audit. This is the
+first round's findings, filed closed because all three were fixed in the same
+sitting. They are recorded rather than merely committed because the *shape* of
+each recurs, and the next sweep should start by grepping for it.
+
+### The shape, again: a proof that lives in a different statement than the code it justifies
+
+All three are the same fault the `gui/**` lint sweep kept finding. A value is
+checked in one statement and used in another, and in between, something makes
+the check not mean what it looks like it means.
+
+### 1. `apps/explorer` listed a fabricated date for every file older than 2000-03-01
+
+`columns.rs::format_datetime` — the Date Modified column — carried a local
+civil calendar that shifted the epoch to 2000-03-01 "to simplify leap-year
+handling", and then, for anything *before* that epoch, did not compute a date
+at all. It estimated one:
+
+| | |
+|---|---|
+| year | `1970 + days / 365` |
+| month | `day_of_year / 30 + 1`, clamped to ≤ 12 |
+| day | clamped to ≤ 28 |
+
+| Real date | Shown as |
+|---|---|
+| 1985-07-04 | 1985-07-09 |
+| 1999-06-15 | 1999-06-23 |
+| 2000-02-29 (a real leap day) | 2000-03-07 |
+| 1970-01-01 | 1970-01-01 (the one it got right) |
+
+**Why nothing caught it.** Every value it produced was *in range* — a plausible
+month, a plausible day — so no clamp, assertion, or type could have flagged it.
+The error grew with the file's age, and old files are exactly the ones a user
+sorts by date to find. The crate's single `test_format_datetime` sampled a 2024
+timestamp, which is on the correct side of the seam; the whole bug lived in a
+branch no test entered.
+
+The post-2000 path was arithmetically identical to Hinnant's, which is why the
+damage was confined: `719468 + 11017 = 5 × 146097`, so 2000-03-01 is an exact
+era boundary and the shifted form degenerates to the standard one above it.
+
+### 2 & 3. `starts_with(q) && ends_with(q)` is not a bounds proof
+
+A string of a *single* `q` starts with it and ends with it — the same byte
+answering both tests. The guard passes at `len == 1`, and the `&s[1..s.len() -
+1]` that follows becomes `1..0`, which panics.
+
+| Crate | Trigger | Reachable by |
+|---|---|---|
+| `apps/ircclient` `CtcpMessage::parse` | `"\x01"` | a PRIVMSG trailing parameter, i.e. anything the server sends — a one-line remote client kill |
+| `apps/installer` YAML scalar parser | a lone `"` or `'` | a typo in a hand-edited install manifest |
+
+The installer's had a `wrapping_sub()` in it, which is the interesting part:
+somebody silenced `clippy::arithmetic_side_effects` at the subtraction instead
+of asking why it fired. That made the underflow *silent but not harmless* — it
+produced `usize::MAX` and the slice panicked anyway, one line later and less
+legibly. **A suppression that moves a panic rather than removing it is worse
+than the warning was.**
+
+Both now `strip_prefix`/`strip_suffix` in sequence, which structurally cannot
+make the mistake: after the prefix is removed, the suffix is looked for in what
+is *left*, and an empty string has no delimiter to end with. Grep
+`starts_with(.*).*&&.*ends_with(` before believing any similar guard; as of
+this sweep the remaining lane-C hits are all `filter`/`any` predicates that
+never slice.
+
+### `is_action` vs `parse`: two recognisers for one grammar
+
+`CtcpMessage` had a second, independent ACTION parser (`starts_with("\x01ACTION")`
+plus `&text[8..text.len() - 1]`). It disagreed with `parse()` three ways, all
+reachable from the wire:
+
+| Input | `action_text` said | `parse` said |
+|---|---|---|
+| `"\x01ACTION\x01"` | *panic* (sliced `8..7`) | `Action("")` |
+| `"\x01ACTIONfoo\x01"` | `Action("oo")` — the hard-coded `8` assumed a space nobody checked for | `Unknown("ACTIONFOO", "")` |
+| `"\x01ACTIONé \x01"` | *panic* — index 8 fell inside the `é` | `Unknown(…)` |
+
+Fixed by defining `action_text` in terms of the same framing and verb split
+`parse` uses, and `is_action` in terms of `action_text`. `parse` also folds case
+with ASCII rules rather than `to_uppercase`, so the two cannot drift on
+`"actıon"` (dotless i, which *does* uppercase to `ACTION`).
+
+### Deliberately not changed: the ~15 `(i + 1) % len()` sites
+
+Every wrapping-index step in `apps/**` that divides by a runtime length was
+checked, and **every one is guarded** — always in a different statement from the
+division, which is the shape above, but the guard is genuinely there each time.
+`startupmanager::field_count()` and `life`'s `Grid` dimensions look unguarded
+but are constants behind a method and a constructor.
+
+They were left alone on the sweep's own rule: **duplication alone is not the
+warrant for extraction — divergence is.** These ~15 do not disagree with each
+other; they all wrap a stale index by `%`. They *do* disagree with
+`guitk::step::wrapping_after`, which clamps first (`step::wrapping_after(3, 9)`
+is `0`; `(9 + 1) % 3` is `1`) — as does `apps/filediff`'s local
+`wrap_next`/`wrap_prev`. So a migration to `guitk::step` would not be removing
+a divergence, it would be *introducing* one into fifteen call sites at once, to
+delete a `%`. Not done. If `guitk::step` ever grows a mod-wrap variant, that
+changes; until then this note is why nobody should "tidy" these.
+
+### Remaining backlog
+
+`apps/**` opts into the workspace lints (all 142 crates do), but the defensive
+five are `warn`, not `deny`, so a warning backlog accumulates uncounted — the
+installer's `wrapping_sub` and `apps/backup`'s `days + 719_468` were both
+firing silently for months. A measured figure for `apps/**` (via
+`scripts/clippy-sites.py`, deduplicated by `(file, line, column, lint)` — never
+a raw total) is the next round's first step.

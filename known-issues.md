@@ -46340,9 +46340,10 @@ with no pipe on the command.
 
 ---
 
-## `apps/**` bug-hunt sweep, round 1: four live defects and one latent (lane C)
+## `apps/**` bug-hunt sweep, round 1: four live defects and two latent (lane C)
 **Status:** FIXED 2026-08-20 — `5b4dd7731` (calendar), `80dd0a5f3` (slices),
-`c989b21d0` (clipboard preview), `e1390abb1` (sticky-note columns).
+`c989b21d0` (clipboard preview), `e1390abb1` (sticky-note columns),
+`d5a1e7eb8` + `ae3946e33` (grid column counts).
 
 The roadmap asks lane C to run bug-hunt sweeps over `apps/**` between
 features; ~200 crates there have never had a systematic audit. This is the
@@ -46481,6 +46482,83 @@ front so it cannot quietly stop testing the bug if the constant changes.
 Generally: **a regression test for a "lands inside a character" bug must assert
 that its input actually lands inside a character.** Otherwise the alignment is
 a coincidence, and coincidences are not stable under refactoring.
+
+### (6) `apps/colorpicker` divided by zero in one grid and not in its twin
+
+`ColorPickerApp::render_history` computed how many swatches fit across the
+window and then indexed its cells with `i % cells_per_row` over a loop bounded
+by **the number of colors in the history**, not by `cells_per_row`. A window
+narrower than one 28px swatch plus its padding makes that count zero and the
+modulo panics.
+
+`render_palette`, **sixty lines below in the same file**, computes the same
+quantity and writes `.max(1)` at *both* of its divisions. The author knew — in
+one of the two places — and neither site says why. Same shape as everything
+above: a proof that lives in a different statement from the code it justifies.
+
+Latent rather than live today, and only by accident: `self.width` is assigned
+`WINDOW_WIDTH` once in `create()` and there is no `Resize` handler yet, so
+`cells_per_row` is 18 forever. It goes live the moment resize lands.
+
+Fixed in `d5a1e7eb8`, then folded into (7). Verified regressive: with the old
+body restored, the new test panics at the modulo rather than merely failing an
+assertion.
+
+### (7) …and five other spellings of the same guard, one crate away from the answer
+
+Finding (6) is not one site, it is the sixth transcription of one piece of
+arithmetic. Every place in lane C's tree that asks "how many `cell`-wide
+columns fit across this width":
+
+| Where | Guard against zero |
+|---|---|
+| `gui/toolkit/src/grid.rs` `LayoutCache::compute` | `NonZeroUsize`, with the reasoning written out |
+| `apps/worldclock` `render_grid` | `.max(1.0)` before the cast |
+| `apps/charmap` `render_grid` | `.max(1.0)` before the cast |
+| `apps/slides` sorter grid | `.max(1.0)`, **plus an `#[allow(arithmetic_side_effects)]` at each division** vouching for it from twenty lines away |
+| `apps/charmap` recent/favorites strip | **none** — safe only because the cap is `cols * 3`, so zero columns made both loops `take(0)` |
+| `apps/defrag` block map | `if cols > 0 { … checked_div … }` |
+| `apps/colorpicker` `render_history` | **none at all** — finding (6) |
+
+Seven sites, five spellings, one outright missing and one present-by-accident.
+The toolkit already had the right answer — `NonZeroUsize`, with a comment
+explaining exactly why the floor is one — and **kept it private**, so every app
+wrote its own. That is the same asymmetry as the `tzrules` request filed the
+same day (`requests/c-b-year-of-day-computes-the-month-and-day-and-throws-them-away.md`):
+export one direction of a piece of arithmetic and the tree grows transcriptions
+of the other, and one of them will be wrong.
+
+`ae3946e33` adds `guitk::grid::columns_across(avail, cell, gap) -> NonZeroUsize`,
+makes `LayoutCache::compute` call it, and routes colorpicker (both grids),
+charmap (both grids), worldclock and slides through it. The floor of one is now
+in the return type, so `i % columns` uses the `Rem<NonZeroUsize> for usize` impl
+that *cannot* divide by zero — slides drops both `#[allow]`s and charmap drops a
+`checked_div` and a `.max(1)`.
+
+Each migration is an **exact identity**, deliberately, not a re-derivation:
+worldclock's and slides' `(w - gap) / (cell + gap)` is
+`columns_across(w - 2*gap, cell, gap)`, and charmap's gapless grids pass
+`gap = 0.0`. The single visible change is charmap's recent strip, which now
+shows one clipped column where it previously showed none — which is the
+toolkit's documented floor, and the more useful rendering.
+
+Two subtleties worth keeping:
+
+- **The degenerate case is keyed off `cell`, not off the pitch.** A zero-width
+  cell separated by an 8px gap would otherwise "fit" once per gap, counting the
+  separators as though they were content. `LayoutCache` had this right
+  (`if cell_width <= 0.0`) and the first draft of `columns_across` did not;
+  the `columns_across_agrees_with_the_layout_cache` test is what pins it.
+- **`inf as usize` saturates, it does not wrap**, so a zero pitch would have
+  produced `usize::MAX` columns rather than a panic — non-zero, so no
+  zero-check would have caught it, and a grid of `usize::MAX` columns is not an
+  answer anyone wants.
+
+**Not migrated: `apps/defrag`.** Its `if cols > 0` skips the whole block map
+rather than clipping it — a different contract, and correct as it stands.
+Migrating it would change what the user sees for no defect. Same rule as the
+`(i + 1) % len()` sites below: divergence in *correctness* is the warrant for
+extraction; divergence in *spelling*, over code that is already right, is not.
 
 ### Deliberately not changed: the ~15 `(i + 1) % len()` sites
 

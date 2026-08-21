@@ -17,6 +17,7 @@
 //! Uses the guitk library for UI rendering.
 
 use guitk::color::Color;
+use guitk::date;
 use guitk::ratio;
 use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::style::CornerRadii;
@@ -360,21 +361,29 @@ impl ArchiveEntry {
     }
 }
 
-/// Convert days since epoch to (year, month, day).
-/// Approximate civil date calculation.
+/// Convert days since the Unix epoch to (year, month, day).
+///
+/// Was a local transcription of Howard Hinnant's `civil_from_days` — one of
+/// four in `apps/`, of which the file manager's had been quietly wrong for
+/// every date before 2000-03-01. This one was right, which is the point: four
+/// spellings of one algorithm is four things to check, and a reader has no way
+/// to tell the right ones from the wrong one without redoing the derivation.
+/// `guitk::date` reaches the same algorithm through `tzrules`, which is what
+/// the libc's `localtime` and the taskbar clock render dates through.
+///
+/// An archive states its own timestamps, so `days` is bounded by nothing this
+/// program controls; the old `wrapping_add(719468)` would have turned a
+/// hostile one into a date in the past. Saturating at `i32::MAX` days lands in
+/// the year 5 881 580 instead, which sorts where a nonsense date belongs.
 fn days_to_ymd(days: u64) -> (u64, u64, u64) {
-    // Algorithm adapted from Howard Hinnant's civil_from_days.
-    let z = days.wrapping_add(719468);
-    let era = z / 146097;
-    let doe = z - era * 146097;
-    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
-    let y = yoe + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = doy - (153 * mp + 2) / 5 + 1;
-    let m = if mp < 10 { mp + 3 } else { mp - 9 };
-    let y = if m <= 2 { y + 1 } else { y };
-    (y, m, d)
+    let (year, month, day) =
+        date::Date::from_days_since_epoch(i32::try_from(days).unwrap_or(i32::MAX)).ymd();
+    // The year cannot be negative: `days` is unsigned and the epoch is 1970.
+    (
+        u64::try_from(year).unwrap_or(0),
+        u64::from(month),
+        u64::from(day),
+    )
 }
 
 // ============================================================================

@@ -427,7 +427,30 @@ rule table); the gate sites are `posix/src/time.rs` (`clock_settime`,
 (`check_mlock_caps`), `posix/src/epoll.rs` (`timerfd_create`). Tracked in
 `known-issues.md` → `TD-POSIX-CAPS-ARE-NOT-THE-KERNEL'S`, step 3.
 
-## C-Q2 — [C] When the text on a line runs both ways, should the Right arrow key move the caret one character *later in the sentence*, or one step *to the right on the screen*? — Status: OPEN
+## C-Q2 — [C] When the text on a line runs both ways, should the Right arrow key move the caret one character *later in the sentence*, or one step *to the right on the screen*? — Status: **ANSWERED 2026-08-21 by the operator — b (visual)**
+
+> **ANSWERED 2026-08-21 (relayed by lane A).** The operator answered **b** —
+> the visual convention, matching the recommendation below.
+>
+> **Note on how this answer arrived, because it was briefly misfiled.** It came
+> in as the bare words *"b, i guess"* inside a large multi-lane answer batch, and
+> lane A first read it as an answer to **Q49** (modern AMD graphics), which the
+> same message also answered at length. The operator corrected this the same
+> day: *"the 'q49: b, i guess' was meant to be for c-q2"*. Q49 is unaffected —
+> `design-decisions.md` §262 was written from the operator's detailed Q49
+> answer and never cited the stray "b", so no record needs revising; only this
+> question gained an answer it had been missing.
+>
+> Lane A is relaying rather than acting — **the write-up is lane C's.** Move this
+> into your own `design-decisions.md` number range with `**Decided by:**
+> Operator (Claude recommended this option)`, add the `**In short:**` opener,
+> then delete this question and index it under "Resolved".
+>
+> Per the entry below, switching this on is one line in each of three text
+> widgets — `caret_left`/`caret_right` are already written and tested. Mind the
+> measured caveat: a widget that does not also remember which side of a
+> direction boundary the caret is on will **skip an entire right-to-left word**
+> in one press, which is worse than today.
 
 **In short:** Hebrew and Arabic are written right to left, and a line can mix
 them with English — "I said שלום to him". On such a line the order the

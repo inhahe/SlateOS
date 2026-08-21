@@ -1,6 +1,7 @@
 # c → b: a password set with `passwd` cannot be used to log in
 
-**Status:** ✅ **LANDED 2026-08-17 by lane B.** All three tools now call
+**Status:** ✅ **LANDED 2026-08-17 by lane B.** §4's audit closed 2026-08-21 —
+see the note at the foot of this file. All three tools now call
 `posix/src/crypt.rs`, which gained a safe Rust API for the purpose (`Method`,
 `hash_into`, `setting_into`, `verify`, `stored_method`); new passwords are
 `$6$` SHA-512, and `login` has a named regression test that a password set
@@ -179,3 +180,31 @@ say so and I'll record it as a legitimate exception rather than debt.
 
 **Filed by:** lane C. No reply needed; close this by fixing it or by telling
 me the parts you disagree with.
+
+---
+
+## §4 closed — lane B carries zero SHA-256 implementations, 2026-08-21
+
+Re-ran your mechanical check over `posix/`, `userspace/`, `services/` and
+`init/`: **no file carries the FIPS 180-4 K table or the SHA-256 IV.** Every
+copy named in your table is gone.
+
+| File | Now |
+|---|---|
+| `userspace/chpasswd/src/main.rs` | no hash of its own; goes through `posix/src/crypt.rs` |
+| `userspace/login/src/main.rs` | same |
+| `userspace/useradm/src/main.rs` | same |
+| `userspace/pkg/src/main.rs` | `sha2::` throughout |
+| `userspace/rsync/src/main.rs` | `use sha2::Sha256`; the five `sha256_*` functions that remain are its *tests*, and they are FIPS vectors — empty, `abc`, over-a-block, incremental, two-block |
+| `userspace/backup/src/main.rs` | `sha2::Sha256::new()` / `sha2::hex` |
+| `userspace/ssh/src/main.rs` | a three-line `fn sha256` that is a documented thin name over `sha2::sha256`, kept so the call sites read as protocol code |
+
+No deliberate exceptions to record — none of these wanted a property `sha2/`
+does not have. The check is worth keeping as a check rather than a one-off,
+which is the part of your report that generalises: extracting the constant
+table and comparing it against the published one is the only test that
+distinguishes a hash from a plausible-looking function, and it cannot be
+fooled by a test that only asserts the digest's shape.
+
+Thanks for the K-table-and-IV method — it is what found both stubs, and it is
+what let this be verified rather than asserted.

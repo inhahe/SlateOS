@@ -46312,3 +46312,60 @@ This does **not** close this entry. It was a missing *revision*; the entry above
 is about a missing *benchmark*, and the gate can now correctly name a path that
 still nothing measures. If anything it raises the priority of fix (2), since the
 rule will now fire in strictly more situations.
+
+**`[A]` 2026-08-20 — fix (2) is now done, and the audit it required found the
+defect underneath both of them.** The gate no longer implies coverage it does
+not have: `scripts/boot-test.sh` carries a per-file `BENCH_COVERAGE` map, and
+its report is split into files the suite measures and files headed "covered by
+NO benchmark. Running --bench will not tell you whether these got slower". The
+default for anything not written down is *uncovered*, so silence is never read
+as coverage. Rationale and the noise-vs-false-assurance tradeoff: design-decisions
+§250.
+
+Building that map required going through all 86 recorded benchmarks and reading
+which module each one actually calls, and that turned up three things worse than
+coarse granularity:
+
+- **Four benchmarks measure a copy of the code rather than the code.**
+  `net_checksum`, `tcp_checksum_v4`, `tcp_checksum_v6` and `dns_build_query` all
+  time private reimplementations living in `bench.rs` (lines 6395, 6451, 6520,
+  6664); one says so in its own doc comment. They cover no kernel file at all.
+  Make the real label encoder in `net/dns.rs` ten times slower and every one of
+  them stays green — and the old `BENCH_CRITICAL_PATHS` annotation cited them by
+  name as the benchmarks `kernel/src/net` "actually guards".
+- **`kernel/src/idt.rs` is measured by neither benchmark cited for it.**
+  `isr_latency`'s window opens at `apic.rs:1059`, inside `handle_timer_irq` and
+  past the IDT stub; `page_fault` hand-rolls map/unmap through `page_table` with
+  the CPU exception explicitly excluded (`bench.rs:5450`). The same two facts
+  mean **`mm/fault.rs`, the actual `#PF` handler, is unbenchmarked** despite
+  "page fault handling" being a row in CLAUDE.md's perf-critical table.
+- **`kernel/src/apic.rs` was not watched at all**, despite holding the only code
+  `isr_latency` times. Added to `BENCH_CRITICAL_PATHS`.
+
+The per-path benchmark annotations on `BENCH_CRITICAL_PATHS` were deleted rather
+than corrected: they were a second copy of a mapping that now lives in
+`BENCH_COVERAGE`, and a second copy is a second thing to be wrong. A
+`report_bench_coverage_rot()` check runs on every green boot and fails the map
+if it cites a benchmark the newest `bench/history.jsonl` row does not contain —
+which catches renames, deletions, and the several benchmarks that print `SKIP`
+and record nothing, the last of which a source grep cannot see.
+
+**Confirmed first-hand the same day.** The `--bench` run this gate demanded for
+`kernel/src/mm/user.rs` completed — PASSED, 86 benchmarks recorded, boot streak
+33 — and observed nothing about the change, because no benchmark calls
+`copy_to_user` or `copy_from_user`. That run was flagged `RUN CONTAMINATED` by
+its own instruments (wall time 212 s against a median of 144 s; lane-B held the
+boot lock for the preceding 300 s), so its one `REGRESSED, UNREPLICATED` line —
+`net_veth_roundtrip` 875 ns → 1334 ns, inside its own 635–1326 ns range at the
+top end — is not attributable to any code change and is logged here rather than
+chased. Under the new report, that same `mm/user.rs` change would have been told
+"nothing here would be measured by --bench", which is both true and 21 minutes
+cheaper.
+
+**Still open:** fix (1), a ZFS read benchmark. Also now visible as consequences
+of the audit: `mm/fault.rs` and `net/dns.rs` have no honest benchmark, and four
+existing benchmarks should either be pointed at the real implementations or
+renamed to admit they are microbenchmarks of `bench.rs`. Pointing them at the
+real code is the correct fix — the reason given for duplicating
+(`tcp_checksum_bench`: "to avoid depending on tcp module internals") is a reason
+to widen the module's public surface, not a reason to measure something else.

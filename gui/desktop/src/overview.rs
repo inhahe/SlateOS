@@ -12,6 +12,7 @@
 
 use guitk::color::Color;
 use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
+use guitk::step;
 use guitk::style::CornerRadii;
 
 // ============================================================================
@@ -957,10 +958,12 @@ pub fn on_mouse_scroll(state: &mut OverviewState, delta: f32) -> OverviewAction 
         .and_then(|d| state.lanes.iter().position(|l| l.desktop_id == d))
         .unwrap_or(0);
 
+    // Clamped: a scroll gesture that ran off the end of the desktops and
+    // reappeared at the other end would be a surprise, not a convenience.
     let new_idx = if delta > 0.0 {
-        current_idx.saturating_add(1).min(state.lanes.len() - 1)
+        step::clamped_after(state.lanes.len(), current_idx)
     } else {
-        current_idx.saturating_sub(1)
+        step::clamped_before(state.lanes.len(), current_idx)
     };
 
     if let Some(lane) = state.lanes.get(new_idx) {
@@ -999,17 +1002,15 @@ fn navigate_selection(state: &mut OverviewState, key: OverviewKey) {
         .hovered_window
         .and_then(|wid| all.iter().position(|t| t.window_id == wid));
 
+    // Clamped, matching the scroll gesture above: arrowing off the edge of
+    // the grid holds still rather than teleporting to the opposite edge.
     let new_idx = match (current_idx, key) {
         (None, _) => Some(0),
-        (Some(i), OverviewKey::ArrowRight) | (Some(i), OverviewKey::ArrowDown) => {
-            if i + 1 < all.len() {
-                Some(i + 1)
-            } else {
-                Some(i)
-            }
+        (Some(i), OverviewKey::ArrowRight | OverviewKey::ArrowDown) => {
+            Some(step::clamped_after(all.len(), i))
         }
-        (Some(i), OverviewKey::ArrowLeft) | (Some(i), OverviewKey::ArrowUp) => {
-            Some(i.saturating_sub(1))
+        (Some(i), OverviewKey::ArrowLeft | OverviewKey::ArrowUp) => {
+            Some(step::clamped_before(all.len(), i))
         }
         (Some(i), _) => Some(i),
     };

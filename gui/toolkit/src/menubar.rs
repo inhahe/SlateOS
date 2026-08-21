@@ -9,10 +9,10 @@
 //! Uses the Catppuccin Mocha dark theme, consistent with `menu.rs`.
 
 use crate::color::Color;
-use crate::cycle;
 use crate::event::{EventResult, Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use crate::render::{FontWeightHint, RenderCommand, TextOverflow};
 use crate::row_strip::RowStrip;
+use crate::step;
 use crate::style::CornerRadii;
 
 // ─── Re-export the shared item-id type from the context-menu module ────────
@@ -787,7 +787,7 @@ impl MenuBar {
                 if self.open_submenu.is_some() {
                     self.open_submenu = None;
                 } else {
-                    self.open_menu(cycle::before(self.items.len(), top_idx));
+                    self.open_menu(step::wrapping_before(self.items.len(), top_idx));
                 }
                 EventResult::Consumed
             }
@@ -803,7 +803,7 @@ impl MenuBar {
                 }
 
                 // Otherwise move to the next top-level menu.
-                self.open_menu(cycle::after(self.items.len(), top_idx));
+                self.open_menu(step::wrapping_after(self.items.len(), top_idx));
                 EventResult::Consumed
             }
 
@@ -1523,13 +1523,13 @@ fn next_selectable(
     // Where the walk begins: one place beyond the current hover in the
     // direction of travel, or the near end of the list when nothing is hovered.
     let start = match current {
-        Some(idx) if forward => cycle::after(len, idx),
-        Some(idx) => cycle::before(len, idx),
+        Some(idx) if forward => step::wrapping_after(len, idx),
+        Some(idx) => step::wrapping_before(len, idx),
         None if forward => 0,
         None => len.saturating_sub(1),
     };
 
-    cycle::indices(len, start, forward).find(|idx| entries.get(*idx).is_some_and(is_selectable))
+    step::indices(len, start, forward).find(|idx| entries.get(*idx).is_some_and(is_selectable))
 }
 
 /// Jump to the first entry whose label starts with `ch`.

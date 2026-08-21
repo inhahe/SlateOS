@@ -143,9 +143,9 @@ mod pointer_tests;
 use appearance::config;
 use appearance::{AppearanceSettings, TaskbarStyle, TransparencyLevel};
 use guitk::color::Color;
-use guitk::cycle;
 use guitk::event::{Key, KeyEvent, Modifiers, MouseButton, MouseEvent, MouseEventKind};
 use guitk::render::RenderTree;
+use guitk::step;
 use guitk::style::{Border, CornerRadii, Shadow};
 use guitk::wheel;
 use launcher::{AppEntry, Category};
@@ -1989,18 +1989,18 @@ impl DesktopShell {
         let count = self.visible_windows().len();
         if count > 1 {
             self.alt_tab_active = true;
-            self.alt_tab_index = cycle::before(count, count.saturating_sub(1));
+            self.alt_tab_index = step::wrapping_before(count, count.saturating_sub(1));
         }
     }
 
     pub fn next_alt_tab(&mut self) {
         let count = self.visible_windows().len();
         if count > 0 {
-            // `cycle::after` carries the "the list is not empty" condition
+            // `step::wrapping_after` carries the "the list is not empty" condition
             // inside the expression that depends on it, and lands on the first
             // window rather than an arbitrary one if the index has gone stale
             // because windows closed while the switcher was open.
-            self.alt_tab_index = cycle::after(count, self.alt_tab_index);
+            self.alt_tab_index = step::wrapping_after(count, self.alt_tab_index);
         }
     }
 
@@ -2011,7 +2011,7 @@ impl DesktopShell {
             // Clamping first matters: a stale index — windows closed while the
             // switcher was open — would otherwise step from one out-of-range
             // index to another rather than back into the list.
-            self.alt_tab_index = cycle::before(count, self.alt_tab_index.min(last));
+            self.alt_tab_index = step::wrapping_before(count, self.alt_tab_index.min(last));
         }
     }
 

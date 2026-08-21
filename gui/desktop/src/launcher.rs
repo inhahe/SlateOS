@@ -31,6 +31,7 @@
 use guitk::color::Color;
 use guitk::event::{Key, KeyEvent};
 use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
+use guitk::step;
 use guitk::style::CornerRadii;
 use guitk::text;
 use guitk::text::TextCursor;
@@ -316,18 +317,17 @@ impl LauncherState {
                 return self.launch_selected();
             }
 
+            // Clamped, not wrapping: the results are a *ranking*, so running
+            // off the end of it and landing back on the best match would be
+            // saying something the list does not mean. `step` names the
+            // choice; see its module docs for the other one.
             Key::Up => {
-                if self.selected_index > 0 {
-                    self.selected_index -= 1;
-                }
+                self.selected_index = step::clamped_before(self.results.len(), self.selected_index);
                 return LauncherAction::None;
             }
 
             Key::Down => {
-                let max_idx = self.results.len().saturating_sub(1);
-                if self.selected_index < max_idx {
-                    self.selected_index += 1;
-                }
+                self.selected_index = step::clamped_after(self.results.len(), self.selected_index);
                 return LauncherAction::None;
             }
 

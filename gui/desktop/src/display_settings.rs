@@ -11,9 +11,9 @@
 //! - Test patterns for calibration (grayscale, color bars, gradient)
 
 use guitk::color::Color;
-use guitk::cycle;
 use guitk::daywindow::DailyWindow;
 use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
+use guitk::step;
 use guitk::style::CornerRadii;
 
 // ============================================================================
@@ -621,7 +621,7 @@ impl DisplaySettingsManager {
 
     /// Select the next display (wrapping).
     pub fn select_next_display(&mut self) {
-        self.selected_display = cycle::after(self.displays.len(), self.selected_display);
+        self.selected_display = step::wrapping_after(self.displays.len(), self.selected_display);
     }
 
     /// Set brightness for the selected display.

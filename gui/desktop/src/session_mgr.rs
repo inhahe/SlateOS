@@ -8,9 +8,9 @@
 //! which apps were open and where they were placed.
 
 use guitk::color::Color;
-use guitk::cycle;
 use guitk::idseq::IdSeq;
 use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
+use guitk::step;
 use guitk::style::CornerRadii;
 
 // ============================================================================
@@ -450,11 +450,11 @@ impl WorkspacePicker {
 
     /// Navigate selection.
     pub fn select_next(&mut self, count: usize) {
-        self.selected_index = cycle::after(count, self.selected_index);
+        self.selected_index = step::wrapping_after(count, self.selected_index);
     }
 
     pub fn select_prev(&mut self, count: usize) {
-        self.selected_index = cycle::before(count, self.selected_index);
+        self.selected_index = step::wrapping_before(count, self.selected_index);
     }
 
     /// Render the picker overlay.

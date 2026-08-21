@@ -524,13 +524,13 @@ impl AlertDialog {
         match event.key {
             Key::Tab => {
                 // Cycle focus through buttons.
-                // The fifth copy of the wrap `cycle` was extracted to own; see
+                // The fifth copy of the wrap `step` was extracted to own; see
                 // its module doc. Both ends of the list are inside the helper,
                 // so an empty button row needs no guard here either.
                 self.focused_button = if event.modifiers.shift {
-                    crate::cycle::before(self.buttons.len(), self.focused_button)
+                    crate::step::wrapping_before(self.buttons.len(), self.focused_button)
                 } else {
-                    crate::cycle::after(self.buttons.len(), self.focused_button)
+                    crate::step::wrapping_after(self.buttons.len(), self.focused_button)
                 };
                 EventResult::Consumed
             }
@@ -3133,7 +3133,7 @@ mod tests {
 
     #[test]
     fn tabbing_a_dialog_with_no_buttons_is_not_fatal() {
-        // `cycle` answers 0 for an empty list, which is the only index that
+        // `step` answers 0 for an empty list, which is the only index that
         // could mean anything; what matters is that neither direction
         // subtracts from a zero length.
         let mut dialog = AlertDialog::info("Note", "No buttons here")

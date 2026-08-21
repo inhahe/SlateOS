@@ -497,7 +497,9 @@ impl ScreenRecorder {
                 return true;
             }
             self.state = RecordingState::Countdown {
-                remaining_secs: remaining_secs - 1,
+                // Saturating so that the countdown's floor is a property of
+                // this expression rather than of the branch above it.
+                remaining_secs: remaining_secs.saturating_sub(1),
             };
         }
         false
@@ -604,10 +606,11 @@ impl ScreenRecorder {
         self.stats.bytes_written = bytes;
     }
 
-    /// Check if max duration reached.
+    /// Check if max duration reached. A limit of zero is no limit.
     pub fn is_duration_exceeded(&self) -> bool {
         self.config.max_duration_secs > 0
-            && self.stats.elapsed_ms >= self.config.max_duration_secs as u64 * 1000
+            && self.stats.elapsed_ms
+                >= u64::from(self.config.max_duration_secs).saturating_mul(1000)
     }
 
     /// Delete a history entry by ID.

@@ -20,7 +20,7 @@
 //! selection re-establishes it before returning, so there is no window in which
 //! the two disagree and no bound left for a caller to prove.
 //!
-//! Like [`crate::cycle`], the methods take the list's *length* rather than the
+//! Like [`crate::step`], the methods take the list's *length* rather than the
 //! list. A viewport that cached the length would be one more thing to keep in
 //! step, and the lists this serves are recomputed on demand — a filtered
 //! clipboard history, a search result — so the length it cached would routinely

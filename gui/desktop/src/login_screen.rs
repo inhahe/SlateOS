@@ -385,9 +385,15 @@ impl LoginScreen {
     }
 
     /// Set lockout expiry (called after auth_failure triggers lockout).
+    ///
+    /// Saturating, and saturating in the safe direction: an expiry that
+    /// cannot be represented becomes `u64::MAX`, which is a lockout that
+    /// does not end. A wrapping one would land *behind* `now_ms` and clear
+    /// the lockout on the next tick, which is the failure that matters here.
     pub fn set_lockout_expiry(&mut self, now_ms: u64) {
         if self.locked_out {
-            self.lockout_until = now_ms + self.config.lockout_seconds as u64 * 1000;
+            self.lockout_until =
+                now_ms.saturating_add(u64::from(self.config.lockout_seconds).saturating_mul(1000));
         }
     }
 

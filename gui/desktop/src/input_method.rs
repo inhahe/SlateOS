@@ -10,8 +10,8 @@
 //! - Custom layout support
 
 use guitk::color::Color;
-use guitk::cycle;
 use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
+use guitk::step;
 use guitk::style::CornerRadii;
 
 // ============================================================================
@@ -288,12 +288,12 @@ impl InputMethodManager {
 
     /// Cycle to the next layout.
     pub fn next_layout(&mut self) {
-        self.active_index = cycle::after(self.layouts.len(), self.active_index);
+        self.active_index = step::wrapping_after(self.layouts.len(), self.active_index);
     }
 
     /// Cycle to the previous layout.
     pub fn prev_layout(&mut self) {
-        self.active_index = cycle::before(self.layouts.len(), self.active_index);
+        self.active_index = step::wrapping_before(self.layouts.len(), self.active_index);
     }
 
     /// Switch to a specific layout by id.

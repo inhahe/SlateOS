@@ -10,7 +10,7 @@
 //! negative infinity in one and from zero in another, so the same samples gave
 //! two different answers; and only one of the three could report an average.
 //!
-//! Written here once, the wrap goes through [`cycle`], which carries the "the
+//! Written here once, the wrap goes through [`step`](crate::step), which carries the "the
 //! buffer is not empty" condition inside the expression that depends on it, so
 //! a capacity of zero is a history that holds nothing rather than a division by
 //! zero or an index off the end.
@@ -21,7 +21,7 @@
 //! once per metric and then only pushed to — there is nothing here worth
 //! monomorphising for.
 
-use crate::cycle;
+use crate::step;
 
 /// The last `capacity` samples of a value that is measured repeatedly.
 ///
@@ -89,7 +89,7 @@ impl SampleHistory {
         if let Some(slot) = self.samples.get_mut(self.cursor) {
             *slot = value;
         }
-        self.cursor = cycle::after(self.capacity(), self.cursor);
+        self.cursor = step::wrapping_after(self.capacity(), self.cursor);
         if self.count < self.capacity() {
             self.count = self.count.saturating_add(1);
         }
@@ -100,7 +100,7 @@ impl SampleHistory {
         // Before the buffer wraps the oldest sample is at 0; afterwards it is
         // wherever the cursor is about to overwrite.
         let start = if self.is_full() { self.cursor } else { 0 };
-        cycle::indices(self.capacity(), start, true)
+        step::indices(self.capacity(), start, true)
             .take(self.count)
             .map(|idx| self.samples.get(idx).copied().unwrap_or(0.0))
     }
@@ -118,7 +118,7 @@ impl SampleHistory {
             return 0.0;
         }
         // The cursor points at the *next* slot, so the latest is one behind it.
-        let idx = cycle::before(self.capacity(), self.cursor);
+        let idx = step::wrapping_before(self.capacity(), self.cursor);
         self.samples.get(idx).copied().unwrap_or(0.0)
     }
 

@@ -626,10 +626,12 @@ impl ListeningStats {
     }
 
     /// Total listening time formatted.
+    ///
+    /// This is a lifetime accumulator, so it is measured in days within a
+    /// month of use. It used to be hard-wired to `{h}h {m}m`, which reported
+    /// a year of podcasts as `2920h 0m` and a first session as `0h 12m`.
     pub fn total_time_display(&self) -> String {
-        let hours = self.total_listening_secs / 3600;
-        let mins = (self.total_listening_secs % 3600) / 60;
-        format!("{}h {}m", hours, mins)
+        guitk::duration::coarse(self.total_listening_secs)
     }
 
     /// Record a listening session.
@@ -779,14 +781,7 @@ pub fn xml_unescape(s: &str) -> String {
 
 /// Format seconds as HH:MM:SS or MM:SS.
 pub fn format_duration(total_secs: u32) -> String {
-    let hours = total_secs / 3600;
-    let mins = (total_secs % 3600) / 60;
-    let secs = total_secs % 60;
-    if hours > 0 {
-        format!("{:02}:{:02}:{:02}", hours, mins, secs)
-    } else {
-        format!("{:02}:{:02}", mins, secs)
-    }
+    guitk::duration::clock(u64::from(total_secs))
 }
 
 /// Format bytes as human-readable size.

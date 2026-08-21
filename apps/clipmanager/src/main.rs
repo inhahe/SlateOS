@@ -187,22 +187,15 @@ impl ClipEntry {
         format_size(self.size_bytes)
     }
 
-    /// Human-readable timestamp (simple seconds-ago style).
+    /// Human-readable timestamp.
+    ///
+    /// The Clipboard Manager and the desktop's clipboard viewer list the same
+    /// entries, and used to age them in different words: this one counted
+    /// seconds (`"45s ago"`) where the viewer said `"just now"`, and neither
+    /// ever stopped counting days, so a pinned snippet from last spring read
+    /// `"400d ago"`.
     fn time_display(&self, now: u64) -> String {
-        let diff = now.saturating_sub(self.timestamp);
-        if diff < 60 {
-            return format!("{diff}s ago");
-        }
-        let mins = diff / 60;
-        if mins < 60 {
-            return format!("{mins}m ago");
-        }
-        let hours = mins / 60;
-        if hours < 24 {
-            return format!("{hours}h ago");
-        }
-        let days = hours / 24;
-        format!("{days}d ago")
+        guitk::duration::relative(now.saturating_sub(self.timestamp))
     }
 }
 
@@ -2093,7 +2086,11 @@ mod tests {
     #[test]
     fn test_clip_entry_time_display_seconds() {
         let e = ClipEntry::new(1, String::new(), ClipType::PlainText, 990, String::new());
-        assert_eq!(e.time_display(1000), "10s ago");
+        // Was "10s ago". The desktop's clipboard viewer lists the same
+        // entries and said "just now" for the same age; a seconds countdown
+        // on a clipboard row is a number nobody reads and that changes on
+        // every repaint.
+        assert_eq!(e.time_display(1000), "just now");
     }
 
     #[test]

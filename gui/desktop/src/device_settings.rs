@@ -219,12 +219,12 @@ impl DeviceInfo {
     }
 
     /// Format connection duration for display.
+    ///
+    /// This function's shape is the one `guitk::duration::coarse_minutes` was
+    /// derived from — it was already right, and is now shared.
     pub fn uptime_display(&self, now: u64) -> String {
         match self.connected_duration(now) {
-            Some(secs) if secs < 60 => format!("{secs}s"),
-            Some(secs) if secs < 3600 => format!("{}m", secs / 60),
-            Some(secs) if secs < 86400 => format!("{}h {}m", secs / 3600, (secs % 3600) / 60),
-            Some(secs) => format!("{}d {}h", secs / 86400, (secs % 86400) / 3600),
+            Some(secs) => guitk::duration::coarse_minutes(secs),
             None => "—".to_string(),
         }
     }

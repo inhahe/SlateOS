@@ -1035,18 +1035,14 @@ fn format_bytes(bytes: u64) -> String {
     guitk::bytes::iec(bytes)
 }
 
-/// Format milliseconds as MM:SS or HH:MM:SS.
+/// Format a recording's length as a clock reading.
+///
+/// This is the same object the screen recorder lists — a captured video and
+/// how long it runs — so it gets the same rendering. It used to leave the
+/// leading minutes digit unpadded (`1:05` beside the recorder's `01:05`),
+/// which made two lists of recordings disagree about the same quantity.
 fn format_duration_ms(ms: u64) -> String {
-    let total_secs = ms / 1000;
-    let hours = total_secs / 3600;
-    let minutes = (total_secs % 3600) / 60;
-    let seconds = total_secs % 60;
-
-    if hours > 0 {
-        format!("{hours}:{minutes:02}:{seconds:02}")
-    } else {
-        format!("{minutes}:{seconds:02}")
-    }
+    guitk::duration::clock(ms / 1000)
 }
 
 // ============================================================================
@@ -3779,10 +3775,12 @@ mod tests {
 
     #[test]
     fn test_format_duration_ms() {
-        assert_eq!(format_duration_ms(0), "0:00");
-        assert_eq!(format_duration_ms(5000), "0:05");
-        assert_eq!(format_duration_ms(65000), "1:05");
-        assert_eq!(format_duration_ms(3661000), "1:01:01");
+        // The minutes field is padded now ("0:05" -> "00:05"), matching the
+        // screen recorder's list of the same kind of object.
+        assert_eq!(format_duration_ms(0), "00:00");
+        assert_eq!(format_duration_ms(5000), "00:05");
+        assert_eq!(format_duration_ms(65000), "01:05");
+        assert_eq!(format_duration_ms(3661000), "01:01:01");
     }
 
     // --- CameraApp tests ---

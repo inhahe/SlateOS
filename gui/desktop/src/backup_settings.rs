@@ -363,16 +363,13 @@ impl BackupHistoryEntry {
     }
 
     /// Format the duration for display.
+    ///
+    /// [`guitk::duration::coarse`] rather than `coarse_minutes`: this is how
+    /// long a backup *took*, a measurement, so a ninety-second run is `1m 30s`
+    /// and dropping the seconds would discard something real. It also used to
+    /// stop at hours, so a first full backup of a large disk read `26h 0m`.
     pub fn duration_display(&self) -> String {
-        if self.duration_secs < 60 {
-            format!("{}s", self.duration_secs)
-        } else if self.duration_secs < 3600 {
-            format!("{}m {}s", self.duration_secs / 60, self.duration_secs % 60)
-        } else {
-            let hours = self.duration_secs / 3600;
-            let mins = (self.duration_secs % 3600) / 60;
-            format!("{hours}h {mins}m")
-        }
+        guitk::duration::coarse(self.duration_secs)
     }
 
     /// Format the timestamp as a simple date string.

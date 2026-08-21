@@ -916,17 +916,7 @@ impl OperationProgress {
         if self.eta_seconds <= 0.0 || self.eta_seconds.is_infinite() {
             return "calculating...".to_string();
         }
-        let secs = self.eta_seconds as u64;
-        let hours = secs / 3600;
-        let minutes = (secs % 3600) / 60;
-        let seconds = secs % 60;
-        if hours > 0 {
-            format!("{}h {:02}m {:02}s", hours, minutes, seconds)
-        } else if minutes > 0 {
-            format!("{}m {:02}s", minutes, seconds)
-        } else {
-            format!("{}s", seconds)
-        }
+        guitk::duration::units(self.eta_seconds as u64)
     }
 
     /// Progress summary string.

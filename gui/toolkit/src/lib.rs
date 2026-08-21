@@ -80,7 +80,10 @@ pub mod widget;
 // `bytes` is here for the same reason and joined them for the same one: the
 // forty-seven hand-written `format_size`/`format_bytes` copies included the
 // backup tool and the installer, neither of which can reach `guitk`.
-pub use textfmt::{bytes, csv, escape, fold, kv};
+// `duration` followed on the same evidence: thirty-eight hand-written span
+// formatters, two of which lived in one file and disagreed about the length of
+// one recording.
+pub use textfmt::{bytes, csv, duration, escape, fold, kv};
 
 // Case-insensitive substring search lives in `textfind` for the same reason:
 // the headless components search text too, and the applications that need it

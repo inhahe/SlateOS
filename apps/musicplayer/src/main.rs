@@ -2476,12 +2476,16 @@ fn handle_mouse(state: &mut PlayerState, mouse_event: &MouseEvent) -> bool {
 // Utility Functions
 // ============================================================================
 
-/// Format seconds as mm:ss.
+/// Format seconds as `mm:ss`, widening to `hh:mm:ss` past an hour.
+///
+/// This used to have no hours field at all, so it rendered anything past an
+/// hour as total minutes. That is survivable for a track position, which is
+/// the caller it was written for — but it is also the formatter for the
+/// playlist total at the bottom of the queue, where an afternoon of music
+/// read `347:52`. Now it rolls, because `guitk::duration::clock` always does.
 fn format_time(secs: f32) -> String {
     let total = secs.max(0.0) as u32;
-    let minutes = total / 60;
-    let seconds = total % 60;
-    format!("{:02}:{:02}", minutes, seconds)
+    guitk::duration::clock(u64::from(total))
 }
 
 /// Generate a deterministic color from an album name (for album art placeholder).
@@ -3346,7 +3350,10 @@ mod tests {
     fn test_format_time() {
         assert_eq!(format_time(0.0), "00:00");
         assert_eq!(format_time(65.0), "01:05");
-        assert_eq!(format_time(3661.0), "61:01");
+        // Was `61:01`. This assertion did not catch the missing hours field;
+        // it pinned it, which is the more useful half of the lesson. A test
+        // that records what the code does is not evidence that it is right.
+        assert_eq!(format_time(3661.0), "01:01:01");
         assert_eq!(format_time(-5.0), "00:00");
     }
 

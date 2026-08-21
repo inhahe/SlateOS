@@ -1119,16 +1119,7 @@ pub fn format_size(bytes: u64) -> String {
 
 /// Format a duration in seconds as "Xh Ym Zs".
 fn format_duration(secs: u64) -> String {
-    let hours = secs / 3600;
-    let minutes = (secs % 3600) / 60;
-    let seconds = secs % 60;
-    if hours > 0 {
-        format!("{hours}h {minutes}m {seconds}s")
-    } else if minutes > 0 {
-        format!("{minutes}m {seconds}s")
-    } else {
-        format!("{seconds}s")
-    }
+    guitk::duration::units(secs)
 }
 
 /// Format a percentage with one decimal place.

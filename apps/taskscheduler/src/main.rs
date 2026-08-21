@@ -2575,16 +2575,12 @@ fn format_timestamp(ts: u64) -> String {
 }
 
 /// Format milliseconds into a readable duration.
+///
+/// See automator's `format_duration_ms`, which was the other copy. This one
+/// rounded through `f64`, so a task that ran 59 960 ms reported `60.0s` — a
+/// full minute, printed in the shape reserved for spans shorter than one.
 fn format_duration_ms(ms: u64) -> String {
-    if ms < 1000 {
-        format!("{ms}ms")
-    } else if ms < 60_000 {
-        format!("{:.1}s", ms as f64 / 1000.0)
-    } else {
-        let mins = ms / 60_000;
-        let secs = (ms % 60_000) / 1000;
-        format!("{mins}m {secs}s")
-    }
+    guitk::duration::units_ms(ms)
 }
 
 // ============================================================================
@@ -3520,6 +3516,21 @@ mod tests {
     #[test]
     fn test_format_duration_ms_minutes() {
         assert_eq!(format_duration_ms(125000), "2m 5s");
+    }
+
+    #[test]
+    fn test_format_duration_ms_never_rounds_past_a_minute() {
+        // Regression: the old body divided into an f64 and printed one decimal
+        // place, so a task that ran 59.96 s reported "60.0s" — a duration its
+        // own branch had excluded.
+        assert_eq!(format_duration_ms(59_960), "59.9s");
+    }
+
+    #[test]
+    fn test_format_duration_ms_has_an_hours_field() {
+        // Regression: the old ladder stopped at minutes, so a 90-minute task
+        // reported "90m 0s".
+        assert_eq!(format_duration_ms(5_400_000), "1h 30m 0s");
     }
 
     // --- list scrolling -----------------------------------------------------

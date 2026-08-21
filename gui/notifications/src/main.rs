@@ -1561,31 +1561,23 @@ impl NotificationDaemon {
         });
     }
 
+    /// How long ago `timestamp_ms` was, as a label.
+    ///
+    /// The notification centre and the desktop's notification pane
+    /// (`desktop::notif_pane`) display the same notifications, and used to
+    /// word their ages differently: this one spelled the units out
+    /// (`"3 min ago"`, `"2 hours ago"`, `"Yesterday"`), the pane abbreviated
+    /// them (`"3m ago"`, `"2h ago"`, `"yesterday"`). Both now use
+    /// `guitk::duration::relative`, whose abbreviations are what fits a
+    /// notification row, and which does not run out at days — this ladder
+    /// reported a month-old notification as `"31 days ago"`.
+    ///
+    /// A timestamp ahead of the clock is an age of zero, not a separate
+    /// state, so it reads `"just now"` like every other age of zero rather
+    /// than the bare `"now"` it used to get.
     fn format_relative_time(&self, timestamp_ms: u64) -> String {
-        if self.current_time_ms < timestamp_ms {
-            return String::from("now");
-        }
         let elapsed_ms = self.current_time_ms.saturating_sub(timestamp_ms);
-        let seconds = elapsed_ms / 1000;
-        let minutes = seconds / 60;
-        let hours = minutes / 60;
-        let days = hours / 24;
-
-        if seconds < 60 {
-            String::from("now")
-        } else if minutes < 60 {
-            format!("{minutes} min ago")
-        } else if hours < 24 {
-            if hours == 1 {
-                String::from("1 hour ago")
-            } else {
-                format!("{hours} hours ago")
-            }
-        } else if days == 1 {
-            String::from("Yesterday")
-        } else {
-            format!("{days} days ago")
-        }
+        guitk::duration::relative(elapsed_ms / 1000)
     }
 
     // -----------------------------------------------------------------------
@@ -2396,23 +2388,27 @@ mod tests {
     #[test]
     fn test_relative_time_formatting() {
         let daemon = NotificationDaemon::new(1920.0, 1080.0);
-        // "now" case.
+        // Age zero, and a timestamp ahead of the clock, which is also an age
+        // of zero rather than a state of its own.
         let mut d = daemon;
         d.current_time_ms = 10_000;
-        assert_eq!(d.format_relative_time(10_000), "now");
-        assert_eq!(d.format_relative_time(9_500), "now");
-        // Minutes.
+        assert_eq!(d.format_relative_time(10_000), "just now");
+        assert_eq!(d.format_relative_time(9_500), "just now");
+        assert_eq!(d.format_relative_time(20_000), "just now");
+        // Abbreviated now, matching the desktop's notification pane, which
+        // shows the same notifications: was "3 min ago", "2 hours ago",
+        // "1 hour ago", "Yesterday".
         d.current_time_ms = 180_000;
-        assert_eq!(d.format_relative_time(0), "3 min ago");
-        // Hours.
+        assert_eq!(d.format_relative_time(0), "3m ago");
         d.current_time_ms = 7_200_000;
-        assert_eq!(d.format_relative_time(0), "2 hours ago");
-        // 1 hour.
+        assert_eq!(d.format_relative_time(0), "2h ago");
         d.current_time_ms = 3_600_000;
-        assert_eq!(d.format_relative_time(0), "1 hour ago");
-        // Yesterday.
+        assert_eq!(d.format_relative_time(0), "1h ago");
         d.current_time_ms = 86_400_000 + 1000;
-        assert_eq!(d.format_relative_time(0), "Yesterday");
+        assert_eq!(d.format_relative_time(0), "yesterday");
+        // Was "31 days ago": the ladder used to run out at days.
+        d.current_time_ms = 31 * 86_400_000;
+        assert_eq!(d.format_relative_time(0), "1mo ago");
     }
 
     #[test]

@@ -439,21 +439,17 @@ impl PomodoroApp {
 
     // ── Format helpers ─────────────────────────────────────────────────
 
+    /// The countdown on the dial: `mm:ss`, widening past an hour.
+    ///
+    /// The stock intervals are all under an hour, but the settings screen
+    /// does not cap them, and a 90-minute focus block used to read `90:00`.
     fn format_time(secs: u32) -> String {
-        let m = secs / 60;
-        let s = secs % 60;
-        format!("{m:02}:{s:02}")
+        guitk::duration::clock(u64::from(secs))
     }
 
+    /// Total focus time across the day's sessions, which is routinely hours.
     fn format_time_long(secs: u32) -> String {
-        let h = secs / 3600;
-        let m = (secs % 3600) / 60;
-        let s = secs % 60;
-        if h > 0 {
-            format!("{h}h {m:02}m {s:02}s")
-        } else {
-            format!("{m}m {s:02}s")
-        }
+        guitk::duration::units(u64::from(secs))
     }
 
     fn progress_fraction(&self) -> f32 {
@@ -1666,8 +1662,8 @@ mod tests {
 
     #[test]
     fn test_format_time_long() {
-        assert_eq!(PomodoroApp::format_time_long(0), "0m 00s");
-        assert_eq!(PomodoroApp::format_time_long(3661), "1h 01m 01s");
+        assert_eq!(PomodoroApp::format_time_long(0), "0s");
+        assert_eq!(PomodoroApp::format_time_long(3661), "1h 1m 1s");
     }
 
     #[test]

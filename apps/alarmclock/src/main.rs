@@ -1827,29 +1827,17 @@ impl Default for AlarmClockApp {
 
 /// Format a duration in seconds as `HH:MM:SS` or `MM:SS`.
 pub fn format_duration_hms(total_seconds: u32) -> String {
-    let h = total_seconds / 3600;
-    let m = (total_seconds % 3600) / 60;
-    let s = total_seconds % 60;
-    if h > 0 {
-        format!("{:02}:{:02}:{:02}", h, m, s)
-    } else {
-        format!("{:02}:{:02}", m, s)
-    }
+    guitk::duration::clock(u64::from(total_seconds))
 }
 
 /// Format a duration in milliseconds as `MM:SS.mmm` or `HH:MM:SS.mmm`.
+///
+/// The stopwatch reads the same span as [`format_duration_hms`], one field
+/// wider. Both defer to `guitk::duration` so they cannot come to disagree
+/// about where the hours field appears — which is the bug this crate's
+/// sibling `screen_capture` shipped for exactly that reason.
 pub fn format_duration_ms(total_ms: u64) -> String {
-    let ms = total_ms % 1000;
-    let total_secs = total_ms / 1000;
-    let s = total_secs % 60;
-    let total_mins = total_secs / 60;
-    let m = total_mins % 60;
-    let h = total_mins / 60;
-    if h > 0 {
-        format!("{:02}:{:02}:{:02}.{:03}", h, m, s, ms)
-    } else {
-        format!("{:02}:{:02}.{:03}", m, s, ms)
-    }
+    guitk::duration::clock_ms(total_ms)
 }
 
 /// Parse a `HH:MM:SS` or `MM:SS` string into total seconds.

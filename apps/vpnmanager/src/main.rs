@@ -2954,15 +2954,13 @@ fn render_dialog_field(
     y + FIELD_HEIGHT + 6.0
 }
 
-/// Format seconds as a human-readable duration (e.g. "100h 0m").
+/// Format seconds as a human-readable duration (e.g. "4d 4h").
+///
+/// The only caller is a profile's lifetime `total_connection_time_secs`,
+/// which for a VPN left up passes a day within a day. This used to have no
+/// days field at all and reported that as `100h 0m`.
 fn format_duration_long(secs: u64) -> String {
-    let hours = secs / 3600;
-    let minutes = (secs % 3600) / 60;
-    if hours > 0 {
-        format!("{hours}h {minutes}m")
-    } else {
-        format!("{minutes}m")
-    }
+    guitk::duration::coarse(secs)
 }
 
 // ============================================================================
@@ -3441,13 +3439,17 @@ mod tests {
 
     #[test]
     fn test_format_duration_long_zero() {
-        assert_eq!(format_duration_long(0), "0m");
+        // Was "0m". A profile that has never connected has no minutes
+        // either; the unit shown is now the one the number actually has.
+        assert_eq!(format_duration_long(0), "0s");
     }
 
     #[test]
     fn test_format_duration_long_hours() {
         assert_eq!(format_duration_long(7200), "2h 0m");
         assert_eq!(format_duration_long(3660), "1h 1m");
+        // Was "100h 0m", because there was no days field.
+        assert_eq!(format_duration_long(360_000), "4d 4h");
     }
 
     // --- Overview tab prose ---

@@ -3471,21 +3471,7 @@ pub fn format_speed(bps: u64) -> String {
 /// Format duration in seconds as human-readable
 #[must_use]
 pub fn format_duration(seconds: u64) -> String {
-    if seconds >= 86400 {
-        let d = seconds / 86400;
-        let h = (seconds % 86400) / 3600;
-        format!("{d}d {h}h")
-    } else if seconds >= 3600 {
-        let h = seconds / 3600;
-        let m = (seconds % 3600) / 60;
-        format!("{h}h {m}m")
-    } else if seconds >= 60 {
-        let m = seconds / 60;
-        let s = seconds % 60;
-        format!("{m}m {s}s")
-    } else {
-        format!("{seconds}s")
-    }
+    guitk::duration::coarse(seconds)
 }
 
 // ─── Main ────────────────────────────────────────────────────────────

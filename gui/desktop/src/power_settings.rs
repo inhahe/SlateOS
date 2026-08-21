@@ -210,16 +210,15 @@ impl BatteryInfo {
     }
 
     /// Format remaining time as "Xh Ym" or "—".
+    ///
+    /// The same estimate the tray shows via `power::BatteryStatus::
+    /// time_remaining_str`, held here in minutes rather than seconds. Both go
+    /// through `guitk::duration::coarse_minutes`, so the two readouts a user
+    /// can have on screen at once cannot disagree about one number.
     pub fn remaining_formatted(&self) -> String {
         match self.remaining_mins {
             Some(m) if m > 0 => {
-                let hours = m / 60;
-                let mins = m % 60;
-                if hours > 0 {
-                    format!("{}h {}m", hours, mins)
-                } else {
-                    format!("{}m", mins)
-                }
+                guitk::duration::coarse_minutes(u64::from(m).saturating_mul(60))
             }
             _ => "—".into(),
         }

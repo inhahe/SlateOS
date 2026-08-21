@@ -697,21 +697,59 @@ pub fn days_from_civil(year: i64, month: u32, day: u32) -> i64 {
     era * 146_097 + doe - 719_468
 }
 
-/// The Gregorian year containing `days` (days since 1970-01-01).
+/// The Gregorian `(year, month, day)` containing `days` (days since
+/// 1970-01-01), with `month` and `day` 1-based.
+///
+/// Howard Hinnant's `civil_from_days`, and the exact inverse of
+/// [`days_from_civil`] for every date that function can produce — including
+/// dates before 1970, which is where hand-rolled versions of this go wrong.
+///
+/// # Why this is public
+///
+/// It is the other half of a bijection whose forward direction
+/// ([`days_from_civil`]) was already exported. Exporting only one direction
+/// does not stop callers needing the other; it only stops them sharing it. By
+/// 2026-08-20 the tree held **six** independent transcriptions of this
+/// function, and one of them — the file manager's — estimated the month as
+/// `day_of_year / 30 + 1` and so reported a wrong date for every timestamp
+/// before 2000-03-01. Every value it returned was in range, so no clamp and no
+/// assertion could have caught it (see
+/// `requests/c-b-year-of-day-computes-the-month-and-day-and-throws-them-away.md`).
+///
+/// [`year_of_day`] is defined in terms of this function, so the two cannot
+/// disagree about which calendar year a date falls in.
 #[must_use]
 #[allow(clippy::arithmetic_side_effects)]
-pub fn year_of_day(days: i64) -> i64 {
-    // Inverse of `days_from_civil`, restricted to the year.
+// The two casts at the end are exact: `m` is 1‥=12 and `d` is 1‥=31, and those
+// ranges are enforced by the arithmetic above rather than by convention. The
+// allow is on the function because attributes on a tail expression are not
+// stable Rust.
+#[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
+pub fn civil_from_days(days: i64) -> (i64, u32, u32) {
+    // Shift the epoch to 0000-03-01 so that the leap day lands at the end of
+    // the year and the era arithmetic below has no special case for February.
     let z = days + 719_468;
     let era = z.div_euclid(146_097);
-    let doe = z - era * 146_097;
-    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doe = z - era * 146_097; // 0‥=146_096
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365; // 0‥=399
     let y = yoe + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    // `mp` is a March-based month index; January and February belong to the
-    // next calendar year.
-    if mp >= 10 { y + 1 } else { y }
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100); // 0‥=365, from March 1
+    let mp = (5 * doy + 2) / 153; // March-based month index, 0‥=11
+    let d = doy - (153 * mp + 2) / 5 + 1; // 1‥=31
+    let m = if mp < 10 { mp + 3 } else { mp - 9 }; // 1‥=12
+    // `mp >= 10` is January or February, which belong to the *next* calendar
+    // year under a March-based count.
+    let year = if mp >= 10 { y + 1 } else { y };
+    (year, m as u32, d as u32)
+}
+
+/// The Gregorian year containing `days` (days since 1970-01-01).
+///
+/// A thin projection of [`civil_from_days`]; see there for why the whole date
+/// is available and why this is not a second copy of the algorithm.
+#[must_use]
+pub fn year_of_day(days: i64) -> i64 {
+    civil_from_days(days).0
 }
 
 #[cfg(test)]
@@ -911,6 +949,73 @@ mod tests {
             [(1969, 12, 31), (1970, 1, 1), (2000, 2, 29), (2021, 3, 14), (2100, 12, 31)]
         {
             assert_eq!(year_of_day(days_from_civil(y, m, d)), y, "{y}-{m}-{d}");
+        }
+    }
+
+    #[test]
+    fn civil_from_days_is_the_exact_inverse_of_days_from_civil() {
+        // A round trip over every day in a span that straddles 1970 in both
+        // directions, so a version that is only correct forward of the epoch
+        // — the failure mode that shipped in the file manager — cannot pass.
+        // 1900-01-01 through 2100-12-31 inclusive.
+        let first = days_from_civil(1900, 1, 1);
+        let last = days_from_civil(2100, 12, 31);
+        let mut days = first;
+        while days <= last {
+            let (y, m, d) = civil_from_days(days);
+            assert!((1..=12).contains(&m), "month {m} out of range at day {days}");
+            assert!((1..=days_in_month(m, y)).contains(&d), "day {d} out of range for {y}-{m}");
+            assert_eq!(days_from_civil(y, m, d), days, "round trip at {y}-{m}-{d}");
+            days += 1;
+        }
+    }
+
+    #[test]
+    fn civil_from_days_names_the_dates_a_month_estimate_gets_wrong() {
+        // The three dates from
+        // `requests/c-b-year-of-day-computes-the-month-and-day-and-throws-them-away.md`
+        // that the file manager's `day_of_year / 30 + 1` estimate reported
+        // wrongly, plus the epoch and the day before it.
+        for (y, m, d) in [
+            (1969, 12, 31),
+            (1970, 1, 1),
+            (1985, 7, 4),
+            (1999, 6, 15),
+            (2000, 2, 29), // a real leap day, which the estimate moved to March
+            (2000, 3, 1),
+        ] {
+            assert_eq!(civil_from_days(days_from_civil(y, m, d)), (y, m, d), "{y}-{m}-{d}");
+        }
+    }
+
+    #[test]
+    fn civil_from_days_handles_dates_far_outside_the_unix_era() {
+        // Hinnant's algorithm is correct for the whole `i64` range, and
+        // `days_from_civil`'s doc comment promises that; a version with a
+        // `days < 0` special case is correct only where it was tested.
+        for (y, m, d) in [
+            (1, 1, 1),
+            (1582, 10, 15), // the Gregorian calendar's first day, proleptic here
+            (1600, 2, 29),  // a century leap year
+            (1700, 2, 28),  // a century *non*-leap year
+            (-1, 12, 31),   // 1 BC in the proleptic Gregorian numbering
+            (-400, 2, 29),
+            (9999, 12, 31),
+        ] {
+            assert_eq!(civil_from_days(days_from_civil(y, m, d)), (y, m, d), "{y}-{m}-{d}");
+        }
+    }
+
+    #[test]
+    fn year_of_day_is_civil_from_days_and_cannot_drift_from_it() {
+        // Every month boundary over four centuries, which is where a
+        // separately-written year projection would disagree first: the
+        // March-based count puts January and February in the following year.
+        let mut days = days_from_civil(1800, 1, 1);
+        let last = days_from_civil(2200, 1, 1);
+        while days <= last {
+            assert_eq!(year_of_day(days), civil_from_days(days).0);
+            days += 1;
         }
     }
 

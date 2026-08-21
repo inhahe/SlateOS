@@ -890,14 +890,25 @@ impl OperationProgress {
     }
 
     /// Speed formatted as human-readable string.
+    ///
+    /// Binary, because this is a rate of bytes written to a disk image whose
+    /// own size is reported in binary units on the same panel. It used to
+    /// divide by 1024 and write `MB/s`, so the rate and the size disagreed
+    /// about what a "MB" was. See design-decisions.md §489.
     pub fn speed_display(&self) -> String {
-        let mb_per_sec = self.speed_bytes_per_sec / (1024.0 * 1024.0);
-        if mb_per_sec >= 1.0 {
-            format!("{:.1} MB/s", mb_per_sec)
+        #[expect(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            reason = "measured throughput: negative and non-finite are filtered \
+                      above, and a rate past u64::MAX is not physical"
+        )]
+        let bytes_per_sec = if self.speed_bytes_per_sec.is_finite() && self.speed_bytes_per_sec > 0.0
+        {
+            self.speed_bytes_per_sec as u64
         } else {
-            let kb_per_sec = self.speed_bytes_per_sec / 1024.0;
-            format!("{:.1} KB/s", kb_per_sec)
-        }
+            0
+        };
+        guitk::bytes::iec_rate(bytes_per_sec)
     }
 
     /// ETA formatted.
@@ -905,17 +916,7 @@ impl OperationProgress {
         if self.eta_seconds <= 0.0 || self.eta_seconds.is_infinite() {
             return "calculating...".to_string();
         }
-        let secs = self.eta_seconds as u64;
-        let hours = secs / 3600;
-        let minutes = (secs % 3600) / 60;
-        let seconds = secs % 60;
-        if hours > 0 {
-            format!("{}h {:02}m {:02}s", hours, minutes, seconds)
-        } else if minutes > 0 {
-            format!("{}m {:02}s", minutes, seconds)
-        } else {
-            format!("{}s", seconds)
-        }
+        guitk::duration::units(self.eta_seconds as u64)
     }
 
     /// Progress summary string.
@@ -3692,24 +3693,9 @@ impl DiskImagerApp {
 // Helper functions
 // ============================================================================
 
-/// Format byte count into human-readable string (e.g., "1.5 GB").
+/// Format byte count into human-readable string (e.g., "1.5 GiB").
 pub fn format_bytes(bytes: u64) -> String {
-    const KB: u64 = 1024;
-    const MB: u64 = 1024 * 1024;
-    const GB: u64 = 1024 * 1024 * 1024;
-    const TB: u64 = 1024 * 1024 * 1024 * 1024;
-
-    if bytes >= TB {
-        format!("{:.2} TB", bytes as f64 / TB as f64)
-    } else if bytes >= GB {
-        format!("{:.2} GB", bytes as f64 / GB as f64)
-    } else if bytes >= MB {
-        format!("{:.1} MB", bytes as f64 / MB as f64)
-    } else if bytes >= KB {
-        format!("{:.1} KB", bytes as f64 / KB as f64)
-    } else {
-        format!("{} B", bytes)
-    }
+    guitk::bytes::iec(bytes)
 }
 
 /// `path` cut from its start to fit `max_width` pixels, keeping the filename.
@@ -4158,7 +4144,7 @@ mod tests {
             is_readonly: false,
         };
         let s = drive.size_display();
-        assert!(s.contains("MB") || s.contains("GB"));
+        assert!(s.contains("MiB") || s.contains("GiB"));
     }
 
     #[test]
@@ -4488,17 +4474,28 @@ mod tests {
     #[test]
     fn test_progress_speed_display() {
         let mut p = OperationProgress::new(1024 * 1024 * 100);
-        p.advance(1024 * 1024 * 50, 1000); // 50 MB in 1 second
+        p.advance(1024 * 1024 * 50, 1000); // 50 MiB in 1 second
         let s = p.speed_display();
-        assert!(s.contains("MB/s"));
+        assert_eq!(s, "50.0 MiB/s");
     }
 
     #[test]
     fn test_progress_speed_display_kb() {
         let mut p = OperationProgress::new(1024 * 100);
-        p.advance(512, 1000); // 0.5 KB in 1 second
+        p.advance(2560, 1000); // 2.5 KiB in 1 second
         let s = p.speed_display();
-        assert!(s.contains("KB/s"));
+        assert_eq!(s, "2.5 KiB/s");
+    }
+
+    /// A rate below one kibibyte is printed exactly, not as a fraction of the
+    /// next unit up. The old formatter had no bytes-per-second branch at all
+    /// and rendered 512 B/s as "0.5 KB/s" -- a mantissa below one, in a unit
+    /// the value never reached, with the wrong prefix family besides.
+    #[test]
+    fn a_sub_kibibyte_rate_is_printed_in_bytes() {
+        let mut p = OperationProgress::new(1024 * 100);
+        p.advance(512, 1000);
+        assert_eq!(p.speed_display(), "512 B/s");
     }
 
     #[test]
@@ -4560,25 +4557,25 @@ mod tests {
     #[test]
     fn test_format_bytes_kb() {
         let s = format_bytes(2048);
-        assert!(s.contains("KB"));
+        assert!(s.contains("KiB"));
     }
 
     #[test]
     fn test_format_bytes_mb() {
         let s = format_bytes(5 * 1024 * 1024);
-        assert!(s.contains("MB"));
+        assert!(s.contains("MiB"));
     }
 
     #[test]
     fn test_format_bytes_gb() {
         let s = format_bytes(2 * 1024 * 1024 * 1024);
-        assert!(s.contains("GB"));
+        assert!(s.contains("GiB"));
     }
 
     #[test]
     fn test_format_bytes_tb() {
         let s = format_bytes(2 * 1024 * 1024 * 1024 * 1024);
-        assert!(s.contains("TB"));
+        assert!(s.contains("TiB"));
     }
 
     #[test]

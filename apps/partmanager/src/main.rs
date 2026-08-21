@@ -151,44 +151,7 @@ const MIN_PARTITION_BAR_WIDTH: f32 = 4.0;
 
 /// Format a byte count into a human-readable string using binary units.
 fn format_size(bytes: u64) -> String {
-    const KIB: u64 = 1024;
-    const MIB: u64 = 1024 * KIB;
-    const GIB: u64 = 1024 * MIB;
-    const TIB: u64 = 1024 * GIB;
-
-    if bytes >= TIB {
-        let whole = bytes / TIB;
-        let frac = ((bytes % TIB) * 100) / TIB;
-        if frac == 0 {
-            return format!("{whole} TiB");
-        }
-        return format!("{whole}.{frac:02} TiB");
-    }
-    if bytes >= GIB {
-        let whole = bytes / GIB;
-        let frac = ((bytes % GIB) * 100) / GIB;
-        if frac == 0 {
-            return format!("{whole} GiB");
-        }
-        return format!("{whole}.{frac:02} GiB");
-    }
-    if bytes >= MIB {
-        let whole = bytes / MIB;
-        let frac = ((bytes % MIB) * 100) / MIB;
-        if frac == 0 {
-            return format!("{whole} MiB");
-        }
-        return format!("{whole}.{frac:02} MiB");
-    }
-    if bytes >= KIB {
-        let whole = bytes / KIB;
-        let frac = ((bytes % KIB) * 100) / KIB;
-        if frac == 0 {
-            return format!("{whole} KiB");
-        }
-        return format!("{whole}.{frac:02} KiB");
-    }
-    format!("{bytes} B")
+    guitk::bytes::iec(bytes)
 }
 
 /// Format a sector count to bytes given a sector size.
@@ -5013,27 +4976,27 @@ mod tests {
 
     #[test]
     fn test_format_size_kib() {
-        assert_eq!(format_size(1024), "1 KiB");
-        assert_eq!(format_size(2048), "2 KiB");
-        assert_eq!(format_size(1536), "1.50 KiB");
+        assert_eq!(format_size(1024), "1.0 KiB");
+        assert_eq!(format_size(2048), "2.0 KiB");
+        assert_eq!(format_size(1536), "1.5 KiB");
     }
 
     #[test]
     fn test_format_size_mib() {
-        assert_eq!(format_size(1024 * 1024), "1 MiB");
-        assert_eq!(format_size(10 * 1024 * 1024), "10 MiB");
+        assert_eq!(format_size(1024 * 1024), "1.0 MiB");
+        assert_eq!(format_size(10 * 1024 * 1024), "10.0 MiB");
     }
 
     #[test]
     fn test_format_size_gib() {
-        assert_eq!(format_size(1024 * 1024 * 1024), "1 GiB");
-        assert_eq!(format_size(500_107_862_016), "465.76 GiB");
+        assert_eq!(format_size(1024 * 1024 * 1024), "1.0 GiB");
+        assert_eq!(format_size(500_107_862_016), "465.8 GiB");
     }
 
     #[test]
     fn test_format_size_tib() {
-        assert_eq!(format_size(1024u64 * 1024 * 1024 * 1024), "1 TiB");
-        assert_eq!(format_size(2u64 * 1024 * 1024 * 1024 * 1024), "2 TiB");
+        assert_eq!(format_size(1024u64 * 1024 * 1024 * 1024), "1.0 TiB");
+        assert_eq!(format_size(2u64 * 1024 * 1024 * 1024 * 1024), "2.0 TiB");
     }
 
     #[test]

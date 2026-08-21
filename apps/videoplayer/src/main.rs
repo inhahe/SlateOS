@@ -1813,19 +1813,7 @@ impl Default for PlayerPreferences {
 // ============================================================================
 
 fn format_bytes(bytes: u64) -> String {
-    const KB: u64 = 1024;
-    const MB: u64 = KB * 1024;
-    const GB: u64 = MB * 1024;
-
-    if bytes >= GB {
-        format!("{:.2} GB", bytes as f64 / GB as f64)
-    } else if bytes >= MB {
-        format!("{:.1} MB", bytes as f64 / MB as f64)
-    } else if bytes >= KB {
-        format!("{} KB", bytes / KB)
-    } else {
-        format!("{bytes} B")
-    }
+    guitk::bytes::iec(bytes)
 }
 
 fn format_bitrate(bps: u64) -> String {
@@ -4858,7 +4846,7 @@ mod tests {
     #[test]
     fn test_media_file_display() {
         let file = sample_media_file();
-        assert!(file.file_size_display().contains("GB"));
+        assert!(file.file_size_display().contains("GiB"));
         assert!(file.overall_bitrate() > 0);
     }
 
@@ -5102,9 +5090,9 @@ mod tests {
     #[test]
     fn test_format_bytes() {
         assert_eq!(format_bytes(500), "500 B");
-        assert_eq!(format_bytes(2048), "2 KB");
-        assert!(format_bytes(1_500_000).contains("MB"));
-        assert!(format_bytes(2_000_000_000).contains("GB"));
+        assert_eq!(format_bytes(2048), "2.0 KiB");
+        assert!(format_bytes(1_500_000).contains("MiB"));
+        assert!(format_bytes(2_000_000_000).contains("GiB"));
     }
 
     #[test]

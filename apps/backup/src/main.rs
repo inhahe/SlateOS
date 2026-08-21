@@ -1138,15 +1138,7 @@ fn relative_path(full: &Path, base: &Path) -> PathBuf {
 
 /// Format byte size as human-readable string.
 fn format_size(bytes: u64) -> String {
-    if bytes < 1024 {
-        format!("{} B", bytes)
-    } else if bytes < 1024 * 1024 {
-        format!("{:.1} KiB", bytes as f64 / 1024.0)
-    } else if bytes < 1024 * 1024 * 1024 {
-        format!("{:.1} MiB", bytes as f64 / (1024.0 * 1024.0))
-    } else {
-        format!("{:.1} GiB", bytes as f64 / (1024.0 * 1024.0 * 1024.0))
-    }
+    textfmt::bytes::iec(bytes)
 }
 
 /// Get current unix timestamp.

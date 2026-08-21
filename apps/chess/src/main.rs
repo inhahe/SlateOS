@@ -3023,7 +3023,7 @@ mod tests {
             RenderCommand::Text {
                 y, text, font_size, ..
             } if (*font_size - PIECE_FONT_SIZE).abs() < 0.01
-                && text.chars().next() == Some(glyph) =>
+                && text.starts_with(glyph) =>
             {
                 Some(*y)
             }

@@ -312,19 +312,7 @@ impl ArchiveEntry {
 
     /// Format the size for display.
     pub fn format_size(bytes: u64) -> String {
-        if bytes < 1024 {
-            return format!("{bytes} B");
-        }
-        let kb = bytes as f64 / 1024.0;
-        if kb < 1024.0 {
-            return format!("{kb:.1} KB");
-        }
-        let mb = kb / 1024.0;
-        if mb < 1024.0 {
-            return format!("{mb:.1} MB");
-        }
-        let gb = mb / 1024.0;
-        format!("{gb:.2} GB")
+        guitk::bytes::iec(bytes)
     }
 
     /// Format CRC as a hex string.
@@ -1127,7 +1115,7 @@ impl CreateArchiveSettings {
         }
 
         if self.split.enabled && self.split.volume_size < 65536 {
-            problems.push("Volume size must be at least 64 KB".into());
+            problems.push("Volume size must be at least 64 KiB".into());
         }
 
         if self.encryption.is_enabled() && self.encryption.password.is_empty() {
@@ -2683,19 +2671,19 @@ mod tests {
     #[test]
     fn test_entry_format_size_kb() {
         let s = ArchiveEntry::format_size(2048);
-        assert!(s.contains("KB"));
+        assert!(s.contains("KiB"));
     }
 
     #[test]
     fn test_entry_format_size_mb() {
         let s = ArchiveEntry::format_size(5 * 1024 * 1024);
-        assert!(s.contains("MB"));
+        assert!(s.contains("MiB"));
     }
 
     #[test]
     fn test_entry_format_size_gb() {
         let s = ArchiveEntry::format_size(3 * 1024 * 1024 * 1024);
-        assert!(s.contains("GB"));
+        assert!(s.contains("GiB"));
     }
 
     #[test]
@@ -3527,7 +3515,7 @@ mod tests {
             ..Default::default()
         };
         let problems = s.validate();
-        assert!(problems.iter().any(|p| p.contains("64 KB")));
+        assert!(problems.iter().any(|p| p.contains("64 KiB")));
     }
 
     // --- AppState tests ---

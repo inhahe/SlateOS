@@ -687,22 +687,17 @@ impl AboutDialog {
 /// Format an uptime duration in seconds as a human-readable string.
 ///
 /// Examples:
-/// - 0 seconds -> "0m"
+/// - 0 seconds -> "0s"
 /// - 90 seconds -> "1m"
 /// - 3600 seconds -> "1h 0m"
-/// - 90000 seconds -> "1d 1h 0m"
+/// - 90000 seconds -> "1d 1h"
+///
+/// The days case used to carry a third component (`1d 1h 0m`), which is the
+/// one place in the About box where the number stops being glanceable — and
+/// the minutes digit of a week-long uptime is the least interesting digit on
+/// the screen.
 pub fn format_uptime(seconds: u64) -> String {
-    let days = seconds / 86400;
-    let hours = (seconds % 86400) / 3600;
-    let minutes = (seconds % 3600) / 60;
-
-    if days > 0 {
-        format!("{}d {}h {}m", days, hours, minutes)
-    } else if hours > 0 {
-        format!("{}h {}m", hours, minutes)
-    } else {
-        format!("{}m", minutes)
-    }
+    guitk::duration::coarse_minutes(seconds)
 }
 
 /// Format a memory amount in megabytes as a human-readable GiB string.
@@ -780,7 +775,9 @@ mod tests {
 
     #[test]
     fn test_format_uptime_zero() {
-        assert_eq!(format_uptime(0), "0m");
+        // Was "0m", which named a unit the number did not have. A machine up
+        // for no time at all has been up zero seconds.
+        assert_eq!(format_uptime(0), "0s");
     }
 
     #[test]
@@ -801,17 +798,20 @@ mod tests {
     #[test]
     fn test_format_uptime_days() {
         // 2d 5h 30m = 2*86400 + 5*3600 + 30*60 = 172800 + 18000 + 1800 = 192600
-        assert_eq!(format_uptime(192600), "2d 5h 30m");
+        // Two components, not three: the minutes digit of a multi-day uptime
+        // is the least interesting number in the About box.
+        assert_eq!(format_uptime(192600), "2d 5h");
     }
 
     #[test]
     fn test_format_uptime_one_day_exact() {
-        assert_eq!(format_uptime(86400), "1d 0h 0m");
+        assert_eq!(format_uptime(86400), "1d 0h");
     }
 
     #[test]
     fn test_format_uptime_under_one_minute() {
-        assert_eq!(format_uptime(59), "0m");
+        // Was "0m".
+        assert_eq!(format_uptime(59), "59s");
     }
 
     #[test]

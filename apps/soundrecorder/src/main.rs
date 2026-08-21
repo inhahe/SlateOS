@@ -1466,13 +1466,7 @@ impl RecordingEntry {
 
     /// Format the file size in human-readable form.
     pub fn format_size(&self) -> String {
-        if self.size_bytes < 1024 {
-            format!("{} B", self.size_bytes)
-        } else if self.size_bytes < 1024 * 1024 {
-            format!("{:.1} KB", self.size_bytes as f64 / 1024.0)
-        } else {
-            format!("{:.1} MB", self.size_bytes as f64 / (1024.0 * 1024.0))
-        }
+        guitk::bytes::iec(self.size_bytes)
     }
 }
 
@@ -2887,7 +2881,7 @@ mod tests {
             duration_secs: 0.0, size_bytes: 2048,
             sample_rate: 48000, channels: 1, created_timestamp: 0,
         };
-        assert_eq!(e.format_size(), "2.0 KB");
+        assert_eq!(e.format_size(), "2.0 KiB");
     }
 
     #[test]
@@ -2897,7 +2891,7 @@ mod tests {
             duration_secs: 0.0, size_bytes: 5_242_880,
             sample_rate: 48000, channels: 1, created_timestamp: 0,
         };
-        assert_eq!(e.format_size(), "5.0 MB");
+        assert_eq!(e.format_size(), "5.0 MiB");
     }
 
     // -- RecordingHistory tests ----------------------------------------------

@@ -206,7 +206,7 @@ pub enum ColumnValue {
     Text(String),
     /// Integer value displayed as-is.
     Number(i64),
-    /// Byte count formatted as "1.2 MB".
+    /// Byte count formatted as "1.2 MiB".
     Size(u64),
     /// Unix-epoch seconds formatted as a date/time string.
     DateTime(u64),
@@ -1464,15 +1464,7 @@ fn path_extension(path: &str) -> String {
 
 /// Format a byte count as a human-readable size string.
 fn format_size(bytes: u64) -> String {
-    if bytes < 1024 {
-        format!("{bytes} B")
-    } else if bytes < 1024 * 1024 {
-        format!("{:.1} KB", bytes as f64 / 1024.0)
-    } else if bytes < 1024 * 1024 * 1024 {
-        format!("{:.1} MB", bytes as f64 / (1024.0 * 1024.0))
-    } else {
-        format!("{:.2} GB", bytes as f64 / (1024.0 * 1024.0 * 1024.0))
-    }
+    guitk::bytes::iec(bytes)
 }
 
 /// Format an integer with thousand separators.
@@ -1638,21 +1630,21 @@ mod tests {
 
     #[test]
     fn test_format_size_kilobytes() {
-        assert_eq!(format_size(1024), "1.0 KB");
-        assert_eq!(format_size(1536), "1.5 KB");
-        assert_eq!(format_size(1024 * 100), "100.0 KB");
+        assert_eq!(format_size(1024), "1.0 KiB");
+        assert_eq!(format_size(1536), "1.5 KiB");
+        assert_eq!(format_size(1024 * 100), "100.0 KiB");
     }
 
     #[test]
     fn test_format_size_megabytes() {
-        assert_eq!(format_size(1024 * 1024), "1.0 MB");
-        assert_eq!(format_size(1024 * 1024 + 512 * 1024), "1.5 MB");
+        assert_eq!(format_size(1024 * 1024), "1.0 MiB");
+        assert_eq!(format_size(1024 * 1024 + 512 * 1024), "1.5 MiB");
     }
 
     #[test]
     fn test_format_size_gigabytes() {
-        assert_eq!(format_size(1024 * 1024 * 1024), "1.00 GB");
-        assert_eq!(format_size(2 * 1024 * 1024 * 1024), "2.00 GB");
+        assert_eq!(format_size(1024 * 1024 * 1024), "1.0 GiB");
+        assert_eq!(format_size(2 * 1024 * 1024 * 1024), "2.0 GiB");
     }
 
     #[test]
@@ -1754,7 +1746,7 @@ mod tests {
     fn test_column_value_display() {
         assert_eq!(ColumnValue::Text("hello".into()).display(), "hello");
         assert_eq!(ColumnValue::Number(42).display(), "42");
-        assert_eq!(ColumnValue::Size(1024).display(), "1.0 KB");
+        assert_eq!(ColumnValue::Size(1024).display(), "1.0 KiB");
         assert_eq!(ColumnValue::Duration(222).display(), "3:42");
         assert_eq!(ColumnValue::Percentage(0.85).display(), "85%");
         assert_eq!(ColumnValue::Empty.display(), "");

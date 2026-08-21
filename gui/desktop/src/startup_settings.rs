@@ -180,13 +180,18 @@ impl StartupEntry {
     }
 
     /// Human-readable delay string.
+    ///
+    /// `"Immediate"` stays here rather than moving into the shared formatter:
+    /// it is a word for *no delay configured*, not a rendering of zero.
+    ///
+    /// Everything above it had no minutes branch, so a startup item held back
+    /// five minutes — which the settings screen lets you configure — read
+    /// `300.0s`.
     pub fn delay_text(&self) -> String {
         if self.delay_ms == 0 {
             "Immediate".to_string()
-        } else if self.delay_ms < 1000 {
-            format!("{}ms", self.delay_ms)
         } else {
-            format!("{:.1}s", self.delay_ms as f64 / 1000.0)
+            guitk::duration::units_ms(self.delay_ms)
         }
     }
 
@@ -1081,6 +1086,10 @@ mod tests {
         assert_eq!(e.delay_text(), "500ms");
         e.delay_ms = 2500;
         assert_eq!(e.delay_text(), "2.5s");
+        // Regression: the old body's ladder ended at seconds, so a five-minute
+        // delay — which this very screen lets you configure — read "300.0s".
+        e.delay_ms = 300_000;
+        assert_eq!(e.delay_text(), "5m 0s");
     }
 
     #[test]

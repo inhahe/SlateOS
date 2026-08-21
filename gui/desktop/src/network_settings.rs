@@ -825,15 +825,7 @@ impl NetworkInterface {
 
     /// Format transfer amount.
     pub fn format_bytes(bytes: u64) -> String {
-        if bytes >= 1_073_741_824 {
-            format!("{:.1} GB", bytes as f64 / 1_073_741_824.0)
-        } else if bytes >= 1_048_576 {
-            format!("{:.1} MB", bytes as f64 / 1_048_576.0)
-        } else if bytes >= 1024 {
-            format!("{:.1} KB", bytes as f64 / 1024.0)
-        } else {
-            format!("{bytes} B")
-        }
+        guitk::bytes::si(bytes)
     }
 
     /// Get a summary string for this interface.
@@ -2916,9 +2908,9 @@ mod tests {
     #[test]
     fn test_format_bytes() {
         assert_eq!(NetworkInterface::format_bytes(500), "500 B");
-        assert_eq!(NetworkInterface::format_bytes(1500), "1.5 KB");
-        assert_eq!(NetworkInterface::format_bytes(1_500_000), "1.4 MB");
-        assert_eq!(NetworkInterface::format_bytes(2_000_000_000), "1.9 GB");
+        assert_eq!(NetworkInterface::format_bytes(1500), "1.5 kB");
+        assert_eq!(NetworkInterface::format_bytes(1_500_000), "1.5 MB");
+        assert_eq!(NetworkInterface::format_bytes(2_000_000_000), "2.0 GB");
     }
 
     // NetworkSettings tests

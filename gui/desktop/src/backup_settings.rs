@@ -363,16 +363,13 @@ impl BackupHistoryEntry {
     }
 
     /// Format the duration for display.
+    ///
+    /// [`guitk::duration::coarse`] rather than `coarse_minutes`: this is how
+    /// long a backup *took*, a measurement, so a ninety-second run is `1m 30s`
+    /// and dropping the seconds would discard something real. It also used to
+    /// stop at hours, so a first full backup of a large disk read `26h 0m`.
     pub fn duration_display(&self) -> String {
-        if self.duration_secs < 60 {
-            format!("{}s", self.duration_secs)
-        } else if self.duration_secs < 3600 {
-            format!("{}m {}s", self.duration_secs / 60, self.duration_secs % 60)
-        } else {
-            let hours = self.duration_secs / 3600;
-            let mins = (self.duration_secs % 3600) / 60;
-            format!("{hours}h {mins}m")
-        }
+        guitk::duration::coarse(self.duration_secs)
     }
 
     /// Format the timestamp as a simple date string.
@@ -387,15 +384,7 @@ impl BackupHistoryEntry {
 
 /// Format bytes for display.
 fn format_bytes(bytes: u64) -> String {
-    if bytes >= 1_073_741_824 {
-        format!("{:.1} GB", bytes as f64 / 1_073_741_824.0)
-    } else if bytes >= 1_048_576 {
-        format!("{:.1} MB", bytes as f64 / 1_048_576.0)
-    } else if bytes >= 1024 {
-        format!("{:.1} KB", bytes as f64 / 1024.0)
-    } else {
-        format!("{bytes} B")
-    }
+    guitk::bytes::iec(bytes)
 }
 
 // ============================================================================
@@ -1659,7 +1648,7 @@ mod tests {
             error_message: None,
             target_path: "/backup".to_string(),
         };
-        assert_eq!(entry.size_display(), "4.7 GB");
+        assert_eq!(entry.size_display(), "4.7 GiB");
         assert_eq!(entry.duration_display(), "1h 1m");
         assert!(entry.date_display().contains("01:01"));
     }
@@ -1667,9 +1656,9 @@ mod tests {
     #[test]
     fn test_format_bytes() {
         assert_eq!(format_bytes(500), "500 B");
-        assert_eq!(format_bytes(2048), "2.0 KB");
-        assert_eq!(format_bytes(1_500_000), "1.4 MB");
-        assert_eq!(format_bytes(2_000_000_000), "1.9 GB");
+        assert_eq!(format_bytes(2048), "2.0 KiB");
+        assert_eq!(format_bytes(1_500_000), "1.4 MiB");
+        assert_eq!(format_bytes(2_000_000_000), "1.9 GiB");
     }
 
     #[test]

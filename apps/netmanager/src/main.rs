@@ -263,21 +263,15 @@ pub struct NetworkInterface {
 }
 
 impl NetworkInterface {
-    /// Format byte count as human-readable string.
+    /// Format an interface's transfer counter.
+    ///
+    /// Decimal, not binary: this is the same `rx_bytes`/`tx_bytes` the tray
+    /// indicator and the network settings page show, and two windows quoting
+    /// one counter must not disagree about what it says. See
+    /// design-decisions.md §489 -- bytes moved over a link are SI, bytes
+    /// occupying storage are IEC.
     fn format_bytes(bytes: u64) -> String {
-        if bytes < 1024 {
-            return format!("{bytes} B");
-        }
-        let kb = bytes as f64 / 1024.0;
-        if kb < 1024.0 {
-            return format!("{kb:.1} KB");
-        }
-        let mb = kb / 1024.0;
-        if mb < 1024.0 {
-            return format!("{mb:.1} MB");
-        }
-        let gb = mb / 1024.0;
-        format!("{gb:.2} GB")
+        guitk::bytes::si(bytes)
     }
 
     /// Summary status line for the status bar.
@@ -2717,8 +2711,8 @@ mod tests {
 
     #[test]
     fn test_format_bytes_kb() {
-        assert_eq!(NetworkInterface::format_bytes(1024), "1.0 KB");
-        assert_eq!(NetworkInterface::format_bytes(2048), "2.0 KB");
+        assert_eq!(NetworkInterface::format_bytes(1024), "1.0 kB");
+        assert_eq!(NetworkInterface::format_bytes(2048), "2.0 kB");
     }
 
     #[test]
@@ -2728,7 +2722,7 @@ mod tests {
 
     #[test]
     fn test_format_bytes_gb() {
-        assert_eq!(NetworkInterface::format_bytes(1_073_741_824), "1.00 GB");
+        assert_eq!(NetworkInterface::format_bytes(1_073_741_824), "1.1 GB");
     }
 
     #[test]

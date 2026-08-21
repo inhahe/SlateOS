@@ -55,7 +55,9 @@
 
 extern crate alloc;
 
+pub mod bytes;
 pub mod csv;
+pub mod duration;
 pub mod escape;
 pub mod fold;
 pub mod kv;

@@ -1091,18 +1091,7 @@ impl Photo {
 
     /// Human-readable file size.
     pub fn human_size(&self) -> String {
-        if self.file_size < 1024 {
-            format!("{} B", self.file_size)
-        } else if self.file_size < 1024 * 1024 {
-            format!("{:.1} KB", self.file_size as f64 / 1024.0)
-        } else if self.file_size < 1024 * 1024 * 1024 {
-            format!("{:.1} MB", self.file_size as f64 / (1024.0 * 1024.0))
-        } else {
-            format!(
-                "{:.2} GB",
-                self.file_size as f64 / (1024.0 * 1024.0 * 1024.0)
-            )
-        }
+        guitk::bytes::iec(self.file_size)
     }
 }
 
@@ -3386,7 +3375,7 @@ mod tests {
         let p1 = Photo::new(1, "/a", "a", ImageFormat::Jpeg, 500, 1);
         assert_eq!(p1.human_size(), "500 B");
         let p2 = Photo::new(2, "/b", "b", ImageFormat::Jpeg, 5_242_880, 1);
-        assert_eq!(p2.human_size(), "5.0 MB");
+        assert_eq!(p2.human_size(), "5.0 MiB");
     }
 
     // --- Album tests ---

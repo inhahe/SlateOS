@@ -1804,41 +1804,18 @@ impl FileSearchApp {
 
 #[must_use]
 pub fn format_size(bytes: u64) -> String {
-    const KIB: u64 = 1024;
-    const MIB: u64 = 1024 * KIB;
-    const GIB: u64 = 1024 * MIB;
-    const TIB: u64 = 1024 * GIB;
-
-    if bytes >= TIB {
-        format!("{:.2} TiB", bytes as f64 / TIB as f64)
-    } else if bytes >= GIB {
-        format!("{:.2} GiB", bytes as f64 / GIB as f64)
-    } else if bytes >= MIB {
-        format!("{:.1} MiB", bytes as f64 / MIB as f64)
-    } else if bytes >= KIB {
-        format!("{:.1} KiB", bytes as f64 / KIB as f64)
-    } else {
-        format!("{bytes} B")
-    }
+    guitk::bytes::iec(bytes)
 }
 
+/// How long ago a file was modified or created, as a label.
+///
+/// This ladder was the most complete of the five the audit found — it is the
+/// one `guitk::duration::relative` was built from — but it capitalised
+/// `"Just now"` and had no `"yesterday"`, so one age read differently here
+/// than in the clipboard and notification panes.
 #[must_use]
 pub fn format_relative_time(seconds: u64) -> String {
-    if seconds < 60 {
-        "Just now".to_string()
-    } else if seconds < 3600 {
-        format!("{}m ago", seconds / 60)
-    } else if seconds < 86400 {
-        format!("{}h ago", seconds / 3600)
-    } else if seconds < 604_800 {
-        format!("{}d ago", seconds / 86400)
-    } else if seconds < 2_592_000 {
-        format!("{}w ago", seconds / 604_800)
-    } else if seconds < 31_536_000 {
-        format!("{}mo ago", seconds / 2_592_000)
-    } else {
-        format!("{}y ago", seconds / 31_536_000)
-    }
+    guitk::duration::relative(seconds)
 }
 
 // ─── Main ────────────────────────────────────────────────────────────
@@ -2466,14 +2443,19 @@ mod tests {
     fn test_format_size() {
         assert_eq!(format_size(0), "0 B");
         assert_eq!(format_size(1024), "1.0 KiB");
-        assert_eq!(format_size(1_073_741_824), "1.00 GiB");
+        assert_eq!(format_size(1_073_741_824), "1.0 GiB");
     }
 
     #[test]
     fn test_format_relative() {
-        assert_eq!(format_relative_time(30), "Just now");
+        // Lowercase now: the clipboard and notification panes both said
+        // "just now" for the same age, and this was the only capital.
+        assert_eq!(format_relative_time(30), "just now");
         assert_eq!(format_relative_time(3600), "1h ago");
-        assert_eq!(format_relative_time(86400), "1d ago");
+        // Was "1d ago". A day ago is yesterday, which is what every other
+        // ladder in the system already called it.
+        assert_eq!(format_relative_time(86400), "yesterday");
+        assert_eq!(format_relative_time(172_800), "2d ago");
     }
 
     #[test]

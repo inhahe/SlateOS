@@ -204,29 +204,16 @@ pub struct TransferRates {
 
 impl TransferRates {
     /// Format a byte rate as human-readable (e.g. "1.5 MB/s").
+    ///
+    /// Decimal, matching the counters below and the resource monitor's network
+    /// graph. See design-decisions.md §489.
     pub fn format_rate(bytes_per_sec: u64) -> String {
-        if bytes_per_sec >= 1_000_000_000 {
-            format!("{:.1} GB/s", bytes_per_sec as f64 / 1_000_000_000.0)
-        } else if bytes_per_sec >= 1_000_000 {
-            format!("{:.1} MB/s", bytes_per_sec as f64 / 1_000_000.0)
-        } else if bytes_per_sec >= 1_000 {
-            format!("{:.1} KB/s", bytes_per_sec as f64 / 1_000.0)
-        } else {
-            format!("{} B/s", bytes_per_sec)
-        }
+        guitk::bytes::si_rate(bytes_per_sec)
     }
 
     /// Format total bytes.
     pub fn format_bytes(bytes: u64) -> String {
-        if bytes >= 1_000_000_000 {
-            format!("{:.2} GB", bytes as f64 / 1_000_000_000.0)
-        } else if bytes >= 1_000_000 {
-            format!("{:.1} MB", bytes as f64 / 1_000_000.0)
-        } else if bytes >= 1_000 {
-            format!("{:.0} KB", bytes as f64 / 1_000.0)
-        } else {
-            format!("{} B", bytes)
-        }
+        guitk::bytes::si(bytes)
     }
 
     pub fn rx_formatted(&self) -> String {
@@ -298,16 +285,12 @@ impl NetworkState {
         }
     }
 
-    /// Uptime formatted as "Xh Ym" or "Xs".
+    /// Uptime formatted as "Xd Yh", "Xh Ym", "Xm Ys" or "Xs".
+    ///
+    /// This had no days field, so an Ethernet link left up for a week — the
+    /// normal state of a desktop — reported `168h 0m`.
     pub fn uptime_formatted(&self) -> String {
-        let s = self.connected_secs;
-        if s >= 3600 {
-            format!("{}h {}m", s / 3600, (s % 3600) / 60)
-        } else if s >= 60 {
-            format!("{}m {}s", s / 60, s % 60)
-        } else {
-            format!("{}s", s)
-        }
+        guitk::duration::coarse(self.connected_secs)
     }
 
     /// Tooltip text for the tray icon.
@@ -795,7 +778,7 @@ mod tests {
     #[test]
     fn transfer_rate_format() {
         assert_eq!(TransferRates::format_rate(500), "500 B/s");
-        assert_eq!(TransferRates::format_rate(1500), "1.5 KB/s");
+        assert_eq!(TransferRates::format_rate(1500), "1.5 kB/s");
         assert_eq!(TransferRates::format_rate(1_500_000), "1.5 MB/s");
         assert_eq!(TransferRates::format_rate(1_500_000_000), "1.5 GB/s");
     }

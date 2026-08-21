@@ -415,18 +415,25 @@ impl HardwareProvider for SyscallProvider {
                             .get(&format!("{prefix}fs"))
                             .cloned()
                             .unwrap_or_default(),
-                        capacity_gb: entry
-                            .get(&format!("{prefix}capacity_gb"))
+                        // Raw byte counts, not gigabytes. The node used to
+                        // publish `capacity_gb` as a float, which forced every
+                        // reader to guess whether the producer had divided by
+                        // 1000 or 1024 — and the display code guessed wrong.
+                        // Linux's `/sys/block/*/size` is a sector count for the
+                        // same reason: a kernel interface should report the
+                        // quantity, and leave scaling to whoever formats it.
+                        capacity_bytes: entry
+                            .get(&format!("{prefix}capacity_bytes"))
                             .and_then(|v| v.parse().ok())
-                            .unwrap_or(0.0),
-                        used_gb: entry
-                            .get(&format!("{prefix}used_gb"))
+                            .unwrap_or(0),
+                        used_bytes: entry
+                            .get(&format!("{prefix}used_bytes"))
                             .and_then(|v| v.parse().ok())
-                            .unwrap_or(0.0),
-                        free_gb: entry
-                            .get(&format!("{prefix}free_gb"))
+                            .unwrap_or(0),
+                        free_bytes: entry
+                            .get(&format!("{prefix}free_bytes"))
                             .and_then(|v| v.parse().ok())
-                            .unwrap_or(0.0),
+                            .unwrap_or(0),
                         mount_point: entry
                             .get(&format!("{prefix}mount"))
                             .cloned()
@@ -440,10 +447,10 @@ impl HardwareProvider for SyscallProvider {
                     .get("model")
                     .cloned()
                     .unwrap_or_else(|| "Unknown Disk".to_string()),
-                capacity_gb: entry
-                    .get("capacity_gb")
+                capacity_bytes: entry
+                    .get("capacity_bytes")
                     .and_then(|v| v.parse().ok())
-                    .unwrap_or(0.0),
+                    .unwrap_or(0),
                 interface: entry.get("interface").cloned().unwrap_or_default(),
                 serial: entry.get("serial").cloned().unwrap_or_default(),
                 smart_status: entry
@@ -830,7 +837,11 @@ impl HardwareProvider for StubProvider {
     fn query_storage(&self) -> Result<Vec<DiskInfo>, HwQueryError> {
         Ok(vec![DiskInfo {
             model: "Samsung 990 Pro 2TB".to_string(),
-            capacity_gb: 1863.0,
+            // 2.0×10¹² bytes, which is how a "2 TB" drive is actually sold —
+            // and 1.82 TiB, which is what the display will call it. The figure
+            // this replaced was 1863.0 labelled `GB`: gibibytes wearing an SI
+            // name, so the mock disk agreed with neither reading.
+            capacity_bytes: 2_000_398_934_016,
             interface: "NVMe".to_string(),
             serial: "S6Z2NF0W123456".to_string(),
             smart_status: "Healthy".to_string(),
@@ -838,17 +849,17 @@ impl HardwareProvider for StubProvider {
                 PartitionInfo {
                     label: "EFI System".to_string(),
                     filesystem: "FAT32".to_string(),
-                    capacity_gb: 0.5,
-                    used_gb: 0.1,
-                    free_gb: 0.4,
+                    capacity_bytes: 536_870_912,
+                    used_bytes: 115_343_360,
+                    free_bytes: 421_527_552,
                     mount_point: "/boot/efi".to_string(),
                 },
                 PartitionInfo {
                     label: "Slate OS Root".to_string(),
                     filesystem: "ext4".to_string(),
-                    capacity_gb: 500.0,
-                    used_gb: 127.3,
-                    free_gb: 372.7,
+                    capacity_bytes: 536_870_912_000,
+                    used_bytes: 136_667_299_840,
+                    free_bytes: 400_203_612_160,
                     mount_point: "/".to_string(),
                 },
             ],

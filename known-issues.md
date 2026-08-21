@@ -46940,10 +46940,10 @@ here:**
 
 ---
 
-## `apps/**` bug-hunt sweep, round 1: four live defects and two latent (lane C)
+## `apps/**` bug-hunt sweep, round 1: five live defects and two latent (lane C)
 **Status:** FIXED 2026-08-20 — `5b4dd7731` (calendar), `80dd0a5f3` (slices),
 `c989b21d0` (clipboard preview), `e1390abb1` (sticky-note columns),
-`d5a1e7eb8` + `ae3946e33` (grid column counts).
+`d5a1e7eb8` + `ae3946e33` (grid column counts), `253478bd3` (QR block structure).
 
 The roadmap asks lane C to run bug-hunt sweeps over `apps/**` between
 features; ~200 crates there have never had a systematic audit. This is the
@@ -47160,6 +47160,59 @@ Migrating it would change what the user sees for no defect. Same rule as the
 `(i + 1) % len()` sites below: divergence in *correctness* is the warrant for
 extraction; divergence in *spelling*, over code that is already right, is not.
 
+### (8) `apps/qrcode` generated unscannable codes for 16 of its 40 version/EC pairs
+
+The worst of the round, and the one that shows the doctrine at full strength.
+
+`get_version_info` returns a row of a transcribed spec table that **states the
+same fact twice**: `data_capacity_bytes` is the published byte-mode capacity,
+and `total_codewords`, `num_blocks` and `ec_codewords_per_block` imply it.
+Nothing compared the two. Sixteen of the forty rows disagreed:
+
+| Rows | Table said | Capacity implies |
+|---|---|---|
+| v5-Q, v5-H, v6-Q, v6-H, v8-M, v10-L | 2 or 3 blocks | 4 |
+| v7-H, v9-M, v10-M | 2 or 3 | 5 |
+| v7-Q, v8-Q, v8-H | 2 | 6 |
+| v9-Q, v9-H, v10-Q, v10-H | 3 | 8 |
+
+Every implied count comes out an **exact integer**, which is what identifies
+the block column as the wrong one rather than the capacity column — had the
+capacity been the typo, the implied block counts would have come out
+fractional. The corrected values also match ISO/IEC 18004's own block table,
+derived independently.
+
+**Why nothing caught it.** This is not a panic and not a length error.
+`encode_data_bits` padded to `total_codewords - ec_per_block * num_blocks` —
+98 data codewords for v5-Q instead of 62 — and `apply_error_correction` then
+added exactly enough EC to reach `total_codewords`, because the two errors are
+the same quantity with opposite signs. **The symbol filled the matrix and
+rendered correctly.** It was simply not the codeword layout any conforming
+decoder de-interleaves, so it did not scan. Two of the three tests written for
+this fix pass against the *broken* table; only the one comparing the table to
+itself fails. Nothing short of a second opinion could have found it — there was
+no crash, no overflow, no out-of-range value, and the rendered image looked
+exactly like a QR code.
+
+Reachable with the default EC level (M) at 123 bytes of payload and up, and
+from **47 bytes at Q** — an ordinary URL.
+
+Fixed in `253478bd3`: the sixteen counts corrected; `byte_mode_capacity()`
+derives the payload size from the block structure and a test asserts it equals
+every row's stated capacity; both halves of the encoder read the data codeword
+count from one `data_codewords()` instead of each spelling out the subtraction.
+
+**A lint suppression whose justification did not cover the case that bit.**
+`apps/qrcode` allows `arithmetic_side_effects` and `indexing_slicing`
+file-wide, with a comment explaining that "indices are computed from QR-version
+metadata, all bounded by the matrix dimension." That is true of the matrix
+pokes and Galois-field lookups it was written for, and was never true of
+`total_data / num_blocks`, which divides by a *table column*. A file-wide
+allow inherits the reasoning of the sites the author had in mind and extends
+it silently to every site added afterwards — the same defect as finding (2)'s
+`wrapping_sub`, one scope larger. `num_blocks` is now a `NonZeroUsize` and the
+function returns `None` on a zero row rather than dividing.
+
 ### Deliberately not changed: the ~15 `(i + 1) % len()` sites
 
 Every wrapping-index step in `apps/**` that divides by a runtime length was
@@ -47183,6 +47236,363 @@ changes; until then this note is why nobody should "tidy" these.
 `apps/**` opts into the workspace lints (all 142 crates do), but the defensive
 five are `warn`, not `deny`, so a warning backlog accumulates uncounted — the
 installer's `wrapping_sub` and `apps/backup`'s `days + 719_468` were both
-firing silently for months. A measured figure for `apps/**` (via
-`scripts/clippy-sites.py`, deduplicated by `(file, line, column, lint)` — never
-a raw total) is the next round's first step.
+firing silently for months.
+
+**Measured 2026-08-21** (`cargo clippy --workspace --exclude kernel
+--all-targets --keep-going --target x86_64-pc-windows-gnu`, counted with
+`scripts/clippy-sites.py`, deduplicated by `(file, line, column, lint)`):
+
+| Tree | Distinct sites |
+|---|---|
+| `apps/**` | **4986** |
+| `net*/**` | 87 |
+| `gui/**` | 1 |
+| `textfmt` | 0 |
+
+Within `apps/**` the defensive five are 4872 of the 4986 — **97.7%**:
+`indexing_slicing` 2195, `arithmetic_side_effects` 1887, `unwrap_used` 617,
+`expect_used` 117, `panic` 56. The remaining 114 are ordinary style lints.
+Worst files: `indexer` 196, `terminal/pty.rs` 162, `unitconverter` 159,
+`markdowneditor` 155, `paint` 136.
+
+The shape of that table is the finding, not the total. The shared code — the
+toolkit, the desktop, the extracted crates — is essentially clean, and the
+200 application crates hold effectively all of it. That is not because the
+apps are worse code; it is because **the shared crates are the only ones
+anything ever pointed a linter at.** `gui/**` was audited during the
+extractions that produced `guitk::grid`, `guitk::date` and `textfmt`;
+`apps/**` has never had a pass at all.
+
+Two cautions before anyone treats 4986 as a defect count:
+
+- **It is an upper bound on suspicion, not a bug count.** Most
+  `indexing_slicing` sites index a literal-sized array with a bounded loop
+  counter. The sweep's five real defects were each found by *reasoning about
+  a duplicated shape*, not by walking a lint list — none of the five would
+  have been top of this ranking.
+- **It includes test code, which is where the lints are least meaningful**
+  (panicking on bad data is the point of a test). The workspace lint table
+  allows the defensive five under `#[cfg(test)]` by convention, but that is a
+  convention applied by hand, not a `cfg` in the table, so test sites are
+  counted here. Splitting the figure by target is worth doing before using it
+  to prioritise.
+
+## apps/** bug-hunt sweep, round 2: twenty-nine programs divided by 1024 and called it KB (lane C)
+
+**Filed:** 2026-08-21 by Lane C.
+**Status:** FIXED — `textfmt::bytes` plus a 52-call-site migration across 45 files.
+See design-decisions.md §489 for the units policy this settles.
+
+### The defect
+
+Forty-four functions in the tree turned a byte count into text for a person to
+read: `format_size`, `format_bytes`, `human_size`, `human_file_size`. **Twenty-
+seven of them divided by 1024 and labelled the result `KB`, `MB`, `GB`.** Three
+more formatted bytes *per second* and split the same way, two of them wrong, so
+the final tally is forty-seven hand-written implementations and twenty-nine
+mislabellings.
+
+That is not a style quibble. `KB` is 1000 bytes; `KiB` is 1024. The two differ
+by 2.4% at kilobytes and by 10% at terabytes, so the number shown to the user
+was simply not the quantity the label named:
+
+| Real size | What it said | What that label means |
+|---|---|---|
+| 1 GiB file (`apps/explorer`) | `1.00 GB` | 1.07 GB |
+| 4 TiB disk (`apps/diskimager`) | `4096.00 GB` | 4.40 TB, and not in gigabytes |
+| 1 500 000 B of traffic (`network_settings`) | `1.4 MB` | 1.5 MB |
+
+The last row is the one that proves it was drift rather than a considered
+choice: **`gui/desktop` displayed the same network byte counters in two units
+on one screen.** The tray indicator (`network_indicator.rs`) divided by 1000 and
+said `MB`; the settings page (`network_settings.rs`) divided by 1024 and also
+said `MB`. Same subsystem, same counter, two different numbers, and at most one
+of them right.
+
+The tally across all forty-four size formatters (the counts below are recomputed
+from the migration diff itself, not from the first grep, which under-counted):
+
+| | Count |
+|---|---|
+| base 1024, IEC names (`KiB`) — correct | 14 |
+| base 1000, SI names (`KB`) — correct | 3 |
+| **base 1024, SI names — wrong** | **27** |
+
+### The second defect, present in forty-three of the forty-four
+
+Every copy but one chose its unit from the *unrounded* byte count and rounded
+afterwards, so the printed mantissa could reach the base while keeping the
+smaller unit's name. 1 048 575 bytes is one byte under 1 MiB, so the `KiB`
+branch was taken, and `1048575 / 1024 = 1023.999…` printed as **`1024.0 KiB`** —
+a quantity that cannot exist, since the entire point of the unit is that there
+are 1024 of them.
+
+The exception is `apps/partmanager`, which was the most careful of the forty-four
+in every respect: pure integer arithmetic, no floats, and it even suppressed a
+trailing `.00`. It truncated rather than rounded, which is why it alone never
+printed a full base.
+
+A third, milder problem: several stopped at `GB` or `TB`, so large volumes were
+described in thousands of the wrong unit.
+
+### The third defect: the same mistake again, in rate form
+
+Three more functions formatted bytes *per second*, and they reproduced the
+split exactly:
+
+| | Divides by | Prints |
+|---|---|---|
+| `gui/desktop/network_indicator.rs` `format_rate` | 1000 | `MB/s` — correct |
+| `gui/desktop/resmon.rs` `format_bytes_per_sec` | 1024 | `MB/s` — wrong |
+| `apps/diskimager` `speed_display` | 1024 | `MB/s` — wrong |
+
+The first two are the *same quantity* — a network link's throughput — rendered
+by the tray indicator and by the resource monitor's network graph, which a user
+can have open side by side. They disagreed by 2.4% while claiming the same
+unit. `resmon`'s copy is reached only from `ResourceType::Network`, so there
+was never a domain difference to justify it; it was drift.
+
+`textfmt::bytes` therefore also exports `iec_rate`/`si_rate`, which are `scale`
+plus a `/s`. A rate now cannot disagree with the size it is a rate of, and the
+suffix is spelled in one place rather than six.
+
+One more instance was not a function at all: `apps/archivemanager` refused a
+split-volume size below `65536` with the message *"Volume size must be at least
+64 KB"* — a hand-written label with the same 1024-vs-1000 error, and a test
+asserting it. Both now say `64 KiB`.
+
+### The fourth defect: the scaling had moved upstream, into the interface
+
+`apps/sysinfo` had no wrong formatter — it had wrong *data*. `DiskInfo` and
+`PartitionInfo` stored `capacity_gb`/`used_gb`/`free_gb` as `f32`, already
+divided by 1024³, and four display sites printed them with `format!("{:.1} GB")`.
+So the "Samsung 990 Pro 2TB" read **`1863.0 GB`**, which is its capacity in
+neither unit — 2000 GB, or 1863 GiB — and the disk's own figure did not equal
+the sum of its partitions'.
+
+The important part is where the division lived. `apps/sysinfo/src/hwquery.rs`
+parses `/sys/hardware/block`, and the *node's own keys* were `capacity_gb`,
+`used_gb`, `free_gb` — floats. A reader of that interface cannot tell whether
+the producer divided by 1000 or 1024, and this one did not have to guess only
+because the same crate wrote both halves. Linux publishes `/sys/block/*/size`
+as a raw sector count for exactly this reason. The keys are now
+`capacity_bytes`/`used_bytes`/`free_bytes`, integers, and nothing in the tree
+produces the node yet, so the rename costs nothing today and stops a driver
+from baking a divisor into an ABI tomorrow.
+
+Both structs now hold `u64` byte counts and scale at the point of display. The
+mock data was re-derived so the partitions sum exactly to the disk (2 TB =
+2 000 398 934 016 B = EFI + root + home), which the pre-scaled gigabyte figures
+did not.
+
+This is the shape a `fn format_*` grep cannot find, and it is the most dangerous
+of the four: the other three put the mistake in a function that could be
+replaced, while this one put it in a field name and a wire format.
+
+### Why this is finding 9 and not a style cleanup
+
+It is the sweep's recurring shape in its clearest form yet. The two halves of
+the answer — **what to divide by** and **what to call the result** — were
+written as two *independent statements* in each of forty-seven places. Nothing
+tied them together, so they could disagree; across enough copies they did, and
+a majority of the copies ended up on the wrong side.
+
+Note what could not have caught it. Every output was a plausible string. No
+value was out of range, nothing overflowed, no test failed, and the number was
+never absurd enough to look wrong — `1.00 GB` for a 1 GiB file is off by 7%,
+which is invisible unless you already know the answer. As with the QR
+codeword tables in round 1, **only the table compared against itself** found it.
+
+### The fix
+
+`textfmt::bytes`, a new module in the dependency-free crate:
+
+- `iec(bytes)` → `1.5 MiB` (base 1024), `si(bytes)` → `1.5 MB` (base 1000),
+  and `scale(bytes, Unit)` for callers choosing at run time.
+- **The base and the unit names are one table**, chosen together by `Unit`. A
+  caller selects a family, never a divisor, so 1024-with-`KB` is now unspellable.
+- Rounds to tenths *first* and promotes afterwards, so the mantissa is always
+  below the base — `iec(1_048_575)` is `1.0 MiB`, not `1024.0 KiB`.
+- Runs to `EiB`/`EB`, past `u64::MAX`, so nothing saturates.
+- All-integer `u128` arithmetic with a `NonZeroU128` divisor: no float rounding
+  in the decision, and the division cannot be by zero.
+
+Re-exported as `guitk::bytes` for the GUI callers. The three headless crates —
+`apps/backup`, `apps/indexer`, `apps/installer` — depend on `textfmt`
+directly, which is exactly the three the crate's own module doc predicted would
+need it. That is the layering argument in
+`requests/c-b-year-of-day-computes-the-month-and-day-and-throws-them-away.md`,
+holding for a second primitive.
+
+All 52 call sites across 45 files now delegate — 42 `iec`, 7 `si`, 1 `iec_rate`,
+2 `si_rate`. That is five more sites than the forty-seven implementations
+replaced, because `apps/remotedesktop`'s single formatter became two (see below)
+and `apps/sysinfo`'s pre-scaled `capacity_gb` field became four display-site
+calls.
+
+### Which family, decided once instead of forty-seven times
+
+The rule §489 records, and the reason the SI set grew from 4 to 9: **bytes
+*moved over a link* are decimal; bytes *occupying storage* are binary.** It is
+stated that way so it can be applied to the next call site without re-deriving
+it from first principles, which is what forty-seven authors each failed to do.
+
+The consequences worth knowing:
+
+- `netmanager` and `vpnmanager` report interface/tunnel `rx_bytes`/`tx_bytes`
+  counters — the same counters the tray indicator and the network settings page
+  show — so they became SI. They had been base-1024-labelled-`KB`, i.e. wrong
+  under either reading.
+- `apps/remotedesktop` had one formatter serving both a *file transfer's* size
+  and the *session's* link counters. It now has two named functions, because
+  the answer genuinely differs: the file is the same file the explorer lists.
+- `apps/torrent` stayed binary throughout, including `downloaded`/`uploaded`.
+  Those count bytes of file content, not link traffic, and every torrent client
+  in existence quotes piece lengths in MiB.
+
+### What did not change
+
+The **numbers**, almost everywhere. All 29 broken sites were already
+*computing* base-1024 values, so correcting them to IEC names changed only
+text. Numbers moved only where a display was reclassified as decimal:
+`network_settings` (1.4 → 1.5 MB), `resmon`'s network graph, `netmanager` and
+`vpnmanager`. In every one of those cases the number moved *into* agreement
+with another window showing the same counter.
+
+### The same conflation, in the inverse direction — not fixed
+
+Two places *parse* a size suffix rather than print one, and both map `KB`/`MB`/
+`GB` to binary multipliers:
+
+- `apps/installer/src/lib.rs:1211` — the partition-size parser. A config saying
+  `size = "500 GB"` requests 537 GB, so a partition table written from a drive's
+  advertised capacity does not fit on that drive.
+- `apps/archivemanager/src/main.rs:258` — the same table, in a test fixture.
+
+This was deliberately **not** changed with the display side. Printing a number
+under a label that means something else is unambiguously false; *reading* a
+suffix is an input convention, and the surrounding ecosystem genuinely splits
+(`fdisk` and `parted` treat every suffix as binary). Changing it would silently
+resize partitions described by existing config files. Filed as
+`open-questions.md` **Q55** with three options, because it is a user-visible
+policy with no obviously-correct answer.
+
+### Related
+
+The formatter is the third primitive extracted by this sweep for the same
+reason, after `guitk::grid::columns_across` (round 1, finding 7) and the
+`tzrules::civil_from_days` request still open with lane B. In all three the
+tree held one correct answer that callers could not reach, and grew wrong
+copies of it. Whether that is worth generalising — an audit for *any* small
+computation restated more than three times — is the natural round-3 question.
+
+## apps/** bug-hunt sweep, round 3: thirty-eight programs each decided for themselves how long a length of time is (lane C)
+
+**Filed:** 2026-08-21 by Lane C.
+**Status:** FIXED — `textfmt::duration` (7 shapes) plus a 31-call-site migration
+across 29 files, in six commits `e1a723a91`..`ed8faae31`.
+See design-decisions.md §490 for the shape policy this settles.
+
+### The defect, and how it differs from round 2
+
+Round 2's defect had **one** right answer: dividing by 1024 and printing `MB` is
+false under any policy. Durations do not work that way. `01:05`, `1m 5s` and
+`just now` are all honest renderings of a length of time, and picking between
+them is a real editorial choice. **That legitimacy is exactly what let the
+disagreement go unnoticed for 38 functions** — every reviewer looking at any one
+of them saw a defensible formatter.
+
+So the audit could not ask "which of these is wrong?". It asked two narrower
+questions:
+
+1. Do two formatters that have chosen the *same* shape disagree about it?
+2. Do two surfaces that display the **same object** render it differently?
+
+Question 2 found the serious ones. Four times, two windows a user can have open
+simultaneously rendered one underlying number two ways:
+
+| The one number | Surface A | Surface B |
+|---|---|---|
+| a recording's length (`duration_ms` **is assigned from** `elapsed_ms`) | overlay: `01:01:01` | list, a moment later: `61:01` |
+| the machine's uptime | `procexplorer`: `3d 4h 12m 30s` | `sysmonitor`: `3d 4h 12m` |
+| the battery's remaining time | `power` (tray) | `power_settings` (page) |
+| one clipboard's entries | `clipmanager`: `10s ago` | `clipboard_viewer`: `just now` |
+| one notification queue | `notif_pane` | `gui/notifications` |
+
+### Why the tests did not catch it
+
+`screen_capture.rs` is the clearest case and worth recording in full, because
+the same structure recurs. Both methods had a passing test.
+`test_stats_elapsed_display` used 3 661 000 ms; `test_entry_duration_display`
+used 125 000 ms. Under an hour the two functions agree, so **neither test ever
+evaluated the other's input**, and each proved its own copy correct. The bug
+lived in the gap between two green tests.
+
+That is this round's lesson, stated generally: *the defect is not duplication.
+It is duplication whose copies are each locally proven.* A test that pins what
+one copy does is not evidence that the copy is right — `musicplayer` asserted
+`format_time(3661.0) == "61:01"`, recording a missing hour rollover as intended
+behaviour.
+
+### The individual bugs found
+
+| Where | Bug |
+|---|---|
+| `gui/desktop/screen_capture.rs` | no hour branch in `duration_display` — 61 minutes read `61:01` |
+| `apps/musicplayer:2480` | same, and it also formats the *playlist total*, which routinely exceeds an hour |
+| `apps/benchmark:720` | same, in `elapsed_display` |
+| `apps/camera:1039` | minutes digit unpadded (`1:05`) against the screen recorder's `01:05`, for the same kind of object |
+| `apps/taskscheduler:2578` | divided into an `f64` and printed one decimal, so 59 960 ms reported **`60.0s`** — a string its own under-a-minute branch excludes |
+| `apps/automator`, `apps/taskscheduler`, `startup_settings` | no hours field: a 90-minute automation read `90m 0s`; a five-minute startup delay, configurable *on that very screen*, read `300.0s` |
+| `apps/vpnmanager:2958` | no days field, so a four-day tunnel read `100h 0m 0s` |
+| `apps/pomodoro:442` | `0m 00s` for a zero span |
+| `procexplorer` / `sysmonitor` | the uptime disagreement above |
+
+### The fix
+
+One module, `textfmt/src/duration.rs` (`no_std`, no dependencies), re-exported
+by `guitk` as `guitk::duration` for the apps that reach the toolkit and depended
+on directly by the headless ones. Seven public shapes, tabulated in the module
+doc by *what the reader is doing*, so a caller picks a shape rather than writing
+one. 83 unit tests + 22 doctests.
+
+The one genuinely new idea is the split between `coarse` (bottom unit: seconds)
+and `coarse_minutes` (bottom unit: minutes). Both render "the two most
+significant components", and the choice between them records **whether the
+number was measured or estimated**: printing `1m 30s` for a battery estimate
+invents precision nobody has, while dropping `30s` from a measured 90-second
+backup discards a measurement that was taken. A test asserts the two agree
+across 2 000 000 seconds above the hour, so the module cannot reintroduce its
+own founding defect internally.
+
+### What did not change
+
+Seven formatters deliberately stay hand-written:
+
+- `apps/backup:1153`, `apps/taskscheduler:2561` — these render *timestamps*, not
+  spans. Different problem.
+- `apps/worldclock:466` — a timezone offset is a signed displacement between two
+  clocks, not a length.
+- `apps/calendar:601` — event lengths are natively in **minutes**. Routing them
+  through a seconds API would turn a one-hour meeting from `1h` into `1h 0m`.
+  Not every duration formatter belongs to a shared seconds module.
+- `apps/netscan:2196`, `apps/videoplayer:2031`, `:2038` — seek and scan
+  arithmetic the scanner mistook for formatting.
+
+Two **sentinels** also stay at their call sites, because they are not durations:
+`notif_pane`'s `"now"` (the pane has no clock reading yet — a fact about the
+pane) and `startup_settings`' `"Immediate"` (a word for *no delay configured*,
+not a rendering of zero). `gui/notifications` had a third, a `"now"` for
+*future* timestamps, and that one was **removed**: a future timestamp is an age
+of zero, which `relative` already renders as `just now`.
+
+### Related
+
+`textfmt::duration` is the fourth primitive this sweep has extracted for one
+recurring reason, after `guitk::grid::columns_across` (round 1, finding 7),
+`textfmt::bytes` (round 2) and the `tzrules::civil_from_days` request still open
+with lane B. The round-2 note asked whether an audit for *any* small computation
+restated more than three times was worth generalising; three rounds now say yes,
+and the discriminator that makes such an audit tractable is question 2 above —
+**start from objects displayed on more than one surface**, not from functions
+that look alike.

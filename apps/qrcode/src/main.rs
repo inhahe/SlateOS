@@ -38,6 +38,8 @@
 #![allow(clippy::struct_excessive_bools)]
 #![allow(dead_code)]
 
+use core::num::NonZeroUsize;
+
 use guitk::Color;
 use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::style::CornerRadii;
@@ -222,6 +224,13 @@ impl EcLevel {
 
 /// QR version info: (version, `ec_level`) -> (`total_codewords`, `ec_codewords_per_block`, `num_blocks`)
 /// Simplified table for versions 1-10.
+///
+/// The table states the same fact twice on purpose: `data_capacity_bytes` is
+/// the published byte-mode capacity, and `total_codewords`, `num_blocks` and
+/// `ec_codewords_per_block` imply it. That redundancy is the transcription's
+/// only proofreader — see [`Self::byte_mode_capacity`] and the test that
+/// compares the two for every row — and it is what caught sixteen of the forty
+/// rows carrying a block count that did not match their own capacity.
 struct VersionInfo {
     version: u8,
     ec_level: EcLevel,
@@ -229,6 +238,37 @@ struct VersionInfo {
     ec_codewords_per_block: usize,
     num_blocks: usize,
     total_codewords: usize,
+}
+
+/// Bits in the byte-mode character-count indicator: 8 for versions 1-9, 16
+/// from version 10 up (ISO/IEC 18004 §8.4.1).
+fn count_indicator_bits(version: u8) -> usize {
+    if version <= 9 { 8 } else { 16 }
+}
+
+impl VersionInfo {
+    /// Codewords left for data once error correction has taken its share.
+    ///
+    /// This is what the encoder pads up to and what the interleaver splits
+    /// into blocks, so both must read it from here rather than each spelling
+    /// out `total - ec_per_block * num_blocks`.
+    fn data_codewords(&self) -> usize {
+        self.total_codewords
+            .saturating_sub(self.ec_codewords_per_block.saturating_mul(self.num_blocks))
+    }
+
+    /// Payload bytes that fit in byte mode, derived from the block structure.
+    ///
+    /// The 4-bit mode indicator and the character-count indicator come out of
+    /// the data codewords before any payload does; the remainder rounds down
+    /// to whole bytes because a partial byte cannot hold a character.
+    fn byte_mode_capacity(&self) -> usize {
+        let header_bits = 4_usize.saturating_add(count_indicator_bits(self.version));
+        self.data_codewords()
+            .saturating_mul(8)
+            .saturating_sub(header_bits)
+            / 8
+    }
 }
 
 /// Get version info for a given version and EC level.
@@ -259,33 +299,33 @@ fn get_version_info(version: u8, ec_level: EcLevel) -> Option<VersionInfo> {
         // Version 5
         (5, EcLevel::L, 106, 26, 1, 134),
         (5, EcLevel::M, 84, 24, 2, 134),
-        (5, EcLevel::Q, 60, 18, 2, 134),
-        (5, EcLevel::H, 44, 22, 2, 134),
+        (5, EcLevel::Q, 60, 18, 4, 134),
+        (5, EcLevel::H, 44, 22, 4, 134),
         // Version 6
         (6, EcLevel::L, 134, 18, 2, 172),
         (6, EcLevel::M, 106, 16, 4, 172),
-        (6, EcLevel::Q, 74, 24, 2, 172),
-        (6, EcLevel::H, 58, 28, 2, 172),
+        (6, EcLevel::Q, 74, 24, 4, 172),
+        (6, EcLevel::H, 58, 28, 4, 172),
         // Version 7
         (7, EcLevel::L, 154, 20, 2, 196),
         (7, EcLevel::M, 122, 18, 4, 196),
-        (7, EcLevel::Q, 86, 18, 2, 196),
-        (7, EcLevel::H, 64, 26, 2, 196),
+        (7, EcLevel::Q, 86, 18, 6, 196),
+        (7, EcLevel::H, 64, 26, 5, 196),
         // Version 8
         (8, EcLevel::L, 192, 24, 2, 242),
-        (8, EcLevel::M, 152, 22, 2, 242),
-        (8, EcLevel::Q, 108, 22, 2, 242),
-        (8, EcLevel::H, 84, 26, 2, 242),
+        (8, EcLevel::M, 152, 22, 4, 242),
+        (8, EcLevel::Q, 108, 22, 6, 242),
+        (8, EcLevel::H, 84, 26, 6, 242),
         // Version 9
         (9, EcLevel::L, 230, 30, 2, 292),
-        (9, EcLevel::M, 180, 22, 3, 292),
-        (9, EcLevel::Q, 130, 20, 3, 292),
-        (9, EcLevel::H, 98, 24, 3, 292),
+        (9, EcLevel::M, 180, 22, 5, 292),
+        (9, EcLevel::Q, 130, 20, 8, 292),
+        (9, EcLevel::H, 98, 24, 8, 292),
         // Version 10
-        (10, EcLevel::L, 271, 18, 2, 346),
-        (10, EcLevel::M, 213, 26, 2, 346),
-        (10, EcLevel::Q, 151, 24, 3, 346),
-        (10, EcLevel::H, 119, 28, 3, 346),
+        (10, EcLevel::L, 271, 18, 4, 346),
+        (10, EcLevel::M, 213, 26, 5, 346),
+        (10, EcLevel::Q, 151, 24, 8, 346),
+        (10, EcLevel::H, 119, 28, 8, 346),
     ];
 
     for &(v, ec, dc, ecpb, nb, tc) in table {
@@ -553,8 +593,7 @@ fn encode_data_bits(data: &[u8], version: u8, ec_level: EcLevel) -> Option<Vec<u
     let info = get_version_info(version, ec_level)?;
 
     // Mode indicator: 0100 (byte mode)
-    // Character count indicator: 8 bits for versions 1-9, 16 bits for versions 10+
-    let count_bits = if version <= 9 { 8 } else { 16 };
+    let count_bits = count_indicator_bits(version);
 
     let mut bits = BitWriter::new();
 
@@ -569,11 +608,11 @@ fn encode_data_bits(data: &[u8], version: u8, ec_level: EcLevel) -> Option<Vec<u
         bits.write_bits(u32::from(byte), 8);
     }
 
-    // Terminator (up to 4 zero bits)
-    let total_data_bits = info
-        .total_codewords
-        .saturating_sub(info.ec_codewords_per_block.saturating_mul(info.num_blocks))
-        .saturating_mul(8);
+    // Terminator (up to 4 zero bits). The target is the version's data
+    // codeword count, read from the one place that derives it -- padding to a
+    // different number than `apply_error_correction` splits into blocks is how
+    // a symbol ends up structurally invalid while still filling the matrix.
+    let total_data_bits = info.data_codewords().saturating_mul(8);
     let remaining = total_data_bits.saturating_sub(bits.len());
     let terminator = remaining.min(4);
     bits.write_bits(0, terminator);
@@ -603,27 +642,32 @@ fn apply_error_correction(
     let gf = GfTables::new();
 
     let ec_per_block = info.ec_codewords_per_block;
-    let num_blocks = info.num_blocks;
+    // A table row claiming zero blocks would divide by zero two lines below.
+    // The function already returns `Option`, so refusing to encode is both
+    // cheaper and more honest than trusting the table from a distance.
+    let num_blocks = NonZeroUsize::new(info.num_blocks)?;
     let total_data = data_codewords.len();
+    // The spec's two groups: `num_blocks - extra` blocks of `base` codewords
+    // followed by `extra` blocks of `base + 1`, smaller group first.
     let base_block_size = total_data / num_blocks;
     let extra_blocks = total_data % num_blocks;
 
     // Split data into blocks
-    let mut blocks: Vec<Vec<u8>> = Vec::with_capacity(num_blocks);
+    let mut blocks: Vec<Vec<u8>> = Vec::with_capacity(num_blocks.get());
     let mut offset: usize = 0;
-    for i in 0..num_blocks {
-        let block_size = if i < num_blocks.saturating_sub(extra_blocks) {
+    for i in 0..num_blocks.get() {
+        let block_size = if i < num_blocks.get().saturating_sub(extra_blocks) {
             base_block_size
         } else {
             base_block_size.saturating_add(1)
         };
         let end = offset.saturating_add(block_size).min(total_data);
-        blocks.push(data_codewords[offset..end].to_vec());
+        blocks.push(data_codewords.get(offset..end).unwrap_or(&[]).to_vec());
         offset = end;
     }
 
     // Compute EC for each block
-    let mut ec_blocks: Vec<Vec<u8>> = Vec::with_capacity(num_blocks);
+    let mut ec_blocks: Vec<Vec<u8>> = Vec::with_capacity(num_blocks.get());
     for block in &blocks {
         ec_blocks.push(rs_encode(block, ec_per_block, &gf));
     }
@@ -2679,6 +2723,110 @@ mod tests {
         let ec1 = rs_encode(&data, 7, &gf);
         let ec2 = rs_encode(&data, 7, &gf);
         assert_eq!(ec1, ec2);
+    }
+
+    // --- Version table consistency ---
+
+    #[test]
+    fn every_version_row_agrees_with_its_own_capacity() {
+        // The table states the byte-mode capacity outright *and* implies it
+        // from the block structure. Nothing compared the two, and sixteen of
+        // the forty rows disagreed: v5-Q through v10-H carried block counts
+        // copied down from the row above rather than the spec's own.
+        //
+        // The consequence was not a panic. `encode_data_bits` padded to
+        // `total - ec_per_block * num_blocks` -- 98 data codewords for v5-Q
+        // instead of 62 -- and `apply_error_correction` then added exactly
+        // enough EC to reach `total_codewords`, so the symbol filled the
+        // matrix and looked right. It simply was not the codeword layout any
+        // conforming decoder de-interleaves, so it did not scan.
+        for version in 1..=10_u8 {
+            for ec in EcLevel::all() {
+                let Some(info) = get_version_info(version, *ec) else {
+                    panic!("missing table row for v{version}-{ec:?}");
+                };
+                assert!(
+                    info.num_blocks >= 1,
+                    "v{version}-{ec:?}: zero blocks would divide by zero"
+                );
+                assert!(
+                    info.ec_codewords_per_block.saturating_mul(info.num_blocks)
+                        < info.total_codewords,
+                    "v{version}-{ec:?}: error correction claims the whole symbol"
+                );
+                assert_eq!(
+                    info.byte_mode_capacity(),
+                    info.data_capacity_bytes,
+                    "v{version}-{ec:?}: {} data codewords in {} blocks of {} EC \
+                     imply {} payload bytes, but the table says {}",
+                    info.data_codewords(),
+                    info.num_blocks,
+                    info.ec_codewords_per_block,
+                    info.byte_mode_capacity(),
+                    info.data_capacity_bytes,
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_full_symbol_is_exactly_total_codewords_at_every_version() {
+        // The data half and the EC half are computed by different functions
+        // from the same table row. If they read different numbers out of it,
+        // the interleaved result is the wrong length for the matrix -- which
+        // is what a wrong `num_blocks` used to cause everywhere except that
+        // the two errors happened to cancel in the total.
+        for version in 1..=10_u8 {
+            for ec in EcLevel::all() {
+                let Some(info) = get_version_info(version, *ec) else {
+                    continue;
+                };
+                let payload = vec![b'A'; info.data_capacity_bytes];
+                let Some(data) = encode_data_bits(&payload, version, *ec) else {
+                    panic!("v{version}-{ec:?}: full-capacity payload did not encode");
+                };
+                assert_eq!(
+                    data.len(),
+                    info.data_codewords(),
+                    "v{version}-{ec:?}: padded to the wrong data codeword count"
+                );
+                let Some(full) = apply_error_correction(&data, version, *ec) else {
+                    panic!("v{version}-{ec:?}: error correction failed");
+                };
+                assert_eq!(
+                    full.len(),
+                    info.total_codewords,
+                    "v{version}-{ec:?}: symbol is not the version's codeword count"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn block_sizes_follow_the_specs_two_groups() {
+        // The spec splits the data into `n - extra` blocks of `c` codewords
+        // and `extra` blocks of `c + 1`, smaller group first. Everything
+        // downstream -- the interleave, and every decoder -- assumes it.
+        for version in 1..=10_u8 {
+            for ec in EcLevel::all() {
+                let Some(info) = get_version_info(version, *ec) else {
+                    continue;
+                };
+                let d = info.data_codewords();
+                let n = info.num_blocks;
+                let base = d / n;
+                let extra = d % n;
+                assert!(
+                    base >= 1,
+                    "v{version}-{ec:?}: {d} data codewords do not fill {n} blocks"
+                );
+                assert_eq!(
+                    base * (n - extra) + (base + 1) * extra,
+                    d,
+                    "v{version}-{ec:?}: the two groups do not account for every codeword"
+                );
+            }
+        }
     }
 
     // --- Version selection tests ---

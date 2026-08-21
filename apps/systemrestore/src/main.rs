@@ -4208,22 +4208,7 @@ impl Default for SystemRestoreUI {
 
 /// Format bytes to a human-readable string.
 fn format_bytes(bytes: u64) -> String {
-    const KB: u64 = 1024;
-    const MB: u64 = 1024 * KB;
-    const GB: u64 = 1024 * MB;
-    const TB: u64 = 1024 * GB;
-
-    if bytes >= TB {
-        format!("{:.1} TB", bytes as f64 / TB as f64)
-    } else if bytes >= GB {
-        format!("{:.1} GB", bytes as f64 / GB as f64)
-    } else if bytes >= MB {
-        format!("{:.1} MB", bytes as f64 / MB as f64)
-    } else if bytes >= KB {
-        format!("{:.1} KB", bytes as f64 / KB as f64)
-    } else {
-        format!("{} B", bytes)
-    }
+    guitk::bytes::iec(bytes)
 }
 
 /// Format a duration in seconds to a short human-readable string.
@@ -4575,7 +4560,7 @@ mod tests {
             None,
         );
         let display = snap.size_display();
-        assert!(display.contains("GB") || display.contains("MB"));
+        assert!(display.contains("GiB") || display.contains("MiB"));
     }
 
     #[test]
@@ -5543,10 +5528,10 @@ mod tests {
     fn test_format_bytes() {
         assert_eq!(format_bytes(0), "0 B");
         assert_eq!(format_bytes(500), "500 B");
-        assert_eq!(format_bytes(1024), "1.0 KB");
-        assert_eq!(format_bytes(1_048_576), "1.0 MB");
-        assert_eq!(format_bytes(1_073_741_824), "1.0 GB");
-        assert_eq!(format_bytes(1_099_511_627_776), "1.0 TB");
+        assert_eq!(format_bytes(1024), "1.0 KiB");
+        assert_eq!(format_bytes(1_048_576), "1.0 MiB");
+        assert_eq!(format_bytes(1_073_741_824), "1.0 GiB");
+        assert_eq!(format_bytes(1_099_511_627_776), "1.0 TiB");
     }
 
     #[test]

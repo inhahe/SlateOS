@@ -209,27 +209,17 @@ impl ClipEntry {
 
     /// Format the size for display.
     pub fn size_display(&self) -> String {
-        if self.size_bytes < 1024 {
-            format!("{} B", self.size_bytes)
-        } else if self.size_bytes < 1024 * 1024 {
-            format!("{:.1} KB", self.size_bytes as f64 / 1024.0)
-        } else {
-            format!("{:.1} MB", self.size_bytes as f64 / (1024.0 * 1024.0))
-        }
+        guitk::bytes::iec(u64::try_from(self.size_bytes).unwrap_or(u64::MAX))
     }
 
     /// Format the age for display.
+    ///
+    /// See `clipmanager`'s `time_display`: the app and this pane list the same
+    /// clipboard entries and used to age them in different words. This ladder
+    /// also stopped at days, so a pinned snippet from last spring read
+    /// `"400d ago"`.
     pub fn age_display(&self, now: u64) -> String {
-        let elapsed = now.saturating_sub(self.timestamp);
-        if elapsed < 60 {
-            "just now".to_string()
-        } else if elapsed < 3600 {
-            format!("{}m ago", elapsed / 60)
-        } else if elapsed < 86400 {
-            format!("{}h ago", elapsed / 3600)
-        } else {
-            format!("{}d ago", elapsed / 86400)
-        }
+        guitk::duration::relative(now.saturating_sub(self.timestamp))
     }
 }
 
@@ -928,14 +918,14 @@ mod tests {
     fn test_size_display_kb() {
         let mut e = ClipEntry::text(1, "hi", 100);
         e.size_bytes = 2048;
-        assert_eq!(e.size_display(), "2.0 KB");
+        assert_eq!(e.size_display(), "2.0 KiB");
     }
 
     #[test]
     fn test_size_display_mb() {
         let mut e = ClipEntry::text(1, "hi", 100);
         e.size_bytes = 1024 * 1024 * 5;
-        assert_eq!(e.size_display(), "5.0 MB");
+        assert_eq!(e.size_display(), "5.0 MiB");
     }
 
     #[test]

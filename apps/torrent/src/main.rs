@@ -3456,22 +3456,7 @@ impl TorrentApp {
 /// Format bytes as human-readable size
 #[must_use]
 pub fn format_size(bytes: u64) -> String {
-    const KIB: u64 = 1024;
-    const MIB: u64 = 1024 * KIB;
-    const GIB: u64 = 1024 * MIB;
-    const TIB: u64 = 1024 * GIB;
-
-    if bytes >= TIB {
-        format!("{:.2} TiB", bytes as f64 / TIB as f64)
-    } else if bytes >= GIB {
-        format!("{:.2} GiB", bytes as f64 / GIB as f64)
-    } else if bytes >= MIB {
-        format!("{:.1} MiB", bytes as f64 / MIB as f64)
-    } else if bytes >= KIB {
-        format!("{:.1} KiB", bytes as f64 / KIB as f64)
-    } else {
-        format!("{bytes} B")
-    }
+    guitk::bytes::iec(bytes)
 }
 
 /// Format speed in bytes/s as human-readable
@@ -3486,21 +3471,7 @@ pub fn format_speed(bps: u64) -> String {
 /// Format duration in seconds as human-readable
 #[must_use]
 pub fn format_duration(seconds: u64) -> String {
-    if seconds >= 86400 {
-        let d = seconds / 86400;
-        let h = (seconds % 86400) / 3600;
-        format!("{d}d {h}h")
-    } else if seconds >= 3600 {
-        let h = seconds / 3600;
-        let m = (seconds % 3600) / 60;
-        format!("{h}h {m}m")
-    } else if seconds >= 60 {
-        let m = seconds / 60;
-        let s = seconds % 60;
-        format!("{m}m {s}s")
-    } else {
-        format!("{seconds}s")
-    }
+    guitk::duration::coarse(seconds)
 }
 
 // ─── Main ────────────────────────────────────────────────────────────
@@ -4074,7 +4045,7 @@ mod tests {
         assert_eq!(format_size(1023), "1023 B");
         assert_eq!(format_size(1024), "1.0 KiB");
         assert_eq!(format_size(1_048_576), "1.0 MiB");
-        assert_eq!(format_size(1_073_741_824), "1.00 GiB");
+        assert_eq!(format_size(1_073_741_824), "1.0 GiB");
     }
 
     #[test]

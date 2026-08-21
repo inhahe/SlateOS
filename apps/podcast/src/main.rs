@@ -626,10 +626,12 @@ impl ListeningStats {
     }
 
     /// Total listening time formatted.
+    ///
+    /// This is a lifetime accumulator, so it is measured in days within a
+    /// month of use. It used to be hard-wired to `{h}h {m}m`, which reported
+    /// a year of podcasts as `2920h 0m` and a first session as `0h 12m`.
     pub fn total_time_display(&self) -> String {
-        let hours = self.total_listening_secs / 3600;
-        let mins = (self.total_listening_secs % 3600) / 60;
-        format!("{}h {}m", hours, mins)
+        guitk::duration::coarse(self.total_listening_secs)
     }
 
     /// Record a listening session.
@@ -779,31 +781,12 @@ pub fn xml_unescape(s: &str) -> String {
 
 /// Format seconds as HH:MM:SS or MM:SS.
 pub fn format_duration(total_secs: u32) -> String {
-    let hours = total_secs / 3600;
-    let mins = (total_secs % 3600) / 60;
-    let secs = total_secs % 60;
-    if hours > 0 {
-        format!("{:02}:{:02}:{:02}", hours, mins, secs)
-    } else {
-        format!("{:02}:{:02}", mins, secs)
-    }
+    guitk::duration::clock(u64::from(total_secs))
 }
 
 /// Format bytes as human-readable size.
 pub fn format_bytes(bytes: u64) -> String {
-    if bytes < 1024 {
-        return format!("{} B", bytes);
-    }
-    let kb = bytes as f64 / 1024.0;
-    if kb < 1024.0 {
-        return format!("{:.1} KB", kb);
-    }
-    let mb = kb / 1024.0;
-    if mb < 1024.0 {
-        return format!("{:.1} MB", mb);
-    }
-    let gb = mb / 1024.0;
-    format!("{:.2} GB", gb)
+    guitk::bytes::iec(bytes)
 }
 
 // ============================================================================
@@ -3845,16 +3828,16 @@ mod tests {
     fn test_format_bytes() {
         assert_eq!(format_bytes(0), "0 B");
         assert_eq!(format_bytes(512), "512 B");
-        assert_eq!(format_bytes(1024), "1.0 KB");
-        assert_eq!(format_bytes(1_048_576), "1.0 MB");
-        assert_eq!(format_bytes(1_073_741_824), "1.00 GB");
+        assert_eq!(format_bytes(1024), "1.0 KiB");
+        assert_eq!(format_bytes(1_048_576), "1.0 MiB");
+        assert_eq!(format_bytes(1_073_741_824), "1.0 GiB");
     }
 
     #[test]
     fn test_format_bytes_large() {
         let size = 45_000_000u64;
         let display = format_bytes(size);
-        assert!(display.contains("MB"));
+        assert!(display.contains("MiB"));
     }
 
     // -----------------------------------------------------------------------
@@ -4125,7 +4108,7 @@ mod tests {
             download_status: DownloadStatus::NotDownloaded,
             notes: EpisodeNotes::new(),
         };
-        assert!(ep.file_size_display().contains("MB"));
+        assert!(ep.file_size_display().contains("MiB"));
     }
 
     // -----------------------------------------------------------------------

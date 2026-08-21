@@ -2175,6 +2175,63 @@ The index is split by lane so three lanes adding a line at once land at three
 different offsets and the merge is automatic. Newest first within each lane.
 `(§n)` cites `design-decisions.md`.
 
+## Q55 — [C] The installer reads `size = "100 GB"` in a partition table as 107 GB. Should a decimal spelling mean a decimal number? — Status: OPEN
+
+**In short:** An unattended-install config file describes each disk partition
+with a size like `"100 GB"` or `"32 GiB"`. The installer currently treats those
+two spellings as *the same number* — both mean 2^30 bytes, the binary one. So a
+config asking for `500 GB` on a 500 GB drive asks for 537 GB of space and the
+install fails to fit. The question is whether to make the decimal spelling mean
+the decimal number, at the cost of changing what existing config files do.
+
+**Glossary:** `GB` (gigabyte) is decimal — exactly 1 000 000 000 bytes, and it
+is what a disk's box says. `GiB` (gibibyte) is binary — 1 073 741 824 bytes,
+about 7% more. They diverge further at `TB`/`TiB` (10%).
+
+Where it lives: `apps/installer/src/lib.rs:1211`, the `multiplier` match in the
+partition-size parser. `"K"|"KB"|"KIB"` all map to 1024, and so on up to `TB`.
+
+This is the mirror image of the display-side defect fixed in
+design-decisions.md §489 — there, code divided by 1024 and *printed* `GB`; here
+it *reads* `GB` and multiplies by 1024. The display side was unambiguous
+(printing a number under a label that means something else is simply false), so
+it was fixed without asking. This side is not, because the suffix in a config
+file is an input convention, and the surrounding ecosystem is genuinely split.
+
+### The options
+
+**A. Leave it. Every suffix is binary.**
+*What changes:* nothing.
+This is what `fdisk`, `parted` and most partitioning tools do, and what anyone
+who has typed `+512M` at a disk prompt expects. It is also self-consistent: a
+config author who writes `100 GB` gets the same partition every time.
+
+**B. Honour the spelling: `GB` = 10⁹, `GiB` = 2³⁰, bare `G` = 2³⁰.**
+*What changes:* a config that says `100 GB` yields a partition 7% smaller than
+it does today; `100 GiB` and `100 G` are unaffected.
+Matches what the display side now does, and matches the drive's label — which
+is the number a user copies when they write "the 500 GB disk".
+
+**C. Reject the ambiguous spellings: accept only `GiB` and bare `G`, and error
+on `GB` with a message naming both.**
+*What changes:* configs using `GB` stop installing until edited; nothing is
+silently resized.
+The only option that cannot quietly give someone the wrong disk layout, at the
+cost of breaking existing files loudly rather than leaving them wrong quietly.
+
+### If this is never answered
+
+Current behaviour is safe in the sense that it is deterministic and has been
+the behaviour all along; no data is at risk. The concrete cost is that a
+partition table written from a drive's advertised capacity will not fit on that
+drive, and the error will point at the partition table rather than at the units.
+It does not get worse with time, but every config file written in the meantime
+is one more that option B or C would change.
+
+**Recommendation:** B, but weakly, and only because it now disagrees with the
+display code in the same tree. A is the defensible status quo. C is the honest
+one and I would not argue against it.
+
 ## Resolved — lane A
 
 *(none yet)*

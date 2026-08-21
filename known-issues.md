@@ -23937,9 +23937,28 @@ column in a game board or a table), not a string index.
 
 ## B-WORKSPACE-TEST-IS-RED-SLATEOS-COREUTILS-SHADOW-THE-HOSTS (lane B's tree; filed by lane C, 2026-08-16)
 
-**Status: OPEN.** Filed for lane B as
-`requests/c-b-workspace-test-red-slateos-coreutils-shadow-host.md`. Logged here
-because it blocks *every* lane's pre-merge gate, not just lane C's.
+**Status: ✅ FIXED 2026-08-16 by lane B** (`378c71b37`, `051ee45e7`) —
+`userspace/oils/src/hostpath.rs` strikes cargo's two injected directories out
+of `$PATH`, so the scaffolding tools resolve to the host's. The full
+write-up, including the coreutils gaps this uncovered and where they were
+fixed, is
+`B-THE-OILS-TESTS-RESOLVED-grep/sed/cat-FROM-THE-CARGO-BUILD-DIRECTORY`
+further down this file.
+
+**This heading said `Status: OPEN` until 2026-08-21**, five days after the fix
+landed. The stale status is worth a line of its own because this entry's own
+"Correction, same day" note below argues that a wrong statement in a shared
+file is worse than no statement — and then the entry became one. It is the
+predictable failure of recording a fix in a *new* entry and leaving the
+original untouched: three lanes read this file, the bug is described here, and
+nothing here pointed at the resolution. When you fix something that has an
+existing entry, amend that entry; a second entry elsewhere is a cross-reference,
+not a substitute.
+
+Kept below as filed, because the diagnosis is the useful part and it was right.
+
+**Originally filed as** `requests/c-b-workspace-test-red-slateos-coreutils-shadow-host.md`.
+Logged here because it blocked *every* lane's pre-merge gate, not just lane C's.
 
 **What.** `cargo test --workspace --target x86_64-pc-windows-gnu` is
 reproducibly red: `-p oils --lib` reports `1488 passed; 8 failed`. Run on its

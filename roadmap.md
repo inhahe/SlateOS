@@ -2733,7 +2733,7 @@ _Port ext4 first. Don't write a custom filesystem._
 - [x] Port coreutils (85 binaries: echo, cat, ls, head, wc, mkdir, rm, cp, mv, touch, tail, sort, grep, ln, pwd, env, sleep, true, false, uname, basename, dirname, tee, rmdir, seq, yes, which, date, uniq, cut, tr, chmod, chown, id, whoami, hostname, readlink, realpath, stat, printf, test, kill, dd, df, du, xargs, find, ps, nohup, nice, mkfifo, expr, nl, paste, comm, expand, fold, md5sum, sha256sum, tty, diff, cmp, od, strings, uptime, free, unexpand, cal, time, sed, awk, ed, more, sh, tar, bc, patch, split, join, csplit, logger, logname, who, tsort, renice)
 - [x] Port rsync (replaces robocopy need) — Rust implementation: recursive, archive mode, checksums, delete, exclude/include, dry-run, progress, stats
 - [x] Port curl — Rust HTTP/1.1 client: GET/POST/PUT/DELETE/HEAD/PATCH, auth, cookies, redirects, chunked, progress, -o/-O, verbose
-- [x] Port ssh/sshd — Rust SSH-2 client: version exchange, key exchange, password auth, interactive session, host key verification
+- [x] Port ssh/sshd — Rust SSH-2 client: version exchange, key exchange, password auth, interactive session, host key verification; exits with the *remote* command's status and writes remote stderr to local stderr, per `ssh(1)` (2026-08-21 — both were silently discarded before; `known-issues.md` → `B-SSH-CLIENT-DISCARDED-THE-REMOTE-EXIT-STATUS-AND-ALL-OF-STDERR`). Interactive shell sessions depend on the *server* having a pty — see the sshd line further down.
 - [x] Build custom grep (Rust, regex support, line numbers, recursive, case-insensitive)
 - [x] Port find (glob matching, -name, -type, -maxdepth)
 - [x] System administration utilities — Rust userspace binaries:

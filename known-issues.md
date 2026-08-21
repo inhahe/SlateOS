@@ -48346,3 +48346,29 @@ that cannot be displayed. Nothing rots — the tests hold the geometry and the
 hit testing to each other — but every surface added to it inherits the same
 condition, and the systray's parallel implementations keep diverging from the
 shell's with nothing to notice that they have.
+
+**Progress 2026-08-21 — one of the two stated blockers was already stale, and
+the other now has its first piece.** The entry above says the shell "has no
+compositor/IPC event loop yet" and treats that as one obstacle. It is two, and
+they were in different states:
+
+- *A transport to run a loop over.* *Already existed when this was written.*
+  `gui/compositor/src/server.rs` listens, accepts and paces; `oswindow` really
+  connects, blocks and submits; `apps/editor` is a working client end to end
+  over the real protocol. The claim was inherited from an earlier entry and not
+  rechecked. Recorded here rather than quietly corrected, because it is the same
+  failure `design-decisions.md` §305 exists for: a "blocked on X" note that
+  outlives X.
+- *A way for a shell surface to be a shell surface.* Genuinely missing, and the
+  real blocker. The compositor had one flat `z_stack` and every raise went to
+  the top of it, so a taskbar would have gone behind the first application
+  window the user clicked. **Fixed today:** `Layer::{Background, Normal,
+  Overlay}` on `WindowSpec`, a band each window is created in and cannot leave,
+  with raising confined to the band. `design-decisions.md` §494; 7 tests, all
+  verified to fail when the flat push is reintroduced.
+
+**Still open**, and still the reason this entry is not closed: the shell has no
+way to *learn about other windows*. `CompositorRequest` has no window-list query
+and no notification, so a taskbar could now stay in front of the windows it is
+supposed to list while having no idea what they are. That protocol surface plus
+the loop itself are what remain.

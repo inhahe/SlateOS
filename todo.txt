@@ -54212,6 +54212,27 @@ FAILs).  Reversible (pure translator change; no PCB/state).
 ##     DO INSTEAD, for anything whose exit code is the point:
 ##         ./scripts/boot-test.sh --bench; echo "=== EXIT=$? ==="
 ##     unpiped, backgrounded via run_in_background, and read the .output file.
+##
+## (d) ADDED 2026-08-20 (lane C): `cargo clippy --workspace --all-targets` does
+##     NOT work in this tree, and the error it gives blames the wrong thing.
+##
+##     It fails with `found duplicate lang item 'panic_impl'` in `kernel`, which
+##     reads like main is red. It is not. `kernel/Cargo.toml` sets `test = false`
+##     on its `[[bin]]` precisely so that a host `cargo test --workspace` skips
+##     the bare-metal binary -- but `--all-targets` ignores `test = false` and
+##     builds the bin in test mode anyway (a long-standing cargo quirk), which
+##     links std and collides with the kernel's own `#[panic_handler]`.
+##
+##     Because cargo stops the whole invocation on a compile error, this also
+##     truncates the JSON output, so a lint-backlog measurement silently covers
+##     only the crates that happened to finish first.
+##
+##     DO INSTEAD:
+##         cargo clippy --workspace --exclude kernel --all-targets ##             --target x86_64-pc-windows-gnu --message-format=json > f.json
+##     and count with `python scripts/clippy-sites.py f.json [substring]`, which
+##     deduplicates by (file, line, column, lint). Never quote a raw warning
+##     total from `-W <lint>` flags: those leak into dependencies and bypass the
+##     workspace lint table, so the number is not the tree's backlog.
 
 ## ---------------------------------------------------------------------------
 ## [C] 2026-08-16 -- A USE probe font, so the 81 unmeasured scripts are measured

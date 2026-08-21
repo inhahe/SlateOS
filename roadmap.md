@@ -556,9 +556,15 @@ Roadmap:
         Write the stick, disable Secure Boot, pick it from the one-time boot
         menu. Nothing is installed to the internal disk; recovery is "power
         off, remove the stick, power on".
-  - [ ] Verify the image boots with **no rootfs attached**, which is the real
-        bare-metal shape — the boot test currently always attaches
-        `rootfs.ext4` as a second virtio-blk disk and a stick has no equivalent.
+  - [x] Verify the image boots with **no rootfs attached**, which is the real
+        bare-metal shape — the boot test used to attach `rootfs.ext4` as a
+        second virtio-blk disk on the file's mere existence, and a stick has no
+        equivalent. `--no-rootfs` added; `--usb-image --no-rootfs` reached
+        `BOOT_OK` in **75 s** on 2026-08-21. The run is tagged as an
+        **experiment** in `bench/boot-history.jsonl` on purpose: dropping the
+        rootfs drops the rungs that currently *fail*, so it reads greener than
+        a tracking run while testing strictly less, and must not be able to
+        extend the consecutive-clean streak.
   - [ ] Then, and only then, §263's second half: enable the iGPU in firmware,
         move the monitor cable, and write the Intel driver against the chip.
 - ~~`[A]` Ada/SPARK FFI bridge for kernel-space drivers~~ (line ~1206) —

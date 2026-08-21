@@ -23,6 +23,11 @@
 //!   name it, move it, ask about the display. Neither of the two streaming
 //!   directions can bring a window into existence in the first place.
 //!
+//! Alongside them, [`zones`] holds a *shared definition* rather than a frame
+//! format: the snap layouts, so that a shell asking for "zone 3 of the six-cell
+//! grid" and the compositor placing the window there agree on which rectangle
+//! that is.
+//!
 //! Each direction has its own frame magic, so a frame sent the wrong way over a
 //! duplex transport fails on its first four bytes instead of decoding into
 //! plausible nonsense.
@@ -112,6 +117,9 @@ pub use window_list::{
     MAX_WINDOWS_PER_LIST, WINDOW_LIST_MAGIC, WINDOW_LIST_VERSION, WindowInfo, decode_window_list,
     encode_window_list, encode_window_list_into, try_decode_window_list,
 };
+
+pub mod zones;
+pub use zones::{SnapLayout, SnapLayoutPreset, SnapZone, WorkArea, ZONE_GAP, ZoneId};
 
 pub mod frame;
 pub use frame::{Frame, decode_any, try_decode_any};

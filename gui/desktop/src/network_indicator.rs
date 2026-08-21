@@ -285,16 +285,12 @@ impl NetworkState {
         }
     }
 
-    /// Uptime formatted as "Xh Ym" or "Xs".
+    /// Uptime formatted as "Xd Yh", "Xh Ym", "Xm Ys" or "Xs".
+    ///
+    /// This had no days field, so an Ethernet link left up for a week — the
+    /// normal state of a desktop — reported `168h 0m`.
     pub fn uptime_formatted(&self) -> String {
-        let s = self.connected_secs;
-        if s >= 3600 {
-            format!("{}h {}m", s / 3600, (s % 3600) / 60)
-        } else if s >= 60 {
-            format!("{}m {}s", s / 60, s % 60)
-        } else {
-            format!("{}s", s)
-        }
+        guitk::duration::coarse(self.connected_secs)
     }
 
     /// Tooltip text for the tray icon.

@@ -32,7 +32,8 @@
 //! | tracking a position in media, or watching a timer run | [`clock`] | `01:05`, `01:01:01` |
 //! | the same, but the milliseconds matter (a lap, a stopwatch) | [`clock_ms`] | `01:05.250` |
 //! | reading a finished span exactly (a job took *how* long?) | [`units`] | `2d 3h 4m 5s` |
-//! | glancing at a span (uptime, an ETA, a battery estimate) | [`coarse`] | `2d 3h`, `1h 1m` |
+//! | glancing at a *measured* span (uptime, a transfer ETA) | [`coarse`] | `2d 3h`, `1h 1m`, `1m 30s` |
+//! | glancing at an *estimate*, which is not accurate to the second | [`coarse_minutes`] | `2d 3h`, `1h 1m`, `45m` |
 //! | asking how long ago something happened | [`relative`] | `just now`, `5m ago`, `yesterday` |
 //!
 //! [`clock`] **always rolls over into hours.** That is the invariant the
@@ -47,6 +48,16 @@
 //! `0h`, and both print `0s` for a zero span rather than an empty string —
 //! thirty-eight hand-written copies produced four different answers for zero,
 //! including `""`.
+//!
+//! [`coarse_minutes`] is [`coarse`] with a floor: it never names seconds. The
+//! two exist because the audit found the glanceable sites splitting cleanly
+//! into two populations, and forcing either into the other's shape would be a
+//! defect rather than a cosmetic loss. A backup that *took* ninety seconds took
+//! `1m 30s`, and dropping the `30s` discards a measurement. A battery estimate
+//! of ninety seconds is not accurate to the second, and printing `1m 30s`
+//! *invents* one — the estimate will read `1m 40s` a minute later. Precision
+//! you did not measure is a lie in the same way that precision you measured and
+//! then threw away is a loss.
 
 use alloc::format;
 use alloc::string::{String, ToString};
@@ -215,6 +226,43 @@ pub fn coarse(secs: u64) -> String {
     }
 }
 
+/// [`coarse`], but never finer than a minute: `2d 3h`, `1h 1m`, `45m`, `30s`.
+///
+/// Use this for a number nobody measured to the second — a battery estimate, a
+/// "time remaining", a device's connected-for readout. [`coarse`] would render
+/// a 45-minute battery estimate as `45m 0s`, and that trailing `0s` is not a
+/// harmless zero: it asserts a precision the estimate does not have, on a
+/// figure that will read `44m 51s` a moment later. The rule this encodes is
+/// that a display should not be more precise than its input.
+///
+/// The minutes rank therefore shows one component rather than two — there is
+/// nothing below it left to show. Below a minute it falls back to seconds,
+/// because `0m` is strictly less informative than `45s` and a device that was
+/// plugged in seconds ago should say so.
+///
+/// ```
+/// # use textfmt::duration::coarse_minutes;
+/// assert_eq!(coarse_minutes(0), "0s");
+/// assert_eq!(coarse_minutes(45), "45s");
+/// assert_eq!(coarse_minutes(90), "1m");
+/// assert_eq!(coarse_minutes(2_700), "45m");
+/// assert_eq!(coarse_minutes(3_661), "1h 1m");
+/// assert_eq!(coarse_minutes(90_061), "1d 1h");
+/// ```
+#[must_use]
+pub fn coarse_minutes(secs: u64) -> String {
+    let p = Parts::split(secs);
+    if p.days > 0 {
+        format!("{}d {}h", p.days, p.hours)
+    } else if p.hours > 0 {
+        format!("{}h {}m", p.hours, p.minutes)
+    } else if p.minutes > 0 {
+        format!("{}m", p.minutes)
+    } else {
+        format!("{}s", p.seconds)
+    }
+}
+
 /// How long ago something happened: `just now`, `5m ago`, `yesterday`, `3w ago`.
 ///
 /// The argument is an *elapsed* span, not a timestamp — compute it with
@@ -264,7 +312,7 @@ pub fn relative(elapsed_secs: u64) -> String {
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::panic, reason = "test code")]
 mod tests {
-    use super::{clock, clock_ms, coarse, relative, units, Parts};
+    use super::{clock, clock_ms, coarse, coarse_minutes, relative, units, Parts};
     use alloc::format;
 
     // --- the regression this module was written for ---
@@ -396,6 +444,41 @@ mod tests {
             assert!(c.split_whitespace().count() <= u.split_whitespace().count(),
                     "coarse({secs}) = {c} is longer than units({secs}) = {u}");
         }
+    }
+
+    // --- coarse_minutes ---
+
+    #[test]
+    fn coarse_minutes_never_names_seconds_above_a_minute() {
+        // The whole point of the shape: an estimate must not claim a
+        // precision it does not have. Sweep the first six hours, where the
+        // seconds field would otherwise appear.
+        for secs in (60..21_600_u64).step_by(37) {
+            let s = coarse_minutes(secs);
+            assert!(
+                !s.ends_with('s'),
+                "coarse_minutes({secs}) = {s} names seconds"
+            );
+        }
+    }
+
+    #[test]
+    fn coarse_minutes_agrees_with_coarse_wherever_coarse_is_minute_floored() {
+        // Above an hour the two shapes are the same function. Any divergence
+        // there would mean one of them had grown a second definition of what
+        // "the two most significant components" are -- which is exactly the
+        // failure this module was written to end, reintroduced inside it.
+        for secs in (3_600..2_000_000_u64).step_by(1_009) {
+            assert_eq!(coarse(secs), coarse_minutes(secs), "at {secs}s");
+        }
+    }
+
+    #[test]
+    fn coarse_minutes_prefers_seconds_to_a_bare_zero_below_a_minute() {
+        assert_eq!(coarse_minutes(0), "0s");
+        assert_eq!(coarse_minutes(1), "1s");
+        assert_eq!(coarse_minutes(59), "59s");
+        assert_eq!(coarse_minutes(60), "1m");
     }
 
     // --- relative ---

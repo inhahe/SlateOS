@@ -626,10 +626,12 @@ impl ListeningStats {
     }
 
     /// Total listening time formatted.
+    ///
+    /// This is a lifetime accumulator, so it is measured in days within a
+    /// month of use. It used to be hard-wired to `{h}h {m}m`, which reported
+    /// a year of podcasts as `2920h 0m` and a first session as `0h 12m`.
     pub fn total_time_display(&self) -> String {
-        let hours = self.total_listening_secs / 3600;
-        let mins = (self.total_listening_secs % 3600) / 60;
-        format!("{}h {}m", hours, mins)
+        guitk::duration::coarse(self.total_listening_secs)
     }
 
     /// Record a listening session.

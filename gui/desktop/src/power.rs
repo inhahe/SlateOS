@@ -408,16 +408,14 @@ impl BatteryInfo {
     }
 
     /// Format remaining time as "Xh Ym" string.
+    ///
+    /// The battery readout in the tray and the one on the Power settings page
+    /// (`power_settings::BatteryInfo::remaining_formatted`) render the same
+    /// estimate from the same driver, one in seconds and one in minutes. They
+    /// now share a formatter so they cannot drift apart.
     pub fn time_remaining_str(&self) -> Option<String> {
-        self.time_remaining_secs.map(|secs| {
-            let hours = secs / 3600;
-            let mins = (secs % 3600) / 60;
-            if hours > 0 {
-                format!("{}h {}m", hours, mins)
-            } else {
-                format!("{}m", mins)
-            }
-        })
+        self.time_remaining_secs
+            .map(|secs| guitk::duration::coarse_minutes(u64::from(secs)))
     }
 
     /// Whether battery is in a warning state.

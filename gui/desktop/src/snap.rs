@@ -1623,7 +1623,9 @@ mod tests {
         // zone starts at 4.5 — outside the rectangle it is tiling. The
         // in-bounds test above could not see it because it only ever ran on
         // desktop-sized areas, where the subtraction is free.
-        for w in [0.0_f32, 1.0, 2.0, 3.0, 7.0, 11.0, 12.0, 17.0, 18.0, 19.0, 40.0] {
+        for w in [
+            0.0_f32, 1.0, 2.0, 3.0, 7.0, 11.0, 12.0, 17.0, 18.0, 19.0, 40.0,
+        ] {
             for h in [0.0_f32, 1.0, 5.0, 6.0, 13.0, 40.0] {
                 let area = WorkArea::new(3.0, 4.0, w, h);
                 for &preset in SnapLayoutPreset::all() {
@@ -1690,18 +1692,12 @@ mod tests {
 
     #[test]
     fn detect_edge_left() {
-        assert_eq!(
-            detect_edge(2.0, 500.0, SCREEN),
-            Some(SnapEdge::Left)
-        );
+        assert_eq!(detect_edge(2.0, 500.0, SCREEN), Some(SnapEdge::Left));
     }
 
     #[test]
     fn detect_edge_right() {
-        assert_eq!(
-            detect_edge(1916.0, 500.0, SCREEN),
-            Some(SnapEdge::Right)
-        );
+        assert_eq!(detect_edge(1916.0, 500.0, SCREEN), Some(SnapEdge::Right));
     }
 
     #[test]
@@ -1711,18 +1707,12 @@ mod tests {
 
     #[test]
     fn detect_edge_bottom() {
-        assert_eq!(
-            detect_edge(960.0, 1076.0, SCREEN),
-            Some(SnapEdge::Bottom)
-        );
+        assert_eq!(detect_edge(960.0, 1076.0, SCREEN), Some(SnapEdge::Bottom));
     }
 
     #[test]
     fn detect_edge_top_left_corner() {
-        assert_eq!(
-            detect_edge(2.0, 3.0, SCREEN),
-            Some(SnapEdge::TopLeft)
-        );
+        assert_eq!(detect_edge(2.0, 3.0, SCREEN), Some(SnapEdge::TopLeft));
     }
 
     #[test]
@@ -2215,7 +2205,11 @@ mod tests {
         let cases: [(SnapEdge, Option<Ordering>, Option<Ordering>); 6] = [
             (SnapEdge::Left, Some(Ordering::Less), None),
             (SnapEdge::Right, Some(Ordering::Greater), None),
-            (SnapEdge::TopLeft, Some(Ordering::Less), Some(Ordering::Less)),
+            (
+                SnapEdge::TopLeft,
+                Some(Ordering::Less),
+                Some(Ordering::Less),
+            ),
             (
                 SnapEdge::TopRight,
                 Some(Ordering::Greater),

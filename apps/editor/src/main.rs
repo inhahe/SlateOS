@@ -61,6 +61,13 @@ pub struct Document {
     pub selection_anchor: Option<(usize, usize)>,
     /// Scroll offset (first visible line).
     pub scroll_line: usize,
+    /// Carries the sub-line remainder of a high-resolution wheel or trackpad.
+    ///
+    /// Lives on the document rather than on the editor so that each tab keeps
+    /// its own: a fraction earned scrolling one file must not deliver a line in
+    /// another when the user switches tabs. It sits next to `scroll_line`
+    /// because it is that field's input.
+    pub wheel: guitk::wheel::Accumulator,
     /// Horizontal scroll offset, in **pixels** from the left edge of the line.
     ///
     /// **It used to be a byte offset, and that was wrong at the root rather
@@ -296,6 +303,7 @@ impl Document {
             cursor_col: 0,
             selection_anchor: None,
             scroll_line: 0,
+            wheel: guitk::wheel::Accumulator::default(),
             scroll_px: 0.0,
             undo_stack: VecDeque::new(),
             redo_stack: VecDeque::new(),
@@ -346,6 +354,7 @@ impl Document {
             cursor_col: 0,
             selection_anchor: None,
             scroll_line: 0,
+            wheel: guitk::wheel::Accumulator::default(),
             scroll_px: 0.0,
             undo_stack: VecDeque::new(),
             redo_stack: VecDeque::new(),

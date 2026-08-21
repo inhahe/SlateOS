@@ -24,6 +24,7 @@ use guitk::event::{Event, EventResult, Key, KeyEvent, Modifiers, MouseButton, Mo
 #[allow(unused_imports)]
 use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 #[allow(unused_imports)]
+use guitk::scroll_window;
 use guitk::style::CornerRadii;
 use guitk::text;
 
@@ -64,6 +65,10 @@ const FIELD_LABEL_WIDTH: f32 = 130.0;
 const BUTTON_HEIGHT: f32 = 32.0;
 const BUTTON_WIDTH: f32 = 110.0;
 const LOG_ENTRY_HEIGHT: f32 = 22.0;
+/// Height reserved under the log for its "N more" line. Reserved whether
+/// or not the line is drawn, so how many entries fit does not depend on
+/// whether any are hidden.
+const LOG_MORE_HEIGHT: f32 = 16.0;
 const TAB_HEIGHT: f32 = 32.0;
 /// Point size of a profile's free-text notes.
 const NOTES_FONT_SIZE: f32 = 12.0;
@@ -526,7 +531,11 @@ pub struct VpnManager {
     pub editing_profile: Option<VpnProfile>,
     pub show_add_dialog: bool,
     pub scroll_offset: f32,
-    pub log_scroll_offset: f32,
+    /// First log row drawn, counted in rows rather than pixels: the log
+    /// only ever scrolls a whole row at a time, so a pixel offset could only
+    /// express positions the renderer then rounds away. A value past the end
+    /// is not an error, and shows the last page.
+    pub log_scroll_offset: usize,
     pub search_query: String,
 }
 
@@ -550,7 +559,7 @@ impl VpnManager {
             editing_profile: None,
             show_add_dialog: false,
             scroll_offset: 0.0,
-            log_scroll_offset: 0.0,
+            log_scroll_offset: 0,
             search_query: String::new(),
         }
     }
@@ -986,6 +995,21 @@ impl VpnManager {
     /// Clear the connection log.
     pub fn clear_log(&mut self) {
         self.log.clear();
+        self.log_scroll_offset = 0;
+    }
+
+    /// Move the log `delta` rows, negative for up (towards the newest entry).
+    ///
+    /// Clamped at the top only: how many rows fit depends on the panel height,
+    /// which this method is not given. The render clamps against what it is
+    /// actually drawing, so an offset past the end shows the last page.
+    pub fn scroll_log_by(&mut self, delta: isize) {
+        self.log_scroll_offset = scroll_window::shift(self.log_scroll_offset, delta);
+    }
+
+    /// Back to the newest log entry.
+    pub fn scroll_log_to_top(&mut self) {
+        self.log_scroll_offset = 0;
     }
 
     /// Begin editing by opening the add dialog with a new blank profile.
@@ -1705,7 +1729,7 @@ fn render_detail_panel(
         DetailTab::Connection => render_tab_connection(tree, app, px, panel_y, pw),
         DetailTab::SplitTunnel => render_tab_split_tunnel(tree, app, px, panel_y, pw),
         DetailTab::ProtocolConfig => render_tab_protocol(tree, app, px, panel_y, pw),
-        DetailTab::Log => render_tab_log(tree, app, px, panel_y, pw),
+        DetailTab::Log => render_tab_log(tree, app, px, panel_y, pw, panel_h),
         DetailTab::Stats => render_tab_stats(tree, app, px, panel_y, pw),
     }
 
@@ -2263,6 +2287,7 @@ fn render_tab_log(
     px: f32,
     py: f32,
     pw: f32,
+    ph: f32,
 ) {
     let mut y = py + SECTION_PADDING;
 
@@ -2336,23 +2361,34 @@ fn render_tab_log(
     });
     y += LOG_ENTRY_HEIGHT + 2.0;
 
-    // Log entries (reverse chronological)
-    for entry in app.log.iter().rev() {
-        let row_y = y;
-        if row_y > py + 500.0 {
-            break;
-        }
-
-        // Alternating row colors
-        let row_bg = if app
-            .log
-            .iter()
-            .rev()
-            .position(|e| std::ptr::eq(e, entry))
-            .unwrap_or(0)
-            % 2
-            == 0
-        {
+    // Log entries (reverse chronological). The old loop stopped at a
+    // hard-coded `py + 500.0`, a number with no relation to the panel it was
+    // drawing into, and read no offset at all -- so on a short panel it
+    // overran, on a tall one it wasted the space, and either way every entry
+    // past the cut was unreachable rather than merely off-screen.
+    //
+    // It also found each row's stripe parity by scanning the whole log for the
+    // row's own address, which is O(n) per row over a log of up to 500. The
+    // index is what `enumerate` already hands us.
+    let entries: Vec<&LogEntry> = app.log.iter().rev().collect();
+    let rows_top = y;
+    let window = scroll_window::visible(
+        entries.len(),
+        LOG_ENTRY_HEIGHT,
+        (py + ph) - rows_top - LOG_MORE_HEIGHT,
+        app.log_scroll_offset,
+    );
+    for (drawn, entry) in entries
+        .get(window.start..window.end())
+        .unwrap_or_default()
+        .iter()
+        .enumerate()
+    {
+        // Stripe by absolute position, not by position on screen, so the
+        // banding does not invert as the log scrolls.
+        let i = window.start.saturating_add(drawn);
+        let row_y = rows_top + (drawn as f32) * LOG_ENTRY_HEIGHT;
+        let row_bg = if i % 2 == 0 {
             Color::rgba(SURFACE0.r, SURFACE0.g, SURFACE0.b, 80)
         } else {
             Color::TRANSPARENT
@@ -2410,8 +2446,21 @@ fn render_tab_log(
             max_width: Some(pw - SECTION_PADDING * 2.0 - 260.0),
             overflow: TextOverflow::Ellipsis,
         });
+    }
 
-        y += LOG_ENTRY_HEIGHT;
+    // A log hiding entries says how many.
+    let hidden = entries.len().saturating_sub(window.count);
+    if hidden > 0 {
+        tree.push(RenderCommand::Text {
+            x: px + SECTION_PADDING + 8.0,
+            y: rows_top + (window.count as f32) * LOG_ENTRY_HEIGHT,
+            text: format!("{hidden} more"),
+            font_size: 10.0,
+            color: OVERLAY0,
+            font_weight: FontWeightHint::Regular,
+            max_width: None,
+            overflow: TextOverflow::Clip,
+        });
     }
 }
 
@@ -4269,4 +4318,157 @@ mod tests {
         let mgr = VpnManager::new();
         assert!(mgr.connection_for(99999).is_none());
     }
+
+    // --- connection log scrolling -------------------------------------------
+
+    /// A manager on the Log tab with `n` entries whose messages are `L000`
+    /// shaped, so they are told apart from every other string in the render
+    /// without depending on a pixel position. The log renders newest first,
+    /// so L{n-1} is the top row and L000 the last.
+    fn mgr_with_log(n: usize) -> VpnManager {
+        let mut mgr = VpnManager::new();
+        mgr.log.clear();
+        for i in 0..n {
+            mgr.log.push_back(LogEntry {
+                timestamp: 1_700_000_000 + i as u64,
+                profile_name: String::from("Work VPN"),
+                message: format!("L{i:03}"),
+                level: LogLevel::Info,
+            });
+        }
+        mgr.set_tab(DetailTab::Log);
+        mgr
+    }
+
+    fn drawn_log_rows(mgr: &VpnManager) -> Vec<String> {
+        render_app(mgr)
+            .commands
+            .into_iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, .. }
+                    if text.len() == 4
+                        && text.starts_with('L')
+                        && text.get(1..).is_some_and(|d| d.chars().all(|c| c.is_ascii_digit())) =>
+                {
+                    Some(text)
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The bug: the log stopped at a hard-coded `py + 500.0`, a number with no
+    /// relation to the panel it was drawing into, and read no scroll offset at
+    /// all. Everything past the cut was unreachable, not merely off-screen.
+    #[test]
+    fn the_log_stops_at_the_last_entry_that_fits() {
+        let mgr = mgr_with_log(200);
+        let drawn = drawn_log_rows(&mgr);
+        assert!(!drawn.is_empty(), "the log drew no entries at all");
+        assert!(drawn.len() < 200, "the log drew all 200 entries");
+        assert_eq!(
+            drawn.first().map(String::as_str),
+            Some("L199"),
+            "the log is newest first"
+        );
+    }
+
+    /// No row is drawn past the bottom of the log panel, at any offset.
+    #[test]
+    fn no_log_row_is_drawn_past_the_bottom_of_the_panel() {
+        for offset in [0, 5, 1_000] {
+            let mut mgr = mgr_with_log(200);
+            mgr.scroll_log_by(offset);
+            for cmd in render_app(&mgr).commands {
+                if let RenderCommand::Text { y, text, .. } = cmd
+                    && text.len() == 4
+                    && text.starts_with('L')
+                {
+                    assert!(
+                        y + LOG_ENTRY_HEIGHT <= WINDOW_HEIGHT,
+                        "log row {text:?} at y={y} overruns the window bottom \
+                         {WINDOW_HEIGHT} (offset={offset})"
+                    );
+                }
+            }
+        }
+    }
+
+    /// The entries past the fold are reachable, which is the fix.
+    #[test]
+    fn scrolling_reaches_the_log_entries_that_did_not_fit() {
+        let mut mgr = mgr_with_log(200);
+        assert!(!drawn_log_rows(&mgr).contains(&String::from("L000")));
+        mgr.scroll_log_by(200);
+        assert!(
+            drawn_log_rows(&mgr).contains(&String::from("L000")),
+            "the oldest log entry is unreachable after scrolling to the end"
+        );
+    }
+
+    /// An offset past the end means the last page, not a blank log.
+    #[test]
+    fn a_log_that_shrinks_under_a_stale_offset_shows_its_last_page() {
+        let mut mgr = mgr_with_log(200);
+        mgr.scroll_log_by(199);
+        mgr.log.truncate(4);
+        let drawn = drawn_log_rows(&mgr);
+        assert_eq!(drawn.len(), 4, "the log must not go blank");
+        assert_eq!(drawn.last().map(String::as_str), Some("L000"));
+    }
+
+    /// Scrolling up from the top stays at the top rather than wrapping, and
+    /// clearing the log takes the offset back with it.
+    #[test]
+    fn scrolling_the_log_up_from_the_top_stays_at_the_top() {
+        let mut mgr = mgr_with_log(200);
+        mgr.scroll_log_by(-10);
+        assert_eq!(mgr.log_scroll_offset, 0);
+        mgr.scroll_log_by(5);
+        mgr.scroll_log_to_top();
+        assert_eq!(mgr.log_scroll_offset, 0);
+
+        mgr.scroll_log_by(30);
+        mgr.clear_log();
+        assert_eq!(
+            mgr.log_scroll_offset, 0,
+            "clearing the log should not leave the view scrolled into nothing"
+        );
+    }
+
+    /// A log hiding entries says how many.
+    #[test]
+    fn a_log_that_is_hiding_entries_says_so() {
+        let mgr = mgr_with_log(200);
+        let shown = drawn_log_rows(&mgr).len();
+        let labels: Vec<String> = render_app(&mgr)
+            .commands
+            .into_iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, .. } => Some(text),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            labels.contains(&format!("{} more", 200 - shown)),
+            "expected a \"{} more\" line",
+            200 - shown
+        );
+
+        // ...and a log with room for everything says nothing.
+        let mgr = mgr_with_log(3);
+        let labels: Vec<String> = render_app(&mgr)
+            .commands
+            .into_iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, .. } => Some(text),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            !labels.iter().any(|t| t.ends_with(" more")),
+            "a complete log should not claim to be hiding entries"
+        );
+    }
+
 }

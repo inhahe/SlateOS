@@ -53,13 +53,60 @@ const CHECK_HIGHLIGHT: Color = Color::rgba(243, 139, 168, 120);
 const SQUARE_SIZE: f32 = 64.0;
 const BOARD_OFFSET_X: f32 = 40.0;
 const BOARD_OFFSET_Y: f32 = 60.0;
-const PANEL_X: f32 = BOARD_OFFSET_X + SQUARE_SIZE * 8.0 + 20.0;
+const BOARD_SIZE: f32 = SQUARE_SIZE * 8.0;
+const PANEL_X: f32 = BOARD_OFFSET_X + BOARD_SIZE + 20.0;
 const PIECE_FONT_SIZE: f32 = 38.0;
 const LABEL_FONT_SIZE: f32 = 14.0;
 const TITLE_FONT_SIZE: f32 = 22.0;
 const INFO_FONT_SIZE: f32 = 16.0;
 const MOVE_FONT_SIZE: f32 = 13.0;
 const DOT_RADIUS: f32 = 8.0;
+
+// ── Board geometry ──────────────────────────────────────────────────
+//
+// Where a square is drawn and which square a click lands on are the same
+// question asked from two directions, so they are answered in one place. Both
+// used to be spelled out at each site -- the square's origin five times, the
+// board's far edge four -- with nothing but care keeping the board a player
+// sees and the board a click resolves against in the same position.
+
+/// Screen coordinates of the top-left corner of `pos`.
+///
+/// Row 0 is White's back rank and belongs at the *bottom* of the window, so the
+/// row is flipped on the way to the screen. This flip is the reason the mapping
+/// is worth naming: it is the one part a reader cannot check by inspection, and
+/// the one part an inverse has to undo.
+fn square_origin(pos: Pos) -> (f32, f32) {
+    let screen_row = 7 - pos.row;
+    (
+        BOARD_OFFSET_X + f32::from(pos.col) * SQUARE_SIZE,
+        BOARD_OFFSET_Y + f32::from(screen_row) * SQUARE_SIZE,
+    )
+}
+
+/// Screen coordinates of the centre of `pos`.
+fn square_center(pos: Pos) -> (f32, f32) {
+    let (x, y) = square_origin(pos);
+    (x + SQUARE_SIZE / 2.0, y + SQUARE_SIZE / 2.0)
+}
+
+/// The square a screen point falls on, or `None` if it is off the board.
+///
+/// The bounds are checked before the cast rather than after: a float-to-integer
+/// cast in Rust saturates, so a point to the left of the board would otherwise
+/// come out as column 0 instead of as no square at all.
+fn square_at(x: f32, y: f32) -> Option<Pos> {
+    let bx = x - BOARD_OFFSET_X;
+    let by = y - BOARD_OFFSET_Y;
+    if bx < 0.0 || by < 0.0 || bx >= BOARD_SIZE || by >= BOARD_SIZE {
+        return None;
+    }
+    // Truncation is the intent -- the fraction is the position within the
+    // square -- and the guard above is what makes the cast safe.
+    let col = (bx / SQUARE_SIZE) as i8;
+    let screen_row = (by / SQUARE_SIZE) as i8;
+    Some(Pos::new(7 - screen_row, col))
+}
 
 // ── Piece values for AI evaluation ─────────────────────────────────
 const PAWN_VALUE: i32 = 100;
@@ -424,9 +471,11 @@ impl Board {
         for row in 0..8 {
             for col in 0..8 {
                 if let Some(p) = self.squares[row][col]
-                    && p.side == side && p.kind == PieceKind::King {
-                        return Some(Pos::new(row as i8, col as i8));
-                    }
+                    && p.side == side
+                    && p.kind == PieceKind::King
+                {
+                    return Some(Pos::new(row as i8, col as i8));
+                }
             }
         }
         None
@@ -447,9 +496,11 @@ impl Board {
         ] {
             let p = Pos::new(pos.row + dr, pos.col + dc);
             if let Some(piece) = self.get(p)
-                && piece.side == attacker && piece.kind == PieceKind::Knight {
-                    return true;
-                }
+                && piece.side == attacker
+                && piece.kind == PieceKind::Knight
+            {
+                return true;
+            }
         }
 
         // Check king attacks (adjacent squares)
@@ -460,9 +511,11 @@ impl Board {
                 }
                 let p = Pos::new(pos.row + dr, pos.col + dc);
                 if let Some(piece) = self.get(p)
-                    && piece.side == attacker && piece.kind == PieceKind::King {
-                        return true;
-                    }
+                    && piece.side == attacker
+                    && piece.kind == PieceKind::King
+                {
+                    return true;
+                }
             }
         }
 
@@ -471,9 +524,11 @@ impl Board {
         for &dc in &[-1i8, 1] {
             let p = Pos::new(pos.row + pawn_dir, pos.col + dc);
             if let Some(piece) = self.get(p)
-                && piece.side == attacker && piece.kind == PieceKind::Pawn {
-                    return true;
-                }
+                && piece.side == attacker
+                && piece.kind == PieceKind::Pawn
+            {
+                return true;
+            }
         }
 
         // Check sliding piece attacks (rook/queen on ranks/files)
@@ -1154,16 +1209,17 @@ impl ChessApp {
 
         // Select a piece (must be own piece)
         if let Some(piece) = self.board.get(pos)
-            && piece.side == Side::White {
-                self.selected = Some(pos);
-                self.legal_moves_for_selected = self
-                    .board
-                    .generate_legal_moves()
-                    .into_iter()
-                    .filter(|m| m.from == pos)
-                    .collect();
-                return;
-            }
+            && piece.side == Side::White
+        {
+            self.selected = Some(pos);
+            self.legal_moves_for_selected = self
+                .board
+                .generate_legal_moves()
+                .into_iter()
+                .filter(|m| m.from == pos)
+                .collect();
+            return;
+        }
 
         // Clicked empty square or opponent piece without selection
         self.selected = None;
@@ -1309,19 +1365,7 @@ impl ChessApp {
     /// Handle a mouse click event.
     fn handle_mouse(&mut self, event: &MouseEvent) {
         if let MouseEventKind::Press(MouseButton::Left) = event.kind {
-            // Convert mouse position to board square
-            let board_x = event.x - BOARD_OFFSET_X;
-            let board_y = event.y - BOARD_OFFSET_Y;
-
-            if board_x >= 0.0
-                && board_y >= 0.0
-                && board_x < SQUARE_SIZE * 8.0
-                && board_y < SQUARE_SIZE * 8.0
-            {
-                let col = (board_x / SQUARE_SIZE) as i8;
-                // Flip row: screen y=0 is top, but row 7 = rank 8 should be at top
-                let row = 7 - (board_y / SQUARE_SIZE) as i8;
-                let pos = Pos::new(row, col);
+            if let Some(pos) = square_at(event.x, event.y) {
                 self.click_square(pos);
             }
         }
@@ -1345,7 +1389,7 @@ impl ChessApp {
             x: 0.0,
             y: 0.0,
             width: PANEL_X + 250.0,
-            height: BOARD_OFFSET_Y + SQUARE_SIZE * 8.0 + 80.0,
+            height: BOARD_OFFSET_Y + BOARD_SIZE + 80.0,
             color: BASE,
             corner_radii: CornerRadii::ZERO,
         });
@@ -1390,12 +1434,11 @@ impl ChessApp {
         self.render_board(&mut commands);
 
         // Rank labels (1-8 on left)
-        for rank in 0..8 {
-            let screen_row = 7 - rank;
-            let y = BOARD_OFFSET_Y + screen_row as f32 * SQUARE_SIZE + SQUARE_SIZE / 2.0 - 6.0;
+        for rank in 0..8i8 {
+            let (_, cy) = square_center(Pos::new(rank, 0));
             commands.push(RenderCommand::Text {
                 x: BOARD_OFFSET_X - 16.0,
-                y,
+                y: cy - 6.0,
                 text: format!("{}", rank + 1),
                 color: SUBTEXT0,
                 font_size: LABEL_FONT_SIZE,
@@ -1406,12 +1449,11 @@ impl ChessApp {
         }
 
         // File labels (a-h on bottom)
-        for file in 0..8 {
-            let x = BOARD_OFFSET_X + file as f32 * SQUARE_SIZE + SQUARE_SIZE / 2.0 - 4.0;
-            let y = BOARD_OFFSET_Y + SQUARE_SIZE * 8.0 + 8.0;
+        for file in 0..8i8 {
+            let (cx, _) = square_center(Pos::new(0, file));
             commands.push(RenderCommand::Text {
-                x,
-                y,
+                x: cx - 4.0,
+                y: BOARD_OFFSET_Y + BOARD_SIZE + 8.0,
                 text: format!("{}", (b'a' + file as u8) as char),
                 color: SUBTEXT0,
                 font_size: LABEL_FONT_SIZE,
@@ -1435,9 +1477,7 @@ impl ChessApp {
         for row in 0..8i8 {
             for col in 0..8i8 {
                 let pos = Pos::new(row, col);
-                let screen_row = 7 - row;
-                let sx = BOARD_OFFSET_X + col as f32 * SQUARE_SIZE;
-                let sy = BOARD_OFFSET_Y + screen_row as f32 * SQUARE_SIZE;
+                let (sx, sy) = square_origin(pos);
 
                 // Base square color
                 let is_light = (row + col) % 2 != 0;
@@ -1454,16 +1494,17 @@ impl ChessApp {
 
                 // Last move highlight
                 if let Some(last) = self.last_move
-                    && (pos == last.from || pos == last.to) {
-                        commands.push(RenderCommand::FillRect {
-                            x: sx,
-                            y: sy,
-                            width: SQUARE_SIZE,
-                            height: SQUARE_SIZE,
-                            color: LAST_MOVE_HIGHLIGHT,
-                            corner_radii: CornerRadii::ZERO,
-                        });
-                    }
+                    && (pos == last.from || pos == last.to)
+                {
+                    commands.push(RenderCommand::FillRect {
+                        x: sx,
+                        y: sy,
+                        width: SQUARE_SIZE,
+                        height: SQUARE_SIZE,
+                        color: LAST_MOVE_HIGHLIGHT,
+                        corner_radii: CornerRadii::ZERO,
+                    });
+                }
 
                 // Check highlight on king
                 if in_check && king_pos == Some(pos) {
@@ -1521,17 +1562,16 @@ impl ChessApp {
 
         // Legal move indicators (dots on target squares)
         for mv in &self.legal_moves_for_selected {
-            let screen_row = 7 - mv.to.row;
-            let cx = BOARD_OFFSET_X + mv.to.col as f32 * SQUARE_SIZE + SQUARE_SIZE / 2.0;
-            let cy = BOARD_OFFSET_Y + screen_row as f32 * SQUARE_SIZE + SQUARE_SIZE / 2.0;
+            let (sx, sy) = square_origin(mv.to);
+            let (cx, cy) = square_center(mv.to);
 
             // Use a small filled circle (approximated with a rounded rect)
             let has_piece = self.board.get(mv.to).is_some();
             if has_piece {
                 // Capture indicator: ring around the square
                 commands.push(RenderCommand::StrokeRect {
-                    x: BOARD_OFFSET_X + mv.to.col as f32 * SQUARE_SIZE + 3.0,
-                    y: BOARD_OFFSET_Y + screen_row as f32 * SQUARE_SIZE + 3.0,
+                    x: sx + 3.0,
+                    y: sy + 3.0,
                     width: SQUARE_SIZE - 6.0,
                     height: SQUARE_SIZE - 6.0,
                     color: LEGAL_MOVE_DOT,
@@ -1663,7 +1703,7 @@ impl ChessApp {
         }
 
         // Controls hint at bottom of panel
-        let controls_y = BOARD_OFFSET_Y + SQUARE_SIZE * 8.0 - 40.0;
+        let controls_y = BOARD_OFFSET_Y + BOARD_SIZE - 40.0;
         if py < controls_y {
             py = controls_y;
         }
@@ -1708,6 +1748,15 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
+    // A test that indexes past the end, or unwraps a `None`, is a test that
+    // has already failed; panicking is the reporting mechanism, not a fault.
+    #![allow(
+        clippy::arithmetic_side_effects,
+        clippy::expect_used,
+        clippy::indexing_slicing,
+        clippy::unwrap_used
+    )]
+
     use super::*;
 
     // ── Board setup helpers ─────────────────────────────────────────
@@ -2889,6 +2938,349 @@ mod tests {
         assert_eq!(app.cursor.col, 0); // Should not move
     }
 
+    // ── Board geometry tests ────────────────────────────────────────
+    //
+    // Collapsing the renderer and the hit test into `square_origin` /
+    // `square_at` means a click test that aims at where the code says a square
+    // was painted passes for any mapping, right or wrong. So the checks below
+    // are of two kinds, and the second kind is the load-bearing one:
+    //
+    //   * round-trips -- click where the board was actually painted;
+    //   * claims measured against something the mapping does not decide: the
+    //     window, and which end of it White starts at.
+    //
+    // A round-trip has a second blind spot worth naming, because it is not
+    // obvious: `square_at` maps every point in a square to that square, so
+    // clicking a thing to find out which square it is on cannot tell a centred
+    // thing from one drawn in the corner. Anything whose *placement within* a
+    // square matters is measured against the painted rectangle instead.
+
+    /// Every square the renderer painted, as (pos-independent) rectangles, in
+    /// the order drawn. A board square is a `SQUARE_SIZE` fill; the highlights
+    /// and dots drawn over it are smaller or a different shape.
+    fn painted_squares(commands: &[RenderCommand]) -> Vec<(f32, f32)> {
+        commands
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::FillRect {
+                    x,
+                    y,
+                    width,
+                    height,
+                    color,
+                    ..
+                } if *width == SQUARE_SIZE
+                    && *height == SQUARE_SIZE
+                    && (*color == LIGHT_SQUARE || *color == DARK_SQUARE) =>
+                {
+                    Some((*x, *y))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The colour the renderer actually painted `pos`.
+    ///
+    /// The *location* is `square_origin`'s opinion, so this shares an origin
+    /// with the renderer and cannot judge where a square went. The *colour* is
+    /// read back off the paint, and that part is independent: a renderer that
+    /// colours squares by some rule other than the one the board believes is
+    /// caught here.
+    fn painted_color(commands: &[RenderCommand], pos: Pos) -> Option<Color> {
+        let (ox, oy) = square_origin(pos);
+        commands.iter().find_map(|c| match c {
+            RenderCommand::FillRect {
+                x,
+                y,
+                width,
+                height,
+                color,
+                ..
+            } if *width == SQUARE_SIZE
+                && *height == SQUARE_SIZE
+                && (*x - ox).abs() < 0.01
+                && (*y - oy).abs() < 0.01 =>
+            {
+                Some(*color)
+            }
+            _ => None,
+        })
+    }
+
+    /// Centre of the square the renderer painted at `pos`.
+    fn painted_center(commands: &[RenderCommand], pos: Pos) -> Option<(f32, f32)> {
+        let (ox, oy) = square_origin(pos);
+        painted_squares(commands)
+            .into_iter()
+            .find(|&(x, y)| (x - ox).abs() < 0.01 && (y - oy).abs() < 0.01)
+            .map(|(x, y)| (x + SQUARE_SIZE / 2.0, y + SQUARE_SIZE / 2.0))
+    }
+
+    /// Where the glyph for a piece standing on `pos` was drawn.
+    fn painted_piece_y(commands: &[RenderCommand], glyph: char) -> Option<f32> {
+        commands.iter().find_map(|c| match c {
+            RenderCommand::Text {
+                y, text, font_size, ..
+            } if (*font_size - PIECE_FONT_SIZE).abs() < 0.01
+                && text.chars().next() == Some(glyph) =>
+            {
+                Some(*y)
+            }
+            _ => None,
+        })
+    }
+
+    #[test]
+    fn every_square_is_clickable_across_its_whole_face() {
+        // Corners as well as the centre: a hit test that is off by less than
+        // half a square still answers the centre correctly.
+        for row in 0..8i8 {
+            for col in 0..8i8 {
+                let pos = Pos::new(row, col);
+                let (ox, oy) = square_origin(pos);
+                for (dx, dy) in [
+                    (0.5, 0.5),
+                    (SQUARE_SIZE / 2.0, SQUARE_SIZE / 2.0),
+                    (SQUARE_SIZE - 0.5, 0.5),
+                    (0.5, SQUARE_SIZE - 0.5),
+                    (SQUARE_SIZE - 0.5, SQUARE_SIZE - 0.5),
+                ] {
+                    assert_eq!(
+                        square_at(ox + dx, oy + dy),
+                        Some(pos),
+                        "({}, {}) should land on {pos:?}",
+                        ox + dx,
+                        oy + dy
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn nothing_outside_the_board_lands_on_a_square() {
+        // Swept well past every edge, because the failure this is looking for
+        // is a saturating cast or a wrap, and both live beyond the board rather
+        // than just outside it.
+        let far = BOARD_OFFSET_X + BOARD_SIZE + 200.0;
+        let mut x = -100.0;
+        while x < far {
+            let mut y = -100.0;
+            while y < far {
+                let inside = x >= BOARD_OFFSET_X
+                    && y >= BOARD_OFFSET_Y
+                    && x < BOARD_OFFSET_X + BOARD_SIZE
+                    && y < BOARD_OFFSET_Y + BOARD_SIZE;
+                assert_eq!(
+                    square_at(x, y).is_some(),
+                    inside,
+                    "({x}, {y}) inside={inside}"
+                );
+                y += 7.0;
+            }
+            x += 7.0;
+        }
+    }
+
+    #[test]
+    fn a_click_left_of_the_board_selects_nothing() {
+        let mut app = ChessApp::new();
+        let (_, y) = square_center(Pos::new(1, 0));
+        app.handle_mouse(&MouseEvent {
+            x: BOARD_OFFSET_X - 30.0,
+            y,
+            kind: MouseEventKind::Press(MouseButton::Left),
+        });
+        assert!(
+            app.selected.is_none(),
+            "a click off the left edge must not saturate onto the a-file"
+        );
+    }
+
+    #[test]
+    fn the_painted_board_is_sixty_four_squares_on_an_even_grid() {
+        // Measured against the window and against itself, not against
+        // `square_origin`: eight distinct columns and eight distinct rows,
+        // evenly spaced, each square painted exactly once.
+        let app = ChessApp::new();
+        let squares = painted_squares(&app.render());
+        assert_eq!(squares.len(), 64, "one fill per square");
+
+        let mut xs: Vec<f32> = squares.iter().map(|&(x, _)| x).collect();
+        let mut ys: Vec<f32> = squares.iter().map(|&(_, y)| y).collect();
+        xs.sort_by(f32::total_cmp);
+        xs.dedup_by(|a, b| (*a - *b).abs() < 0.01);
+        ys.sort_by(f32::total_cmp);
+        ys.dedup_by(|a, b| (*a - *b).abs() < 0.01);
+        assert_eq!(xs.len(), 8, "eight distinct columns");
+        assert_eq!(ys.len(), 8, "eight distinct rows");
+
+        for pair in xs.windows(2) {
+            let (a, b) = (pair[0], pair[1]);
+            assert!(
+                (b - a - SQUARE_SIZE).abs() < 0.01,
+                "columns should be one square apart, got {}",
+                b - a
+            );
+        }
+        for pair in ys.windows(2) {
+            let (a, b) = (pair[0], pair[1]);
+            assert!(
+                (b - a - SQUARE_SIZE).abs() < 0.01,
+                "rows should be one square apart, got {}",
+                b - a
+            );
+        }
+        assert!(
+            xs[0] >= 0.0 && ys[0] >= 0.0,
+            "board starts inside the window"
+        );
+        assert!(
+            xs[7] + SQUARE_SIZE <= PANEL_X,
+            "the board should not run under the side panel"
+        );
+    }
+
+    #[test]
+    fn white_is_painted_at_the_bottom_of_the_window() {
+        // The row flip in `square_origin` is the one part of the mapping that
+        // cannot be checked by inspection, and a round-trip test cannot see it
+        // at all -- painting and hit-testing both flip, so both stay
+        // consistent. This is the check with an outside opinion: the white king
+        // starts nearer the bottom edge than the black king.
+        let app = ChessApp::new();
+        let commands = app.render();
+        let white = painted_piece_y(&commands, '\u{2654}').expect("white king painted");
+        let black = painted_piece_y(&commands, '\u{265A}').expect("black king painted");
+        assert!(
+            white > black,
+            "white should be drawn lower down the window than black, got {white} vs {black}"
+        );
+    }
+
+    #[test]
+    fn the_dark_square_is_in_each_players_lower_left_corner() {
+        // Read back off the paint rather than recomputed, so a renderer that
+        // colours squares by some other rule is caught. a1 is dark and h1 is
+        // light -- "light on the right" -- which is the same convention a
+        // checkers board follows.
+        let app = ChessApp::new();
+        let commands = app.render();
+        assert_eq!(
+            painted_color(&commands, Pos::new(0, 0)),
+            Some(DARK_SQUARE),
+            "a1 is dark"
+        );
+        assert_eq!(
+            painted_color(&commands, Pos::new(0, 7)),
+            Some(LIGHT_SQUARE),
+            "h1 is light"
+        );
+        assert_eq!(
+            painted_color(&commands, Pos::new(7, 7)),
+            Some(DARK_SQUARE),
+            "h8 is dark"
+        );
+    }
+
+    #[test]
+    fn the_rank_and_file_labels_line_up_with_the_squares_they_name() {
+        // The labels are drawn from the same mapping as the squares, so this
+        // pins them to the *painted* squares instead: rank 1's label shares a
+        // row with a1, and file a's label shares a column with it.
+        let app = ChessApp::new();
+        let commands = app.render();
+        let label_pos = |want: &str| -> Option<(f32, f32)> {
+            commands.iter().find_map(|c| match c {
+                RenderCommand::Text {
+                    x,
+                    y,
+                    text,
+                    font_size,
+                    ..
+                } if (*font_size - LABEL_FONT_SIZE).abs() < 0.01 && text == want => Some((*x, *y)),
+                _ => None,
+            })
+        };
+        let (a1x, a1y) = square_center(Pos::new(0, 0));
+        let (h8x, h8y) = square_center(Pos::new(7, 7));
+
+        let (_, r1y) = label_pos("1").expect("rank 1 label");
+        let (_, r8y) = label_pos("8").expect("rank 8 label");
+        assert!(
+            (r1y - a1y).abs() < SQUARE_SIZE / 2.0,
+            "rank 1 beside rank 1"
+        );
+        assert!(
+            (r8y - h8y).abs() < SQUARE_SIZE / 2.0,
+            "rank 8 beside rank 8"
+        );
+
+        let (fax, _) = label_pos("a").expect("file a label");
+        let (fhx, _) = label_pos("h").expect("file h label");
+        assert!(
+            (fax - a1x).abs() < SQUARE_SIZE / 2.0,
+            "file a under the a-file"
+        );
+        assert!(
+            (fhx - h8x).abs() < SQUARE_SIZE / 2.0,
+            "file h under the h-file"
+        );
+    }
+
+    #[test]
+    fn a_legal_move_dot_is_drawn_on_the_square_it_offers() {
+        // The dots are what a player aims at, so each has to sit on the square
+        // that clicking it moves to. Checked against the painted square, and
+        // then by clicking the dot's own centre.
+        let mut app = ChessApp::new();
+        app.click_square(Pos::new(0, 1)); // b1 knight
+        let dests: Vec<Pos> = app.legal_moves_for_selected.iter().map(|m| m.to).collect();
+        assert!(!dests.is_empty(), "the knight should have moves");
+        let commands = app.render();
+        let dots: Vec<(f32, f32)> = commands
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::FillRect {
+                    x, y, color, width, ..
+                } if *color == LEGAL_MOVE_DOT && (*width - DOT_RADIUS * 2.0).abs() < 0.01 => {
+                    Some((*x + DOT_RADIUS, *y + DOT_RADIUS))
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(dots.len(), dests.len(), "one dot per destination");
+        let squares = painted_squares(&commands);
+        for (x, y) in dots {
+            let hit = square_at(x, y).expect("a dot should sit on a square");
+            assert!(
+                dests.contains(&hit),
+                "a dot at ({x}, {y}) resolves to {hit:?}, which is not a legal destination"
+            );
+
+            // Landing anywhere on the square is not enough. A dot on the
+            // square's corner still resolves to that square, so the round-trip
+            // above passes while the player sees a dot straddling two squares.
+            // The square it must be centred in is the painted one, found by
+            // asking which fill contains the dot -- no shared arithmetic with
+            // the code that placed it.
+            let (sx, sy) = squares
+                .iter()
+                .copied()
+                .find(|&(sx, sy)| {
+                    x >= sx && x < sx + SQUARE_SIZE && y >= sy && y < sy + SQUARE_SIZE
+                })
+                .expect("a dot should fall inside a painted square");
+            let (want_x, want_y) = (sx + SQUARE_SIZE / 2.0, sy + SQUARE_SIZE / 2.0);
+            assert!(
+                (x - want_x).abs() < 0.01 && (y - want_y).abs() < 0.01,
+                "a dot at ({x}, {y}) is not centred in the square painted at \
+                 ({sx}, {sy}); expected ({want_x}, {want_y})"
+            );
+        }
+    }
+
     // ── Rendering tests ─────────────────────────────────────────────
 
     #[test]
@@ -2984,9 +3376,9 @@ mod tests {
     #[test]
     fn test_mouse_click_on_board() {
         let mut app = ChessApp::new();
-        // Click on e2 (col=4, row=1). Screen: x = offset + 4*64 + 32, y = offset + 6*64 + 32
-        let x = BOARD_OFFSET_X + 4.0 * SQUARE_SIZE + SQUARE_SIZE / 2.0;
-        let y = BOARD_OFFSET_Y + 6.0 * SQUARE_SIZE + SQUARE_SIZE / 2.0; // row 1 = screen row 6
+        // e2, where White's king's pawn starts. The coordinates come from the
+        // painted board rather than from a fourth copy of the arithmetic.
+        let (x, y) = painted_center(&app.render(), Pos::new(1, 4)).expect("e2 should be painted");
         let event = MouseEvent {
             x,
             y,

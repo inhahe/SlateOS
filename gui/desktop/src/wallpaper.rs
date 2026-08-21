@@ -23,7 +23,7 @@
 
 use guitk::color::Color;
 use guitk::render::RenderCommand;
-use guitk::rng::{seeded_from_system, RandomSource, SeededRng};
+use guitk::rng::{RandomSource, SeededRng, seeded_from_system};
 use guitk::style::CornerRadii;
 
 use std::fmt;
@@ -1878,15 +1878,13 @@ mod tests {
     fn random_wallpaper_changes_image() {
         let mut mgr = WallpaperManager::new();
         mgr.set_slideshow("/wp", 300, false);
-        mgr.populate_slideshow_paths(
-            vec![
-                "a.png".into(),
-                "b.png".into(),
-                "c.png".into(),
-                "d.png".into(),
-                "e.png".into(),
-            ],
-        );
+        mgr.populate_slideshow_paths(vec![
+            "a.png".into(),
+            "b.png".into(),
+            "c.png".into(),
+            "d.png".into(),
+            "e.png".into(),
+        ]);
 
         let id_before = mgr.current_image_id();
         mgr.random_wallpaper();
@@ -1980,7 +1978,13 @@ mod tests {
                 panic!("a populated slideshow is always present");
             };
             (0..12)
-                .filter_map(|i| state.order.get(i).and_then(|&p| state.paths.get(p)).cloned())
+                .filter_map(|i| {
+                    state
+                        .order
+                        .get(i)
+                        .and_then(|&p| state.paths.get(p))
+                        .cloned()
+                })
                 .collect()
         };
 

@@ -24037,6 +24037,88 @@ path ever becomes hot enough that two extra ZAP walks matter, the fix is to
 cache the resolved registry per-pool — which the driver already does, once per
 mount — not to stop reading it.
 
+## §246 — A cleanly exported ZFS pool mounts read-only; a destroyed one does not, even though it would work
+
+**Date:** 2026-08-20
+**Decided by:** Claude (autonomous)
+
+**In short.** A ZFS disk records what it currently *is* — in use, cleanly
+unplugged, deleted, or a spare kept in reserve. SlateOS was ignoring that field
+entirely and just trying to read whatever disk it was handed. Two of those
+states are disks that hold no file data at all, so reading them produced a
+misleading "this is not a ZFS disk" error about something that plainly is one.
+The third, a *deleted* pool, is the interesting one: deleting a ZFS pool barely
+touches the disk, so SlateOS would have mounted it and shown the files as if
+nothing had happened. The decision is to read the field, to mount a cleanly
+unplugged pool without complaint, and to refuse a deleted one by name — even
+though refusing it means turning away a disk we could in fact read.
+
+**Decision.** `label::parse_config` screens `state` and accepts only
+`POOL_STATE_ACTIVE` (0) and `POOL_STATE_EXPORTED` (1). `SPARE` (3), `L2CACHE`
+(4) and `DESTROYED` (2) return `NotSupported`. An absent `state` key is read as
+`ACTIVE`.
+
+**Why accept `EXPORTED`.** An export is the ordinary, correct way to hand a
+disk from one machine to another: ZFS quiesces the pool, commits, and writes
+the state. The on-disk image is consistent *by construction*, which is a
+stronger guarantee than the `ACTIVE` case gives — an active pool's labels were
+written by a machine that may still be writing. This driver is read-only, so
+the only thing `ACTIVE` could offer over `EXPORTED` is the risk of racing a
+live writer. Refusing `EXPORTED` would mean refusing the single commonest way a
+ZFS disk legitimately arrives in another computer, and `zpool import` itself
+takes an exported pool with no flag. There is no case for refusing it.
+
+**Why refuse `DESTROYED`, which is the actual tradeoff.** `zpool destroy`
+rewrites the state field and, essentially, nothing else — the uberblocks stay
+valid, the object tree stays intact, and that is precisely why `zpool import -D`
+can undo it. So a destroyed pool is *readable*, and refusing it turns away data
+we could have shown.
+
+- **For mounting it:** we are read-only, so we cannot make anything worse; the
+  data is right there; a user plugging in a disk to recover files from a pool
+  they deleted is a real and sympathetic case; and "it works" is a better
+  outcome than an error.
+- **Against, which won:** `destroy` is a deliberate statement that this pool is
+  gone. A filesystem that silently resurrects it makes deletion meaningless —
+  and worse, does so *invisibly*, since a mounted destroyed pool looks
+  identical to a live one. ZFS's own design already settled this argument: it
+  could have made `import` find destroyed pools by default and chose to require
+  an explicit `-D`, so the recovery case is served by an extra gesture rather
+  than by ambiguity. Matching that costs a recovery user one flag we have not
+  built yet; matching the other way costs every user the ability to trust that
+  a deleted pool is deleted.
+
+The asymmetry is the point: mounting a destroyed pool fails *silently and
+plausibly*, refusing one fails *loudly and recoverably*. When one error is
+detectable by the user and the other is not, take the detectable one.
+
+**Why `SPARE` and `L2CACHE` are not a tradeoff at all.** Both are genuine pool
+members with complete, valid labels and no part of any object tree behind them
+— a spare is unwritten reserve, an L2ARC device is an evictable copy of blocks
+whose home is elsewhere. Before this change they reached `find_uberblock` and
+failed as `InvalidArgument`, whose meaning is "this is not a ZFS device". That
+is simply false about a device ZFS labelled itself, and a false diagnosis sends
+whoever reads it looking in the wrong place.
+
+**Why absent means `ACTIVE`.** Every real label carries `state`. Defaulting the
+other way would convert *any* future failure to parse one nvlist key into a
+refusal to mount a healthy pool — trading a bug that never fires for one that
+fires on good hardware.
+
+**Folded in, and why here rather than separately.** `SPA_VERSION_FEATURES` was
+documented as "highest SPA version this driver will mount" while being compared
+against nothing. It is now enforced (`version > 5000 → NotSupported`). No such
+version exists, so this fixes no live bug; it makes an existing doc comment true
+and costs one `u64` compare on a once-per-mount path. It rode along with the
+state check rather than consuming its own eight-minute boot-test cycle, because
+a check that cannot fire today cannot be validated by anything except the fact
+that the ordinary pool still mounts — which the same boot proves.
+
+**What would change this.** If a recovery workflow is ever wanted, the shape is
+an explicit mount option that carries the user's intent, mirroring `-D` — not
+relaxing the default. Relaxing the default would put the two indistinguishable
+outcomes back.
+
 ## §463 — Two shared RNG crates merge into the dependency-free one
 
 **Date:** 2026-08-18
@@ -24895,3 +24977,1576 @@ list does not move as the list grows.
   value a caller sets, but no input is wired to set one yet; that is settings-
   shell plumbing, tracked in `known-issues.md` under
   `C-TOUCHPAD-GESTURE-LIST-DRAWS-PAST-THE-PANEL`.
+
+---
+
+## §471 — The kanban board scrolls as one, not one column at a time
+
+**Date:** 2026-08-18
+**Decided by:** Claude (autonomous)
+
+**In short:** A kanban board is a row of columns ("To Do", "Doing", "Done"),
+each a vertical stack of cards. When a column has more cards than fit on
+screen, the ones below the fold have to be reachable somehow. The choice was
+whether scrolling moves *all* the columns together, like a single sheet of
+paper, or whether each column scrolls on its own with the mouse pointer
+deciding which one moves. Chose: all together, one shared position.
+
+### The decision
+
+`KanbanApp::scroll_offset` is a single `usize` — a card index, not a pixel
+offset — and every column starts drawing at that index. Page Up/Down and the
+arrow keys move it. Each column then clamps it against its *own* card count
+independently, via `scroll_window::visible_variable`, so a column with four
+cards sits at its last page while the one next to it with sixty is still
+scrolling through the middle.
+
+### The alternatives
+
+| | *What changes:* |
+|---|---|
+| **One shared offset** (chosen) | Page Down moves every column down together; a short column stops at its end and stays there while the others keep going. |
+| **One offset per column** | Page Down moves only the column the selection (or the pointer) is in; the others stay where they were. |
+
+### Why one
+
+- **There is nothing to point at yet.** Per-column scrolling needs a way to say
+  *which* column — a pointer position, or a "current column" that scroll keys
+  follow. The board view has a `selected_column`, but it is moved by the same
+  Left/Right keys that move cards between columns, so a scroll bound to it
+  would move the view every time the user reorganised the board. Wiring a
+  pointer into it is real work with no user asking for it.
+- **Columns are read across, not down.** The point of the layout is comparing
+  the same horizontal band across the three columns — what is in progress
+  *next to* what is done. Independent offsets break that alignment: after a few
+  scrolls the columns show unrelated slices, and the row you were comparing is
+  in three different places.
+- **The clamp makes the ragged case harmless.** The obvious objection to a
+  shared offset is that columns are different lengths, so one number cannot be
+  right for all of them. Clamping per column answers that: the short column
+  does not go blank, it pins to its last page and waits. That is exactly the
+  §470 rule, applied three times instead of once.
+
+### The cost, stated plainly
+
+If one column is much longer than the others, reaching its bottom scrolls the
+short columns to their ends first, where they then sit unchanging — the screen
+appears half-frozen while the long column moves. This is the real downside and
+it is accepted: it is legible (the columns visibly hit their ends) rather than
+confusing, and it is only reached on boards lopsided enough that the columns
+were not comparable anyway.
+
+### What would change this
+
+A pointer-position hook in the board view — the moment the app knows which
+column the mouse is over, per-column scrolling becomes cheap and the "read
+across" argument weakens, because the user would be steering deliberately
+rather than having the alignment broken out from under them. At that point
+this should be revisited rather than defended.
+
+## §472 — The podcast sidebar scrolls as one; only its title is pinned
+
+**Date:** 2026-08-18
+**Decided by:** Claude (autonomous)
+
+**In short:** The podcast app's sidebar is a single column holding a library
+menu (Search, All Episodes, Queue, Downloads, History, Statistics), then your
+subscriptions, then a list of twelve categories. It was drawn straight down
+the column with no limit, so on anything but a tall window the bottom of it
+fell off the edge of the screen — and because it was cut by the screen edge
+rather than by a scroll position, there was no way to get to what fell off.
+The categories were unreachable outright. The choice was whether to pin the
+fixed parts in place and scroll only the subscriptions, which is what most
+apps do, or to scroll the whole column together.
+
+**Decision: the whole column below the title scrolls together.**
+
+The deciding fact is arithmetic, not taste. The sidebar's *fixed* content —
+six library entries at 32px, twelve categories at 32px, two headings and two
+dividers — is 732px tall. A 600px window cannot show it **with no
+subscriptions in it at all**. Pinning is not an option that was rejected on
+preference; it is an option that does not exist, because there is nothing
+left to pin it against.
+
+| Option | *What changes* | Why not |
+|---|---|---|
+| Pin the library entries and the categories; scroll only the subscriptions | The menu and categories stay put; the middle scrolls | The fixed parts alone overflow a 600px window, so at ordinary sizes the subscription list is allotted a *negative* height and shows nothing, while the categories still run off the bottom. It fails exactly where it is needed. |
+| Give the subscriptions a minimum height and let the categories be clipped | The subscriptions always show a few rows | Restores the original bug in a smaller form: whatever is clipped is clipped by the window edge, so it is still unreachable. |
+| **Scroll everything below the title (chosen)** | The whole sidebar list moves under a fixed "Podcasts" heading; every row is reachable at some scroll position | Nothing is ever unreachable at any window size, and no section can starve another. |
+
+**The cost, stated plainly:** the library menu is no longer always on screen.
+Scroll down to your 80th subscription and "All Episodes" is above the fold.
+That is a real regression against the pinned-sidebar convention, and it is
+accepted because the convention presupposes a window tall enough to honour
+it. This mirrors §471's reasoning for the kanban board: when a layout cannot
+be satisfied, one scroll that always works beats several that work only at
+sizes we do not control.
+
+**Consequences in code** (`apps/podcast/src/main.rs`):
+
+- `SidebarRow` models the column as a flat list of `Header` / `Divider` /
+  `Item` rows with per-row heights, so `scroll_window::visible_variable` can
+  measure it. `sidebar_rows()` builds that list in one place — a list whose
+  height is computed by one function and drawn by another drifts the moment
+  either gains a row.
+- The now-playing bar is drawn *over* the bottom 80px of the sidebar, so the
+  sidebar's usable height ends where that bar begins, not at the window edge.
+  That was a second, independent instance of the same off-the-bottom bug and
+  is now covered by the bounds test at every scroll position, playing and
+  stopped.
+
+**Revisit when:** the sidebar gains its own vertical constraint independent
+of the window — a resizable split, or a collapsed "compact" mode that hides
+the categories behind a disclosure. Either would free enough room for the
+library menu to be pinned honestly, at which point pinning it is the better
+behaviour and this should be reversed rather than defended.
+
+## §473 — A collapsed panel keeps its scroll position, measured against the size it has when open
+
+**Date:** 2026-08-20
+**Decided by:** Claude (autonomous)
+
+**In short:** The partition manager has a "Pending Operations" panel at the
+bottom of the window that you can shut by clicking its title bar. Shut, it is
+28 pixels tall — the title bar and nothing else. The list inside it can be
+scrolled, and the question is what happens to that scroll position while the
+panel is closed. The bug that raised the question: the scroll limit was worked
+out from *how tall the panel is right now*, so while it was shut the limit was
+computed against a zero-pixel-tall window and came out as "the entire list."
+The wheel also worked over the shut panel's title bar, so a stray scroll there
+would park the closed panel below its own last row — which you only discovered
+when you opened it again and found it blank.
+
+**Decision: the scroll limit is always measured against the panel's *open*
+height, and shutting the panel neither moves the list nor forgets where it
+was.** Separately, the wheel no longer answers over the title bar at all, so a
+shut panel cannot be scrolled in the first place.
+
+| Option | *What changes* | Why not / why |
+|---|---|---|
+| Limit measured against the current height | While shut, any scroll position is legal | This *is* the bug. A zero-tall viewport makes "scrolled to the end" mean "the whole list is above the fold," and the panel reopens showing nothing. |
+| Reset the scroll to the top when the panel is shut | Reopening always shows operation 1 | Loses the user's place for no benefit. Shutting a panel to get screen room and reopening it thirty seconds later should not lose your position in a forty-item queue. |
+| **Limit measured against the open height (chosen)** | Reopening shows exactly what was showing when you shut it | The scroll offset becomes a property of the *list*, not of whether it happens to be visible, which is what it already was everywhere else. |
+
+**The cost, stated plainly:** the geometry type's `max_scroll` takes no `&self`
+— it deliberately ignores the panel's measured height in favour of a constant.
+That reads as an oversight, so it carries a comment saying it is not one. The
+alternative, threading an "as if open" flag through the geometry, buys nothing
+and gives a future reader two heights to choose between, which is the exact
+mistake the type was introduced to end.
+
+**Consequences in code** (`apps/partmanager/src/main.rs`):
+
+- `QueueList::max_scroll(count)` is an associated function over
+  `QUEUE_PANEL_HEIGHT - QUEUE_HEADER_HEIGHT`, not a method over
+  `self.viewport_height()`.
+- `QueueList::contains` is empty by construction while the panel is collapsed
+  (`data_top == bottom`), so the wheel and the hover both refuse a shut panel
+  without either of them separately asking whether it is open. Only
+  `contains_header` answers there, and it toggles.
+- `clamp_queue_scroll()` runs on every path that shortens the queue — undo,
+  clear, apply — because a scroll limit that is never re-checked is a limit
+  only at the moment it was set.
+
+**Revisit when:** the panel becomes resizable by dragging its title bar. Then
+the "open height" stops being a constant and the scroll limit has to be
+measured against the last height the user chose, which is a stored value rather
+than a compile-time one. The shape of the decision is unchanged — it is still
+"the size it has when open" — but `max_scroll` would then legitimately take
+`&self`.
+
+## §474 — Space *around* a row belongs to that row; space *between* cards belongs to neither
+
+**Date:** 2026-08-20
+**Decided by:** Claude (autonomous)
+
+**In short:** Lists in this OS leave a few blank pixels around each row so the
+rows read as separate items. Somebody clicking in that blank strip has to get
+*some* answer, and until now each list answered from whatever its arithmetic
+happened to do rather than from a stated rule. Two lists that look alike now
+answer differently on purpose — the partition manager's disk sidebar gives the
+strip to the row above it, the desktop's notification pane gives it to nobody —
+so the rule is written down in each, and tested, rather than left to be inferred
+from the code.
+
+### What the two cases actually look like
+
+| | partmanager's disk sidebar | desktop's notification pane |
+|---|---|---|
+| Row pitch | 48 px | card height + an 8 px gutter |
+| Painted | 46 px tall, inset 4 px from each side of the column | the card, with the gutter left blank |
+| Blank strip | 2 px under each row, 4 px either side | 8 px between cards |
+| **Who owns the strip** | **the row above it** | **nobody** |
+
+### The decision
+
+**A blank strip that exists to shape a row is decoration and belongs to that
+row. A blank strip that exists to separate two things is a gutter and belongs to
+neither.** Which one a given strip is, is a fact about the design of that list,
+not something to be derived from its arithmetic — so each list states it, in a
+method the renderer calls and the hit test does not, and asserts it in a test.
+
+### Why not one rule for both
+
+*Option A — every strip belongs to the row above it (what the sidebar does).*
+*What changes:* a click anywhere in the list hits something; the pointer never
+falls between rows. Right for the sidebar, where the inset is purely cosmetic
+and the rows are a single-selection list: a 4 px dead zone at the edge of a
+220 px column would be a click that visibly did nothing. **Wrong for the
+notification pane**, where the gutter is genuinely between two independent
+cards, each with its own toggle — giving it to the card above means a click
+aimed at the gap toggles an app, and the two neighbours are equally plausible
+targets, so the mistake is a coin flip the user cannot predict.
+
+*Option B — every strip belongs to nobody.* *What changes:* clicks in the gap
+do nothing. Right for the pane; wrong for the sidebar, where it would put an
+unresponsive 2 px band between every pair of disks and a dead margin down both
+edges of the column, for no benefit — there is nothing there to click *instead*.
+
+*Option C — each list says which, and is tested on it (chosen).* *What
+changes:* nothing visible today; both lists already behaved this way. What
+changes is that the behaviour is now a stated rule with a test, rather than a
+side effect of whichever expression the hit test happened to contain.
+
+### The cost
+
+Two lists in one tree answer a superficially identical question differently,
+which is a thing a reader can trip over. That is paid for directly: each side
+names the other. `DiskSidebar`'s docs say the inset is "the opposite of
+`notif_pane`, where the gutter between cards belongs to no card", and each has a
+test whose name states its own rule
+(`the_inset_and_the_gap_under_a_sidebar_row_still_belong_to_that_row`). A future
+edit that swaps one rule for the other fails a test rather than shipping.
+
+### Consequences in code
+
+- `DiskSidebar::row_paint_rect()` is the only place the 4 px inset and 2 px gap
+  appear, and only the renderer calls it. `row_at()` divides by the full pitch
+  and `contains_column()` spans the full width, so neither can pick the inset up
+  by accident.
+- `notif_pane`'s hit test tests against the card *height* while its layout walks
+  the card *pitch*, so the gutter falls outside every card's band.
+- The reintroduction sweep carries a case for each direction: putting the gap
+  back as a boundary in the sidebar, and handing the gutter to the card above in
+  the pane.
+
+**Revisit when:** a list needs a third answer — e.g. a drag-to-reorder list,
+where the gap between two rows is a real target of its own (the insertion
+point) and belongs to neither row *and* is not dead space. That is a genuinely
+different rule, not a variant of these two, and would need its own method rather
+than a flag on one of these.
+
+---
+
+## §475 — A settings page is described once and interpreted twice: drawing and hit-testing are two readings of one walk
+
+**Date:** 2026-08-20
+**Decided by:** Claude (autonomous)
+
+**In short:** the Settings app used to say where each row went in two separate
+places — once in the code that draws the page, once in the code that decides
+what a click landed on. Those two copies drifted, so some controls were drawn
+in one place and clickable in another, and eleven controls were drawn with no
+clickable region at all. Now each page is described by a single function, and
+two different "readers" walk that one description: one paints, the other
+answers "what is under the pointer?". A row cannot be drawn somewhere it cannot
+be clicked, because one function put both of them there.
+
+### The problem
+
+`apps/settings/src/main.rs` had eleven `render_*_page` methods that walked a
+`y` cursor down the content column, and ten `handle_*_click` methods that
+reconstructed the same cursor from the same constants to work out which row a
+click was in. Two independent transcriptions of one layout.
+
+They had drifted, and the drift was invisible in the source because each copy
+was individually plausible. What it cost, at the point this was written:
+
+| Control | Symptom |
+|---|---|
+| Input Device (Sound) | drawn; nothing opened it — the handler's cursor stopped three rows short |
+| Diagnostic data collection (Permissions) | same |
+| Verbosity (Audio accessibility) | same |
+| Per-app switches: Camera, Microphone, Background | drawn; only the Location list had a handler |
+| Pointer size, ×5 (Interaction) | drawn; no handler at all |
+
+Adding the three missing `show_dropdown` calls was possible, and would have
+meant writing three more hand-derived `y` computations into the copy that was
+already wrong — one more turn of the same crank.
+
+### The decision
+
+Collapse the two walks into one. A page is described by
+`build_*_page<S: PageSink>(&self, s: &mut S)`, which speaks a small vocabulary
+— `section`, `toggle_row`, `dropdown_row`, `slider_row`, `pill_row`,
+`list_row`, `button_at`. Three sinks interpret that same call sequence:
+
+- **`DrawSink`** paints each row as the cursor passes it.
+- **`HitSink`** paints nothing and keeps the first registered rectangle
+  containing the pointer, yielding a `RowHit` — a *named* control, not a
+  position.
+- **`AnchorSink`** paints nothing and reports where a given dropdown's closed
+  button was drawn, so the popup opens against it.
+
+The trait exposes four primitives (`x`, `y`, `advance`, `draw`, `hit_rect`);
+everything else is a provided method built from those, so a row's geometry is
+written down once and both readings inherit it. `handle_click` becomes
+`row_at(mx, my)` followed by `apply_row_hit(hit)`, and nothing downstream of
+`row_at` knows where anything was drawn.
+
+`dropdown_layout` used to carry a per-dropdown table of anchor coordinates —
+a *third* copy, and the one that decided where the list appears rather than
+merely where a click lands. It now walks the page for the answer.
+
+### What was given up
+
+- **`impl FnOnce` in trait methods makes `PageSink` non-object-safe.** No
+  `dyn PageSink`. Irrelevant here — the sinks are used generically at three
+  known call sites and never stored — but it is a real constraint on the
+  design's future.
+- **Provided methods cannot capture `self`.** They call `self.draw(…)`, so the
+  closures may only capture their own parameters. This forced `render_button`,
+  `render_text_field` and `render_monitor_preview` from `&self` methods to free
+  functions. Mild churn, and arguably an improvement: none of them read state.
+- **Hit-testing costs a page walk.** Every click walks the page's description,
+  and `dropdown_layout` walks it again. Both are a few hundred no-op calls on a
+  human-timescale event; the alternative is caching the rectangles, which
+  reintroduces a second copy that can go stale — the exact failure being
+  removed.
+- **A dropdown open on a page that does not draw it now has no layout**, so it
+  is not drawn. Previously the hard-coded anchor meant it appeared anyway, in a
+  place unrelated to any button. Not drawing it is the honest behaviour, and it
+  is self-healing: the next click closes it.
+
+### The related call: a row is its control's click target
+
+Previously some pages accepted a click anywhere in the row and others required
+the pointer to be inside the 44-pixel toggle itself, with no principle
+distinguishing them. Now the whole row is the target, uniformly
+(`ROW_HIT_WIDTH`, inset by `ROW_HIT_INSET` to match the highlight the list rows
+paint). A row holds exactly one control, so there is nothing else in it for a
+click to mean; and a 44-pixel switch is a needle to thread with a mouse when the
+label beside it is what the user is aiming at anyway. The cost is that a click
+on empty space to the right of a label now toggles the setting — deliberate,
+and the same rule §474 settled for rows elsewhere.
+
+### Alternatives considered
+
+- **Add the three missing openers and stop.** Cheapest, and leaves eight other
+  drawn-but-inert controls plus the mechanism that produced all of them.
+- **A retained widget tree** — build nodes, lay them out, hit-test the tree.
+  The general answer, and what a real toolkit does. Rejected here because it is
+  a `guitk` change with eleven other apps' worth of consequences, whereas the
+  immediate defect is one app describing itself twice. `PageSink` is
+  deliberately smaller than a widget tree: no retained state, no layout pass,
+  no invalidation.
+- **Cache the hit rectangles at render time** and consult them on click. Halves
+  the duplication rather than removing it: the cache is a second representation
+  that is correct only if it was rebuilt since the last state change, and
+  "clicked before the first paint" and "state changed without a repaint" both
+  become live bugs.
+
+### How it is held
+
+`DropdownId::ALL` exists so a test can walk the enum rather than a hand-written
+list; `test_every_dropdown_has_something_that_opens_it` asserts each one is
+reachable from some page. `test_every_toggle_on_every_page_flips_its_own_field`
+sweeps every page's switches, reading each field back through its own id, so a
+toggle wired to the wrong field fails rather than surprising someone later.
+The tests locate controls by asking the page for the coordinates — a test that
+recomputes the layout from the same constants would pass while the shipped hit
+test disagreed with the shipped renderer, which is the bug itself, one level up.
+Verified by injecting a one-row drift into `HitSink`'s starting cursor: nine
+tests fail.
+
+## §476 — A slider is one mapping read in two directions, measured from the track the page says it drew
+
+**Date:** 2026-08-20
+**Decided by:** Claude (autonomous)
+
+**In short:** all eight sliders in the Settings app painted their value
+correctly and none of them could be moved with the mouse — there was nothing
+to click. Making them drag could have been done by giving each slider row a
+click band and doing the arithmetic where the mouse arrives, which is how the
+dropdowns were done before §475 and is why three of them opened nothing. It was
+done instead by naming each slider, stating its range in exactly one place, and
+asking the page itself where the track was painted; the value a drag produces
+and the position the handle is drawn at are now the same formula read forwards
+and backwards.
+
+### What was wrong
+
+`PageSink::slider_row` registered no hit band, with a comment saying as much.
+Every page also converted its own field into a 0–1 handle position by hand at
+the call site:
+
+| Slider | The conversion the page wrote out |
+|---|---|
+| Volume, Input volume, per-app volume | `percent_norm(self.output_volume)` |
+| Text size | `(f32::from(self.text_size_percent) - 50.0) / 200.0` |
+| Defer feature updates | `f32::from(self.defer_feature_days) / 365.0` |
+| Defer quality updates | `f32::from(self.defer_quality_days) / 30.0` |
+| Colour temperature, voice rate | the field, already 0–1 |
+
+and formatted the number beside it from the same field a second time
+(`Some(&format!("{}%", self.text_size_percent))`). Nothing yet read those
+ranges in the other direction, because nothing could set a slider — so the
+moment a drag existed, the range would have been written down twice, in two
+directions, in two places, which is the drift §475 was written to stop.
+
+### The decision
+
+Four pieces, none of which knows where anything is drawn:
+
+- **`SliderId`** names the eight sliders (`AppVolume(usize)` for the indexed
+  ones) and `SliderId::range()` states each one's low and high value **in the
+  units the state stores it in** — percent, days, or a bare fraction. This is
+  the only statement of a slider's range anywhere.
+- **`slider_fraction` / `set_slider_fraction`** on `SettingsState` are the two
+  directions of that one mapping, and `slider_raw` / a `match` on the id are
+  the only place a `SliderId` meets the field behind it — the shape
+  `toggle_mut` already has for the switches.
+- **`slider_track(x, y)`** is the single placement. `render_slider` paints from
+  it, `slider_band` widens it into a grab target, and `AnchorId::Slider` reports
+  it. A drag then measures `(mx - track_x) / SLIDER_WIDTH` from the track *the
+  page said it drew*, not from a constant recomputed at the mouse handler.
+- **`dragging: Option<SliderId>`** holds the gesture. `Move` re-derives the
+  track every event, so a drag survives the page redrawing underneath it.
+
+`AnchorSink` — which §475 introduced to answer "where is this dropdown's
+button?" — was generalised to an `AnchorId` so it answers "where is this
+control?" for both. That is one sink and one walk rather than two nearly
+identical ones.
+
+### What was given up
+
+- **A page walk per mouse-move while dragging.** The track is re-derived on
+  every `Move` event instead of being captured once at press time. Caching it
+  in `dragging` would be one walk per gesture rather than one per event — but
+  it would also be a coordinate held across redraws, which is precisely the
+  stale-geometry bug this design exists to prevent. A page walk is a few dozen
+  arithmetic ops and allocates nothing; a mouse move is not a hot path.
+- **The grab band stops short of the row label.** Every other control here uses
+  a whole-row target (§474), and a slider deliberately does not: a press
+  anywhere in the band jumps the value to the pointer, so a whole-row band
+  would mean brushing the words "Text Size" slams it to 50%. The band is the
+  track plus a handle's radius at each end, full row height.
+- **Rounding is now visible.** The integer-valued settings round to the nearest
+  whole percent or day, so the handle can sit up to half a step from where the
+  pointer released. That is inherent in storing a `u8`, and the test allows
+  exactly half a step and no more.
+
+### Alternatives rejected
+
+- **A click band per slider row, arithmetic at the mouse handler.** The obvious
+  version, and the one §475 had just finished removing from ten dropdowns and
+  eleven other controls. It puts the track's position in the handler and the
+  track's drawing in the renderer, which is the same defect wearing a different
+  hat.
+- **`RowHit::Slider` carrying the track rectangle.** Considered, and it is what
+  the original known-issues entry proposed. Rejected because it puts `f32` in a
+  type the tests compare with `==` (it would lose `Eq`), and because the answer
+  it carries is a snapshot: `AnchorId` gets the same information from the live
+  page for the same cost.
+- **Keeping `percent_norm` and adding a matching `norm_percent`.** Two
+  functions per unit, growing with each new slider, and no structural reason
+  the pair stays inverse. `range()` plus one clamp covers all eight.
+
+### How it is held
+
+Seven tests, each verified to fail against a deliberately broken version:
+
+| Mutation | Caught by |
+|---|---|
+| grab band drifts one row from its own track | `test_a_press_on_the_painted_track_grabs_the_slider` |
+| `TextSize` range loses its `50.0` offset | `test_a_slider_readout_agrees_with_its_handle` |
+| drag maps to half the track's width | 5 tests |
+| `Move` no longer follows a held slider | 5 tests |
+| every per-app drag writes app 0 | `test_dragging_one_per_app_volume_leaves_the_others_alone` |
+
+Note which test catches the wrong *range*: not the one that drags to each end,
+because that test asks `range()` what the ends are and so moves with the
+mutation. It is the readout test, which spells out `"50%"` and `"250%"`
+literally. A test that derives its expectation from the code it is testing
+proves only self-consistency — the same trap the pre-§475 tests fell into by
+recomputing row positions.
+
+---
+
+## §477 — A pane's grid is its drawn rectangle, converted once
+
+**Date:** 2026-08-20
+**Decided by:** Claude (autonomous)
+
+**In short:** every terminal pane in the tmux app was a fixed 80 columns by 24
+rows however large it was actually drawn, so splitting a window four ways left
+four programs still wrapping their output at 80 columns with blank space beside
+it. The obvious fix — call the existing `TerminalBuffer::resize` from the places
+that change a layout — would have needed each of those places to work out the
+cell count for itself, which is the same shape of mistake that caused §475 and
+§476. It was done instead by writing the pixels-to-cells conversion once and the
+layout walk once, and having both the painting and the sizing read them.
+
+### What was wrong
+
+`TerminalBuffer::resize(cols, rows)` existed, was correct, and **had no callers
+outside the tests**. `Multiplexer::resize_pane` adjusted the layout *ratios*;
+nothing anywhere turned a pane's pixel rectangle into a cell count. Meanwhile
+`render_pane` worked out how many cells to draw with its own arithmetic:
+
+```rust
+let visible_rows = ((height - 4.0) / cell_h) as usize;
+let visible_cols = ((width - 4.0) / cell_w) as usize;
+```
+
+so the number of cells *drawn* tracked the pane, and the number of cells the
+terminal *believed in* did not. The `4.0` was a bare literal appearing in two
+places that had to agree with a `+ 2.0` inset elsewhere.
+
+### The family this belongs to
+
+This is the third instance in this lane of one fault: **a renderer and some
+other consumer each spell out the same layout arithmetic, and the region drawn
+stops agreeing with the region the state believes in.**
+
+| | The two readings | What the user saw |
+|---|---|---|
+| §475 | a settings page drew rows and hit-tested them separately | controls that did nothing when clicked |
+| §476 | a slider's value→position mapping, written at each call site | handles drawn right, undraggable |
+| §477 | a pane's rectangle → cell count, in the paint and nowhere else | output wrapped at 80 columns in a 142-column pane |
+
+The fix is the same each time and is the decision being recorded: collapse the
+duplicated arithmetic into a single value or walk that every consumer reads,
+so the two cannot drift. Here that is `pane_grid(width, height)` — the only
+pixel→cell conversion — and `Window::bounds()` — the only layout walk.
+
+### Where the resize is driven from, and why in two places
+
+A `relayout()` pass (`&mut self`) walks `Window::bounds()` and pushes each
+pane's grid into its buffer. Three placements were considered:
+
+- **Only from the nine mutations that change a rectangle** (`new`,
+  `new_session`, `attach`, `kill_session`, `new_window`, `split_pane`,
+  `close_pane`, `resize_pane`, `apply_layout`). Correct between frames, but one
+  forgotten call site silently reintroduces the whole bug.
+- **Only from `render`.** Structurally safe, but wrong between frames:
+  `Pane::max_scroll_back` and `Pane::page_lines` are read by *key handling*,
+  which runs between two paints. A pane split and then paged before the next
+  frame would page by the old screenful.
+- **A `with_active_window(f)` closure funnel** that relayouts on the way out.
+  Rejected: `close_pane` needs `self.find_pane_mut` after the walk and would
+  fight the borrow checker for no gain in safety.
+
+**Both of the first two were taken.** `relayout` is idempotent — resizing a
+buffer to the size it already has does nothing — so the per-mutation calls cost
+nothing given the render-time one, and vice versa. The mutation calls buy
+between-frame correctness; the render call means a *future* mutation that
+forgets to say so costs a frame's lag rather than a terminal that wraps in the
+wrong place until the next split. `render` therefore takes `&mut self`: a
+pane's grid is part of what a frame decides.
+
+**Scope: every window of the attached session, and no other session.** A
+background window's program keeps running and writing, so it must not learn its
+new width only when the user switches to it. A detached session has no client
+and therefore no size, and skipping them also bounds the walk at 32 windows
+rather than that times 64 sessions.
+
+### One consequence worth naming
+
+`Pane::max_scroll_back` measures against `buffer.rows` rather than the pane's
+drawn height, because key handling runs nowhere near layout. That was a
+documented wart while the two could differ — a pane drawn shorter than its grid
+stopped that many lines short of the top of its scrollback. It is now simply
+correct: the buffer's row count *is* the drawn height, asked of the one place
+that stores it.
+
+### What the tests are, and what two of them cost to find
+
+Nine tests, mutation-checked against twelve mutations; all twelve are caught.
+Two mutations survived the first run, and both survivals were the same mistake
+in the tests:
+
+- Setting the content inset to zero changed no column count at 1200x800,
+  because 4 px is smaller than one 8.4 px cell. A sub-cell constant is only
+  visible at the widths where it straddles a cell boundary, so the test that
+  catches it (`a_grid_always_fits_inside_the_pane_that_holds_it`) sweeps sizes
+  in 0.5 px steps and asserts the arithmetic, rather than checking one live
+  layout.
+- Starting the layout walk at `y = 0.0` instead of `TAB_BAR_HEIGHT` — i.e.
+  drawing the panes over the tab bar — was invisible, because both checks that
+  should have caught it asked `Window::bounds` where the panes were, and
+  `Window::bounds` was the mutated function. `no_cell_is_drawn_over_the_chrome`
+  takes its bounds from `TAB_BAR_HEIGHT`, `STATUS_BAR_HEIGHT` and
+  `WINDOW_WIDTH` directly instead, and catches all three of tab bar, status bar
+  and right edge.
+
+**A test that derives its expectation from the code under test proves only
+self-consistency.** That sentence closes §476 as well; it is written twice
+because it cost real mutation-testing time to rediscover.
+
+---
+
+## §478 — A control that cannot act is drawn from the fact that it cannot act
+
+**Date:** 2026-08-20
+**Decided by:** Claude (autonomous)
+
+**In short:** the Settings app drew seven push buttons that looked completely
+ordinary and did nothing when clicked, because the features behind them — an
+accounts service, an activity log, package rollback, a reinstall path — do not
+exist yet. A user could not tell "not implemented" from "my click missed". They
+are now drawn greyed out. The decision worth recording is not *that* they are
+greyed out but *how*: the app is not told twice that a button is inert, once for
+the click and once for the paint. It is told once, and the paint is derived.
+
+### The shape
+
+`PageSink::button_at` already carried the fact, as `what: Option<RowHit>` —
+`Some` for a button with somewhere to send a click, `None` for the seven. The
+obvious fix adds a second argument (`enabled: bool`, or a dimmed colour at the
+call site). That is a second statement of one fact, and two statements of one
+fact drift: this lane has now fixed that exact drift four times (§475 hit-testing
+vs drawing, §476 a slider's mapping read in two directions, §477 a pane's
+rectangle converted twice, and this).
+
+So the target picks the painter:
+
+```rust
+match what {
+    Some(what) => { self.hit_rect(…, what); self.draw(… render_button(…, color)); }
+    None       => self.draw(… render_disabled_button(…)),
+}
+```
+
+**A button painted live while having nothing behind it is now inexpressible** —
+not "guarded against", not "tested for", but unsayable, because no argument
+exists to say it with.
+
+### Three smaller calls inside it
+
+**`render_disabled_button` takes no colour.** A live button's colour says what
+kind of action it is: accent for the ordinary one, red for the destructive one.
+A button that cannot act has no kind. Passing the colour through and dimming it
+would keep "Remove Account" reading as an alarm about something that cannot
+happen. Dropping the argument entirely also means the disabled path cannot
+accidentally be given a live colour.
+
+**Same width and height as the live button.** Both come from the same
+`button_width`/`BUTTON_HEIGHT`, so the page does not reflow depending on which
+features happen to exist. A layout that shifts when a service lands is a layout
+that has to be re-checked when a service lands.
+
+**A dimmed button still registers no click band.** This was already the
+behaviour and the original report argued for it; the argument survives the
+change and is worth restating, because "disabled" in most toolkits means
+*consumes the click and ignores it*. Here it must not: a band that swallowed the
+click would take away the only pointer-level feedback the user gets ("nothing
+happened here") *and* block whatever is drawn beneath from ever receiving it.
+Dimming says why nothing happened; not registering keeps the click honest.
+`pressing_a_dimmed_button_is_ignored_rather_than_swallowed` holds this in place.
+
+### The alternative that was rejected
+
+*Hide the seven buttons entirely until their features exist.* It is defensible —
+nothing false is shown — and it was rejected on two grounds. It makes the pages
+change shape as services land, so every page's layout has to be re-verified
+piecemeal rather than once. And it removes the only signal a user has that the
+feature is *intended*: a greyed-out "Go Back" on the Recovery page says rollback
+is coming; an absent one says the OS has no such concept. The dimmed button is a
+smaller lie than the missing one.
+
+### One repair the change forced
+
+"Change Password" was not going through `button_at` at all — it was painted by a
+raw `render_button` inside a `row(…)` closure, which is why it could never have
+had a click band and why no amount of care at the `button_at` call sites would
+have covered it. A `PageSink::button_row` now routes a button-in-a-row through
+`button_at`, so there is one path. This is the recurring lesson stated the other
+way round: collapsing the duplicate is what *finds* the copies, because anything
+left outside the single path stands out.
+
+### Testing note
+
+The tests take the paint from the render tree and the clickability from the page
+walk — two independent places — and assert they agree in both directions. One
+mutation escaped the first run: restoring the disabled button's full-brightness
+label was invisible, because the tests read only the fill colour. A dimmed fill
+under a live label is half a disabled button and reads on screen as a live one.
+Both commands are checked now. The same lesson as §476 and §477 in yet another
+costume: **a check that reads only part of what the user sees only proves that
+part.**
+
+---
+
+## §479 — A control drawn inside a closure has nowhere to hang a click band
+
+**Date:** 2026-08-20
+**Decided by:** Claude (autonomous)
+
+**In short:** the Settings app offered six little pictures to choose an account
+avatar from. All six were painted by one drawing call, so the part of the app
+that answers "what is under the pointer?" saw one opaque blob rather than six
+tiles — there was nowhere to register six click bands even in principle. The
+first tile was hardcoded as the outlined one and nothing stored a choice. The
+fix loops per tile, naming the tile geometry once so the drawn square and the
+clickable square are the same expression. The decision worth recording is a
+narrower one about *whose* picture the page edits, and a testing rule that this
+lane had not previously written down.
+
+### Why a closure is the wrong container for a control
+
+`PageSink` has two implementations that matter: one paints, one hit-tests.
+`draw(f)` hands `f` to the painter and *discards it unevaluated* in the
+hit-tester. That is the right design — it is why a page is written once and
+answers both questions — but it means anything a closure computes internally is
+invisible to the click side by construction. Six tiles in one closure is not
+"six controls that were forgotten"; it is **zero controls**, drawn.
+
+So the shape of the fix is forced: one loop iteration per tile, with
+`hit_rect` and `draw` called at the same offset from the same
+`picture_tile_dx(idx)`. That is §475 again (a page drew rows and hit-tested
+them separately), and it is now the fifth in this family — §475, §476, §477,
+§478, §479.
+
+### The call that had a real choice in it: which account gets edited
+
+`SettingsState` has two notions of "an account we care about":
+
+| | Means | Set by |
+|---|---|---|
+| `is_current` | the account signed in on this machine | the system |
+| `selected_account` | the row the Accounts page has highlighted | clicking a row |
+
+On a fresh state they are the same account, so either would pass a naive test.
+They are chosen deliberately to be `is_current`, because the Login Options page
+says "Choose a picture for **your** account". Editing
+`user_accounts[selected_account]` would mean that browsing to Bob's row, then
+switching to Login Options, silently retargets a control whose label still says
+"your". A control whose meaning depends on where the user has been is a control
+that cannot be labelled correctly.
+
+The counter-argument is real and was weighed: an administrator plausibly *wants*
+to set another user's picture, and `selected_account` is the obvious handle for
+that. Rejected because it would be an admin feature wearing a personal-settings
+label. When account administration exists, it belongs on the Accounts page next
+to the row it edits — where `selected_account` is the right question — not
+smuggled into a page about yourself.
+
+### Two smaller calls
+
+**`UserAccount::picture` is an index into `ACCOUNT_PICTURES`, not an icon
+string.** One list then decides both what the grid offers and what the account
+list draws; they cannot drift into offering different sets. The cost is that an
+index can be out of range, which a string cannot — paid for by
+`set_current_account_picture` refusing an out-of-range index outright, so the
+stored field never names a picture that does not exist.
+
+**No signed-in account draws as "nothing outlined", not as tile 0.** The
+accessor returns `Option<usize>`. A machine with nobody signed in should not
+claim a choice was made — which is the same instinct as §478's dimmed buttons:
+do not let the UI assert something the state does not know.
+
+### Testing note — two rules this lane had not written down
+
+**A hit band is a rectangle; a probe at its centre tests a point.** Shifting
+every band 12 px off its tile survived the first mutation run, because the bands
+are as wide as the tiles and a small offset still covers the middle. Only a
+click near an edge asks whether the clickable square *is* the square on screen.
+Corner probes now, and this generalises to every control in the app.
+
+**Collapsing the paint and the band into one expression buys correctness at the
+price of one blind spot, and the price is right.** A wrong `picture_tile_dx`
+moves both together, so no test that checks them against each other can see it.
+The remedy is not to un-collapse them — that is the bug this family keeps
+fixing — but to add one check against something with **no shared origin**:
+`the_picture_tiles_stand_apart_inside_the_content_column` measures the painted
+tiles against the window. Overlapping tiles (only the leftmost of a stack is
+reachable) and a strip running off the content column both fail there. Same
+move as `no_cell_is_drawn_over_the_chrome` in §477, and it is now the standard
+companion to any single-expression collapse.
+
+---
+
+## §480 — A test that only ever uses the input that works proves the code works on that input
+
+**Date:** 2026-08-20
+**Decided by:** Claude (autonomous)
+
+**In short:** the emoji picker stapled the chosen skin tone onto every emoji,
+so picking "dark" and clicking a pizza put a pizza followed by a small brown
+square on the clipboard. Seventy-five of its eighty-two emoji were affected and
+five tests covered the feature, all of them tinting the same thumbs-up — one of
+the seven emoji for which the code was right. The fix is a Unicode property
+table. The decisions worth recording are *where* the property comes from, and a
+testing rule about inputs that cannot distinguish two implementations.
+
+### Where "does this emoji have skin?" is allowed to come from
+
+Two places could answer it, and the choice is not obvious:
+
+| | Answer comes from | Cost |
+|---|---|---|
+| A flag on each `EmojiEntry` | whoever adds the entry | must be re-judged per entry, and is wrong *silently* |
+| A codepoint table | Unicode `emoji-data.txt` | 39 ranges of literal data to carry |
+
+Chosen: **the table**. The deciding argument is not that the table is more
+accurate — a careful author would get the flags right — but that the flag's
+failure mode is invisible. Adding "🧑‍🚀 astronaut" with `skin: false` produces
+no error, no warning and no wrong pixel until somebody picks a tone; the entry
+just quietly refuses to tint. The table is answerable to a published document,
+so `the_modifier_base_table_agrees_with_unicode` can check it against
+hand-verified codepoints and the check means something.
+
+The counter-argument is real: the table is 39 lines of magic numbers that no
+reader can verify by eye, and it will go stale as Unicode adds bases. Accepted,
+because staleness in the table is *uniform and datable* ("this is Unicode
+15.1") whereas staleness in per-entry flags is scattered and undatable. When it
+needs updating, it is one transcription against one file.
+
+The surprising part is worth writing down for whoever reads the table next:
+**`Emoji_Modifier_Base` is much narrower than "looks like a person".** 😀 is
+not a modifier base. Neither is 😂 or 😎. Faces are yellow *as a design
+choice*, not as a default skin tone, and Unicode does not let you tint them.
+
+### Where the modifier goes, and what the grid shows
+
+**The modifier goes directly after the base it tints, not at the end of the
+sequence,** and a variation selector caught between the two is dropped (a
+modifier already forces emoji presentation, so `base FE0F modifier` is not a
+well-formed `emoji_modifier_sequence`). This distinction is invisible in the
+shipped database — every tone-taking entry there is one character long — but it
+is the difference between a correct rule and one that happens to agree with the
+correct rule on today's data.
+
+**The grid draws the tinted emoji, not the plain one.** Previously the tone
+showed up in the preview and on the clipboard but not in the grid, so the
+surface you look at while choosing was the one surface that did not show the
+choice. This is §478's instinct pointed the other way: there, the UI asserted
+something the state did not know; here, the UI declined to show something the
+state did know.
+
+### Testing note — the rule this one adds
+
+**An input set can be large, realistic, and still incapable of telling two
+implementations apart.** Mutating "put the modifier after the base" into "put
+it at the end" survived the first mutation run against a sweep of all
+eighty-two database entries, because in every one of them the two produce the
+same string. More data does not help; only *differently shaped* data does. The
+fix is one constructed input — a ZWJ sequence — asserted by hand.
+
+Stated generally: **a rule about ordering within a sequence cannot be tested by
+data that is one element long, however much of that data there is.** The
+companion to §479's "measure against something with no shared origin": that
+rule is about where the expectation comes from, this one is about whether the
+input can express the difference at all.
+
+The other half is §479's lesson arriving from a new direction. There, a control
+was drawn but never hit-tested. Here, a function was tested five times over on
+the one input for which it was correct. Both are coverage that counts the
+gesture rather than the case: five skin-tone tests is a plausible-looking
+number, and all five were the same test.
+
+---
+
+## §481 — A control's click cell is the space it owns, not the ink it draws
+
+**Date:** 2026-08-20
+**Decided by:** Claude (autonomous)
+
+**In short:** the emoji picker draws six skin-tone swatches as 18-pixel circles
+24 pixels apart, and only the circles could be clicked — so a fifth of the strip
+did nothing. Fixing it meant deciding what a swatch's clickable area *is*, and
+then working out how to test a layout after collapsing its two copies into one
+function, which removes the very disagreement most of these tests look for.
+
+### The click cell is the pitch, not the circle
+
+Two defensible answers:
+
+| | Clickable area | Consequence |
+|---|---|---|
+| The drawn circle | 18px of every 24px | the gaps are dead; aiming between two tones does nothing |
+| The whole pitch | 24px of every 24px | the gaps go to the nearer circle; a click always means something |
+
+Chosen: **the pitch**. The argument is that the gap is not a region the user
+perceives as "not a swatch" — it is the space *between* swatches, six pixels
+wide, well under the accuracy anyone aims with. A user who lands there was
+aiming at a swatch, and the nearest one is the only reasonable reading of their
+intent. There is no competing target to steal from: the gaps are interior to a
+strip that holds nothing else.
+
+The counter-argument — that a control should be exactly as big as it looks — is
+real and is why this is a decision rather than an obvious fix. It is right for
+controls that *abut* other controls, where growing one shrinks its neighbour.
+It is wrong here, where the alternative owner of those pixels is nothing at all.
+
+The same reasoning settles the smaller call alongside it: **a click on the
+strip's label is consumed, not ignored.** The strip is part of the popup;
+"ignored" means the click is offered to whatever is behind, and a user who
+misses a swatch by a few pixels should not thereby activate a window underneath.
+
+**`tab_at` rejects negative `x` explicitly** rather than relying on the cast. A
+float-to-integer cast in Rust *saturates*, so `-30.0 as usize` is `0` — a click
+off the left edge of the window was selecting tab 0. The guard carries a comment
+naming the saturation, because without it the guard reads as dead code that a
+later reader will delete.
+
+### The testing problem this creates — §479's rule from the other side
+
+§475–§479 are five instances of one fault: a renderer and a hit test each
+spelling out the same arithmetic, and drifting. The fix each time is to collapse
+them into one named function. **But the collapse removes the disagreement the
+tests were looking for.** Once paint and band both read `grid_left()`, a test
+that clicks where the grid was painted passes for *any* `grid_left`, correct or
+not — and that is not hypothetical: mutating the centring divisor from `2.0` to
+`4.0` survived the entire first mutation run.
+
+So the collapse must be paid for with a check of a different kind:
+
+**Measure the painted geometry against something the layout function does not
+get to decide.** Not "the columns start where `grid_left()` says" — that is a
+tautology — but "the painted columns leave equal margins on the left and right
+of `WINDOW_WIDTH`". `grid_left` has no vote on that. Likewise the grid's clip
+rectangle is checked against the *painted skin-tone strip*, not against
+`grid_bottom()`: two renderers agreeing is evidence; a renderer agreeing with
+the function it called is not.
+
+Stated as a rule: **after collapsing duplicated geometry, every layout function
+needs one assertion whose expected value comes from outside it.** The window's
+own dimensions and a second, independently-painted element are the two sources
+available. §479 arrived at the same requirement from a different direction —
+there the concern was where an expectation comes from, here it is what a
+collapse costs — which is a reasonable sign the rule is load-bearing.
+
+The companion mechanical rule, learned from the second escape: **a sweep that
+tests "which cell does this x hit" must extend past the last cell.** A sweep
+bounded by the controls it knows about cannot see a hit test that wraps, clamps
+or saturates beyond them, and all three are ordinary integer-cast behaviours. It
+sweeps the whole window now.
+
+---
+
+## §482 — A convention the code invents for itself is a convention nothing can contradict
+
+**Date:** 2026-08-20
+**Decided by:** Claude (autonomous)
+
+**In short:** the checkers board was built mirror-image — the bottom-left
+square was light and out of play, where a real board has it dark and playable.
+The game was legal and every one of its 103 tests passed, because a checkers
+board is symmetric under that mirror, so the app and its tests agreed with each
+other perfectly while both disagreed with the world. Fixing it meant deciding
+how to move a hundred coordinates without changing what any test meant, and
+what kind of assertion could have caught this in the first place.
+
+### Why the tests could not see it
+
+`Pos::is_dark` said `(row + col) % 2 == 1`. Everything downstream took its
+answer: the opening position, the click filter, the square colours. Nothing in
+the program had an independent opinion about which squares are dark, so nothing
+could disagree. The tests were worse than silent — they were *confirmatory*:
+`test_pos_dark_squares` asserted `Pos::new(0, 1).is_dark()`, which is the
+implementation restated in the test file.
+
+This is the same shape as §480's "a test that only ever uses the input that
+works" and §481's "collapsing paint and hit test means a wrong function moves
+them together", arriving now at the level of a whole subsystem:
+
+**A test whose expected value is derived from the code under test measures
+consistency, not correctness.** The remedy is the same each time — one
+assertion sourced from outside — but the *outside* is different here. For a
+layout function it was the window's own dimensions. For a rule of a game it is
+the rule as published: a dark square in each player's lower left, and the double
+corner on the right. Those are facts about checkers, not facts about this
+program, so the test can fail.
+
+Two of them are asserted, not one, and deliberately: either alone is a single
+bit that a mirrored board has a fifty-fifty chance of satisfying by accident.
+Together they cannot both hold on a mirrored board.
+
+The second, complementary check is `the_board_is_painted_the_colour_it_says
+_each_square_is`, which reads the colour back off the render commands rather
+than asking `is_dark`. It found the bottom-left painted square by geometry —
+smallest `x`, largest `y` — and required it to be dark. It alone caught three of
+the nine mutations, including two that had nothing to do with parity (a board
+drawn a column to the right of where clicks land, and a board drawn without its
+vertical flip). **A test that reaches the subject by a different route than the
+code does tends to catch faults nobody was aiming at.**
+
+### How a hundred coordinates were moved
+
+Flipping the parity invalidates every square named in the tests. Three options:
+
+| | Approach | Cost |
+|---|---|---|
+| Hand-edit each test | 183 lines, each re-reasoned | slow, and each edit is a fresh chance to encode the same mistake |
+| Relax the tests to not name squares | fewer coordinates | throws away the specificity that makes them useful |
+| Mechanical `col → 7 - col` mirror | one transform, applied uniformly | must be justified as meaning-preserving |
+
+Chosen: **the mirror**, because it is provably meaning-preserving rather than
+merely plausible. Checkers is symmetric under reflection in the vertical axis:
+rows are untouched, so the direction each side advances and the rank on which a
+man crowns are unchanged; diagonals map to diagonals; and old-dark squares map
+to new-dark ones (`row + (7 - col) ≡ row + col + 1`). A test that said "this
+piece has two moves against the edge" still says exactly that afterwards. The
+transform also had to rewrite the expected move-notation strings, which is a
+good sign it was applied at the right level of abstraction.
+
+**Two tests were excluded from the mirror, and the reason is the interesting
+part.** `test_cursor_bounds` and `test_cursor_upper_bounds` set the cursor to a
+corner and press an arrow key; they are about the clamp at 0 and 7, not about a
+square. Mirroring them silently inverted what they tested — the "upper bounds"
+test began at column 0 — and they failed, loudly, which is the outcome you want
+from a blind mechanical edit. Generalising: **a coordinate in a test is either a
+position on the board or a limit of the coordinate system, and a transform of
+the board must not touch the second kind.** They now carry a comment saying so,
+because nothing else distinguishes them from the outside.
+
+### The parity was written three times
+
+`is_dark` and both of `Board::new`'s placement loops each spelled out
+`(row + col) % 2 == 1` independently — the §475–§481 fault again, in a game
+rule rather than a layout. The loops now ask `is_dark()`. The correction was
+one line instead of three, and the pieces cannot end up on squares the board
+paints light.
+
+---
+
+## §483 — An inverse tells you which cell a point is in, never where in the cell it is
+
+**Date:** 2026-08-20
+**Decided by:** Claude (autonomous)
+
+**In short:** chess drew its board and hit-tested clicks from the same
+arithmetic written out eleven times, so the two could drift apart the way
+§475-§482 keep drifting apart. Collapsing them into `square_origin` /
+`square_at` is the same fix as always. What is new is a hole the *tests* had:
+checking a dot by clicking it — feeding its position back through the hit
+test and seeing which square comes out — cannot detect a dot drawn in the
+corner of the right square, because the hit test answers "that square" for
+every point in it. A mutation that made `square_center` return the corner
+survived a full round-trip suite.
+
+### The collapse
+
+Eleven sites spelled out the same mapping: the square's top-left corner five
+times, the board's far edge four, the centre twice. They are now one place:
+
+```rust
+fn square_origin(pos: Pos) -> (f32, f32);   // paint
+fn square_center(pos: Pos) -> (f32, f32);   // labels, dots, glyphs
+fn square_at(x: f32, y: f32) -> Option<Pos>; // clicks
+```
+
+Nothing user-visible was wrong beforehand — unlike checkers (§482), this board
+was oriented correctly and its bounds guard was intact. This is the *preventive*
+half of the family: the arithmetic agreed today, and nothing made it agree
+tomorrow. Two byproducts of doing it: `PANEL_X` and the window height now derive
+from a `BOARD_SIZE` constant instead of restating `SQUARE_SIZE * 8.0`, and the
+lone test that hand-wrote the mapping a fourth time (`test_mouse_click_on_board`,
+which computed e2's pixel position in a comment and then in code) now reads its
+coordinates off the painted board.
+
+### The hole in the round-trip
+
+§481 established that collapsing paint and hit test *removes the disagreement
+the tests were looking for*, and that the remedy is an assertion whose expected
+value comes from outside the mapping. Chess's dot test looked like it obeyed
+that rule: it took each painted dot, put its centre through `square_at`, and
+required the answer to be a legal destination. But:
+
+**An inverse is a function onto cells. Every point in a cell maps to the same
+answer, so a round-trip through it is blind to sub-cell position by
+construction.** A dot painted at its square's top-left corner — visibly wrong,
+overhanging into the neighbour by a radius — round-trips perfectly.
+
+This is not the same failure as §481's. There the test and the code shared an
+origin; here they do not, and the test still cannot see the fault, because the
+*question* discards the information. Round-tripping proves membership. If you
+care about placement, membership is not enough, and no amount of round-tripping
+will become enough.
+
+### What was asserted instead, and the tradeoff
+
+| | Approach | Verdict |
+|---|---|---|
+| Compare the dot to `square_center(dest)` | one line | rejected — that is the function under test supplying its own expected value; the mutation moves both |
+| Compare the dot to the painted square containing it | ~10 lines | **chosen** |
+| Assert the dot's rectangle lies wholly within some painted square | similar | rejected — passes for any dot that fits, and a dot is much smaller than a square |
+
+Chosen: find the `SQUARE_SIZE` fill whose rectangle *contains* the dot centre,
+and require the dot centre to be that rectangle's centre to within 0.01. The
+expected value comes from the render commands — a second, independently emitted
+artefact — so it holds regardless of what `square_center` computes. The
+containment search is the part that costs the extra lines, and it is also the
+part that makes the assertion mean something: it identifies the square by
+geometry rather than by asking the mapping.
+
+Generalising for the next one of these: **a test of a positioned element should
+name the element's position relative to something else that was drawn, not
+relative to the formula that drew it.** Round-trips remain worth having — they
+caught six of the fifteen mutations here — but they are a membership check
+wearing a placement check's clothes.
+
+### Result
+
+15 mutations, 15 caught (14 before the dot assertion was strengthened). 121
+tests green, up from 113. Clippy on the binary fell 78 → 76 warnings as the
+duplicated arithmetic went away, and the test module gained the
+`unwrap_used`/`expect_used`/`indexing_slicing`/`arithmetic_side_effects` allow
+that `CLAUDE.md` prescribes for `#[cfg(test)]`, clearing its remaining three.
+
+## §484 — A hit test that rejects an out-of-range index has two edges; one that clamps has one
+
+**Date:** 2026-08-20
+**Decided by:** Claude (autonomous)
+
+**In short:** in gomoku a click slightly *outside* the board still lands on a
+stone, because stones sit on the boundary lines and half of an edge stone hangs
+off the board. The old code decided which line you clicked, threw the answer
+away if it was off the board, and only then asked "were you close enough?".
+That ordering gave the left and top edges a different rule from the right and
+bottom: an 18-pixel overshoot past the left edge placed a stone, the identical
+overshoot past the right edge did nothing. The fix is to reorder the two
+questions — pin the answer to the board first, then measure the distance — so
+there is one rule and it is the same on all four sides.
+
+### The two spellings
+
+```rust
+// Before: index, reject, then measure.
+let col = (mx / CELL_SIZE + 0.5) as i32;
+let row = (my / CELL_SIZE + 0.5) as i32;
+if col >= 0 && col < BOARD_SIZE as i32 && row >= 0 && row < BOARD_SIZE as i32 {
+    // ... distance check
+}
+
+// After: clamp, then measure.
+let col = (((x - BOARD_OFFSET_X) / CELL_SIZE).round() as i32).clamp(0, LAST_INDEX);
+let row = (((y - BOARD_OFFSET_Y) / CELL_SIZE).round() as i32).clamp(0, LAST_INDEX);
+let (ix, iy) = intersection(row, col);
+let (dx, dy) = (x - ix, y - iy);
+if dx * dx + dy * dy <= CLICK_RADIUS_SQ { Some((row, col)) } else { None }
+```
+
+Two questions are being asked — *which* intersection, and *is it near enough* —
+and there is exactly one correct order. The distance check is the real
+acceptance test; it already refuses everything that is genuinely off the board,
+because a point far outside is far from every intersection. The range check is
+therefore not a safety net but a second, independent edge policy layered on top
+of the first, and nothing makes the two agree.
+
+### Why it came out asymmetric, and why nobody noticed
+
+`CLICK_RADIUS_SQ` is `15² × 1.5`, so the hit test reaches 18.371 px. Take a
+click *d* pixels past an edge, with `CELL_SIZE` 36:
+
+| edge | the index the old code computed | verdict |
+|---|---|---|
+| left, *d* ∈ [0, 18) | `-d/36 + 0.5` → `0` | accepted |
+| left, *d* ∈ [18, 18.371] | `-d/36 + 0.5` ∈ [-0.0103, 0] → **`0`** | accepted |
+| right, *d* ∈ [0, 18) | `14.5 + d/36` → `14` | accepted |
+| right, *d* ∈ [18, 18.371] | `14.5 + d/36` ∈ [15.0, 15.0103] → **`15`** | **rejected** |
+
+The two bold rows are the same click mirrored, and they disagree. The cause of
+the mirror-asymmetry is that **a Rust float-to-integer cast truncates toward
+zero, not downward**: `-0.0103_f32 as i32` is `0`, not `-1`. So the `col >= 0`
+half of the guard was dead code — it could never fire — while the `col < 15`
+half fired for real. A guard that is half-dead is worse than one that is
+entirely dead, because it looks symmetric in the source.
+
+The visible footprint is narrow: a 0.371 px band, one integer pixel column. It
+is reachable — a click exactly 18 px past the right edge does nothing while 18
+px past the left places a stone — but it is small enough to explain why it
+survived. **That narrowness is not a reason to treat the entry as cosmetic.**
+The band's width is `reach - CELL_SIZE/2`; it is small only because the slop
+happens to be a hair over half a cell. Widen the slop, shrink the cell, or add
+a second board with different constants, and the same code shape yields a wide
+dead strip down two sides of the board. The bug is the ordering, not the 0.371.
+
+### Testing: three ways a geometry test can be blind
+
+The mutation sweep over the collapsed code caught 12 of 15 seeded faults on the
+first pass. All three survivors were gaps in the tests, and each generalises:
+
+1. **Probing exactly on the target cannot distinguish "nearest" from "at or
+   before".** `.round()` and `.floor()` give the same answer for a click dead
+   on a crossing, so a test that only clicks crossings passes under both. The
+   probes were moved *beside* each crossing — seven offsets at a stone's
+   radius, which is under half a cell (so the nearest crossing is unambiguous),
+   inside the slop (so a hit is required), and exactly the ink a player aims at.
+2. **Collecting where lines *are* says nothing about how far they *go*.** The
+   grid helper returned each line's x or y, so a grid with correct spacing and
+   truncated length passed. A second test now requires every horizontal to span
+   the first vertical to the last, and vice versa.
+3. **A board sized one line too wide shifts nothing, so nothing notices.** Every
+   element is placed from `intersection`, so widening `BOARD_PIXEL_SIZE` moves
+   only the wooden background — which no test looked at. A test now requires
+   the background's four margins around the *painted* grid to be positive and
+   equal.
+
+After those three, 15 of 15. Note that (2) and (3) are both instances of the
+same shape as §483: the expected value has to come from a second, independently
+emitted render command, never from the function under test.
+
+### Alternatives considered
+
+| Option | Verdict |
+|---|---|
+| Keep index-then-reject, widen the guard to `-1..=BOARD_SIZE` and clamp after | Rejected. It makes the edges agree by adding a third constant that has to stay in step with the slop. Two numbers encoding one policy is what the entry is about. |
+| Drop the slop entirely: a click hits the nearest intersection, always | Rejected. The board deliberately has gaps — the middle of a cell belongs to no intersection — because dropping a stone half a cell from where the player aimed is worse than a click that does nothing. |
+| Clamp, then measure (**chosen**) | One acceptance rule, applied identically on all four sides, with the reach stated once as `CLICK_RADIUS_SQ`. The clamp cannot rescue a bad click, because the distance check runs after it. |
+
+### Not changed: the column letters
+
+gomoku's files are lettered `A`–`O`, which includes `I`. A Go board skips `I`,
+running `A`–`H`, `J`–`P`. Whether that convention carries to gomoku could not
+be settled from a primary source — the Renju International Federation rules and
+Wikipedia's Renju article contain no coordinate notation at all — and the app
+has no notation path (no move list, no save format, no engine protocol) where
+the choice would be observable to anything but a reader of the board edge. It
+is left alone deliberately rather than "fixed" into a second convention.
+Contrast §482, where the outside authority *was* available and did settle it.
+
+### Outcome
+
+`apps/gomoku/src/main.rs`: the mapping and its inverse now live in one
+`// ── Board geometry ──` section (`intersection`, `intersection_near`,
+`BOARD_PIXEL_SIZE`, `LAST_INDEX`, `CLICK_RADIUS_SQ`), read by all ten former
+copy sites. 112 tests green, up from 102; 15 of 15 mutations caught; clippy on
+the binary unchanged at 77 and the test module's 12 warnings cleared by the
+`#[cfg(test)]` allow that `CLAUDE.md` prescribes. One test that asserted
+nothing at all — it ran a click and commented "it may or may not place" — now
+asserts the stone count is zero (§480 again).
+
+## §485 — A board that numbers its rows the other way, and the geometry checklist that is now reusable
+
+**Date:** 2026-08-20
+**Decided by:** Claude (autonomous)
+
+**In short:** reversi is the fourth board game in `apps/` to have its screen
+geometry written out at a dozen scattered sites, and the first where the
+collapse caught every seeded fault on the first attempt — because §481–§484
+had already worked out what such a test suite has to check. It also turned up a
+convention that looks like a bug and is not: Othello numbers its rows *downward*
+from the top, the opposite of chess and go. The code had it right, nothing said
+so, and the natural "fix" would have broken it. It now says so, pinned to the
+published rules rather than to a comment.
+
+### Othello counts down; chess and go count up
+
+`a1` is the **upper-left** square of an Othello board and `h8` the lower-right.
+The notation is Goro Hasegawa's and has been standard since the game was
+published. Chess's rank 1 is the bottom row and a go board's line 1 likewise, so
+three neighbouring apps in this directory now disagree with each other on
+purpose:
+
+| app | row 1 is | screen row 0 is |
+|---|---|---|
+| `apps/chess` | the bottom | row 8 — `square_origin` flips |
+| `apps/gomoku` | the bottom | row 15 — the labels flip |
+| `apps/reversi` | **the top** | **row 1 — nothing flips** |
+
+Reversi is the odd one out, and it is the odd one out *by being simpler*: no
+flip appears anywhere in `cell_origin`, which reads exactly like a bug of
+omission. The guard is
+`the_board_is_lettered_and_numbered_the_othello_way`, which requires the painted
+label "1" to sit **above** the painted label "8". Its expected value is the
+published rule, not the code — the §482 discipline. Without it the collapse
+would have made the convention *easier* to break, since after collapsing there
+is one place to "correct" instead of a dozen places that would each have to be
+changed in step.
+
+### The checklist
+
+Four collapses in, the questions a board-geometry suite has to answer are
+settled enough to write down. Reversi's seventeen seeded mutations were all
+caught on the first pass by applying them mechanically:
+
+1. **Is the lattice right, measured against the window?** Count the painted
+   cells, check the spacing between them, check the board is inside the window
+   and clear of any side panel. Never against the placement function. (§481)
+2. **Does every point of a cell hit that cell — not just its centre?** Probe a
+   grid of points across each cell. A mapping shifted by less than half a cell
+   still answers correctly dead centre. (§484)
+3. **Do all four edges agree?** Sweep outward past each edge and inward from
+   each edge. Two of the four apps had a hit test that was correct on two sides
+   only. (§484)
+4. **Does anything far outside resolve to a cell?** Sweep well past the board:
+   wraps, clamps and saturating casts live out there, not just outside. (§481)
+5. **Is each drawn element in the right *place within* its cell?** Measure it
+   against the painted cell that contains it, never against the centring
+   function. (§483)
+6. **Does the frame agree with the cells about how big the board is?** Check the
+   margins on all four sides are positive and equal. A board sized one cell
+   wrong shifts nothing else, so this is its only symptom. (§484)
+7. **Does the notation match the published rules?** Labels compared to each
+   other's painted positions, with the expected ordering taken from the game,
+   not the code. (§482)
+
+### A trap in writing (3): a half-open box has no mirror
+
+The first draft of the edge sweep asserted that `left - d` and `right - 1 + d`
+gave the same answer, and failed immediately. The board occupies the half-open
+box `[left, right) × [top, bottom)`: `left` is on the board and `right` is
+not, so the two edges are not reflections of each other and no offset makes
+them so. The fix is not a better mirror but to stop mirroring — state the
+interval directly, `left - d` and `right + d` both off, `left + d` and
+`right - d` both on. That reads as what it means, and it does not silently
+encode an off-by-one of its own.
+
+The general form: **a symmetry assertion needs the two things it compares to be
+genuinely symmetric.** When they are not, the test's own arithmetic becomes a
+second place the geometry is written down — which is the very fault the
+collapse exists to remove.
+
+### Alternatives considered
+
+| Option | Verdict |
+|---|---|
+| Give reversi a `flip` for consistency with chess and gomoku | Rejected. It would make the three apps' code look alike and make one of them wrong. Consistency between apps is worth nothing against the rules of the game each implements. |
+| Leave the numbering undefended, since it is currently correct | Rejected. Correct-and-unstated is exactly the condition §482 was written about; the collapse concentrates the convention into one line, which makes a well-meaning edit cheaper, not dearer. |
+| Pin it with a comment rather than a test (**partly**) | The comment is there and names the test. On its own it is not enough — a comment does not fail. |
+
+### Outcome
+
+`apps/reversi/src/main.rs`: `cell_origin`, `cell_center`, `cell_at` and
+`BOARD_PIXEL_SIZE` in one `// ── Board geometry ──` section, read by all the
+former copy sites. 90 tests green, up from 81; 17 of 17 mutations caught on the
+first pass; rustfmt drift 26 → 0 (committed separately); binary clippy unchanged
+at 40 and the test module's 5 warnings cleared by the `#[cfg(test)]` allow.
+`test_app_mouse_click_on_board` had spelled the mapping out a second time and
+then asserted only that *some* move had been played; it now clicks
+`cell_center(Pos::new(2, 3))` and asserts which square was played.
+
+## §486 — A test that measures a twin of the shipped code is worse than no test
+
+**Date:** 2026-08-20
+**Decided by:** Claude (autonomous)
+
+**In short:** sudoku is the fifth board game in `apps/` whose screen geometry
+was written out at a dozen scattered sites, and the collapse went the way §485
+predicted. What was new is *why* the existing tests had never noticed. The app
+had two functions that computed the same thing — `cell_pixel_pos`, which the
+renderer called, and `cell_pixel_pos_clean`, which every test called. The suite
+was green, and it was green about code that never ran. Nothing in it could have
+failed if the grid on screen had moved.
+
+### The fault: a twin, not a gap
+
+A missing test is a hole you can see. This is worse, because it looks like
+coverage:
+
+```rust
+// what the renderer called
+fn cell_pixel_pos(row: usize, col: usize) -> (f32, f32) { … }
+// what all five geometry tests called
+fn cell_pixel_pos_clean(row: usize, col: usize) -> (f32, f32) { … }
+```
+
+The two bodies agreed, so the tests passed. They were separate functions, so
+nothing kept them agreeing. Change either one — a spacing tweak, a new gap rule,
+an off-by-one — and the suite reports on the other. Five tests, eighty-one
+cells' worth of assertions, and a total of zero statements about the picture.
+
+The name is the tell. A `_clean`, `_v2`, `_new` or `_impl` suffix on a function
+that already exists means someone wanted the honest version *without* editing
+the one in use — which is the moment the split happens. There is no legitimate
+reason for a test to prefer a duplicate over the function the product calls: if
+the product's version is too tangled to test, that is the bug, and untangling it
+is the fix.
+
+### The same fault wearing a different hat
+
+The collapse produced `cell_origin`, `cell_center`, `axis_offset`, `axis_index`
+and `cell_at`, and the tests were rewritten against them — so the twin was gone.
+Then the mutation sweep came back **20 of 22**, and both survivors were
+mutations of `cell_center`: make it return the cell's corner, or put it half a
+cell out vertically, and every one of 106 tests still passed.
+
+The reason is the same fault in the other direction. `cell_center` was called by
+tests only. The renderer, drawing a digit, had spelled the arithmetic out for
+itself:
+
+```rust
+x: px + CELL_SIZE / 2.0 - 7.0,
+y: py + CELL_SIZE / 2.0 - 10.0,
+```
+
+A helper nothing ships is a twin of the shipped code with the roles swapped, and
+it fails the same way: the tests are right about a function, and the function is
+not what runs. The fix is not another test — it is to make the renderer call
+`cell_center`, and to name the two bare literals (`DIGIT_HALF_WIDTH`,
+`DIGIT_HALF_HEIGHT`) so the subtraction reads as "half a glyph up and left of
+the middle" rather than as arithmetic.
+
+### Why the sweep found it and the review had not
+
+Both instances are invisible to reading, because nothing about either is *wrong*
+— the duplicated bodies agree, and the unused helper is correct. They are only
+visible to the question mutation testing asks: *change this, does anything
+notice?* A surviving mutation has exactly two causes, and both are bugs:
+
+| Nothing failed because… | What it means | Fix |
+|---|---|---|
+| no test exercises the function | a genuine coverage hole | write the test |
+| **nothing in the product calls it** | the tests measure a twin | make the product call it |
+
+The second row is the one worth remembering. It reads as a coverage report at a
+glance and is a much bigger problem: coverage can be added later, whereas a suite
+aimed at the wrong function will stay green through any change at all. So a
+mutation sweep is not just a check on the tests here — it is the only mechanical
+way to ask whether the tests and the product are looking at the same code.
+
+### Decision: the painted lines between cells select nothing
+
+A sudoku grid has visible gaps — 2px inside a box, 4px between boxes — and a
+click can land in one. The three options:
+
+| Option | *What changes:* |
+|---|---|
+| **Chosen: the gap selects nothing** | a click exactly on a printed line leaves the selection where it was |
+| Round to the nearer cell | a click on a line moves the selection to whichever cell is closer |
+| Grow each cell to own the gap after it | a click on a line selects the cell above/left of it |
+
+Chosen because the gaps *are* the grid's printed lines, and a click on the line
+between two cells has not said which of the two was meant; guessing produces a
+selection the user did not ask for and, on the 4px box boundaries, a visibly
+arbitrary one. The gaps are 2–4px against a 52px cell, so the cost is a rare
+no-op rather than a mis-selection, and a no-op is the failure the user can see
+and correct. Against it: on a touchscreen or at a coarse pointer scale a 4px
+dead band is a real miss, and the other two options never miss. If that ever
+matters, `axis_index` is the one place to change, and
+`a_click_on_the_line_between_two_cells_selects_neither` is the test that will
+fail and name the policy.
+
+### Outcome
+
+`apps/sudoku/src/main.rs`: `axis_offset`, `grid_total_size`, `box_pixel_span`,
+`cell_origin`, `cell_center`, `axis_index` and `cell_at` in one
+`// ── Grid geometry ──` section; `cell_pixel_pos`, `cell_pixel_pos_clean`,
+`inner_gaps_before`, `pixel_to_grid_coord` and `cell_pos` deleted. `handle_mouse`
+went from twelve lines to three. All five pre-existing geometry tests were
+instances of anti-patterns already named in §481–§483 and were replaced by nine
+written to §485's checklist. 106 tests green, up from 102 net of the five
+deletions; 23 of 23 mutations caught once the `cell_center` survivors were
+closed (the twenty-third seeds the fault those survivors had exposed — digits
+pinned to their cells' corners); rustfmt drift 368 → 0 (committed separately);
+binary clippy unchanged at 95.
+
+## §487 — "Inside the window" is not a constraint: measure the frame, not the containment
+
+**Date:** 2026-08-20
+**Decided by:** Claude (autonomous)
+
+**In short:** when a test checks that a game board is drawn *inside* its window,
+it is checking almost nothing — a window twice the size it should be passes just
+as happily as a correct one, and so does a board shoved into one corner. Two
+mutation sweeps in a row (nonogram, then dots) produced a survivor for exactly
+this reason, and in dots the fault was not hypothetical: the board really was
+hanging 12 pixels up and to the left of centre, and had been all along, with a
+green suite. The rule adopted here is to assert on the *margins* — the gaps
+between the board and each of the four window edges — and to require the
+opposing pair to be equal, which is a claim that has only one right answer.
+
+### What went wrong twice
+
+Both boards derived their window size from their content, which is correct, and
+both were then tested with a containment assertion:
+
+```rust
+assert!(right <= win_w, "the grid runs off the right of the window");
+```
+
+That is satisfiable by an infinite family of wrong answers. In **nonogram**,
+`grid_pixel_span` counted a trailing gap after the last cell that the last cell
+does not have, so every window was 2px too wide; nothing could see it. In
+**dots**, `dot_pos` placed the first dot's *centre* at `PADDING` — putting its
+left half inside the padding — while `window_width` reserved `PADDING` *plus* a
+whole dot's width past the last column. Result: 14px of margin on the left and
+top, 26px on the right and bottom. A player would have seen the board sitting
+visibly off-centre; the suite saw a board inside its window.
+
+The shape of the mistake is the same in both: **the window and the board were
+each computed correctly with respect to a different idea of where the board's
+edge is**, and containment is too weak to notice a disagreement that goes the
+"safe" way. Containment only fails when the board overflows — i.e. it catches
+the *less* likely of the two errors.
+
+### The rule
+
+For any board painted inside a window, assert on the four margins, derived
+**from the painted geometry** (the render commands), not from the constants:
+
+| Assertion | Catches |
+|---|---|
+| every margin > 0 | the board overflowing, or being drawn under the header/footer |
+| left margin == right margin | any horizontal size or origin disagreement |
+| top margin == bottom margin | the same vertically |
+
+The equality is the load-bearing half, and it is what a containment check can
+never give you: two numbers that must agree pin the origin and the span
+*together*, so a change to either one that is not matched by the other fails.
+It also costs nothing to write — the margins are already being computed to do
+the containment check.
+
+The margins must be measured to the **painted** extent, not the logical one.
+In dots, the board's logical edge is the last dot's *centre* but its painted
+edge is half a disc further out; measuring the wrong one is precisely how the
+bug got in. So the test reads the dot rectangles out of the render command list
+and adds back `DOT_RADIUS`, rather than calling `dot_pos`.
+
+### The alternative that was rejected
+
+The obvious cheaper fix is to assert the window size against a formula:
+
+```rust
+assert_eq!(app.window_width(), PADDING * 2.0 + (gs - 1) as f32 * DOT_SPACING + DOT_RADIUS * 2.0);
+```
+
+*What changes:* the test names a number instead of a relationship.
+
+This is the anti-pattern §486 is about, in miniature: the test restates the
+implementation's arithmetic, so it passes whenever the two copies match and
+tells you nothing about whether either is right. `test_dot_pos_origin` was
+already written that way — `assert_eq!(x, PADDING)` — and it passed throughout
+the entire period the board was off-centre, because it was asserting the very
+expression that was wrong. It now asserts `x - DOT_RADIUS == PADDING`, which is
+a statement about the picture rather than about the source.
+
+### The general form: a test may not name the constant it is testing
+
+The same sweep produced a second survivor of the same shape, and it is the
+clearer statement of the rule. Cutting dots' `CLICK_THRESHOLD` from 10px to 1px
+— which would have made the game nearly unclickable — passed every test,
+because all six slop assertions were written as
+`app.hit_test_line(mid, y - DotsAndBoxes::CLICK_THRESHOLD + eps)`. They move
+with the constant, so they can never disagree with it. They were testing that
+10 equals 10.
+
+**A test that mentions the constant under test is measuring the constant
+against itself.** The fix is not to hard-code a rival number — that is just the
+formula anti-pattern again — but to state the two bounds the constant has to
+sit between, in terms of *other* quantities that mean something to a user:
+
+| Bound | Written as | Fails when |
+|---|---|---|
+| lower | a click within `LINE_HOVER_THICKNESS / 2` of the line finds it | the threshold is too small to cover the line the player can see |
+| upper | a click `DOT_SPACING / 2` from two parallel lines finds neither | the threshold is wide enough that the bands overlap |
+
+Neither mentions `CLICK_THRESHOLD`, so both can object to it. This generalises:
+a padding is bounded below by what it has to clear and above by what it must
+not collide with; a font size by legibility and by its slot. Where those bounds
+genuinely cannot be named, the constant is arbitrary and should be documented
+as arbitrary rather than pinned by a test that cannot fail.
+
+### Where this goes
+
+Item 1 of §485's board-geometry checklist ("the lattice is measured against the
+window") should be read as requiring the margin form. Item 6 ("frame margins
+positive and equal") already said so; the two are one item in practice and the
+mistake both times was doing 1 and skipping 6. The checklist is unchanged, but
+the two items are now always written as a single test —
+`the_painted_grid_is_square_evenly_spaced_and_fits_the_window` in nonogram,
+`the_painted_dots_are_a_square_even_lattice_centred_in_the_window` in dots — so
+that it is not possible to do one without the other.

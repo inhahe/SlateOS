@@ -53,9 +53,6 @@ pub const TAB_GAP: f32 = 1.0;
 /// Width of the close box at the right end of a tab.
 pub const TAB_CLOSE_WIDTH: f32 = 24.0;
 
-/// How many lines one notch of the scroll wheel moves.
-const SCROLL_LINES_PER_NOTCH: f32 = 3.0;
-
 /// What the caller should do about an event.
 ///
 /// Deliberately not `bool`: "the editor wants to close" and "the editor wants to
@@ -576,19 +573,24 @@ impl EditorState {
                 EditorResponse::Redraw
             }
             MouseEventKind::Scroll { dy, .. } => {
-                let lines = (dy / self.line_height * SCROLL_LINES_PER_NOTCH) as i64;
+                let doc = self.active_document_mut();
+                // `dy` is a notch count, not a distance. This used to divide it
+                // by the line height, which is what a pixel distance would
+                // want — and one notch over a 21px line is 0.14 lines,
+                // truncated to zero, so the wheel did nothing at all at any
+                // speed. The accumulator also keeps the fractions a trackpad
+                // sends, which the old truncation discarded outright.
+                let lines = doc.wheel.rows(dy);
                 if lines == 0 {
                     return EditorResponse::Idle;
                 }
-                let doc = self.active_document_mut();
                 let last = doc.lines.len().saturating_sub(1);
-                let scrolled = if lines < 0 {
+                let scrolled = if lines > 0 {
                     doc.scroll_line
-                        .saturating_add(lines.unsigned_abs() as usize)
+                        .saturating_add(lines.unsigned_abs())
                         .min(last)
                 } else {
-                    doc.scroll_line
-                        .saturating_sub(lines.unsigned_abs() as usize)
+                    doc.scroll_line.saturating_sub(lines.unsigned_abs())
                 };
                 if scrolled == doc.scroll_line {
                     return EditorResponse::Idle;
@@ -1113,24 +1115,109 @@ mod tests {
         assert!(!editor.dragging, "a double click does not start a drag");
     }
 
+    /// One notch of the wheel, as the compositor actually sends it.
+    ///
+    /// `dy` is a *notch count*: 1.0 per detent, fractional for a trackpad.
+    /// This helper exists mainly so no test can quietly reintroduce the old
+    /// habit of writing a pixel distance here — which is what let the dead
+    /// wheel below survive having a test.
+    fn wheel(dy: f32) -> Event {
+        Event::Mouse(MouseEvent {
+            x: 100.0,
+            y: 100.0,
+            kind: MouseEventKind::Scroll { dx: 0.0, dy },
+        })
+    }
+
     #[test]
     fn the_wheel_moves_the_view_and_leaves_the_caret_alone() {
         let mut editor = editor_with(&"line\n".repeat(200));
-        let event = Event::Mouse(MouseEvent {
-            x: 100.0,
-            y: 100.0,
-            kind: MouseEventKind::Scroll {
-                dx: 0.0,
-                dy: -editor.line_height * 4.0,
-            },
-        });
-        assert_eq!(editor.handle_event(&event), EditorResponse::Redraw);
+        assert_eq!(editor.handle_event(&wheel(-4.0)), EditorResponse::Redraw);
         assert!(editor.active_document().scroll_line > 0);
         assert_eq!(
             editor.active_document().cursor_line,
             0,
             "scrolling must not drag the caret"
         );
+    }
+
+    /// The regression test for a wheel that did nothing at any speed.
+    ///
+    /// The handler used to compute `dy / line_height * 3.0`, treating the
+    /// notch count as a pixel distance: one notch came to 0.14 lines, `as i64`
+    /// truncated that to 0, and the handler returned `Idle`. The old version of
+    /// the test above passed anyway, because it sent `dy = -line_height * 4.0`
+    /// — a pixel distance, the same wrong dialect the handler spoke. A single
+    /// ordinary notch is the case that matters and the case that was broken.
+    #[test]
+    fn a_single_notch_scrolls_the_view() {
+        let mut editor = editor_with(&"line\n".repeat(200));
+        assert_eq!(editor.handle_event(&wheel(-1.0)), EditorResponse::Redraw);
+        assert_eq!(
+            editor.active_document().scroll_line,
+            3,
+            "one notch is three lines"
+        );
+    }
+
+    /// Away from the user goes down the file, towards the user comes back.
+    #[test]
+    fn the_wheel_scrolls_both_ways() {
+        let mut editor = editor_with(&"line\n".repeat(200));
+        editor.handle_event(&wheel(-5.0));
+        let down = editor.active_document().scroll_line;
+        assert!(down > 0, "scrolling away from the user moves down the file");
+        editor.handle_event(&wheel(5.0));
+        assert_eq!(
+            editor.active_document().scroll_line,
+            0,
+            "and the same distance back returns to the top"
+        );
+    }
+
+    /// A precision trackpad sends fractions of a notch. Truncating each event
+    /// on its own would return zero every time and never scroll at all.
+    #[test]
+    fn a_trackpads_fractions_of_a_notch_eventually_scroll() {
+        let mut editor = editor_with(&"line\n".repeat(200));
+        for _ in 0..10 {
+            editor.handle_event(&wheel(-0.1));
+        }
+        assert_eq!(
+            editor.active_document().scroll_line,
+            3,
+            "ten tenths of a notch is one notch, which is three lines"
+        );
+    }
+
+    /// The remainder belongs to the document, not the editor: a fraction
+    /// earned in one tab must not deliver a line in another.
+    #[test]
+    fn each_tab_keeps_its_own_wheel_remainder() {
+        let mut editor = editor_with(&"line\n".repeat(200));
+        editor.handle_event(&wheel(-0.2));
+        assert_eq!(editor.active_document().scroll_line, 0, "not yet a line");
+
+        let mut other = Document::new();
+        other.lines = vec!["line".to_string(); 200];
+        editor.tabs.open(other);
+        editor.handle_event(&wheel(-0.2));
+        assert_eq!(
+            editor.active_document().scroll_line,
+            0,
+            "the first tab's fraction must not scroll the second"
+        );
+    }
+
+    /// Scrolling stops at the last line rather than running off the end.
+    #[test]
+    fn the_wheel_stops_at_the_end_of_the_file() {
+        let mut editor = editor_with(&"line\n".repeat(20));
+        for _ in 0..50 {
+            editor.handle_event(&wheel(-1.0));
+        }
+        let last = editor.active_document().lines.len().saturating_sub(1);
+        assert_eq!(editor.active_document().scroll_line, last);
     }
 
     #[test]

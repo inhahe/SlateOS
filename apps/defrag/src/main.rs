@@ -29,6 +29,7 @@
 use guitk::color::Color;
 #[allow(unused_imports)]
 use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
+use guitk::scroll_window;
 #[allow(unused_imports)]
 use guitk::style::CornerRadii;
 use guitk::table::{Column, Fit, Table};
@@ -74,6 +75,13 @@ const FONT_SIZE_SMALL: f32 = 11.0;
 const FONT_SIZE_HEADING: f32 = 16.0;
 const FONT_SIZE_TITLE: f32 = 18.0;
 const ROW_HEIGHT: f32 = 26.0;
+
+/// Height reserved under the file list for the "N more" line.
+///
+/// Reserved unconditionally, so the number of rows that fit does not depend
+/// on whether any are being hidden — a budget that changed with its own
+/// result could show a row, discover the footer was needed, and hide it again.
+const LIST_FOOTER_HEIGHT: f32 = 18.0;
 
 /// Index of each column in [`file_list_columns`].
 const FILE_PATH: usize = 0;
@@ -1285,8 +1293,13 @@ pub struct DefragUI {
     pub file_sort_column: FileSortColumn,
     /// File list sort direction.
     pub file_sort_direction: SortDirection,
-    /// Scroll offset for the file list.
-    pub file_scroll_offset: f32,
+    /// Index of the first file-list row to draw.
+    ///
+    /// A row index rather than a pixel offset: the list draws whole rows, so
+    /// a pixel offset could only express positions the renderer then rounds
+    /// away. Written by [`DefragUI::scroll_file_list_by`]; a value past the
+    /// end is not an error, and shows the last full page.
+    pub file_scroll_offset: usize,
     /// Whether the SSD warning dialog is shown.
     pub show_ssd_warning: bool,
     /// Whether the exclude editor is shown.
@@ -1321,7 +1334,7 @@ impl DefragUI {
             ],
             file_sort_column: FileSortColumn::Severity,
             file_sort_direction: SortDirection::Descending,
-            file_scroll_offset: 0.0,
+            file_scroll_offset: 0,
             show_ssd_warning: false,
             show_exclude_editor: false,
             exclude_input: String::new(),
@@ -1909,8 +1922,16 @@ impl DefragUI {
             if cols > 0 {
                 let total = bmap.blocks.len();
                 // Downsample if too many blocks.
-                let step = if total > cols * ((map_h / cell) as usize) {
-                    total / (cols * ((map_h / cell) as usize)).max(1)
+                // How many blocks the map can show at all. Saturating rather
+                // than wrapping: a map big enough to overflow the product
+                // would otherwise wrap to a tiny capacity and downsample a
+                // map that had room to spare.
+                let capacity = cols.saturating_mul((map_h / cell) as usize);
+                // A zero capacity means nothing fits, so there is nothing to
+                // downsample *to* — step 1 and let the draw loop's own bounds
+                // discard the blocks, rather than dividing by zero.
+                let step = if total > capacity {
+                    total.checked_div(capacity).unwrap_or(1).max(1)
                 } else {
                     1
                 };
@@ -2196,22 +2217,37 @@ impl DefragUI {
 
         // File rows
         let row_area_y = header_y + ROW_HEIGHT;
-        let max_visible = ((h - ROW_HEIGHT) / ROW_HEIGHT) as usize;
 
-        let mut sorted_files = files.to_vec();
+        let mut sorted_files = files.clone();
         sort_file_list(
             &mut sorted_files,
             self.file_sort_column,
             self.file_sort_direction,
         );
 
-        for (i, file) in sorted_files.iter().enumerate() {
-            if i >= max_visible {
-                break;
-            }
-            let ry = row_area_y + i as f32 * ROW_HEIGHT;
+        // Room for the "N more" line is reserved whether or not it is needed,
+        // so the number of rows that fit does not depend on its own answer —
+        // deciding the window first and then taking a row back for the footer
+        // could hide a row that had fitted a moment earlier.
+        let window = scroll_window::visible(
+            sorted_files.len(),
+            ROW_HEIGHT,
+            h - ROW_HEIGHT - LIST_FOOTER_HEIGHT,
+            self.file_scroll_offset,
+        );
 
-            // Alternating row background
+        for (drawn, file) in sorted_files
+            .get(window.start..window.end())
+            .unwrap_or_default()
+            .iter()
+            .enumerate()
+        {
+            let i = window.start.saturating_add(drawn);
+            let ry = row_area_y + drawn as f32 * ROW_HEIGHT;
+
+            // Alternating row background, striped by absolute row index rather
+            // than by position on screen, so the stripes do not invert as the
+            // list scrolls.
             if i % 2 == 0 {
                 tree.push(RenderCommand::FillRect {
                     x,
@@ -2294,6 +2330,38 @@ impl DefragUI {
                 Fit::Start,
             );
         }
+
+        // A list that is hiding rows says so. Without this the list looks
+        // complete: it ends flush against the bottom of its panel, which is
+        // exactly what a list with nothing more to show looks like.
+        let hidden = sorted_files.len().saturating_sub(window.count);
+        if hidden > 0 {
+            tree.push(RenderCommand::Text {
+                x: x + PADDING,
+                y: row_area_y + window.count as f32 * ROW_HEIGHT + 2.0,
+                text: format!("{hidden} more"),
+                color: COLOR_SUBTEXT0,
+                font_size: FONT_SIZE,
+                font_weight: FontWeightHint::Regular,
+                max_width: Some(w - 2.0 * PADDING),
+                overflow: TextOverflow::Ellipsis,
+            });
+        }
+    }
+
+    /// Move the file list `delta` rows, negative for up.
+    ///
+    /// A row index rather than a pixel offset: the list draws whole rows, so a
+    /// pixel offset could only express positions the renderer then rounds
+    /// away. A value past the end is not an error — that shows the last page.
+    pub fn scroll_file_list_by(&mut self, delta: isize) {
+        self.file_scroll_offset = scroll_window::shift(self.file_scroll_offset, delta);
+    }
+
+    /// Back to the top — where a fresh analysis should leave the list, since
+    /// its first rows are the worst-fragmented files and the reason to look.
+    pub fn scroll_file_list_to_top(&mut self) {
+        self.file_scroll_offset = 0;
     }
 
     // -- statistics view -------------------------------------------------------
@@ -3063,6 +3131,131 @@ mod tests {
                 _ => None,
             })
             .collect()
+    }
+
+    /// The panel height every scrolling test below renders at, matching
+    /// [`file_list_texts`].
+    const LIST_H: f32 = 400.0;
+
+    /// How many rows fit in that panel: the header and the "N more" line are
+    /// both outside the row area.
+    fn list_capacity() -> usize {
+        scroll_window::capacity(ROW_HEIGHT, LIST_H - ROW_HEIGHT - LIST_FOOTER_HEIGHT)
+    }
+
+    /// An app listing `n` files whose severity order is their path order, so a
+    /// failure message reads as a contiguous run of names.
+    fn app_with_numbered_files(n: usize) -> DefragUI {
+        let files: Vec<FileFragInfo> = (0..n)
+            .map(|i| FileFragInfo {
+                path: format!("/f{i:03}"),
+                size_bytes: 1024 * 1024,
+                // Severity rises with fragment count at a fixed size, so a
+                // count that falls with the index sorts the list into path
+                // order under the default Severity/Descending sort.
+                fragment_count: u32::try_from(n - i).unwrap_or(u32::MAX).saturating_add(1),
+                block_count: 1,
+                excluded: false,
+            })
+            .collect();
+        let mut app = DefragUI::new();
+        app.analysis = Some(analyze_drive(&sample_block_map(), &files));
+        app
+    }
+
+    /// The paths the file list actually drew, in the order it drew them.
+    fn drawn_file_paths(app: &DefragUI) -> Vec<String> {
+        file_list_texts(app)
+            .into_iter()
+            .map(|(_, t, _, _)| t)
+            .filter(|t| t.starts_with("/f"))
+            .collect()
+    }
+
+    /// The bug this change is about: the list stopped at the last row that fit
+    /// and there was no way to reach the rest.
+    #[test]
+    fn the_file_list_stops_at_the_last_row_that_fits() {
+        let cap = list_capacity();
+        assert!(cap > 2, "the panel must fit several rows to be a test");
+        let app = app_with_numbered_files(cap + 20);
+        let drawn = drawn_file_paths(&app);
+        assert_eq!(drawn.len(), cap);
+        assert_eq!(drawn.first().map(String::as_str), Some("/f000"));
+    }
+
+    /// ...and the rows past the fold are now reachable, which is the fix.
+    #[test]
+    fn scrolling_the_file_list_reaches_the_rows_that_did_not_fit() {
+        let cap = list_capacity();
+        let mut app = app_with_numbered_files(cap + 20);
+        let last = format!("/f{:03}", cap + 19);
+        assert!(
+            !drawn_file_paths(&app).contains(&last),
+            "the last file should start out below the fold"
+        );
+        app.scroll_file_list_by(isize::try_from(cap + 20).unwrap());
+        assert!(
+            drawn_file_paths(&app).contains(&last),
+            "the last file is still unreachable after scrolling to the end"
+        );
+    }
+
+    /// An offset past the end means the last page, not a blank panel. A new
+    /// analysis can list far fewer files than the one before it, and nothing
+    /// resets the offset when it does.
+    #[test]
+    fn a_file_list_that_shrinks_under_a_stale_offset_shows_its_last_page() {
+        let cap = list_capacity();
+        let mut app = app_with_numbered_files(cap + 40);
+        app.scroll_file_list_by(isize::try_from(cap + 39).unwrap());
+
+        // A new, much shorter analysis lands under the old offset.
+        let short = app_with_numbered_files(cap + 1);
+        app.analysis = short.analysis;
+        let drawn = drawn_file_paths(&app);
+        assert_eq!(drawn.len(), cap, "the panel must not go blank");
+        assert_eq!(
+            drawn.last().map(String::as_str),
+            Some(format!("/f{cap:03}").as_str()),
+            "the last page should end at the last row"
+        );
+    }
+
+    /// Scrolling up from the top stays at the top rather than wrapping to the
+    /// end — an unsigned offset makes that structural, and this pins it.
+    #[test]
+    fn scrolling_the_file_list_up_from_the_top_stays_at_the_top() {
+        let mut app = app_with_numbered_files(50);
+        app.scroll_file_list_by(-10);
+        assert_eq!(app.file_scroll_offset, 0);
+        assert_eq!(
+            drawn_file_paths(&app).first().map(String::as_str),
+            Some("/f000")
+        );
+    }
+
+    /// A list hiding rows says how many. Without the line it ends flush with
+    /// the bottom of the panel, which is what a complete list looks like.
+    #[test]
+    fn a_file_list_that_is_hiding_rows_says_so() {
+        let cap = list_capacity();
+        let app = app_with_numbered_files(cap + 7);
+        let more: Vec<String> = file_list_texts(&app)
+            .into_iter()
+            .map(|(_, t, _, _)| t)
+            .filter(|t| t.ends_with(" more"))
+            .collect();
+        assert_eq!(more, vec![String::from("7 more")]);
+
+        // ...and a list with nothing hidden says nothing.
+        let app = app_with_numbered_files(cap);
+        assert!(
+            !file_list_texts(&app)
+                .iter()
+                .any(|(_, t, _, _)| t.ends_with(" more")),
+            "a complete list should not claim to be hiding rows"
+        );
     }
 
     #[test]

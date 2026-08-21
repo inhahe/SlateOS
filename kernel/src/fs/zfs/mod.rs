@@ -41,6 +41,9 @@
 //!
 //! | Not supported | Where it is caught |
 //! |---|---|
+//! | a hot spare or L2ARC cache device — a real pool member holding no pool data | `label::parse_config` |
+//! | a destroyed pool (`zpool import -D` territory) | `label::parse_config` |
+//! | an SPA version above 5000 | `label::parse_config` |
 //! | mirror / raidz (more than one vdev child) | `label::parse_config` |
 //! | a separate intent-log (SLOG) device | `label::parse_config` |
 //! | any top-level vdev but the first, e.g. a stripe's second disk | `label::parse_config` |

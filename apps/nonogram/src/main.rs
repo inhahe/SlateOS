@@ -69,6 +69,18 @@ const CLUE_SLOT_W: f32 = 18.0;
 /// Pixel height reserved for each clue number in the column clue area.
 const CLUE_SLOT_H: f32 = 16.0;
 
+/// Half a clue number's drawn width and height at `CLUE_FONT_SIZE`.
+///
+/// `RenderCommand::Text` is positioned by its top-left corner, so a number is
+/// centred on a row or column by starting it this far up and to the left of
+/// that row's or column's middle. The figures are eyeballed -- the renderer has
+/// no text-metrics call to ask -- which is why they are named rather than left
+/// as bare literals subtracted from an inline half-cell.
+const CLUE_HALF_WIDTH: f32 = 4.0;
+/// Half a clue number's drawn height at `CLUE_FONT_SIZE`. See
+/// `CLUE_HALF_WIDTH`.
+const CLUE_HALF_HEIGHT: f32 = 7.0;
+
 // ── Grid sizes ─────────────────────────────────────────────────────
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum GridSize {
@@ -521,7 +533,10 @@ impl NonogramApp {
 
     /// Number of cells the player has filled (regardless of correctness).
     fn player_filled_count(&self) -> usize {
-        self.cells.iter().filter(|&&c| c == CellMark::Filled).count()
+        self.cells
+            .iter()
+            .filter(|&&c| c == CellMark::Filled)
+            .count()
     }
 
     /// Format elapsed time as M:SS.
@@ -540,6 +555,104 @@ impl NonogramApp {
     /// Maximum number of clue values among all column clues.
     fn max_col_clue_len(&self) -> usize {
         self.col_clues.iter().map(|c| c.len()).max().unwrap_or(1)
+    }
+
+    // ── Grid geometry ──────────────────────────────────────────────
+    //
+    // Where a cell is painted and which cell a click lands in used to be
+    // worked out separately: `CELL_SIZE + CELL_GAP` was spelled out at five
+    // sites and the grid's origin at two, once in `handle_mouse_playing` and
+    // once in `render_playing`. That origin is not a constant -- it is pushed
+    // right and down by however much room this puzzle's clues need -- so the
+    // two copies had to agree about the clue slot sizes as well as about the
+    // cells, and a change to either would have moved the picture without
+    // moving the hit test. A third copy lived in the tests, which meant the
+    // suite was measuring its own arithmetic rather than the app's; see
+    // design-decisions.md §486. These are now the one place it is written.
+
+    /// Distance from one cell's near edge to the next one's.
+    const CELL_STEP: f32 = CELL_SIZE + CELL_GAP;
+
+    /// Width of the band of row clues down the left-hand side.
+    ///
+    /// Every row is given the same width -- that of the wordiest row in this
+    /// puzzle -- so that the clue columns line up with each other.
+    fn row_clue_area_w(&self) -> f32 {
+        self.max_row_clue_len() as f32 * CLUE_SLOT_W
+    }
+
+    /// Height of the band of column clues across the top. See
+    /// `row_clue_area_w`.
+    fn col_clue_area_h(&self) -> f32 {
+        self.max_col_clue_len() as f32 * CLUE_SLOT_H
+    }
+
+    /// Screen coordinates of the grid's top-left corner.
+    fn grid_origin(&self) -> (f32, f32) {
+        (
+            PADDING + self.row_clue_area_w(),
+            HEADER_HEIGHT + PADDING + self.col_clue_area_h(),
+        )
+    }
+
+    /// Distance across the whole grid, in pixels.
+    ///
+    /// The last cell has no gap after it, so this is one gap short of
+    /// `side * CELL_STEP` -- which is the sort of detail that goes wrong when
+    /// the window size and the cells are measured by different code.
+    fn grid_pixel_span(&self) -> f32 {
+        self.grid_side as f32 * Self::CELL_STEP - CELL_GAP
+    }
+
+    /// Screen coordinates of the top-left corner of a cell.
+    fn cell_origin(&self, row: usize, col: usize) -> (f32, f32) {
+        let (ox, oy) = self.grid_origin();
+        (
+            ox + col as f32 * Self::CELL_STEP,
+            oy + row as f32 * Self::CELL_STEP,
+        )
+    }
+
+    /// Screen coordinates of the middle of a cell.
+    fn cell_center(&self, row: usize, col: usize) -> (f32, f32) {
+        let (x, y) = self.cell_origin(row, col);
+        (x + CELL_SIZE / 2.0, y + CELL_SIZE / 2.0)
+    }
+
+    /// The row or column an offset from the grid's near edge falls in, or
+    /// `None` if it falls outside the grid.
+    ///
+    /// Each cell owns half of the gap on either side of it, which makes the
+    /// mapping forgiving in the middle of the grid *and* symmetric at its
+    /// edges: there is exactly `CELL_GAP / 2` of slop past the first cell's
+    /// near edge and past the last cell's far edge, the same as between any
+    /// two neighbours. The previous version handed each cell the whole gap
+    /// *after* it, which gave the right-hand and bottom edges a gap's worth of
+    /// slop and the left and top edges none -- an asymmetry small enough never
+    /// to be noticed and still worth not having. Nonogram is a game of many
+    /// rapid clicks, so slop is wanted here; sudoku made the opposite call for
+    /// the opposite reason (design-decisions.md §486).
+    ///
+    /// The bounds are checked before any cast, because a float-to-integer cast
+    /// in Rust truncates toward zero and would turn a point just left of the
+    /// grid into column 0. See known-issues.md
+    /// `C-GOMOKU-THE-CLICK-SLOP-ONLY-WORKED-ON-TWO-EDGES`.
+    fn axis_index(&self, offset: f32) -> Option<usize> {
+        let shifted = offset + CELL_GAP / 2.0;
+        if shifted < 0.0 || shifted >= self.grid_side as f32 * Self::CELL_STEP {
+            return None;
+        }
+        // Truncation is the intent -- the fraction is the position within the
+        // cell -- and the guard above is what makes the cast safe.
+        Some((shifted / Self::CELL_STEP) as usize)
+    }
+
+    /// The cell a click at `(x, y)` lands on, or `None` if it misses the grid.
+    fn cell_at_point(&self, x: f32, y: f32) -> Option<(usize, usize)> {
+        let (ox, oy) = self.grid_origin();
+        let row = self.axis_index(y - oy)?;
+        let col = self.axis_index(x - ox)?;
+        Some((row, col))
     }
 
     // ── Event handling ─────────────────────────────────────────────
@@ -569,14 +682,12 @@ impl NonogramApp {
 
     fn handle_key_select(&mut self, key_event: &KeyEvent) {
         match key_event.key {
-            Key::Up
-                if self.select_cursor > 0 => {
-                    self.select_cursor -= 1;
-                }
-            Key::Down
-                if self.select_cursor + 1 < self.puzzles.len() => {
-                    self.select_cursor += 1;
-                }
+            Key::Up if self.select_cursor > 0 => {
+                self.select_cursor -= 1;
+            }
+            Key::Down if self.select_cursor + 1 < self.puzzles.len() => {
+                self.select_cursor += 1;
+            }
             Key::Enter | Key::Space => {
                 self.start_puzzle(self.select_cursor);
             }
@@ -586,22 +697,18 @@ impl NonogramApp {
 
     fn handle_key_playing(&mut self, key_event: &KeyEvent) {
         match key_event.key {
-            Key::Up
-                if self.cursor_row > 0 => {
-                    self.cursor_row -= 1;
-                }
-            Key::Down
-                if self.cursor_row + 1 < self.grid_side => {
-                    self.cursor_row += 1;
-                }
-            Key::Left
-                if self.cursor_col > 0 => {
-                    self.cursor_col -= 1;
-                }
-            Key::Right
-                if self.cursor_col + 1 < self.grid_side => {
-                    self.cursor_col += 1;
-                }
+            Key::Up if self.cursor_row > 0 => {
+                self.cursor_row -= 1;
+            }
+            Key::Down if self.cursor_row + 1 < self.grid_side => {
+                self.cursor_row += 1;
+            }
+            Key::Left if self.cursor_col > 0 => {
+                self.cursor_col -= 1;
+            }
+            Key::Right if self.cursor_col + 1 < self.grid_side => {
+                self.cursor_col += 1;
+            }
             Key::Enter | Key::Space => {
                 self.toggle_fill(self.cursor_row, self.cursor_col);
                 if self.check_win() {
@@ -660,27 +767,12 @@ impl NonogramApp {
         let mx = mouse_event.x;
         let my = mouse_event.y;
 
-        let row_clue_area_w = self.max_row_clue_len() as f32 * CLUE_SLOT_W;
-        let col_clue_area_h = self.max_col_clue_len() as f32 * CLUE_SLOT_H;
-
-        let grid_origin_x = PADDING + row_clue_area_w;
-        let grid_origin_y = HEADER_HEIGHT + PADDING + col_clue_area_h;
-
-        let cell_step = CELL_SIZE + CELL_GAP;
-
-        let col_f = (mx - grid_origin_x) / cell_step;
-        let row_f = (my - grid_origin_y) / cell_step;
-
-        if col_f >= 0.0 && row_f >= 0.0 {
-            let col = col_f as usize;
-            let row = row_f as usize;
-            if row < self.grid_side && col < self.grid_side {
-                self.cursor_row = row;
-                self.cursor_col = col;
-                self.toggle_fill(row, col);
-                if self.check_win() {
-                    self.screen = Screen::Won;
-                }
+        if let Some((row, col)) = self.cell_at_point(mx, my) {
+            self.cursor_row = row;
+            self.cursor_col = col;
+            self.toggle_fill(row, col);
+            if self.check_win() {
+                self.screen = Screen::Won;
             }
         }
     }
@@ -815,19 +907,14 @@ impl NonogramApp {
     fn render_playing(&self) -> Vec<RenderCommand> {
         let mut cmds = Vec::new();
 
-        let row_clue_area_w = self.max_row_clue_len() as f32 * CLUE_SLOT_W;
-        let col_clue_area_h = self.max_col_clue_len() as f32 * CLUE_SLOT_H;
-        let cell_step = CELL_SIZE + CELL_GAP;
-        let grid_pixel_w = self.grid_side as f32 * cell_step - CELL_GAP;
-        let grid_pixel_h = grid_pixel_w;
+        let grid_span = self.grid_pixel_span();
+        let (grid_origin_x, grid_origin_y) = self.grid_origin();
 
-        let total_width = PADDING + row_clue_area_w + grid_pixel_w + PADDING;
         let footer_height = 40.0;
-        let total_height =
-            HEADER_HEIGHT + PADDING + col_clue_area_h + grid_pixel_h + footer_height + PADDING;
-
-        let grid_origin_x = PADDING + row_clue_area_w;
-        let grid_origin_y = HEADER_HEIGHT + PADDING + col_clue_area_h;
+        // The window is measured from the grid's far edge rather than restating
+        // the clue widths, so it cannot disagree with where the grid is drawn.
+        let total_width = grid_origin_x + grid_span + PADDING;
+        let total_height = grid_origin_y + grid_span + footer_height + PADDING;
 
         // Background
         cmds.push(RenderCommand::FillRect {
@@ -843,13 +930,13 @@ impl NonogramApp {
         self.render_header(&mut cmds, total_width);
 
         // Column clues
-        self.render_col_clues(&mut cmds, grid_origin_x, HEADER_HEIGHT + PADDING, col_clue_area_h);
+        self.render_col_clues(&mut cmds);
 
         // Row clues
-        self.render_row_clues(&mut cmds, PADDING, grid_origin_y, row_clue_area_w);
+        self.render_row_clues(&mut cmds);
 
         // Grid cells
-        self.render_grid(&mut cmds, grid_origin_x, grid_origin_y);
+        self.render_grid(&mut cmds);
 
         // Footer
         self.render_footer(&mut cmds, total_width, total_height, footer_height);
@@ -910,20 +997,21 @@ impl NonogramApp {
         }
     }
 
-    fn render_col_clues(
-        &self,
-        cmds: &mut Vec<RenderCommand>,
-        grid_origin_x: f32,
-        clue_area_y: f32,
-        _col_clue_area_h: f32,
-    ) {
-        let cell_step = CELL_SIZE + CELL_GAP;
+    fn render_col_clues(&self, cmds: &mut Vec<RenderCommand>) {
         let max_len = self.max_col_clue_len();
+        // The clue band sits directly on top of the grid, so its top edge is
+        // the grid's own origin less the band's height -- derived rather than
+        // restated, so the clues cannot drift away from the columns they
+        // describe.
+        let clue_area_y = self.grid_origin().1 - self.col_clue_area_h();
 
         for (c, clue) in self.col_clues.iter().enumerate() {
             let is_current = self.screen == Screen::Playing && c == self.cursor_col;
-            let base_x = grid_origin_x + c as f32 * cell_step;
-            // Right-align clue numbers from bottom of the clue area.
+            // Centred on the column it belongs to, so a clue is over its own
+            // column whatever the spacing is.
+            let center_x = self.cell_center(0, c).0;
+            // Bottom-align clue numbers against the grid: the last value of
+            // every clue sits in the slot immediately above the first row.
             let start_slot = max_len - clue.len();
             for (j, &val) in clue.iter().enumerate() {
                 let slot = start_slot + j;
@@ -935,7 +1023,7 @@ impl NonogramApp {
                     FontWeightHint::Regular
                 };
                 cmds.push(RenderCommand::Text {
-                    x: base_x + CELL_SIZE / 2.0 - 4.0,
+                    x: center_x - CLUE_HALF_WIDTH,
                     y: cy,
                     text: val.to_string(),
                     color,
@@ -948,20 +1036,18 @@ impl NonogramApp {
         }
     }
 
-    fn render_row_clues(
-        &self,
-        cmds: &mut Vec<RenderCommand>,
-        clue_area_x: f32,
-        grid_origin_y: f32,
-        _row_clue_area_w: f32,
-    ) {
-        let cell_step = CELL_SIZE + CELL_GAP;
+    fn render_row_clues(&self, cmds: &mut Vec<RenderCommand>) {
         let max_len = self.max_row_clue_len();
+        // The clue band butts up against the grid's left edge; see
+        // `render_col_clues` for why this is derived and not restated.
+        let clue_area_x = self.grid_origin().0 - self.row_clue_area_w();
 
         for (r, clue) in self.row_clues.iter().enumerate() {
             let is_current = self.screen == Screen::Playing && r == self.cursor_row;
-            let base_y = grid_origin_y + r as f32 * cell_step + CELL_SIZE / 2.0 - 7.0;
-            // Right-align clue numbers from the right edge of the clue area.
+            // Centred on the row it belongs to.
+            let base_y = self.cell_center(r, 0).1 - CLUE_HALF_HEIGHT;
+            // Right-align clue numbers against the grid: the last value of
+            // every clue sits in the slot immediately left of the first column.
             let start_slot = max_len - clue.len();
             for (j, &val) in clue.iter().enumerate() {
                 let slot = start_slot + j;
@@ -986,18 +1072,12 @@ impl NonogramApp {
         }
     }
 
-    fn render_grid(
-        &self,
-        cmds: &mut Vec<RenderCommand>,
-        grid_origin_x: f32,
-        grid_origin_y: f32,
-    ) {
-        let cell_step = CELL_SIZE + CELL_GAP;
+    fn render_grid(&self, cmds: &mut Vec<RenderCommand>) {
+        let (grid_origin_x, grid_origin_y) = self.grid_origin();
 
         for r in 0..self.grid_side {
             for c in 0..self.grid_side {
-                let cx = grid_origin_x + c as f32 * cell_step;
-                let cy = grid_origin_y + r as f32 * cell_step;
+                let (cx, cy) = self.cell_origin(r, c);
 
                 let is_cursor =
                     self.screen == Screen::Playing && r == self.cursor_row && c == self.cursor_col;
@@ -1016,7 +1096,11 @@ impl NonogramApp {
                         }
                     }
                     CellMark::MarkedEmpty => {
-                        if error { Color::rgba(243, 139, 168, 60) } else { SURFACE0 }
+                        if error {
+                            Color::rgba(243, 139, 168, 60)
+                        } else {
+                            SURFACE0
+                        }
                     }
                     CellMark::Empty => SURFACE0,
                 };
@@ -1069,23 +1153,28 @@ impl NonogramApp {
         // Draw grid lines for 5-cell groups (thicker lines every 5 cells)
         if self.grid_side >= 10 {
             let line_color = OVERLAY0;
+            let span = self.grid_pixel_span();
             for g in 1..(self.grid_side / 5) {
-                let pos = g as f32 * 5.0 * cell_step - CELL_GAP / 2.0;
+                // Down the middle of the gap before the group's first cell,
+                // taken from that cell's own origin so the rule always lands
+                // between the two cells it separates.
+                let cell = g * 5;
+                let (bx, by) = self.cell_origin(cell, cell);
                 // Vertical line
                 cmds.push(RenderCommand::Line {
-                    x1: grid_origin_x + pos,
+                    x1: bx - CELL_GAP / 2.0,
                     y1: grid_origin_y,
-                    x2: grid_origin_x + pos,
-                    y2: grid_origin_y + self.grid_side as f32 * cell_step - CELL_GAP,
+                    x2: bx - CELL_GAP / 2.0,
+                    y2: grid_origin_y + span,
                     color: line_color,
                     width: 1.5,
                 });
                 // Horizontal line
                 cmds.push(RenderCommand::Line {
                     x1: grid_origin_x,
-                    y1: grid_origin_y + pos,
-                    x2: grid_origin_x + self.grid_side as f32 * cell_step - CELL_GAP,
-                    y2: grid_origin_y + pos,
+                    y1: by - CELL_GAP / 2.0,
+                    x2: grid_origin_x + span,
+                    y2: by - CELL_GAP / 2.0,
                     color: line_color,
                     width: 1.5,
                 });
@@ -1159,6 +1248,16 @@ fn main() {
 // ═══════════════════════════════════════════════════════════════════════
 #[cfg(test)]
 mod tests {
+    // A test that indexes past the end, or unwraps a `None`, is a test that
+    // has already failed; panicking is the reporting mechanism, not a fault.
+    #![allow(
+        clippy::arithmetic_side_effects,
+        clippy::expect_used,
+        clippy::indexing_slicing,
+        clippy::panic,
+        clippy::unwrap_used
+    )]
+
     use super::*;
 
     // ── Helper: create a key press event ────────────────────────────
@@ -1284,10 +1383,7 @@ mod tests {
         // ##### -> [5]
         // .###. -> [3]
         // ..#.. -> [1]
-        let heart = parse_picture(
-            ".#.#.\n#####\n#####\n.###.\n..#..",
-            5,
-        );
+        let heart = parse_picture(".#.#.\n#####\n#####\n.###.\n..#..", 5);
         let row_clues = compute_row_clues(&heart, 5);
         assert_eq!(row_clues.len(), 5);
         assert_eq!(row_clues[0], vec![1, 1]);
@@ -1299,10 +1395,7 @@ mod tests {
 
     #[test]
     fn test_compute_col_clues_heart() {
-        let heart = parse_picture(
-            ".#.#.\n#####\n#####\n.###.\n..#..",
-            5,
-        );
+        let heart = parse_picture(".#.#.\n#####\n#####\n.###.\n..#..", 5);
         let col_clues = compute_col_clues(&heart, 5);
         assert_eq!(col_clues.len(), 5);
         // col 0: .#.#. transposed columns:
@@ -1320,10 +1413,7 @@ mod tests {
 
     #[test]
     fn test_compute_row_clues_arrow() {
-        let arrow = parse_picture(
-            "..#..\n.##..\n#####\n.##..\n..#..",
-            5,
-        );
+        let arrow = parse_picture("..#..\n.##..\n#####\n.##..\n..#..", 5);
         let row_clues = compute_row_clues(&arrow, 5);
         assert_eq!(row_clues[0], vec![1]);
         assert_eq!(row_clues[1], vec![2]);
@@ -1334,10 +1424,7 @@ mod tests {
 
     #[test]
     fn test_compute_col_clues_arrow() {
-        let arrow = parse_picture(
-            "..#..\n.##..\n#####\n.##..\n..#..",
-            5,
-        );
+        let arrow = parse_picture("..#..\n.##..\n#####\n.##..\n..#..", 5);
         let col_clues = compute_col_clues(&arrow, 5);
         // col0: .,..,#,..,.. -> [1]
         assert_eq!(col_clues[0], vec![1]);
@@ -1369,10 +1456,7 @@ mod tests {
 
     #[test]
     fn test_parse_picture_heart_fill_count() {
-        let grid = parse_picture(
-            ".#.#.\n#####\n#####\n.###.\n..#..",
-            5,
-        );
+        let grid = parse_picture(".#.#.\n#####\n#####\n.###.\n..#..", 5);
         let filled = grid.iter().filter(|&&v| v).count();
         // Row 0: 2, Row 1: 5, Row 2: 5, Row 3: 3, Row 4: 1 = 16
         assert_eq!(filled, 16);
@@ -1414,7 +1498,10 @@ mod tests {
     #[test]
     fn test_builtin_puzzles_count() {
         let puzzles = builtin_puzzles();
-        assert!(puzzles.len() >= 8, "Should have at least 8 built-in puzzles");
+        assert!(
+            puzzles.len() >= 8,
+            "Should have at least 8 built-in puzzles"
+        );
     }
 
     #[test]
@@ -2100,17 +2187,16 @@ mod tests {
 
     #[test]
     fn test_mouse_click_grid_fills_cell() {
+        // This test used to work the grid's origin out for itself from
+        // PADDING, HEADER_HEIGHT and the clue slot sizes -- a second copy of
+        // the app's own arithmetic, which meant it would have gone on passing
+        // if the grid had moved. It now asks the app where a cell is; that the
+        // answer matches the picture is what the geometry tests below check.
         let mut app = app_playing_heart();
-        let row_clue_w = app.max_row_clue_len() as f32 * CLUE_SLOT_W;
-        let col_clue_h = app.max_col_clue_len() as f32 * CLUE_SLOT_H;
-        let gx = PADDING + row_clue_w;
-        let gy = HEADER_HEIGHT + PADDING + col_clue_h;
-
-        // Click in cell (0,0)
-        let click_x = gx + CELL_SIZE / 2.0;
-        let click_y = gy + CELL_SIZE / 2.0;
-        app.handle_event(&left_click(click_x, click_y));
-        assert_eq!(app.cell_at(0, 0), CellMark::Filled);
+        let (cx, cy) = app.cell_center(2, 3);
+        app.handle_event(&left_click(cx, cy));
+        assert_eq!(app.cell_at(2, 3), CellMark::Filled);
+        assert_eq!((app.cursor_row, app.cursor_col), (2, 3));
     }
 
     // ── Max clue lengths ───────────────────────────────────────────
@@ -2173,7 +2259,10 @@ mod tests {
             .iter()
             .filter(|c| matches!(c, RenderCommand::Text { .. }))
             .count();
-        assert!(text_count > 0, "Playing screen should contain text commands");
+        assert!(
+            text_count > 0,
+            "Playing screen should contain text commands"
+        );
     }
 
     #[test]
@@ -2227,7 +2316,12 @@ mod tests {
         assert_eq!(app.row_clues.len(), 10);
         assert_eq!(app.col_clues.len(), 10);
         // Sum of all row clue values should equal total filled cells
-        let row_sum: u32 = app.row_clues.iter().flat_map(|c| c.iter()).map(|&v| v as u32).sum();
+        let row_sum: u32 = app
+            .row_clues
+            .iter()
+            .flat_map(|c| c.iter())
+            .map(|&v| v as u32)
+            .sum();
         let filled = app.total_filled_in_solution() as u32;
         assert_eq!(row_sum, filled);
     }
@@ -2236,7 +2330,12 @@ mod tests {
     fn test_col_clue_sum_equals_filled() {
         let mut app = NonogramApp::new();
         app.start_puzzle(0);
-        let col_sum: u32 = app.col_clues.iter().flat_map(|c| c.iter()).map(|&v| v as u32).sum();
+        let col_sum: u32 = app
+            .col_clues
+            .iter()
+            .flat_map(|c| c.iter())
+            .map(|&v| v as u32)
+            .sum();
         let filled = app.total_filled_in_solution() as u32;
         assert_eq!(col_sum, filled);
     }
@@ -2285,6 +2384,417 @@ mod tests {
             .filter(|c| matches!(c, RenderCommand::Line { .. }))
             .count();
         // 10x10 grid should have group lines at position 5 (1 vertical + 1 horizontal)
-        assert!(line_count >= 2, "Medium grid should have group divider lines");
+        assert!(
+            line_count >= 2,
+            "Medium grid should have group divider lines"
+        );
+    }
+
+    // ── Grid geometry, measured against the picture ────────────────
+    //
+    // Written to the checklist in design-decisions.md §485: the lattice
+    // against the window, every point of a cell rather than its middle, all
+    // four edges inward and outward, a far sweep well past the grid, and each
+    // element's place *within* the cell that holds it. Expected values come
+    // from the render list wherever they can, never from the function under
+    // test -- the previous mouse test worked the grid's origin out for itself
+    // and would have passed with the grid drawn anywhere at all.
+
+    /// Top-left corners of the painted cells, in render order.
+    ///
+    /// A cell is the only thing drawn exactly `CELL_SIZE` square, which picks
+    /// them out of the render list without consulting `cell_origin`.
+    fn painted_cells(cmds: &[RenderCommand]) -> Vec<(f32, f32)> {
+        cmds.iter()
+            .filter_map(|c| match c {
+                RenderCommand::FillRect {
+                    x,
+                    y,
+                    width,
+                    height,
+                    ..
+                } if (*width - CELL_SIZE).abs() < 0.01 && (*height - CELL_SIZE).abs() < 0.01 => {
+                    Some((*x, *y))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The painted cell containing `(x, y)`, if any.
+    fn painted_cell_containing(cmds: &[RenderCommand], x: f32, y: f32) -> Option<(f32, f32)> {
+        painted_cells(cmds)
+            .into_iter()
+            .find(|&(cx, cy)| x >= cx && x < cx + CELL_SIZE && y >= cy && y < cy + CELL_SIZE)
+    }
+
+    /// The window the app asks for, as the background rectangle states it.
+    fn window_size(cmds: &[RenderCommand]) -> (f32, f32) {
+        match cmds.first() {
+            Some(RenderCommand::FillRect { width, height, .. }) => (*width, *height),
+            other => panic!("expected a background rect first, got {other:?}"),
+        }
+    }
+
+    // ── 1. The lattice, measured against the window ────────────
+
+    #[test]
+    fn the_painted_grid_is_square_evenly_spaced_and_fits_the_window() {
+        // Every puzzle, because the grid's origin depends on how much room
+        // this puzzle's clues need -- a 5x5 with one-figure clues and a 15x15
+        // with four-figure ones do not start in the same place.
+        for idx in 0..NonogramApp::new().puzzles.len() {
+            let mut app = NonogramApp::new();
+            app.start_puzzle(idx);
+            let side = app.grid_side;
+            let cmds = app.render();
+            let cells = painted_cells(&cmds);
+            assert_eq!(cells.len(), side * side, "puzzle {idx}: one rect per cell");
+
+            let mut xs: Vec<f32> = cells.iter().map(|c| c.0).collect();
+            let mut ys: Vec<f32> = cells.iter().map(|c| c.1).collect();
+            xs.sort_by(f32::total_cmp);
+            xs.dedup_by(|a, b| (*a - *b).abs() < 0.01);
+            ys.sort_by(f32::total_cmp);
+            ys.dedup_by(|a, b| (*a - *b).abs() < 0.01);
+            assert_eq!(xs.len(), side, "puzzle {idx}: {side} distinct columns");
+            assert_eq!(ys.len(), side, "puzzle {idx}: {side} distinct rows");
+
+            // Stated against the constants rather than against `CELL_STEP`, so
+            // a change to the spacing has to be made here too.
+            let step = CELL_SIZE + CELL_GAP;
+            for pair in xs.windows(2) {
+                assert!(
+                    (pair[1] - pair[0] - step).abs() < 0.01,
+                    "puzzle {idx}: columns are {} apart, expected {step}",
+                    pair[1] - pair[0]
+                );
+            }
+            for pair in ys.windows(2) {
+                assert!(
+                    (pair[1] - pair[0] - step).abs() < 0.01,
+                    "puzzle {idx}: rows are {} apart, expected {step}",
+                    pair[1] - pair[0]
+                );
+            }
+
+            let (win_w, win_h) = window_size(&cmds);
+            let right = xs[side - 1] + CELL_SIZE;
+            let bottom = ys[side - 1] + CELL_SIZE;
+            assert!(
+                xs[0] > 0.0 && ys[0] > 0.0,
+                "puzzle {idx}: the grid starts inside the window"
+            );
+            assert!(
+                right < win_w,
+                "puzzle {idx}: the grid ends inside the window, {right} vs {win_w}"
+            );
+            assert!(
+                bottom < win_h,
+                "puzzle {idx}: the grid ends above the footer, {bottom} vs {win_h}"
+            );
+            assert!(
+                ys[0] >= HEADER_HEIGHT,
+                "puzzle {idx}: the grid starts below the header, {} vs {HEADER_HEIGHT}",
+                ys[0]
+            );
+
+            // The frame is even: the margin to the right of the last column is
+            // the same as the margin to the left of the clue band. "Inside the
+            // window" alone would let the window be any amount too wide, which
+            // is exactly what happens if the grid's width is measured with a
+            // trailing gap the last cell does not have.
+            let band_w = app.max_row_clue_len() as f32 * CLUE_SLOT_W;
+            let left_margin = xs[0] - band_w;
+            let right_margin = win_w - right;
+            assert!(
+                (left_margin - right_margin).abs() < 0.01,
+                "puzzle {idx}: {left_margin} of margin on the left but {right_margin} on the right"
+            );
+        }
+    }
+
+    #[test]
+    fn the_clue_bands_leave_room_for_the_wordiest_clue_and_no_more() {
+        // The two bands are what push the grid right and down, so their width
+        // is measured as the gap between the window's padding and the grid the
+        // renderer actually painted -- not as the app's own formula.
+        for idx in 0..NonogramApp::new().puzzles.len() {
+            let mut app = NonogramApp::new();
+            app.start_puzzle(idx);
+            let cmds = app.render();
+            let cells = painted_cells(&cmds);
+            let left = cells
+                .iter()
+                .map(|c| c.0)
+                .fold(f32::INFINITY, |a, b| if b < a { b } else { a });
+            let top = cells
+                .iter()
+                .map(|c| c.1)
+                .fold(f32::INFINITY, |a, b| if b < a { b } else { a });
+            let expected_w = app.max_row_clue_len() as f32 * CLUE_SLOT_W;
+            let expected_h = app.max_col_clue_len() as f32 * CLUE_SLOT_H;
+            assert!(
+                (left - PADDING - expected_w).abs() < 0.01,
+                "puzzle {idx}: row clue band is {} wide, expected {expected_w}",
+                left - PADDING
+            );
+            assert!(
+                (top - HEADER_HEIGHT - PADDING - expected_h).abs() < 0.01,
+                "puzzle {idx}: column clue band is {} tall, expected {expected_h}",
+                top - HEADER_HEIGHT - PADDING
+            );
+        }
+    }
+
+    // ── 2. Every point of a cell, not just its middle ──────────
+
+    #[test]
+    fn every_point_in_a_painted_cell_resolves_to_that_cell() {
+        // A mapping shifted by less than half a cell still answers correctly
+        // dead centre, which is all the old round-trip test ever asked.
+        let app = app_playing_heart();
+        let cmds = app.render();
+        let inset = 0.5;
+        let far = CELL_SIZE - 0.5;
+        for row in 0..app.grid_side {
+            for col in 0..app.grid_side {
+                let (ox, oy) = app.cell_origin(row, col);
+                for dx in [inset, CELL_SIZE / 2.0, far] {
+                    for dy in [inset, CELL_SIZE / 2.0, far] {
+                        assert_eq!(
+                            app.cell_at_point(ox + dx, oy + dy),
+                            Some((row, col)),
+                            "({dx}, {dy}) into cell ({row}, {col}) missed it"
+                        );
+                    }
+                }
+                // And that cell is the one actually painted there.
+                let (mx, my) = app.cell_center(row, col);
+                assert_eq!(
+                    painted_cell_containing(&cmds, mx, my),
+                    Some((ox, oy)),
+                    "cell ({row}, {col}) is not painted where cell_origin says"
+                );
+            }
+        }
+    }
+
+    // ── 3. All four edges, inward and outward ───────────────
+
+    #[test]
+    fn the_grid_edges_take_the_same_slop_on_all_four_sides() {
+        // Each cell owns half the gap on either side of it, so the outermost
+        // cells reach exactly CELL_GAP / 2 beyond the painted grid -- the same
+        // on every side. The previous mapping gave the right and bottom edges
+        // a whole gap and the left and top none. Note the clickable region is
+        // the half-open box [near, far), so the two ends are not mirror images
+        // and no offset makes them so; state the interval (§485).
+        let app = app_playing_heart();
+        let side = app.grid_side;
+        let (left, top) = app.cell_origin(0, 0);
+        let (last_x, last_y) = app.cell_origin(side - 1, side - 1);
+        let slop = CELL_GAP / 2.0;
+        let near_x = left - slop;
+        let near_y = top - slop;
+        let far_x = last_x + CELL_SIZE + slop;
+        let far_y = last_y + CELL_SIZE + slop;
+        let mid_x = app.cell_center(0, side / 2).0;
+        let mid_y = app.cell_center(side / 2, 0).1;
+
+        assert_eq!(
+            app.cell_at_point(near_x, mid_y),
+            Some((side / 2, 0)),
+            "the left edge takes its half-gap of slop"
+        );
+        assert_eq!(
+            app.cell_at_point(mid_x, near_y),
+            Some((0, side / 2)),
+            "the top edge takes its half-gap of slop"
+        );
+        assert_eq!(
+            app.cell_at_point(far_x - 0.01, mid_y),
+            Some((side / 2, side - 1)),
+            "the right edge takes its half-gap of slop"
+        );
+        assert_eq!(
+            app.cell_at_point(mid_x, far_y - 0.01),
+            Some((side - 1, side / 2)),
+            "the bottom edge takes its half-gap of slop"
+        );
+
+        assert_eq!(
+            app.cell_at_point(near_x - 0.01, mid_y),
+            None,
+            "a hair further left than the slop is off the grid"
+        );
+        assert_eq!(
+            app.cell_at_point(mid_x, near_y - 0.01),
+            None,
+            "a hair above the slop is off the grid"
+        );
+        assert_eq!(
+            app.cell_at_point(far_x, mid_y),
+            None,
+            "a hair past the right-hand slop is off the grid"
+        );
+        assert_eq!(
+            app.cell_at_point(mid_x, far_y),
+            None,
+            "a hair below the bottom slop is off the grid"
+        );
+    }
+
+    // ── 4. A far sweep, well past the grid ──────────────────
+
+    #[test]
+    fn nothing_far_outside_the_painted_grid_lands_on_a_cell() {
+        // A hit test with no far edge answers the last cell for every point
+        // past the grid, and a single probe just outside it would not tell.
+        let app = app_playing_heart();
+        let cmds = app.render();
+        let (win_w, win_h) = window_size(&cmds);
+        let slop = CELL_GAP / 2.0;
+        let mut y = -40.0;
+        while y < win_h + 40.0 {
+            let mut x = -40.0;
+            while x < win_w + 40.0 {
+                let hit = app.cell_at_point(x, y);
+                match hit {
+                    Some((r, c)) => {
+                        let (ox, oy) = app.cell_origin(r, c);
+                        assert!(
+                            x >= ox - slop
+                                && x < ox + CELL_SIZE + slop
+                                && y >= oy - slop
+                                && y < oy + CELL_SIZE + slop,
+                            "({x}, {y}) was answered as cell ({r}, {c}) painted at ({ox}, {oy})"
+                        );
+                    }
+                    None => {
+                        assert!(
+                            painted_cell_containing(&cmds, x, y).is_none(),
+                            "({x}, {y}) is inside a painted cell but cell_at_point says otherwise"
+                        );
+                    }
+                }
+                x += 6.0;
+            }
+            y += 6.0;
+        }
+    }
+
+    // ── 5. Each element's place *within* its cell ────────────
+
+    #[test]
+    fn a_row_clue_is_painted_level_with_the_row_it_describes() {
+        // Measured against the painted cells of that row, never against
+        // `cell_origin` -- the clue has to be over its own row on screen.
+        let app = app_playing_heart();
+        let cmds = app.render();
+        let (left, _) = app.cell_origin(0, 0);
+        for (r, clue) in app.row_clues.iter().enumerate() {
+            let (_, oy) = app.cell_origin(r, 0);
+            let last = *clue.last().expect("every heart row has a clue");
+            let found = cmds.iter().any(|c| match c {
+                RenderCommand::Text { x, y, text, .. } => {
+                    *text == last.to_string() && *x < left && *y >= oy && *y < oy + CELL_SIZE
+                }
+                _ => false,
+            });
+            assert!(
+                found,
+                "row {r}'s clue {last} is not drawn left of the grid and level with the row painted at y={oy}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_column_clue_is_painted_above_the_column_it_describes() {
+        let app = app_playing_heart();
+        let cmds = app.render();
+        let (_, top) = app.cell_origin(0, 0);
+        for (c, clue) in app.col_clues.iter().enumerate() {
+            let (ox, _) = app.cell_origin(0, c);
+            let last = *clue.last().expect("every heart column has a clue");
+            let found = cmds.iter().any(|cmd| match cmd {
+                RenderCommand::Text { x, y, text, .. } => {
+                    *text == last.to_string() && *y < top && *x >= ox && *x < ox + CELL_SIZE
+                }
+                _ => false,
+            });
+            assert!(
+                found,
+                "column {c}'s clue {last} is not drawn above the grid and over the column painted at x={ox}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_cursor_is_outlined_where_that_cell_is_painted() {
+        let mut app = app_playing_heart();
+        app.cursor_row = 3;
+        app.cursor_col = 1;
+        let cmds = app.render();
+        let (ox, oy) = app.cell_origin(3, 1);
+        let outline = cmds.iter().any(|c| match c {
+            RenderCommand::StrokeRect {
+                x, y, width, color, ..
+            } => {
+                *color == YELLOW
+                    && *width > CELL_SIZE
+                    && (*x - (ox - 1.0)).abs() < 0.01
+                    && (*y - (oy - 1.0)).abs() < 0.01
+            }
+            _ => false,
+        });
+        assert!(
+            outline,
+            "the cursor outline is not drawn around the cell painted at ({ox}, {oy})"
+        );
+    }
+
+    // ── 6. The group rules fall between cells, not across them ──
+
+    #[test]
+    fn the_group_rules_fall_in_the_gaps_between_cells() {
+        // A rule every five cells marks a boundary; if it is drawn a whole
+        // cell out it crosses the cells it is meant to separate. Checked
+        // against the painted cells: no rule may pass through one.
+        let mut app = NonogramApp::new();
+        let idx = app
+            .puzzles
+            .iter()
+            .position(|p| p.size == GridSize::Medium)
+            .expect("a medium puzzle");
+        app.start_puzzle(idx);
+        let cmds = app.render();
+        let cells = painted_cells(&cmds);
+        let mut verticals = 0;
+        let mut horizontals = 0;
+        for cmd in &cmds {
+            let RenderCommand::Line { x1, y1, x2, y2, .. } = cmd else {
+                continue;
+            };
+            if (x1 - x2).abs() < 0.01 {
+                verticals += 1;
+                for &(cx, _) in &cells {
+                    assert!(
+                        *x1 <= cx || *x1 >= cx + CELL_SIZE,
+                        "a vertical rule at x={x1} crosses the cell painted at x={cx}"
+                    );
+                }
+            } else if (y1 - y2).abs() < 0.01 {
+                horizontals += 1;
+                for &(_, cy) in &cells {
+                    assert!(
+                        *y1 <= cy || *y1 >= cy + CELL_SIZE,
+                        "a horizontal rule at y={y1} crosses the cell painted at y={cy}"
+                    );
+                }
+            }
+        }
+        assert_eq!(verticals, 1, "a 10-wide grid has one vertical group rule");
+        assert_eq!(horizontals, 1, "and one horizontal");
     }
 }

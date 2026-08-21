@@ -59,7 +59,7 @@ const CELL_SIZE: f32 = 60.0;
 const BOARD_OFFSET_X: f32 = 40.0;
 const BOARD_OFFSET_Y: f32 = 70.0;
 const BOARD_SIZE: usize = 8;
-const PANEL_X: f32 = BOARD_OFFSET_X + CELL_SIZE * 8.0 + 30.0;
+const PANEL_X: f32 = BOARD_OFFSET_X + BOARD_PIXEL_SIZE + 30.0;
 const TITLE_FONT_SIZE: f32 = 22.0;
 const INFO_FONT_SIZE: f32 = 16.0;
 const LABEL_FONT_SIZE: f32 = 14.0;
@@ -71,23 +71,28 @@ const AI_DEPTH: i32 = 4;
 
 // ── Directions for flipping (row_delta, col_delta) ──────────────────
 const DIRECTIONS: [(i32, i32); 8] = [
-    (-1, -1), (-1, 0), (-1, 1),
-    (0, -1),           (0, 1),
-    (1, -1),  (1, 0),  (1, 1),
+    (-1, -1),
+    (-1, 0),
+    (-1, 1),
+    (0, -1),
+    (0, 1),
+    (1, -1),
+    (1, 0),
+    (1, 1),
 ];
 
 // ── Positional weights for AI evaluation ────────────────────────────
 // Corners are extremely valuable, edges are good, squares adjacent to
 // corners (X-squares and C-squares) are dangerous.
 const POSITION_WEIGHTS: [[i32; 8]; 8] = [
-    [120, -20,  20,   5,   5,  20, -20, 120],
-    [-20, -40,  -5,  -5,  -5,  -5, -40, -20],
-    [ 20,  -5,  15,   3,   3,  15,  -5,  20],
-    [  5,  -5,   3,   3,   3,   3,  -5,   5],
-    [  5,  -5,   3,   3,   3,   3,  -5,   5],
-    [ 20,  -5,  15,   3,   3,  15,  -5,  20],
-    [-20, -40,  -5,  -5,  -5,  -5, -40, -20],
-    [120, -20,  20,   5,   5,  20, -20, 120],
+    [120, -20, 20, 5, 5, 20, -20, 120],
+    [-20, -40, -5, -5, -5, -5, -40, -20],
+    [20, -5, 15, 3, 3, 15, -5, 20],
+    [5, -5, 3, 3, 3, 3, -5, 5],
+    [5, -5, 3, 3, 3, 3, -5, 5],
+    [20, -5, 15, 3, 3, 15, -5, 20],
+    [-20, -40, -5, -5, -5, -5, -40, -20],
+    [120, -20, 20, 5, 5, 20, -20, 120],
 ];
 
 // ── Cell state ──────────────────────────────────────────────────────
@@ -134,6 +139,59 @@ impl Pos {
     fn in_bounds(self) -> bool {
         self.row >= 0 && self.row < 8 && self.col >= 0 && self.col < 8
     }
+}
+
+// ── Board geometry ────────────────────────────────────
+//
+// Where a cell is painted and which cell a click lands in were computed
+// independently, from the same arithmetic copied out at a dozen sites. Nothing
+// but care kept the board a player sees in the same place as the board a click
+// resolves against; these three functions are the one place it is written.
+
+/// Distance across the whole board, in pixels.
+///
+/// Reversi pieces sit *inside* the cells, so unlike go the board spans the full
+/// `BOARD_SIZE` cells rather than one less.
+const BOARD_PIXEL_SIZE: f32 = CELL_SIZE * BOARD_SIZE as f32;
+
+/// Screen coordinates of the top-left corner of a cell.
+///
+/// Row 0 is the top of the window, and that is also row *1* of the board:
+/// Othello numbers its ranks downward from the top, so `a1` is the upper-left
+/// square. Chess and go both run the other way. Because the screen and the
+/// notation agree here there is no flip to apply, and nothing for the inverse
+/// below to undo -- which is exactly why a reader might "fix" it into the chess
+/// convention, and why `the_board_is_lettered_and_numbered_the_othello_way`
+/// pins it to the published rules rather than to this comment.
+fn cell_origin(pos: Pos) -> (f32, f32) {
+    (
+        BOARD_OFFSET_X + pos.col as f32 * CELL_SIZE,
+        BOARD_OFFSET_Y + pos.row as f32 * CELL_SIZE,
+    )
+}
+
+/// Screen coordinates of the middle of a cell, where its piece is drawn.
+fn cell_center(pos: Pos) -> (f32, f32) {
+    let (x, y) = cell_origin(pos);
+    (x + CELL_SIZE / 2.0, y + CELL_SIZE / 2.0)
+}
+
+/// The cell a click at `(x, y)` lands in, or `None` if the click is off the
+/// board.
+///
+/// The bounds are checked *before* the cast rather than after: a float-to-
+/// integer cast in Rust truncates toward zero, so a point a little to the left
+/// of the board comes out as column `0` rather than as `-1`, and an "is this
+/// index in range" test performed afterwards would wave it through.
+fn cell_at(x: f32, y: f32) -> Option<Pos> {
+    let bx = x - BOARD_OFFSET_X;
+    let by = y - BOARD_OFFSET_Y;
+    if bx < 0.0 || by < 0.0 || bx >= BOARD_PIXEL_SIZE || by >= BOARD_PIXEL_SIZE {
+        return None;
+    }
+    // Truncation is the intent here -- the fraction is the position within the
+    // cell -- and the guard above is what makes the cast safe.
+    Some(Pos::new((by / CELL_SIZE) as i32, (bx / CELL_SIZE) as i32))
 }
 
 // ── Board ───────────────────────────────────────────────────────────
@@ -493,7 +551,10 @@ impl MoveRecord {
             Cell::White => "W",
             Cell::Empty => "?",
         };
-        format!("{color_str}:{col_char}{row_num}(+{flipped})", flipped = self.flipped)
+        format!(
+            "{color_str}:{col_char}{row_num}(+{flipped})",
+            flipped = self.flipped
+        )
     }
 }
 
@@ -547,22 +608,18 @@ impl ReversiApp {
         }
 
         match event.key {
-            Key::Up
-                if self.cursor_row > 0 => {
-                    self.cursor_row -= 1;
-                }
-            Key::Down
-                if self.cursor_row < 7 => {
-                    self.cursor_row += 1;
-                }
-            Key::Left
-                if self.cursor_col > 0 => {
-                    self.cursor_col -= 1;
-                }
-            Key::Right
-                if self.cursor_col < 7 => {
-                    self.cursor_col += 1;
-                }
+            Key::Up if self.cursor_row > 0 => {
+                self.cursor_row -= 1;
+            }
+            Key::Down if self.cursor_row < 7 => {
+                self.cursor_row += 1;
+            }
+            Key::Left if self.cursor_col > 0 => {
+                self.cursor_col -= 1;
+            }
+            Key::Right if self.cursor_col < 7 => {
+                self.cursor_col += 1;
+            }
             Key::Enter | Key::Space => {
                 self.try_place_piece();
             }
@@ -625,10 +682,7 @@ impl ReversiApp {
                 return;
             }
             // Current player keeps the turn
-            self.message = format!(
-                "{} has no legal moves — turn passes!",
-                color_name(next)
-            );
+            self.message = format!("{} has no legal moves — turn passes!", color_name(next));
             // current_turn stays the same
         }
 
@@ -687,13 +741,9 @@ impl ReversiApp {
         let black_count = self.board.count(Cell::Black);
         let white_count = self.board.count(Cell::White);
         if self.current_turn == Cell::Black {
-            self.message = format!(
-                "Your turn (Black). B:{black_count} W:{white_count}"
-            );
+            self.message = format!("Your turn (Black). B:{black_count} W:{white_count}");
         } else {
-            self.message = format!(
-                "AI thinking (White)... B:{black_count} W:{white_count}"
-            );
+            self.message = format!("AI thinking (White)... B:{black_count} W:{white_count}");
         }
     }
 
@@ -716,17 +766,10 @@ impl ReversiApp {
         }
 
         if let MouseEventKind::Press(MouseButton::Left) = event.kind {
-            // Check if click is within the board
-            let bx = event.x - BOARD_OFFSET_X;
-            let by = event.y - BOARD_OFFSET_Y;
-            if bx >= 0.0 && by >= 0.0 {
-                let col = (bx / CELL_SIZE) as i32;
-                let row = (by / CELL_SIZE) as i32;
-                if (0..8).contains(&col) && (0..8).contains(&row) {
-                    self.cursor_row = row;
-                    self.cursor_col = col;
-                    self.try_place_piece();
-                }
+            if let Some(pos) = cell_at(event.x, event.y) {
+                self.cursor_row = pos.row;
+                self.cursor_col = pos.col;
+                self.try_place_piece();
             }
         }
     }
@@ -749,7 +792,7 @@ impl ReversiApp {
             x: 0.0,
             y: 0.0,
             width: PANEL_X + 250.0,
-            height: BOARD_OFFSET_Y + CELL_SIZE * 8.0 + 60.0,
+            height: BOARD_OFFSET_Y + BOARD_PIXEL_SIZE + 60.0,
             color: BASE,
             corner_radii: CornerRadii::ZERO,
         });
@@ -794,8 +837,8 @@ impl ReversiApp {
         cmds.push(RenderCommand::FillRect {
             x: BOARD_OFFSET_X - 3.0,
             y: BOARD_OFFSET_Y - 3.0,
-            width: CELL_SIZE * 8.0 + 6.0,
-            height: CELL_SIZE * 8.0 + 6.0,
+            width: BOARD_PIXEL_SIZE + 6.0,
+            height: BOARD_PIXEL_SIZE + 6.0,
             color: BOARD_BORDER,
             corner_radii: CornerRadii::all(4.0),
         });
@@ -809,8 +852,8 @@ impl ReversiApp {
 
         for row in 0..8 {
             for col in 0..8 {
-                let x = BOARD_OFFSET_X + col as f32 * CELL_SIZE;
-                let y = BOARD_OFFSET_Y + row as f32 * CELL_SIZE;
+                let pos = Pos::new(row, col);
+                let (x, y) = cell_origin(pos);
 
                 // Cell background (slight alternation for visual interest)
                 let cell_color = if (row + col) % 2 == 0 {
@@ -827,8 +870,6 @@ impl ReversiApp {
                     corner_radii: CornerRadii::ZERO,
                 });
 
-                let pos = Pos::new(row, col);
-
                 // Last move highlight
                 if self.last_move == Some(pos) {
                     cmds.push(RenderCommand::FillRect {
@@ -842,7 +883,8 @@ impl ReversiApp {
                 }
 
                 // Cursor highlight
-                if row == self.cursor_row && col == self.cursor_col
+                if row == self.cursor_row
+                    && col == self.cursor_col
                     && self.phase == Phase::Playing
                     && self.current_turn == Cell::Black
                 {
@@ -860,8 +902,7 @@ impl ReversiApp {
                 // Pieces
                 let cell = self.board.get(pos);
                 if cell.is_piece() {
-                    let cx = x + CELL_SIZE / 2.0;
-                    let cy = y + CELL_SIZE / 2.0;
+                    let (cx, cy) = cell_center(pos);
                     self.render_piece(&mut cmds, cx, cy, cell);
                 }
 
@@ -871,8 +912,9 @@ impl ReversiApp {
                     && valid_moves.contains(&pos)
                     && cell == Cell::Empty
                 {
-                    let cx = x + CELL_SIZE / 2.0 - DOT_RADIUS;
-                    let cy = y + CELL_SIZE / 2.0 - DOT_RADIUS;
+                    let (mid_x, mid_y) = cell_center(pos);
+                    let cx = mid_x - DOT_RADIUS;
+                    let cy = mid_y - DOT_RADIUS;
                     cmds.push(RenderCommand::FillRect {
                         x: cx,
                         y: cy,
@@ -901,7 +943,7 @@ impl ReversiApp {
             // Column labels (a-h)
             let col_label = String::from((b'a' + i as u8) as char);
             cmds.push(RenderCommand::Text {
-                x: BOARD_OFFSET_X + i as f32 * CELL_SIZE + CELL_SIZE / 2.0 - 4.0,
+                x: cell_center(Pos::new(0, i)).0 - 4.0,
                 y: BOARD_OFFSET_Y - 14.0,
                 text: col_label,
                 color: SUBTEXT0,
@@ -913,7 +955,7 @@ impl ReversiApp {
             // Row labels (1-8)
             cmds.push(RenderCommand::Text {
                 x: BOARD_OFFSET_X - 18.0,
-                y: BOARD_OFFSET_Y + i as f32 * CELL_SIZE + CELL_SIZE / 2.0 - 6.0,
+                y: cell_center(Pos::new(i, 0)).1 - 6.0,
                 text: format!("{}", i + 1),
                 color: SUBTEXT0,
                 font_size: LABEL_FONT_SIZE,
@@ -929,12 +971,16 @@ impl ReversiApp {
         // Status message at bottom
         cmds.push(RenderCommand::Text {
             x: BOARD_OFFSET_X,
-            y: BOARD_OFFSET_Y + CELL_SIZE * 8.0 + 20.0,
+            y: BOARD_OFFSET_Y + BOARD_PIXEL_SIZE + 20.0,
             text: self.message.clone(),
-            color: if self.phase == Phase::GameOver { PEACH } else { TEXT_COLOR },
+            color: if self.phase == Phase::GameOver {
+                PEACH
+            } else {
+                TEXT_COLOR
+            },
             font_size: INFO_FONT_SIZE,
             font_weight: FontWeightHint::Regular,
-            max_width: Some(CELL_SIZE * 8.0 + 250.0),
+            max_width: Some(BOARD_PIXEL_SIZE + 250.0),
             overflow: TextOverflow::Ellipsis,
         });
 
@@ -991,7 +1037,7 @@ impl ReversiApp {
             x: px,
             y: py,
             width: 220.0,
-            height: CELL_SIZE * 8.0,
+            height: BOARD_PIXEL_SIZE,
             color: SURFACE0,
             corner_radii: CornerRadii::all(8.0),
         });
@@ -1013,7 +1059,11 @@ impl ReversiApp {
             x: px + 15.0,
             y: py + 20.0,
             text: turn_text,
-            color: if self.phase == Phase::GameOver { RED } else { turn_color },
+            color: if self.phase == Phase::GameOver {
+                RED
+            } else {
+                turn_color
+            },
             font_size: INFO_FONT_SIZE,
             font_weight: FontWeightHint::Bold,
             max_width: Some(190.0),
@@ -1149,7 +1199,11 @@ impl ReversiApp {
         };
         for (idx, record) in self.move_history[history_start..].iter().enumerate() {
             let move_num = history_start + idx + 1;
-            let move_color = if record.color == Cell::Black { BLUE } else { PEACH };
+            let move_color = if record.color == Cell::Black {
+                BLUE
+            } else {
+                PEACH
+            };
             cmds.push(RenderCommand::Text {
                 x: px + 15.0,
                 y: py + 225.0 + idx as f32 * 18.0,
@@ -1163,7 +1217,7 @@ impl ReversiApp {
         }
 
         // Controls help at bottom of panel
-        let help_y = py + CELL_SIZE * 8.0 - 40.0;
+        let help_y = py + BOARD_PIXEL_SIZE - 40.0;
         cmds.push(RenderCommand::Text {
             x: px + 15.0,
             y: help_y,
@@ -1204,6 +1258,15 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
+    // A test that indexes past the end, or unwraps a `None`, is a test that
+    // has already failed; panicking is the reporting mechanism, not a fault.
+    #![allow(
+        clippy::arithmetic_side_effects,
+        clippy::expect_used,
+        clippy::indexing_slicing,
+        clippy::unwrap_used
+    )]
+
     use super::*;
 
     // ── Board setup helpers ─────────────────────────────────────────
@@ -1344,10 +1407,7 @@ mod tests {
     #[test]
     fn test_flip_horizontal_right() {
         // Black at (3,0), White at (3,1), place Black at (3,2)
-        let board = board_with(&[
-            (3, 0, Cell::Black),
-            (3, 1, Cell::White),
-        ]);
+        let board = board_with(&[(3, 0, Cell::Black), (3, 1, Cell::White)]);
         let flips = board.get_flips(Pos::new(3, 2), Cell::Black);
         // No flip: Black at (3,0) flanks (3,1) if placed at (3,2)?
         // Direction left (-0, -1) from (3,2): sees White at (3,1), then Black at (3,0). Yes!
@@ -1357,10 +1417,7 @@ mod tests {
 
     #[test]
     fn test_flip_horizontal_left() {
-        let board = board_with(&[
-            (3, 5, Cell::White),
-            (3, 6, Cell::Black),
-        ]);
+        let board = board_with(&[(3, 5, Cell::White), (3, 6, Cell::Black)]);
         // Place Black at (3,4) — direction right: sees White at (3,5), then Black at (3,6)
         let flips = board.get_flips(Pos::new(3, 4), Cell::Black);
         assert_eq!(flips.len(), 1);
@@ -1369,10 +1426,7 @@ mod tests {
 
     #[test]
     fn test_flip_vertical_down() {
-        let board = board_with(&[
-            (2, 3, Cell::Black),
-            (3, 3, Cell::White),
-        ]);
+        let board = board_with(&[(2, 3, Cell::Black), (3, 3, Cell::White)]);
         // Place Black at (4,3) — direction up: sees White at (3,3), then Black at (2,3)
         let flips = board.get_flips(Pos::new(4, 3), Cell::Black);
         assert_eq!(flips.len(), 1);
@@ -1381,10 +1435,7 @@ mod tests {
 
     #[test]
     fn test_flip_vertical_up() {
-        let board = board_with(&[
-            (4, 3, Cell::White),
-            (5, 3, Cell::Black),
-        ]);
+        let board = board_with(&[(4, 3, Cell::White), (5, 3, Cell::Black)]);
         // Place Black at (3,3) — direction down: sees White at (4,3), then Black at (5,3)
         let flips = board.get_flips(Pos::new(3, 3), Cell::Black);
         assert_eq!(flips.len(), 1);
@@ -1393,10 +1444,7 @@ mod tests {
 
     #[test]
     fn test_flip_diagonal_down_right() {
-        let board = board_with(&[
-            (2, 2, Cell::Black),
-            (3, 3, Cell::White),
-        ]);
+        let board = board_with(&[(2, 2, Cell::Black), (3, 3, Cell::White)]);
         // Place Black at (4,4) — direction up-left: sees White at (3,3), then Black at (2,2)
         let flips = board.get_flips(Pos::new(4, 4), Cell::Black);
         assert_eq!(flips.len(), 1);
@@ -1405,10 +1453,7 @@ mod tests {
 
     #[test]
     fn test_flip_diagonal_up_left() {
-        let board = board_with(&[
-            (4, 4, Cell::White),
-            (5, 5, Cell::Black),
-        ]);
+        let board = board_with(&[(4, 4, Cell::White), (5, 5, Cell::Black)]);
         // Place Black at (3,3) — direction down-right: sees White at (4,4), then Black at (5,5)
         let flips = board.get_flips(Pos::new(3, 3), Cell::Black);
         assert_eq!(flips.len(), 1);
@@ -1417,10 +1462,7 @@ mod tests {
 
     #[test]
     fn test_flip_diagonal_down_left() {
-        let board = board_with(&[
-            (2, 5, Cell::Black),
-            (3, 4, Cell::White),
-        ]);
+        let board = board_with(&[(2, 5, Cell::Black), (3, 4, Cell::White)]);
         // Place Black at (4,3) — direction up-right: sees White at (3,4), then Black at (2,5)
         let flips = board.get_flips(Pos::new(4, 3), Cell::Black);
         assert_eq!(flips.len(), 1);
@@ -1429,10 +1471,7 @@ mod tests {
 
     #[test]
     fn test_flip_diagonal_up_right() {
-        let board = board_with(&[
-            (4, 2, Cell::White),
-            (5, 1, Cell::Black),
-        ]);
+        let board = board_with(&[(4, 2, Cell::White), (5, 1, Cell::Black)]);
         // Place Black at (3,3) — direction down-left: sees White at (4,2), then Black at (5,1)
         let flips = board.get_flips(Pos::new(3, 3), Cell::Black);
         assert_eq!(flips.len(), 1);
@@ -1473,10 +1512,7 @@ mod tests {
     #[test]
     fn test_no_flip_with_gap() {
         // Black at (0,0), Empty at (0,1), White at (0,2) — no flank because of gap
-        let board = board_with(&[
-            (0, 0, Cell::Black),
-            (0, 2, Cell::White),
-        ]);
+        let board = board_with(&[(0, 0, Cell::Black), (0, 2, Cell::White)]);
         let flips = board.get_flips(Pos::new(0, 3), Cell::Black);
         // Direction left from (0,3): White at (0,2), then Empty at (0,1) — no flank
         assert_eq!(flips.len(), 0);
@@ -1485,10 +1521,7 @@ mod tests {
     #[test]
     fn test_no_flip_same_color() {
         // Black at (0,0), Black at (0,1) — can't flip own pieces
-        let board = board_with(&[
-            (0, 0, Cell::Black),
-            (0, 1, Cell::Black),
-        ]);
+        let board = board_with(&[(0, 0, Cell::Black), (0, 1, Cell::Black)]);
         let flips = board.get_flips(Pos::new(0, 2), Cell::Black);
         assert_eq!(flips.len(), 0);
     }
@@ -1496,9 +1529,7 @@ mod tests {
     #[test]
     fn test_no_flip_edge_of_board() {
         // White at (0,6), place Black at (0,7) — no Black beyond edge
-        let board = board_with(&[
-            (0, 6, Cell::White),
-        ]);
+        let board = board_with(&[(0, 6, Cell::White)]);
         let flips = board.get_flips(Pos::new(0, 7), Cell::Black);
         assert_eq!(flips.len(), 0);
     }
@@ -1612,10 +1643,7 @@ mod tests {
     fn test_game_over_neither_can_move() {
         // Create a position where neither can move but board isn't full
         // Isolated single pieces with no adjacent opponent pieces
-        let board = board_with(&[
-            (0, 0, Cell::Black),
-            (7, 7, Cell::White),
-        ]);
+        let board = board_with(&[(0, 0, Cell::Black), (7, 7, Cell::White)]);
         assert!(board.is_game_over());
     }
 
@@ -1644,10 +1672,7 @@ mod tests {
 
     #[test]
     fn test_winner_tie() {
-        let board = board_with(&[
-            (0, 0, Cell::Black),
-            (0, 1, Cell::White),
-        ]);
+        let board = board_with(&[(0, 0, Cell::Black), (0, 1, Cell::White)]);
         assert_eq!(board.winner(), Cell::Empty);
     }
 
@@ -1712,8 +1737,10 @@ mod tests {
         // The initial moves should not be at X-squares
         let mv = mv.unwrap();
         let x_squares = [
-            Pos::new(1, 1), Pos::new(1, 6),
-            Pos::new(6, 1), Pos::new(6, 6),
+            Pos::new(1, 1),
+            Pos::new(1, 6),
+            Pos::new(6, 1),
+            Pos::new(6, 6),
         ];
         // AI should prefer non-X-square moves at the start
         assert!(!x_squares.contains(&mv), "AI should avoid X-squares early");
@@ -1932,15 +1959,20 @@ mod tests {
     #[test]
     fn test_app_mouse_click_on_board() {
         let mut app = ReversiApp::new();
-        // Click on d3 (row 2, col 3)
-        let x = BOARD_OFFSET_X + 3.0 * CELL_SIZE + CELL_SIZE / 2.0;
-        let y = BOARD_OFFSET_Y + 2.0 * CELL_SIZE + CELL_SIZE / 2.0;
+        // Click the middle of d3 -- column d, row 3, which in Othello's
+        // top-down numbering is the third row from the top.
+        let (x, y) = cell_center(Pos::new(2, 3));
         app.handle_mouse(&MouseEvent {
             x,
             y,
             kind: MouseEventKind::Press(MouseButton::Left),
         });
-        assert!(!app.move_history.is_empty());
+        // Which square, not merely that *a* square was played: only four moves
+        // are legal from the opening position, so "some move happened" passed
+        // even for a hit test that transposed row and column. It has to be the
+        // *first* record -- `last_move` by now is the AI's reply, not the click.
+        assert_eq!(app.move_history[0].pos, Pos::new(2, 3));
+        assert_eq!(app.move_history[0].color, Cell::Black);
     }
 
     #[test]
@@ -1952,6 +1984,415 @@ mod tests {
             kind: MouseEventKind::Press(MouseButton::Left),
         });
         assert!(app.move_history.is_empty());
+    }
+
+    // ── Board geometry tests ───────────────────────────────
+    //
+    // `cell_origin` and `cell_at` are each other's inverse, so a test that
+    // clicks where the code says it drew something agrees with any mapping,
+    // right or wrong. The checks that carry weight here are the ones whose
+    // expected value comes from somewhere else: the painted cells, the window,
+    // and the way an Othello board is lettered.
+
+    /// Top-left corners of the painted cell backgrounds, in the order the
+    /// renderer emitted them. Nothing here consults `cell_origin`, so these are
+    /// the squares a player actually sees.
+    fn painted_cells(commands: &[RenderCommand]) -> Vec<(f32, f32)> {
+        commands
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::FillRect {
+                    x, y, width, color, ..
+                } if (*width - CELL_SIZE).abs() < 0.01
+                    && (*color == BOARD_GREEN || *color == BOARD_GREEN_LIGHT) =>
+                {
+                    Some((*x, *y))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The painted cell that contains `(x, y)`, if any. This is how a test says
+    /// "the same square the player is looking at" without asking `cell_origin`.
+    fn painted_cell_containing(cells: &[(f32, f32)], x: f32, y: f32) -> Option<(f32, f32)> {
+        cells
+            .iter()
+            .copied()
+            .find(|&(cx, cy)| x >= cx && x < cx + CELL_SIZE && y >= cy && y < cy + CELL_SIZE)
+    }
+
+    /// Centres of the pieces the renderer painted. The body is the fill in a
+    /// piece colour; the shadow behind it is a different colour, so it does not
+    /// match and is not counted twice.
+    fn painted_piece_centers(commands: &[RenderCommand]) -> Vec<(f32, f32)> {
+        commands
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::FillRect {
+                    x, y, width, color, ..
+                } if (*width - PIECE_RADIUS * 2.0).abs() < 0.01
+                    && (*color == BLACK_PIECE || *color == WHITE_PIECE) =>
+                {
+                    Some((*x + PIECE_RADIUS, *y + PIECE_RADIUS))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Where a coordinate label was drawn. Filtered by font size so the panel's
+    /// own text -- which includes bare digits, such as the score -- cannot be
+    /// mistaken for a row number.
+    fn label_pos(commands: &[RenderCommand], want: &str) -> Option<(f32, f32)> {
+        commands.iter().find_map(|c| match c {
+            RenderCommand::Text {
+                x,
+                y,
+                text,
+                font_size,
+                color,
+                ..
+            } if (*font_size - LABEL_FONT_SIZE).abs() < 0.01
+                && *color == SUBTEXT0
+                && text == want =>
+            {
+                Some((*x, *y))
+            }
+            _ => None,
+        })
+    }
+
+    #[test]
+    fn the_painted_board_is_eight_cells_square_and_evenly_spaced() {
+        // Measured against the window and against itself, never against
+        // `cell_origin`: 64 cells on an 8x8 lattice, one cell apart, inside the
+        // window and clear of the side panel.
+        let app = ReversiApp::new();
+        let cells = painted_cells(&app.render());
+        assert_eq!(
+            cells.len(),
+            BOARD_SIZE * BOARD_SIZE,
+            "one painted cell each"
+        );
+
+        let mut xs: Vec<f32> = cells.iter().map(|c| c.0).collect();
+        let mut ys: Vec<f32> = cells.iter().map(|c| c.1).collect();
+        xs.sort_by(f32::total_cmp);
+        xs.dedup_by(|a, b| (*a - *b).abs() < 0.01);
+        ys.sort_by(f32::total_cmp);
+        ys.dedup_by(|a, b| (*a - *b).abs() < 0.01);
+        assert_eq!(xs.len(), BOARD_SIZE, "eight distinct columns");
+        assert_eq!(ys.len(), BOARD_SIZE, "eight distinct rows");
+
+        for pair in xs.windows(2) {
+            assert!(
+                (pair[1] - pair[0] - CELL_SIZE).abs() < 0.01,
+                "columns should be one cell apart, got {}",
+                pair[1] - pair[0]
+            );
+        }
+        for pair in ys.windows(2) {
+            assert!(
+                (pair[1] - pair[0] - CELL_SIZE).abs() < 0.01,
+                "rows should be one cell apart, got {}",
+                pair[1] - pair[0]
+            );
+        }
+        assert!(
+            xs[0] > 0.0 && ys[0] > 0.0,
+            "the board starts inside the window"
+        );
+        assert!(
+            xs[BOARD_SIZE - 1] + CELL_SIZE <= PANEL_X,
+            "the board should not run under the side panel"
+        );
+    }
+
+    #[test]
+    fn every_point_in_a_painted_cell_resolves_to_that_cell() {
+        // Probed at nine points across each cell rather than only at its
+        // centre. A hit test that is off by a fraction of a cell still answers
+        // correctly dead centre, so the centre alone cannot tell a correct
+        // mapping from a shifted one; the corners can.
+        let app = ReversiApp::new();
+        let commands = app.render();
+        let cells = painted_cells(&commands);
+        let inset = 1.0;
+        for (i, &(cx, cy)) in cells.iter().enumerate() {
+            // Emission order is row-major, which is itself worth pinning: it is
+            // what makes "the nth painted cell" mean "(n / 8, n % 8)".
+            let want = Pos::new(i as i32 / BOARD_SIZE as i32, i as i32 % BOARD_SIZE as i32);
+            for dx in [inset, CELL_SIZE / 2.0, CELL_SIZE - inset] {
+                for dy in [inset, CELL_SIZE / 2.0, CELL_SIZE - inset] {
+                    assert_eq!(
+                        cell_at(cx + dx, cy + dy),
+                        Some(want),
+                        "({}, {}) is inside the cell painted at ({cx}, {cy})",
+                        cx + dx,
+                        cy + dy
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_board_edges_reject_clicks_alike_on_all_four_sides() {
+        // Unlike go, this board has no click slop -- a piece sits inside its
+        // cell, so the cell's rectangle is exactly what is clickable. What
+        // matters is that all four edges say so. The original chess and gomoku
+        // hit tests each got this wrong in one direction only, because a Rust
+        // float-to-integer cast truncates toward zero and so a bounds test
+        // applied *after* the cast is not symmetric.
+        let app = ReversiApp::new();
+        let cells = painted_cells(&app.render());
+        let left = cells.iter().map(|c| c.0).fold(f32::MAX, f32::min);
+        let right = cells.iter().map(|c| c.0).fold(f32::MIN, f32::max) + CELL_SIZE;
+        let top = cells.iter().map(|c| c.1).fold(f32::MAX, f32::min);
+        let bottom = cells.iter().map(|c| c.1).fold(f32::MIN, f32::max) + CELL_SIZE;
+        let mid_x = f32::midpoint(left, right);
+        let mid_y = f32::midpoint(top, bottom);
+
+        // Stated as the interval itself rather than as a mirror of one edge
+        // about the other: the board is the half-open box [left, right) x
+        // [top, bottom), so `left - d` and `right + d` are the matching pair
+        // and `left` and `right` themselves are not. Getting that reflection
+        // wrong is how the first draft of this test failed.
+        let mut d = 0.25f32;
+        while d < CELL_SIZE * 2.0 {
+            for (name, p) in [
+                ("left", (left - d, mid_y)),
+                ("right", (right + d, mid_y)),
+                ("top", (mid_x, top - d)),
+                ("bottom", (mid_x, bottom + d)),
+            ] {
+                assert_eq!(
+                    cell_at(p.0, p.1),
+                    None,
+                    "{d}px past the {name} edge, at ({}, {}), is off the board",
+                    p.0,
+                    p.1
+                );
+            }
+            if d < CELL_SIZE {
+                for (name, p) in [
+                    ("left", (left + d, mid_y)),
+                    ("right", (right - d, mid_y)),
+                    ("top", (mid_x, top + d)),
+                    ("bottom", (mid_x, bottom - d)),
+                ] {
+                    assert!(
+                        cell_at(p.0, p.1).is_some(),
+                        "{d}px inside the {name} edge, at ({}, {}), is on the board",
+                        p.0,
+                        p.1
+                    );
+                }
+            }
+            d += 0.25;
+        }
+    }
+
+    #[test]
+    fn nothing_outside_the_painted_board_lands_on_a_cell() {
+        // Swept far past every edge, because the faults this is looking for --
+        // a saturating cast, a wrap, a bounds test applied after the cast --
+        // all live beyond the board rather than just outside it.
+        let app = ReversiApp::new();
+        let cells = painted_cells(&app.render());
+        let far = BOARD_OFFSET_X + BOARD_PIXEL_SIZE + 200.0;
+        let mut x = -200.0;
+        while x < far {
+            let mut y = -200.0;
+            while y < far {
+                if let Some(pos) = cell_at(x, y) {
+                    assert!(
+                        pos.in_bounds(),
+                        "({x}, {y}) resolved to ({}, {}), which is off the board",
+                        pos.row,
+                        pos.col
+                    );
+                    assert!(
+                        painted_cell_containing(&cells, x, y).is_some(),
+                        "({x}, {y}) resolved to a cell but is not inside any painted one"
+                    );
+                }
+                y += 7.0;
+            }
+            x += 7.0;
+        }
+    }
+
+    #[test]
+    fn a_piece_is_painted_in_the_middle_of_the_cell_it_sits_on() {
+        // Measured against the painted cell that *contains* the piece, not
+        // against `cell_center`. Asking `cell_center` where the piece should be
+        // would agree with any renderer that used it, including one that put
+        // the piece in a corner: an inverse tells you which cell a point is in,
+        // never where in the cell it is. See design-decisions.md 483.
+        let mut app = ReversiApp::new();
+        app.board = board_with(&[
+            (0, 0, Cell::Black),
+            (3, 4, Cell::White),
+            (7, 7, Cell::Black),
+        ]);
+        let commands = app.render();
+        let cells = painted_cells(&commands);
+        let centers = painted_piece_centers(&commands);
+        assert_eq!(centers.len(), 3, "one piece painted per piece on the board");
+
+        for (x, y) in centers {
+            let (cx, cy) = painted_cell_containing(&cells, x, y)
+                .expect("a piece should be painted inside some cell");
+            let (want_x, want_y) = (cx + CELL_SIZE / 2.0, cy + CELL_SIZE / 2.0);
+            assert!(
+                (x - want_x).abs() < 0.01 && (y - want_y).abs() < 0.01,
+                "a piece at ({x}, {y}) is not centred in its cell at ({want_x}, {want_y})"
+            );
+        }
+    }
+
+    #[test]
+    fn the_board_is_lettered_and_numbered_the_othello_way() {
+        // Othello numbers its ranks *downward*: a1 is the upper-left square and
+        // h8 the lower-right. Chess and go both run the other way, so this is
+        // exactly the kind of convention a later reader might "correct". The
+        // outside opinion is the published rule, and the observable form of it
+        // is the window: the label "1" must sit above the label "8", while "a"
+        // sits left of "h".
+        let app = ReversiApp::new();
+        let commands = app.render();
+        let (_, y1) = label_pos(&commands, "1").expect("row 1 label");
+        let (_, y8) = label_pos(&commands, "8").expect("row 8 label");
+        assert!(
+            y1 < y8,
+            "Othello's row 1 is the top row; got 1 at {y1} and 8 at {y8}"
+        );
+
+        let (xa, _) = label_pos(&commands, "a").expect("column a label");
+        let (xh, _) = label_pos(&commands, "h").expect("column h label");
+        assert!(
+            xa < xh,
+            "column a should be drawn left of column h, got {xa} vs {xh}"
+        );
+    }
+
+    #[test]
+    fn the_labels_line_up_with_the_cells_they_name() {
+        // Pinned to the *painted* cells rather than recomputed, so labels that
+        // drift off the row or column they name are caught.
+        let app = ReversiApp::new();
+        let commands = app.render();
+        let cells = painted_cells(&commands);
+        for (i, name) in ["a", "d", "h"].iter().enumerate() {
+            let col = [0usize, 3, BOARD_SIZE - 1][i];
+            let (x, _) = label_pos(&commands, name).expect("column label");
+            let want = cells[col].0 + CELL_SIZE / 2.0;
+            assert!(
+                (x - want).abs() < CELL_SIZE / 2.0,
+                "label {name} sits at {x}, but its column is centred on {want}"
+            );
+        }
+        for (i, name) in ["1", "4", "8"].iter().enumerate() {
+            let row = [0usize, 3, BOARD_SIZE - 1][i];
+            let (_, y) = label_pos(&commands, name).expect("row label");
+            let want = cells[row * BOARD_SIZE].1 + CELL_SIZE / 2.0;
+            assert!(
+                (y - want).abs() < CELL_SIZE / 2.0,
+                "label {name} sits at {y}, but its row is centred on {want}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_border_sits_squarely_under_the_painted_cells() {
+        // The border is drawn from `BOARD_PIXEL_SIZE` and the cells from
+        // `cell_origin`. If those two disagree about how big the board is, the
+        // frame is off-centre -- and that is the only symptom, since every
+        // other part of the board is placed from `cell_origin` and just shifts
+        // along with it.
+        let app = ReversiApp::new();
+        let commands = app.render();
+        let cells = painted_cells(&commands);
+        let (bx, by, bw, bh) = commands
+            .iter()
+            .find_map(|c| match c {
+                RenderCommand::FillRect {
+                    x,
+                    y,
+                    width,
+                    height,
+                    color,
+                    ..
+                } if *color == BOARD_BORDER => Some((*x, *y, *width, *height)),
+                _ => None,
+            })
+            .expect("the board border should be painted");
+
+        let left = cells.iter().map(|c| c.0).fold(f32::MAX, f32::min);
+        let right = cells.iter().map(|c| c.0).fold(f32::MIN, f32::max) + CELL_SIZE;
+        let top = cells.iter().map(|c| c.1).fold(f32::MAX, f32::min);
+        let bottom = cells.iter().map(|c| c.1).fold(f32::MIN, f32::max) + CELL_SIZE;
+        let margins = [
+            ("left", left - bx),
+            ("right", bx + bw - right),
+            ("top", top - by),
+            ("bottom", by + bh - bottom),
+        ];
+        for &(name, m) in &margins {
+            assert!(
+                m > 0.0,
+                "the {name} margin is {m}; the cells escape the border"
+            );
+        }
+        for pair in margins.windows(2) {
+            assert!(
+                (pair[0].1 - pair[1].1).abs() < 0.01,
+                "the {} margin is {} but the {} margin is {}",
+                pair[0].0,
+                pair[0].1,
+                pair[1].0,
+                pair[1].1
+            );
+        }
+    }
+
+    #[test]
+    fn a_legal_move_dot_marks_the_middle_of_a_legal_cell() {
+        // The dots are what a player aims at, so each one has to sit in the
+        // middle of a cell that a click on it would actually play.
+        let app = ReversiApp::new();
+        let commands = app.render();
+        let cells = painted_cells(&commands);
+        let legal = app.board.legal_moves(Cell::Black);
+        let dots: Vec<(f32, f32)> = commands
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::FillRect { x, y, color, .. } if *color == VALID_MOVE_DOT => {
+                    Some((*x + DOT_RADIUS, *y + DOT_RADIUS))
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(dots.len(), legal.len(), "one dot per legal move");
+
+        for (x, y) in dots {
+            let (cx, cy) = painted_cell_containing(&cells, x, y)
+                .expect("a dot should be painted inside some cell");
+            assert!(
+                (x - (cx + CELL_SIZE / 2.0)).abs() < 0.01
+                    && (y - (cy + CELL_SIZE / 2.0)).abs() < 0.01,
+                "a dot at ({x}, {y}) is not centred in its cell at ({cx}, {cy})"
+            );
+            let hit = cell_at(x, y).expect("a dot should sit on a clickable cell");
+            assert!(
+                legal.contains(&hit),
+                "the dot at ({x}, {y}) resolves to ({}, {}), which is not a legal move",
+                hit.row,
+                hit.col
+            );
+        }
     }
 
     // ── Rendering tests ─────────────────────────────────────────────
@@ -1984,7 +2425,10 @@ mod tests {
         let app = ReversiApp::new();
         let cmds = app.render();
         // Initial board has 4 pieces, each rendered as shadow + body + border = 12 fill/stroke cmds
-        let fill_count = cmds.iter().filter(|cmd| matches!(cmd, RenderCommand::FillRect { .. })).count();
+        let fill_count = cmds
+            .iter()
+            .filter(|cmd| matches!(cmd, RenderCommand::FillRect { .. }))
+            .count();
         assert!(fill_count >= 64 + 4); // 64 cells + at least 4 piece bodies
     }
 
@@ -1994,13 +2438,21 @@ mod tests {
         let cmds = app.render();
         // Valid moves rendered as small rounded rectangles (dots)
         // There are 4 valid moves initially for Black
-        let valid_dot_count = cmds.iter().filter(|cmd| {
-            if let RenderCommand::FillRect { color, corner_radii, .. } = cmd {
-                *color == VALID_MOVE_DOT && corner_radii.top_left > 0.0
-            } else {
-                false
-            }
-        }).count();
+        let valid_dot_count = cmds
+            .iter()
+            .filter(|cmd| {
+                if let RenderCommand::FillRect {
+                    color,
+                    corner_radii,
+                    ..
+                } = cmd
+                {
+                    *color == VALID_MOVE_DOT && corner_radii.top_left > 0.0
+                } else {
+                    false
+                }
+            })
+            .count();
         assert_eq!(valid_dot_count, 4);
     }
 

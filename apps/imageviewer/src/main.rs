@@ -19,6 +19,7 @@ use guitk::event::{Event, Key, KeyEvent, Modifiers, MouseButton, MouseEvent, Mou
 use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 #[allow(unused_imports)]
 use guitk::style::CornerRadii;
+use guitk::wheel;
 
 mod video;
 
@@ -500,6 +501,15 @@ pub struct ViewerState {
 
     // Toolbar hover state
     pub hovered_button: Option<usize>,
+
+    /// The fraction of a zoom step the wheel has earned but not yet spent.
+    ///
+    /// The zoom is a *stepped* quantity -- `zoom_in` adds a fixed `ZOOM_STEP`
+    /// -- so this is the accumulator case, not the continuous one. Without it
+    /// the handler read only the sign of `dy` and took a full step per event,
+    /// which on a precision trackpad (a stream of 0.05-notch events) ran the
+    /// zoom from minimum to maximum on a single flick of two fingers.
+    zoom_wheel: wheel::Accumulator,
 }
 
 impl ViewerState {
@@ -527,6 +537,7 @@ impl ViewerState {
             drag_start_pan_x: 0.0,
             drag_start_pan_y: 0.0,
             hovered_button: None,
+            zoom_wheel: wheel::Accumulator::default(),
         }
     }
 
@@ -955,11 +966,21 @@ impl ViewerState {
     pub fn handle_mouse_event(&mut self, event: &MouseEvent) -> bool {
         match &event.kind {
             MouseEventKind::Scroll { dx: _, dy } => {
-                // Scroll wheel zooms when cursor is over the image area
-                if *dy > 0.0 {
-                    self.transform.zoom_in();
-                } else if *dy < 0.0 {
-                    self.transform.zoom_out();
+                // One notch is one zoom step -- `rows_at(.., 1.0)` rather than
+                // the default three, because a step is already a coarse move
+                // and three of them per detent would overshoot every time.
+                //
+                // The sign is inverted against the accumulator's list
+                // convention on purpose: `dy` positive is away from the user,
+                // which scrolls a list *up* (a negative row delta) but is the
+                // near-universal gesture for zooming *in*.
+                let steps = self.zoom_wheel.rows_at(*dy, 1.0);
+                for _ in 0..steps.unsigned_abs() {
+                    if steps < 0 {
+                        self.transform.zoom_in();
+                    } else {
+                        self.transform.zoom_out();
+                    }
                 }
                 true
             }
@@ -1770,6 +1791,50 @@ mod tests {
     )]
 
     use super::*;
+
+    /// One detent is one zoom step, and the direction is the one every other
+    /// viewer uses: wheel away from the user zooms in.
+    #[test]
+    fn one_wheel_notch_is_one_zoom_step() {
+        let mut state = ViewerState::new(800.0, 600.0);
+        let start = state.transform.zoom;
+        state.handle_mouse_event(&MouseEvent {
+            x: 100.0,
+            y: 100.0,
+            kind: MouseEventKind::Scroll { dx: 0.0, dy: 1.0 },
+        });
+        assert_eq!(state.transform.zoom, start + ZOOM_STEP);
+        state.handle_mouse_event(&MouseEvent {
+            x: 100.0,
+            y: 100.0,
+            kind: MouseEventKind::Scroll { dx: 0.0, dy: -1.0 },
+        });
+        assert_eq!(state.transform.zoom, start);
+    }
+
+    /// The bug the accumulator exists to stop. A trackpad reports a two-finger
+    /// flick as a stream of small fractions; reading only the sign of each took
+    /// a whole zoom step per event, so one gesture ran the zoom from end to end.
+    #[test]
+    fn a_trackpad_flick_does_not_zoom_from_end_to_end() {
+        let mut state = ViewerState::new(800.0, 600.0);
+        let start = state.transform.zoom;
+        // Forty events at a twentieth of a notch is two notches of real
+        // movement -- and used to be forty steps, i.e. the entire range twice
+        // over, pinned at MAX_ZOOM.
+        for _ in 0..40 {
+            state.handle_mouse_event(&MouseEvent {
+                x: 100.0,
+                y: 100.0,
+                kind: MouseEventKind::Scroll { dx: 0.0, dy: 0.05 },
+            });
+        }
+        assert_eq!(state.transform.zoom, start + 2.0 * ZOOM_STEP);
+        assert!(
+            state.transform.zoom < MAX_ZOOM,
+            "a two-notch gesture must not reach the limit"
+        );
+    }
 
     #[test]
     fn test_image_format_detection_bmp() {

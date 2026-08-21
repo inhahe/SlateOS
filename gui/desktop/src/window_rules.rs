@@ -16,9 +16,9 @@
 //! Rules are evaluated in priority order; first match wins (unless
 //! `apply_all` is set, in which case all matching rules are merged).
 
-use crate::scroll_window;
 use guitk::color::Color;
 use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
+use guitk::scroll_window;
 use guitk::style::CornerRadii;
 use guitk::text;
 

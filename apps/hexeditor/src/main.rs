@@ -33,6 +33,7 @@ use guitk::render::{FontFamily, FontWeightHint, RenderCommand, RenderTree, TextO
 #[allow(unused_imports)]
 use guitk::style::{Borders, CornerRadii, Edges, FontWeight, Style, TextAlign};
 use guitk::text;
+use guitk::wheel;
 #[allow(unused_imports)]
 use guitk::widget::{Widget, WidgetId, WidgetTree};
 
@@ -171,13 +172,28 @@ pub enum OffsetDisplay {
 
 
 /// Hex view configuration.
+///
+/// One of these belongs to each document, because each tab keeps its own place
+/// in its own file. That is also why the wheel accumulator lives here rather
+/// than on the editor: two views sharing one accumulator would steal each
+/// other's banked fractions, and switching tabs mid-flick would move the wrong
+/// file.
+///
+/// There is deliberately no `show_inspector` field here. There used to be,
+/// alongside the [`HexEditor::show_inspector`] that actually drives the
+/// renderer, and a flag stored twice is a flag that can disagree with itself —
+/// the dead copy defaulted to `true` and stayed `true` however the panel was
+/// toggled.
 #[derive(Clone, Debug)]
 pub struct HexView {
     pub bytes_per_line: BytesPerLine,
     pub offset_display: OffsetDisplay,
     pub show_ascii: bool,
-    pub show_inspector: bool,
     pub scroll_offset: usize,
+    /// Banks the fractions a high-resolution wheel or trackpad sends, so that a
+    /// stream of tenth-of-a-notch events scrolls instead of rounding away to
+    /// nothing. See [`guitk::wheel`].
+    pub wheel: wheel::Accumulator,
 }
 
 impl Default for HexView {
@@ -186,8 +202,8 @@ impl Default for HexView {
             bytes_per_line: BytesPerLine::default(),
             offset_display: OffsetDisplay::default(),
             show_ascii: true,
-            show_inspector: true,
             scroll_offset: 0,
+            wheel: wheel::Accumulator::default(),
         }
     }
 }
@@ -1640,16 +1656,99 @@ impl HexEditor {
         }
     }
 
-    /// Number of visible lines in the hex view area.
+    // ========================================================================
+    // Dump geometry
+    //
+    // Everything below is the *one* place each edge of the hex dump is
+    // computed. It is one place because it used not to be: the top edge was
+    // spelled out separately in `visible_lines`, in `handle_mouse_click`, in
+    // `render_hex_view` and in `render_inspector`, while the bottom edge and
+    // the right edge were spelled only in the renderer's clip. The click path
+    // therefore had no bottom and no right at all — a click in the status bar
+    // computed a line number below every line that had been drawn and jumped
+    // the cursor to the end of the file, and a click on the data inspector,
+    // which is painted *over* the dump's right-hand side, moved the cursor in
+    // the document behind it.
+    //
+    // The rule that keeps them honest: the renderer emits its clip from these
+    // helpers, and the hit test accepts exactly what these helpers describe,
+    // so the region drawn *is* the region clicked.
+    // ========================================================================
+
+    /// Top edge of the hex dump, below the toolbar and the tab strip.
+    const fn content_top() -> f32 {
+        TOOLBAR_HEIGHT + TAB_BAR_HEIGHT
+    }
+
+    /// Height of the hex dump, above the status bar.
+    ///
+    /// Clamped at zero: a window shorter than its own chrome has a negative
+    /// height, and every consumer wants "no room" rather than a negative one.
+    fn content_height(&self) -> f32 {
+        (self.window_height - Self::content_top() - STATUS_BAR_HEIGHT).max(0.0)
+    }
+
+    /// Width of the hex dump, left of the data inspector panel when it is open.
+    fn content_width(&self) -> f32 {
+        let full = if self.show_inspector {
+            self.window_width - INSPECTOR_WIDTH
+        } else {
+            self.window_width
+        };
+        full.max(0.0)
+    }
+
+    /// Number of whole lines the hex dump has room for.
+    ///
+    /// Whole lines only. The renderer draws no partial line, so the strip of
+    /// dump below the last full one belongs to no line and [`Self::line_at`]
+    /// rejects it.
     pub fn visible_lines(&self) -> usize {
-        let content_height = self.window_height
-            - TOOLBAR_HEIGHT
-            - TAB_BAR_HEIGHT
-            - STATUS_BAR_HEIGHT;
-        if content_height <= 0.0 || LINE_HEIGHT <= 0.0 {
+        if LINE_HEIGHT <= 0.0 {
             return 0;
         }
-        (content_height / LINE_HEIGHT) as usize
+        #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
+        let lines = (self.content_height() / LINE_HEIGHT) as usize;
+        lines
+    }
+
+    /// The absolute line index the point `(x, y)` falls on, or `None` if the
+    /// point is not on a line the renderer drew.
+    ///
+    /// `x` matters as well as `y` because the data inspector is drawn over the
+    /// dump's right-hand side; without the check a click on an inspector field
+    /// moves the cursor in the file underneath.
+    ///
+    /// A point past the end of the data still returns a line. That is not
+    /// drift: clicking the blank space below the last line is the ordinary
+    /// "put the cursor at the end" affordance every editor has, and the
+    /// callers clamp the resulting byte offset to the last byte. What used to
+    /// be wrong is that clicking the *status bar*, which is not blank dump at
+    /// all, did the same thing.
+    fn line_at(&self, x: f32, y: f32) -> Option<usize> {
+        if !x.is_finite() || x < 0.0 || x >= self.content_width() {
+            return None;
+        }
+        let from_top = y - Self::content_top();
+        if !from_top.is_finite() || from_top < 0.0 || from_top >= self.content_height() {
+            return None;
+        }
+        #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
+        let slot = (from_top / LINE_HEIGHT) as usize;
+        if slot >= self.visible_lines() {
+            return None;
+        }
+        Some(self.active_doc().view.scroll_offset.saturating_add(slot))
+    }
+
+    /// The largest scroll offset that still shows something.
+    ///
+    /// The last line is allowed to sit at the top of the dump — that is what
+    /// `Ctrl+End` lands on — so the bound is `total_lines - 1` rather than
+    /// `total_lines - visible_lines`. Scrolling further would leave the dump
+    /// blank with no indication of which way to scroll back.
+    fn max_scroll(&self) -> usize {
+        self.active_doc().total_lines().saturating_sub(1)
     }
 
     // ========================================================================
@@ -2162,14 +2261,10 @@ impl HexEditor {
 
     /// Handle mouse click in the hex view area.
     pub fn handle_mouse_click(&mut self, x: f32, y: f32, shift_held: bool) {
-        let bpl = self.active_doc().view.bytes_per_line.value();
-        let content_y = y - TOOLBAR_HEIGHT - TAB_BAR_HEIGHT;
-        if content_y < 0.0 {
+        let Some(absolute_line) = self.line_at(x, y) else {
             return;
-        }
-
-        let line = (content_y / LINE_HEIGHT) as usize;
-        let absolute_line = line.saturating_add(self.active_doc().view.scroll_offset);
+        };
+        let bpl = self.active_doc().view.bytes_per_line.value();
         let char_w = cell_width(HEX_FONT_SIZE);
 
         // Offset column width (10 chars for hex offset "00000000: ").
@@ -2224,22 +2319,19 @@ impl HexEditor {
     }
 
     /// Handle scroll event.
+    ///
+    /// `dy` is in wheel **notches**, positive away from the user, and a
+    /// precision device sends fractions of one. This used to read only the
+    /// sign of `dy` and move a flat three lines per event, which made a
+    /// trackpad — which sends a fraction of a notch per frame — scroll three
+    /// lines a frame, and made a fast wheel flick no faster than a slow one.
+    /// [`wheel::Accumulator`] converts and banks the remainder instead.
     pub fn handle_scroll(&mut self, dy: f32) {
+        let max_scroll = self.max_scroll();
         let doc = self.active_doc_mut();
-        let lines = if dy < 0.0 { 3usize } else { 0usize };
-        let lines_down = if dy > 0.0 { 3usize } else { 0usize };
-
-        if lines > 0 {
-            doc.view.scroll_offset = doc.view.scroll_offset.saturating_sub(lines);
-        }
-        if lines_down > 0 {
-            let max_scroll = doc.total_lines().saturating_sub(1);
-            doc.view.scroll_offset = doc
-                .view
-                .scroll_offset
-                .saturating_add(lines_down)
-                .min(max_scroll);
-        }
+        let delta = doc.view.wheel.rows(dy);
+        doc.view.scroll_offset =
+            guitk::scroll_window::shift(doc.view.scroll_offset, delta).min(max_scroll);
     }
 
     // ========================================================================
@@ -2411,22 +2503,20 @@ impl HexEditor {
     /// Render the main hex view.
     fn render_hex_view(&self, tree: &mut RenderTree) {
         let doc = self.active_doc();
-        let content_y = TOOLBAR_HEIGHT + TAB_BAR_HEIGHT;
-        let content_width = if self.show_inspector {
-            self.window_width - INSPECTOR_WIDTH
-        } else {
-            self.window_width
-        };
+        let content_y = Self::content_top();
+        let content_width = self.content_width();
         let vis = self.visible_lines();
         let bpl = doc.view.bytes_per_line.value();
         let char_w = cell_width(HEX_FONT_SIZE);
 
-        // Clip to hex view area.
+        // Clip to the hex view area. The rectangle comes from the same three
+        // helpers the hit test consults, so the dump that gets drawn is
+        // exactly the dump that answers a click.
         tree.push(RenderCommand::PushClip {
             x: 0.0,
             y: content_y,
             width: content_width,
-            height: self.window_height - content_y - STATUS_BAR_HEIGHT,
+            height: self.content_height(),
         });
 
         // The offset, hex and ASCII columns are all stepped by `char_w`, which
@@ -2609,9 +2699,11 @@ impl HexEditor {
     /// Render the data inspector panel.
     fn render_inspector(&self, tree: &mut RenderTree) {
         let doc = self.active_doc();
-        let panel_x = self.window_width - INSPECTOR_WIDTH;
-        let panel_y = TOOLBAR_HEIGHT + TAB_BAR_HEIGHT;
-        let panel_height = self.window_height - panel_y - STATUS_BAR_HEIGHT;
+        // The panel starts exactly where the dump ends, by construction rather
+        // than by two subtractions that have to agree.
+        let panel_x = self.content_width();
+        let panel_y = Self::content_top();
+        let panel_height = self.content_height();
 
         // Panel background.
         tree.push(RenderCommand::FillRect {
@@ -2842,7 +2934,7 @@ impl HexEditor {
         let bar_width: f32 = 400.0;
         let bar_height: f32 = 40.0;
         let x = self.window_width - bar_width - 20.0;
-        let y = TOOLBAR_HEIGHT + TAB_BAR_HEIGHT + 4.0;
+        let y = Self::content_top() + 4.0;
 
         // Shadow.
         tree.push(RenderCommand::BoxShadow {
@@ -3132,6 +3224,25 @@ fn main() {
 // ============================================================================
 
 #[cfg(test)]
+// Panicking on bad data is what a test is *for*: an `unwrap` that fires is the
+// failure report, and an index out of range is the assertion. The project
+// convention (CLAUDE.md, "Coding Conventions") is to enforce these lints in
+// production code and allow them under `#[cfg(test)]`, which is what this does.
+//
+// `float_cmp` is here for a sharper reason. Several of these tests compare a
+// coordinate the renderer emitted against the helper that produced it, and
+// exact equality *is* the assertion: the renderer passes those helpers' return
+// values straight into the clip, so anything short of bit-for-bit identity
+// means a second copy of the arithmetic has appeared somewhere. A tolerance
+// would let exactly the drift these tests exist to catch slip through.
+#[allow(
+    clippy::indexing_slicing,
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::arithmetic_side_effects,
+    clippy::float_cmp
+)]
 mod tests {
     use super::*;
 
@@ -3482,6 +3593,326 @@ mod tests {
             );
             assert!(app.active_doc().cursor_in_hex);
         }
+    }
+
+    // ====================================================================
+    // Where the dump is, and where a click on it lands
+    //
+    // The renderer and the hit test used to compute the dump's edges
+    // separately, and only the renderer computed the bottom and right ones
+    // at all. These tests read the rectangle out of the `PushClip` the
+    // renderer actually emits rather than recomputing it, because a test
+    // that recomputes the renderer's arithmetic and then checks the hit
+    // test against *that* passes just as happily when the two drift.
+    // ====================================================================
+
+    /// A long enough file that the dump is nowhere near running out of lines.
+    fn long_doc(app: &mut HexEditor) {
+        app.documents[0] = HexDocument::from_data((0..4096u32).map(|b| b as u8).collect());
+    }
+
+    /// The rectangle the renderer clips the dump to: `(x, y, width, height)`.
+    fn dump_clip(app: &HexEditor) -> (f32, f32, f32, f32) {
+        app.render()
+            .commands
+            .iter()
+            .find_map(|cmd| match cmd {
+                RenderCommand::PushClip {
+                    x,
+                    y,
+                    width,
+                    height,
+                } => Some((*x, *y, *width, *height)),
+                _ => None,
+            })
+            .expect("the hex dump is drawn under a clip")
+    }
+
+    /// The `(top_y, absolute_line)` of every line the renderer actually drew,
+    /// recovered from the offset column it prints at the left edge.
+    fn painted_lines(app: &HexEditor) -> Vec<(f32, usize)> {
+        let bpl = app.active_doc().view.bytes_per_line.value();
+        app.render()
+            .commands
+            .iter()
+            .filter_map(|cmd| match cmd {
+                // The offset column is the only text drawn at x == 4.0, and
+                // it prints the byte offset of the line's first byte.
+                RenderCommand::Text { x, y, text, .. } if *x == 4.0 => {
+                    let digits = text.trim_end_matches(':').trim();
+                    let offset = match app.active_doc().view.offset_display {
+                        OffsetDisplay::Hex => usize::from_str_radix(digits, 16).ok()?,
+                        OffsetDisplay::Decimal => digits.parse().ok()?,
+                    };
+                    Some((*y, offset / bpl))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// An x inside the hex column, where a click selects a byte.
+    fn hex_column_x() -> f32 {
+        cell_width(HEX_FONT_SIZE) * 11.0
+    }
+
+    #[test]
+    fn clicking_the_status_bar_does_not_move_the_cursor() {
+        // The bug this whole section exists for. The click path subtracted the
+        // toolbar and tab strip and checked only that the result was not
+        // negative, so a click on the status bar — a good forty lines below the
+        // last line the renderer drew — computed a line number anyway, and the
+        // cursor jumped to the end of the file.
+        let mut app = HexEditor::new(1200.0, 800.0);
+        long_doc(&mut app);
+        app.active_doc_mut().cursor = 0;
+
+        let status_bar_y = app.window_height - STATUS_BAR_HEIGHT / 2.0;
+        app.handle_mouse_click(hex_column_x(), status_bar_y, false);
+        assert_eq!(
+            app.active_doc().cursor,
+            0,
+            "a click on the status bar moved the cursor"
+        );
+        assert_eq!(app.line_at(hex_column_x(), status_bar_y), None);
+    }
+
+    #[test]
+    fn clicking_the_data_inspector_does_not_move_the_cursor_behind_it() {
+        // The inspector is painted over the dump's right-hand side, and the
+        // click path had no right edge at all: a click on an inspector field
+        // ran off the end of the ASCII column, clamped to the last byte of the
+        // line, and moved the cursor in the file underneath.
+        let mut app = HexEditor::new(1200.0, 800.0);
+        long_doc(&mut app);
+        app.show_inspector = true;
+        app.active_doc_mut().cursor = 0;
+
+        let (_, _, clip_w, _) = dump_clip(&app);
+        assert_eq!(
+            clip_w,
+            app.window_width - INSPECTOR_WIDTH,
+            "the dump should stop where the inspector starts"
+        );
+
+        let inspector_x = app.window_width - INSPECTOR_WIDTH / 2.0;
+        let first_line_y = HexEditor::content_top() + LINE_HEIGHT / 2.0;
+        app.handle_mouse_click(inspector_x, first_line_y, false);
+        assert_eq!(
+            app.active_doc().cursor,
+            0,
+            "a click on the inspector moved the cursor in the document"
+        );
+
+        // With the panel closed the same point is dump, and does select.
+        app.show_inspector = false;
+        app.handle_mouse_click(inspector_x, first_line_y, false);
+        assert!(
+            app.active_doc().cursor > 0,
+            "closing the inspector should hand that x back to the dump"
+        );
+    }
+
+    #[test]
+    fn the_clip_the_renderer_emits_is_the_region_a_click_lands_in() {
+        let mut app = HexEditor::new(1200.0, 800.0);
+        long_doc(&mut app);
+        app.active_doc_mut().view.scroll_offset = 9;
+
+        let (x, y, w, h) = dump_clip(&app);
+        assert_eq!(x, 0.0);
+        assert_eq!(y, HexEditor::content_top());
+        assert_eq!(w, app.content_width());
+        assert_eq!(h, app.content_height());
+
+        // Top edge: inside is the first visible line, one pixel above is the
+        // tab strip.
+        assert_eq!(app.line_at(hex_column_x(), y), Some(9));
+        assert_eq!(app.line_at(hex_column_x(), y - 0.5), None);
+
+        // Bottom edge: past the clip nothing is accepted.
+        assert_eq!(app.line_at(hex_column_x(), y + h), None);
+
+        // Left and right edges.
+        assert!(app.line_at(0.0, y).is_some());
+        assert_eq!(app.line_at(-0.5, y), None);
+        assert!(app.line_at(w - 0.5, y).is_some());
+        assert_eq!(app.line_at(w, y), None);
+    }
+
+    #[test]
+    fn every_line_the_renderer_drew_hit_tests_to_itself() {
+        // Sweeps across each painted line rather than probing its top edge: a
+        // top-edge probe returns the right index under several wrong
+        // implementations, because the error in a mis-stepped grid is zero at
+        // the origin and grows down the row.
+        let mut app = HexEditor::new(1200.0, 800.0);
+        long_doc(&mut app);
+
+        for scroll in [0usize, 1, 7, 33] {
+            app.active_doc_mut().view.scroll_offset = scroll;
+            let drawn = painted_lines(&app);
+            assert!(!drawn.is_empty(), "nothing was drawn at scroll {scroll}");
+            assert_eq!(
+                drawn.len(),
+                app.visible_lines(),
+                "the renderer and `visible_lines` disagree at scroll {scroll}"
+            );
+
+            for (top, line) in drawn {
+                for step in 0..8 {
+                    #[allow(clippy::cast_precision_loss)]
+                    let y = top + LINE_HEIGHT * (step as f32) / 8.0;
+                    assert_eq!(
+                        app.line_at(hex_column_x(), y),
+                        Some(line),
+                        "the line painted at {top} hit-tests as something else at y={y}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_toolbar_and_tab_strip_are_not_part_of_the_dump() {
+        let mut app = HexEditor::new(1200.0, 800.0);
+        long_doc(&mut app);
+        app.active_doc_mut().cursor = 100;
+
+        for y in [0.0, TOOLBAR_HEIGHT / 2.0, HexEditor::content_top() - 0.5] {
+            app.handle_mouse_click(hex_column_x(), y, false);
+            assert_eq!(
+                app.active_doc().cursor,
+                100,
+                "a click at y={y} moved the cursor"
+            );
+        }
+    }
+
+    #[test]
+    fn a_window_shorter_than_its_own_chrome_has_no_lines() {
+        // The toolbar, tab strip and status bar together are taller than this
+        // window, so the dump's height is negative before it is clamped.
+        let app = HexEditor::new(1200.0, 40.0);
+        assert_eq!(app.content_height(), 0.0);
+        assert_eq!(app.visible_lines(), 0);
+        for y in [0.0, 20.0, 39.0, HexEditor::content_top()] {
+            assert_eq!(app.line_at(hex_column_x(), y), None, "at y={y}");
+        }
+    }
+
+    #[test]
+    fn a_nonfinite_coordinate_selects_nothing() {
+        // Pointer coordinates arrive from outside the process.
+        let mut app = HexEditor::new(1200.0, 800.0);
+        long_doc(&mut app);
+        app.active_doc_mut().cursor = 42;
+
+        let good_y = HexEditor::content_top() + LINE_HEIGHT / 2.0;
+        for bad in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+            assert_eq!(app.line_at(bad, good_y), None);
+            assert_eq!(app.line_at(hex_column_x(), bad), None);
+            app.handle_mouse_click(bad, good_y, false);
+            app.handle_mouse_click(hex_column_x(), bad, false);
+            assert_eq!(app.active_doc().cursor, 42, "{bad} moved the cursor");
+        }
+    }
+
+    // ====================================================================
+    // The wheel
+    // ====================================================================
+
+    #[test]
+    fn one_notch_of_the_wheel_moves_three_lines() {
+        let mut app = HexEditor::new(1200.0, 800.0);
+        long_doc(&mut app);
+
+        app.handle_scroll(-1.0);
+        assert_eq!(app.active_doc().view.scroll_offset, 3);
+        app.handle_scroll(-2.0);
+        assert_eq!(
+            app.active_doc().view.scroll_offset,
+            9,
+            "two notches should move twice as far as one — the old handler \
+             read only the sign of dy and moved a flat three lines"
+        );
+        app.handle_scroll(1.0);
+        assert_eq!(app.active_doc().view.scroll_offset, 6);
+    }
+
+    #[test]
+    fn a_trackpads_fractions_add_up_instead_of_vanishing() {
+        // A precision device sends a fraction of a notch per frame. Rounding
+        // each event on its own would return zero every time and the dump
+        // would never move.
+        let mut app = HexEditor::new(1200.0, 800.0);
+        long_doc(&mut app);
+
+        for _ in 0..10 {
+            app.handle_scroll(-0.1);
+        }
+        assert_eq!(
+            app.active_doc().view.scroll_offset,
+            3,
+            "ten tenths of a notch is one notch"
+        );
+    }
+
+    #[test]
+    fn the_wheel_stops_at_both_ends_of_the_file() {
+        let mut app = HexEditor::new(1200.0, 800.0);
+        app.documents[0] = HexDocument::from_data((0u8..=255).collect());
+        let last = app.active_doc().total_lines() - 1;
+
+        for _ in 0..200 {
+            app.handle_scroll(-1.0);
+        }
+        assert_eq!(
+            app.active_doc().view.scroll_offset,
+            last,
+            "the last line should stay at the top of the dump"
+        );
+
+        for _ in 0..200 {
+            app.handle_scroll(1.0);
+        }
+        assert_eq!(app.active_doc().view.scroll_offset, 0);
+    }
+
+    #[test]
+    fn a_nonfinite_wheel_delta_does_not_poison_the_accumulator() {
+        let mut app = HexEditor::new(1200.0, 800.0);
+        long_doc(&mut app);
+
+        app.handle_scroll(f32::NAN);
+        assert_eq!(app.active_doc().view.scroll_offset, 0);
+        app.handle_scroll(-1.0);
+        assert_eq!(
+            app.active_doc().view.scroll_offset,
+            3,
+            "a NaN in the residue would have stopped the wheel for good"
+        );
+    }
+
+    #[test]
+    fn each_tab_banks_its_own_wheel_fractions() {
+        // Two documents sharing one accumulator would steal each other's
+        // remainders, so a flick that switched tabs would move the wrong file.
+        let mut app = HexEditor::new(1200.0, 800.0);
+        long_doc(&mut app);
+        app.documents
+            .push(HexDocument::from_data((0..4096u32).map(|b| b as u8).collect()));
+
+        app.active_tab = 0;
+        for _ in 0..4 {
+            app.handle_scroll(-0.1);
+        }
+        app.active_tab = 1;
+        for _ in 0..4 {
+            app.handle_scroll(-0.1);
+        }
+        assert_eq!(app.documents[0].view.scroll_offset, 1);
+        assert_eq!(app.documents[1].view.scroll_offset, 1);
     }
 
     #[test]
@@ -4756,8 +5187,10 @@ mod tests {
         assert_eq!(view.bytes_per_line, BytesPerLine::Sixteen);
         assert_eq!(view.offset_display, OffsetDisplay::Hex);
         assert!(view.show_ascii);
-        assert!(view.show_inspector);
         assert_eq!(view.scroll_offset, 0);
+        // The inspector's visibility is `HexEditor`'s alone; the view used to
+        // carry a second, dead copy of the flag.
+        assert!(HexEditor::new(1200.0, 800.0).show_inspector);
     }
 
     // ====================================================================

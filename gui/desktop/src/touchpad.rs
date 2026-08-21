@@ -12,9 +12,9 @@
 //! - Disable while typing
 //! - Custom gesture → action bindings
 
-use crate::scroll_window;
 use guitk::color::Color;
 use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
+use guitk::scroll_window;
 use guitk::style::CornerRadii;
 
 // ============================================================================
@@ -1413,7 +1413,9 @@ mod tests {
                 RenderCommand::Line { y1, y2, .. } => Some(y1.max(*y2)),
                 _ => None,
             })
-            .fold(None, |acc: Option<f32>, v| Some(acc.map_or(v, |a| a.max(v))))
+            .fold(None, |acc: Option<f32>, v| {
+                Some(acc.map_or(v, |a| a.max(v)))
+            })
     }
 
     #[test]
@@ -1448,9 +1450,9 @@ mod tests {
             // version of this test only checked the former, and so passed with
             // the height budget removed entirely. Check where it landed.
             let label = cmds.iter().find_map(|c| match c {
-                RenderCommand::Text { text, y, font_size, .. } if text == "Pinch gesture" => {
-                    Some(y + font_size)
-                }
+                RenderCommand::Text {
+                    text, y, font_size, ..
+                } if text == "Pinch gesture" => Some(y + font_size),
                 _ => None,
             });
             let label_bottom =
@@ -1478,7 +1480,10 @@ mod tests {
             "a 400px panel should show at least one gesture row"
         );
         let page_len = first_page.len();
-        assert_eq!(first_page[0], 0, "an unscrolled list starts at the first row");
+        assert_eq!(
+            first_page[0], 0,
+            "an unscrolled list starts at the first row"
+        );
 
         for offset in 1..=8_u8 {
             ui.scroll_offset = usize::from(offset);
@@ -1488,7 +1493,11 @@ mod tests {
                 Some(offset),
                 "scrolling to {offset} should start the list at row {offset}"
             );
-            assert_eq!(rows.len(), page_len, "a full page stays full while scrolling");
+            assert_eq!(
+                rows.len(),
+                page_len,
+                "a full page stays full while scrolling"
+            );
         }
     }
 
@@ -1501,12 +1510,19 @@ mod tests {
 
         ui.scroll_offset = 0;
         let page_len = drawn_finger_counts(&ui.render(&mgr, 10.0, 20.0, 700.0, 400.0)).len();
-        assert!(page_len > 0 && page_len < 9, "the panel must show a partial list for this test to mean anything");
+        assert!(
+            page_len > 0 && page_len < 9,
+            "the panel must show a partial list for this test to mean anything"
+        );
 
         for offset in [9_usize, 10, 500, usize::MAX] {
             ui.scroll_offset = offset;
             let rows = drawn_finger_counts(&ui.render(&mgr, 10.0, 20.0, 700.0, 400.0));
-            assert_eq!(rows.len(), page_len, "offset {offset} should still show a full page");
+            assert_eq!(
+                rows.len(),
+                page_len,
+                "offset {offset} should still show a full page"
+            );
             assert_eq!(
                 rows.last().copied(),
                 Some(8),

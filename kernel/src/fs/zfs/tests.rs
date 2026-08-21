@@ -51,7 +51,10 @@ use crate::fs::vfs::{EntryType, FileSystem};
 use crate::serial_println;
 
 use super::dmu::parse_dnode;
-use super::label::{SPA_VERSION_FEATURES, front_label_offset, parse_uberblock};
+use super::label::{
+    POOL_STATE_ACTIVE, POOL_STATE_DESTROYED, POOL_STATE_EXPORTED, POOL_STATE_L2CACHE,
+    POOL_STATE_SPARE, SPA_VERSION_FEATURES, front_label_offset, parse_uberblock,
+};
 use super::nvlist::{
     DATA_TYPE_NVLIST, DATA_TYPE_STRING, DATA_TYPE_UINT64, NV_ENCODE_NATIVE, NV_ENCODE_XDR,
     NV_LITTLE_ENDIAN, NvList,
@@ -1496,8 +1499,42 @@ const fn dirent(ty: u64, obj: u64) -> u64 {
     (ty << 60) | obj
 }
 
+/// The parts of a label configuration the tests vary.
+///
+/// Every field here is one the mounting path screens on, so each rejection
+/// case can override exactly one of them against [`ConfigSpec::disk`] and the
+/// name of the case says what is being tested. Positional arguments would not:
+/// `build_config(b"disk", 0, 1, 0, 5000)` is unreadable, and adding a sixth
+/// screen would silently renumber every existing call.
+struct ConfigSpec<'a> {
+    /// `vdev_tree.type`: `disk`, `file`, `mirror`, `raidz`…
+    vdev_type: &'a [u8],
+    /// `vdev_tree.id` — this top-level vdev's index within the pool.
+    id: u64,
+    /// `vdev_tree.is_log` — non-zero marks a separate intent-log device.
+    is_log: u64,
+    /// `state` — `POOL_STATE_*`.
+    state: u64,
+    /// `version` — the SPA version.
+    version: u64,
+}
+
+impl ConfigSpec<'_> {
+    /// An ordinary, mountable single-disk pool. Every image builds from this,
+    /// and every rejection case below overrides one field of it.
+    const fn disk() -> Self {
+        Self {
+            vdev_type: b"disk",
+            id: 0,
+            is_log: 0,
+            state: POOL_STATE_ACTIVE,
+            version: SPA_VERSION_FEATURES,
+        }
+    }
+}
+
 /// The pool configuration nvlist a vdev label carries.
-fn build_config(vdev_type: &[u8], id: u64, is_log: u64) -> Vec<u8> {
+fn build_config(spec: &ConfigSpec<'_>) -> Vec<u8> {
     let mut vdev = Vec::new();
     // A nested list carries its own version and nvflag, but no encoding byte —
     // it inherits the outer list's.
@@ -1507,14 +1544,14 @@ fn build_config(vdev_type: &[u8], id: u64, is_log: u64) -> Vec<u8> {
         b"type",
         DATA_TYPE_STRING,
         1,
-        &xdr_string(vdev_type),
+        &xdr_string(spec.vdev_type),
     ));
     // Written unconditionally, including in the ordinary `id: 0, is_log: 0`
     // case: a real label always carries both, and a builder that emitted them
     // only when interesting would leave the mounting path never once reading
     // the shape it will actually meet on disk.
-    vdev.extend_from_slice(&nv_pair_u64(b"id", id));
-    vdev.extend_from_slice(&nv_pair_u64(b"is_log", is_log));
+    vdev.extend_from_slice(&nv_pair_u64(b"id", spec.id));
+    vdev.extend_from_slice(&nv_pair_u64(b"is_log", spec.is_log));
     vdev.extend_from_slice(&nv_pair_u64(b"ashift", IMG_ASHIFT));
     vdev.extend_from_slice(&nv_pair_u64(b"asize", u64::try_from(IMG_LEN).unwrap_or(0)));
     vdev.extend_from_slice(&0u32.to_be_bytes()); // terminator
@@ -1528,7 +1565,10 @@ fn build_config(vdev_type: &[u8], id: u64, is_log: u64) -> Vec<u8> {
     ));
     out.extend_from_slice(&nv_pair_u64(b"pool_guid", IMG_GUID));
     out.extend_from_slice(&nv_pair_u64(b"txg", IMG_TXG));
-    out.extend_from_slice(&nv_pair_u64(b"version", SPA_VERSION_FEATURES));
+    out.extend_from_slice(&nv_pair_u64(b"version", spec.version));
+    // Like `id` and `is_log`: always written, so the ordinary mount exercises
+    // the same key the rejection cases below vary.
+    out.extend_from_slice(&nv_pair_u64(b"state", spec.state));
     out.extend_from_slice(&nv_pair(b"vdev_tree", DATA_TYPE_NVLIST, 1, &vdev));
     out.extend_from_slice(&0u32.to_be_bytes()); // terminator
     out
@@ -2006,7 +2046,7 @@ fn build_pool() -> Pool {
 
     // --- Labels ----------------------------------------------------------
 
-    let config = build_config(b"disk", 0, 0);
+    let config = build_config(&ConfigSpec::disk());
     let nvlist_at = usize::try_from(VDEV_LABEL_NVLIST_OFFSET).unwrap_or(0);
     let ub_array_at = usize::try_from(VDEV_LABEL_UBERBLOCK_OFFSET).unwrap_or(0);
     let label_stride = usize::try_from(VDEV_LABEL_SIZE).unwrap_or(0);
@@ -2302,21 +2342,30 @@ fn test_pool_damage(c: &mut Checks) -> KernelResult<()> {
         "a big-endian pool is refused by name",
     );
 
+    // The config cases below each overwrite the *same* bytes — the nvlist
+    // region of both front labels — so each starts from a fresh clone of the
+    // good image. Sharing one buffer would make every case's verdict depend on
+    // the one before it, and a case that stopped rejecting would be masked by
+    // its predecessor's damage rather than reported.
+    let reconfigured = |spec: &ConfigSpec<'_>| {
+        let mut bytes = pool.bytes.clone();
+        let cfg = build_config(spec);
+        for label in 0..2usize {
+            let at = label.saturating_mul(stride).saturating_add(pool.nvlist_at);
+            put_bytes(&mut bytes, at, &cfg);
+        }
+        bytes
+    };
+
     // A mirror or raidz top-level vdev. One `SectorSource` is one device, and
     // a raidz child's DVAs are offset per-leg, so reading one leg as if it
     // were the whole thing would return plausible-looking garbage.
-    //
-    // The three config cases below all overwrite the *same* bytes — the nvlist
-    // region of both front labels — so each starts from a fresh clone. Sharing
-    // one buffer would make each case's verdict depend on the one before it.
-    let mut bytes = pool.bytes.clone();
-    let mirror = build_config(b"mirror", 0, 0);
-    for label in 0..2usize {
-        let at = label.saturating_mul(stride).saturating_add(pool.nvlist_at);
-        put_bytes(&mut bytes, at, &mirror);
-    }
     c.check_err(
-        mount(bytes).map(|_| ()),
+        mount(reconfigured(&ConfigSpec {
+            vdev_type: b"mirror",
+            ..ConfigSpec::disk()
+        }))
+        .map(|_| ()),
         KernelError::NotSupported,
         "a mirror vdev is refused rather than half-read",
     );
@@ -2328,14 +2377,12 @@ fn test_pool_damage(c: &mut Checks) -> KernelResult<()> {
     // tree". Without the check the mount gets as far as reading the meta object
     // set off a log device and reports `IoError`, which says "this pool is
     // corrupt" about a pool that is perfectly intact.
-    let mut bytes = pool.bytes.clone();
-    let slog = build_config(b"disk", 0, 1);
-    for label in 0..2usize {
-        let at = label.saturating_mul(stride).saturating_add(pool.nvlist_at);
-        put_bytes(&mut bytes, at, &slog);
-    }
     c.check_err(
-        mount(bytes).map(|_| ()),
+        mount(reconfigured(&ConfigSpec {
+            is_log: 1,
+            ..ConfigSpec::disk()
+        }))
+        .map(|_| ()),
         KernelError::NotSupported,
         "an intent-log device is named, not misread as the pool's data disk",
     );
@@ -2345,16 +2392,82 @@ fn test_pool_damage(c: &mut Checks) -> KernelResult<()> {
     // tells them apart. Every DVA this driver can follow names vdev 0, so on a
     // device holding vdev 1 there is nothing readable at all, and saying so
     // here beats failing on the first block with a checksum error.
-    let mut bytes = pool.bytes;
-    let second = build_config(b"disk", 1, 0);
-    for label in 0..2usize {
-        let at = label.saturating_mul(stride).saturating_add(pool.nvlist_at);
-        put_bytes(&mut bytes, at, &second);
-    }
     c.check_err(
-        mount(bytes).map(|_| ()),
+        mount(reconfigured(&ConfigSpec {
+            id: 1,
+            ..ConfigSpec::disk()
+        }))
+        .map(|_| ()),
         KernelError::NotSupported,
         "a stripe's second disk is refused before it can fail a block read",
+    );
+
+    // A hot spare. It is a genuine member of the pool, labelled and idle,
+    // holding no part of any object tree — so there is nothing here to mount
+    // however healthy the label looks.
+    c.check_err(
+        mount(reconfigured(&ConfigSpec {
+            state: POOL_STATE_SPARE,
+            ..ConfigSpec::disk()
+        }))
+        .map(|_| ()),
+        KernelError::NotSupported,
+        "a hot spare is named, not mistaken for the pool it stands by",
+    );
+
+    // An L2ARC cache device. Same shape as the spare: a real pool member whose
+    // contents are an evictable copy of blocks that live somewhere else.
+    c.check_err(
+        mount(reconfigured(&ConfigSpec {
+            state: POOL_STATE_L2CACHE,
+            ..ConfigSpec::disk()
+        }))
+        .map(|_| ()),
+        KernelError::NotSupported,
+        "an L2ARC cache device is refused rather than read as a pool",
+    );
+
+    // A destroyed pool. This is the case the state check exists for: `zpool
+    // destroy` rewrites the state field and little else, so the uberblocks are
+    // still valid and the mount would *succeed* — silently reviving a pool the
+    // administrator deleted. Refusing it is what `zpool import -D` being a
+    // separate, explicit gesture means.
+    c.check_err(
+        mount(reconfigured(&ConfigSpec {
+            state: POOL_STATE_DESTROYED,
+            ..ConfigSpec::disk()
+        }))
+        .map(|_| ()),
+        KernelError::NotSupported,
+        "a destroyed pool is refused, not silently revived",
+    );
+
+    // A cleanly exported pool, by contrast, mounts: an export leaves the
+    // on-disk state consistent by definition, and read-only is all this driver
+    // does. Asserting the *accepted* half matters as much as the refused ones —
+    // a state check that rejected everything but `ACTIVE` would pass all five
+    // cases above while breaking the commonest way a disk is legitimately
+    // handed to another machine.
+    c.check(
+        mount(reconfigured(&ConfigSpec {
+            state: POOL_STATE_EXPORTED,
+            ..ConfigSpec::disk()
+        }))
+        .is_ok(),
+        "a cleanly exported pool still mounts read-only",
+    );
+
+    // An SPA version this driver has never seen. Nothing above 5000 exists
+    // today, which is the point: the constant documents a ceiling, and a
+    // ceiling nothing compares against is a comment, not a check.
+    c.check_err(
+        mount(reconfigured(&ConfigSpec {
+            version: SPA_VERSION_FEATURES.saturating_add(1),
+            ..ConfigSpec::disk()
+        }))
+        .map(|_| ()),
+        KernelError::NotSupported,
+        "an SPA version past the documented ceiling is refused by name",
     );
 
     Ok(())

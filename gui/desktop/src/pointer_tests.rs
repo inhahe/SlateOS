@@ -26,6 +26,7 @@ use crate::{
 use appearance::{AppearanceSettings, WindowCorners};
 use guitk::render::{RenderCommand, RenderTree};
 use guitk::style::CornerRadii;
+use guitk::wheel;
 
 fn shell() -> DesktopShell {
     DesktopShell::new(1000, 800)
@@ -135,7 +136,10 @@ fn a_scrolled_row_launches_the_program_named_on_it() {
     );
 
     let (x, y) = centre(shell.start_menu_row_rect(0));
-    shell.handle_mouse(&scroll(x, y, -3.0 * START_MENU_ROW_HEIGHT));
+    // One detent, which is three rows. This used to read
+    // `-3.0 * START_MENU_ROW_HEIGHT` — a delta in pixels, matching the units
+    // the handler wrongly assumed rather than the notches it is actually sent.
+    shell.handle_mouse(&scroll(x, y, -1.0));
     assert_eq!(shell.start_menu_scroll, 3);
 
     let expected = shell.start_menu_entries()[3].executable_path.clone();
@@ -149,7 +153,7 @@ fn the_list_cannot_scroll_past_either_end() {
     let mut shell = shell();
     shell.toggle_start_menu();
 
-    shell.scroll_start_menu(-1_000);
+    shell.scroll_start_menu(1_000);
     assert_eq!(shell.start_menu_scroll, shell.start_menu_max_scroll());
     // The last row must still show the last program rather than blank space
     // past the end of the list.
@@ -159,25 +163,83 @@ fn the_list_cannot_scroll_past_either_end() {
         Some(shell.start_menu_entries().len() - 1)
     );
 
-    shell.scroll_start_menu(1_000);
+    shell.scroll_start_menu(-1_000);
     assert_eq!(shell.start_menu_scroll, 0);
 }
 
-/// A wheel that reports less than a row per event still has to move the list,
-/// or the menu simply cannot be scrolled with that mouse.
+/// One detent of an ordinary wheel is `1.0` notch, and a notch is three rows.
+///
+/// This is what the old `dy / START_MENU_ROW_HEIGHT` could never produce: it
+/// read `dy` as pixels, so a notch came out as `1.0 / 36.0`, truncated to zero,
+/// and every scroll fell through to a fallback that moved a single row no
+/// matter how far the wheel was turned.
 #[test]
-fn a_small_wheel_delta_still_moves_a_row() {
-    assert_eq!(scroll_rows(-1.0), -1);
-    assert_eq!(scroll_rows(1.0), 1);
-    assert_eq!(scroll_rows(0.0), 0);
-    assert_eq!(scroll_rows(-2.0 * START_MENU_ROW_HEIGHT), -2);
+fn one_notch_moves_three_rows() {
+    let mut acc = wheel::Accumulator::default();
+    // Positive `dy` is away from the user, which moves towards row 0.
+    assert_eq!(scroll_rows(&mut acc, -1.0), 3);
+    assert_eq!(scroll_rows(&mut acc, 1.0), -3);
+    assert_eq!(scroll_rows(&mut acc, 0.0), 0);
+    assert_eq!(scroll_rows(&mut acc, -2.0), 6);
+}
+
+/// A trackpad sends fractions of a notch. Rounding each one on its own would
+/// discard all of them; the accumulator banks them until they make a row.
+#[test]
+fn a_trackpads_fractions_add_up_instead_of_being_discarded() {
+    let mut acc = wheel::Accumulator::default();
+    // A tenth of a notch is three tenths of a row, so the first delivery lands
+    // on the fourth event and the ten together are worth exactly three rows.
+    let mut total = 0;
+    for _ in 0..10 {
+        total += scroll_rows(&mut acc, -0.1);
+    }
+    assert_eq!(total, 3);
+}
+
+/// The menu must actually respond to a real wheel event, end to end — the old
+/// code's failure was invisible to any test that called the helper directly
+/// with a pixel-shaped number.
+#[test]
+fn a_wheel_notch_over_the_menu_scrolls_it() {
+    let mut shell = shell();
+    shell.toggle_start_menu();
+    let rect = shell.start_menu_row_rect(0);
+    let (x, y) = centre(rect);
+    assert_eq!(
+        shell.handle_mouse(&scroll(x, y, -1.0)),
+        ShellAction::Consumed
+    );
+    assert_eq!(
+        shell.start_menu_scroll, 3,
+        "one detent should cross three rows"
+    );
+}
+
+/// A fraction left over from one visit to the menu must not move the next one.
+#[test]
+fn reopening_the_menu_forgets_the_leftover_fraction() {
+    let mut shell = shell();
+    shell.toggle_start_menu();
+    let rect = shell.start_menu_row_rect(0);
+    let (x, y) = centre(rect);
+    // Two tenths of a notch: six tenths of a row, so nothing moves yet.
+    shell.handle_mouse(&scroll(x, y, -0.1));
+    shell.handle_mouse(&scroll(x, y, -0.1));
+    assert_eq!(shell.start_menu_scroll, 0);
+    shell.toggle_start_menu();
+    shell.toggle_start_menu();
+    // Were the 0.6 rows still banked, this 0.6 would complete a row.
+    shell.handle_mouse(&scroll(x, y, -0.1));
+    shell.handle_mouse(&scroll(x, y, -0.1));
+    assert_eq!(shell.start_menu_scroll, 0);
 }
 
 #[test]
 fn reopening_the_menu_rewinds_the_list() {
     let mut shell = shell();
     shell.toggle_start_menu();
-    shell.scroll_start_menu(-2);
+    shell.scroll_start_menu(2);
     assert_eq!(shell.start_menu_scroll, 2);
     shell.toggle_start_menu();
     shell.toggle_start_menu();
@@ -881,7 +943,7 @@ fn a_scaled_start_menu_still_reaches_every_program() {
                     seen.insert(index);
                 }
             }
-            shell.scroll_start_menu(-1);
+            shell.scroll_start_menu(1);
         }
         assert_eq!(seen.len(), total, "unreachable programs at {percent}%");
     }

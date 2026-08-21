@@ -32396,6 +32396,17 @@ After that, `cargo fmt --check` becomes a usable gate.
 **Severity.** Low for correctness - formatting changes nothing that runs. Medium
 for friction, because it makes every `cargo fmt` a trap and therefore makes the
 documented pre-commit step something an agent learns to skip.
+
+**Progress.** Chipped away at opportunistically, one crate per commit, whenever
+a task leaves a file otherwise untouched:
+
+| Crate / file | Diffs cleared | Commit |
+|---|---|---|
+| `apps/tmux/src/main.rs` | 47 | `fc1ff70b1` (2026-08-20) |
+
+Still outstanding: `osfont`, `guitk`, `gui/desktop`, `apps/hexeditor`
+(24 diffs), and the rest of `apps/**`.
+
 ## A-VFS-READ-256-STEPPED-3X-WITH-BYTE-IDENTICAL-VFS-SOURCE (lane A, 2026-08-17)
 
 **Status: RESOLVED 2026-08-17 — not a regression. A QEMU/TCG code-layout
@@ -42190,6 +42201,851 @@ the calendar popup actually depends on, that month *n+1* begins exactly
 
 ---
 
+## Dead scroll offsets, one shared root cause — swept 2026-08-18 (lane C)
+
+**In short:** fifteen lists across the toolkit and eleven apps had a scroll
+position that *nothing that draws ever read*. The field was declared,
+initialised to zero, and then never mentioned again — so the list drew from the
+top always, and everything past the bottom edge was unreachable by any means
+the app offered. All fifteen are now fixed; this section is the record of what
+the class looks like, so the next one is recognised faster. Two further
+instances have since been fixed on the same pattern
+(`apps/diskimager`, `apps/devicemanager`), and the sixteenth — the free-form
+one that needed a different fix — is done too: see
+`C-KANBAN-CARD-DETAIL-PANEL-HAS-A-DEAD-SCROLL-OFFSET` below, which also records
+why the fix this file originally proposed for it was the wrong one.
+
+The dead-field signature is cheap to test for and worth reusing: **grep the
+field name and count the hits.** Two — a declaration and an initialiser — means
+nothing reads it. That is how all of them were found, after the first turned up
+by accident.
+
+Two refinements the sweep added to that rule:
+
+- **A field that is *read* but never *written* is worse than a dead one**, and
+  the grep test does not catch it. radio's `station_scroll` had four hits —
+  declaration, initialiser, and two reads in the renderer — so it looked alive.
+  Nothing ever assigned it, so the list was frozen at row 0 while the selection
+  walked off the bottom: with 20 preset stations and 10 rows visible, half the
+  list was unreachable. When a grep turns up reads, check that at least one hit
+  is on the left of an `=`.
+- **Pulling on a dead field finds live ones.** settings' dead `dropdown_scroll`
+  led to the discovery that every dropdown in the app was decorative; netscan's
+  dead `sidebar_scroll` led to three further defects in the same screen. The
+  dead field is a marker for a list nobody ever exercised, and a list nobody
+  exercised usually has more than one thing wrong with it. Budget for that
+  before starting, rather than treating each find as a one-line change.
+
+### The instances
+
+| Where | Symptom | Fix |
+|---|---|---|
+| `gui/toolkit/src/listview.rs` — `ListViewport::visible_range` | Not a dead field but the same class: the method re-derived the window itself instead of using `scroll_window`, and lacked its last-page clamp. A list that *shrank* between the call that set `first_visible` and the render that asked what to draw returned an **empty** range — a blank panel, not the last page. | `visible_range` now literally calls `scroll_window::visible_count`. The duplicate implementation is gone, so the two cannot drift again — that is a property of the code now, not of a test. |
+| `apps/diskanalyzer` — `DiskAnalyzerUI::scroll_offset` | `f32`, never read. The list view cut off at the last row that fit and offered no way to reach the rest. | Changed to `usize` (a row index — the list draws whole rows, so a pixel offset can only express positions the renderer rounds away), given `scroll_list_by`/`scroll_list_to_top`, and the row loop now windows through `scroll_window::visible`. |
+| `apps/kanban` — `KanbanApp::scroll_offset` | `f32`, never read. Worse than the others: the card loop was **unbounded**, so a column with more cards than fit drew *past the bottom of the window*, over whatever was beneath it. | Changed to `usize`; the column now windows through `scroll_window::visible_variable` and says how many cards it is hiding (`+N more`). See design-decisions.md §471 for the one-offset-for-all-columns choice. |
+| `apps/tmux` — `TerminalBuffer::scroll_offset` **and** `Pane::copy_scroll` | Two fields for one concept, both dead. `copy_scroll` was only ever *reset* to 0 by `enter_copy_mode`; nothing incremented it and nothing rendered read it. The module doc's advertised "copy mode for scrollback browsing" drew a `[COPY MODE]` badge and nothing else — the scrollback was entirely unreachable. | `TerminalBuffer::scroll_offset` **deleted**: how far back a *view* is looking is a property of the view, not of the buffer, and two panes over one buffer would have to disagree about it. `copy_scroll` survives, and is now read by `TerminalBuffer::visible_lines`/`view_rows` and written by `Pane::scroll_back`/`scroll_forward`/`scroll_to_top`/`scroll_to_bottom`, bound to `k`/`j`/`b`/`f`/`g`/`G` (and `q` to leave) in `process_prefix_key`. |
+| `apps/defrag` — file-list offset | Never read. The list measured against the raw panel height, so the overflow was cut by the *window edge* rather than by a scroll position — which is what made the hidden rows unreachable rather than merely off-screen. | Windows through `scroll_window::visible`, with an unconditionally-reserved "N more" footer per design-decisions.md §470. |
+| `apps/podcast` — sidebar offset | Never read, and the sidebar needed more than a viewport: its *fixed* content alone (six library entries, twelve categories, two headings, two dividers) is 732px, so a 600px window could not show it with **no subscriptions at all**. | The column below the title became a flat `SidebarRow` list measured by `scroll_window::visible_variable` and scrolled as one. See §472 for the tradeoff against the usual pinned-sidebar convention. |
+| `apps/podcast` — `episode_list_scroll` | Never read. The list drew rows until one *started* past the content height, so it drew that straddling row whole and past the bottom, and everything after it was cut by the window edge. | `scroll_window::visible` against the content height the caller already reduces by the now-playing bar, same reserved footer. |
+| `apps/taskscheduler` — `task_list_scroll` **and** `history_scroll` | Both never read. Both renderers took a height parameter named `_height` and **ignored it**, drawing every row at a computed y with no bound. A `PushClip` hid the overflow, which is what kept it from being obvious — but a clipped row is exactly as unreachable as one drawn off the window when there is no offset to bring it back. | Both window through `scroll_window::visible`. `recent(100)` looked like a bound and was not (a hundred rows is 3200px); it is now `HISTORY_ROWS_OFFERED`, which is what it always was — how far back the tab reaches, not a viewport. |
+| `apps/vpnmanager` — `log_scroll_offset` | Never read. The log stopped drawing at a hard-coded `py + 500.0`, a number with no relation to the panel it was drawing into: it overran a short panel and wasted a tall one. | `render_tab_log` is now handed the panel height instead of inventing one. Also fixed: the row-stripe parity was found by scanning the whole log for the row's own address with `std::ptr::eq` — O(n²) per frame over a 500-row log, with `.unwrap_or(0)` silently guessing on failure. `enumerate()` already has the index. `clear_log()` now resets the offset. |
+| `apps/netmanager` — `sidebar_scroll` | Declared `f32` with the comment `(future: scroll offset)`, read by nothing. The interface loop had **no break of any kind**, so a long list drew straight through the status bar and off the bottom of the window. | Windows through `sh` — the height `render_sidebar` already computed and threw away. The selection highlight now compares against the *absolute* row index, so it follows the selected interface as the list scrolls instead of staying on whichever row happens to be there. |
+| `apps/netscan` — `sidebar_scroll` (+ three more it exposed) | Dead. Pulling on it found three more in the same screen: the results table shifted rows by a pixel offset and drew *all* of them behind a clip, so the bottom row was sliced in half and an unclamped offset could push the table out of its own panel; the port list compared each row's y against a `dy` it was advancing *inside the same loop*, so its `break` could never fire and its `continue` skipped the advance — one notch past a row's height made the entire port list vanish; and the click hit-test computed the table's first row itself, getting a different answer from the renderer (no 26px summary bar, no scroll offset), so clicking a row on a scrolled table opened some earlier host's panel. | Table and hit-test both read `RESULTS_ROWS_TOP` and call one `results_visible_rows()`, so they cannot disagree. `sidebar_scroll` was **deleted** rather than wired up — the only scrollable thing in that sidebar is the port list, which has its own offset, so inventing a meaning for a second one would be worse than removing it. `topology_zoom`, dead for the same reason, went with it. |
+| `apps/radio` — `genre_scroll` (dead) **and** `station_scroll` (read, never written) | `station_scroll` is the read-but-never-written case above. `genre_scroll` was dead, and the genre loop bounded itself against the sidebar's bottom edge rather than against the search hint pinned 20px above it, so a window shorter than ~468px drew genres straight over the hint. The genre filter is cycled by Left/Right with no regard for what is on screen, so the highlighted genre could also sit below the fold with no key that brought it back. | Both lists now use the toolkit types written for these rules: `ListViewport` for the station list and the genre selection, `scroll_window` for the genre list's window. Every distance is a named constant and both renderers `debug_assert!` that the geometry they walk is the geometry the capacity was computed from — the two were previously spelled out twice with different values. A page is now a windowful rather than a fixed five rows. |
+| `apps/settings` — `dropdown_scroll` (+ the hit-test it exposed) | Dead, and the popup was **unbounded**: `popup_h` was `item_count * 36 + 8` with no reference to `window_height`, and the device dropdowns are built from runtime lists, so "taller than the window" is not hypothetical. Pulling on it found the larger defect — the popup's geometry existed only inside `render_open_dropdown`, so the click handler had nothing to test against and settled for `// For simplicity, any click closes the dropdown`. `apply_dropdown_selection` — correct, complete, covering all ten dropdowns — was reachable **only from tests**. | `DropdownLayout` holds the geometry, computed once by `dropdown_layout()` and used by both the renderer and the hit-test; `item_at` is the literal inverse of `row_top` and sits beside it in the same `impl`, so a change to one is a change to the other. The popup is pulled up to fit the window and scrolls when it cannot, opening a dropdown reveals the choice it already has, and a popup hiding items says how many. |
+
+### What the reintroduction checks confirmed
+
+Each fix was verified by restoring the defect and re-running:
+
+- `listview` — exactly 3 of the new tests failed;
+  `every_sequence_of_moves_leaves_the_selection_visible` correctly did **not**,
+  since `reveal` maintains the clamp under mutating calls and the bug only
+  showed when the list changed behind the viewport's back.
+- `diskanalyzer` — all 4 new tests failed.
+- `kanban` — 3 of 5 failed. The other two are aimed elsewhere (the
+  measure/draw agreement, and the shrunk-column clamp, which lives in
+  `scroll_window` and has its own tests there).
+- `tmux` — `scrolling_back_changes_what_the_pane_draws` failed, which is the
+  only one of the eleven new tests that goes through `render()`. The other ten
+  are about numbers; this one is about pixels, and it is the one that would
+  have caught the original bug.
+- `podcast` — 4 of 7 sidebar tests failed with the sidebar unbounded again; the
+  3 that did not are testing the clamp and reachability, which that particular
+  defect does not violate. The episode list: 4 of 6.
+- `taskscheduler` — 6 of 8. `vpnmanager` — 4 of 6. `netmanager` — 4 of 7 (the
+  other three test the last-page clamp and reachability, which an *unbounded*
+  list satisfies trivially — an unbounded list does reach everything, it just
+  draws it in the wrong place).
+- `netscan` — each of the four defects was reintroduced separately: 1 test for
+  the hit-test, 3 for the table window, 3 for the port loop, 1 for the topology
+  notice.
+- `radio` — three separate reintroductions: the frozen scroll fires 2, the hint
+  overdraw 1, the unfollowed genre filter 2.
+- `settings` — three separate reintroductions: the missing hit-test fires 1,
+  the unbounded popup 3, the dead scroll offset 3.
+
+### Two things the sweep settled, worth not re-deciding
+
+**Test what is *drawn*, and scope the helper by shape, not by pixel position.**
+A test that only asks what the selection index is would have passed throughout
+radio's frozen-scroll bug — the index was always right; it was the window that
+never moved. The helpers key on the text shape (`H000` hostnames, `I000`
+interfaces, the `" more"` suffix) or on command provenance (settings scopes to
+commands from the popup's `BoxShadow` onward) rather than on an x/y box,
+specifically so that moving a panel cannot silently turn a helper into a filter
+that matches nothing and a test into one that asserts about an empty list.
+
+**The strongest test of a hit-test is the renderer.** settings' best test asks
+the renderer what it drew and the hit-test what is under each drawn row, and
+requires them to agree. A hit-test checked against its own arithmetic checks
+nothing — that is exactly the bug netscan had, where hit-test and renderer each
+computed the first row and got different answers.
+
+### A seventeenth instance, found later
+
+`apps/remotedesktop`'s `content_scroll` (fixed in `ffd9d7b25`, while converting
+that app's wheel handler for `C-SCROLL-DELTA-UNITS-ARE-DOCUMENTED-WRONG`). It
+had the standard four grep hits — declared, initialised, written by the wheel,
+never read — so the file-transfer and history lists drew every row and let the
+clip cut the tail off, and everything past the bottom edge was unreachable.
+
+Two things about it are worth adding to the sweep's record:
+
+- **The same app had a second, differently-shaped instance the grep signature
+  does not catch.** Its session list ignored `sidebar_scroll` — an offset that
+  *is* live, and correctly read by the neighbouring profiles list in the same
+  sidebar. A per-field grep cannot see that, because the field's hits are all
+  present and correct; what is missing is a hit in one particular renderer.
+  **The check that finds it is per-*list*, not per-field:** for every list that
+  clips, does the loop that draws it consult an offset at all?
+- **This one was reachable.** remotedesktop has a real `handle_event`, so
+  unlike most of the sweep's instances this was a live user-visible bug rather
+  than a latent one waiting on `C-NO-APP-IS-WIRED-TO-AN-EVENT-LOOP`. That is
+  the second app in that position, after kanban.
+
+### Two more, found the same way — one fixed, one not
+
+Turned up while surveying the rest of the scroll-delta consumers. Both are the
+plain shape: declared, initialised, written by the wheel handler, **never
+read**.
+
+| App | Field | Hits | Why the sweep's grep missed it | Status |
+|---|---|---|---|---|
+| `apps/diskimager` | `scroll_offset` (`main.rs:1015`, written at 1551) | 3 | Three hits, not four — it has no `.max()`/clamp helper of its own, so it falls below the signature's threshold. | **fixed, `344301f1c`** |
+| `apps/devicemanager` | `properties_scroll` (`main.rs:777`, written at 3145) | 5 | Five hits, not four: two extra *writes* (`= 0.0` resets at 878 and 3080) push it over. Resets look like liveness and are not. | **fixed, `676fa35b0`** |
+
+**diskimager turned out to be a matched pair, and that is a new shape.** Its
+`scroll_offset` was written by the wheel and read by nobody — but its ISO 9660
+file tree read `iso_scroll_offset`, which was *written* by nobody. A dead
+writer and a dead reader, in the same app, for the same list: two halves of one
+feature that were never joined. The visible result was worse than an offset
+that does nothing, because the tree is the app's whole browse tab and could
+show a few thousand files of which the user could reach one screenful.
+
+Fixing it meant deleting both fields for a single `iso_scroll: usize`, and the
+tree gained the interaction it was already *drawn* for while it was reachable:
+`expanded` was rendered as a `v`/`>` arrow but nothing could ever change it, so
+no directory below the root's own children had ever been visible either. See
+`C-RENDERER-AND-HIT-TEST-DERIVE-THE-SAME-LAYOUT-SEPARATELY` — the same commit
+named the drive list's duplicated `64.0` row height, which the renderer and the
+hit-test each carried their own copy of.
+
+**Look for the dead-reader half too.** The sweep so far has only ever grepped
+for offsets that are written and not read. An offset that is *read and not
+written* renders a list that can never move, which looks identical to a list
+that simply fits. The grep is the mirror image: for each scroll-offset field,
+does anything outside `new()`/`Default` assign to it?
+
+That is the lesson worth carrying: **a hit count is a bad test for a dead
+field, in both directions.** What identifies one is the absence of a *read*,
+and both of these have zero. The reliable grep is for the field name in the
+crate's render functions, not a count over the crate.
+
+Their live siblings in the same two apps are fine and read correctly
+(`diskimager::sidebar_scroll` at 1576/1810, `devicemanager::tree_scroll` at
+1722/3054/3115), which is what makes the dead one easy to overlook: the app
+visibly scrolls, just not in that pane.
+
+### Left over
+
+`gui/desktop`'s touchpad-gesture, Bluetooth and window-rules panels are now
+*correct* for any offset a caller sets, but still have **no input wired to set
+one** — tracked separately as
+`C-TOUCHPAD-GESTURE-LIST-DRAWS-PAST-THE-PANEL`. The panels render from `&self`
+and cannot write a position back, so this needs settings-shell plumbing rather
+than a change in the panels.
+
+**And the larger thing this sweep walked into.** Chasing the last few offsets
+turned up *why* a scroll position can sit dead in eleven separate apps without
+anyone noticing: for most of them there is **no way to scroll at all**, because
+the app is never connected to an input source. Of the 140 app crates, 59 define
+no event handler anywhere in the crate, and `podcast` — three of this sweep's instances —
+is one of them. Its `scroll_episode_list_by` is correct, tested, and called
+only by tests. The same is true of `defrag`, `diskanalyzer`, `netmanager`,
+`taskscheduler`, `vpnmanager` and `tmux`: this sweep gave each of them a
+working viewport that no user can currently reach. (`kanban`, `netscan`,
+`radio` and `settings` do have handlers, so their fixes are reachable the
+moment an app is hosted at all.) That is tracked as
+`C-NO-APP-IS-WIRED-TO-AN-EVENT-LOOP` below, and it is the reason the fixes here
+were still worth making — the viewport logic is the part that is hard to get
+right and easy to test, and it is now right and tested in all of them.
+
+---
+
+## `C-SCROLL-DELTA-UNITS-ARE-DOCUMENTED-WRONG`
+
+**In short:** when you turn the mouse wheel one notch, the number the system
+hands the app is **1**. But the comment on that number says it is a distance in
+*pixels*, so about half the apps multiply it by 20 or 40 to turn "pixels" into
+something useful, and the other half ignore its size and just move three rows.
+The result is that one notch of the same wheel scrolls a different amount in
+every app — and in the text editor it scrolls **nothing at all**, ever.
+
+**Where:** the declaration is `gui/toolkit/src/event.rs:75` —
+
+```rust
+/// Scroll wheel (dx, dy in pixels).
+Scroll { dx: f32, dy: f32 },
+```
+
+— and the only thing in the tree that actually produces one is
+`gui/compositor/src/present/host.rs:320`, `wheel_delta()`, which returns
+`raw / WHEEL_DELTA` where `WHEEL_DELTA` is 120. That is **notches**: exactly
+`1.0` per detent, and a fraction of one for a high-resolution trackpad. The
+doc comment is simply wrong, and has been since it was written.
+
+**What each consumer currently does with one notch (`dy == 1.0`):**
+
+| Interpretation | Apps | One notch moves |
+|---|---|---|
+| `dy * 40.0` | spreadsheet | 40 px |
+| `dy * 20.0` | benchmark, devicemanager, diskimager, sysinfo | 20 px |
+| `dy * SCROLL_SPEED` | filediff | one `SCROLL_SPEED` |
+| `dy` raw | emojipicker, remotedesktop | **1 px** — visually nothing |
+| `dy / line_height * 3.0` | editor | **0 lines — the wheel is dead** (see below) |
+| sign only, 3 rows | procexplorer, sysmonitor, terminal, settings | 3 rows |
+| sign only, 1 row/step | netscan, imageviewer | 1 row / one zoom step |
+
+The editor case is the worst and is worth stating exactly, because it is a
+plain user-visible bug rather than an inconsistency:
+`apps/editor/src/input.rs:579` computes
+`let lines = (dy / self.line_height * SCROLL_LINES_PER_NOTCH) as i64;` with
+`line_height = 21.0` and `SCROLL_LINES_PER_NOTCH = 3.0`. One notch gives
+`1.0 / 21.0 * 3.0 = 0.143`, which `as i64` truncates to `0`, and the next line
+is `if lines == 0 { return EditorResponse::Idle; }`. **You would need to turn
+the wheel seven notches in one event to move a single line.** This code is the
+only consumer that reads the doc comment literally, which is what makes it the
+proof that the doc comment is the defect.
+
+**The proper fix**, in this order:
+
+1. ~~Correct the declaration in `event.rs` to say notches~~ — **done**
+   (`c41dac699`). The producer was already right, so nothing in the
+   compositor changed.
+2. ~~Give the toolkit one shared converter~~ — **done**: `gui/toolkit/src/wheel.rs`,
+   `wheel::Accumulator::rows()` for row-based views and `wheel::pixels()` for
+   continuous ones, at `ROWS_PER_NOTCH = 3.0`.
+
+   It went in its own module rather than into `scroll_window` as planned
+   above, because it is **stateful and `scroll_window` is deliberately not**.
+   Point 4 forces that: a converter that rounds each event on its own throws
+   a trackpad's `0.1`s away and the view never moves — the editor's bug in a
+   different disguise — so it has to bank the remainder in a `residue` field.
+   `scroll_window`'s whole contract is that it is a pure function callable
+   from `render(&self)`; giving it state would have broken that for every
+   existing caller.
+3. Convert the twelve consumers. **In progress:**
+
+   | Consumer | Status |
+   |---|---|
+   | editor | done, `453bc70b4` — the dead wheel now moves 3 lines a notch |
+   | emojipicker | done, `6912e8f38` |
+   | remotedesktop | done, `ffd9d7b25` |
+   | diskimager | done, `344301f1c` |
+   | devicemanager | done, `676fa35b0` — sidebar in rows, properties panel in pixels |
+   | sysinfo | done, `ffe8dad25` — both panes in rows; see the note below |
+   | benchmark | done, `0bc50c220` — pixels, bounded by a `content_bottom`-measured `max_scroll()`; see the note below |
+   | spreadsheet (`* 40.0`) | to do |
+   | filediff (`* SCROLL_SPEED`) | to do |
+   | procexplorer, sysmonitor, terminal, settings, netscan (sign only) | to do — correct in effect, but they should stop open-coding it and pick up trackpad support |
+   | musicplayer, partmanager, credmanager | not yet examined |
+
+4. ~~Accumulate the fraction across events rather than truncating each one~~ —
+   done, and pinned by `a_trackpads_fractions_add_up_instead_of_vanishing`
+   (ten `-0.1` events must total three rows) and by a 500-event drift test.
+
+**A note for the remaining conversions, learned from the three done so far:**
+every one of these apps already had a passing scroll test, and not one of them
+could have failed. They were written in the units of the bug — a `dy` of
+`-30.0` or `-10.0`, a pixel distance sized so the broken arithmetic would
+produce a visible number — and then asserted something like `offset >= 0.0` or
+`> 0.0`, which is equally true of an offset that never moved. Two further
+traps, both of which bit:
+
+- **Check the fixture can actually scroll.** emojipicker's grid cannot
+  overflow its panel in *any* category tab (82 emoji over eight categories,
+  the largest filling 160px of a 320px panel), and remotedesktop's sample
+  history is seven rows against a pane that fits eleven. A scroll test on
+  either asserts nothing. Both now assert `max_scroll() > 0` in the fixture
+  itself, so it cannot silently degrade.
+- **Assert a row, not a non-zero number.** `> 0.0` passes under a
+  one-pixel-per-notch defect. The assertion has to be `>= row_height`.
+
+**A third trap, from sysinfo (`ffe8dad25`): the wheel is rarely the only thing
+wrong with the pane.** The grep that finds `dy * 20.0` finds one line; the
+conversion turned up five more defects in the same two panes, none of which
+the wheel fix would have addressed and none of which had a test:
+
+| Also wrong | Symptom |
+|---|---|
+| neither offset was bounded at the far end | scrolling past the last row kept the number climbing while the list stood still, and the same distance had to be scrolled back before anything moved |
+| the click and the hover each derived "which row is under the pointer" separately, and **neither subtracted the scroll offset** | after scrolling, clicking a row selected a different one, and the highlight followed the click rather than the pointer |
+| the hit test was not ranged to the pane | empty space below a short list hit-tested as a row |
+| PageDown had no bound, and stepped a fixed row count rather than the screenful showing | paging past the end ran up the same invisible debt as the wheel |
+| keyboard navigation never touched the scroll offset | arrowing past the last drawn row selected a category off screen, and the wheel was the only thing that could reveal which |
+| the row stripes were keyed on the screen slot, not the row index | the whole table's colouring inverted whenever it scrolled by an odd number of rows |
+
+The pattern to carry into the remaining conversions: **a pane whose wheel was
+wrong is a pane nobody has driven.** Budget for auditing the whole pane — its
+bounds, its hit test, its keyboard paths and its renderer — not just the line
+the grep found. Four of the six above were found by *writing the tests*, not by
+reading the code.
+
+Two of them are the divergence class in
+`C-RENDERER-AND-HIT-TEST-DERIVE-THE-SAME-LAYOUT-SEPARATELY` below: sysinfo
+recomputed the pane rectangle and the property table's top edge from the same
+four constants at the renderer, the click handler *and* the hover handler.
+They are derived once now (`pane_top`/`property_rows_top`), with a
+`debug_assert!` in the renderer holding it to the same stack of furniture the
+scroll bound is computed from — an invariant a comment cannot enforce.
+
+**And a trap in the tests themselves.** The helper that read back "which rows
+did the renderer draw" filtered fill-rects by the row-stripe colour, and
+`COLOR_ROW_EVEN` happens to be the same RGB as `COLOR_SURFACE0`, the pane's
+own background — so it reported one row more than the table drew and made two
+*correct* page-step assertions fail by one. A test helper filtered on the
+wrong property is as wrong as the code it is checking, and it fails in the
+direction that wastes the most time: it accuses the fix.
+
+`scripts/reintro-sysinfo.py` puts each of the nine defects back one at a time
+and checks a test fails. That check is what turns "57 tests pass" into
+evidence; it found nothing missing here, but only because it was written after
+the tests rather than instead of them.
+
+**A fourth trap, from benchmark (`0bc50c220`): a pixel view needs no
+accumulator, and it needs a renderer that takes the offset as an argument.**
+
+benchmark was the last `* 20.0` consumer and the first one converted to
+`wheel::pixels` where the reasoning was not obvious, so both halves are worth
+writing down.
+
+*No accumulator.* The first draft gave it a `wheel::Accumulator` beside the
+`wheel::pixels` call, on autopilot from the five row-based conversions before
+it. That is cargo cult. An accumulator exists to bank the fraction of a notch
+that would otherwise be rounded away *because a row index cannot hold it* — a
+`usize` has nowhere to put 0.2 of a row. A pixel offset is an `f32` and is
+already continuous: 0.2 of a notch is 14.4 px of real movement, applied
+immediately. Rule: **an accumulator belongs to an integer offset, and only to
+an integer offset.**
+
+*The renderer has to take the scroll offset as a parameter.* The far-end bound
+here cannot be a row count — a tab is cards, bar charts, a variable number of
+sub-test rows and an optional trend graph — so `max_scroll()` measures it with
+`guitk::render::content_bottom`, by rendering the tab into a scratch tree and
+asking where the drawing stopped. That only works if the renderer can be asked
+to draw at offset *zero*. A renderer that reads `self.scroll_y` can only ever
+answer "how tall is it **from here**", which is the question whose answer you
+are trying to bound; reintroducing exactly that (`render_active_tab(&mut
+scratch, self.scroll_y)`) makes the offset converge on half the true limit and
+is caught by three tests. Hence `render_active_tab(&self, tree, scroll: f32)`
+and `render_content` passing `self.scroll_y` in at the one call site that
+should.
+
+*And the pane audit paid again.* Same lesson as sysinfo: the grep found one
+line, the pane had eleven defects. The History tab's click handler skipped the
+tab title (30 px) before dividing by the row height but not the summary line
+or the column header (50 px more), so a click selected the row **two below**
+the one under the pointer; it never checked the click was inside the content
+rectangle, so the button strip below the pane selected whichever row the
+arithmetic landed on; `Home` was the only scroll key, so there was no keyboard
+route past the fold at all; and switching tabs kept the previous tab's offset,
+opening the new one part-way down its own content. All eleven are put back one
+at a time by `scripts/reintro-benchmark.py`, each caught by a named test.
+
+*A note on that script:* it originally reported four defects as pinned by
+"(build/other failure)" — no named test — which is not evidence of anything,
+since a revert that fails to compile says nothing about the suite. (The real
+cause was the machine's C: drive filling up mid-run.) Both reintroduction
+scripts now fall back to printing the compiler's own `error` lines when a red
+run names no test, so "it failed" and "it did not build" can be told apart.
+
+**Until it is fixed:** two code comments (`apps/netscan/src/main.rs:2541` and
+`apps/settings/src/main.rs:3228`) already point here to explain why they use
+only the sign of `dy`. New scroll handlers should use `guitk::wheel` rather
+than inventing another pixel constant.
+
+---
+
+## `C-RENDERER-AND-HIT-TEST-DERIVE-THE-SAME-LAYOUT-SEPARATELY`
+
+**In short:** in an app where the list on screen is not a plain run of
+equal-height rows — say it has group headings in it, or the order it is drawn
+in is not the order it is stored in — the code that *draws* the list and the
+code that works out *what you clicked on* are usually two separate pieces of
+arithmetic that were written to agree and do not. You click one row and a
+different row lights up. Found and fixed in remotedesktop and diskimager; the
+sweep for it is not finished.
+
+**The instance found (`apps/remotedesktop`, fixed in `ffd9d7b25`):** the
+connections sidebar draws a 22px heading for each group followed by the 52px
+profile rows in that group, with the groups sorted alphabetically. The
+hit-test was
+
+```rust
+let idx = (y / SIDEBAR_ITEM_HEIGHT) as usize;   // 52.0
+if idx < self.profiles.len() { self.selected_profile = Some(idx); }
+```
+
+which is wrong in two independent ways at once, and both matter:
+
+1. **It does not know the headings are there.** They occupy 22px each, so
+   every row below the first heading is offset by a multiple of 22 that the
+   division never accounts for.
+2. **It indexes the wrong sequence.** The sidebar is ordered by sorted group;
+   `profiles` is in insertion order. Even with uniform row heights those are
+   different lists.
+
+On the shipped sample data — `[Dev/Development, Prod/Production,
+Build/Development, Staging/Staging]` — a click on "Build Machine" selected
+"Production DB", a different profile in a different group.
+
+**The fix that generalises:** make the layout a *value* that both sides read,
+rather than a calculation each side performs. remotedesktop now has
+
+```rust
+pub enum SidebarRow { Header(String), Profile(usize) }
+pub fn sidebar_rows(&self) -> Vec<SidebarRow>   // the layout, in draw order
+```
+
+and the renderer and the hit-test both walk it. They cannot disagree, because
+there is nothing left for them to disagree about. The same shape handles
+scrolling for free: `scroll_window::visible_variable` takes the row heights,
+so the hit-test walks the rows *starting at the scroll offset* and is
+automatically right for a scrolled list too — which the old code also got
+wrong.
+
+Two behaviours fall out of the change and are worth keeping deliberately:
+a click on a heading now selects **nothing** rather than sliding to whichever
+row is adjacent, and a click below the last row selects nothing rather than
+being clamped onto the last row.
+
+**Where to look for more of it.** The signature is a divide-by-a-row-height in
+a click handler:
+
+```bash
+grep -rn "as usize" --include=main.rs apps/ | grep -i "y /\|_y /"
+```
+
+Any hit that lands in a list which (a) interleaves headings or separators,
+(b) is drawn in a different order from the collection it indexes, (c) has
+variable-height rows, or (d) can be scrolled while the hit-test ignores the
+offset, is the same bug. Case (d) is the easiest to check and probably the
+most common, since the dead-scroll-offset sweep found so many lists whose
+offset nothing read.
+
+**A note on why this survived:** remotedesktop had 100 passing tests and none
+of them clicked a profile. Render tests assert the *picture* is right and
+event tests assert the *state machine* is right; nothing asserted the two
+agree about geometry. The regression test that now covers it pins the exact
+pixel layout in a doc comment and then clicks four y-coordinates.
+
+**A second instance (`apps/diskimager`, fixed in `344301f1c`)** — the milder
+form, and the one that shows the class is not confined to lists with headings
+in them. The drive sidebar's 64px row height was written out as a bare `64.0`
+in the renderer *and* as a bare `64.0` in the hit-test, and the two happened to
+agree. The bug they were one edit away from was already half-present: the
+hit-test added the scroll offset as **pixels before dividing**, which is case
+(d) above, so any list scrolled to a position that was not a whole multiple of
+64 selected the row above or below the one drawn under the pointer. The browse
+tab's ISO file tree was worse — it had no hit-test at all, so the panel's stack
+of furniture heights (`28`, `90`, `22`, `20`) existed in exactly one place and
+there was nothing for a click to disagree with, because nothing could be
+clicked.
+
+**A test that catches this class without knowing the layout.** Rather than
+pinning pixel coordinates (which remotedesktop's test does, and which has to be
+rewritten whenever the design changes), diskimager compares the two derivations
+against each other: render the app, find the list's `PushClip` command, and
+assert its rectangle equals the one the hit-test measures.
+
+```rust
+let want_y = app.content_top() + app.iso_list_offset();
+let want_h = app.iso_list_height();
+assert!(rt.commands.iter().any(|c| matches!(c,
+    RenderCommand::PushClip { y, height, .. }
+        if (y - want_y).abs() < 0.5 && (height - want_h).abs() < 0.5)));
+```
+
+That fails the moment the drawn list and the clickable list describe different
+rectangles, whatever the reason, and it needs no updating when the numbers
+change. It is worth adding to every app with a clipped, clickable list.
+
+**And the companion check, per list rather than per field:** does the draw loop
+consult a scroll offset at all? `a_scrolled_file_tree_draws_the_rows_the_offset_selects`
+scrolls, renders, and asserts the *first row drawn* is the one at the offset
+and that the loop stops at the bottom of the pane. A renderer that ignores its
+offset passes every render test ever written for it, because the picture it
+draws is a perfectly valid picture of the top of the list.
+
+**A third instance (`apps/devicemanager`, fixed in `676fa35b0`)** — three
+derivations, not two, and the reason it matters is that they *agreed*.
+
+The sidebar's rule for which tree nodes are on screen (a node is drawn if it is
+`visible`, and, if it is a child, if its category is expanded) existed in the
+renderer's forward walk, in `tree_hit_test`'s own loop, and a third time in
+`is_node_visible` as a **backwards scan** — walk up from the node looking for a
+depth-0 parent, and ask whether that parent is expanded. The backwards scan
+never consults the parent's own `visible` flag, so it and the forward walk
+disagree about a device whose category the search filter has hidden.
+
+That state is unreachable today, but only because of an invariant kept in a
+*fourth* function: `apply_search_filter` marks a category invisible exactly when
+it has hidden all of that category's devices. Nothing ties the three walkers to
+that function. Making a category match on its own name — an obvious
+improvement, and one a future session would make without ever reading
+`is_node_visible` — breaks the invariant and the arrow keys start selecting rows
+that are not on screen.
+
+**So: an invariant maintained somewhere else is not a reason for two
+derivations to be allowed to exist.** It is a reason the bug has not fired yet.
+All three now call `visible_tree_indices()`, and the regression test
+(`is_node_visible_agrees_even_where_the_filters_invariant_does_not_hold`)
+hand-builds the state the filter cannot currently produce, because a test that
+only exercises reachable states cannot pin a rule about unreachable ones.
+
+Worth noting how this was caught: not by the 133 passing tests, but by
+deliberately reintroducing each of five defects one at a time and checking a
+test failed. Four fired. The fifth — reverting `is_node_visible` to the
+backwards scan — fired **nothing**, which is what exposed that the divergence
+was latent rather than live, and that the doc comment claiming otherwise was
+overstated.
+
+### Measuring a panel that is not a list of rows
+
+devicemanager's properties panel could not be given a scroll bound at all,
+because its height depends on which tab is open, how many properties the
+selected device has, whether a driver badge is present, and how many separators
+that adds up to. There is no row count to multiply.
+
+The obvious answer — a `measure_general_tab` beside `render_general_tab`, and so
+on — is this whole issue in another costume: two derivations of one layout,
+written to agree, drifting the first time someone adds a line to one of them.
+
+The answer that cannot drift is `guitk::render::content_bottom` (added in
+`44c3f6578`): render the panel into a throwaway `Vec<RenderCommand>` and measure
+*that*. It is not a second derivation, it is the first one's output, so there is
+nothing for it to disagree with. Three details in it are worth keeping in mind
+if it is reused:
+
+- It **ignores `PushClip` on purpose.** Honouring the clip returns the clip
+  height every time, which is exactly the useless answer — the reason to measure
+  is to find the content the clip is hiding.
+- `RenderCommand::Text.y` is the **top** edge, not the baseline (the compositor
+  adds the ascent at `gui/compositor/src/lib.rs:2764`), so a text bottom is
+  `y + line_height`, and the line height depends on the font family in force —
+  which means `PushFont` has to be tracked.
+- A `Line`'s bottom includes half its stroke width and a `BoxShadow`'s includes
+  its offset, blur and spread; a measurement that used the box alone would let a
+  shadow hang off the end of the scroll range.
+
+This is the tool for the remaining free-form panels, starting with
+`C-KANBAN-CARD-DETAIL-PANEL-HAS-A-DEAD-SCROLL-OFFSET`.
+
+---
+
+## `C-NO-APP-IS-WIRED-TO-AN-EVENT-LOOP`
+
+**In short:** none of the 140 apps in `apps/` can be used. Each one builds its
+picture correctly and has tests proving the picture is right, but no app is
+connected to the thing that delivers mouse clicks and keystrokes, so `fn main()`
+draws a single frame and exits. Nothing is broken *inside* the apps — the
+missing piece is the wiring between an app and the compositor (the program that
+owns the screen and the input devices).
+
+**The evidence**, from a survey of all 140 crates under `apps/` (every `.rs`
+file in each, not just `main.rs`):
+
+- **59 of 140 define no event handler anywhere in the crate** — no
+  `handle_event`, `handle_mouse` or `handle_key` in any of its `.rs` files.
+  Among them: podcast, defrag, diskanalyzer, netmanager, taskscheduler,
+  vpnmanager, tmux, explorer, notes, calendar, contacts, email.
+- **60 have a stub `fn main()`** of the form `let _app = FooApp::new();` — it
+  constructs the app and immediately drops it.
+- The rest render one frame and print about it. `apps/settings/src/main.rs`
+  says so outright: `// In a real Slate OS environment, this would enter the
+  compositor event loop. // For now, render one frame to verify the UI builds
+  correctly.`
+- There is **no `trait App`** in `gui/toolkit` — nothing defines what an app
+  must provide in order to be hosted. Each app invented its own handler
+  signature by convention, which is why three different names for the same
+  method exist across the tree.
+
+**Why this has stayed invisible:** the apps' tests call `render()` and
+`handle_event()` directly, so they pass and prove real things about the
+drawing and the state machine. What no test can currently assert is that
+anything ever *calls* those methods outside a test. That is also the root
+cause of the whole dead-scroll-offset class above: a scroll offset can sit
+unwritten for as long as you like when there is no input path that would have
+written it.
+
+**The proper fix:** define the app-side contract once in the toolkit — a trait
+with `render(&self) -> RenderTree` and `handle_event(&mut self, &Event) ->
+EventResult`, which is the shape most apps already have — and a `run()` that
+connects it to the compositor client protocol already present in
+`gui/compositor/src/lib.rs` (`ClientMouseKind` at line 2066 is the app-facing
+half and already exists). Then convert apps to it. That is a large but
+extremely mechanical change, and it wants to be done *before* many more apps
+are written, since every app added meanwhile is another one to convert.
+
+**What it costs while unfixed:** nothing regresses, because nothing runs; but
+every UI behaviour in `apps/` is unverified against a real user, and each new
+app adds more unexercised surface. Related: the crate-wide
+`#![allow(dead_code)]` entry below, which is a direct symptom.
+
+---
+
+## `C-CRATE-WIDE-ALLOW-DEAD-CODE-HIDES-UNREACHABLE-UI`
+
+**In short:** many app crates start with a line that switches off the compiler's
+"you wrote this and never used it" warning for the whole file. That warning is
+the single most useful signal for finding a feature that was built and never
+connected — it is exactly what would have flagged the dead scroll offsets — and
+these crates have it turned off everywhere rather than at the few places that
+need it.
+
+**Where:** `#![allow(dead_code)]` at the top of, among others,
+`apps/radio/src/main.rs:1` and `apps/netscan/src/main.rs:22`. netscan's is why
+`sidebar_scroll` and `topology_zoom` sat dead without a warning; radio's is why
+`genre_scroll` did.
+
+**Why it cannot simply be deleted, which is the interesting part.** Removing
+radio's produces **31 warnings**, and every one of them is downstream of a
+single fact: `fn main()` is `let _app = RadioApp::new();`, so `render()` is
+never called outside tests, so everything `render()` uses is dead too. The
+allow is not hiding sloppiness; it is hiding
+`C-NO-APP-IS-WIRED-TO-AN-EVENT-LOOP`. Deleting the allow today would bury the
+one or two real findings under 30 false ones.
+
+**The proper fix** is therefore ordered: wire the apps to an event loop first;
+then the allows can come off, and what remains warned about is genuinely
+unreachable code worth deleting. Doing it in the other order produces noise
+that gets suppressed again.
+
+**In the meantime:** do not add `#![allow(dead_code)]` to a *new* crate, and
+when a specific item is legitimately unused, allow it on that item rather than
+on the crate.
+
+---
+
+## `C-THREE-SETTINGS-DROPDOWNS-HAVE-NO-OPENER` — **fixed**
+
+**Fixed** by collapsing every Settings page into a single description walked by
+two interpreters, so the row drawn at a given position *is* the row clicked
+there. See `design-decisions.md` §475. The three dropdowns turned out to be a
+symptom rather than three omissions: the same duplication had also left every
+per-app permission switch outside the Location list inert, and all five
+pointer-size buttons on the Interaction page. `DropdownId::ALL` now exists so
+`test_every_dropdown_has_something_that_opens_it` can walk the enum, and eight
+further tests click controls at the coordinates the page itself reports. A
+one-row drift injected into the hit test fails nine of them.
+
+**In short:** the Settings app draws three rows that look like the other
+dropdowns and show a current value — "Input Device", "Diagnostic data
+collection" and "Verbosity" — but clicking them does nothing. Both halves of
+each one are fully written; what is missing is the single line that opens the
+popup when the row is clicked.
+
+**Where:** `apps/settings/src/main.rs`. `DropdownId` (line 793) has ten
+variants. `dropdown_layout()` has a complete arm for all ten
+(`InputDevice` at 2864, `DiagnosticLevel` at 2891, `NarratorVerbosity` at
+2939) and `apply_dropdown_selection` has a complete arm for all ten (3740,
+3752, 3767). But `show_dropdown(DropdownId::…)` has only **seven** call sites
+outside tests — Resolution, RefreshRate, Scale, OutputDevice, IpConfig,
+CursorSize, ColorFilter. The three above have none.
+
+The rows themselves *are* drawn: `render_setting_row(…, "Input Device", …)` at
+1678, `"Diagnostic data collection"` at 2345, `"Verbosity"` at 2406 with
+`self.narrator_verbosity.label()` beside it. So the user sees a control with a
+value and no way to change it.
+
+**How to confirm:** `grep -n 'show_dropdown(DropdownId::' apps/settings/src/main.rs`
+and compare the variants found against the ten in the enum.
+
+**The proper fix:** add the hit-test and `show_dropdown` call for each of the
+three, next to the row that draws it, exactly as the seven working ones do.
+Small and self-contained. Worth doing together with a test that asserts every
+`DropdownId` variant has an opener, so an eleventh dropdown cannot be added
+half-wired — the enum is the list to iterate, which makes that test cheap and
+exhaustive.
+
+---
+
+## `C-KANBAN-CARD-DETAIL-PANEL-HAS-A-DEAD-SCROLL-OFFSET` — **fixed, `90a1de9b0`**
+
+**In short:** the sixteenth instance of the dead-scroll-offset class above, left
+unfixed because it is a different shape and the fix is not the same one. The
+kanban card-detail panel has a scroll position that nothing reads, so a card
+with a long description, a long checklist and several comments draws past the
+bottom of the panel with no way to reach the rest.
+
+**Fixed, but not the way this entry predicted** — see "What the fix actually
+turned out to be" at the end.
+
+**Where:** `apps/kanban/src/main.rs` — `detail_scroll: f32` declared at line
+918, initialised at 952, and mentioned nowhere else (the two-hit grep
+signature). The panel is `render_card_detail` at line 1860.
+
+**Why it was not fixed with the others.** The fifteen fixed above are all
+**row lists**: uniform-height rows, so "which rows fit" is a division, and
+`scroll_window::visible` answers it. The card detail panel is free-flowing
+content — a wrapped description, then a checklist, then a comment thread —
+where each item's height depends on its text. `scroll_window::visible_variable`
+exists for that (kanban's own board columns use it), but it needs a measured
+height per item, and the detail panel currently computes its heights *while*
+drawing rather than up front. Doing this properly means the same split kanban
+already made for cards: a `detail_item_height()` that measures, used by both
+the layout pass and the renderer, so the two cannot disagree.
+
+**The proper fix:** measure the panel's content into a `Vec<f32>` of item
+heights the way `card_height` already does for the board, window it with
+`scroll_window::visible_variable`, make `detail_scroll` a `usize` item index
+(not an `f32` — the panel scrolls by whole items), and reserve the "N more"
+footer unconditionally per design-decisions.md §470. kanban does have an event
+handler, so unlike several of the fifteen this fix would be reachable as soon
+as apps are hosted at all — see `C-NO-APP-IS-WIRED-TO-AN-EVENT-LOOP`.
+
+### What the fix actually turned out to be
+
+The proposal above was wrong in its central choice, and the reason is worth
+keeping, because the same choice comes up for every free-form panel.
+
+**It was worse than described.** The panel had no `PushClip` either, so the
+overflow was not merely unreachable — it was *drawn over the desktop*, below the
+modal it was supposed to be inside. The dead-offset grep finds the missing
+scroll; it says nothing about a missing clip, and the two travel together
+because a panel nobody could scroll is a panel nobody looked at.
+
+**`detail_scroll` stayed an `f32`.** The proposal wanted a `usize` item index on
+the grounds that "the panel scrolls by whole items". It does not, and cannot: an
+item here is a whole comment thread entry or a wrapped description, several
+hundred pixels tall. Snapping to those would mean one keypress jumping most of a
+screen, and a description taller than the modal would have no reachable middle
+at all — there is no index that names a position part way down one item. An
+index is right for kanban's *board columns*, whose items are cards of a bounded
+height; it is wrong here. **The unit follows the item size, not the container.**
+
+**The `Vec<f32>` of measured heights was not needed, and building it would have
+been the mistake.** A `detail_item_height()` used by "both the layout pass and
+the renderer" is exactly two derivations of one layout — the thing
+`C-RENDERER-AND-HIT-TEST-DERIVE-THE-SAME-LAYOUT-SEPARATELY` is about. They agree
+the day they are written and drift the first time someone adds a line to one.
+What the panel actually needed was `guitk::render::content_bottom`: render the
+body into a `RenderTree` that is thrown away, and measure *that*. It is the
+first derivation's output, so there is nothing for it to disagree with, and it
+needs no per-item bookkeeping at all.
+
+**Generalisation:** a panel whose content is a list of same-shaped rows wants
+`scroll_window` and an index. A panel whose content is *prose and furniture*
+wants pixels and `content_bottom`. Reaching for the row machinery because the
+last fifteen fixes used it is how a free-form panel ends up with an item index
+it cannot honour.
+
+---
+
+## `C-TMUX-PANES-NEVER-RESIZE-THEIR-GRID` (lane C) — ✅ **FIXED 2026-08-20**
+
+**In short:** every tmux pane's terminal grid is a fixed 80x24 no matter how
+big or small the pane is drawn. Splitting a window four ways does not tell the
+four terminals they are now a quarter the size, so a program running in one
+still wraps its output at 80 columns and still thinks it has 24 rows.
+
+`TerminalBuffer::resize(cols, rows)` exists and is correct, but **its only
+callers are tests**. `Multiplexer::resize_pane` adjusts the *layout*
+proportions; nothing converts a pane's pixel rectangle into a cell count and
+pushes it into the buffer.
+
+**Where:** `apps/tmux/src/main.rs` — `TerminalBuffer::resize` (~line 223),
+`Multiplexer::resize_pane` (~line 1600), and the layout walk in
+`Multiplexer::render` that computes each pane's `(x, y, w, h)` bounds.
+
+**The proper fix:** the layout pass has the rectangles and the cell metrics
+(`char_width()`, `char_height()`), so it can compute `(cols, rows)` per pane.
+It runs inside `render(&self)`, which cannot write, so the resize belongs in a
+`&mut self` pass that runs before rendering — a `relayout()` called when the
+window size or the split layout changes, driving `TerminalBuffer::resize`. In a
+real terminal this would also be where `TIOCSWINSZ`/`SIGWINCH` equivalents go
+out to the child process.
+
+**What it currently costs, beyond the wrapping:** the scrollback clamp
+(`Pane::max_scroll_back`) measures against `buffer.rows` because key handling
+runs nowhere near layout and cannot know the drawn height. The two agree
+whenever the grid matches the pane — the state this issue is about restoring —
+and while they do not, a pane drawn *shorter* than its grid stops that many
+lines short of the very top of its scrollback. Fixing the resize fixes that
+clamp for free.
+
+### Fixed 2026-08-20
+
+Fixed as described above, but with the emphasis on making the fault
+*unrepresentable* rather than merely absent — this is the third instance in
+this lane of the same family (a renderer and some other consumer each spelling
+out the same layout arithmetic, then disagreeing), after
+`design-decisions.md` §475 and §476. See §477 for the reasoning.
+
+Two things now exist exactly once and are read by both the paint and the
+sizing pass:
+
+- **`pane_grid(width, height) -> (cols, rows)`** — the only conversion from a
+  pane's pixel rectangle to a cell count. `render_pane` asks it instead of
+  recomputing `(height - 4.0) / cell_h`, so what is drawn and what was
+  written into are the same grid.
+- **`Window::bounds()`** — the only layout walk. `Multiplexer::render` paints
+  those rectangles and `Multiplexer::relayout` converts them into cell counts.
+
+`relayout()` is a new `&mut self` pass that pushes each pane's grid into
+`TerminalBuffer::resize` — which until now had no callers outside the tests.
+It runs from the nine mutations that can change a pane's rectangle (`new`,
+`new_session`, `attach`, `kill_session`, `new_window`, `split_pane`,
+`close_pane`, `resize_pane`, `apply_layout`) **and** from `render` as a
+backstop. Both, deliberately: the per-mutation calls are what make key
+handling *between* two frames — which reads `Pane::max_scroll_back` and
+`Pane::page_lines` — see a current grid, and the render-time call is what
+makes a future mutation that forgets to say so cost a frame's lag instead of
+a terminal that wraps in the wrong place until the next split. It is
+idempotent, so having both costs nothing.
+
+The scrollback clamp noted above is fixed for free, as predicted: the buffer's
+row count now *is* the pane's drawn height.
+
+Nine new tests (102 green, clippy unchanged at its 28 pre-existing warnings).
+Mutation-tested with twelve mutations — every one is caught. Two were **not**,
+on the first run, and both failures were instructive:
+
+- *Dropping the content inset* changed no column count at 1200x800, because
+  4 px is less than one 8.4 px cell. Caught now by
+  `a_grid_always_fits_inside_the_pane_that_holds_it`, which sweeps pane sizes
+  in 0.5 px steps rather than checking one live layout.
+- *Starting the layout walk at `y = 0.0` instead of `TAB_BAR_HEIGHT`* was
+  invisible because both existing checks asked `Window::bounds` where the
+  panes were — the very function being mutated. Caught now by
+  `no_cell_is_drawn_over_the_chrome`, whose bounds come from the layout
+  constants directly. That test also catches dropping `STATUS_BAR_HEIGHT` and
+  overrunning `WINDOW_WIDTH`.
+
+The general lesson, which keeps recurring: **a test that derives its
+expectation from the code under test proves only self-consistency.**
+
 ## TD-SPLIT-GNU-HEX-SUFFIX-START-READS-OUT-OF-BOUNDS (lane B, 2026-08-18) — **upstream bug; ours diverges on purpose**
 
 **In short:** `split --hex-suffixes=FROM` is supposed to start naming its output
@@ -42618,3 +43474,2593 @@ half-changing it would have been worse than leaving it.
 **What makes the fix trustworthy** is `userspace/coreutils/tests/human_gnu.rs`:
 36121 renderings measured from GNU across three instruments, all matching. See
 `design-decisions.md` §338 for the fixture's construction and its limits.
+
+## TD-A-FULL-PAGE-FILE-MAKES-RUSTC-REPORT-A-SOURCE-ERROR (lane C, 2026-08-20)
+
+**Not a code defect. Read this before debugging a build failure that says a
+core prelude item does not exist.**
+
+A `cargo test --workspace --target x86_64-pc-windows-gnu` run produced this,
+and nothing else that looked like a cause:
+
+```
+error[E0425]: cannot find type `Option` in this scope
+  --> userspace\charwidth\src\lib.rs:33:31
+help: consider importing this enum
+   |
+26 + use std::option::Option;
+error: requires `Range` lang_item
+error: could not compile `charwidth` (lib) due to 7 previous errors
+```
+
+`charwidth` is an ordinary `std` crate with no `#![no_std]` and no
+`#![no_core]`, and it compiles on its own. The real cause is eight lines
+higher in the log, repeated eight times:
+
+```
+process didn't exit successfully: `…rustc.exe --crate-name memchr …` (exit code: 0xc000012d)
+error: only metadata stub found for `dylib` dependency `std` please provide path to the corresponding .rmeta file with full metadata
+error: cannot resolve a prelude import
+```
+
+`0xC000012D` is `STATUS_COMMITMENT_LIMIT`: Windows refused a commit because
+the page file could not grow. It killed eight parallel `rustc` processes —
+among them stock registry crates (`memchr`, `embed-manifest`) that have never
+failed to compile. One of the casualties was killed while writing metadata, so
+the next `rustc` to open `libstd`'s rmeta found a **truncated stub**, could not
+resolve the prelude, and reported the only thing it could see: that `Option` is
+undefined in the first file that used it. The named crate is arbitrary — it is
+whichever crate happened to compile next, not the crate at fault.
+
+The trigger was the C: volume reaching **0 bytes free** earlier in the session
+(it was back to 235 GB by the time this was diagnosed). The page file lives on
+C: and cannot expand into a full volume, so every commit past the current
+limit fails. Nothing in the repository caused it and nothing in the repository
+can prevent it.
+
+**How to recognise it:** a compile error naming a prelude item (`Option`,
+`Some`, `None`, `Result`, `Box`) or a lang item (`requires \`Range\`
+lang_item`) in a crate that plainly uses `std`. Grep the log for `0xc000012d`
+and `only metadata stub found` before reading a single line of the accused
+source. The accused source is fine.
+
+**How to recover:** free space on C:, then re-run. The corrupted artifacts are
+in the target directory; cargo re-runs the failed units, so a plain re-run is
+enough — a `cargo clean` is not needed and costs a full rebuild. Lowering
+parallelism (`cargo test -j 6`) reduces peak commit and makes a repeat less
+likely on a machine that is near the limit.
+
+**Why this is filed rather than fixed:** the whole-workspace gate that
+`CLAUDE.md` requires before a merge ("All existing tests pass — `cargo test
+--workspace`") is exactly the command with the highest peak memory in the
+project, so it is the one that will hit this first. There is no repository-side
+fix; the value here is the five minutes a future session will otherwise spend
+looking for a `#![no_std]` that is not there.
+
+## C-SPREADSHEET-SCROLLBARS-ARE-DRAWN-BUT-NOT-DRAGGABLE (lane C, 2026-08-20)
+
+**Status:** open — dead control, not a wrong one.
+
+`apps/spreadsheet/src/main.rs` draws a vertical and a horizontal scrollbar
+(`render_scrollbars`, the `scroll_ratio` computations near the end of the
+render path). Both track the offset correctly, so they always *show* the right
+thing. Neither is wired to the mouse: `handle_left_click` tests for sheet tabs,
+column/row resize handles, the autofill handle and then the grid, and returns
+`Ignored` for a click anywhere in the scrollbar gutter. There is no thumb-drag
+state and no `MouseEventKind::Move` arm for one.
+
+So the grid can be moved by the wheel, by the arrow keys, by Page Up/Down and
+by anything that calls `ensure_cell_visible` — but not by the control that
+exists to move it, which is the first thing a user will reach for.
+
+**The fix** is a drag mode alongside the existing `InteractionMode::ColResize`
+/ `RowResize`: press in the gutter jumps a page in that direction, press on the
+thumb records the grab offset, move maps the pointer back through the same
+`scroll_ratio` the renderer used, and release ends it. The mapping must be the
+renderer's own ratio rather than a second derivation of it — that is exactly
+the divergence the layout law (`col_screen_x`/`row_screen_y`) was introduced to
+end, and a scrollbar with its own idea of the offset would reintroduce it in a
+new place. Note `scroll_by` already screens non-finite input, which a drag
+needs because the ratio divides by a content extent that can be zero.
+
+## C-SPREADSHEET-FREEZE-ACCEPTS-A-BAND-BIGGER-THAN-THE-WINDOW (lane C, 2026-08-20)
+
+**Status:** open — degrades safely, but the state is not useful.
+
+`toggle_freeze_panes` pins at the active cell with no upper bound, so selecting
+column T in a 1280 px window and freezing gives a 2000 px frozen band inside a
+~1216 px viewport. The result is safe — `push_clip_rect` clamps the resulting
+negative extent to zero and `render_row_band` returns early on a non-positive
+height, both of which are covered by
+`tests::no_clip_has_a_negative_extent` — but the sheet is then entirely frozen
+band with nothing able to scroll, and the only way out is to freeze again to
+unfreeze.
+
+Excel refuses the operation instead. **The fix** is to cap the freeze at what
+leaves a usable pane (Excel's rule is essentially "the frozen band may not fill
+the viewport"), and to say so in the status bar rather than silently pinning
+less than was asked for. Deferred because it needs a user-visible policy call
+on *which* rule — cap silently, refuse with a message, or scroll the sheet so
+the requested split fits — rather than because it is hard.
+
+## C-CREDMANAGER-SCROLLS-INTO-EMPTY-SPACE-FOREVER (lane C, 2026-08-20)
+
+**Status:** FIXED the same day, in `credmanager: give the two scroll offsets an
+end to stop at`. The three steps below were done in that order and in one
+commit; `scripts/reintro-credmanager.py` puts each of the nine resulting
+defects back and checks the suite goes red for it. The write-up is kept
+because the *shape* of the bug — a bound that could not exist because the
+state did not know the window size — is worth recognising elsewhere in
+`apps/`.
+
+**Originally:** found while converting every wheel handler in the tree to
+`guitk::wheel`; credmanager was the one app deliberately left out of that
+change because fixing it properly needs a small refactor first.
+
+`apps/credmanager/src/main.rs` holds two pixel scroll offsets, `list_scroll`
+and `detail_scroll`. Both are clamped with `.max(0.0)` and **nothing else** —
+there is no upper bound at all, so the wheel walks either pane off the end of
+its content and keeps going. Fifty notches past the last credential leaves a
+blank panel with no indication of which way is back except to scroll up an
+equal amount.
+
+The reason it has no upper bound is structural rather than an oversight:
+`AppState` does not know how big the window is. `build_render_tree(state,
+width, height)` takes the size as parameters, `render_entry_list` derives its
+own pane height from them (`let h = height - y_start;`), and `handle_event`
+does not handle `Event::Resize` at all — so at the moment the wheel is turned
+there is no size in scope from which a bound could be computed. `fn main()` is
+empty and the only callers of `build_render_tree` are the eight tests, which
+is why nobody has noticed.
+
+**The fix**, in this order and in its own commit:
+
+1. Put `width`/`height` on `AppState` and handle `Event::Resize`, as every
+   other app in `apps/` already does. `build_render_tree`'s parameters become
+   redundant and should go, so there is one answer to how big the window is
+   rather than two that can disagree.
+2. Have the renderer report the content height it actually laid out, so the
+   clamp uses the renderer's own derivation instead of a second copy of
+   `height - y_start` that will drift the first time the header changes.
+3. Only then convert both offsets to `wheel::pixels(dy, ROW_HEIGHT)` — they
+   are continuous, so `pixels` and not an `Accumulator` — clamped to
+   `(content - pane).max(0.0)`, and pin it with the same four tests the other
+   eight apps now carry: one notch is three rows, a fraction of a notch moves
+   now, the end stops at a full pane, a non-finite delta does nothing.
+
+Relevant constants already in the file: `ROW_HEIGHT = 52.0`,
+`SIDEBAR_WIDTH = 220.0`, `ENTRY_LIST_WIDTH = 320.0`, `TOOLBAR_HEIGHT = 48.0`.
+
+## C-FOUR-SCROLLABLE-PANES-DREW-AND-CLICKED-IN-DIFFERENT-PLACES (lane C, 2026-08-20)
+
+**Status:** FIXED the same day, in `gui, apps: four scrollable panes drew in
+one place and clicked in another`. Kept because two of these bug *shapes*
+recur across `apps/` and are worth recognising on sight.
+`scripts/reintro-scroll-panes.py` puts each of the thirteen resulting defects
+back one at a time and checks the suite goes red for it.
+
+Found while finishing the tree-wide `MouseEventKind::Scroll` conversion. Three
+distinct faults, in four panes:
+
+**1. A wheel handler that treated notches as pixels.** All four. The shade
+multiplied by a private `30.0`; the converter's history and the notification
+centre each did `offset - dy`, i.e. **one pixel per detent** against row
+heights of 52 and 72 — a spin of the wheel was visually indistinguishable from
+the list not moving. Fixed with `wheel::pixels(dy, row_h)`; none of the four
+needed an `Accumulator`, because all four offsets are `f32` and can hold a
+trackpad's fraction directly. (`Accumulator` exists only for *integer*
+offsets; using it on a float offset would add latency and buy nothing.)
+
+**2. A scroll offset clamped at one end only.** All four, again — `.max(0.0)`
+stops a list going above its start and says nothing whatever about its end. In
+`gui/desktop/src/notif_pane.rs` all four navigation keys were unbounded too,
+and `PageUp`/`PageDown` stepped by a literal `200.0` rather than the pane's own
+height, so the step was wrong on every screen but one. The structural cause is
+the same one credmanager had (see the entry above): **the state did not know
+how big its viewport was**, so no bound could be computed at the moment the
+wheel turned. Fixed by storing the viewport size on the state and deriving
+`max_scroll()` from measured content.
+
+**3. The same layout arithmetic written more than once.** The expensive one.
+`notif_pane.rs` declared `QUICK_SETTINGS_HEIGHT = 200.0` while
+`render_quick_settings` walked its rows and drew **276**; both hit tests used
+the constant, so every notification click and hover in the shade landed 76 px
+from the pointer — a card is 80 px tall with 8 px between, so a click selected
+the card *above* the one under the cursor, or fell in a gap and did nothing.
+The whole existing suite passed throughout. `gui/notifications/src/main.rs` had
+the same shape latent: renderer and hit test each walked the group list with
+their own copy of the arithmetic, and the hit test additionally ignored the
+renderer's clip, so a row scrolled *under* the panel header — drawn nowhere —
+was still clickable. Fixed by making the layout a single piece of data
+(`card_tops()`/`card_at()` in the shade, `center_rows()` in the daemon) that
+the renderer, the hit test and the scroll bound all read.
+
+**What to look for elsewhere.** Any app that (a) derives a row index from a
+scroll offset in one function while a renderer derives a row *position* in
+another, or (b) clamps a scroll offset with `.max(0.0)` and nothing else.
+Un-audited candidates, all deriving an index from an offset:
+`apps/compass/src/main.rs:399`, `apps/jsonviewer/src/main.rs:2513`,
+`apps/logviewer/src/main.rs:1099`, `apps/regextester/src/main.rs:2073` and
+`:2287`, `apps/renamer/src/main.rs:1663`, `apps/snippets/src/main.rs:1914`,
+`apps/speedtest/src/main.rs:1097` and `:1127`.
+
+**A test that only probes row centres does not pin fault 3.** The first
+version of `clicking_a_card_where_it_is_drawn_selects_that_card` took its
+coordinates from the same layout helper the hit test uses, so the two were
+wrong together and it passed. It now reads the card positions out of the
+`RenderCommand`s `render()` actually emits, and probes each rectangle's top
+edge, middle, bottom edge and the gap below it —
+`a_cards_hit_rectangle_is_exactly_the_rectangle_it_is_painted_in`.
+
+## C-A-SPEED-TEST-HISTORY-DRAWN-UPSIDE-DOWN-RELATIVE-TO-ITS-HIT-TEST (lane C, 2026-08-20) — FIXED
+
+The audit the entry above asked for, carried out. Two of the nine candidates
+had real defects; five turned out not to be candidates at all.
+
+**`apps/speedtest` — the list was mirrored.** `render_history_panel` drew the
+results newest-first (`.iter().rev()`) and highlighted the row whose *history*
+index matched `history_hover`; both hit tests (`handle_click` and
+`handle_mouse_move`) computed the **draw position** and stored that. So
+pointing at the top row highlighted the bottom one, pointing at the second
+highlighted the second-from-last, and only the middle row of an odd-length
+list lit itself — which is why a spot check could miss it. Fault family 3 from
+the entry above, in its purest form: the renderer applied a transformation the
+hit test did not.
+
+Two more in the same panel:
+
+- **The hit test ran under the stats strip.** The avg/best/worst strip is
+  opaque and painted over the bottom 24 px of the list, but the hit test's
+  bound was the panel's full height. Pointing at "avg 84.2 Mbps" selected a
+  result painted underneath it. Fault family 3's clip variant, the same as the
+  notification centre's.
+- **The history could not be scrolled at all.** `history_scroll` was read in
+  three places and written by nothing — there was no wheel handler. With
+  `MAX_HISTORY` of 20 rows of 26 px in a 206 px viewport, **twelve of the
+  twenty results were drawn nowhere and reachable by nothing.** Fault family 2,
+  in its terminal form: not "clamped at one end" but "never moved at all".
+
+Fixed the way the four panes were: one `history_rows()` walk yielding
+`(screen y, history index)` with the scroll already applied, which the
+renderer, both hit tests and the scroll bound all read; a
+`history_viewport_height()` that subtracts the stats strip and feeds the clip,
+the bound and the hit test alike; `max_history_scroll()` derived from measured
+content; and a wheel arm using `wheel::pixels` (the offset is an `f32`, so no
+`Accumulator`). 66 → 80 tests.
+
+**`apps/compass` — dead scroll state with a divergence already built in.** The
+waypoint list carried a `wp_scroll: usize` that `handle_mouse` **added to its
+row index** and `render_waypoint_view` **ignored outright**. It was never
+written, so it sat at zero and never bit — but it is exactly the shape that
+made the notification shade hit-test 76 px from where it painted, pre-loaded
+and waiting for whoever wired scrolling up. The two also disagreed about the
+row's width: 36..864 painted, 40..860 clicked, so a 4 px strip down each side
+of every row looked selectable and was not.
+
+Removed rather than wired up: `MAX_WAYPOINTS` is 10 and sixteen rows fit above
+the status bar, so this list provably cannot overflow and scrolling it would
+be dead code with dead tests. The assumption that makes that safe is now a
+tripwire — `every_waypoint_the_app_will_hold_fits_on_screen` fails if the cap
+is ever raised past what fits, so whoever raises it is made to add real
+scrolling instead of finding out from a user. 111 → 116 tests.
+
+**Correction to the candidate list above: five of those nine were not
+candidates.** `apps/jsonviewer`, `apps/logviewer`, `apps/regextester`,
+`apps/renamer` and `apps/snippets` contain **no mouse handling whatsoever** —
+zero occurrences of `MouseEventKind` between them. The line numbers cited were
+renderer arithmetic, not hit tests, so no divergence is possible: there is
+nothing on the other side to diverge from. They have a different problem, and
+it is the one already tracked as `C-NO-APP-IS-WIRED-TO-AN-EVENT-LOOP`.
+
+Worth recording separately, because it is a distinct smell from the ones
+above: **several of them carry a `scroll_offset` field that nothing ever
+writes.** `apps/logviewer/src/main.rs:714` is the clearest — the field exists,
+`render_log_list` faithfully honours it, and its value is `0.0` forever. The
+renderer looks like it supports scrolling and the state looks like it tracks
+it; only the absence of a writer gives it away. When those apps are wired to
+an event loop, each such field is a place where a wheel handler will be added
+without anyone re-deriving the bound or the hit test — so check for the three
+fault families at that point rather than assuming the plumbing is sound
+because the renderer reads the offset.
+
+Both fixes are pinned by `scripts/reintro-list-hit-tests.py`, which puts all
+eight defects back one at a time and asserts the suite goes red for each.
+
+## TD-ONE-CARGO-TARGET-DIRECTORY-PER-AWKWARD-MOMENT (lane C, 2026-08-20) — **cause fixed, one tree still to reclaim**
+
+**Not a code defect. Read this if a build fails with `No space left on
+device`, or with anything stranger — see the companion entry
+TD-A-FULL-PAGE-FILE-MAKES-RUSTC-REPORT-A-SOURCE-ERROR for what a full volume
+looks like when it does *not* name the disk.**
+
+On 2026-08-20 the D: volume reached **1.2 MB free of 1.9 TB**, mid-way through
+the whole-workspace gate `CLAUDE.md` requires before a merge. That run printed:
+
+```
+= note: ld: final link failed: No space left on device
+error: could not compile `envoy-cli` (bin "envoy-cli" test)
+rustc-LLVM ERROR: IO failure on output stream: No space left on device
+error: could not compile `posix` (lib test)
+```
+
+so this one at least accused the right thing. `git commit` had already failed
+a minute earlier with `fatal: sha1 file '…/index.lock' write error. Out of
+diskspace`, which is how it was noticed at all.
+
+### Cause: a workaround taken eleven times
+
+Cargo serialises concurrent invocations sharing a `CARGO_TARGET_DIR` behind a
+build lock, so a foreground `cargo clippy` started next to a background
+`cargo test --workspace` waits — for the ~30 minutes the workspace build
+takes. The obvious dodge is to hand the second run a target directory of its
+own. Lane C had taken that dodge, across several sessions, eleven times:
+
+| tree | | tree | |
+|---|---|---|---|
+| `target-cred` | `target-hl` | `target-hl2` | `target-hl3` |
+| `target-hl4` | `target-lint` | `target-probe` | `target-probe2` |
+| `target-systray` | `target-test` | | |
+
+Every one is a full debug build of a ~200-crate workspace. **Deleting the ten
+above took the volume from 1.2 MB free to 175 GB free.** None was named in any
+document, none was pruned by anything, and each was created to dodge a wait of
+minutes at a cost that fell on some later run instead.
+
+That is the shape of the problem: the cost of the dodge is not paid by the run
+that takes it. It lands on whichever run happens to be in flight when the
+volume fills, as an error that may or may not mention the disk.
+
+### Fix: a fixed per-lane set, and a script that notices when it slips
+
+`scripts/prune-build-trees.py` lists every cargo build tree in the worktree
+with its size, and deletes the ones outside the sanctioned set for the lane.
+Lane C's set is `target`, `target-c` (long/background runs) and
+`target-clippy-c` (the foreground check that would otherwise queue behind
+them). Two working directories is enough; a third is a request to justify, not
+a default.
+
+It reports by default and only deletes under `--prune`, and it will not delete
+a directory unless it carries cargo's own `CACHEDIR.TAG` signature *and* holds
+no git-tracked file — so a source directory that happens to be called
+`targets/` cannot be caught by it. It borrows `detect_lane` from
+`scripts/which-lane.py` rather than reimplementing the mapping, because the
+failure mode of getting the lane wrong here is deleting *another* lane's
+build trees.
+
+A script that needs its own build directory should take an env-var override
+that **defaults into the sanctioned set**, the way
+`scripts/reintro-list-hit-tests.py` does with `REINTRO_TARGET_DIR` — not mint
+a new name.
+
+### Still outstanding: the default tree is 121.8 GB
+
+After the cleanup, lane C's three sanctioned trees measure:
+
+```
+  keep    target                 121.8 GB
+  keep    target-c                12.4 GB
+  keep    target-clippy-c        772.1 MB
+```
+
+`target` — the one used by any `cargo` command that *forgets* to set
+`CARGO_TARGET_DIR` — is ten times the size of the tree that does the actual
+work, because it has accumulated across sessions and target triples and
+nothing has ever pruned it. It is sanctioned, so the script keeps it; that it
+reached 121.8 GB is evidence the sanctioned set needs pruning on age too, not
+just on membership. Reclaiming it costs one rebuild for whoever next runs a
+bare `cargo` command in this worktree, and is worth doing.
+
+**Other lanes are not touched.** `os/target`, `os/target-lint`,
+`os-lane-a/target`, and lane B's `target`/`target-check`/`target-test` were
+left strictly alone — another agent may have a run in flight in any of them,
+and the script only ever prunes the worktree it is invoked from. If the
+operator wants the whole drive swept, each lane should run the script in its
+own worktree.
+
+## C-TWO-PROCESS-LISTS-HIT-TEST-UNDER-THEIR-OWN-STATUS-BAR (lane C, 2026-08-20) — **FIXED**
+
+**Status:** FIXED the same day. The sweep grew from two instances to five while
+being fixed, one commit each:
+
+| Commit | App |
+|---|---|
+| `f0343e329` | `sysmonitor: the process list was hit-tested under its own status bar` |
+| `0d0c8dc1b` | `procexplorer: the process list was hit-tested under its own status bar` |
+| `a0539b77c` | `credmanager: clicking the "60 entries" caption opened the first credential` |
+| `d72793429` | `musicplayer: the track under the pointer was not the track that got played` |
+| `bea1a3bd7` | `hexeditor: clicking the status bar jumped the cursor to the end of the file` |
+
+**The fix is the same collapse in all five**: three helpers — a `const fn`
+top, a `fn …_height()` that clamps at zero, and a `fn row_at()` that is the
+renderer's arithmetic inverted — with every pointer path *and* the renderer's
+clip routed through them, so the region drawn **is** the region clicked. Where
+an app had a second renderer for a second tab (musicplayer's playlist), that
+one goes through them too.
+
+`scripts/reintro-row-hit-tests.py` puts each of the twelve resulting defects
+back one at a time and checks the suite goes red for it. All twelve are
+pinned — but only after the sweep itself found the gap: **musicplayer's
+Playlists tab is drawn by a second renderer with the same arithmetic in it,
+and the snap could be put back there alone with all 52 tests still green.**
+That is the reintroduction check earning its keep; a test count cannot see a
+duplicated renderer.
+
+**Four faults were found only while fixing, not while auditing** — worth
+noting, because the audit that opened this entry looked for exactly one shape
+and walked past these:
+
+- **musicplayer's renderer snapped to whole rows while the hit test was
+  continuous.** A wheel-only user never sees this (a notch is a whole number
+  of rows); every trackpad user plays a different track than the one they
+  pointed at.
+- **musicplayer clamped `scroll_offset` only inside the wheel handler**, so a
+  resize, a search that shortened the library, or a tab switch could leave the
+  list wound off its own end, painting nothing at all.
+- **hexeditor's wheel read only the *sign* of `dy`** and moved a flat three
+  lines per event — and read it backwards relative to every other view in the
+  tree, since `dy > 0` is away from the user and so scrolls *up*.
+- **hexeditor's click path had no *right* edge**, and the data inspector is
+  painted over the dump's right-hand side, so clicking an inspector field
+  moved the cursor in the file behind the panel. (hexeditor also carried a
+  dead second copy of `show_inspector` on `HexView`, beside the `HexEditor`
+  one that actually drives the renderer. Removed.)
+
+**Two lessons for the next sweep of this family**, both learned the expensive
+way here:
+
+1. **A test that probes row *tops* cannot catch a snapping-vs-continuous
+   divergence.** With musicplayer's old snapped renderer,
+   `from_top = (36 + i*36) - 36 + 18 = i*36 + 18`, so `idx == i` at *every*
+   top edge — the error is zero at the origin of each row and grows down it.
+   The tests now sweep eight points across each painted row. This was found by
+   patching the snap back in and watching the top-edge version stay green,
+   which is the only way to know a regression test discriminates.
+2. **A negative `f32` cast to `usize` saturates to 0 in Rust; it does not
+   wrap.** That is why credmanager's missing lower bound was *quiet*: a click
+   on the "60 entries" caption produced a negative offset, saturated to row 0,
+   and decrypted and displayed the first credential rather than crashing.
+
+**Where:** `apps/sysmonitor/src/main.rs` (hit tests at ~1099, ~1116, ~1157) and
+`apps/procexplorer/src/main.rs` (~1159, ~1174, ~1216).
+
+The same defect as the speed test's stats strip
+(`C-A-SPEED-TEST-HISTORY-DRAWN-UPSIDE-DOWN-RELATIVE-TO-ITS-HIT-TEST`, fault
+family 2), in the two apps whose whole purpose is a long clickable list of
+processes. Both were found by the query that family suggests: an app that both
+handles a mouse event and *divides* by a row height somewhere, then checking
+whether the divisor's base and bound match the renderer's.
+
+Both apps paint an **opaque** status bar across the bottom of the window:
+
+| | sysmonitor | procexplorer |
+|---|---|---|
+| status bar | `y = window_height - 24`, `CRUST` (`:1386`) | `y = window_height - 24`, `COLOR_STATUS_BG` (`:1505`) |
+| renderer's row area | `content_h = window_height - TAB_BAR_HEIGHT - 24` (`:1724`) | `content_h = window_height - content_y - 24` (`:1517`) |
+| rows clipped to | `tree.clip(0, rows_y, w, row_area_h)` (`:1830`) | `row_area_h = content_h - HEADER_HEIGHT` (`:1568`) |
+| scroll bound | `visible_row_count` subtracts `STATUS_BAR_HEIGHT` (`:1276`) | `content_h` subtracts it (`:1334`) |
+| **hit test** | **`if my >= rows_start`** — no lower bound | **`if my >= content_y + HEADER_HEIGHT`** — no lower bound |
+
+So in each app the renderer, the clip *and* the scroll bound all know the list
+stops 24 px above the bottom of the window, and the hit test is the one place
+that does not. With `ROW_HEIGHT` at 22 in both, the 24-px status bar covers
+**just over one full row**: clicking the status bar selects a process that is
+not on screen, and moving the pointer across it highlights one. In sysmonitor
+the right-click path does it too, so the context menu — *Kill process* among its
+actions — can open against a row the user cannot see.
+
+That last point is why this is filed as a defect rather than a cosmetic
+mismatch: the selection it makes is invisible, and the action offered on it is
+destructive.
+
+**Why the tests miss it.** Both suites probe row *centres*, computed from the
+same `content_y + HEADER_HEIGHT` base the hit test uses, so they cannot observe
+a bound the hit test never applies. The lesson is the one already recorded for
+the speed test: read the row positions out of the `RenderCommand`s the renderer
+actually emits, and probe the *edges* of each rectangle rather than its middle.
+
+**What the proper fix looks like.** Identical in both, and identical to the fix
+already landed in `apps/speedtest`: one description of the row area — a
+`rows_top()` and a `rows_height()` on the app — read by the renderer, by
+`visible_row_count`, and by all three hit tests, with the hit test rejecting
+`my >= rows_top() + rows_height()`. sysmonitor additionally spells the same
+number two ways (`content_y = TAB_BAR_HEIGHT` then `+ HEADER_HEIGHT` in the
+left-click arm; `content_y = TAB_BAR_HEIGHT + HEADER_HEIGHT` in the right-click
+and move arms), which is not itself a bug but is the state a list is in
+immediately before two copies drift apart — the helpers remove it.
+
+Tests should assert, for each app and each of the three pointer paths, that a
+click at `rows_top() + rows_height() - 0.5` still selects and one at
+`rows_top() + rows_height()` does not, with the row area's extent read from the
+emitted clip command rather than recomputed.
+
+**Not fixed in the commit that found it** only because that commit's workspace
+gate was already running and editing the crates would have invalidated it —
+the same reason `C-TOUCHPAD-GESTURE-LIST-DRAWS-PAST-THE-PANEL` waited a day.
+It was the next thing lane C picked up; see the **Status** block at the top of
+this entry for the five commits that closed it. Everything from here down is
+the original write-up, kept because the *shape* of the defect — a top edge
+spelled once per pointer path plus once in the renderer, and a bottom edge
+spelled only in the renderer's clip — is worth recognising elsewhere in
+`apps/`.
+
+### The same sweep, third instance: credmanager's list header selects row zero
+
+`apps/credmanager/src/main.rs` `handle_list_click` (`:5130`) has no guard of
+its own. `handle_mouse` sends it every left click in the entry-list column that
+is not in the toolbar (`:5024`), so the 32-px "N entries" header strip reaches
+it, and:
+
+```rust
+let y_start = TOOLBAR_HEIGHT + LIST_HEADER_HEIGHT;   // 48 + 32
+let row_idx = ((my - y_start + state.list_scroll) / ROW_HEIGHT) as usize;
+```
+
+For `my` inside that strip the numerator is negative — between −32 and 0 over a
+`ROW_HEIGHT` of 52 — and a negative `f32` cast to `usize` **saturates to 0**
+rather than wrapping. So clicking the header selects the first entry and opens
+its detail panel. With the list scrolled it picks some other wrong row instead
+of none.
+
+Below the list it is safe by luck rather than by bound: `filtered_ids.get(row_idx)`
+returns `None` past the end, so an over-large index selects nothing. The fix is
+the same helper pair as the other two, which turns both the top and the bottom
+into an explicit rejection rather than one accident and one saturation.
+
+Lower severity than the process lists — the action is a selection, not a kill —
+but the same root cause, and the constant it gets wrong (`LIST_HEADER_HEIGHT`)
+is one that was *already* extracted to stop exactly this. Extracting the
+constant fixed the two spellings and left the missing bound.
+
+### Fourth instance: the music player's list snaps when drawn and doesn't when clicked
+
+`apps/musicplayer/src/main.rs`. `scroll_offset` is a **continuous pixel**
+offset — `wheel::pixels(*dy, TRACK_ROW_HEIGHT)` writes it (`:2296`) and a test
+pins a fractional value deliberately (`a_fraction_of_a_notch_moves_now_rather_than_being_banked`,
+`:2553`, asserts `0.3 * TRACK_ROW_HEIGHT`). The two render paths then throw the
+fraction away:
+
+```rust
+let scroll_start = (state.scroll_offset / TRACK_ROW_HEIGHT) as usize;  // :1364, :1501
+...
+let row_y = TRACK_ROW_HEIGHT + i as f32 * TRACK_ROW_HEIGHT;            // snapped
+```
+
+while the two hit tests keep it:
+
+```rust
+let row_idx = ((rel_y - TRACK_ROW_HEIGHT + state.scroll_offset)
+    / TRACK_ROW_HEIGHT) as usize;                                      // :2239, :2311
+```
+
+So at any offset that is not a whole number of rows the list is drawn snapped
+and hit-tested continuously. At 0.3 rows of scroll the top 70% of every drawn
+row selects the right track and the **bottom 30% selects the one below it** —
+and because `MouseEventKind::DoubleClick` uses the same arithmetic (`:2311`),
+double-clicking near the bottom of a row *plays* the wrong track.
+
+Two defects, not one. The second is that the single click has no bounds check
+at all:
+
+```rust
+state.selected_index = Some(row_idx);   // :2241 — row_idx unbounded
+```
+
+The renderer clamps `display_count` to the list length, but the click handler
+does not, so clicking the empty strip below the last track selects a track
+index that does not exist. (The double-click path is safe here by luck — it
+goes through `filtered.get(row_idx)`.)
+
+Note the asymmetry worth keeping: the fraction is not merely dropped, it is
+*stored and tested*. A test asserts the app accepts a third of a notch, and the
+renderer cannot show it. Whichever way that is resolved — snap the offset on
+write, or let the renderer draw at the fractional position — both sides must be
+resolved the same way, which is the whole point of deriving them from one
+helper.
+
+`sysinfo`'s `tree_hit_test` already carries a doc comment describing exactly
+this bug in the past tense ("The old form added the scroll offset as **pixels
+before dividing**, so any list scrolled to a position that was not a whole
+multiple of `TREE_ROW_HEIGHT` selected the row above or below the one drawn
+under the pointer"). It was fixed there and never swept for elsewhere.
+
+### Fifth instance: the hex editor's status bar jumps the cursor to end-of-file
+
+`apps/hexeditor/src/main.rs` `handle_mouse_click` (`:2164`) bounds the click
+above and not below:
+
+```rust
+let content_y = y - TOOLBAR_HEIGHT - TAB_BAR_HEIGHT;
+if content_y < 0.0 { return; }
+let line = (content_y / LINE_HEIGHT) as usize;
+```
+
+`visible_line_count` (`:1645`) subtracts `STATUS_BAR_HEIGHT` and the click
+handler does not, so the status bar is live: a click on it produces a line past
+the last one drawn. The offset is then clamped — `doc.cursor = offset.min(max)`
+— which makes the symptom *quiet rather than absent*: clicking the status bar
+moves the cursor to the last byte of the file, discarding any selection through
+`update_selection`. Milder than the process lists (no destructive action) but
+the same missing bound, and the clamp is what stops it being noticed.
+
+Unlike musicplayer, the scroll offset here is a `usize` row index
+(`line.saturating_add(view.scroll_offset)`), so there is no fractional
+divergence — only the missing lower bound.
+
+### Checked and clear
+
+All fifteen apps that both handle a mouse event and divide by a row height have
+now been swept. Clear:
+
+* `ebook` — library `list_top` is `TOOLBAR_HEIGHT`, matching the hit test's
+  subtraction.
+* `partmanager` — `y >= top && y < bottom`, bounded at both ends.
+* `netscan`, `remotedesktop` (profile sidebar) — both already carry regression
+  tests for an earlier mis-selection.
+* `benchmark` — `history_row_at` rejects outside `content_top()..content_bottom_edge()`,
+  guards non-finite input, and carries a doc comment recording a previous fix of
+  this exact family.
+* `devicemanager`, `sysinfo` — both route every caller through one
+  `tree_hit_test` that rejects `offset >= pane_height()`; both doc-comment why.
+* `filediff` — has `MouseEventKind::Scroll` handlers but no click-to-row
+  mapping at all, so there is nothing to diverge. Its `visible_range` helper
+  already centralises the render-side arithmetic.
+* `settings` — the sidebar category list is fixed-length and unscrolled, and
+  `idx < SettingsCategory::ALL.len()` bounds it correctly.
+
+Recorded so the next sweep does not re-derive them.
+
+**Debt, not a bug, in `settings` — FIXED, see below:** `list_y = HEADER_HEIGHT + SEARCH_BAR_HEIGHT + 16.0`
+is written out longhand four times — the renderer (`:1422`, as
+`search_y + SEARCH_BAR_HEIGHT + 16.0`), the click handler (`:3264`), the hover
+handler (`:3343`) and `test_sidebar_click` (`:4049`). All four agree today. The
+test is the notable part: it recomputes the constant rather than reading the
+emitted render command, and probes the row *centre* (`+ 10.0` into a 44-px
+row), so it would pass unchanged if the renderer and the hit test drifted
+apart. That is the same blind spot that let the speed test's mirrored history
+survive sixty-six tests.
+
+**Settings sidebar: fixed.** The four copies are now one. `SettingsState` grew a
+`search_top()`, a `category_list_top()`, a `category_row_top(idx)`, a
+`CATEGORY_ROW_PAINTED_HEIGHT` and a `category_at(mx, my)` that is
+`category_row_top` inverted; the renderer draws from the former and both hit
+tests — click and hover — answer from the latter.
+
+Collapsing it turned up one small live fault that the four-copy arrangement had
+been hiding in plain sight. The renderer paints each highlight
+`CATEGORY_ITEM_HEIGHT - 4.0` tall, so there are four blank pixels between one
+row and the next; both hit tests claimed the full 44-pixel slot. Hovering those
+four pixels therefore lit up the row *above* the pointer — a highlight sitting
+one to four pixels clear of the cursor that summoned it. `category_at` now
+returns `None` there, which is what the renderer's own output says, and matches
+the precedent `notif_pane`'s `card_at` set for the gaps between notification
+cards.
+
+`test_sidebar_click` is gone, replaced by five tests that read the rectangles
+`render()` actually emitted (signature: a `FillRect` at `x == 8.0` of width
+`SIDEBAR_WIDTH - 16.0`, which nothing else in the sidebar shares) and probe
+*those*:
+
+| test | pins |
+|---|---|
+| `every_category_is_clickable_exactly_where_it_was_painted` | eight probes across each painted row; click and hover must agree, and each starts from a different category so a hit test that does nothing cannot pass |
+| `the_gaps_between_category_rows_belong_to_no_row` | every whole pixel of every four-pixel gap |
+| `nothing_outside_the_category_list_selects_a_category` | above the list, past its last row to the window's bottom, right of the sidebar, and NaN/±inf on both axes |
+| `the_hover_highlight_lands_under_the_pointer` | hovers an *unselected* row and asserts the second rectangle that appears contains the pointer |
+| `the_whole_category_list_fits_the_window` | tripwire: the sidebar has no clip and no scroll, so a list taller than the window has rows that cannot be reached at all |
+
+Measured, not assumed: a three-pixel shift applied to the renderer alone fails
+`every_category_is_clickable_exactly_where_it_was_painted` and
+`the_hover_highlight_lands_under_the_pointer`. The test they replace passed that
+same shift, which is the whole point — it clicked ten pixels into a
+forty-four-pixel row and never looked at the renderer. Shifting the *shared*
+constant, by contrast, fails nothing, because after the collapse a drift is no
+longer expressible in one edit.
+
+Three settings defects were added to `scripts/reintro-row-hit-tests.py`
+(fourteen in total now): the renderer drifting three pixels, the gap check
+deleted, and the hover handler given back its own copy of the arithmetic.
+
+**Still open in `settings`:** the sidebar cannot scroll. Eight categories need
+464 px and the default window is 800 px tall, so it fits today; the tripwire
+above fires when it stops fitting. The fix at that point is a
+`guitk::scroll_window` plus a `wheel::Accumulator`, as `notif_pane` has — not a
+smaller `CATEGORY_ITEM_HEIGHT`.
+
+**Also noted — FIXED, see below:** `gui/desktop/src/notif_pane.rs` duplicates the
+quick-settings layout numbers between `render_quick_settings` (`:1008`) and
+`handle_quick_settings_click` (`:1536`) — title, `+20.0`, N × `QS_ROW_HEIGHT`,
+`+4.0`, volume slider, `+QS_ROW_HEIGHT`, brightness slider, written out twice
+and inverted by hand the second time. They agree today, and the dispatcher
+bounds the area at both ends, so this is debt rather than a bug. The card list
+in the same file has already been collapsed (`card_tops` / `card_at` /
+`content_height` / `max_scroll`), so the quick-settings block is the last
+hand-inverted layout in that pane.
+
+**Quick settings: fixed, and it was hiding a live fault after all.** The
+duplication was real — `render_quick_settings` walked caption, toggles, gap,
+sliders adding heights up while `handle_quick_settings_click` walked the same
+list subtracting them back off, both spelling `20.0` and `4.0` by hand even
+though `QS_TITLE_HEIGHT` and `QS_SLIDER_GAP` already existed — and the
+hand-inverted walk had a hole in it:
+
+```rust
+let slider_y = content_y - toggle_area_end - 4.0;
+...
+if slider_y < QS_ROW_HEIGHT {
+    self.quick_settings.volume = value;
+```
+
+`slider_y` is negative for the four pixels the renderer leaves blank between
+the last toggle and the volume slider, and nothing asked whether it was above
+zero. A negative `f32` divided into a row height is still negative, and
+`slider_y < QS_ROW_HEIGHT` is true of every negative number — so **clicking the
+blank gap set the volume**, to wherever along the track the pointer happened to
+be. There is no visual cue that those four pixels do anything.
+
+Collapsed the same way as everything else in this sweep: `qs_start_y()`,
+`qs_toggle_top(idx)`, `qs_slider_top(slot)` and a `qs_at(local_y) ->
+Option<QsHit>` that inverts them, with `QsHit` naming what is there
+(`Toggle(idx)` / `Volume` / `Brightness`). The renderer places every row from
+the helpers, `handle_quick_settings_click` matches on `qs_at`, and
+`PANE_PADDING + HEADER_HEIGHT` — which was itself written out three times, in
+the renderer, the click dispatcher and `list_start_y` — is now `qs_start_y()`
+once.
+
+Four new tests, all reading rows out of the commands `render_quick_settings`
+pushed (toggle pills by `TOGGLE_WIDTH`/`TOGGLE_HEIGHT` less the six-pixel
+inset; slider rows by the track's width, height *and* colour, so a slider at
+100% is not counted twice by its own filled portion):
+
+| test | pins |
+|---|---|
+| `every_quick_setting_row_answers_where_it_was_drawn` | eight probes across every painted toggle and slider row |
+| `the_gap_above_the_volume_slider_does_not_set_the_volume` | every whole pixel of the gap, clicking the far end of the track so a hit would be loud |
+| `the_caption_and_the_space_past_the_last_slider_belong_to_nothing` | the caption, past the last slider, negative, NaN, ±inf |
+| `a_click_through_the_pane_reaches_the_toggle_that_was_drawn` | the whole path — pane-local coordinates, the dispatcher's bounds, the pill's x range, and the emitted `QuickSettingToggled` |
+
+Measured: deleting the gap check fails
+`the_gap_above_the_volume_slider_does_not_set_the_volume`; shifting the toggle
+renderer three pixels alone fails
+`every_quick_setting_row_answers_where_it_was_drawn`. 2404 tests pass, rustfmt
+clean, clippy unchanged at 82.
+
+That closes the last hand-inverted layout in `notif_pane` — the card list
+(`card_tops`/`card_at`) was collapsed earlier, in the fix that found the 76-px
+drift.
+
+### The toolkit menus: eight walks of one list become two — FIXED
+
+The same fault family, in its hardest form, and the only instance so far that
+sits in the toolkit rather than in one app: `gui/toolkit/src/menu.rs` (every
+right-click menu in the OS) and `gui/toolkit/src/menubar.rs` (the dropdowns
+under File/Edit/View in every windowed app).
+
+A list whose rows all share one height needs no help: `top + i * H` and
+`(y - top) / H` are visibly each other's inverse, and you cannot change one
+without changing the other. These lists *differ* — a separator is 9 px where
+an item is 28 — so there is no closed form, only a walk. Each file carried
+**four** of them, and each of the four spelled out
+
+```rust
+match item {
+    Separator => SEPARATOR_HEIGHT,
+    _ => ITEM_HEIGHT,
+}
+```
+
+for itself: one summing the heights for the popup's total (`total_height` /
+`dropdown_content_height`), one adding them up to place the rows on screen
+(the renderer's `let mut current_y` / `let mut cur_y`), one subtracting them
+back off to answer a click (`index_at_y` / `item_index_at_y`), and one adding
+them up again to decide where a submenu hangs (`y_offset_for_index`, in both).
+Eight copies between the two files. Four walks of one list is four chances for
+three of them to be right.
+
+**No live fault was found in either** — the eight copies did agree. What they
+did not have was any way to *stay* agreeing, and the existing tests could not
+have told anyone otherwise: they probed row centres, where a three-pixel drift
+is invisible.
+
+The fix is a new toolkit primitive, `gui/toolkit/src/row_strip.rs`. A
+`RowStrip` is that walk done once: given the top of the run and each row's
+height it reports where every row is (`top`, `height`, `bottom`,
+`total_height`) and which row owns a given `y` (`index_at`). A row owns its
+top edge and not its bottom one, so adjacent rows never both answer for the
+pixel between them; a non-finite height is taken as zero rather than poisoning
+every row after it with NaN. It deliberately does not decide whether a row is
+*selectable* — a separator has a position and a height like anything else, and
+whether clicking one means something is the caller's rule, which is the one
+thing `index_at_y` and `item_index_at_y` still add on top.
+
+Both files now build one strip and read it from all four places. Eleven new
+tests, all reading the hover rectangle `render()` actually emitted and
+sweeping eight points across it plus both its edges:
+
+| test | file | pins |
+|---|---|---|
+| `every_item_is_selectable_exactly_where_it_was_painted` | menu | eight probes across every painted row, plus its two edges |
+| `a_separator_is_drawn_inside_the_run_it_reserves_space_in` | menu | the line lands inside the space the row reserves, and the row is unselectable |
+| `a_submenu_hangs_off_the_row_it_belongs_to` | menu | `y_offset_for_index` equals the painted top, for every row |
+| `the_menu_is_exactly_as_tall_as_the_rows_it_holds` | menu | the popup reaches one padding past the last row, and `point_in_bounds` agrees |
+| `nothing_outside_the_run_selects_an_item` | menu | both paddings, past the bottom, NaN, ±inf |
+| `an_empty_menu_is_just_its_padding` | menu | the degenerate case |
+| `every_dropdown_row_is_selectable_exactly_where_it_was_painted` | menubar | as above, through the real open-and-hover pointer path |
+| `a_dropdown_separator_is_drawn_inside_the_run_it_reserves_space_in` | menubar | as above |
+| `a_submenu_hangs_off_the_dropdown_row_it_belongs_to` | menubar | as above |
+| `a_dropdown_is_exactly_as_tall_as_the_rows_it_holds` | menubar | the panel reaches one padding past the last row |
+| `nothing_outside_the_dropdown_run_selects_a_row` | menubar | padding, past the bottom, NaN, ±inf, and the empty dropdown |
+
+Verified by reintroduction, six defects, all now in
+`scripts/reintro-row-hit-tests.py` (21 pinned): drifting either renderer three
+pixels fails three tests; giving either hit test its own walk back fails four
+and five respectively — the menubar one also takes down the pre-existing
+`click_check_item_toggles`; and giving either `y_offset_for_index` its own
+walk back fails three. 982 guitk tests pass, rustfmt clean, clippy clean.
+
+Worth recording for the next person who writes such a test: the menu bar's own
+bottom border is drawn in the *separator colour*, so filtering emitted `Line`
+commands by colour alone finds three separators in a dropdown that has two.
+The test keys on the panel's left inset as well.
+
+Still open, and not this fix: neither menu scrolls. A dropdown taller than the
+screen is drawn past the bottom edge and the rows below it can be neither seen
+nor reached. `RowStrip` is the right shape to build that on — a scroll offset
+is just a different `origin` — but no caller needs it yet.
+
+*(Fixed 2026-08-20 — see "Neither menu scrolled" below.)*
+
+### Neither menu scrolled — FIXED
+
+The paragraph directly above, made good. Both toolkit menus now scroll, in
+`53cf09c34` (`menu.rs`) and `9e85a16a9` (`menubar.rs`).
+
+The live fault was worst in `ContextMenu::show`, which placed a popup with
+
+```rust
+self.y = if y + total_height > 1080.0 { (y - total_height).max(0.0) } else { y };
+```
+
+A 120-item menu has `total_height == 3368`, so `y - total_height` is negative,
+the `.max(0.0)` clamps it to zero, and the menu is drawn from the top of the
+screen running 2288 px off the bottom of it. Every row past the display edge
+was painted where no pointer can go. The menu bar's dropdowns had the same
+shape with `dropdown_rect` supplying the height.
+
+Three things about the fix are worth carrying to the next scrollable list:
+
+**A scroll offset is just a different origin — provided it is subtracted
+exactly once.** Both menus subtract it in one place, the origin handed to
+`RowStrip::new`, so `index_at` remains the renderer's placement inverted for
+free. A second subtraction anywhere else is a second description of where the
+rows are, which is the whole fault family this sweep exists to remove.
+
+**A scrolled list needs two heights and two tests where an unscrolled one
+needs one of each.** `content_height` is the rows; `panel_height` is what fits
+on screen, and the old code had only the first. Likewise the strip says which
+row owns a `y` *in the list*, and a visible-region bound says whether that part
+of the list is *on screen*. Without a scroll offset those two coincide, which
+is exactly why one of them used to be enough — with one, the list extends into
+the panel's own padding and the strip alone cheerfully names a row scrolled out
+of sight.
+
+**A non-finite offset must be refused, not clamped.** `NaN` compares false
+against both ends of a `clamp`, so a clamp passes it straight through to the
+strip's origin and every row's position becomes `NaN` at once — a menu that
+answers for no pointer at all. Both `set_scroll` and `clamped_scroll` return
+early on `!is_finite()`, and `reintro-row-hit-tests.py` pins it.
+
+Along the way, `menubar.rs`'s five independent descriptions of one panel
+rectangle (`dropdown_rect`, `click_in_submenu_chain`, `hover_in_submenu_chain`,
+`render_submenu_chain`, and the renderer adding `DROPDOWN_VPAD` back on in a
+fifth place) became one `DropdownPanel` value — there was otherwise nowhere to
+put a scroll offset that all five would see. `item_index_at_y` and
+`y_offset_for_index` were deleted rather than left as dead copies of the
+geometry, and their tests rewritten against `DropdownPanel`.
+
+One performance fault fell out of it. `calculate_dropdown_width` widens a panel
+to fit its widest label, which means measuring every label, which means shaping
+every label through the font. `dropdown_panel` is consulted by the hit test, the
+renderer *and* every wheel notch, so a 200-row dropdown was shaping 200 labels
+several times per mouse move. It is now computed where the entries change and
+cached. The guitk suite went from 92 s to 7.4 s.
+
+1000 → 1015 guitk tests; the sweep grew from 58 defects to 67.
+
+### The tree widget selected its first node for a click above it — FIXED
+
+Found while migrating the menus, by asking which *other* toolkit widget
+inverts its own renderer. `gui/toolkit/src/tree.rs` did, twice:
+
+```rust
+// handle_click, and again verbatim in handle_context_menu
+let row_index = ((y + self.scroll_offset) / self.config.row_height) as usize;
+```
+
+`visible.get(row_index)` bounded it above. Nothing bounded it below. **A
+negative `f32` cast to `usize` saturates to zero in Rust** — it does not wrap
+and it does not trap — so a click a few pixels above the first row selected
+the first node, and a right-click there opened the context menu on it. NaN
+casts to zero as well, so any coordinate a caller failed to compute did the
+same. And `row_height` is a `pub` field on `TreeConfig`: a zero made the
+division infinite or NaN, and *both* ends of that cast land on a real row, so
+every click in the tree went to row 0.
+
+This is the credmanager fault word for word — the one that decrypted and
+displayed the first credential when you clicked the "60 entries" caption —
+except in the toolkit, where every tree widget in the OS inherits it rather
+than one app.
+
+Both paths now go through one `row_at(y)` that refuses non-finite
+coordinates, negative content offsets, non-positive row heights, and anything
+past the last row. It stays a plain division rather than a `RowStrip`: these
+rows are all one height, and the `row_strip` module doc says plainly that a
+uniform list needs no help, because `top + i * H` and `(y - top) / H` are
+visibly each other's inverse and you cannot change one without changing the
+other. A `RowStrip` here would allocate two `Vec`s per click to express
+something a division already expresses honestly.
+
+| test | pins |
+|---|---|
+| `every_row_answers_exactly_where_it_was_painted` | eight probes across each painted row background, plus both edges |
+| `a_point_above_the_first_row_selects_nothing_rather_than_the_first_node` | the saturating cast, through both pointer paths |
+| `a_coordinate_that_is_not_a_number_selects_nothing` | NaN and ±inf, through both pointer paths |
+| `a_row_height_of_zero_selects_nothing_rather_than_everything` | zero, NaN and negative row heights |
+| `nothing_past_the_last_row_answers` | the last row's own edge, past it, and the empty tree |
+| `scrolling_moves_the_rows_and_the_answers_together` | the hit test follows a scrolled row to where it is now drawn |
+
+Verified by reintroduction: restoring the unbounded cast fails three of them,
+drifting the renderer three pixels fails the other two. Both are now in
+`scripts/reintro-row-hit-tests.py` (23 pinned). 988 guitk tests pass, rustfmt
+clean, clippy clean.
+
+### `reintro-row-hit-tests.py` credited a compile error as evidence — FIXED
+
+Worth writing down because the script's whole purpose is to be believed.
+
+It decides a defect is pinned by watching the suite go from green to red. Run
+against a working tree with a half-finished edit in it, the suite was *already*
+red, so every defect "pinned" — including, in the run that exposed this, two
+guitk entries whose evidence was `error[E0599]: no method named selected_id`,
+a compile failure in an unrelated file. **It printed `all 21 defects pinned`
+and exited 0.**
+
+The existing fallback that prints the compiler's own words when no test is
+named is what made it visible at all — but that is something a reader has to
+notice, not something the script refuses to do. It now runs each crate's suite
+once before touching anything and exits 2 with `BASELINE NOT GREEN` if any of
+them is red, on the principle that a measurement taken against an unknown
+baseline is not a weaker measurement but no measurement.
+
+The general form, for anything else built this way: a test that proves a
+property by observing a *transition* must establish the starting state, or it
+is only observing the end state and calling it a transition.
+
+### partmanager described one rectangle four times — FIXED
+
+The partition list's geometry was spelled out independently by the renderer,
+the click handler and the wheel handler. Each was correct about something and
+none agreed with the others:
+
+| what | where rows begin | how tall the region is |
+|---|---|---|
+| renderer | `top + 18 + PARTITION_ROW_HEIGHT` | clip of `list_height - 20` |
+| click | a flat seven-term sum ending `+ PARTITION_ROW_HEIGHT + 18.0` | down to `height - STATUS_BAR - queue_h` |
+| wheel | plain `top` — the section heading's own y, 42 px too high | `queue_top - top - 40` |
+
+The consequences, in descending order of how much they matter:
+
+- **The clip ran 22 px below the bottom a click was accepted at.** Rows were
+  painted over the queue panel's header where no click could reach them. That
+  is invisible *today* only because `render_queue_panel` runs after
+  `render_partition_list` and covers the overdraw — which is paint order doing
+  a hit test's job, and stops being true the moment either panel moves.
+- **The wheel measured the viewport from the heading rather than from the
+  first row**, making it 2 px taller than it is. A viewport believed too tall
+  gives a maximum scroll that is too small, so the last row's final sliver
+  could never be brought into view.
+- **The click accepted a `DISK_MAP_PADDING`-wide strip right of the last
+  painted pixel; the wheel accepted one left of the first.** A gutter that
+  belongs to no list scrolled and selected in one.
+- **The row index came from an unguarded `as usize`.** A negative or NaN `f32`
+  cast to `usize` saturates to zero in Rust rather than wrapping or trapping,
+  so a NaN coordinate named row 0.
+
+`PartitionList` now holds the left, width, panel top, data top and bottom;
+`row_at()` is `row_y()` inverted; and the renderer, the hit test and the wheel
+all read it. `queue_panel_height()` collapses the four hand-written choices
+between `QUEUE_PANEL_HEIGHT` and a literal `28.0`, one of which *is* the
+partition list's bottom edge.
+
+| test | pins |
+|---|---|
+| `every_visible_partition_row_answers_exactly_where_it_was_painted` | eight probes across every row the renderer emitted and did not clip away, plus its last pixel |
+| `the_clip_the_renderer_emits_is_the_region_a_click_lands_in` | the clip's own top and bottom edge, read out of the `PushClip` command |
+| `nothing_beside_the_painted_list_selects_a_partition` | both horizontal gutters |
+| `a_coordinate_that_is_not_a_number_selects_nothing` | NaN, ±inf and negative, through the click path and through `row_at` directly |
+| `scrolling_to_the_end_brings_the_last_row_fully_into_view` | the wheel's idea of the viewport against the renderer's |
+| `the_wheel_and_the_click_agree_on_where_the_list_is` | the wheel's horizontal extent against the painted one |
+
+All six verified by reintroduction — each defect put back one at a time, each
+pinned by the test named for it. partmanager 113 → 119 tests.
+
+**The queue panel, noted here as still open, is now done too** — and it did
+have divergences, four of them. See "partmanager's operation queue panel was
+described four ways" below.
+
+### Two hit tests let a NaN select the first row — FIXED
+
+Found while sweeping the rest of lane C for the same family. Both had a bounds
+guard that looked complete and was not, for the same reason: **a NaN compares
+false against every operator, so it passes a `<`/`>=` bounds test by failing
+it**, and `NaN as usize` is `0` rather than a trap or a wrap. The two compose
+into "a coordinate that is nowhere selects row 0".
+
+- `apps/settings` `DropdownLayout::item_at` — every one of its three guards is
+  a `<` or a `>=`, so a NaN reached the divide and chose the popup's first
+  visible item.
+- `apps/remotedesktop` `handle_sidebar_click` — guarded with `y < 0.0`. Its
+  `Connections` arm survived by accident, because it walks rows with `y < next`
+  and that is false for a NaN too, so the loop ran off the end. Its
+  `ActiveSessions` arm divides, and selected session 0.
+
+Both now reject non-finite coordinates up front, where it is one condition
+rather than three double negatives.
+
+Also strengthened while there:
+`the_hit_test_names_the_item_that_was_drawn_under_the_pointer` in settings was
+probing each dropdown row's **centre**, where a drift of a few pixels is
+invisible in a 36 px row — it now sweeps eight points across each row plus the
+row's last pixel. A centre probe passes straight through the fault it exists
+to catch.
+
+**Cleared in the same sweep, no change needed:** `guitk/textview`
+(`hit_test` clamps a caret to line 0 for a click above the text, which is what
+every editor does and is not the list-selection rule), `gui/desktop/run_dialog`,
+`apps/compass`, `apps/ebook`, `apps/unitconverter`, `apps/jsonviewer`,
+`apps/sysinfo`, `apps/devicemanager`, `apps/diskimager`, `apps/benchmark` —
+the last four already carry explicit `is_finite` guards from earlier passes.
+
+### A settings test positioned its probes with the function it was testing — FIXED
+
+Found by trying to reintroduce a defect and discovering there was nothing to
+reintroduce it *into*. `the_hit_test_names_the_item_that_was_drawn_under_the_pointer`
+computed each probe as `layout.row_top(row) + …` and then asked
+`layout.item_at(…)` which item that was. But `item_at` is `row_top` inverted,
+so the probe and the answer came from the same place and agreed by
+construction. What the test could not see is the only thing worth seeing: the
+*renderer* drawing somewhere other than `row_top`. Shifting the dropdown
+renderer's `iy` three pixels — the exact fault the test is named for — left it
+passing.
+
+It now recovers each row's top from the `Text` command the renderer actually
+pushed. That anchor rests on the renderer drawing an item's label a fixed
+distance below the item's top, so a second test,
+`the_selected_rows_highlight_confirms_where_the_rows_are_painted`, checks that
+distance against the highlight rectangle the selected row paints at its own top
+edge — the one place the popup emits a rectangle aligned to a row. Without it,
+moving the baseline would silently move every probe and quietly restore the
+original flaw.
+
+Both failure modes are now in `scripts/reintro-row-hit-tests.py`. The general
+rule, which is the same one that broke the sweep script itself: **a test must
+get its expected values from somewhere other than the code under test.** A
+renderer's own arithmetic is not an independent source just because it lives in
+a different function.
+
+### The notification pane's per-app settings list described one card four ways — FIXED
+
+The pane's *notification* half was collapsed onto `card_tops` / `card_at` /
+`qs_at` in an earlier pass, and the doc comments there still narrate the 76 px
+drift that prompted it. The *per-app settings* half — the page you reach
+through the pane's "Settings" link — was left as it was, and it had every
+symptom the other half was fixed for.
+
+`render_app_settings` walked a running total; `handle_app_settings_click`
+divided by a literal. Four disagreements, in descending severity:
+
+| | Renderer paints | Click accepted |
+|---|---|---|
+| card body | `FillRect { height: 100.0 }`, then `y += 108.0` | the full 108 px pitch |
+| enabled pill, x | `enabled_x .. enabled_x + 40` | `rx >= enabled_x`, **no right edge at all** |
+| enabled pill, y | `card_top + 10 .. card_top + 32` | `card_local_y < 35.0`, i.e. `card_top .. card_top + 35` |
+| bottom of list | clipped to the pane, loop breaks at the edge | **no bottom bound whatsoever** |
+
+So: the eight-pixel gutter between two cards belonged to the card above it;
+a click anywhere to the right of the pill — including past the pane's own edge
+— switched an app's notifications off; so did a click on the app *name*, which
+is drawn in that 0..35 band; and so did a click below the pane entirely, on an
+app card that was never on screen, hitting whatever window was behind it. The
+last one is the serious one: it is a click the user aimed at something else.
+
+`content_y < 0.0` was also the only guard, and a NaN is not less than zero, so
+it passed — and `NaN as usize` is `0`, not a trap. A pointer position that is
+nowhere at all named the first app in the list. The same shape as the settings
+dropdown and the remotedesktop sidebar above.
+
+**Fixed** by the same collapse: `APP_HEADING_HEIGHT` / `APP_CARD_HEIGHT` /
+`APP_CARD_PITCH` / `APP_TOGGLE_TOP` as named constants, `app_card_top(idx)` as
+the walk, `app_card_at(local_y)` as that walk inverted and bounded by the same
+clip the renderer draws inside, and `app_toggle_rect(card_top)` returning the
+one rectangle both the renderer and the hit test use. `card_width()` replaces
+three hand-written copies of `PANE_WIDTH - 2.0 * PANE_PADDING`. The link at the
+bottom of the list is placed from `app_card_top(len)` rather than from whatever
+`y` the loop happened to leave behind.
+
+Seven tests, each reintroduction-verified:
+
+| Test | Catches |
+|---|---|
+| `every_pixel_of_a_painted_pill_toggles_its_own_app` | the pill's rectangle shrinking, or drifting from the paint |
+| `nothing_outside_a_painted_pill_toggles_anything` | the unbounded right edge and the 0..35 band |
+| `the_gutter_between_two_app_cards_names_no_card` | the pitch/height confusion |
+| `a_card_below_the_panes_bottom_edge_is_not_clickable` | the missing bottom bound |
+| `the_pills_are_painted_on_the_cards_the_walk_places` | renderer and hit test drifting *together* |
+| `an_app_settings_coordinate_that_is_not_a_number_names_no_card` | the walk going back to a divide-and-cast |
+| `the_per_app_heading_is_not_part_of_the_first_card` | the caption being absorbed into card 0 |
+
+Three notes on the tests themselves, each of which cost a failing run to learn:
+
+- **The gutter has to be asked of `app_card_at` directly, not through a
+  click.** A click in the gutter is refused twice — once for being on no card,
+  and again for being nowhere near the pill — and the second refusal hides the
+  first, so the click-level assertion passes whether the gutter is handled
+  correctly or not. It is the card *identity* that is wrong, and only the
+  identity test sees it.
+- **Filtering the render tree by shape alone is not enough here.** The
+  quick-settings block above the list paints its toggles at the same size *and
+  the same x* as an app card's pill, so a shape filter returned nine
+  rectangles for four cards and the first "pill" the test swept was a
+  quick-setting 200 px higher up. The helper now slices the command list from
+  the "Per-App Settings" caption onwards first.
+- **The NaN guard as written is not reintroducible, and pretending otherwise
+  would have been the same mistake as the settings dropdown test above.**
+  Deleting `!local_y.is_finite()` from `app_card_at` leaves the suite green,
+  because a NaN also fails both comparisons *inside* the walk, so the walk
+  refuses it on its own. The guard is real defence but it is defence against a
+  future shape, not the current one. So the entry in
+  `scripts/reintro-row-hit-tests.py` reintroduces what actually reopens the
+  hole — the walk collapsing back into `(local_y - heading) / pitch as usize`
+  — and that the test does catch. A sweep entry whose defect the suite cannot
+  see is worse than no entry: it reports a green that means nothing.
+
+**Also cleared here:** `desktop`'s clippy run was failing outright — not
+warning, failing — on a `manual_contains` lint in a pre-existing test, so
+`cargo clippy -p desktop` had been red for however long since the toolchain
+picked that lint up. Fixed in passing; the crate now emits 77 warnings and no
+errors, down from 79 and one.
+
+### partmanager's operation queue panel was described four ways — FIXED
+
+The last site logged as still-open from the earlier partmanager entry, and it
+was not the quiet one that note assumed. Four consumers — `render_queue_panel`,
+the header click in `handle_left_click`, the row hover in `handle_mouse_move`,
+and the wheel in `handle_scroll` — each recomputed the panel's top and its
+rows' offsets, and `28.0` (the header's height, which `QUEUE_HEADER_HEIGHT`
+already named) was written out five times.
+
+| what | region it accepted | how it placed a row |
+|---|---|---|
+| renderer | `top + 28` down `queue_h - 28` | `list_top + i * 22 - scroll` |
+| header click | `queue_top` to `queue_top + 28`, `x >= SIDEBAR_WIDTH`, no right edge | — |
+| hover | `queue_top + 28` to `height - STATUS_BAR`, `x >= SIDEBAR_WIDTH`, no right edge | `((y - queue_top - 28 + scroll) / 22) as usize`, unguarded |
+| wheel | `queue_top` to `height - STATUS_BAR` — the header **included** | viewport as `queue_h - 28` |
+
+What that cost, worst first:
+
+- **A notch over a *collapsed* panel scrolled it to an arbitrary place.** The
+  wheel accepted the header; a shut panel is nothing *but* its header. Shut,
+  `queue_h` is 28, so the wheel's viewport term `queue_h - 28` is zero and its
+  maximum scroll became the entire content height. You could park a closed
+  panel anywhere — and then find it there, showing blank space, when you
+  opened it.
+- **`queue_scroll` was clamped by the wheel and by nothing else.**
+  `undo_last_operation`, `clear_operations` and `apply_operations` all shorten
+  the queue out from under a scrolled panel; none touched the offset. Undo
+  twenty operations from a scrolled-to-the-end panel and it stayed parked below
+  its own last row.
+- **A notch over the words "Pending Operations" scrolled rows the pointer was
+  not on**, because the wheel accepted a strip the hover refused.
+- **The hover divided and cast with no guard on the offset.** A NaN clears a
+  `y >= queue_top + 28.0` bound *by failing it*, and `NaN as usize` is `0`, so
+  a pointer that is nowhere at all highlighted row 0.
+- **Neither the header click nor the hover had a right-hand bound.** Both
+  answered for the whole half-plane right of the sidebar, the region past the
+  window's own right edge included.
+
+`QueueList` now holds left, width, panel top, data top and bottom; `row_at()`
+is `row_y()` inverted; `contains_header()` and `contains()` are the two regions,
+and the second is empty by construction while the panel is collapsed, so no
+consumer has to ask separately whether it is open. `queue_panel_height()` is
+gone — `PartitionList::of` now takes its bottom edge from
+`QueueList::of(app).panel_top` rather than recomputing the same subtraction,
+which is the one number the two panels genuinely share.
+
+`QueueList::max_scroll` deliberately takes **no `self`**: it measures against
+the viewport the panel has when *open*, not the one it has right now. Using the
+current viewport is what let a zero-tall collapsed panel hold a scroll position
+the open panel refuses, and it would also snap the list to the top every time
+the panel was shut.
+
+| test | pins |
+|---|---|
+| `every_visible_queue_row_answers_exactly_where_it_was_painted` | eight probes across every row the renderer emitted and did not clip away, plus its last pixel, at a deliberate half-row scroll offset |
+| `the_clip_the_queue_panel_emits_is_the_region_the_pointer_lands_in` | the clip's own top and bottom edge, read out of the `PushClip` command |
+| `the_queue_panels_header_toggles_it_and_highlights_no_row` | the header is a button and not a row, at both its edges |
+| `nothing_right_of_the_window_belongs_to_the_queue_panel` | the missing right-hand bound, through the click and the hover |
+| `a_collapsed_queue_panel_neither_scrolls_nor_highlights` | the wheel against a shut panel, and that reopening does not move the list |
+| `shortening_the_queue_pulls_the_panel_back_onto_its_rows` | undo and clear, checked as "is there a blank strip below the last painted row" rather than against a recomputed offset |
+| `the_queue_row_walk_refuses_a_coordinate_that_is_not_in_the_list` | `row_at` directly: the header, the status bar, a NaN coordinate, a NaN scroll, a negative offset |
+| `the_wheel_and_the_hover_agree_on_where_the_queue_is` | forty probes down through the panel, asserting the two consumers answer the same at every one |
+
+Two notes on building those:
+
+- **The wheel's own existing test was probing the header.** `QUEUE_POINT` was
+  `(400, 600)`, which in a 750 px window is 28 px above the first row — inside
+  the strip only the wheel thought was part of the list. It passed *because* of
+  the defect. Moved to `(400, 650)`, and the reason recorded next to it.
+- **The blank-strip assertion had to come from the render tree, not from
+  `max_scroll`.** Asserting `queue_scroll == QueueList::max_scroll(n)` after an
+  undo would have compared the code under test with itself. What the test
+  actually asks is whether the bottom-most row the renderer painted still
+  reaches the bottom of the clip it painted, which is the thing a user sees.
+
+Verified by reintroduction: all nine new entries in
+`scripts/reintro-row-hit-tests.py` put their defect back and go red.
+partmanager 119 → 127 tests, rustfmt clean (two pre-existing diffs cleared with
+it), clippy down from 19 warnings to 11 — the test module now allows
+`unwrap_used`/`expect_used`/`panic`, which CLAUDE.md says belongs there, and
+the 11 that remain are all `arithmetic_side_effects` on `f32` in production
+code, pre-existing.
+
+**Then still open in this file:** the sidebar's disk list. Now fixed — see the
+next section.
+
+### partmanager's disk sidebar was described three ways — FIXED
+
+The last instance of this family in `apps/partmanager/src/main.rs`, and the
+quietest: unlike the partition list and the queue panel, **no divergence had
+happened yet**. `top + 28.0` — the height of the "Disks" caption — was written
+out three times, in `render_sidebar`, in the sidebar click and in the sidebar
+hover, and `((y - list_top) / SIDEBAR_DISK_ROW_HEIGHT) as usize` twice, once in
+each pointer path, with no shared definition of either. The three agreed.
+
+That is not a reason to leave it. The other two lists in this same file agreed
+once too. What "no divergence yet" actually describes is a defect that has not
+been *committed* yet, in a shape where committing one takes a single edit to
+any of the three copies — and where nothing in the test suite would have
+noticed, because the tests probed row centres.
+
+Two smaller things were true of it as well:
+
+- The unguarded divide-and-cast — the fault that let `credmanager` decrypt the
+  first credential from a click on a caption, because a negative `f32` cast to
+  `usize` **saturates to 0** in Rust rather than wrapping — was closed here
+  only *by accident*, by the enclosing `x < SIDEBAR_WIDTH && y >= top &&
+  y < bottom` test happening to run first. It is now closed *at the cast*, in
+  `DiskSidebar::row_at`, where an edit somewhere else cannot lose it.
+- The clip was `bottom - list_top` with nothing stopping it going negative. A
+  window short enough that the title bar, toolbar, caption and status bar
+  between them eat the column would have pushed a negative-height clip into
+  the render tree. `viewport_height()` clamps at 0, and `of()` clamps `bottom`
+  to `data_top`, the same way `PartitionList` already did.
+
+#### `DiskSidebar`, and the two things it writes down that were only implied
+
+The fix is the same collapse as `PartitionList` and `QueueList`: one
+`DiskSidebar` value with `panel_top` / `data_top` / `bottom` / `left` /
+`width`, a `row_y(i)` and a `row_at(y, count)` that is its inverse, and every
+consumer — renderer included — routed through it. `render_sidebar` no longer
+computes a single coordinate of its own.
+
+Two facts about this list were true of the code but stated nowhere, so the next
+edit could have reversed either without contradicting anything:
+
+| | The rule | Where it now lives |
+|---|---|---|
+| **The inset and the gap are decoration** | A row is *painted* inset 4 px from each side of the column and 2 px short of its own bottom, so the selected row reads as a rounded chip. It *answers* across the column's full width and its full pitch. A click in the gap belongs to the row above it. | `row_paint_rect()`, which only the renderer may call; `ROW_INSET_X` / `ROW_GAP_Y` are named and commented as decoration |
+| **The column consumes the pointer where no row answers** | A click on the "Disks" caption, or on the blank space below the last disk, must not fall through to the disk map behind it. | `contains_column()` (the whole column) is a separate and wider question from `contains()` (the rows) |
+
+A third, smaller one came out of the same pass: `render_sidebar` still held
+seven literals — three `x: 12.0`, three `max_width: Some(SIDEBAR_WIDTH - 24.0)`
+and the health dot's `x: SIDEBAR_WIDTH - 20.0`. Those are single-consumer
+decoration and were not part of the fault, but every `SIDEBAR_WIDTH` in that
+function is a second spelling of `geom.width`, which is exactly the state the
+whole collapse exists to leave. They now go through `text_x()` /
+`text_max_width()` / `right()`, and `render_sidebar` contains no occurrence of
+`SIDEBAR_WIDTH` at all.
+
+The first of the two rules above is the **opposite** of the one `notif_pane`
+needed, where the 8 px
+gutter between cards belongs to no card and the hit test had to be taught to
+refuse it. Two lists in the same tree, two different answers, both correct —
+which is exactly why neither can be left to be inferred from the arithmetic.
+Both are now asserted by a test, so a future edit that swaps one rule for the
+other fails rather than ships.
+
+#### Tests
+
+Eight, all reading their expected values from the render tree — the clip
+`render_sidebar` pushes and the row rectangles it fills — never from a second
+copy of the code under test's arithmetic:
+
+| Test | What it pins |
+|---|---|
+| `every_visible_sidebar_disk_answers_exactly_where_it_was_painted` | 8 probes across each painted row plus its last pixel, for **both** pointer paths. Probing centres cannot see a renderer 3 px out of step with a 48 px row |
+| `the_clip_the_sidebar_emits_is_the_region_the_pointer_lands_in` | The clip's first pixel names row 0; the pixel above it and the pixel past its end name nothing |
+| `the_inset_and_the_gap_under_a_sidebar_row_still_belong_to_that_row` | The decoration rule above, at four x positions and inside the gap |
+| `the_disks_caption_consumes_the_pointer_and_names_no_disk` | `Consumed` with no selection change, for click and hover |
+| `nothing_right_of_the_sidebar_belongs_to_it` | The right-hand bound neither pointer path used to have — including a point past the window's own edge |
+| `a_sidebar_row_below_the_fold_answers_nowhere` | 24 disks in a column with room for ~13: no row painted entirely below the clip is reachable from any y in the window |
+| `the_sidebar_walk_refuses_a_coordinate_that_is_not_in_the_list` | The caption, the status bar, NaN, ±∞, and an empty list |
+| `the_click_and_the_hover_agree_on_where_the_sidebar_is` | 60 probes down the whole column: the two must name the same row *and* agree on whether the sidebar consumed the pointer |
+
+127 → 135 tests, all green. rustfmt clean; clippy unchanged at 13 warnings for
+the crate with `--all-targets` (measured `git stash`-bracketed, so the number
+is a delta and not a snapshot) — all `arithmetic_side_effects` on `f32` in
+production code, pre-existing.
+
+#### One case deliberately *not* added to the reintroduction sweep
+
+`DiskSidebar::row_at` checks `!offset.is_finite() || offset < 0.0` before the
+cast, and that check is **unreachable today**: the `y >= self.data_top &&
+y < self.bottom` test immediately above it already rejects every input that
+could make the offset negative or NaN. Removing it therefore leaves the suite
+green, and a sweep entry for it would report a green that means nothing — which
+is worse than no entry. It stays in the code as a guard at the cast rather than
+a guard somewhere else, and it stays out of the sweep, and the doc comment on
+`row_at` says both. The sweep instead pins the *pair* of guards: removing both
+is caught, which is the edit that would actually reintroduce the fault.
+
+`scripts/reintro-row-hit-tests.py` is now **58 defects** (was 49), nine of them
+new here: the row walk answering above its own first row; the renderer drawing
+3 px below where rows answer; the renderer pacing rows by the height it paints
+rather than their pitch (the classic gap-vs-pitch slip, which accumulates 2 px
+per row and so is invisible at the top of the list); the clip stopping a row
+short; no right-hand bound on the click; the same on the hover; a caption click
+falling through to the disk map; and the gap and the inset each being treated
+as a boundary rather than as decoration.
+
+**With this, every list in `apps/partmanager/src/main.rs` — the partition list,
+the operation queue and the disk sidebar — has exactly one description of where
+its rows are, and each has a reintroduction case proving the suite can see it
+being undone.**
+
+## C-A-NESTED-SUBMENU-BELOW-THE-FIRST-LEVEL-RESOLVES-THE-WRONG-ENTRIES (lane C, 2026-08-20) — FIXED 2026-08-20
+
+**In short:** In a menu-bar dropdown, a submenu inside a submenu — `View →
+Zoom → Advanced → …` — shows the wrong list of commands, usually an empty one.
+Only the first level of nesting works. Found while making the dropdowns scroll;
+it is not caused by that change and predates it.
+
+`gui/toolkit/src/menubar.rs`. An open submenu is tracked by an `OpenSubmenu`
+node holding a `parent_index`, and the chain of them is a singly-linked list
+from the dropdown downwards. To draw or hit-test a node you need its *entries*,
+which `resolve_submenu_entries(root_children, sub)` is supposed to supply. Its
+entire body is:
+
+```rust
+match root_children.get(sub.parent_index) {
+    Some(MenuBarEntry::SubMenu { children, .. }) => children.clone(),
+    _ => Vec::new(),
+}
+```
+
+`parent_index` indexes into *the entries of the level above this node*. That is
+`root_children` only for the first submenu. For a node at depth 2 it indexes
+into the depth-1 submenu's children, so looking it up in `root_children` reads
+an unrelated entry — which is normally not a `SubMenu` at all, giving
+`Vec::new()` and a submenu that draws nothing and activates nothing. If the
+root happens to have a `SubMenu` at that index, it silently shows *that* menu's
+commands instead.
+
+All six call sites pass the root children, including the four chain walkers
+(`click_in_submenu_chain`, `hover_in_submenu_chain`, `scroll_in_submenu_chain`,
+`render_submenu_chain`) which recurse into `sub.child` while passing
+`root_children` through unchanged. So every path is wrong at depth ≥ 2, not
+just one of them.
+
+The function knows. Its doc comment claims "we build the path by collecting
+parent indices from the root submenu down to the target", which the body does
+not do, and 45 lines of comment inside the body talk the problem in a circle —
+"the only reliable approach is to walk the chain from the very first submenu
+node … but we don't have the root submenu pointer" — before giving up on a
+lookup that is right only at depth 1.
+
+**The proper fix** is smaller than the comment: every walker already recurses
+from the top of the chain downwards, so each level has its own entries in hand
+by the time it recurses. Resolve before recursing and pass *this level's*
+resolved entries as the child's parent entries, rather than passing
+`root_children` down untouched. `resolve_submenu_entries` then takes "the
+entries of the level above" and its body is already correct for that. The
+keyboard paths, which grab the deepest node with `deepest_submenu_mut` and have
+no chain to descend, need a combined `deepest_with_entries` helper that walks
+down accumulating entries and returns both.
+
+**Until then:** submenus one level deep — which is all the toolkit's own
+fixtures and, as far as a grep shows, all its callers — behave correctly.
+
+**Fixed** exactly as proposed. Each of the four walkers now resolves its own
+level before descending and hands the recursion *those* entries;
+`resolve_submenu_entries`'s first parameter is named `parent_entries` and
+documented as the level above, which its body was always right for. The 45
+lines of circular comment are gone, replaced by the one sentence that settles
+it. `render_submenu_chain` became a free function in the process: as a method
+it could reach `self.items` at every level, which is precisely the mistake, so
+taking `&self` away from it makes the wrong version unwritable rather than
+merely absent. The keyboard, which jumps to the deepest node instead of
+descending, got `deepest_with_entries` (and an immutable twin) that walks and
+resolves together; `find_deepest` had no callers left and was deleted.
+
+Four regression tests, all confirmed to fail when the recursion is handed
+`parent_entries` again: the depth-2 panel draws its own labels and not the
+decoy's, a click there activates the id that was drawn under it, two Downs and
+Enter reach the second of two deep entries, and the wheel finds a deep list
+long enough to scroll. The fixture parks a *decoy submenu* at the root index
+the depth-2 node's `parent_index` equals, so the old code resolved to a
+plausible-looking wrong menu rather than to nothing — a test against an empty
+list would have passed against half the bug.
+
+## C-A-SUBMENU-NEAR-THE-RIGHT-EDGE-IS-DRAWN-OFF-THE-SCREEN (lane C, 2026-08-20) — FIXED 2026-08-20
+
+**In short:** A dropdown submenu always opens to the right of its parent panel.
+For a menu near the right edge of the display the child is drawn past the edge,
+where its rows can be neither seen nor clicked. The horizontal twin of the
+vertical overflow fixed in "Neither menu scrolled" above.
+
+`gui/toolkit/src/menubar.rs`. `ContextMenu::show` flips horizontally when a
+popup would overflow the right edge; the menu bar's submenus never do. The
+child's x is decided in three places — `MenuBar::submenu_at`, the `OpenChild`
+arm of `click_in_submenu_chain`, and the hover path — and all three say
+`panel.right()` unconditionally.
+
+**The proper fix:** one `DropdownPanel::child_origin(child_width, row_top)`
+that all three go through, returning `self.right()` normally and
+`(self.x - child_width).max(0.0)` when the former would run past
+`DEFAULT_VIEWPORT_WIDTH` — which the file will need to gain, having only
+`DEFAULT_VIEWPORT_HEIGHT` today. Three places deciding one thing is the same
+duplication shape the `DropdownPanel` collapse removed everywhere else in the
+file, so the fix is the collapse rather than three edits.
+
+**Fixed** as the collapse. `DropdownPanel::child_origin(child_width)` is the
+one spelling of the rule and all three sites go through it;
+`DEFAULT_VIEWPORT_WIDTH` joins its vertical twin. It takes only the width, not
+the `row_top` guessed at above — the row's top is the child's `y`, which is a
+separate question already answered by `row_top`, and folding two answers into
+one function is the shape being removed rather than a smaller version of it.
+The flipped position is floored at zero: a submenu wider than everything to its
+left has nowhere good to go, and clipped-on-the-right is at least reachable
+where a negative `x` is neither visible nor clickable.
+
+Two regression tests, both confirmed to fail when `child_origin` goes back to
+`self.right()`: a table of the rule's four cases (fits, exactly fits, one pixel
+over, no room either side), and an end-to-end through `hover_in_submenu_chain`
+asserting a flipped child ends flush with its parent's left edge and inside the
+screen.
+
+### Note on the reintroduction sweep this turned up
+
+Re-running `scripts/reintro-row-hit-tests.py` over the enlarged set reported
+one of 67 defects **not pinned**: `menu.rs`'s "a menu taller than the screen is
+given its full height and runs off it". Investigating it showed the anchor, not
+the suite, was at fault — it patched `ContextMenu::show`'s
+`let panel_height = self.panel_height();` to `content_height()`, and that is an
+*equivalent mutation*. `show` uses the height only to choose the upward flip,
+and for any `y` inside the viewport `(y - panel_height).max(0.0)` and
+`(y - content_height).max(0.0)` are both 0, so no test could ever have told the
+two apart. The cap that is load-bearing is `panel_height()` itself, which every
+vertical bound in the file is measured from; removing *its* `.min()` fails five
+tests. The anchor was moved there.
+
+Worth remembering: a sweep case can be wrong in a way that looks exactly like a
+missing test. The first move on a NOT PINNED line is to ask what the mutation
+actually changes for a caller — not to write a test that forces the mutation to
+be observable, which here would have meant asserting on a `y` outside the
+screen.
+
+---
+
+## `C-SETTINGS-BUTTONS-WITH-NOTHING-BEHIND-THEM` — visible half fixed 2026-08-20
+
+**Status.** The seven buttons are now **drawn dimmed** instead of looking
+pressable, so the app no longer promises an action it cannot perform. The real
+half — actually implementing the seven features — is unchanged and still waits
+on the services named in the table below. See "Fixed 2026-08-20" at the end of
+this entry, and `design-decisions.md` §478. The original report follows.
+
+**In short:** the Settings app draws seven push buttons that do nothing when
+clicked, because there is no state for them to change yet. They are not broken
+wiring — the features they would trigger (changing a password, reinstalling the
+OS, rolling back a package generation) do not exist. Right now clicking one is
+silently ignored, which is honest but unhelpful; a user cannot tell "not
+implemented" from "my click missed".
+
+**Where:** `apps/settings/src/main.rs`. The `ButtonId` enum lists the buttons a
+click can reach, and has exactly one variant, `CheckForUpdates`. Every other
+`button_at(…)` call passes `None` for its click target, so no band is
+registered:
+
+| Button | Page | What it would need |
+|---|---|---|
+| Change Password | User Accounts | an account/credential service |
+| Add Account, Remove Account | User Accounts | the same |
+| Manage Family Settings | User Accounts | the same |
+| Clear Activity History | Permissions | a stored activity log |
+| Go Back (to previous version) | Recovery | package-generation rollback (`pkg`) |
+| Reset (Fresh Start) | Recovery | a reinstall path |
+
+The Snapshots page is the same shape: it lists four package generations and
+marks the current one, and none of the rows is selectable. So is the account
+picture grid on User Accounts, which is drawn and inert. (The picture grid was
+fixed on 2026-08-20 — see
+`C-SETTINGS-ACCOUNT-PICTURE-GRID-WAS-DRAWN-BUT-NOT-SELECTABLE` below.)
+
+**Why it is `None` rather than a target that does nothing:** a registered band
+swallows the click. A button that consumes a click and produces no effect is
+worse than one that ignores it, because the pointer-level feedback ("nothing
+happened here") is the only signal the user gets either way, and swallowing
+also blocks anything drawn beneath from ever receiving it.
+
+**How to confirm:** `grep -n 'button_at(' apps/settings/src/main.rs` and count
+the calls whose last argument is `None`.
+
+**The proper fix, in two parts.** The visible half is cheap and can be done now:
+draw a button with no target in a disabled style (dimmed fill, muted label) so
+the UI stops promising an action it cannot perform. The real half is per-button
+and each waits on a service that does not exist — `pkg` generation rollback for
+Recovery and Snapshots, an accounts service for the four account buttons. Add a
+`ButtonId` variant and an `apply_row_hit` arm as each lands; the `None` at the
+call site is the single place that has to change.
+
+### Fixed 2026-08-20 — the visible half
+
+Done as described, but with the styling *derived* from the click target rather
+than requested alongside it. `PageSink::button_at` already took
+`what: Option<RowHit>`; that one value now picks the painter as well as
+registering the band, so `render_button` runs for `Some` and a new
+`render_disabled_button` for `None`. **There is no way to ask for the live
+colour while passing `None`** — the combination that was the bug is not
+expressible. Same reasoning as §475/§476/§477 and recorded as §478.
+
+`render_disabled_button` takes no colour argument. The colour a live button
+carries says what *kind* of action it is (accent for ordinary, red for
+destructive), and a button that cannot act has no kind; a greyed-out "Remove
+Account" painted red would be an alarm about something that cannot happen.
+Width and height come from the same `button_width`/`BUTTON_HEIGHT`, so nothing
+on the page moves depending on whether a feature exists yet.
+
+One button was not going through `button_at` at all: "Change Password" was
+painted by a raw `render_button` inside a `row(…)` closure, which is why it
+could never have had a band. A new `PageSink::button_row` routes a
+button-in-a-row through `button_at`, so there is now one path.
+
+The `None` band is still `None`, deliberately — the argument in the original
+report stands. A band that swallowed the click would take the "nothing happened
+here" feedback away *and* block anything drawn beneath. Dimming is what tells
+the user why nothing happened; not registering is what keeps the click honest.
+
+Three tests (168 green, clippy clean, rustfmt clean). They read the paint out
+of the render tree and the clickability out of the page's click bands — two
+independent places — and assert the two agree, in both directions: a
+live-looking button with no band is the original complaint, and a dimmed button
+that *is* clickable is a working feature the user has been told not to try.
+`the_buttons_with_nothing_behind_them_are_the_ones_on_record` pins the census at
+exactly these seven, so wiring one up without striking it off here fails, and so
+does adding an eighth.
+
+Mutation-tested with five mutations; all five caught. One was missed at first:
+giving the disabled button back its full-brightness label was invisible, because
+the tests read only the fill. A dimmed fill under a live label is half a
+disabled button and reads on screen as a live one. The liveness test now checks
+both commands.
+
+**What is left.** Only the real half, per-button, each waiting on a service:
+
+| Button | Waits on |
+|---|---|
+| Change Password, Add/Remove Account, Manage Family Settings | an accounts/credential service |
+| Clear Activity History | a stored activity log |
+| Go Back | `pkg` generation rollback |
+| Reset (Fresh Start) | a reinstall path |
+
+As each lands: add a `ButtonId` variant, an `apply_row_hit` arm, and change the
+`None` at the call site to `Some(RowHit::Press(…))`. The button becomes live
+automatically — no styling change is needed, because there is no styling
+argument. Strike the label from the census test in the same commit.
+
+The Snapshots page's generation rows and the User Accounts picture grid are the
+same shape (drawn and inert) but are not buttons and were **not** covered by
+this fix; they needed a selectable treatment of their own. The picture grid got
+one the same day — see
+`C-SETTINGS-ACCOUNT-PICTURE-GRID-WAS-DRAWN-BUT-NOT-SELECTABLE`. The Snapshots
+rows are still inert and still wait on `pkg` generation rollback.
+
+---
+
+## `C-SETTINGS-SLIDERS-CANNOT-BE-DRAGGED` — fixed
+
+**Fixed** (see `design-decisions.md` §476). Sliders are now press-drag-release:
+`SliderId` names each one and states its range, `SettingsState::slider_fraction`
+and `set_slider_fraction` are the one mapping between a stored setting and a
+handle position read in each direction, and `AnchorId::Slider` asks the page
+itself where the track was painted so a drag measures from the bar on screen.
+`slider_track` is the single placement the painted bar, the grab band and the
+drag origin all come from — the remedy `pill_rect` applies to pills. The
+original report follows.
+
+One correction to it: there are eight sliders, not seven, and **none of them
+is brightness** — the Display page has no brightness control at all. That is a
+missing feature rather than a broken one; see
+`C-SETTINGS-DISPLAY-HAS-NO-BRIGHTNESS-CONTROL`.
+
+---
+
+**In short:** every slider in the Settings app — volume, brightness, night-light
+warmth, text size, narrator voice rate, the two update-deferral sliders — draws
+its current value correctly and cannot be moved with the mouse. The keyboard
+arrow keys change some of them; the pointer changes none.
+
+**Where:** `apps/settings/src/main.rs`, `PageSink::slider_row`. It registers no
+click band at all (`self.row(label, None, …)`), with a comment saying so. The
+drawing side, `render_slider`, is complete.
+
+**How to confirm:** open Sound, drag the volume slider, watch it not move.
+
+**The proper fix:** sliders need press-drag-release, not a click. That means the
+page walk has to yield a band tagged with the slider's id *and* its track
+geometry, plus a `dragging: Option<SliderId>` in `SettingsState` that
+`MouseEventKind::Move` consults while a button is held. The value is then
+`(mx - track_x) / SLIDER_WIDTH` clamped to 0..1, mapped back through whatever
+range that slider covers — which means a `SliderId` enum carrying the range, in
+the same shape as `ToggleId`/`toggle_mut`, so the mapping is written once. The
+band and the track must come from one place, exactly as `pill_rect` now does for
+pills; a slider whose visible track and draggable range differ is the same class
+of defect this file was restructured to eliminate.
+
+## `C-SETTINGS-DISPLAY-HAS-NO-BRIGHTNESS-CONTROL`
+
+**In short:** the Settings app's Display page offers resolution, refresh rate,
+scale, orientation and a night-light section, but no way to change screen
+brightness. It is the one display setting a laptop user reaches for most, and
+it is simply absent — not broken, not greyed out, not there.
+
+**Where:** `apps/settings/src/main.rs`, `build_display_page`. Nothing in
+`apps/settings/src/` mentions brightness at all, and `SettingsState` has no
+field for it. The entry `C-SETTINGS-SLIDERS-CANNOT-BE-DRAGGED` listed
+"brightness" among the sliders that could not be dragged, which was wrong —
+there was never a brightness slider to drag.
+
+**How to confirm:** open Settings → Display and look for it.
+
+**The proper fix:** two halves, and only the first is ours.
+
+1. *The control.* A `brightness_percent: u8` on `SettingsState`, a
+   `SliderId::Brightness` with range `(0.0, 100.0)`, and one
+   `self.slider(s, "Brightness", SliderId::Brightness)` in `build_display_page`.
+   With §476's plumbing in place that is a handful of lines, and the existing
+   slider tests cover it the moment the id joins `SliderId::FIXED`.
+2. *Somewhere for it to go.* A slider that moves a number in a settings process
+   and changes nothing on screen is worse than no slider, because it claims to
+   work. Real brightness needs a backlight control path — DPMS/DDC-CI over the
+   display connection for external monitors, a panel backlight interface for
+   built-in ones — which lives behind the compositor and does not exist yet.
+   See `TD-COMPOSITOR-HAS-NO-SCANOUT`.
+
+So this is deliberately left undone rather than half-done: adding (1) without
+(2) puts an inert control on the page, which is exactly the fault
+`C-SETTINGS-BUTTONS-WITH-NOTHING-BEHIND-THEM` records for seven buttons and
+which that entry argues against repeating. Do (1) when (2) lands.
+
+## `C-OILS-WAIT-N-TEST-FLAKES-UNDER-LOAD`
+
+**In short:** one test in the shell (`oils`) fails now and then during a full
+`cargo test --workspace` run, and passes every time when run on its own. It is
+not a real bug in the shell — it is a test that waits a fixed fifth of a second
+and assumes a background job has reached a particular state by then. On a busy
+machine it has not, and the test reports a failure that means nothing.
+
+**Where:** `userspace/oils/src/interp.rs`, in
+`interp::tests::wait_n_ignores_a_job_whose_status_was_already_reported` — the
+third stanza, at the line asserting `listing(&mut sh, "jobs").lines().count()
+== 1`. Lane **B**'s tree; filed to them as
+`requests/c-b-oils-wait-n-test-flakes-under-a-loaded-workspace-run.md`.
+
+**How to confirm:** run `cargo test --workspace`. Observed once as
+`left: 0, right: 1`. `cargo test -p oils --lib` alone was green 5/5
+(1484 passed each run), and the single test alone green 3/3, so the trigger is
+contention from the other test binaries, not the shell.
+
+**The proper fix:** the two stanzas above the failing one call
+`settle_jobs(&mut sh)`, which waits out `JOB_EXIT_NOTICE_GRACE` and then polls
+`poll_jobs()` until every job has a status. The failing stanza instead writes
+`sh.run_source("( exit 7 ) & sleep 0.2")` — a wall-clock guess in place of the
+helper written for exactly this hazard. Use `settle_jobs` there too. (The
+`( sleep 0.1; exit 9 ) &` on the last line is a different thing and should
+stay: there the sleep is the live job under test, not a stand-in for settling.)
+
+**Why it is filed rather than fixed:** `userspace/**` is lane B's. A flaky test
+in another lane cannot be cleared by work in this one, and it is not a reason
+to hold a green lane back — but an intermittent red that nobody has written
+down teaches everyone to ignore workspace failures, which is worse than the
+flake.
+
+
+---
+
+## `C-SETTINGS-ACCOUNT-PICTURE-GRID-WAS-DRAWN-BUT-NOT-SELECTABLE` (lane C, 2026-08-20) — FIXED
+
+**In short:** Settings → Accounts → Login Options offers six little pictures
+under "Choose a picture for your account". It looked like a choice and was not
+one: the first picture was always outlined as the chosen one, clicking any of
+them did nothing, and nothing anywhere stored which one you had picked. Now
+each picture is clickable, the outline follows the one you chose, and your
+choice shows up as the avatar beside your name in the account list.
+
+**Where:** `apps/settings/src/main.rs`, `build_login_options_page`.
+
+**What was wrong.** All six tiles were painted inside a single `s.draw(…)`
+closure that computed its own `icon_size`, `icon_spacing` and per-tile `x`
+inline, with `let is_selected = idx == 0;` hardcoded. A closure is opaque to
+the hit sink — the page walk sees one drawing call, not six tiles — so there
+was nowhere to register six click bands even if somebody had wanted to. This
+is the §474/§475 shape once more: geometry written inside the paint, where no
+other consumer can reach it.
+
+Separately, `UserAccount` had no field for a picture, so there was nothing for
+a click to write; and the account list drew a hardcoded `"\u{1F464}"` avatar
+for every row regardless of who the row was.
+
+### Fixed 2026-08-20
+
+**The tile geometry is named once**, beside the theme cards which needed the
+same treatment: `ACCOUNT_PICTURES` (the six icons, in draw order),
+`PICTURE_TILE_SIZE`, `PICTURE_TILE_SPACING`, `picture_tile_dx(index)` and
+`render_account_picture`. The grid loop now runs one iteration per tile,
+calling `s.hit_rect(x + picture_tile_dx(idx), …)` and then `s.draw(…)` at the
+same offset, so the square the user sees and the square a click resolves to
+come from one expression.
+
+**`UserAccount::picture` is an index into `ACCOUNT_PICTURES`,** not an icon
+string, so the grid the user picks from and the avatar drawn in the account
+list cannot come to offer different sets of pictures. The three default
+accounts were given distinct pictures (Alice 👩, Bob 👨, Charlie 👶) — partly
+so the list looks like a list of people, and partly because three identical
+avatars would let a hardcoded-avatar regression pass unnoticed.
+
+**The choice is written to the account marked `is_current`, not to
+`user_accounts[selected_account]`.** These coincide on a fresh state, which is
+exactly why it is worth stating: the Login Options page says "your account", so
+which row the Accounts page happens to have *highlighted* must not decide whose
+picture changes. `set_current_account_picture` also refuses an index past the
+end of `ACCOUNT_PICTURES`, so the stored field can never name a picture that
+does not exist.
+
+**Nothing is ringed when nobody is signed in.** `current_account_picture`
+returns `Option<usize>`, and `None` draws as "no tile outlined" rather than as
+tile 0 — a machine with no signed-in account should not claim a choice was
+made.
+
+### Testing
+
+Seven tests (175 green, clippy clean, rustfmt clean). The tiles are recovered
+from the **render tree** and driven with real `handle_click` calls, so where a
+tile is drawn and where a click lands have to agree without either being asked
+to describe the other. The outline is looked up across the whole tree rather
+than assumed to follow its own tile's fill, so a ring painted over the wrong
+tile is a mismatch instead of being silently credited to the right one.
+
+Twelve mutations, all twelve caught. Three are worth recording:
+
+- **The bands were probed at the corners, not just the centre.** Shifting every
+  band 12 px off its tile was *not* caught at first: the bands are as wide as
+  the tiles, so a small offset still leaves the middle covered. Only a click
+  near an edge tells whether the clickable square is the square on screen.
+  General form: **a control's hit band is a rectangle, and a probe at its
+  centre tests a point, not a rectangle.**
+- **A geometry mutation that moves the paint and the band together is
+  invisible to any test that checks them against each other** — which is the
+  price of collapsing them into one expression, and the right price. What
+  catches it is a check against something with no shared origin:
+  `the_picture_tiles_stand_apart_inside_the_content_column` measures the
+  painted tiles against the window, so overlapping tiles (the leftmost of a
+  stack would be the only reachable one) and a strip running past the content
+  column both fail.
+- **The expected avatars are spelled out, not derived from the accounts.** A
+  list that drew one hardcoded avatar three times — which is what it did — would
+  otherwise have passed by agreeing with itself.
+
+See `design-decisions.md` §479.
+
+
+---
+
+## `C-EMOJI-SKIN-TONE-WAS-APPLIED-TO-EMOJI-THAT-HAVE-NO-SKIN` (lane C, 2026-08-20) — FIXED
+
+**In short:** the emoji picker has a row of six skin-tone swatches along the
+bottom. Choosing one used to change *every* emoji in the picker, not just the
+people. Pick "dark", click the pizza, and what landed on your clipboard was a
+pizza followed by a small brown square — because a skin-tone modifier that
+follows something without skin is not absorbed into the glyph; it draws on its
+own. Seventy-five of the picker's eighty-two emoji were affected. Now the tone
+applies only to the emoji Unicode says can wear one, and the grid shows the
+tone as you have set it instead of only revealing it after you have clicked.
+
+**Where:** `apps/emojipicker/src/main.rs` — `SkinToneModifier::apply`, and the
+glyph drawn by `render_grid`.
+
+**What was wrong.** `apply` was a two-line append:
+
+```rust
+let mut result = String::with_capacity(base_emoji.len().saturating_add(4));
+result.push_str(base_emoji);
+result.push(ch);
+```
+
+It asked nothing about what it was appending to. Unicode has a property for
+exactly this question — `Emoji_Modifier_Base` — and the set is far narrower
+than "looks like a person": a raised hand and a dancer are in it, but a
+grinning face is **not**, and neither is anything in the other seven
+categories. Of the eighty-two entries in the shipped database, seven are
+modifier bases.
+
+The defect was invisible to the test suite because all five existing skin-tone
+tests tinted `"\u{1F44D}"` (thumbs up), which is one of the seven. Nothing ever
+passed `apply` an emoji it would break.
+
+A second, quieter half: `render_grid` drew `entry.emoji` raw while
+`render_preview` and the click path both drew `skin_tone.apply(...)`. The grid —
+the thing you are looking at when you choose — was the one surface that did not
+show the choice.
+
+### Fixed 2026-08-20
+
+**`EMOJI_MODIFIER_BASE`**, a sorted, disjoint table of the 39 codepoint ranges
+carrying the Unicode 15.1 `Emoji_Modifier_Base` property, with
+`is_emoji_modifier_base(char)` deciding membership by binary search and
+`takes_skin_tone(&str)` asking it about an emoji's first scalar. A table read
+off `emoji-data.txt` rather than a hand-set flag on each database entry: the
+flag would have to be re-judged on every entry added, and would be wrong
+silently.
+
+**`apply` returns the emoji unchanged when it has no skin**, and when it does
+have skin puts the modifier **directly after the base** rather than at the end
+of the sequence, dropping a variation selector caught between the two (a
+modifier already forces emoji presentation, so `base FE0F modifier` is not a
+well-formed `emoji_modifier_sequence` — UTS #51).
+
+**The grid draws `skin_tone.apply(...)` too**, so the tone is visible where it
+is chosen rather than only in the preview and the clipboard.
+
+**Recently-used still records the untinted emoji**, which was already true and
+is now pinned by a test: it means changing the tone re-tints the recent list
+instead of leaving rows frozen at whatever tone was active when each was
+picked.
+
+### Known limit (deliberate, documented at `takes_skin_tone`)
+
+A ZWJ sequence can carry a modifier base in a later segment — "man
+technologist" is a man joined to a laptop — and toning one properly means
+toning *each* base segment. The current rule tones only the first. Every ZWJ
+entry in this database is flag-shaped and takes no tone at all, so the
+distinction does not bite today; **adding a person-shaped ZWJ sequence to the
+database is what should trigger generalising it.** The behaviour is pinned by
+`the_modifier_goes_after_the_base_it_tints_not_at_the_end`, which asserts the
+man is tinted and the laptop is not.
+
+### Testing
+
+Eight new tests (62 green, clippy clean, rustfmt clean). Ten mutations, all ten
+caught. Two are worth recording:
+
+- **The whole database is swept, split by the property, and both halves are
+  asserted to be non-empty.** A test that tinted one hand-picked emoji is what
+  let this bug live for the life of the file; a test that sweeps but happens to
+  run on a database with nothing in one half would repeat the mistake
+  silently, so `entries_by_skin` fails loudly rather than passing vacuously.
+- **Where the modifier goes could not be tested against the shipped
+  database at all.** Every tone-taking entry in it is a single character, so
+  "after the base" and "at the end of the sequence" produce the same string,
+  and that mutation escaped the first run. It took a *constructed* multi-scalar
+  input to separate them. General form: **a rule about ordering within a
+  sequence cannot be tested by data that is one element long**, however much of
+  it there is.
+
+See `design-decisions.md` §480.
+
+
+---
+
+## `C-EMOJIPICKER-THE-GAPS-BETWEEN-THE-SKIN-TONE-SWATCHES-WERE-DEAD` (lane C, 2026-08-20) — FIXED
+
+**In short:** the emoji picker's six skin-tone swatches are drawn as 18-pixel
+circles six pixels apart. Only the circles were clickable, so a click that
+landed in one of the five gaps between them did nothing at all — and, worse,
+was reported as *not handled*, which offers it to whatever is behind the popup.
+A click off the left edge of the window, meanwhile, quietly switched to the
+recently-used tab. Both come from the same root: this file wrote out its layout
+arithmetic twice — once where a thing is painted, once where a click is
+resolved — and the two copies were free to disagree. They now come from one set
+of named functions.
+
+**Where:** `apps/emojipicker/src/main.rs` — the new `// === Layout ===`
+section, and every renderer and hit test that used to do the arithmetic itself.
+
+### What was wrong
+
+Four separate quantities were spelled out at more than one site:
+
+| Quantity | Times written | Consumers |
+|---|---|---|
+| the grid's left margin | 5 | `render_grid`, `grid_hit_test`, 2 tests |
+| the grid's bottom edge | 6 | clip rect, scroll clamp, 3 branches of `handle_mouse` |
+| the tab list and tab width | 2 in full | `render_tab_bar`, `handle_tab_click` |
+| the swatch strip's origin | 2 | `render_skin_tone_bar`, `handle_skin_tone_click` |
+
+Nothing but care kept them equal, and in two places care had already run out:
+
+**The swatch gaps belonged to nobody.** `render_skin_tone_bar` steps by
+`CIRCLE + SPACING` (24px) and paints an 18px circle at each step;
+`handle_skin_tone_click` re-derived the index but then tested membership against
+the *circle*, so six pixels out of every twenty-four were dead. A user aiming
+between two tones — the natural thing to do when they are 6px apart — got
+nothing.
+
+**A click left of the tab bar landed on tab 0.** `(x / tab_width) as usize` is a
+float-to-integer cast, which in Rust *saturates*: `-30.0 as usize` is `0`, not a
+wrap or a panic. A click off the left edge of the window silently switched the
+picker to recently-used.
+
+**A click on the strip's label was reported as ignored.** The strip is part of
+the popup; declining it hands the click to whatever is underneath.
+
+### Fixed 2026-08-20
+
+A `// === Layout ===` section holding every number that decides *where*
+something is drawn: `grid_left()`, `grid_bottom()` (defined as
+`skin_tone_bar_y()`, so the grid ends exactly where the strip begins by
+construction rather than by two matching subtractions), `skin_tone_swatch_x()`,
+`skin_tone_swatch_at()`, `tabs()`, `tab_width()`, `tab_x()`, `tab_at()`. Every
+renderer and every hit test now reads them.
+
+**A swatch's click cell is its whole pitch**, not the circle drawn inside it:
+`skin_tone_swatch_at` divides by `SKIN_TONE_PITCH` from a strip origin pulled
+half a gap to the left, so the six swatches tile the strip with no dead pixels
+and the gaps go to the nearer circle. `tab_at` rejects negative `x` explicitly,
+with a comment naming the saturating cast so nobody "simplifies" the guard away.
+`handle_skin_tone_click` consumes either way.
+
+### Testing
+
+Nine new geometry tests (72 green, clippy clean, rustfmt clean). Fourteen
+mutations, all fourteen caught — but only after two escaped the first run, and
+those two are the interesting part:
+
+- **Sweeping the strip has to sweep past the end of it.** "A click past the last
+  swatch wraps onto a real one" (`Some(index % len)`) survived, because the
+  sweep stopped one circle-width after the last swatch and the wrap region
+  starts further out. The test now sweeps the full window width and asserts the
+  tone is *unchanged* outside the swatch run — with the fixture pre-set to a
+  non-default tone, so "unchanged" cannot be confused with "landed on swatch 0".
+- **Collapsing paint and hit test into one function means a wrong function
+  moves them together.** "The grid is centred on the wrong width" (`/4.0`
+  instead of `/2.0`) survived every test that clicked where the grid was
+  painted, because both readings came from `grid_left()`. What catches it is a
+  measurement against something with **no shared origin**: the painted columns
+  are checked for equal left and right margins against `WINDOW_WIDTH`, a claim
+  `grid_left` does not itself get to decide. Same shape for
+  `the_grid_is_clipped_to_exactly_where_the_strip_begins`, which cross-checks
+  the clip rectangle against the *painted strip* rather than against
+  `grid_bottom()`.
+
+See `design-decisions.md` §481.
+
+
+---
+
+## `C-CHECKERS-THE-BOARD-WAS-MIRRORED` (lane C, 2026-08-20) — FIXED
+
+**In short:** a checkers board is set up with a dark square in the corner
+nearest each player's left hand — the same rule as chess — and the pieces stand
+on the dark squares. This one had it backwards: the bottom-left square, a1, was
+light and out of play, so the whole board was a mirror image of a real one. The
+game was still perfectly legal, because the playable squares of a checkers
+board are a mirror image of themselves; it just did not look like a checkers
+board, and the double corner (a landmark players actually name and play toward)
+sat on each player's left instead of their right. The chess app shipped
+alongside it, on the same 8×8 grid, had it right.
+
+**Where:** `apps/checkers/src/main.rs` — `Pos::is_dark`, and the two loops in
+`Board::new` that placed the opening position.
+
+### What was wrong
+
+```rust
+fn is_dark(self) -> bool {
+    (self.row + self.col) % 2 == 1
+}
+```
+
+`Pos::new(0, 0)` is a1, so this makes a1 light. Everything downstream — which
+squares can be clicked, where the twenty-four pieces start, which squares get
+painted `DARK_SQUARE` — followed from it and was internally consistent, which
+is why nothing caught it. The parity was also **written out three times**: once
+in `is_dark` and once in each of `Board::new`'s two placement loops, which is
+what would have let the pieces and the paint drift apart had anyone ever
+corrected one of the three.
+
+### Fixed 2026-08-20
+
+`is_dark` is now `(row + col) % 2 == 0`, derived in its doc comment from the
+convention rather than asserted as a magic parity, and `Board::new` asks
+`is_dark()` instead of restating it. The keyboard cursor starts on a1 rather
+than b1, which is where the first playable square now is.
+
+Every board coordinate in the test module moved with it, by a mechanical
+`col → 7 - col` mirror. That transform is an exact symmetry of checkers — rows,
+and therefore the direction each side moves and where kings crown, are
+untouched — so all 103 existing tests kept their meaning, including the three
+that assert move notation (`"b3xd5"` became `"g3xe5"`). Two tests were
+deliberately **excluded** from the mirror: `test_cursor_bounds` and
+`test_cursor_upper_bounds` name the board's corners because they are about the
+arrow-key clamp, not about any square's colour.
+
+### Testing
+
+Four new tests (107 green, no new clippy warnings, rustfmt clean). Nine
+mutations, all nine caught. The one worth recording:
+
+- **`the_board_is_painted_the_colour_it_says_each_square_is` reads the colour
+  back off the render commands** — it finds the square drawn at
+  `BOARD_OFFSET_X` with the largest `y`, i.e. the bottom-left one, and requires
+  it to be `DARK_SQUARE`. That is the only test here whose expected value does
+  not come from `is_dark`, and it alone caught three mutations: swapped square
+  colours, a board painted one column to the right of where clicks land, and a
+  board painted without its vertical flip. It asserts an `Option` rather than
+  unwrapping, so "painted no bottom-left square at all" fails as a wrong colour
+  rather than as a panic.
+- `the_board_is_oriented_the_way_a_real_checkers_board_is` states the
+  convention twice over — dark in each player's lower left, *and* the double
+  corner on each player's right — so a mirrored board cannot satisfy both.
+
+See `design-decisions.md` §482.
+
+
+---
+
+## `C-CHESS-THE-BOARD-GEOMETRY-WAS-WRITTEN-ELEVEN-TIMES` (lane C, 2026-08-20) — FIXED
+
+**In short:** chess worked. This is the same duplication that made a mirrored
+board possible in checkers and dead gaps possible in the emoji picker, caught
+before it produced a symptom rather than after. Where a square gets painted and
+which square a click lands on were computed independently, from the same
+arithmetic copied out eleven times, with nothing but care keeping the board a
+player sees in the same place as the board a click resolves against.
+
+**Where:** `apps/chess/src/main.rs` — `handle_mouse`, `render_board`, the rank
+and file labels, the legal-move dots and capture rings, the window height, and
+`PANEL_X`.
+
+### What was wrong
+
+Nothing observable. That is the point of the entry: the eleven copies agreed on
+2026-08-20, and no mechanism made them agree on 2026-08-21. Specifically, the
+square's top-left corner was spelled out five times:
+
+```rust
+let screen_row = 7 - row;
+let sx = BOARD_OFFSET_X + col as f32 * SQUARE_SIZE;
+let sy = BOARD_OFFSET_Y + screen_row as f32 * SQUARE_SIZE;
+```
+
+the board's far edge four times as `SQUARE_SIZE * 8.0`, and the hit test
+inverted the whole thing by hand in `handle_mouse`. A *test* wrote the mapping
+a fourth time — `test_mouse_click_on_board` computed e2's pixel coordinates in
+a comment and then again in code — so it would have moved with a renderer bug
+rather than catching it.
+
+### Fixed 2026-08-20
+
+One `// ── Board geometry ──` section holding `square_origin`, `square_center`
+and `square_at`, plus a `BOARD_SIZE` constant. Every one of the eleven sites now
+reads from it. `square_at` keeps its bounds check **before** the cast, with a
+comment saying why: a float-to-integer cast in Rust saturates, so without the
+guard a click 30px left of the board would land on the a-file instead of on
+nothing. That guard existed before and was correct; the comment is new, because
+a guard whose purpose is not written down is a guard someone deletes as
+redundant.
+
+### Testing
+
+Eight new tests (121 green, up from 113; fmt clean; binary clippy warnings fell
+78 → 76 as the duplicated arithmetic went away, and the test module gained the
+`#[cfg(test)]` lint allow `CLAUDE.md` prescribes, clearing its last three).
+Fifteen mutations, all fifteen caught.
+
+Per §481, collapsing paint and hit test into one function *removes* the
+disagreement a click test was looking for, so the load-bearing assertions are
+the ones sourced from outside the mapping:
+
+- **`the_painted_board_is_sixty_four_squares_on_an_even_grid`** measures the
+  paint against the window and against itself — 64 fills, eight distinct
+  columns and eight distinct rows, evenly spaced, starting inside the window
+  and stopping short of the side panel. No call to `square_origin`.
+- **`white_is_painted_at_the_bottom_of_the_window`** is the only check that can
+  see the row flip at all. Painting and hit-testing both flip, so a round-trip
+  stays consistent either way; this one asserts that the white king's glyph is
+  drawn lower down the window than the black king's, which is a fact about
+  chess rather than about this code.
+- **`nothing_outside_the_board_lands_on_a_square`** sweeps to 200px *past* the
+  far edge, because the faults it hunts — saturation and wraparound — live
+  beyond the board rather than just outside it.
+
+**One mutation initially survived, and it is the finding worth keeping.** Making
+`square_center` return the square's *corner* passed the whole suite: the dot
+test clicked each dot and checked which square came back, and a corner belongs
+to the same square its centre does. An inverse maps every point in a cell to
+one answer, so round-tripping through it is blind to position within the cell by
+construction. The dot test now finds the painted square that *contains* the dot
+and requires the dot to be at that rectangle's centre — an expected value taken
+from a second, independently emitted render command rather than from the
+function under test. See `design-decisions.md` §483.
+
+## `C-GOMOKU-THE-CLICK-SLOP-ONLY-WORKED-ON-TWO-EDGES` (lane C, 2026-08-20) — FIXED
+
+**Status:** FIXED 2026-08-20
+
+**In short:** unlike chess, this one was a real bug a player could hit. In
+gomoku stones sit *on* the lines, so half of a stone drawn on the boundary
+hangs off the board, and clicking that overhanging half is meant to work. It
+worked on the left and top edges and did nothing on the right and bottom. The
+board looked symmetric and behaved asymmetrically.
+
+**Where:** `apps/gomoku/src/main.rs` — `handle_mouse` (before the fix), now
+`intersection_near`.
+
+### What was wrong
+
+The hit test asked its two questions in the wrong order: it computed a row and
+column index, rejected the click if the index was off the board, and only then
+measured whether the click was near enough to count.
+
+```rust
+let col = (mx / CELL_SIZE + 0.5) as i32;
+let row = (my / CELL_SIZE + 0.5) as i32;
+if col >= 0 && col < BOARD_SIZE as i32 && row >= 0 && row < BOARD_SIZE as i32 {
+    // ... only now: is the click within STONE_RADIUS * STONE_RADIUS * 1.5?
+}
+```
+
+The distance check is the real acceptance test and already refuses everything
+genuinely off the board. The range check is a *second* edge policy layered on
+it, and the two do not agree, because **a Rust float-to-integer cast truncates
+toward zero rather than downward**. A click 18 px past the left edge produces
+`-0.0103 as i32` = `0`, which passes `col >= 0`; the mirror-image click 18 px
+past the right edge produces `15.0103 as i32` = `15`, which fails `col < 15`.
+The `col >= 0` half of the guard could never fire at all.
+
+Reproduced before fixing, with a throwaway probe test: sweeping the same
+overshoot past each edge placed 2 stones off the left edge and 0 off the right.
+
+The affected band is `reach - CELL_SIZE/2` = 18.371 − 18 = **0.371 px**, so in
+practice one integer pixel column down the right and bottom edges. Narrow, but
+reachable, and the width is an accident of the current constants — a larger
+slop or a smaller cell turns the same code into a wide dead strip.
+
+### Fixed 2026-08-20
+
+One `// ── Board geometry ──` section holds `intersection` and its inverse
+`intersection_near`, plus `BOARD_PIXEL_SIZE`, `LAST_INDEX` and
+`CLICK_RADIUS_SQ`. The inverse **clamps into range and then measures**, so
+there is a single acceptance rule applied identically on all four sides:
+
+```rust
+let col = (((x - BOARD_OFFSET_X) / CELL_SIZE).round() as i32).clamp(0, LAST_INDEX);
+let row = (((y - BOARD_OFFSET_Y) / CELL_SIZE).round() as i32).clamp(0, LAST_INDEX);
+let (ix, iy) = intersection(row, col);
+let (dx, dy) = (x - ix, y - iy);
+if dx * dx + dy * dy <= CLICK_RADIUS_SQ { Some((row, col)) } else { None }
+```
+
+The clamp cannot rescue a bad click because the distance check runs after it.
+Ten further sites that had each spelled out `BOARD_OFFSET_X + col as f32 *
+CELL_SIZE` — grid lines, star points, stones, the cursor, both sets of labels,
+the win-line highlight, the window height, the status bar, `PANEL_X` — now read
+`intersection` or `BOARD_PIXEL_SIZE`.
+
+Guarded by a symmetry sweep that walks the overshoot from 0 to a full cell in
+0.25 px steps and requires left/right and top/bottom to agree at every step —
+which does not encode knowledge of this particular bug, so it also catches the
+next one. 112 tests green (was 102), 15 of 15 seeded mutations caught, binary
+clippy unchanged at 77, test-only warnings 12 → 0. Three of those tests exist
+only because the first mutation pass found gaps; see `design-decisions.md`
+§484 for what each one was blind to.
+
+A separate `#[cfg(test)]` finding, fixed in the same change:
+`test_mouse_click_too_far_from_intersection` asserted **nothing** — it ran the
+click and commented that "it may or may not place. Just check no crash." It now
+asserts the stone count is zero. That is `design-decisions.md` §480 turning up
+again.
+
+**Noted, not changed:** the column labels run `A`–`O` including `I`, where a Go
+board skips `I`. No primary source settles whether that convention carries to
+gomoku, and the app has no notation path where the choice is observable beyond
+the board edge, so it was deliberately left alone rather than changed into a
+second unsourced convention. See `design-decisions.md` §484.
+
+## `C-REVERSI-THE-BOARD-GEOMETRY-WAS-WRITTEN-A-DOZEN-TIMES` (lane C, 2026-08-20) — FIXED
+
+**Status:** FIXED 2026-08-20
+
+**In short:** reversi worked. Like the chess entry above, and unlike the gomoku
+one, this is the duplication caught before it produced a symptom. Where a cell
+gets painted and which cell a click lands in were computed independently from
+the same arithmetic, copied out at about a dozen sites, with nothing but care
+keeping the board a player sees in the same place as the board a click resolves
+against.
+
+**Where:** `apps/reversi/src/main.rs` — `handle_mouse`, `render`'s cell loop,
+the piece centres, the legal-move dots, the rank and file labels, the board
+border, the window height, the panel height, and `PANEL_X`.
+
+### What was wrong
+
+Nothing observable, and notably the hit test was *right*: it checked
+`bx >= 0.0 && by >= 0.0` **before** casting, so it did not have the
+truncate-toward-zero asymmetry that bit chess and gomoku. What it had instead
+was the arithmetic itself, written out again:
+
+```rust
+let bx = event.x - BOARD_OFFSET_X;
+let by = event.y - BOARD_OFFSET_Y;
+if bx >= 0.0 && by >= 0.0 {
+    let col = (bx / CELL_SIZE) as i32;
+    let row = (by / CELL_SIZE) as i32;
+    if (0..8).contains(&col) && (0..8).contains(&row) { ... }
+}
+```
+
+alongside `BOARD_OFFSET_X + col as f32 * CELL_SIZE` in the render loop,
+`x + CELL_SIZE / 2.0` at five places for the centres, and the board's extent as
+a literal `CELL_SIZE * 8.0` at eight. A *test* wrote the mapping a further time:
+`test_app_mouse_click_on_board` computed d3's pixel coordinates by hand and then
+asserted only `!app.move_history.is_empty()` — so it would have moved with a
+renderer bug rather than catching it, and would not have noticed a hit test that
+transposed row and column into another legal square.
+
+### Fixed 2026-08-20
+
+One `// ── Board geometry ──` section holding `cell_origin`, `cell_center` and
+`cell_at`, plus a `BOARD_PIXEL_SIZE` constant. `cell_at` keeps the correct
+order — bounds first, cast second — with a comment saying why, since that is
+the exact mistake the neighbouring two apps made.
+
+Guarded by eight new tests built from the checklist in `design-decisions.md`
+§485: the lattice measured against the window, nine probe points across every
+cell, an inward-and-outward sweep at all four edges, a far sweep well past the
+board, pieces and dots measured against the painted cell that contains them, the
+border's four margins, and the labels. 90 tests green (was 81), **17 of 17**
+seeded mutations caught on the first pass, binary clippy unchanged at 40,
+test-only warnings 5 → 0, rustfmt drift 26 → 0.
+
+**Worth knowing for the next reader:** reversi's rows are numbered **1 at the
+top**, which is correct — Othello's `a1` is the upper-left square, the opposite
+of chess and go. `cell_origin` therefore has no flip in it, which reads like an
+omission and is not. `the_board_is_lettered_and_numbered_the_othello_way`
+requires the painted "1" to sit above the painted "8", so a well-meaning
+"correction" fails rather than shipping. See `design-decisions.md` §485.
+
+## `C-CHECKERS-THE-BOARD-GEOMETRY-WAS-WRITTEN-A-DOZEN-TIMES` (lane C, 2026-08-20) — FIXED
+
+**Status:** FIXED 2026-08-20
+
+**In short:** checkers worked. Like the chess and reversi entries above, and
+unlike the gomoku one, this is the duplication caught before it produced a
+symptom. Where a square gets painted and which square a click lands on were
+computed independently from the same arithmetic, copied out at about a dozen
+sites — the `7 - row` flip that puts rank 1 at the bottom of the window
+appeared three times, once of them written backwards by hand inside the hit
+test. Nothing but care kept the board a player sees in the same place as the
+board a click resolves against.
+
+**Where:** `apps/checkers/src/main.rs` — `handle_mouse`, `render`'s square
+loop, `render_piece`, the legal-move dots, the rank and file labels, the board
+frame, the window height, the panel height and `PANEL_X`.
+
+### What was wrong
+
+Nothing observable, and — as in reversi — the hit test was *right*: it
+checked `board_x >= 0.0 && board_y >= 0.0` **before** casting, so it did not
+have the truncate-toward-zero asymmetry that bit gomoku. What it had instead
+was the arithmetic itself, written out again:
+
+```rust
+let board_x = event.x - BOARD_OFFSET_X;
+let board_y = event.y - BOARD_OFFSET_Y;
+if board_x >= 0.0 && board_y >= 0.0
+    && board_x < SQUARE_SIZE * 8.0 && board_y < SQUARE_SIZE * 8.0
+{
+    let col = (board_x / SQUARE_SIZE) as i8;
+    // Screen y=0 is top, row 7 is at top
+    let row = 7 - (board_y / SQUARE_SIZE) as i8;
+    self.click_square(Pos::new(row, col));
+}
+```
+
+alongside `let screen_row = 7 - row;` in the render loop and a third copy in
+the rank-label loop, `BOARD_OFFSET_X + col as f32 * SQUARE_SIZE` at three
+places, `+ SQUARE_SIZE / 2.0` for the centre at four — the legal-move dots,
+the two label loops, and `render_piece`, which was handed a square's corner
+and worked out its middle for itself — and the board's extent as a literal
+`SQUARE_SIZE * 8.0` at nine. A *test* wrote the mapping a further time:
+`test_app_mouse_click_on_board` computed c3's pixel coordinates by hand, flip
+included, so it would have moved along with a renderer bug instead of catching
+it.
+
+### Fixed 2026-08-20
+
+One `// ── Board geometry ──` section holding `square_origin`,
+`square_center` and `square_at`, plus a `BOARD_PIXEL_SIZE` constant. The flip
+is stated once, in `square_origin`, and `square_at` is the only thing that
+undoes it. `render_piece` now takes the centre rather than the corner, so the
+middle of a square is worked out in exactly one place. `square_at` keeps the
+correct order — bounds first, cast second — with a comment saying why,
+since that is the exact mistake gomoku next door made.
+
+Guarded by nine new tests built from the checklist in `design-decisions.md`
+§485: the lattice measured against the window, nine probe points across
+every square, an inward-and-outward sweep at all four edges, a far sweep well
+past the board, pieces and dots measured against the painted square that
+contains them, the frame's four margins, and the labels — including
+`the_board_is_numbered_upwards_from_rank_one`, which requires the painted "1"
+to sit *below* the painted "8" and so pins draughts' numbering against
+reversi's opposite convention. 116 tests green (was 107), **20 of 20**
+seeded mutations caught on the first pass, binary clippy 51 → 50, test-only
+warnings 15 → 0.
+
+**Worth knowing for the next reader:** checkers numbers its ranks **1 at the
+bottom**, like chess and unlike Othello — so `square_origin` has a flip in
+it and `apps/reversi`'s `cell_origin`, three directories away, correctly does
+not. See `design-decisions.md` §485.
+
+## C-SUDOKU-THE-GRID-GEOMETRY-WAS-WRITTEN-FIVE-TIMES (lane C, 2026-08-20) — FIXED
+
+**In short:** where sudoku painted a cell and which cell it thought you had
+clicked were worked out by different code, and the arithmetic that turns a row
+or column number into a pixel offset was written out three separate times, with
+a fourth statement of the grid's total width and a fifth, dead wrapper on top.
+Nothing was visibly wrong — this is the preventive case again — but the tests
+that were supposed to be watching had been aimed at the wrong function, so
+nothing would have caught it if it had been.
+
+### What was there
+
+Five functions, all describing one grid:
+
+```rust
+fn grid_total_size() -> f32 {
+    // 9 cells + 6 inner cell gaps (within boxes) + 2 box gaps
+    CELL_SIZE * 9.0 + CELL_GAP * 6.0 + BOX_GAP * 2.0
+}
+fn cell_pixel_pos(row: usize, col: usize) -> (f32, f32) { … }      // renderer
+fn inner_gaps_before(pos: usize) -> f32 { … }
+/// Simplified cell_pixel_pos using the inner_gaps_before helper properly.
+fn cell_pixel_pos_clean(row: usize, col: usize) -> (f32, f32) { … } // tests
+fn pixel_to_grid_coord(pixel: f32) -> Option<usize> {
+    for i in 0..GRID_SIZE {
+        let pos = i as f32 * CELL_SIZE                              // …and again
+            + inner_gaps_before(i) * CELL_GAP
+            + (i / BOX_SIZE) as f32 * BOX_GAP;
+        …
+    }
+}
+// Override cell_pixel_pos to use the clean version
+fn cell_pos(row: usize, col: usize) -> (f32, f32) { cell_pixel_pos_clean(row, col) }
+```
+
+`cell_pos` had no callers at all. `grid_total_size` restated the spacing rule in
+its own words, so a change to it would have left the frame and the cells
+disagreeing about how big the grid is. And the two that mattered were the twins:
+`render_grid` called `cell_pixel_pos` at both its cell loop and its box-border
+loop, while **every geometry test called `cell_pixel_pos_clean`** — so the suite
+was green about a function the app never ran. See design-decisions.md §486.
+
+The five pre-existing geometry tests were each an instance of an anti-pattern
+already named: `test_grid_total_size` restated the function's own formula as its
+expected value (§481), `test_pixel_to_grid_round_trip` proved membership rather
+than placement (§483), and the rest probed one point of one cell (§480).
+
+### What it is now
+
+One `// ── Grid geometry ──` section: `axis_offset` (the one place the cell/gap
+arithmetic is written), `grid_total_size` and `box_pixel_span` derived from it,
+`cell_origin`, `cell_center`, `axis_index` and `cell_at`. `handle_mouse` went
+from twelve lines to three. `axis_index` performs no float-to-integer cast at
+all, so gomoku's truncate-toward-zero hazard
+(`C-GOMOKU-THE-CLICK-SLOP-ONLY-WORKED-ON-TWO-EDGES`) cannot recur here.
+
+Nine tests written to §485's checklist replace the five. The mutation sweep came
+back 20 of 22 on the first pass; both survivors were mutations of `cell_center`,
+which nothing outside the tests called — the renderer had spelled the digit's
+centring out for itself as `px + CELL_SIZE / 2.0 - 7.0`. Making the renderer
+call `cell_center`, naming the two literals `DIGIT_HALF_WIDTH` /
+`DIGIT_HALF_HEIGHT`, and having
+`a_digit_is_painted_inside_the_cell_that_holds_it` require the glyph to sit in
+the middle half of its cell rather than merely inside it closed both.
+
+Final: 106 tests green (102 before, net of the five deletions), 23 of 23
+mutations caught, rustfmt drift 368 → 0 (committed separately as `ddfea9465`),
+binary clippy unchanged at 95, test-module warnings 0.
+
+One deliberate behaviour is worth knowing about: a click landing in the painted
+line between two cells now selects neither, rather than rounding to the nearer.
+The reasoning and the alternatives are in design-decisions.md §486, and
+`a_click_on_the_line_between_two_cells_selects_neither` is the test that will
+fail if the policy is ever changed.
+
+## C-NONOGRAM-THE-CLICK-SLOP-WAS-ALL-ON-TWO-SIDES (lane C, 2026-08-20) — FIXED
+
+**In short:** nonogram's cells have a 2px gap between them, and the old hit test
+handed the whole of each gap to the cell *before* it. That gave the right-hand
+and bottom edges of the grid two pixels of forgiveness past the last painted
+cell, and the left and top edges none at all — the same click, the same distance
+outside the grid, worked on two sides and did nothing on the other two. Each
+cell now owns half the gap on either side of it, so the slop is one pixel on
+every side. Found while collapsing the grid's geometry, which had been written
+out at seven sites plus an eighth copy in the tests.
+
+### The asymmetry
+
+```rust
+let cell_step = CELL_SIZE + CELL_GAP;
+let col_f = (mx - grid_origin_x) / cell_step;
+if col_f >= 0.0 { let col = col_f as usize; if col < self.grid_side { … } }
+```
+
+Cell *i* owned `[origin + i*step, origin + (i+1)*step)` — its own 28px plus the
+2px gap that follows it. Inside the grid that is merely generous. At the
+boundaries it is lopsided: a click one pixel left of the first column was
+rejected, and a click one pixel right of the last column was accepted. This is
+the same family as `C-GOMOKU-THE-CLICK-SLOP-ONLY-WORKED-ON-TWO-EDGES`, though
+the cause is different — gomoku's edges disagreed because a float-to-integer
+cast truncates toward zero, nonogram's because the gap was only ever added on
+one side.
+
+`axis_index` now shifts by half a gap before the range check, so a cell owns
+`[origin + i*step - gap/2, origin + i*step + CELL_SIZE + gap/2)`: forgiving
+between neighbours, and exactly `CELL_GAP / 2` of slop past each of the four
+outer edges. Slop is wanted here — nonogram is a game of many rapid clicks —
+which is the opposite of the call sudoku made for the opposite reason
+(design-decisions.md §486). `the_grid_edges_take_the_same_slop_on_all_four_sides`
+is the test that pins it.
+
+### The duplication underneath it
+
+`CELL_SIZE + CELL_GAP` was spelled out five times (`handle_mouse_playing`,
+`render_playing`, `render_col_clues`, `render_row_clues`, `render_grid`) and the
+grid's origin twice. That origin is not a constant: it is pushed right and down
+by however much room the current puzzle's clues need, so the hit test's copy and
+the renderer's copy had to agree about `CLUE_SLOT_W` and `CLUE_SLOT_H` as well
+as about the cells. `test_mouse_click_grid_fills_cell` then worked the origin out
+a third time for itself, which meant the one test aimed at the hit test was
+measuring its own arithmetic and would have passed with the grid painted
+anywhere at all — design-decisions.md §486.
+
+Now one `// ── Grid geometry ──` section: `CELL_STEP`, `row_clue_area_w`,
+`col_clue_area_h`, `grid_origin`, `grid_pixel_span`, `cell_origin`,
+`cell_center`, `axis_index`, `cell_at_point`. The clue bands are positioned by
+subtracting their own width from the grid's origin rather than by restating
+`PADDING + HEADER_HEIGHT`, and the window is measured from the grid's far edge,
+so neither can drift away from the cells.
+
+### Outcome
+
+122 tests green, up from 113: nine written to §485's checklist, including two
+that check a clue is drawn level with the row (or over the column) it describes,
+and one that no five-cell group rule passes through a painted cell. The first
+mutation sweep came back 24/25; the survivor gave `grid_pixel_span` a trailing
+gap the last cell does not have, which made the window two pixels wider than it
+should be — visible to nothing, because the tests only asked that the grid be
+*inside* the window. Requiring the margin right of the last column to equal the
+margin left of the clue band closed it: 25/25 on the re-run. rustfmt drift
+233 → 0 (committed separately), binary clippy 39 → 40 (one more
+`arithmetic_side_effects`, the category the whole file is already full of),
+test-module warnings 37 → 0.
+
+## C-DOTS-TWO-HIT-TESTS-THAT-DID-NOT-AGREE (lane C, 2026-08-20) — FIXED
+
+**In short:** dots-and-boxes carried *two* functions for working out which line
+a click landed on, and they did not implement the same rule. The one the app
+actually ran measured how far the click was from the line itself, so any point
+along a line worked. The other measured how far the click was from the line's
+*middle*, so only a small disc in the centre of each line answered and both
+ends were dead. Three of the tests were aimed at that second one — which
+nothing in the app called. The tests were green about code that does not ship,
+and the rule they were checking was not the rule the player got. The midpoint
+version is gone. Fixing the geometry underneath it also turned up a second,
+visible fault: the board hung 12 pixels up and to the left of centre in its
+own window.
+
+### Two rules, not two spellings
+
+```rust
+fn hit_test_line(&self, mx: f32, my: f32) -> Option<LineId> {
+    let threshold = 12.0;
+    …distance from (mx, my) to the segment's MIDPOINT…
+}
+
+fn hit_test_line_precise(&self, mx: f32, my: f32) -> Option<LineId> {
+    let threshold = 10.0;
+    …point_to_segment_distance(mx, my, x1, y1, x2, y2)…
+}
+```
+
+`handle_mouse` called `hit_test_line_precise`. At `DOT_SPACING` 70 the midpoint
+version made roughly the outer two-thirds of every line unclickable — so had
+the app ever been switched to the shorter name, or had someone "deduplicated"
+the two by keeping the wrong one, the game would have become nearly unplayable
+with a full test suite still passing. This is `design-decisions.md` §486's
+fault in its sharpest form: the twin was not merely *unused*, it *behaved
+differently*, so the suite was not just uninformative but actively misleading.
+
+The tell was the `_precise` suffix. A function whose name ends in `_precise`,
+`_clean`, `_v2`, `_new` or `_impl`, next to one that already exists, is two
+answers to one question with no statement of which is authoritative.
+
+### The board was not centred in its window
+
+Collapsing the geometry surfaced this. `dot_pos` put the first dot's *centre*
+at `PADDING`, so its left half sat inside the padding; but `window_width`
+reserved `PADDING` *plus* a whole dot's width past the last column. The painted
+board therefore sat 14px from the left edge and 26px from the right, and the
+same 14/26 split vertically. Nothing caught it because the only window test
+asked that the board be *inside* the window, which a lopsided frame satisfies.
+`dot_pos` now offsets by `DOT_RADIUS`, so the picture — discs included — sits
+exactly `PADDING` from all four edges, and
+`the_painted_dots_are_a_square_even_lattice_centred_in_the_window` requires the
+opposing margins to be equal rather than merely positive. This is the same
+survivor that nonogram's sweep produced a commit earlier, from the same cause:
+"inside the window" is not a constraint.
+
+`test_dot_pos_origin` had asserted `x == PADDING` — a restatement of the very
+arithmetic that was wrong, so it passed throughout. It now asserts that the
+dot's *disc* begins at `PADDING`, which is a claim about the picture.
+
+### The duplication underneath
+
+A line's two endpoints were derived at six sites: twice in each hit test, twice
+in `render_lines`, twice in `render_cursor` — which is what let the hit test and
+the picture of the same line disagree in the first place. There is now one
+`// ── Board geometry ──` section: `CLICK_THRESHOLD`, `dot_pos`,
+`line_endpoints`, `all_lines`, `board_pixel_span`, `window_width`,
+`window_height`, `hit_test_line`. `render_lines` lost its two per-orientation
+loops and is now a single pass over `all_lines`; `render_cursor` lost its
+`match` on orientation entirely.
+
+### The survivor: tests that restate the number instead of the requirement
+
+The first mutation sweep came back 27/28. The survivor cut `CLICK_THRESHOLD`
+from 10px to 1px — which would have made the game close to unusable — and no
+test objected, because every slop test measured *against
+`DotsAndBoxes::CLICK_THRESHOLD` itself*. All of them moved with it, so none of
+them could disagree with it. That is the same fault as `test_dot_pos_origin`
+asserting `x == PADDING`, and it is what `design-decisions.md` §487 is about:
+a test that names the implementation's number tests only that the number equals
+itself.
+
+`the_clickable_band_covers_the_painted_line_but_not_its_neighbour` states the
+two bounds in terms a player would recognise instead. Lower: a click on the
+painted line — within `LINE_HOVER_THICKNESS / 2` of its centre — must find it,
+or clicks that visibly land on target miss. Upper: a click in the dead centre
+between two parallel lines, `DOT_SPACING / 2` from each, must find neither, or
+the bands overlap and "nearest line" becomes a coin flip in empty space.
+Neither bound mentions the threshold. 28/28 on the re-run.
+
+### Outcome
+
+156 tests green, up from 148 — three duplicate `_precise` tests deleted, eleven
+written to §485's checklist, including one that walks 39 points along *every*
+line on every board size (the test the midpoint rule would have failed), one
+that a click exactly on a dot still lands on a line meeting there rather than
+in a dead spot, and one that the renderer paints each of the `2·n·(n−1)` lines
+exactly once. Mutation sweep 27/28, then 28/28 once the threshold was pinned by
+something other than itself. rustfmt drift 173 → 0 (committed separately),
+binary clippy 95 → 78, test-module warnings 7 → 0.

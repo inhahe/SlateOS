@@ -41,7 +41,20 @@ OUT_IMG="${1:-$ROOT_DIR/rootfs.ext4}"
 # ~162 MiB total) now staged under /tests instead of include_bytes!'d into the
 # kernel image (TD-KERNEL-EMBED-BLOAT; design-decisions.md #86), plus the glibc
 # tree and toolchain binaries.
-IMG_SIZE="${IMG_SIZE:-256M}"
+#
+# 384M (2026-08-21): CPython. The interpreter is 11 MiB stripped and its
+# standard library another 20 MiB, and at 256M the image had ~62 MiB free — so
+# staging it would have left ~30 MiB, i.e. under 12%. That is not a number to
+# ship: the next port lands on a full disk, and a full disk here does not fail
+# cleanly (`mke2fs -d` gives up partway and this script's abort trap then leaves
+# the *previous* image in place, which is the false-green this file spends most
+# of its length preventing). 384M restores ~40% free at the cost of 128 MiB of
+# gitignored host disk.
+#
+# Not larger: block groups are 32768 blocks at 4 KiB, so 384M is 3 of them —
+# enough that the driver's multi-group descriptor walk is exercised, without
+# adding image to hold nothing.
+IMG_SIZE="${IMG_SIZE:-384M}"
 
 # --- standard Ubuntu/Debian glibc locations ----------------------------------
 LD_SO="/lib64/ld-linux-x86-64.so.2"          # PT_INTERP of every x86-64 glibc exe
@@ -1071,6 +1084,130 @@ else
     echo "[rootfs]       (build it with: wsl -d Ubuntu -- bash scripts/make-spike/run.sh)"
 fi
 
+# --- CPython 3.12.3, likewise linked against OUR OWN libc ---------------------
+# The fourth and by a wide margin the largest port: 11 MiB of interpreter plus
+# 20 MiB of standard library, against bash's 5 MiB.  It reaches for 478 external
+# symbols and our libc.a now answers all of them (MISSING_AT_LINK=0), which is
+# the whole reason it is here — bash, pkgconf and make between them exercise a
+# few hundred; CPython is the first program on this image big enough that the
+# libc surface it touches is a meaningful fraction of the library.
+#
+# TWO artifacts, and both are mandatory together.  This is the part that differs
+# from every block above, where a binary is self-contained:
+#
+#   /bin/python3                     the interpreter
+#   /usr/local/lib/python312.zip     the standard library, as ONE file
+#
+# An interpreter without the second does not run *at all*.  It is not that
+# `import json` fails; startup itself fails, inside `init_fs_encoding`, because
+# CPython must import the `encodings` package before it can decode a filesystem
+# path, and `encodings` is not frozen into the binary.  So staging the ELF alone
+# would put 11 MiB on the image to produce a process that dies before main().
+# The two are staged under one condition for that reason.
+#
+# WHY THE STDLIB IS A ZIP.  `<prefix>/lib/python312.zip` is the *first* entry of
+# CPython's default sys.path and `zipimport` is frozen into the binary: this is
+# the layout CPython already looks for, not a trick.  The alternative is 569
+# files and ~12 MiB of small reads our ext4 driver walks at every boot to
+# deliver exactly the same modules.  It is ZIP_STORED, not deflated, because
+# `zlib` has no target build and `zipimport` therefore cannot inflate a
+# compressed member — measured, not assumed.  See scripts/cpython-spike/stdlib.sh.
+#
+# PYTHONHOME must be /usr/local for the zip to be found, since that is the
+# prefix the path above is relative to.  The self-test passes it explicitly
+# rather than relying on a compiled-in prefix.
+#
+# Staleness: the same rule as bash/pkgconf/make for the ELF — absent is honest
+# (warn, self-test no-ops), present-but-older-than-libc.a is a lie (fatal).
+#
+# The zip gets a DIFFERENT check, not an mtime one, and the reasoning is worth
+# recording because the obvious rule is wrong.  The obvious rule is "the zip
+# must be newer than the interpreter"; it was written first and it fired
+# immediately on a tree where nothing was wrong, because `slatelink.sh` is a
+# re-link — it produces a new ELF from unchanged objects and changes nothing
+# whatsoever about the standard library.  The two artifacts share a build tree,
+# not a dependency, so ordering them by mtime asserts a relationship that does
+# not exist.
+#
+# Nor is there a silent failure to guard against.  A stdlib from a different
+# CPython *feature* release is named for that release (`python313.zip`), so it
+# is simply not on sys.path and startup fails loudly; a stdlib from a different
+# *micro* release has the same bytecode magic and is merely a slightly different
+# point release, which is not a false green about anything.  Neither can report
+# OK while being wrong, which is the only thing these gates exist to prevent.
+#
+# What CAN fail silently at build time and loudly at boot is the archive's own
+# shape, so that is what is checked:
+#   * it must contain `encodings/__init__.pyc` — the module CPython imports
+#     before it can decode a path, i.e. the difference between an interpreter
+#     and a fatal error in `init_fs_encoding`;
+#   * every member must be STORED, never Deflated — `zipimport` calls zlib to
+#     inflate, `zlib` has no target build, and a deflated archive therefore
+#     produces "No module named 'zlib'" from inside <frozen zipimport>.  That is
+#     measured, not assumed (see scripts/cpython-spike/stdlib.sh), and a build
+#     host whose zipfile defaults changed would reintroduce it invisibly.
+PY_SLATE="$ROOT_DIR/build/spike/python-slateos.elf"
+PY_ZIP="$ROOT_DIR/build/spike/python312.zip"
+PY_STALE=0
+if [ -e "$PY_SLATE" ] && [ -e "$PY_ZIP" ]; then
+    mkdir -p "$STAGE/usr/local/lib"
+    cp -L "$PY_SLATE" "$STAGE/bin/python3"
+    cp -L "$PY_ZIP" "$STAGE/usr/local/lib/python312.zip"
+    echo "[rootfs] staged CPython 3.12.3 (linked against our libc.a): /bin/python3"
+    echo "[rootfs]        + stdlib /usr/local/lib/python312.zip ($(stat -c%s "$PY_ZIP") bytes)"
+    echo "[rootfs] python3 binary type:"
+    file "$STAGE/bin/python3" 2>/dev/null | sed 's/^/  /'
+    if [ -e "$ROOT_DIR/toolchain/sysroot/lib/libc.a" ] \
+       && [ "$ROOT_DIR/toolchain/sysroot/lib/libc.a" -nt "$PY_SLATE" ]; then
+        echo "[rootfs] WARNING: python-slateos.elf is OLDER than the sysroot libc.a — it links a"
+        echo "[rootfs]          stale libc and proves nothing about the current one. Relink it:"
+        echo "[rootfs]            wsl -d Ubuntu -- bash scripts/cpython-spike/slatelink.sh"
+        PY_STALE=1
+    fi
+    # Archive shape, per the reasoning above. Both checks need `unzip`, which is
+    # not in the required-tools list at the top of this script because nothing
+    # else here needs it; without it they are skipped with a note rather than
+    # failing the build, since a host that cannot inspect the zip can still
+    # stage it and the boot self-test still runs it for real.
+    if command -v unzip >/dev/null 2>&1; then
+        if ! unzip -l "$PY_ZIP" 'encodings/__init__.pyc' >/dev/null 2>&1; then
+            echo "[rootfs] WARNING: python312.zip has no encodings/__init__.pyc — this is not a"
+            echo "[rootfs]          usable stdlib. CPython imports 'encodings' before it can"
+            echo "[rootfs]          decode a filesystem path, so /bin/python3 would die inside"
+            echo "[rootfs]          init_fs_encoding on every invocation. Rebuild it:"
+            echo "[rootfs]            wsl -d Ubuntu -- bash scripts/cpython-spike/stdlib.sh"
+            PY_STALE=1
+        fi
+        # `unzip -v` columns: Length Method Size Cmpr Date Time CRC-32 Name.
+        # Method is $2 ("Stored" / "Defl:N"); the header row's $2 is the literal
+        # "Method", which the /^Defl/ anchor excludes without needing NR>3.
+        PY_DEFLATED="$(unzip -v "$PY_ZIP" 2>/dev/null | awk '$2 ~ /^Defl/ {n++} END {print n+0}')"
+        if [ "${PY_DEFLATED:-0}" -gt 0 ]; then
+            echo "[rootfs] WARNING: python312.zip has $PY_DEFLATED DEFLATED members. zipimport must"
+            echo "[rootfs]          inflate those through zlib, which has no target build, so every"
+            echo "[rootfs]          import of one fails with \"No module named 'zlib'\" raised from"
+            echo "[rootfs]          <frozen zipimport>. Repack it STORED:"
+            echo "[rootfs]            wsl -d Ubuntu -- bash scripts/cpython-spike/stdlib.sh"
+            PY_STALE=1
+        fi
+    else
+        echo "[rootfs] NOTE: no unzip — skipping the python312.zip shape checks"
+    fi
+elif [ -e "$PY_SLATE" ]; then
+    # Loud, not silent, and deliberately NOT staged: a /bin/python3 with no
+    # stdlib is worse than no python3 at all.  It exists, it is executable, it
+    # is 11 MiB, and every invocation of it dies before main() with a fatal
+    # error about `encodings` that reads like a broken libc.
+    echo "[rootfs] WARNING: python-slateos.elf is present but python312.zip is NOT —"
+    echo "[rootfs]          staging NEITHER. An interpreter without its stdlib cannot"
+    echo "[rootfs]          start (it dies in init_fs_encoding looking for 'encodings'),"
+    echo "[rootfs]          so shipping it alone only produces a confusing failure."
+    echo "[rootfs]          Build the stdlib: wsl -d Ubuntu -- bash scripts/cpython-spike/stdlib.sh"
+else
+    echo "[rootfs] NOTE: $PY_SLATE not found — /bin/python3 will be absent"
+    echo "[rootfs]       (build it with scripts/cpython-spike/, see its README)"
+fi
+
 # --- .pc fixtures for the pkgconf self-test -----------------------------------
 # `/bin/pkgconf --version` proves the binary loads, relocates, runs main and
 # exits 0. It does not prove pkgconf *works*, because the thing pkgconf does is
@@ -1443,6 +1580,26 @@ if [ "$MAKE_STALE" -gt 0 ]; then
         echo "[rootfs]        /bin/make on the image would be built against a libc that is"
         echo "[rootfs]        no longer in the build. Rebuild it:"
         echo "[rootfs]          wsl -d Ubuntu -- bash scripts/make-spike/run.sh"
+        echo "[rootfs]        or set ALLOW_STALE_FIXTURES=1 to build the image anyway."
+        exit 1
+    fi
+fi
+
+# And a fourth time for CPython, which sets PY_STALE for any of three reasons —
+# an interpreter older than libc.a, a stdlib with no `encodings`, or a stdlib
+# with deflated members it cannot inflate.  The messages that distinguish them
+# were printed at staging time; this is the gate.
+if [ "$PY_STALE" -gt 0 ]; then
+    if [ "${ALLOW_STALE_FIXTURES:-0}" = "1" ]; then
+        echo "[rootfs] WARNING: the CPython artifacts are stale (see above);" \
+             "continuing because ALLOW_STALE_FIXTURES=1"
+    else
+        echo "[rootfs] ERROR: the CPython artifacts in build/spike/ are STALE."
+        echo "[rootfs]        See the WARNING above for which one and why. CPython is the"
+        echo "[rootfs]        largest consumer of our libc on the image by a factor of two,"
+        echo "[rootfs]        so a stale one is the widest false-green available. Rebuild:"
+        echo "[rootfs]          wsl -d Ubuntu -- bash scripts/cpython-spike/slatelink.sh"
+        echo "[rootfs]          wsl -d Ubuntu -- bash scripts/cpython-spike/stdlib.sh"
         echo "[rootfs]        or set ALLOW_STALE_FIXTURES=1 to build the image anyway."
         exit 1
     fi

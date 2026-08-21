@@ -222,7 +222,10 @@ provision_rootfs() {
         sibling="${sibling%/}"
         [ "$sibling" = "$ROOT" ] && continue
         if looks_like_ext4 "$sibling/rootfs.ext4"; then
-            echo "==> copying rootfs.ext4 from sibling worktree $(basename "$sibling") (256 MiB)"
+            # Size is whatever the sibling's image is, not a constant: it was
+            # 48M, then 256M, then 384M as ports landed. Report the real one.
+            echo "==> copying rootfs.ext4 from sibling worktree $(basename "$sibling")" \
+                 "($(( $(stat -c%s "$sibling/rootfs.ext4" 2>/dev/null || echo 0) / 1048576 )) MiB)"
             cp "$sibling/rootfs.ext4" "$ROOTFS_IMG"
             if looks_like_ext4 "$ROOTFS_IMG"; then
                 return 0

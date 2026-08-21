@@ -213,17 +213,13 @@ impl ClipEntry {
     }
 
     /// Format the age for display.
+    ///
+    /// See `clipmanager`'s `time_display`: the app and this pane list the same
+    /// clipboard entries and used to age them in different words. This ladder
+    /// also stopped at days, so a pinned snippet from last spring read
+    /// `"400d ago"`.
     pub fn age_display(&self, now: u64) -> String {
-        let elapsed = now.saturating_sub(self.timestamp);
-        if elapsed < 60 {
-            "just now".to_string()
-        } else if elapsed < 3600 {
-            format!("{}m ago", elapsed / 60)
-        } else if elapsed < 86400 {
-            format!("{}h ago", elapsed / 3600)
-        } else {
-            format!("{}d ago", elapsed / 86400)
-        }
+        guitk::duration::relative(now.saturating_sub(self.timestamp))
     }
 }
 

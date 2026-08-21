@@ -1819,24 +1819,16 @@ impl NotificationPane {
     /// `"now"`; a timestamp ahead of the clock is one the clock has moved
     /// backwards past, which is an age of zero and says `"just now"` like
     /// every other age of zero.
+    /// The `"now"` sentinel stays here rather than moving into
+    /// `guitk::duration::relative`, because it is not an age: it means this
+    /// pane has no clock, which is a fact about the pane and not about the
+    /// notification. Only the ladder below it is shared — and that ladder ran
+    /// out at weeks, so a notification kept for two months read `"9w ago"`.
     fn format_relative_time(&self, timestamp: u64) -> String {
         if self.current_time == 0 {
             return "now".to_string();
         }
-        let diff = self.current_time.saturating_sub(timestamp);
-        if diff < 60 {
-            "just now".to_string()
-        } else if diff < 3600 {
-            format!("{}m ago", diff / 60)
-        } else if diff < SECS_PER_DAY {
-            format!("{}h ago", diff / 3600)
-        } else if diff < 2 * SECS_PER_DAY {
-            "yesterday".to_string()
-        } else if diff < 7 * SECS_PER_DAY {
-            format!("{}d ago", diff / SECS_PER_DAY)
-        } else {
-            format!("{}w ago", diff / (7 * SECS_PER_DAY))
-        }
+        guitk::duration::relative(self.current_time.saturating_sub(timestamp))
     }
 
     // Note: there is deliberately no `truncate_body` helper here any more. It

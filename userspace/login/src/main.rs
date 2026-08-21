@@ -85,17 +85,13 @@ struct PasswdEntry {
     shell: PathBuf,
 }
 
-#[derive(Debug, Clone)]
-struct ShadowEntry {
-    username: String,
-    password_hash: String,
-    last_changed: i64,
-    min_days: i64,
-    max_days: i64,
-    warn_days: i64,
-    inactive_days: i64,
-    expire_date: i64,
-}
+/// One `shadow(5)` line. Parsed by [`authlib::shadow`], not here: the parser
+/// that used to live in this file required all nine fields, so a hand-written
+/// `alice:$6$…:` line was invisible rather than merely un-aged, and a correct
+/// password for it was refused as "no such user". Aging is a policy on top of
+/// an account; a missing policy is not a missing account. See
+/// `design-decisions.md` §341.
+type ShadowEntry = authlib::shadow::Entry;
 
 fn parse_passwd_entry(line: &str) -> Option<PasswdEntry> {
     let fields: Vec<&str> = line.split(':').collect();
@@ -114,21 +110,7 @@ fn parse_passwd_entry(line: &str) -> Option<PasswdEntry> {
 }
 
 fn parse_shadow_entry(line: &str) -> Option<ShadowEntry> {
-    let fields: Vec<&str> = line.split(':').collect();
-    if fields.len() < 9 {
-        return None;
-    }
-
-    Some(ShadowEntry {
-        username: fields[0].to_string(),
-        password_hash: fields[1].to_string(),
-        last_changed: fields[2].parse().unwrap_or(-1),
-        min_days: fields[3].parse().unwrap_or(-1),
-        max_days: fields[4].parse().unwrap_or(-1),
-        warn_days: fields[5].parse().unwrap_or(-1),
-        inactive_days: fields[6].parse().unwrap_or(-1),
-        expire_date: fields[7].parse().unwrap_or(-1),
-    })
+    authlib::shadow::parse_line(line)
 }
 
 fn lookup_passwd(username: &str) -> Option<PasswdEntry> {
@@ -148,19 +130,7 @@ fn lookup_passwd(username: &str) -> Option<PasswdEntry> {
 }
 
 fn lookup_shadow(username: &str) -> Option<ShadowEntry> {
-    let content = std::fs::read_to_string(SHADOW_FILE).ok()?;
-    for line in content.lines() {
-        let line = line.trim();
-        if line.is_empty() || line.starts_with('#') {
-            continue;
-        }
-        if let Some(entry) = parse_shadow_entry(line)
-            && entry.username == username
-        {
-            return Some(entry);
-        }
-    }
-    None
+    authlib::shadow::lookup(std::path::Path::new(SHADOW_FILE), username)
 }
 
 // ---------------------------------------------------------------------------
@@ -181,62 +151,32 @@ fn lookup_shadow(username: &str) -> Option<ShadowEntry> {
 // longer implements it at all.  `crypt::verify` takes the stored entry as
 // the setting, which is what makes a stored hash self-describing, and the
 // comparison it performs is the only one there is.
+//
+// The same lesson applied a second time (`design-decisions.md` §341) moved the
+// *policy* out too — what a lock marker means, what an entry nothing can
+// recompute means — into `authlib`, because `login` was not the only program
+// that had to know, merely the only one that knew correctly.  What is left
+// below is the one thing that genuinely differs between callers.
 
 /// The outcome of checking a supplied password against a stored entry.
 ///
-/// Four cases rather than a `bool`, because the caller must treat two of
-/// them the same way toward the user (say "Login incorrect", learn nothing)
-/// and differently toward the administrator: an entry nothing can verify is
-/// a broken system, not a mistyped password, and saying so is the only way
-/// anyone finds out.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum PasswordCheck {
-    /// The supplied password reproduces the stored entry.
-    Accepted,
-    /// The entry is one we can recompute, and the password does not match.
-    Rejected,
-    /// The entry is a lock marker (`!`, `!!`, `*`, or a `!`-prefixed hash).
-    /// The account was deliberately disabled; no password opens it.
-    Locked,
-    /// The entry is in no format this system can recompute, so no password
-    /// can ever match it.  That includes `x` (a `passwd(5)` marker that has
-    /// no meaning in `shadow(5)`), a hash whose field lengths do not match
-    /// the method it names — which is how the entries this tree wrote before
-    /// it called `crypt` are recognised — and anything else unparseable.
-    Unusable,
-}
+/// [`authlib::Outcome`], which this used to be a private copy of.
+type PasswordCheck = authlib::Outcome;
 
 /// Check `password` against a `shadow(5)` password field.
+///
+/// [`authlib::check_stored`] plus the one policy a *console* login owns: a
+/// traditional Unix account whose password field is empty is entered by typing
+/// nothing at the prompt.  `authlib` reports such an entry as `NoPassword` and
+/// declines to rule on it, because the other caller of the same function — a
+/// desktop lock screen — must answer the opposite way.  "Press Enter to
+/// unlock" is not a screen lock; on a console at the machine's keyboard, a
+/// deliberately passwordless account is a long-standing Unix choice.
 fn check_password(password: &str, hash: &str) -> PasswordCheck {
-    // A leading `!` or `*` marks the account disabled.  `!` is conventionally
-    // *prefixed* to an otherwise-valid hash so the password survives an
-    // unlock, so this is a prefix test and not an equality test: `!$6$…`
-    // must not fall through and be verified as if the `!` were salt.
-    if hash.starts_with('!') || hash.starts_with('*') {
-        return PasswordCheck::Locked;
-    }
-
-    // Traditional Unix passwordless account: the empty password, and only
-    // the empty password, authenticates.
-    if hash.is_empty() {
-        return if password.is_empty() {
-            PasswordCheck::Accepted
-        } else {
-            PasswordCheck::Rejected
-        };
-    }
-
-    // Asked *before* verifying, so that an entry which can never verify is
-    // reported as broken rather than counted as a wrong password.  There is
-    // no cleartext fallback: an entry that is not a hash is not a password.
-    if posix::crypt::stored_method(hash.as_bytes()).is_none() {
-        return PasswordCheck::Unusable;
-    }
-
-    if posix::crypt::verify(password.as_bytes(), hash.as_bytes()) {
-        PasswordCheck::Accepted
-    } else {
-        PasswordCheck::Rejected
+    match authlib::check_stored(password.as_bytes(), hash.as_bytes()) {
+        PasswordCheck::NoPassword if password.is_empty() => PasswordCheck::Accepted,
+        PasswordCheck::NoPassword => PasswordCheck::Rejected,
+        other => other,
     }
 }
 

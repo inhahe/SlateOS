@@ -541,6 +541,14 @@ name = "authentik-cli"
 version = "0.1.0"
 
 [[package]]
+name = "authlib"
+version = "0.1.0"
+dependencies = [
+ "posix",
+ "userdb",
+]
+
+[[package]]
 name = "auto-cpufreq-cli"
 version = "0.1.0"
 
@@ -5652,6 +5660,7 @@ dependencies = [
 name = "login-cli"
 version = "0.1.0"
 dependencies = [
+ "authlib",
  "posix",
 ]
 
@@ -5662,6 +5671,10 @@ version = "0.1.0"
 [[package]]
 name = "logind"
 version = "0.1.0"
+dependencies = [
+ "authlib",
+ "posix",
+]
 
 [[package]]
 name = "logisim-cli"

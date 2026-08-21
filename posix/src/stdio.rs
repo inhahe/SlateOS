@@ -1241,35 +1241,49 @@ pub extern "C" fn fflush(stream: *mut u8) -> i32 {
     file_flush(file)
 }
 
-/// Discard a stream's buffered data **without** writing it out (`stdio_ext.h`).
+/// Own archive member — gnulib's `fpurge` module defines `__fpurge` itself.
 ///
-/// The deliberate opposite of [`fflush`]: where `fflush` commits pending
-/// output, `__fpurge` throws it away.  A Solaris extension that glibc and musl
-/// both provide; GNU bash calls it in its `fork()` child paths so the child
-/// cannot re-emit output the parent has already buffered but not yet written
-/// (without this, that output appears twice — once from each process).
-///
-/// Both directions are reset, matching glibc:
-/// - write direction: buffered bytes are dropped, never `write(2)`n;
-/// - read direction: read-ahead is dropped, so the next read re-fetches from
-///   the fd;
-/// - any `ungetc` pushback is dropped as well.
-///
-/// `NULL` maps to stdin via [`stream_to_file`], the same convention every other
-/// entry point here uses.  Returns nothing and cannot fail — there is no
-/// syscall to fail, which is the whole point of the function.
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn __fpurge(stream: *mut u8) {
-    let file = stream_to_file(stream);
-    // SAFETY: stream_to_file returns a pointer to one of the static stream
-    // Files or to a live heap File from fopen; either way it is valid and
-    // uniquely borrowed for the duration of this call, exactly as in fseek.
-    let f = unsafe { &mut *file };
-    f.buf_pos = 0;
-    f.buf_len = 0;
-    f.buf_dir = BUF_DIR_IDLE;
-    f.ungetc_byte = -1;
+/// The rest of this file is one module and so one archive member holding some
+/// 63 externally visible symbols, `fopen`/`fread`/`fwrite`/`fflush` among them.
+/// A program that calls any of those extracts the whole member, so a `__fpurge`
+/// living in it would collide with gnulib's unconditionally. See the module
+/// header of `string.rs` and `design-decisions.md` §339/§340.
+mod gnu_fpurge {
+    use super::*;
+
+    /// Discard a stream's buffered data **without** writing it out
+    /// (`stdio_ext.h`).
+    ///
+    /// The deliberate opposite of [`fflush`]: where `fflush` commits pending
+    /// output, `__fpurge` throws it away.  A Solaris extension that glibc and
+    /// musl both provide; GNU bash calls it in its `fork()` child paths so the
+    /// child cannot re-emit output the parent has already buffered but not yet
+    /// written (without this, that output appears twice — once from each
+    /// process).
+    ///
+    /// Both directions are reset, matching glibc:
+    /// - write direction: buffered bytes are dropped, never `write(2)`n;
+    /// - read direction: read-ahead is dropped, so the next read re-fetches
+    ///   from the fd;
+    /// - any `ungetc` pushback is dropped as well.
+    ///
+    /// `NULL` maps to stdin via [`stream_to_file`], the same convention every
+    /// other entry point here uses.  Returns nothing and cannot fail — there is
+    /// no syscall to fail, which is the whole point of the function.
+    #[cfg_attr(target_os = "none", unsafe(no_mangle))]
+    pub extern "C" fn __fpurge(stream: *mut u8) {
+        let file = stream_to_file(stream);
+        // SAFETY: stream_to_file returns a pointer to one of the static stream
+        // Files or to a live heap File from fopen; either way it is valid and
+        // uniquely borrowed for the duration of this call, exactly as in fseek.
+        let f = unsafe { &mut *file };
+        f.buf_pos = 0;
+        f.buf_len = 0;
+        f.buf_dir = BUF_DIR_IDLE;
+        f.ungetc_byte = -1;
+    }
 }
+pub use gnu_fpurge::__fpurge;
 
 // ---------------------------------------------------------------------------
 // Seeking
@@ -2130,6 +2144,257 @@ pub extern "C" fn putchar_unlocked(c: i32) -> i32 {
 }
 
 // ---------------------------------------------------------------------------
+// The rest of the _unlocked family
+// ---------------------------------------------------------------------------
+//
+// glibc exposes an `_unlocked` twin for most of <stdio.h>, and GNU code calls
+// them freely: coreutils routes essentially all of its output through
+// `fputs_unlocked`, and gnulib's `close-stream`/`error` modules call
+// `fflush_unlocked` and `ferror_unlocked` directly. Nothing declares them
+// conditionally, because on glibc they are macros that always exist.
+//
+// We had four of them (`getc`, `getchar`, `putc`, `putchar`) and not the other
+// eight, which is a hard link error the moment a real GNU program is linked and
+// invisible before that: `scripts/coreutils-spike/run.sh` reported all eight as
+// undefined symbols, and `fputs_unlocked` alone was the first failure in 100 of
+// the 106 binaries that did not link.
+//
+// Each is exactly its locked counterpart, for the same reason the four existing
+// ones are: our FILE has no internal lock to skip. `flockfile`/`funlockfile`
+// above are already no-ops, so "unlocked" is not a weaker guarantee here — it is
+// the only guarantee there is.
+//
+// These deliberately do NOT get their own archive members. gnulib supplies no
+// replacement for any of them (it reaches for them via `stdio--.h` macros that
+// fall back to the locked form), so there is nothing for them to collide with,
+// and a program that needs one needs the stdio member anyway.
+
+/// Non-locking version of `fputc`.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn fputc_unlocked(c: i32, stream: *mut u8) -> i32 {
+    fputc(c, stream)
+}
+
+/// Non-locking version of `fputs`.
+///
+/// # Safety
+///
+/// `s` must be a valid NUL-terminated C string.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub unsafe extern "C" fn fputs_unlocked(s: *const u8, stream: *mut u8) -> i32 {
+    // SAFETY: same contract as `fputs`, forwarded unchanged.
+    unsafe { fputs(s, stream) }
+}
+
+/// Non-locking version of `fread`.
+///
+/// # Safety
+///
+/// `ptr` must be valid for `size * nmemb` bytes.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub unsafe extern "C" fn fread_unlocked(
+    ptr: *mut u8,
+    size: usize,
+    nmemb: usize,
+    stream: *mut u8,
+) -> usize {
+    // SAFETY: same contract as `fread`, forwarded unchanged.
+    unsafe { fread(ptr, size, nmemb, stream) }
+}
+
+/// Non-locking version of `fwrite`.
+///
+/// # Safety
+///
+/// `ptr` must be valid for `size * nmemb` bytes.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub unsafe extern "C" fn fwrite_unlocked(
+    ptr: *const u8,
+    size: usize,
+    nmemb: usize,
+    stream: *mut u8,
+) -> usize {
+    // SAFETY: same contract as `fwrite`, forwarded unchanged.
+    unsafe { fwrite(ptr, size, nmemb, stream) }
+}
+
+/// Non-locking version of `fflush`.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn fflush_unlocked(stream: *mut u8) -> i32 {
+    fflush(stream)
+}
+
+/// Non-locking version of `feof`.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn feof_unlocked(stream: *mut u8) -> i32 {
+    feof(stream)
+}
+
+/// Non-locking version of `ferror`.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn ferror_unlocked(stream: *mut u8) -> i32 {
+    ferror(stream)
+}
+
+/// Non-locking version of `clearerr`.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn clearerr_unlocked(stream: *mut u8) {
+    clearerr(stream);
+}
+
+// ---------------------------------------------------------------------------
+// stdio_ext.h — the internal-state accessors gnulib reaches for
+// ---------------------------------------------------------------------------
+//
+// gnulib cannot implement these portably, so it ships a module per function
+// that reaches into the platform's FILE directly, and uses the system's version
+// when there is one. Because a program may therefore bring its own copy of any
+// of them, each gets its own archive member — the `mod gnu_*` idiom documented
+// in `string.rs`'s module header and `design-decisions.md` §339/§340.
+//
+// Ours are real implementations rather than the conservative fallbacks gnulib
+// would otherwise use: we own the FILE layout, so we can answer exactly.
+
+/// Own archive member — gnulib's `fpending` module defines `__fpending`.
+mod gnu_fpending {
+    use super::*;
+
+    /// Bytes buffered for output but not yet written (`stdio_ext.h`).
+    ///
+    /// gnulib's `close-stream` module calls this to decide whether data would
+    /// be lost by closing a stream that has already failed, which is how
+    /// coreutils reports write errors on `stdout` at exit rather than silently
+    /// truncating. Answering 0 unconditionally would make every such check pass
+    /// and turn a lost-data error into a success.
+    ///
+    /// Only the write direction has pending bytes: in the read direction
+    /// `buf_pos` is a read cursor, not a count, so returning it there would
+    /// report buffered *input* as unflushed *output*.
+    #[cfg_attr(target_os = "none", unsafe(no_mangle))]
+    pub extern "C" fn __fpending(stream: *mut u8) -> usize {
+        let file = stream_to_file(stream);
+        // SAFETY: stream_to_file yields a valid, uniquely-borrowed File, as in
+        // every other entry point here.
+        let f = unsafe { &*file };
+        if f.buf_dir == BUF_DIR_WRITE { f.buf_pos } else { 0 }
+    }
+}
+pub use gnu_fpending::__fpending;
+
+/// Own archive member — gnulib's `freadahead` module defines `__freadahead`.
+mod gnu_freadahead {
+    use super::*;
+
+    /// Bytes readable from the buffer without touching the fd (`stdio_ext.h`).
+    ///
+    /// Includes any `ungetc` pushback, which is what gnulib documents and
+    /// relies on: callers use this to decide how far the stream can be rewound
+    /// by arithmetic instead of an `lseek`, and a byte pushed back is a byte
+    /// that must be re-read before the buffer is consulted.
+    #[cfg_attr(target_os = "none", unsafe(no_mangle))]
+    pub extern "C" fn __freadahead(stream: *mut u8) -> usize {
+        let file = stream_to_file(stream);
+        // SAFETY: as above.
+        let f = unsafe { &*file };
+        let buffered = if f.buf_dir == BUF_DIR_READ {
+            // buf_pos is the next index to return, buf_len the count of valid
+            // bytes; saturating because an inverted pair would otherwise wrap
+            // to a huge count and send the caller far past the buffer.
+            f.buf_len.saturating_sub(f.buf_pos)
+        } else {
+            0
+        };
+        buffered.saturating_add(usize::from(f.ungetc_byte >= 0))
+    }
+}
+pub use gnu_freadahead::__freadahead;
+
+/// Own archive member — gnulib's `freadptr` module defines `__freadptr`.
+mod gnu_freadptr {
+    use super::*;
+
+    /// Pointer to the unread part of the read buffer (`stdio_ext.h`).
+    ///
+    /// Writes the number of readable bytes through `sizep` and returns a
+    /// pointer to them, or NULL when there is nothing buffered. Lets a caller
+    /// consume a run of bytes without a call per byte.
+    ///
+    /// Returns NULL when an `ungetc` byte is pending, matching gnulib: the
+    /// pushed-back byte is logically before the buffer but is not stored in it,
+    /// so no single contiguous pointer can describe the stream's next bytes.
+    /// Reporting the buffer alone would silently skip the pushback.
+    ///
+    /// # Safety
+    ///
+    /// `sizep` must be a valid, writable `*mut usize`.
+    #[cfg_attr(target_os = "none", unsafe(no_mangle))]
+    pub unsafe extern "C" fn __freadptr(stream: *mut u8, sizep: *mut usize) -> *const u8 {
+        if sizep.is_null() {
+            return core::ptr::null();
+        }
+        let file = stream_to_file(stream);
+        // SAFETY: as above.
+        let f = unsafe { &*file };
+        if f.buf_dir != BUF_DIR_READ || f.ungetc_byte >= 0 {
+            return core::ptr::null();
+        }
+        let avail = f.buf_len.saturating_sub(f.buf_pos);
+        if avail == 0 {
+            return core::ptr::null();
+        }
+        // SAFETY: caller guarantees sizep is writable.
+        unsafe { *sizep = avail };
+        // SAFETY: buf_pos <= buf_len <= BUF_SIZE, so this is in bounds.
+        unsafe { f.buf.as_ptr().add(f.buf_pos) }
+    }
+}
+pub use gnu_freadptr::__freadptr;
+
+/// Own archive member — gnulib's `freadptrinc` module defines `__freadptrinc`.
+mod gnu_freadptrinc {
+    use super::*;
+
+    /// Consume `increment` bytes previously exposed by [`__freadptr`].
+    ///
+    /// Clamped to the bytes actually available rather than trusted: a caller
+    /// passing more than it was handed would otherwise push `buf_pos` past
+    /// `buf_len`, and every later `buf_len - buf_pos` would then be computed
+    /// from an inverted pair.
+    #[cfg_attr(target_os = "none", unsafe(no_mangle))]
+    pub extern "C" fn __freadptrinc(stream: *mut u8, increment: usize) {
+        let file = stream_to_file(stream);
+        // SAFETY: stream_to_file yields a valid, uniquely-borrowed File.
+        let f = unsafe { &mut *file };
+        if f.buf_dir != BUF_DIR_READ {
+            return;
+        }
+        let avail = f.buf_len.saturating_sub(f.buf_pos);
+        f.buf_pos = f.buf_pos.saturating_add(increment.min(avail));
+    }
+}
+pub use gnu_freadptrinc::__freadptrinc;
+
+/// Own archive member — gnulib's `fseterr` module defines `__fseterr`.
+mod gnu_fseterr {
+    use super::*;
+
+    /// Set a stream's error indicator (`stdio_ext.h`).
+    ///
+    /// The write-side counterpart to `clearerr`. gnulib uses it to mark a
+    /// stream failed when *it* detects an error the underlying stdio did not —
+    /// an overflow in its own printf replacement, for instance — so that a
+    /// later `ferror` reports it.
+    #[cfg_attr(target_os = "none", unsafe(no_mangle))]
+    pub extern "C" fn __fseterr(stream: *mut u8) {
+        let file = stream_to_file(stream);
+        // SAFETY: as above.
+        let f = unsafe { &mut *file };
+        f.flags |= FLAG_ERR;
+    }
+}
+pub use gnu_fseterr::__fseterr;
+
+// ---------------------------------------------------------------------------
 // getline / getdelim — POSIX dynamic line reading
 // ---------------------------------------------------------------------------
 
@@ -2503,6 +2768,273 @@ mod tests {
         assert_eq!(f.buf_len, 0);
         assert_eq!(f.buf_dir, BUF_DIR_IDLE);
         assert_eq!(f.ungetc_byte, -1);
+    }
+
+    // -----------------------------------------------------------------------
+    // stdio_ext.h — __fpending / __freadahead / __freadptr / __freadptrinc /
+    //               __fseterr
+    // -----------------------------------------------------------------------
+    //
+    // These five exist to let gnulib reach into a FILE it did not write.  The
+    // risk is not that they crash but that they answer plausibly and wrongly —
+    // `__fpending` returning a read cursor as an unflushed-byte count would
+    // make coreutils' close-stream check report data loss on a stream that had
+    // none, and returning 0 unconditionally would make it miss real loss.  So
+    // each is driven in *both* buffer directions, not just the one it cares
+    // about.
+
+    #[test]
+    fn fpending_counts_only_unwritten_output() {
+        let mut f = File::new(42, BUF_MODE_FULL);
+        f.buf_dir = BUF_DIR_WRITE;
+        f.buf_pos = 37;
+        assert_eq!(__fpending(core::ptr::addr_of_mut!(f).cast::<u8>()), 37);
+    }
+
+    #[test]
+    fn fpending_reports_nothing_in_the_read_direction() {
+        // The trap: `buf_pos` is a *read cursor* here, not a byte count.
+        // Reporting it would claim 100 bytes of output are about to be lost.
+        let mut f = File::new(42, BUF_MODE_FULL);
+        f.buf_dir = BUF_DIR_READ;
+        f.buf_len = 512;
+        f.buf_pos = 100;
+        assert_eq!(__fpending(core::ptr::addr_of_mut!(f).cast::<u8>()), 0);
+    }
+
+    #[test]
+    fn fpending_reports_nothing_on_an_idle_stream() {
+        let mut f = File::new(42, BUF_MODE_FULL);
+        assert_eq!(__fpending(core::ptr::addr_of_mut!(f).cast::<u8>()), 0);
+    }
+
+    #[test]
+    fn freadahead_counts_the_unconsumed_buffer() {
+        let mut f = File::new(42, BUF_MODE_FULL);
+        f.buf_dir = BUF_DIR_READ;
+        f.buf_len = 300;
+        f.buf_pos = 120;
+        assert_eq!(__freadahead(core::ptr::addr_of_mut!(f).cast::<u8>()), 180);
+    }
+
+    #[test]
+    fn freadahead_includes_an_ungetc_pushback() {
+        let mut f = File::new(42, BUF_MODE_FULL);
+        f.buf_dir = BUF_DIR_READ;
+        f.buf_len = 10;
+        f.buf_pos = 4;
+        f.ungetc_byte = i16::from(b'Q');
+        assert_eq!(__freadahead(core::ptr::addr_of_mut!(f).cast::<u8>()), 7);
+    }
+
+    #[test]
+    fn freadahead_counts_a_pushback_even_with_no_buffer() {
+        // An idle stream still owes the caller the pushed-back byte.
+        let mut f = File::new(42, BUF_MODE_FULL);
+        f.ungetc_byte = i16::from(b'Q');
+        assert_eq!(__freadahead(core::ptr::addr_of_mut!(f).cast::<u8>()), 1);
+    }
+
+    #[test]
+    fn freadahead_reports_nothing_in_the_write_direction() {
+        let mut f = File::new(42, BUF_MODE_FULL);
+        f.buf_dir = BUF_DIR_WRITE;
+        f.buf_pos = 90;
+        assert_eq!(__freadahead(core::ptr::addr_of_mut!(f).cast::<u8>()), 0);
+    }
+
+    #[test]
+    fn freadahead_saturates_on_an_inverted_buffer_pair() {
+        // buf_pos > buf_len should never happen; if it did, a wrapping
+        // subtraction would hand the caller a count near usize::MAX and send
+        // it reading gigabytes past the buffer.
+        let mut f = File::new(42, BUF_MODE_FULL);
+        f.buf_dir = BUF_DIR_READ;
+        f.buf_len = 4;
+        f.buf_pos = 9;
+        assert_eq!(__freadahead(core::ptr::addr_of_mut!(f).cast::<u8>()), 0);
+    }
+
+    #[test]
+    fn freadptr_exposes_the_unread_bytes() {
+        let mut f = File::new(42, BUF_MODE_FULL);
+        f.buf_dir = BUF_DIR_READ;
+        f.buf[0] = b'a';
+        f.buf[1] = b'b';
+        f.buf[2] = b'c';
+        f.buf[3] = b'd';
+        f.buf_len = 4;
+        f.buf_pos = 1;
+        let mut size = 0usize;
+        let p = unsafe { __freadptr(core::ptr::addr_of_mut!(f).cast::<u8>(), &raw mut size) };
+        assert!(!p.is_null());
+        assert_eq!(size, 3);
+        // The pointer must address the *unread* part, not the buffer start.
+        assert_eq!(unsafe { core::slice::from_raw_parts(p, 3) }, b"bcd");
+    }
+
+    #[test]
+    fn freadptr_declines_when_a_pushback_is_pending() {
+        // The pushed-back byte logically precedes the buffer but is not stored
+        // in it, so no single pointer describes the next bytes.  Handing back
+        // the buffer alone would silently drop the pushback.
+        let mut f = File::new(42, BUF_MODE_FULL);
+        f.buf_dir = BUF_DIR_READ;
+        f.buf_len = 4;
+        f.buf_pos = 0;
+        f.ungetc_byte = i16::from(b'Z');
+        let mut size = 99usize;
+        let p = unsafe { __freadptr(core::ptr::addr_of_mut!(f).cast::<u8>(), &raw mut size) };
+        assert!(p.is_null());
+        assert_eq!(size, 99, "size must be left untouched when returning NULL");
+    }
+
+    #[test]
+    fn freadptr_declines_on_a_write_stream_and_an_empty_buffer() {
+        let mut size = 0usize;
+
+        let mut w = File::new(42, BUF_MODE_FULL);
+        w.buf_dir = BUF_DIR_WRITE;
+        w.buf_pos = 8;
+        assert!(unsafe { __freadptr(core::ptr::addr_of_mut!(w).cast::<u8>(), &raw mut size) }
+            .is_null());
+
+        let mut e = File::new(42, BUF_MODE_FULL);
+        e.buf_dir = BUF_DIR_READ;
+        e.buf_len = 5;
+        e.buf_pos = 5;
+        assert!(unsafe { __freadptr(core::ptr::addr_of_mut!(e).cast::<u8>(), &raw mut size) }
+            .is_null());
+    }
+
+    #[test]
+    fn freadptr_declines_a_null_size_pointer() {
+        let mut f = File::new(42, BUF_MODE_FULL);
+        f.buf_dir = BUF_DIR_READ;
+        f.buf_len = 4;
+        assert!(
+            unsafe {
+                __freadptr(
+                    core::ptr::addr_of_mut!(f).cast::<u8>(),
+                    core::ptr::null_mut(),
+                )
+            }
+            .is_null()
+        );
+    }
+
+    #[test]
+    fn freadptrinc_advances_the_read_cursor() {
+        let mut f = File::new(42, BUF_MODE_FULL);
+        f.buf_dir = BUF_DIR_READ;
+        f.buf_len = 10;
+        f.buf_pos = 2;
+        __freadptrinc(core::ptr::addr_of_mut!(f).cast::<u8>(), 5);
+        assert_eq!(f.buf_pos, 7);
+        assert_eq!(__freadahead(core::ptr::addr_of_mut!(f).cast::<u8>()), 3);
+    }
+
+    #[test]
+    fn freadptrinc_clamps_to_what_is_available() {
+        // A caller consuming more than __freadptr handed it would otherwise
+        // invert buf_pos/buf_len and corrupt every later readahead count.
+        let mut f = File::new(42, BUF_MODE_FULL);
+        f.buf_dir = BUF_DIR_READ;
+        f.buf_len = 10;
+        f.buf_pos = 6;
+        __freadptrinc(core::ptr::addr_of_mut!(f).cast::<u8>(), usize::MAX);
+        assert_eq!(f.buf_pos, 10, "cursor must stop at buf_len");
+        assert_eq!(__freadahead(core::ptr::addr_of_mut!(f).cast::<u8>()), 0);
+    }
+
+    #[test]
+    fn freadptrinc_ignores_a_write_stream() {
+        let mut f = File::new(42, BUF_MODE_FULL);
+        f.buf_dir = BUF_DIR_WRITE;
+        f.buf_pos = 3;
+        __freadptrinc(core::ptr::addr_of_mut!(f).cast::<u8>(), 4);
+        assert_eq!(f.buf_pos, 3, "output position must not be advanced");
+    }
+
+    #[test]
+    fn fseterr_raises_the_error_flag_that_ferror_reads() {
+        let mut f = File::new(42, BUF_MODE_FULL);
+        let s = core::ptr::addr_of_mut!(f).cast::<u8>();
+        assert_eq!(ferror(s), 0);
+        __fseterr(s);
+        assert_ne!(ferror(s), 0, "ferror must observe __fseterr");
+        // ...and clearerr must undo it, which is the pairing gnulib relies on.
+        clearerr(s);
+        assert_eq!(ferror(s), 0);
+    }
+
+    #[test]
+    fn fseterr_leaves_eof_and_buffer_state_alone() {
+        let mut f = File::new(42, BUF_MODE_FULL);
+        f.flags |= FLAG_EOF;
+        f.buf_dir = BUF_DIR_WRITE;
+        f.buf_pos = 11;
+        let s = core::ptr::addr_of_mut!(f).cast::<u8>();
+        __fseterr(s);
+        assert_ne!(f.flags & FLAG_ERR, 0);
+        assert_ne!(f.flags & FLAG_EOF, 0, "EOF must survive __fseterr");
+        assert_eq!(f.buf_pos, 11);
+    }
+
+    // -----------------------------------------------------------------------
+    // The _unlocked stdio family
+    // -----------------------------------------------------------------------
+    //
+    // We are single-threaded, so each is its own locked counterpart.  What
+    // these check is that they exist *and forward*, because the failure mode
+    // that motivated adding them was a link error, and the failure mode after
+    // that would be a forward to the wrong function.
+
+    #[test]
+    fn unlocked_output_variants_match_their_locked_counterparts() {
+        let mut a = File::new(42, BUF_MODE_FULL);
+        let mut b = File::new(42, BUF_MODE_FULL);
+        let sa = core::ptr::addr_of_mut!(a).cast::<u8>();
+        let sb = core::ptr::addr_of_mut!(b).cast::<u8>();
+
+        fputc(i32::from(b'x'), sa);
+        fputc_unlocked(i32::from(b'x'), sb);
+        assert_eq!(a.buf_pos, b.buf_pos);
+        assert_eq!(a.buf_dir, b.buf_dir);
+        assert_eq!(a.buf[..a.buf_pos], b.buf[..b.buf_pos]);
+
+        unsafe { fputs(b"hello\0".as_ptr(), sa) };
+        unsafe { fputs_unlocked(b"hello\0".as_ptr(), sb) };
+        assert_eq!(a.buf[..a.buf_pos], b.buf[..b.buf_pos]);
+
+        let data = b"0123456789";
+        unsafe { fwrite(data.as_ptr(), 1, data.len(), sa) };
+        unsafe { fwrite_unlocked(data.as_ptr(), 1, data.len(), sb) };
+        assert_eq!(a.buf[..a.buf_pos], b.buf[..b.buf_pos]);
+    }
+
+    #[test]
+    fn unlocked_status_variants_match_their_locked_counterparts() {
+        let mut f = File::new(42, BUF_MODE_FULL);
+        let s = core::ptr::addr_of_mut!(f).cast::<u8>();
+
+        assert_eq!(feof_unlocked(s), feof(s));
+        assert_eq!(ferror_unlocked(s), ferror(s));
+
+        // Set the flags *through the same pointer* the accessors use.  Writing
+        // `f.flags` directly here would work but is a needless aliasing
+        // hazard: under Stacked Borrows a write through `f` invalidates the
+        // raw pointer already derived from it.
+        // SAFETY: `s` addresses the live `File` above.
+        unsafe { (*s.cast::<File>()).flags |= FLAG_EOF | FLAG_ERR };
+        assert_ne!(feof_unlocked(s), 0);
+        assert_ne!(ferror_unlocked(s), 0);
+        assert_eq!(feof_unlocked(s), feof(s));
+        assert_eq!(ferror_unlocked(s), ferror(s));
+
+        clearerr_unlocked(s);
+        assert_eq!(feof(s), 0, "clearerr_unlocked must clear EOF");
+        assert_eq!(ferror(s), 0, "clearerr_unlocked must clear ERR");
     }
 
     #[test]

@@ -243,6 +243,71 @@ pub extern "C" fn clock_gettime(clk_id: ClockidT, tp: *mut Timespec) -> i32 {
     0
 }
 
+/// `base` value for [`timespec_get`] meaning "seconds since the Unix epoch".
+///
+/// C11 defines exactly this one; C23 adds `TIME_MONOTONIC`, `TIME_ACTIVE` and
+/// `TIME_THREAD_ACTIVE`, which glibc still does not implement and which no
+/// caller we care about uses.  Recognising only `TIME_UTC` is conforming — the
+/// standard requires an unsupported base to return zero, which is what the
+/// implementation below does.
+pub const TIME_UTC: i32 = 1;
+
+/// `timespec_get(ts, base)` — C11's clock reader.
+///
+/// Returns `base` on success and **0** on failure, which is the inverse of
+/// every POSIX convention in this file and is easy to get backwards: there is
+/// no errno involved and no -1.
+///
+/// Own archive member: gnulib ships a `timespec_get` replacement for platforms
+/// that lack it (it is C11, so plenty do), meaning a GNU program that vendors
+/// that module defines the symbol itself and must be able to decline ours.
+/// `scripts/coreutils-spike/run.sh` found this symbol missing from `libc.a`
+/// altogether; giving it its own member at the same time is what keeps it from
+/// turning into a *duplicate* on the next run.  See `string.rs`'s module header
+/// and `design-decisions.md` §339–§340.
+#[cfg(target_os = "none")]
+mod gnu_timespec_get {
+    use super::{CLOCK_REALTIME, TIME_UTC, Timespec, clock_gettime};
+
+    /// See the module-level documentation.
+    ///
+    /// # Safety
+    /// `ts` must be NULL or point to a writable `struct timespec`.
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn timespec_get(ts: *mut Timespec, base: i32) -> i32 {
+        if base != TIME_UTC || ts.is_null() {
+            return 0;
+        }
+        if clock_gettime(CLOCK_REALTIME, ts) != 0 {
+            return 0;
+        }
+        base
+    }
+}
+
+#[cfg(target_os = "none")]
+pub use gnu_timespec_get::timespec_get;
+
+/// `timespec_get(ts, base)` — host build.
+///
+/// Written out twice rather than `cfg`-switched inside one definition: the
+/// target build needs the body inside `mod gnu_timespec_get` so it lands in
+/// its own archive member, and the host build should not carry an extra public
+/// module that exists only to serve a linker concern.
+///
+/// # Safety
+/// `ts` must be NULL or point to a writable `struct timespec`.
+#[cfg(not(target_os = "none"))]
+pub unsafe extern "C" fn timespec_get(ts: *mut Timespec, base: i32) -> i32 {
+    if base != TIME_UTC || ts.is_null() {
+        return 0;
+    }
+    if clock_gettime(CLOCK_REALTIME, ts) != 0 {
+        return 0;
+    }
+    base
+}
+
 /// Check whether a clock ID reports wall-clock (Unix-epoch) time.
 ///
 /// Only `CLOCK_REALTIME` and its coarse variant track the wall clock; all
@@ -5203,6 +5268,78 @@ mod tests {
         let ret = clock_gettime(CLOCK_MONOTONIC, core::ptr::null_mut());
         assert_eq!(ret, -1);
         assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
+    }
+
+    // ---------------------------------------------------------------
+    // timespec_get — C11
+    //
+    // The return convention is inverted relative to everything else in
+    // this file: `base` on success, 0 on failure, no errno.  Each of
+    // these asserts the *value*, not merely success/failure, because
+    // `return 1` and `return base` are indistinguishable while TIME_UTC
+    // is the only base we accept.
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn timespec_get_fills_the_struct_and_returns_its_base() {
+        let mut ts = Timespec {
+            tv_sec: -1,
+            tv_nsec: -1,
+        };
+        let ret = unsafe { timespec_get(&raw mut ts, TIME_UTC) };
+        assert_eq!(ret, TIME_UTC, "success must return `base`, not 1 or 0");
+        assert!(ts.tv_sec > 0, "wall clock must be past the epoch");
+        assert!(
+            (0..1_000_000_000).contains(&ts.tv_nsec),
+            "nanoseconds must be normalised, got {}",
+            ts.tv_nsec
+        );
+    }
+
+    #[test]
+    fn timespec_get_agrees_with_clock_gettime() {
+        // It must read CLOCK_REALTIME, not the monotonic counter — the two
+        // differ by decades, and picking the wrong one would still produce a
+        // plausible-looking struct.
+        let mut a = Timespec {
+            tv_sec: 0,
+            tv_nsec: 0,
+        };
+        let mut b = Timespec {
+            tv_sec: 0,
+            tv_nsec: 0,
+        };
+        assert_eq!(unsafe { timespec_get(&raw mut a, TIME_UTC) }, TIME_UTC);
+        assert_eq!(clock_gettime(CLOCK_REALTIME, &raw mut b), 0);
+        assert!(
+            (b.tv_sec - a.tv_sec).abs() <= 2,
+            "timespec_get {} vs clock_gettime(CLOCK_REALTIME) {}",
+            a.tv_sec,
+            b.tv_sec
+        );
+    }
+
+    #[test]
+    fn timespec_get_rejects_an_unsupported_base() {
+        // C23's TIME_MONOTONIC is 2; we do not implement it, and the standard
+        // says an unsupported base returns zero rather than guessing.
+        let mut ts = Timespec {
+            tv_sec: -1,
+            tv_nsec: -1,
+        };
+        assert_eq!(unsafe { timespec_get(&raw mut ts, 2) }, 0);
+        assert_eq!(unsafe { timespec_get(&raw mut ts, 0) }, 0);
+        assert_eq!(unsafe { timespec_get(&raw mut ts, -1) }, 0);
+        assert_eq!(ts.tv_sec, -1, "a rejected call must not write through ts");
+    }
+
+    #[test]
+    fn timespec_get_rejects_a_null_struct() {
+        assert_eq!(
+            unsafe { timespec_get(core::ptr::null_mut(), TIME_UTC) },
+            0,
+            "NULL must be reported, not dereferenced"
+        );
     }
 
     #[test]

@@ -1,7 +1,7 @@
 //! df — report filesystem disk space usage.
 //!
 //! Usage: df [-h] [FILE...]
-//!   -h  human-readable sizes (K, M, G)
+//!   -h  human-readable sizes (K, M, G, T, ...)
 //!   Without arguments: show all mounted filesystems.
 //!   With FILE: show the filesystem containing FILE.
 //!
@@ -11,6 +11,7 @@
 //! is not in mingw-w64; `stat_fs` falls back to a stub error so the
 //! crate still builds for `cargo test` on the dev machine.
 
+use coreutils::human::{human_readable, Opts};
 use coreutils::quote::quotef_os;
 use std::env;
 use std::io::{self, Write};
@@ -163,17 +164,21 @@ fn stat_fs(_path: &str) -> Result<FsInfo, String> {
     Err("statvfs not available on this platform".to_string())
 }
 
-/// Format a byte count as an IEC string: e.g. "1.5G".
+/// Format a byte count the way `df -h` does: `1.9T`, `554G`, `1.0K`, or a bare
+/// count below a kibibyte.
+///
+/// The option set is the one `du -h` uses, confirmed against GNU rather than
+/// assumed: reading `df --block-size=1` and `df -h` for the same filesystems
+/// gives 553.9 GiB → `554G` and 299.8 GiB → `300G`, so the rounding is upward,
+/// and 1.818 TiB → `1.9T` fixes the base at 1024.
+///
+/// This replaces a hand-rolled `{:.1}` chain byte-identical to the one `du`
+/// carried, with the same four divergences from GNU — a spurious `B` on bare
+/// counts, round-to-nearest instead of up, a decimal that never disappeared at
+/// ten, and no prefix above `G`. On the machine this was written on, that last
+/// one alone made `df -h` report `1860.7G` where every other `df` says `1.9T`.
 fn human_size(bytes: u64) -> String {
-    if bytes >= 1_073_741_824 {
-        format!("{:.1}G", bytes as f64 / 1_073_741_824.0)
-    } else if bytes >= 1_048_576 {
-        format!("{:.1}M", bytes as f64 / 1_048_576.0)
-    } else if bytes >= 1024 {
-        format!("{:.1}K", bytes as f64 / 1024.0)
-    } else {
-        format!("{bytes}B")
-    }
+    human_readable(bytes, Opts::AUTOSCALE | Opts::CEILING | Opts::SI | Opts::BASE_1024, 1, 1)
 }
 
 #[cfg(test)]
@@ -222,8 +227,24 @@ mod tests {
 
     #[test]
     fn human_size_bytes_under_kib() {
-        assert_eq!(human_size(0), "0B");
-        assert_eq!(human_size(1023), "1023B");
+        // `0` and `1023`, not `0B` and `1023B`: `df` suffixes only a scaled
+        // value. These assertions previously demanded the `B`, which no `df`
+        // prints -- they described the old implementation, not the utility.
+        assert_eq!(human_size(0), "0");
+        assert_eq!(human_size(1023), "1023");
+    }
+
+    /// The four figures below are a real `df` reading from the machine this was
+    /// written on, cross-checked against `df --block-size=1` on the same
+    /// filesystems at the same moment. They pin the two properties a `{:.1}`
+    /// format string cannot express: the rounding is upward, and the decimal
+    /// disappears once the mantissa reaches ten.
+    #[test]
+    fn matches_a_real_df_reading() {
+        assert_eq!(human_size(594_744_090_624), "554G"); // 553.9 GiB, rounded up
+        assert_eq!(human_size(321_934_987_264), "300G"); // 299.8 GiB, rounded up
+        assert_eq!(human_size(1_999_372_283_904), "1.9T"); // 1.818 TiB
+        assert_eq!(human_size(1_657_357_066_240), "1.6T"); // 1.507 TiB
     }
 
     #[test]

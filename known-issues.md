@@ -42495,3 +42495,126 @@ utility in this crate, and the harness normalises the prefix on both sides so
 that choice cannot masquerade as a behavioural difference. On the first run it
 did exactly that — 37 "failures", all of them the prefix and none of them the
 message.
+
+## B-BOOT-TEST-FREE-SPACE-FLOOR-IS-BLIND-TO-THE-TEMP-VOLUME (lane B, 2026-08-19) — filed to lane A
+
+**In short:** the boot test refuses to run when the *project* disk is nearly
+full, which is the right idea, but it only ever looks at that one disk. The Rust
+compiler also writes scratch files to the Windows temp folder, which on this
+machine is on a different disk. When that other disk filled up, the boot test
+announced "Free space OK: 47 GiB" and then died with `rustc-LLVM ERROR: out of
+memory` — a message about RAM, for a problem that was entirely about disk.
+
+**Where:** `scripts/boot-test.sh:898` (`measure_free_gb`), which measures
+`df -Pk "$PROJECT_ROOT"` and nothing else. Lane A owns the boot test; filed as
+`requests/b-a-free-space-floor-does-not-check-the-compiler-s-temp-volume.md`.
+
+**How it presented.** Two builds, one cause, two diagnostics that share no
+words:
+
+```
+Free space OK: 47 GiB on the build volume        <- D:, genuinely fine
+rustc-LLVM ERROR: out of memory                  <- C:, at zero bytes free
+Allocation failed
+[run-timeout] child exited: FAIL (exit 101), 227s elapsed
+```
+
+```
+warning: failed to save last-use data ... database or disk is full
+rustc-LLVM ERROR: IO failure on output stream: No space left on device
+error: failed to write `C:/Users/.../Temp/slate-cu/.../root-output`
+  Caused by: There is not enough space on the disk. (os error 112)
+```
+
+The second is self-explanatory; the first is actively misleading, and it is the
+one the boot test produces. An hour can go into looking at parallelism and RAM
+before anyone thinks to run `df` on a volume the run never mentioned.
+
+**Why it is the guard's problem rather than just bad luck.** The floor exists
+(Q47) so that a build cannot fill the tree and take the editor and git down with
+it. That reasoning applies unchanged to the volume holding `$TMP`: if it fills,
+the build dies too, and takes rather more with it. The guard's ok/refuse/unknown
+trichotomy is right and its comment is careful to call 20 GiB a floor rather
+than an estimate — this is a volume it did not have in view, not a design error.
+
+**Proper fix** (detail and rationale in the request): resolve `$TMPDIR`/`$TMP`/
+`$TEMP`/`/tmp`, check it against the floor too when it is on a different
+filesystem from `$PROJECT_ROOT`, say which volume failed, and use a smaller
+floor for scratch than the 20 GiB sized for four full worktree rebuilds.
+Deliberately *not* part of the ask: letting `--reclaim-space` delete anything on
+that volume — here it is the operator's system drive.
+
+**Workaround until then:** when a build reports an LLVM OOM, run `df -h` across
+all volumes before believing it.
+
+**Two incidental findings, recorded because they cost time to establish:**
+
+- MSYS `truncate(1)` creates genuinely sparse files on NTFS — a 5 TB file costs
+  zero bytes — but Python's `file.truncate()` on Windows does **not**; it
+  reserves, and will fill the volume. This is how the disk got full in the first
+  place. `scripts/gen-human-fixture.sh` depends on the sparse behaviour and
+  guards it: it stands up one 5 TB probe, re-reads free space, and refuses to
+  run if the probe cost more than a GiB.
+- NTFS rejects `truncate` past roughly 16 TB with `Invalid argument`, which caps
+  how far a sparse-file-based sweep can reach.
+
+## B-`df`-`du`-AND-`ls`-EACH-HAND-ROLLED-THE-SAME-BROKEN-SIZE-FORMATTER (lane B, 2026-08-19) — ✅ **FIXED 2026-08-19**
+
+**In short:** the three utilities that print human-readable sizes — `df -h`,
+`du -h`, `ls -lh` — each had their own private copy of "turn bytes into
+`1.5G`", written as a chain of `{:.1}` format strings. All three were wrong,
+in the same four ways, and every one of them had unit tests that asserted the
+wrong answers. The most visible symptom: on a machine with terabyte disks,
+`df -h` reported `1860.7G` where every other `df` in the world says `1.9T`.
+
+**Where:** `human_size` in `src/bin/df.rs`, `src/bin/du.rs` and `src/bin/ls.rs`.
+All three are now one-line calls to `coreutils::human::human_readable`; the
+copies are gone.
+
+**The four divergences**, measured against GNU coreutils 8.32 rather than
+reasoned about:
+
+| bytes | GNU | old `du`/`df` | what was wrong |
+|---|---|---|---|
+| 5 | `5` | `5B` | a bare count takes no suffix |
+| 1025 | `1.1K` | `1.0K` | GNU rounds **up**; `{:.1}` rounds to nearest |
+| 16777216 | `16M` | `16.0M` | the decimal drops once the mantissa hits ten |
+| 5×10¹² | `4.6T` | `4768.4G` | the chain stopped at `G` |
+
+**And a fifth, in `ls` only:** `human_size(1048576 - 1)` returned `1024.0K`.
+One byte under a mebibyte is `1.0M` — 1023.999 K rounded up is 1024.0 K, which
+is not a rendering and has to carry into the next prefix. The hand-rolled code
+picked its prefix *first*, from a threshold comparison, then formatted, so it
+had no way to carry. `1024.0K` is a string no `ls` has ever printed.
+
+**Why it survived this long: the tests agreed with the code.** Every one of
+these had coverage, and the coverage asserted the bug:
+
+```rust
+assert_eq!(human_size(0), "0B");        // GNU: 0
+assert_eq!(human_size(1023), "1023B");  // GNU: 1023
+assert_eq!(human_size(10 * 1024), " 10.0K");  // GNU: 10K
+assert_eq!(human_size(2_500_000_000), "  2.3G");  // GNU: 2.4G
+assert!(s.ends_with('K'));  // for 1 MiB - 1, where GNU says 1.0M
+```
+
+These were written by reading the implementation and writing down what it did.
+That is the failure mode, and it is not fixed by writing *more* tests of the
+same kind — the last one is instructive, because asserting only the suffix
+looks like defensive testing while in fact checking the one thing that was
+still right.
+
+**Fix as landed.** All three now call `human_readable` with the option set GNU
+passes for `-h` (`AUTOSCALE | CEILING | SI | BASE_1024`), which was itself
+confirmed rather than assumed: `df --block-size=1` and `df -h` read together on
+the same filesystems give 553.9 GiB → `554G` and 299.8 GiB → `300G` (so the
+rounding is upward) and 1.818 TiB → `1.9T` (so the base is 1024). Every
+replaced assertion was re-measured against GNU on a file of exactly that
+length. `ls` keeps its six-column right-alignment, which is *not* GNU's
+behaviour — real `ls` sizes the column to the widest entry — because that is a
+layout question about `ls` rather than a rendering question about `human`, and
+half-changing it would have been worse than leaving it.
+
+**What makes the fix trustworthy** is `userspace/coreutils/tests/human_gnu.rs`:
+36121 renderings measured from GNU across three instruments, all matching. See
+`design-decisions.md` §338 for the fixture's construction and its limits.

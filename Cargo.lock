@@ -2509,7 +2509,8 @@ version = "0.1.0"
 name = "doas"
 version = "0.1.0"
 dependencies = [
- "sha2",
+ "authlib",
+ "posix",
 ]
 
 [[package]]

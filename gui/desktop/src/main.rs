@@ -149,6 +149,10 @@ use guitk::step;
 use guitk::style::{Border, CornerRadii, Shadow};
 use guitk::wheel;
 use launcher::{AppEntry, Category};
+// The same zone engine the libc's `localtime`, osh's `printf '%(…)T'`, the
+// calendar panel and the Date & Time settings page render through, so the
+// taskbar cannot disagree with `date` about what time it is.
+use tzrules::Tz;
 
 use std::collections::BTreeMap;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -602,6 +606,14 @@ pub struct DesktopShell {
     next_z: u32,
     /// Next window ID (for local tracking; compositor assigns real IDs).
     next_window_id: u64,
+    /// What the user chose in the Date & Time panel.
+    ///
+    /// Held whole, for the same reason [`appearance`](Self::appearance) is:
+    /// the taskbar clock reads the zone *and* the three `show_*` flags, whose
+    /// doc comments in [`datetime_settings::DateTimeSettings`] each say "in
+    /// the taskbar clock" — and until this field existed, none of them reached
+    /// one. See [`current_time_string`](Self::current_time_string).
+    pub datetime: datetime_settings::DateTimeSettings,
     /// The shell's **one** snap implementation.
     ///
     /// `snap.rs` used to be dead code — `mod snap;` was its only reference —
@@ -894,6 +906,7 @@ impl DesktopShell {
             theme: DesktopTheme::default(),
             next_z: 1,
             next_window_id: 1,
+            datetime: datetime_settings::DateTimeSettings::default(),
             // Placeholder: the real area needs `taskbar_rect()`, which needs
             // the appearance scaling that is only set two fields up. Seeded
             // immediately below rather than left to the first snap, so that a
@@ -2601,15 +2614,65 @@ impl DesktopShell {
     // Utilities
     // ======================================================================
 
+    /// The zone the taskbar clock reads in.
+    ///
+    /// UTC when the configured zone is not in the table — which is honest
+    /// rather than convenient: a zone we cannot resolve is not a licence to
+    /// invent an offset, and `datetime_settings` already refuses to read a
+    /// zoneinfo *name* for the same reason (there is no tzdata on disk yet;
+    /// `TD-NO-SYSTEM-DEFAULT-ZONE-WITHOUT-TZ`).
+    fn local_zone(&self) -> Tz {
+        self.datetime
+            .current_timezone()
+            .map_or_else(Tz::utc, |tz| tz.rule)
+    }
+
+    /// The clock as the Date & Time panel has configured it.
+    ///
+    /// Derived on every read rather than cached beside `datetime`, on the same
+    /// reasoning as [`sync_snap_area`](Self::sync_snap_area): `datetime` is a
+    /// public field that anything may assign, so a cached copy would be one
+    /// forgotten call site away from showing a setting the user has changed.
+    /// It is three bools and an empty `Vec`, which does not allocate.
+    fn clock(&self) -> calendar::ClockDisplay {
+        let mut clock = calendar::ClockDisplay::new();
+        clock.show_seconds = self.datetime.show_seconds;
+        clock
+    }
+
+    /// The taskbar clock reading.
+    ///
+    /// This used to be four lines of `secs % 86400` — which is **UTC**, with no
+    /// zone applied at all. The shipped default zone is `America/New_York`, so
+    /// out of the box the corner of the screen was five hours wrong, and no
+    /// setting on the Date & Time panel could correct it: `show_seconds`,
+    /// `show_day_of_week` and `show_date` are each documented as applying "in
+    /// the taskbar clock" and reached nothing.
+    ///
+    /// Meanwhile [`calendar::ClockDisplay`] — a complete taskbar clock, with
+    /// zone handling, a seconds switch, a 12/24-hour switch and its own tests —
+    /// had **no callers anywhere in the tree**. That is the same defect as the
+    /// two snap implementations (see [`snap`](Self::snap) and
+    /// design-decisions §469): the shell drawing its own lesser copy of
+    /// something the tree already did properly, with the user able to see only
+    /// the lesser one.
     fn current_time_string(&self) -> String {
         let secs = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs();
-        let time_secs = secs % 86400;
-        let hours = time_secs / 3600;
-        let minutes = (time_secs % 3600) / 60;
-        format!("{hours:02}:{minutes:02}")
+        self.time_string_at(secs)
+    }
+
+    /// The taskbar clock reading for a given UTC instant.
+    ///
+    /// Split from [`current_time_string`](Self::current_time_string) so that
+    /// the reading can be asserted at all: everything above reads the wall
+    /// clock, and a test of a function that consults `SystemTime::now` can
+    /// only ever check its *shape*, never its value — which is exactly the
+    /// hole the UTC bug lived in.
+    fn time_string_at(&self, utc_secs: u64) -> String {
+        self.clock().format_time(utc_secs, &self.local_zone())
     }
 }
 
@@ -3364,7 +3427,7 @@ mod window_manager_tests {
                     as fn(&mut DesktopShell, WindowId),
             ),
             ("resize", |s: &mut DesktopShell, id| {
-                s.resize_window(id, 300, 200)
+                s.resize_window(id, 300, 200);
             }),
         ] {
             let mut shell = shell();
@@ -3789,5 +3852,90 @@ mod window_manager_tests {
             shell.windows.get(&elsewhere).unwrap().visible,
             "another desktop's windows are not this shortcut's business"
         );
+    }
+
+    // ======================================================================
+    // The taskbar clock
+    //
+    // It used to be four lines of `secs % 86400` — UTC, with no zone applied
+    // — while `calendar::ClockDisplay` sat in the tree with no callers and
+    // the Date & Time panel offered three settings that reached nothing.
+    // ======================================================================
+
+    /// 2026-08-21 16:30:45 UTC.
+    const INSTANT: u64 = 1_787_070_645;
+
+    #[test]
+    fn the_taskbar_clock_reads_in_the_configured_zone_not_utc() {
+        let mut shell = shell();
+
+        assert!(shell.datetime.set_timezone("UTC"));
+        assert_eq!(shell.time_string_at(INSTANT), "16:30");
+
+        // The shipped *default* is New York, which is the whole point: out of
+        // the box the corner of the screen used to read 16:30 in a zone where
+        // it was half past noon.
+        assert!(shell.datetime.set_timezone("America/New_York"));
+        assert_eq!(
+            shell.time_string_at(INSTANT),
+            "12:30",
+            "August is EDT, UTC-4 — a fixed-offset entry would have said 11:30"
+        );
+
+        assert!(shell.datetime.set_timezone("Asia/Tokyo"));
+        assert_eq!(
+            shell.time_string_at(INSTANT),
+            "01:30",
+            "UTC+9 crosses midnight into the next day"
+        );
+    }
+
+    #[test]
+    fn the_default_shell_does_not_show_utc() {
+        // Nothing here sets a zone: this is the desktop as it first boots.
+        let shell = shell();
+        assert_ne!(
+            shell.time_string_at(INSTANT),
+            "16:30",
+            "a fresh desktop must apply its own default zone, not fall to UTC"
+        );
+    }
+
+    #[test]
+    fn the_show_seconds_setting_reaches_the_taskbar_clock() {
+        let mut shell = shell();
+        assert!(shell.datetime.set_timezone("Atlantic/Reykjavik"));
+
+        assert_eq!(shell.time_string_at(INSTANT), "16:30");
+        shell.datetime.show_seconds = true;
+        assert_eq!(shell.time_string_at(INSTANT), "16:30:45");
+    }
+
+    #[test]
+    fn an_unresolvable_zone_falls_back_to_utc_rather_than_inventing_an_offset() {
+        let mut shell = shell();
+        // `set_timezone` validates, so reach past it — this is the state a
+        // configuration file naming a zone we do not ship would produce.
+        shell.datetime.timezone = "Mars/Olympus_Mons".to_string();
+        assert!(shell.datetime.current_timezone().is_none());
+        assert_eq!(shell.time_string_at(INSTANT), "16:30");
+    }
+
+    #[test]
+    fn the_clock_is_the_shared_one_and_not_a_second_implementation() {
+        // The bug was not that the arithmetic was wrong; it was that the shell
+        // had its own. Assert the reading equals what `ClockDisplay` gives for
+        // the same instant and zone, so a re-introduced private copy fails
+        // here rather than in a screenshot.
+        let mut shell = shell();
+        assert!(shell.datetime.set_timezone("Europe/London"));
+        let zone = shell.local_zone();
+        for t in [0_u64, INSTANT, 1_766_000_000, 4_000_000_000] {
+            assert_eq!(
+                shell.time_string_at(t),
+                crate::calendar::ClockDisplay::new().format_time(t, &zone),
+                "{t} rendered by the shell and by the shared clock"
+            );
+        }
     }
 }

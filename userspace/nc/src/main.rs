@@ -204,35 +204,51 @@ fn tcp_send(handle: u64, data: &[u8]) -> Result<usize, i64> {
 
 /// Send all bytes, looping until the entire buffer is transmitted.
 fn tcp_send_all(handle: u64, data: &[u8]) -> Result<(), i64> {
-    let mut offset = 0;
-    while offset < data.len() {
-        let sent = tcp_send(handle, &data[offset..])?;
+    // Walks the remaining subslice rather than an offset into the original, so
+    // the send count is applied to the buffer it describes in the same step.
+    // A kernel that reports sending more than it was given is rejected here
+    // instead of producing an offset past the end of `data`.
+    let mut rest = data;
+    while !rest.is_empty() {
+        let sent = tcp_send(handle, rest)?;
         if sent == 0 {
             return Err(-5); // EIO
         }
-        offset = offset.saturating_add(sent);
+        rest = match rest.get(sent..) {
+            Some(r) => r,
+            None => return Err(-5), // EIO: over-reported send
+        };
     }
     Ok(())
 }
 
-/// Receive data from a TCP connection. Returns 0 on EOF (peer closed).
-fn tcp_recv(handle: u64, buf: &mut [u8]) -> Result<usize, i64> {
+/// Receive from a TCP connection, returning the prefix that was filled.
+///
+/// An empty return is EOF (the peer closed). Returning the slice rather than
+/// its length keeps the count and the buffer it describes together: a caller
+/// handed a bare `usize` has to slice the buffer itself, and the count came
+/// from the kernel across a syscall boundary. The one place that number turns
+/// into a slice is here, and a length longer than the buffer is rejected as
+/// EIO rather than propagated.
+fn tcp_recv(handle: u64, buf: &mut [u8]) -> Result<&[u8], i64> {
+    let cap = buf.len();
     // SAFETY: handle is valid. buf pointer and capacity are derived from
     // a valid mutable Rust slice.
-    let ret = unsafe {
-        syscall3(
-            SYS_TCP_RECV,
-            handle,
-            buf.as_mut_ptr() as u64,
-            buf.len() as u64,
-        )
-    };
-    if ret < 0 { Err(ret) } else { Ok(ret as usize) }
+    let ret = unsafe { syscall3(SYS_TCP_RECV, handle, buf.as_mut_ptr() as u64, cap as u64) };
+    if ret < 0 {
+        return Err(ret);
+    }
+    buf.get(..ret as usize).ok_or(-5) // EIO: over-reported receive
 }
 
 /// Non-blocking receive: returns WouldBlock (-11) if no data ready.
-fn tcp_recv_nonblock(handle: u64, buf: &mut [u8]) -> Result<usize, i64> {
+///
+/// Returns the filled prefix; see [`tcp_recv`] for why the slice rather than a
+/// length. An empty return is EOF, which is distinct from the `-11` error that
+/// means "nothing ready yet".
+fn tcp_recv_nonblock(handle: u64, buf: &mut [u8]) -> Result<&[u8], i64> {
     const MSG_DONTWAIT: u64 = 0x40;
+    let cap = buf.len();
     // SAFETY: handle is valid. buf is a valid mutable slice. arg3 carries
     // the MSG_DONTWAIT flag.
     let ret = unsafe {
@@ -240,11 +256,14 @@ fn tcp_recv_nonblock(handle: u64, buf: &mut [u8]) -> Result<usize, i64> {
             SYS_TCP_RECV,
             handle,
             buf.as_mut_ptr() as u64,
-            buf.len() as u64,
+            cap as u64,
             MSG_DONTWAIT,
         )
     };
-    if ret < 0 { Err(ret) } else { Ok(ret as usize) }
+    if ret < 0 {
+        return Err(ret);
+    }
+    buf.get(..ret as usize).ok_or(-5) // EIO: over-reported receive
 }
 
 /// Close a TCP connection handle.
@@ -281,14 +300,7 @@ fn tcp_peer_addr(handle: u64) -> Result<(u32, u16), i64> {
     let mut buf = [0u8; 6];
     // SAFETY: handle is valid. buf is a stack-allocated 6-byte buffer
     // with sufficient lifetime for the kernel to write into.
-    let ret = unsafe {
-        syscall3(
-            SYS_TCP_PEER_ADDR,
-            handle,
-            buf.as_mut_ptr() as u64,
-            0,
-        )
-    };
+    let ret = unsafe { syscall3(SYS_TCP_PEER_ADDR, handle, buf.as_mut_ptr() as u64, 0) };
     if ret < 0 {
         return Err(ret);
     }
@@ -348,7 +360,7 @@ fn udp_send(handle: u64, dst_ip: u32, dst_port: u16, data: &[u8]) -> Result<(), 
 
 /// Receive a UDP datagram (non-blocking). Returns (bytes_read, src_ip, src_port).
 /// Returns Err(-11) (WouldBlock) if no datagram is queued.
-fn udp_recv(handle: u64, buf: &mut [u8]) -> Result<(usize, u32, u16), i64> {
+fn udp_recv(handle: u64, buf: &mut [u8]) -> Result<(&[u8], u32, u16), i64> {
     let mut src_info = [0u8; 6]; // 4 bytes IP + 2 bytes port
     // SAFETY: handle is a valid UDP socket. buf is a valid mutable slice.
     // src_info is a 6-byte stack buffer for the kernel to write source addr.
@@ -366,7 +378,8 @@ fn udp_recv(handle: u64, buf: &mut [u8]) -> Result<(usize, u32, u16), i64> {
     }
     let src_ip = u32::from_be_bytes([src_info[0], src_info[1], src_info[2], src_info[3]]);
     let src_port = u16::from_le_bytes([src_info[4], src_info[5]]);
-    Ok((ret as usize, src_ip, src_port))
+    let received = buf.get(..ret as usize).ok_or(-5)?; // EIO: over-reported receive
+    Ok((received, src_ip, src_port))
 }
 
 /// Check if a UDP socket has queued datagrams.
@@ -419,29 +432,25 @@ fn sys_sleep(ms: u64) {
 /// Parse a dotted-decimal IPv4 address string into a u32 in network byte order.
 fn parse_ipv4(s: &str) -> Option<u32> {
     let parts: Vec<&str> = s.split('.').collect();
-    if parts.len() != 4 {
+    // A slice pattern names the four octets, so the count check and the four
+    // reads are the same statement. Parsing each as `u8` rather than as `u16`
+    // with a `> 255` test afterwards puts the range in the type: there is no
+    // longer a moment where an out-of-range octet exists as a value.
+    let [a, b, c, d] = parts.as_slice() else {
         return None;
-    }
-    let mut octets = [0u8; 4];
-    for (i, part) in parts.iter().enumerate() {
-        let val: u16 = part.parse().ok()?;
-        if val > 255 {
-            return None;
-        }
-        octets[i] = val as u8;
-    }
-    Some(u32::from_be_bytes(octets))
+    };
+    Some(u32::from_be_bytes([
+        a.parse().ok()?,
+        b.parse().ok()?,
+        c.parse().ok()?,
+        d.parse().ok()?,
+    ]))
 }
 
 /// Format a u32 IP address (network byte order) as a dotted-decimal string.
 fn format_ipv4(ip: u32) -> String {
     let o = ip.to_be_bytes();
     format!("{}.{}.{}.{}", o[0], o[1], o[2], o[3])
-}
-
-/// Returns true if the string looks like a dotted-decimal IPv4 address.
-fn is_ipv4_address(s: &str) -> bool {
-    parse_ipv4(s).is_some()
 }
 
 // ============================================================================
@@ -451,10 +460,12 @@ fn is_ipv4_address(s: &str) -> bool {
 /// Resolve a hostname to an IPv4 address, trying the DNS syscall first and
 /// falling back to a small built-in table for common names.
 fn resolve_host(hostname: &str) -> Result<u32, String> {
-    // If it's already a dotted-decimal address, parse directly.
-    if is_ipv4_address(hostname) {
-        // Unwrap is safe: is_ipv4_address only returns true when parse succeeds.
-        return Ok(parse_ipv4(hostname).expect("is_ipv4_address returned true"));
+    // If it's already a dotted-decimal address, parse directly. Asking
+    // `parse_ipv4` for the value is the same question `is_ipv4_address` asked
+    // (it is literally `parse_ipv4(s).is_some()`), so taking the answer instead
+    // of re-deriving it removes the `expect` and the second parse together.
+    if let Some(ip) = parse_ipv4(hostname) {
+        return Ok(ip);
     }
 
     // Try kernel DNS resolver.
@@ -464,7 +475,10 @@ fn resolve_host(hostname: &str) -> Result<u32, String> {
 
     // Fallback: hardcoded common lookups.
     match hostname {
-        "localhost" => Ok(parse_ipv4("127.0.0.1").expect("hardcoded IP is valid")),
+        // Spelled as the bytes it is, rather than parsed from a literal and
+        // then `expect`ed: a constant that cannot fail to parse should not have
+        // a parse step to fail.
+        "localhost" => Ok(u32::from_be_bytes([127, 0, 0, 1])),
         _ => Err(format!("cannot resolve '{hostname}'")),
     }
 }
@@ -633,9 +647,12 @@ fn parse_args() -> Result<Options, String> {
     let mut exec_cmd: Option<String> = None;
     let mut positionals: Vec<String> = Vec::new();
 
-    let mut i = 1;
-    while i < argv.len() {
-        let arg = &argv[i];
+    // Walked as an iterator rather than an index: an option that takes a value
+    // reads it with `it.next()`, which consumes it in the same expression that
+    // checks it is there. The old form advanced `i` and then looked up the new
+    // `i`, which is two statements that have to agree.
+    let mut it = argv.iter().skip(1);
+    while let Some(arg) = it.next() {
         match arg.as_str() {
             "-h" | "--help" => {
                 print_usage();
@@ -647,36 +664,43 @@ fn parse_args() -> Result<Options, String> {
             "-v" => verbose = true,
             "-k" => keep_listening = true,
             "-w" => {
-                i += 1;
-                let val = argv.get(i)
+                let val = it
+                    .next()
                     .ok_or_else(|| "-w requires a timeout value".to_string())?;
-                let secs: u64 = val.parse()
+                let secs: u64 = val
+                    .parse()
                     .map_err(|_| format!("invalid timeout: '{val}'"))?;
                 timeout_secs = Some(secs);
             }
             "-s" => {
-                i += 1;
-                let val = argv.get(i)
+                let val = it
+                    .next()
                     .ok_or_else(|| "-s requires a source address".to_string())?;
                 source_addr = Some(val.clone());
             }
             "-p" => {
-                i += 1;
-                let val = argv.get(i)
+                let val = it
+                    .next()
                     .ok_or_else(|| "-p requires a source port".to_string())?;
-                let port: u16 = val.parse()
+                let port: u16 = val
+                    .parse()
                     .map_err(|_| format!("invalid source port: '{val}'"))?;
                 source_port = Some(port);
             }
             "-e" => {
-                i += 1;
-                let val = argv.get(i)
+                let val = it
+                    .next()
                     .ok_or_else(|| "-e requires a command".to_string())?;
                 exec_cmd = Some(val.clone());
             }
-            other if other.starts_with('-') => {
-                // Handle combined short flags like -vz, -vl, etc.
-                let flags = &other[1..];
+            // Combined short flags like -vz, -vl. `strip_prefix` yields the
+            // flags and proves the leading '-' in one step, where `&other[1..]`
+            // re-asserts by hand what the guard already established.
+            other => {
+                let Some(flags) = other.strip_prefix('-') else {
+                    positionals.push(arg.clone());
+                    continue;
+                };
                 let mut consumed = true;
                 for ch in flags.chars() {
                     match ch {
@@ -695,9 +719,7 @@ fn parse_args() -> Result<Options, String> {
                     return Err(format!("unknown option: '{other}'"));
                 }
             }
-            _ => positionals.push(arg.clone()),
         }
-        i += 1;
     }
 
     // Determine mode and parse positional arguments.
@@ -706,46 +728,54 @@ fn parse_args() -> Result<Options, String> {
     let port;
     let port_end;
 
+    // Each mode's arity check is written as a slice pattern, so the count and
+    // the bindings it licenses are one statement. `len() != 2` followed by
+    // `positionals[0]` and `positionals[1]` states the same fact three times
+    // and relies on all three staying in agreement.
     if listen {
         mode = Mode::Listen;
         // Listen mode: nc -l port
-        if positionals.len() != 1 {
+        let [port_str] = positionals.as_slice() else {
             return Err("listen mode requires exactly one argument: port".to_string());
-        }
+        };
         host = String::new();
-        port = positionals[0].parse::<u16>()
-            .map_err(|_| format!("invalid port: '{}'", positionals[0]))?;
+        port = port_str
+            .parse::<u16>()
+            .map_err(|_| format!("invalid port: '{port_str}'"))?;
         port_end = port;
     } else if scan {
         mode = Mode::Scan;
         // Scan mode: nc -z hostname port[-port]
-        if positionals.len() != 2 {
+        let [scan_host, port_range] = positionals.as_slice() else {
             return Err("scan mode requires: hostname port[-port]".to_string());
-        }
-        host = positionals[0].clone();
-        let port_range = &positionals[1];
+        };
+        host = scan_host.clone();
         if let Some((start, end)) = port_range.split_once('-') {
-            port = start.parse::<u16>()
+            port = start
+                .parse::<u16>()
                 .map_err(|_| format!("invalid port range start: '{start}'"))?;
-            port_end = end.parse::<u16>()
+            port_end = end
+                .parse::<u16>()
                 .map_err(|_| format!("invalid port range end: '{end}'"))?;
             if port_end < port {
                 return Err(format!("invalid port range: {port}-{port_end}"));
             }
         } else {
-            port = port_range.parse::<u16>()
+            port = port_range
+                .parse::<u16>()
                 .map_err(|_| format!("invalid port: '{port_range}'"))?;
             port_end = port;
         }
     } else {
         mode = Mode::Client;
         // Client mode: nc hostname port
-        if positionals.len() != 2 {
+        let [client_host, port_str] = positionals.as_slice() else {
             return Err("client mode requires: hostname port".to_string());
-        }
-        host = positionals[0].clone();
-        port = positionals[1].parse::<u16>()
-            .map_err(|_| format!("invalid port: '{}'", positionals[1]))?;
+        };
+        host = client_host.clone();
+        port = port_str
+            .parse::<u16>()
+            .map_err(|_| format!("invalid port: '{port_str}'"))?;
         port_end = port;
     }
 
@@ -780,12 +810,17 @@ fn run_tcp_client(opts: &Options) -> Result<(), String> {
         if let Some(ref src) = opts.source_addr {
             eprintln!(
                 "nc: connecting to {} ({}) port {} [tcp] from {}",
-                opts.host, format_ipv4(ip), opts.port, src,
+                opts.host,
+                format_ipv4(ip),
+                opts.port,
+                src,
             );
         } else {
             eprintln!(
                 "nc: connecting to {} ({}) port {} [tcp]",
-                opts.host, format_ipv4(ip), opts.port,
+                opts.host,
+                format_ipv4(ip),
+                opts.port,
             );
         }
     }
@@ -793,15 +828,15 @@ fn run_tcp_client(opts: &Options) -> Result<(), String> {
     let handle = tcp_connect(ip, opts.port).map_err(|e| {
         format!(
             "nc: connect to {} port {} failed: {} (error {})",
-            format_ipv4(ip), opts.port, syscall_error_msg(e), e,
+            format_ipv4(ip),
+            opts.port,
+            syscall_error_msg(e),
+            e,
         )
     })?;
 
     if opts.verbose {
-        eprintln!(
-            "nc: connected to {} port {}",
-            format_ipv4(ip), opts.port,
-        );
+        eprintln!("nc: connected to {} port {}", format_ipv4(ip), opts.port);
     }
 
     // Run the relay loop with optional -e command.
@@ -820,6 +855,11 @@ fn run_tcp_client(opts: &Options) -> Result<(), String> {
 ///
 /// Uses two threads: one reads from stdin and writes to the socket, the other
 /// reads from the socket and writes to stdout.
+// Returns `Result` with no `Err` path on purpose: both call sites choose
+// between this and `run_exec` in a single `if let ... else` whose arms must
+// agree in type, and `run_exec` genuinely can fail (it spawns a child). Making
+// this one return `()` would force the callers to paper over the difference.
+#[allow(clippy::unnecessary_wraps)]
 fn relay_loop(handle: u64, timeout_secs: Option<u64>) -> Result<(), String> {
     let timeout_ms = timeout_secs.map(|s| s.saturating_mul(1000));
     let done = std::sync::Arc::new(AtomicBool::new(false));
@@ -842,7 +882,11 @@ fn relay_loop(handle: u64, timeout_secs: Option<u64>) -> Result<(), String> {
                     break;
                 }
                 Ok(n) => {
-                    if tcp_send_all(tx_handle, &buf[..n]).is_err() {
+                    // `Read::read` promises `n <= buf.len()`, but the promise
+                    // is not in the type; `get` asks the slice instead of
+                    // trusting the number.
+                    let Some(chunk) = buf.get(..n) else { break };
+                    if tcp_send_all(tx_handle, chunk).is_err() {
                         break;
                     }
                 }
@@ -864,12 +908,12 @@ fn relay_loop(handle: u64, timeout_secs: Option<u64>) -> Result<(), String> {
         }
 
         match tcp_recv_nonblock(handle, &mut buf) {
-            Ok(0) => {
+            Ok([]) => {
                 // EOF: peer closed.
                 break;
             }
-            Ok(n) => {
-                if stdout_lock.write_all(&buf[..n]).is_err() {
+            Ok(received) => {
+                if stdout_lock.write_all(received).is_err() {
                     break;
                 }
                 let _ = stdout_lock.flush();
@@ -877,13 +921,13 @@ fn relay_loop(handle: u64, timeout_secs: Option<u64>) -> Result<(), String> {
             Err(-11) => {
                 // WouldBlock: no data yet. Check timeout.
                 if let Some(tmo) = timeout_ms
-                    && idle_start.elapsed().as_millis() as u64 >= tmo {
-                        eprintln!("nc: idle timeout");
-                        break;
-                    }
+                    && idle_start.elapsed().as_millis() as u64 >= tmo
+                {
+                    eprintln!("nc: idle timeout");
+                    break;
+                }
                 // Small sleep to avoid busy-spinning, responsive to Ctrl+C.
                 sleep_interruptible(10);
-                continue;
             }
             Err(_) => break,
         }
@@ -906,7 +950,9 @@ fn run_tcp_listen(opts: &Options) -> Result<(), String> {
     let listener = tcp_bind(opts.port).map_err(|e| {
         format!(
             "nc: bind to port {} failed: {} (error {})",
-            opts.port, syscall_error_msg(e), e,
+            opts.port,
+            syscall_error_msg(e),
+            e,
         )
     })?;
 
@@ -923,16 +969,16 @@ fn run_tcp_listen(opts: &Options) -> Result<(), String> {
             eprintln!("nc: waiting for connection...");
         }
 
-        let conn = tcp_accept(listener).map_err(|e| {
-            format!("nc: accept failed: {} (error {})", syscall_error_msg(e), e)
-        })?;
+        let conn = tcp_accept(listener)
+            .map_err(|e| format!("nc: accept failed: {} (error {})", syscall_error_msg(e), e))?;
 
         // Report the peer address.
         if opts.verbose {
             if let Ok((peer_ip, peer_port)) = tcp_peer_addr(conn) {
                 eprintln!(
                     "nc: connection from {} port {}",
-                    format_ipv4(peer_ip), peer_port,
+                    format_ipv4(peer_ip),
+                    peer_port,
                 );
             } else {
                 eprintln!("nc: connection accepted");
@@ -950,9 +996,10 @@ fn run_tcp_listen(opts: &Options) -> Result<(), String> {
         tcp_close(conn);
 
         if let Err(e) = result
-            && opts.verbose {
-                eprintln!("nc: session error: {e}");
-            }
+            && opts.verbose
+        {
+            eprintln!("nc: session error: {e}");
+        }
 
         if !opts.keep_listening {
             break;
@@ -985,19 +1032,31 @@ fn run_udp_client(opts: &Options) -> Result<(), String> {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_nanos();
-        (49152 + (now % 16384)) as u16
+        // The ephemeral range 49152-65535 is exactly "the top two bits set",
+        // so OR-ing the low 14 bits of the clock into 0xC000 lands in it by
+        // construction -- no addition that a reader has to check cannot carry
+        // out of the range.
+        0xC000 | (now % 16384) as u16
     } else {
         local_port
     };
 
     let handle = udp_bind(bind_port).map_err(|e| {
-        format!("nc: udp bind port {} failed: {} (error {})", bind_port, syscall_error_msg(e), e)
+        format!(
+            "nc: udp bind port {} failed: {} (error {})",
+            bind_port,
+            syscall_error_msg(e),
+            e
+        )
     })?;
 
     if opts.verbose {
         eprintln!(
             "nc: UDP mode, sending to {} ({}) port {}, bound to port {}",
-            opts.host, format_ipv4(ip), opts.port, bind_port,
+            opts.host,
+            format_ipv4(ip),
+            opts.port,
+            bind_port,
         );
     }
 
@@ -1020,7 +1079,10 @@ fn run_udp_client(opts: &Options) -> Result<(), String> {
             match stdin_lock.read(&mut buf) {
                 Ok(0) => break, // EOF
                 Ok(n) => {
-                    if udp_send(send_handle, dst_ip, dst_port, &buf[..n]).is_err() {
+                    // See the TCP relay: `Read::read`'s bound is a promise,
+                    // not a type, so ask the slice for the prefix.
+                    let Some(chunk) = buf.get(..n) else { break };
+                    if udp_send(send_handle, dst_ip, dst_port, chunk).is_err() {
                         break;
                     }
                 }
@@ -1031,7 +1093,9 @@ fn run_udp_client(opts: &Options) -> Result<(), String> {
     });
 
     // Main thread: UDP recv -> stdout
-    let mut recv_buf = [0u8; 65536];
+    // A datagram can be 64 KiB; that is too much for a stack frame, so the
+    // receive buffer is heap-allocated once outside the loop.
+    let mut recv_buf = vec![0u8; 65536].into_boxed_slice();
     let stdout = io::stdout();
     let mut stdout_lock = stdout.lock();
     let idle_start = Instant::now();
@@ -1043,14 +1107,16 @@ fn run_udp_client(opts: &Options) -> Result<(), String> {
 
         if udp_rx_ready(handle) {
             match udp_recv(handle, &mut recv_buf) {
-                Ok((n, src_ip, src_port)) => {
+                Ok((received, src_ip, src_port)) => {
                     if opts.verbose {
                         eprintln!(
                             "nc: received {} bytes from {} port {}",
-                            n, format_ipv4(src_ip), src_port,
+                            received.len(),
+                            format_ipv4(src_ip),
+                            src_port,
                         );
                     }
-                    if stdout_lock.write_all(&recv_buf[..n]).is_err() {
+                    if stdout_lock.write_all(received).is_err() {
                         break;
                     }
                     let _ = stdout_lock.flush();
@@ -1062,12 +1128,13 @@ fn run_udp_client(opts: &Options) -> Result<(), String> {
         } else {
             // No data ready. Check timeout.
             if let Some(tmo) = timeout_ms
-                && idle_start.elapsed().as_millis() as u64 >= tmo {
-                    if opts.verbose {
-                        eprintln!("nc: idle timeout");
-                    }
-                    break;
+                && idle_start.elapsed().as_millis() as u64 >= tmo
+            {
+                if opts.verbose {
+                    eprintln!("nc: idle timeout");
                 }
+                break;
+            }
             sys_sleep(10);
         }
     }
@@ -1081,7 +1148,12 @@ fn run_udp_client(opts: &Options) -> Result<(), String> {
 /// UDP listen mode: bind and receive datagrams, echo stdin back.
 fn run_udp_listen(opts: &Options) -> Result<(), String> {
     let handle = udp_bind(opts.port).map_err(|e| {
-        format!("nc: udp bind port {} failed: {} (error {})", opts.port, syscall_error_msg(e), e)
+        format!(
+            "nc: udp bind port {} failed: {} (error {})",
+            opts.port,
+            syscall_error_msg(e),
+            e
+        )
     })?;
 
     if opts.verbose {
@@ -1089,7 +1161,9 @@ fn run_udp_listen(opts: &Options) -> Result<(), String> {
     }
 
     let timeout_ms = opts.timeout_secs.map(|s| s.saturating_mul(1000));
-    let mut recv_buf = [0u8; 65536];
+    // A datagram can be 64 KiB; that is too much for a stack frame, so the
+    // receive buffer is heap-allocated once outside the loop.
+    let mut recv_buf = vec![0u8; 65536].into_boxed_slice();
     let stdout = io::stdout();
     let mut stdout_lock = stdout.lock();
     let mut last_sender_ip: u32 = 0;
@@ -1130,28 +1204,31 @@ fn run_udp_listen(opts: &Options) -> Result<(), String> {
         }
 
         if udp_rx_ready(handle) {
-            if let Ok((n, src_ip, src_port)) = udp_recv(handle, &mut recv_buf) {
+            if let Ok((received, src_ip, src_port)) = udp_recv(handle, &mut recv_buf) {
                 last_sender_ip = src_ip;
                 last_sender_port = src_port;
                 if opts.verbose {
                     eprintln!(
                         "nc: received {} bytes from {} port {}",
-                        n, format_ipv4(src_ip), src_port,
+                        received.len(),
+                        format_ipv4(src_ip),
+                        src_port,
                     );
                 }
-                if stdout_lock.write_all(&recv_buf[..n]).is_err() {
+                if stdout_lock.write_all(received).is_err() {
                     break;
                 }
                 let _ = stdout_lock.flush();
             }
         } else {
             if let Some(tmo) = timeout_ms
-                && idle_start.elapsed().as_millis() as u64 >= tmo {
-                    if opts.verbose {
-                        eprintln!("nc: idle timeout");
-                    }
-                    break;
+                && idle_start.elapsed().as_millis() as u64 >= tmo
+            {
+                if opts.verbose {
+                    eprintln!("nc: idle timeout");
                 }
+                break;
+            }
             sys_sleep(10);
         }
     }
@@ -1179,7 +1256,10 @@ fn run_port_scan(opts: &Options) -> Result<(), String> {
     if opts.verbose {
         eprintln!(
             "nc: scanning {} ({}) ports {}-{}",
-            opts.host, format_ipv4(ip), opts.port, opts.port_end,
+            opts.host,
+            format_ipv4(ip),
+            opts.port,
+            opts.port_end,
         );
     }
 
@@ -1196,7 +1276,9 @@ fn run_port_scan(opts: &Options) -> Result<(), String> {
             if opts.verbose {
                 println!(
                     "{} ({}) {} [udp] open|filtered",
-                    opts.host, format_ipv4(ip), current_port,
+                    opts.host,
+                    format_ipv4(ip),
+                    current_port,
                 );
             }
             open_count = open_count.saturating_add(1);
@@ -1237,12 +1319,17 @@ fn run_port_scan(opts: &Options) -> Result<(), String> {
                         let port_info = if let Some(ref b) = banner {
                             format!(
                                 "{} ({}) {} [tcp] open -- {}",
-                                opts.host, format_ipv4(ip), current_port, b,
+                                opts.host,
+                                format_ipv4(ip),
+                                current_port,
+                                b,
                             )
                         } else {
                             format!(
                                 "{} ({}) {} [tcp] open",
-                                opts.host, format_ipv4(ip), current_port,
+                                opts.host,
+                                format_ipv4(ip),
+                                current_port,
                             )
                         };
                         println!("{port_info}");
@@ -1251,13 +1338,18 @@ fn run_port_scan(opts: &Options) -> Result<(), String> {
                         if opts.verbose {
                             println!(
                                 "{} ({}) {} [tcp] refused -- {}",
-                                opts.host, format_ipv4(ip), current_port, err_msg,
+                                opts.host,
+                                format_ipv4(ip),
+                                current_port,
+                                err_msg,
                             );
                         }
                     } else if opts.verbose {
                         println!(
                             "{} ({}) {} [tcp] timeout",
-                            opts.host, format_ipv4(ip), current_port,
+                            opts.host,
+                            format_ipv4(ip),
+                            current_port,
                         );
                     }
 
@@ -1269,13 +1361,17 @@ fn run_port_scan(opts: &Options) -> Result<(), String> {
                         if opts.verbose {
                             println!(
                                 "{} ({}) {} [tcp] refused",
-                                opts.host, format_ipv4(ip), current_port,
+                                opts.host,
+                                format_ipv4(ip),
+                                current_port,
                             );
                         }
                     } else if opts.verbose {
                         eprintln!(
                             "nc: port {} error: {} ({})",
-                            current_port, syscall_error_msg(e), e,
+                            current_port,
+                            syscall_error_msg(e),
+                            e,
                         );
                     }
                 }
@@ -1303,10 +1399,10 @@ fn grab_banner(handle: u64) -> Option<String> {
 
     let mut buf = [0u8; 1024];
     match tcp_recv_nonblock(handle, &mut buf) {
-        Ok(0) | Err(_) => None,
-        Ok(n) => {
+        Ok([]) | Err(_) => None,
+        Ok(received) => {
             // Convert to a printable string, replacing non-printable chars.
-            let s: String = buf[..n]
+            let s: String = received
                 .iter()
                 .map(|&b| {
                     if b == b'\r' || b == b'\n' {
@@ -1365,7 +1461,8 @@ fn run_exec(handle: u64, cmd: &str) -> Result<(), String> {
     // Thread: socket -> child stdin
     let done_in = done.clone();
     let in_handle = handle;
-    let stdin_thread = child_stdin.map(|mut cstdin| thread::spawn(move || {
+    let stdin_thread = child_stdin.map(|mut cstdin| {
+        thread::spawn(move || {
             let mut buf = [0u8; 4096];
             loop {
                 if done_in.load(Ordering::SeqCst) || !RUNNING.load(Ordering::SeqCst) {
@@ -1374,9 +1471,9 @@ fn run_exec(handle: u64, cmd: &str) -> Result<(), String> {
                 // Use blocking recv for exec mode: the child process
                 // expects a steady stream and doesn't need polling.
                 match tcp_recv(in_handle, &mut buf) {
-                    Ok(0) => break,
-                    Ok(n) => {
-                        if cstdin.write_all(&buf[..n]).is_err() {
+                    Ok([]) => break,
+                    Ok(received) => {
+                        if cstdin.write_all(received).is_err() {
                             break;
                         }
                     }
@@ -1384,12 +1481,14 @@ fn run_exec(handle: u64, cmd: &str) -> Result<(), String> {
                 }
             }
             done_in.store(true, Ordering::SeqCst);
-        }));
+        })
+    });
 
     // Thread: child stdout -> socket
     let done_out = done.clone();
     let out_handle = handle;
-    let stdout_thread = child_stdout.map(|mut cstdout| thread::spawn(move || {
+    let stdout_thread = child_stdout.map(|mut cstdout| {
+        thread::spawn(move || {
             let mut buf = [0u8; 4096];
             loop {
                 if done_out.load(Ordering::SeqCst) || !RUNNING.load(Ordering::SeqCst) {
@@ -1398,7 +1497,8 @@ fn run_exec(handle: u64, cmd: &str) -> Result<(), String> {
                 match cstdout.read(&mut buf) {
                     Ok(0) => break,
                     Ok(n) => {
-                        if tcp_send_all(out_handle, &buf[..n]).is_err() {
+                        let Some(chunk) = buf.get(..n) else { break };
+                        if tcp_send_all(out_handle, chunk).is_err() {
                             break;
                         }
                     }
@@ -1406,7 +1506,8 @@ fn run_exec(handle: u64, cmd: &str) -> Result<(), String> {
                 }
             }
             done_out.store(true, Ordering::SeqCst);
-        }));
+        })
+    });
 
     // Wait for child to finish.
     let _ = child.wait();
@@ -1461,7 +1562,17 @@ fn main() {
 // Tests
 // ============================================================================
 
+// Panicking on bad data is what a test is *for*: an `unwrap` that fires is a
+// failure report, not a crash in someone's session. CLAUDE.md scopes the four
+// defensive lints to non-test code for exactly this reason.
 #[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects
+)]
 mod tests {
     use super::*;
 
@@ -1546,19 +1657,25 @@ mod tests {
         }
     }
 
-    // --- is_ipv4_address ---
+    // --- recognising an address vs a hostname ---
+    //
+    // These asked `is_ipv4_address`, a one-line `parse_ipv4(s).is_some()`
+    // wrapper that nothing but these tests called once `resolve_host` started
+    // taking the parsed value instead of re-deriving it. Asking `parse_ipv4`
+    // directly tests the same thing without keeping a function alive for the
+    // test suite's benefit.
 
     #[test]
     fn is_ipv4_valid() {
-        assert!(is_ipv4_address("1.2.3.4"));
-        assert!(is_ipv4_address("255.255.255.255"));
+        assert!(parse_ipv4("1.2.3.4").is_some());
+        assert!(parse_ipv4("255.255.255.255").is_some());
     }
 
     #[test]
     fn is_ipv4_hostname() {
-        assert!(!is_ipv4_address("example.com"));
-        assert!(!is_ipv4_address("localhost"));
-        assert!(!is_ipv4_address(""));
+        assert!(parse_ipv4("example.com").is_none());
+        assert!(parse_ipv4("localhost").is_none());
+        assert!(parse_ipv4("").is_none());
     }
 
     // --- Syscall error messages ---
@@ -1603,10 +1720,7 @@ mod tests {
         // dns_resolve will fail in test environment, but the fallback table
         // should handle "localhost".
         // Note: this test only validates the fallback table, not the syscall.
-        assert_eq!(
-            parse_ipv4("127.0.0.1").unwrap(),
-            0x7F00_0001,
-        );
+        assert_eq!(parse_ipv4("127.0.0.1").unwrap(), 0x7F00_0001,);
     }
 
     // --- Banner sanitization ---

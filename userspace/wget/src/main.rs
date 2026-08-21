@@ -137,33 +137,36 @@ fn tcp_send(handle: u64, data: &[u8]) -> Result<usize, WgetError> {
 
 /// Send all bytes, looping until the entire buffer is transmitted.
 fn tcp_send_all(handle: u64, data: &[u8]) -> Result<(), WgetError> {
-    let mut offset = 0;
-    while offset < data.len() {
-        let sent = tcp_send(handle, &data[offset..])?;
+    // The unsent tail is carried as a slice rather than as an offset into
+    // `data`: a kernel that over-reports what it sent then fails the send
+    // instead of producing an out-of-range index.
+    let mut rest = data;
+    while !rest.is_empty() {
+        let sent = tcp_send(handle, rest)?;
         if sent == 0 {
             return Err(WgetError::SendFailed);
         }
-        offset = offset.checked_add(sent).ok_or(WgetError::SendFailed)?;
+        rest = rest.get(sent..).ok_or(WgetError::SendFailed)?;
     }
     Ok(())
 }
 
-/// Receive data from a TCP connection. Returns 0 when the peer has closed.
-fn tcp_recv(handle: u64, buf: &mut [u8]) -> Result<usize, WgetError> {
+/// Receive data from a TCP connection.
+///
+/// Returns the prefix of `buf` the kernel filled — empty when the peer has
+/// closed. Returning the slice rather than a count means the kernel's number
+/// becomes a range in exactly one place, here, where a count larger than the
+/// buffer we handed over is a `RecvFailed` rather than a panic at the
+/// caller's `&buf[..n]`.
+fn tcp_recv(handle: u64, buf: &mut [u8]) -> Result<&[u8], WgetError> {
+    let cap = buf.len();
     // SAFETY: We pass a valid handle and a mutable buffer pointer with its
     // correct length. The kernel writes at most `buf.len()` bytes into the buffer.
-    let ret = unsafe {
-        syscall3(
-            SYS_TCP_RECV,
-            handle,
-            buf.as_mut_ptr() as u64,
-            buf.len() as u64,
-        )
-    };
+    let ret = unsafe { syscall3(SYS_TCP_RECV, handle, buf.as_mut_ptr() as u64, cap as u64) };
     if ret < 0 {
         return Err(WgetError::RecvFailed);
     }
-    Ok(ret as usize)
+    buf.get(..ret as usize).ok_or(WgetError::RecvFailed)
 }
 
 /// Close a TCP connection handle.
@@ -235,9 +238,11 @@ fn parse_url(url: &str) -> Result<ParsedUrl, WgetError> {
         .strip_prefix("http://")
         .ok_or_else(|| WgetError::InvalidUrl("only http:// URLs are supported".to_string()))?;
 
-    // Split host+port from path at the first '/'.
+    // Split host+port from path at the first '/'. `split_at` on the index
+    // `find` returned keeps the '/' at the head of the path, which is what
+    // the request line needs, without naming the index twice.
     let (host_port, path) = match rest.find('/') {
-        Some(idx) => (&rest[..idx], &rest[idx..]),
+        Some(idx) => rest.split_at(idx),
         None => (rest, "/"),
     };
 
@@ -246,14 +251,17 @@ fn parse_url(url: &str) -> Result<ParsedUrl, WgetError> {
     }
 
     // Split host from port.
-    let (host, port) = if let Some(colon_idx) = host_port.rfind(':') {
-        let port_str = &host_port[colon_idx + 1..];
-        let port: u16 = port_str.parse().map_err(|_| {
-            WgetError::InvalidUrl(format!("invalid port number '{port_str}'"))
-        })?;
-        (&host_port[..colon_idx], port)
-    } else {
-        (host_port, 80)
+    // `rsplit_once` rather than `rfind` plus two ranges: the split point and
+    // the two halves are produced together, so there is no `colon_idx + 1`
+    // that a later edit could get wrong.
+    let (host, port) = match host_port.rsplit_once(':') {
+        Some((host, port_str)) => {
+            let port: u16 = port_str
+                .parse()
+                .map_err(|_| WgetError::InvalidUrl(format!("invalid port number '{port_str}'")))?;
+            (host, port)
+        }
+        None => (host_port, 80),
     };
 
     Ok(ParsedUrl {
@@ -333,12 +341,7 @@ fn format_speed(bytes_per_sec: f64) -> String {
 const PROGRESS_BAR_WIDTH: usize = 20;
 
 /// Render and print a progress line to stderr.
-fn print_progress(
-    filename: &str,
-    downloaded: u64,
-    total: Option<u64>,
-    start_time: Instant,
-) {
+fn print_progress(filename: &str, downloaded: u64, total: Option<u64>, start_time: Instant) {
     let elapsed = start_time.elapsed().as_secs_f64();
     let speed = if elapsed > 0.0 {
         downloaded as f64 / elapsed
@@ -370,7 +373,11 @@ fn print_progress(
             } else if eta < 3600.0 {
                 format!("{:.0}m {:.0}s", (eta / 60.0).floor(), eta % 60.0)
             } else {
-                format!("{:.0}h {:.0}m", (eta / 3600.0).floor(), (eta % 3600.0) / 60.0)
+                format!(
+                    "{:.0}h {:.0}m",
+                    (eta / 3600.0).floor(),
+                    (eta % 3600.0) / 60.0
+                )
             };
 
             let bar_filled = "=".repeat(filled.saturating_sub(1));
@@ -405,20 +412,31 @@ fn print_progress(
 
 /// Truncate a filename to fit in `max_len` characters, replacing the middle
 /// with ".." if necessary.
+///
+/// Counts and cuts in `char`s, not bytes. `name` is the last path component
+/// of a URL, so it can be any UTF-8 the server names a file; the previous
+/// byte-slicing version would panic outright (`byte index is not a char
+/// boundary`) the first time a progress line had to shorten a filename
+/// containing a non-ASCII character. Comparing a byte length against a
+/// column budget was wrong for the same reason.
 fn truncate_name(name: &str, max_len: usize) -> String {
-    if name.len() <= max_len {
+    let char_count = name.chars().count();
+    if char_count <= max_len {
         return name.to_string();
     }
     if max_len < 5 {
-        return name[..max_len].to_string();
+        return name.chars().take(max_len).collect();
     }
-    let prefix_len = (max_len - 2) / 2;
-    let suffix_len = max_len - 2 - prefix_len;
-    format!(
-        "{}..{}",
-        &name[..prefix_len],
-        &name[name.len() - suffix_len..]
-    )
+    // Two columns go to the ".." separator.
+    let budget = max_len.saturating_sub(2);
+    let prefix_len = budget / 2;
+    let suffix_len = budget.saturating_sub(prefix_len);
+    let prefix: String = name.chars().take(prefix_len).collect();
+    let suffix: String = name
+        .chars()
+        .skip(char_count.saturating_sub(suffix_len))
+        .collect();
+    format!("{prefix}..{suffix}")
 }
 
 // ============================================================================
@@ -447,7 +465,7 @@ fn parse_http_response(data: &[u8]) -> Result<HttpResponse, WgetError> {
     let header_end = find_header_end(data)
         .ok_or_else(|| WgetError::InvalidResponse("incomplete headers".to_string()))?;
 
-    let header_bytes = &data[..header_end];
+    let header_bytes = data.get(..header_end).unwrap_or_default();
     let header_text = String::from_utf8_lossy(header_bytes);
 
     let mut lines = header_text.split("\r\n");
@@ -466,15 +484,14 @@ fn parse_http_response(data: &[u8]) -> Result<HttpResponse, WgetError> {
             break;
         }
         if let Some((name, value)) = line.split_once(':') {
-            headers.push((
-                name.trim().to_ascii_lowercase(),
-                value.trim().to_string(),
-            ));
+            headers.push((name.trim().to_ascii_lowercase(), value.trim().to_string()));
         }
     }
 
-    // Body starts after \r\n\r\n.
-    let body_offset = header_end + 4;
+    // Body starts after \r\n\r\n. `find_header_end` matched a four-byte
+    // window, so this is always within `data`; clamping says so rather than
+    // relying on the reader to re-derive it.
+    let body_offset = header_end.saturating_add(4).min(data.len());
 
     Ok(HttpResponse {
         status,
@@ -494,9 +511,9 @@ fn parse_status_line(line: &str) -> Result<HttpStatus, WgetError> {
         .ok_or_else(|| WgetError::InvalidResponse("missing status code".to_string()))?;
     let reason = parts.next().unwrap_or("").to_string();
 
-    let code: u16 = code_str.parse().map_err(|_| {
-        WgetError::InvalidResponse(format!("invalid status code '{code_str}'"))
-    })?;
+    let code: u16 = code_str
+        .parse()
+        .map_err(|_| WgetError::InvalidResponse(format!("invalid status code '{code_str}'")))?;
 
     Ok(HttpStatus { code, reason })
 }
@@ -557,88 +574,84 @@ impl ChunkedDecoder {
     /// return zero bytes if the input is entirely framing.
     fn decode(&mut self, input: &[u8]) -> Result<Vec<u8>, WgetError> {
         let mut output = Vec::new();
-        let mut pos = 0;
 
-        while pos < input.len() && !self.finished {
+        // Walked as a shrinking slice rather than as an index into `input`.
+        // Chunked decoding is a state machine over attacker-supplied framing
+        // — the chunk size is a hex number the server chooses — and the
+        // hazard is that a `pos` and a bound get out of step. A slice cannot:
+        // `split_at`, `split_first` and `strip_prefix` are the only ways to
+        // advance, and none of them can step past the end.
+        let mut rest = input;
+
+        while !rest.is_empty() && !self.finished {
             if self.in_chunk {
                 // We are in the middle of a data chunk. Copy up to `remaining`
                 // bytes from input to output.
-                let available = input.len() - pos;
-                let to_copy = available.min(self.remaining);
-                output.extend_from_slice(&input[pos..pos + to_copy]);
-                pos += to_copy;
-                self.remaining -= to_copy;
+                let (data, tail) = rest.split_at(rest.len().min(self.remaining));
+                output.extend_from_slice(data);
+                self.remaining = self.remaining.saturating_sub(data.len());
+                rest = tail;
 
                 if self.remaining == 0 {
                     // Chunk data exhausted; expect trailing \r\n.
                     self.in_chunk = false;
                     // Skip the trailing \r\n if present in remaining input.
-                    if pos + 2 <= input.len()
-                        && input.get(pos) == Some(&b'\r')
-                        && input.get(pos + 1) == Some(&b'\n')
-                    {
-                        pos += 2;
-                    } else if pos < input.len() && input.get(pos) == Some(&b'\r') {
-                        // Only \r received; the \n will come in the next recv.
-                        pos += 1;
+                    // If only the \r arrived, drop it and take the \n on the
+                    // next call; if neither did, the pair spans a recv
+                    // boundary and is handled next time.
+                    if let Some(tail) = rest.strip_prefix(b"\r\n".as_slice()) {
+                        rest = tail;
+                    } else if let Some(tail) = rest.strip_prefix(b"\r".as_slice()) {
+                        rest = tail;
                     }
-                    // If neither, the \r\n spans a recv boundary; we handle
-                    // it on the next call.
                 }
             } else {
                 // We need to read a chunk-size line.
                 // Accumulate bytes into line_buf until we see \r\n.
-                while pos < input.len() {
-                    let byte = input[pos];
-                    pos += 1;
+                while let Some((&byte, tail)) = rest.split_first() {
+                    rest = tail;
                     self.line_buf.push(byte);
 
-                    if self.line_buf.len() >= 2
-                        && self.line_buf[self.line_buf.len() - 2] == b'\r'
-                        && self.line_buf[self.line_buf.len() - 1] == b'\n'
-                    {
-                        // Got a complete line.
-                        // Remove trailing \r\n.
-                        let len = self.line_buf.len() - 2;
-                        let line = &self.line_buf[..len];
-
-                        // The chunk size line may contain extensions after a
-                        // semicolon; ignore them.
-                        let size_str = String::from_utf8_lossy(line);
-                        let hex_part = size_str.split(';').next().unwrap_or("");
-                        let hex_trimmed = hex_part.trim();
-
-                        if hex_trimmed.is_empty() {
-                            // Blank line between chunks or leading CRLF;
-                            // just skip it.
-                            self.line_buf.clear();
-                            continue;
+                    if !self.line_buf.ends_with(b"\r\n") {
+                        // Guard against absurdly long chunk-size lines.
+                        if self.line_buf.len() > 256 {
+                            return Err(WgetError::ChunkedDecodeError(
+                                "chunk size line too long".to_string(),
+                            ));
                         }
+                        continue;
+                    }
 
-                        let chunk_size =
-                            usize::from_str_radix(hex_trimmed, 16).map_err(|_| {
-                                WgetError::ChunkedDecodeError(format!(
-                                    "invalid chunk size '{hex_trimmed}'"
-                                ))
-                            })?;
+                    // Got a complete line. Remove trailing \r\n.
+                    let len = self.line_buf.len().saturating_sub(2);
+                    let line = self.line_buf.get(..len).unwrap_or_default();
 
+                    // The chunk size line may contain extensions after a
+                    // semicolon; ignore them.
+                    let size_str = String::from_utf8_lossy(line);
+                    let hex_part = size_str.split(';').next().unwrap_or("");
+                    let hex_trimmed = hex_part.trim();
+
+                    if hex_trimmed.is_empty() {
+                        // Blank line between chunks or leading CRLF;
+                        // just skip it.
                         self.line_buf.clear();
-
-                        if chunk_size == 0 {
-                            self.finished = true;
-                        } else {
-                            self.remaining = chunk_size;
-                            self.in_chunk = true;
-                        }
-                        break;
+                        continue;
                     }
 
-                    // Guard against absurdly long chunk-size lines.
-                    if self.line_buf.len() > 256 {
-                        return Err(WgetError::ChunkedDecodeError(
-                            "chunk size line too long".to_string(),
-                        ));
+                    let chunk_size = usize::from_str_radix(hex_trimmed, 16).map_err(|_| {
+                        WgetError::ChunkedDecodeError(format!("invalid chunk size '{hex_trimmed}'"))
+                    })?;
+
+                    self.line_buf.clear();
+
+                    if chunk_size == 0 {
+                        self.finished = true;
+                    } else {
+                        self.remaining = chunk_size;
+                        self.in_chunk = true;
                     }
+                    break;
                 }
             }
         }
@@ -686,16 +699,28 @@ fn print_usage() {
     let _ = writeln!(err, "Download files from HTTP servers.");
     let _ = writeln!(err);
     let _ = writeln!(err, "Options:");
-    let _ = writeln!(err, "  -O <file>              Save to specific file ('-' for stdout)");
+    let _ = writeln!(
+        err,
+        "  -O <file>              Save to specific file ('-' for stdout)"
+    );
     let _ = writeln!(err, "  --output-document <f>  Same as -O");
     let _ = writeln!(err, "  -q, --quiet            No output except errors");
-    let _ = writeln!(err, "  -v, --verbose          Show request/response headers");
+    let _ = writeln!(
+        err,
+        "  -v, --verbose          Show request/response headers"
+    );
     let _ = writeln!(err, "  --no-verbose           Default progress-only mode");
     let _ = writeln!(err, "  -c, --continue         Resume a partial download");
     let _ = writeln!(err, "  --header <name:value>  Add a custom HTTP header");
-    let _ = writeln!(err, "  --max-redirect <n>     Maximum redirects (default: 10)");
+    let _ = writeln!(
+        err,
+        "  --max-redirect <n>     Maximum redirects (default: 10)"
+    );
     let _ = writeln!(err, "  --timeout <secs>       Connection/read timeout");
-    let _ = writeln!(err, "  --tries <n>            Number of retries (default: 3)");
+    let _ = writeln!(
+        err,
+        "  --tries <n>            Number of retries (default: 3)"
+    );
     let _ = writeln!(err, "  --user-agent <string>  Custom User-Agent header");
     let _ = writeln!(err, "  -h, --help             Show this help message");
 }
@@ -719,23 +744,31 @@ fn parse_args() -> Result<Options, WgetError> {
     let mut tries: u32 = 3;
     let mut user_agent = String::from("SlateOS-wget/0.1");
 
-    let mut i = 1;
-    while i < argv.len() {
-        let arg = &argv[i];
+    /// The value of a value-taking option, or a diagnostic naming the option.
+    fn value(it: &mut impl Iterator<Item = String>, message: &str) -> Result<String, WgetError> {
+        it.next()
+            .ok_or_else(|| WgetError::InvalidUrl(message.to_string()))
+    }
+
+    // Walked with an iterator rather than an index: an option's value comes
+    // from `it.next()`, so the "step past the value" that each value-taking
+    // arm used to do with `i += 1` — and which the loop then had to undo
+    // with a second `i += 1` at the bottom — is now the act of reading it.
+    let mut it = argv.into_iter();
+    it.next(); // argv[0]
+
+    while let Some(arg) = it.next() {
         match arg.as_str() {
             "-h" | "--help" => {
                 print_usage();
                 process::exit(0);
             }
             "-O" | "--output-document" => {
-                i += 1;
-                let val = argv.get(i).ok_or_else(|| {
-                    WgetError::InvalidUrl("-O requires a filename argument".to_string())
-                })?;
+                let val = value(&mut it, "-O requires a filename argument")?;
                 if val == "-" {
                     output_stdout = true;
                 } else {
-                    output_file = Some(val.clone());
+                    output_file = Some(val);
                 }
             }
             "-q" | "--quiet" => {
@@ -751,10 +784,7 @@ fn parse_args() -> Result<Options, WgetError> {
                 resume = true;
             }
             "--header" => {
-                i += 1;
-                let val = argv.get(i).ok_or_else(|| {
-                    WgetError::InvalidUrl("--header requires a value".to_string())
-                })?;
+                let val = value(&mut it, "--header requires a value")?;
                 if let Some((name, value)) = val.split_once(':') {
                     custom_headers.push((name.trim().to_string(), value.trim().to_string()));
                 } else {
@@ -764,53 +794,39 @@ fn parse_args() -> Result<Options, WgetError> {
                 }
             }
             "--max-redirect" => {
-                i += 1;
-                let val = argv.get(i).ok_or_else(|| {
-                    WgetError::InvalidUrl("--max-redirect requires a number".to_string())
-                })?;
+                let val = value(&mut it, "--max-redirect requires a number")?;
                 max_redirects = val.parse().map_err(|_| {
                     WgetError::InvalidUrl(format!("invalid redirect count '{val}'"))
                 })?;
             }
             "--timeout" => {
-                i += 1;
-                let val = argv.get(i).ok_or_else(|| {
-                    WgetError::InvalidUrl("--timeout requires a number".to_string())
-                })?;
-                timeout_secs = val.parse().map_err(|_| {
-                    WgetError::InvalidUrl(format!("invalid timeout '{val}'"))
-                })?;
+                let val = value(&mut it, "--timeout requires a number")?;
+                timeout_secs = val
+                    .parse()
+                    .map_err(|_| WgetError::InvalidUrl(format!("invalid timeout '{val}'")))?;
             }
             "--tries" => {
-                i += 1;
-                let val = argv.get(i).ok_or_else(|| {
-                    WgetError::InvalidUrl("--tries requires a number".to_string())
-                })?;
-                tries = val.parse().map_err(|_| {
-                    WgetError::InvalidUrl(format!("invalid retry count '{val}'"))
-                })?;
+                let val = value(&mut it, "--tries requires a number")?;
+                tries = val
+                    .parse()
+                    .map_err(|_| WgetError::InvalidUrl(format!("invalid retry count '{val}'")))?;
             }
             "--user-agent" => {
-                i += 1;
-                let val = argv.get(i).ok_or_else(|| {
-                    WgetError::InvalidUrl("--user-agent requires a string".to_string())
-                })?;
-                user_agent = val.clone();
+                user_agent = value(&mut it, "--user-agent requires a string")?;
             }
             s if s.starts_with('-') => {
                 return Err(WgetError::InvalidUrl(format!("unknown option '{s}'")));
             }
-            _ => {
+            other => {
                 // Positional argument: the URL.
                 if url.is_some() {
                     return Err(WgetError::InvalidUrl(
                         "multiple URLs not supported".to_string(),
                     ));
                 }
-                url = Some(arg.clone());
+                url = Some(other.to_string());
             }
         }
-        i += 1;
     }
 
     let url = url.ok_or_else(|| WgetError::InvalidUrl("no URL specified".to_string()))?;
@@ -834,11 +850,7 @@ fn parse_args() -> Result<Options, WgetError> {
 // ============================================================================
 
 /// Build an HTTP/1.1 GET request string.
-fn build_request(
-    url: &ParsedUrl,
-    opts: &Options,
-    resume_offset: u64,
-) -> String {
+fn build_request(url: &ParsedUrl, opts: &Options, resume_offset: u64) -> String {
     let mut req = format!("GET {} HTTP/1.1\r\n", url.path);
     req.push_str(&format!("Host: {}\r\n", url.host));
     req.push_str(&format!("User-Agent: {}\r\n", opts.user_agent));
@@ -869,15 +881,15 @@ fn recv_headers(handle: u64) -> Result<Vec<u8>, WgetError> {
     let mut recv_buf = [0u8; 8192];
 
     loop {
-        let n = tcp_recv(handle, &mut recv_buf)?;
-        if n == 0 {
+        let received = tcp_recv(handle, &mut recv_buf)?;
+        if received.is_empty() {
             // Connection closed before headers were complete.
             if buf.is_empty() {
                 return Err(WgetError::InvalidResponse("empty response".to_string()));
             }
             break;
         }
-        buf.extend_from_slice(&recv_buf[..n]);
+        buf.extend_from_slice(received);
 
         // Check if we have the complete header section.
         if find_header_end(&buf).is_some() {
@@ -998,10 +1010,7 @@ fn do_request(
 
     if opts.verbosity == Verbosity::Verbose {
         eprintln!("---response begin---");
-        eprintln!(
-            "  HTTP {} {}",
-            response.status.code, response.status.reason
-        );
+        eprintln!("  HTTP {} {}", response.status.code, response.status.reason);
         for (name, value) in &response.headers {
             eprintln!("  {name}: {value}");
         }
@@ -1052,10 +1061,10 @@ fn do_request(
     }
 
     // Determine content length and transfer encoding.
-    let content_length: Option<u64> = get_header(&response.headers, "content-length")
-        .and_then(|v| v.parse().ok());
-    let content_type = get_header(&response.headers, "content-type")
-        .unwrap_or("application/octet-stream");
+    let content_length: Option<u64> =
+        get_header(&response.headers, "content-length").and_then(|v| v.parse().ok());
+    let content_type =
+        get_header(&response.headers, "content-type").unwrap_or("application/octet-stream");
     let is_chunked = get_header(&response.headers, "transfer-encoding")
         .map(|v| v.to_ascii_lowercase().contains("chunked"))
         .unwrap_or(false);
@@ -1091,7 +1100,7 @@ fn do_request(
     // Open output file or stdout.
     let result = download_body(
         handle,
-        &raw_response[response.body_offset..],
+        raw_response.get(response.body_offset..).unwrap_or_default(),
         is_chunked,
         content_length,
         opts,
@@ -1178,16 +1187,16 @@ fn download_body(
             }
         }
 
-        let n = tcp_recv(handle, &mut recv_buf)?;
-        if n == 0 {
+        let received = tcp_recv(handle, &mut recv_buf)?;
+        if received.is_empty() {
             // Connection closed by peer.
             break;
         }
 
         let body_data = if let Some(ref mut decoder) = chunked_decoder {
-            decoder.decode(&recv_buf[..n])?
+            decoder.decode(received)?
         } else {
-            recv_buf[..n].to_vec()
+            received.to_vec()
         };
 
         if !body_data.is_empty() {
@@ -1212,7 +1221,9 @@ fn download_body(
         eprintln!();
         eprintln!(
             "'{}' saved [{} in {:.1}s]",
-            output_filename, format_size(body_bytes), elapsed
+            output_filename,
+            format_size(body_bytes),
+            elapsed
         );
     }
 
@@ -1249,7 +1260,18 @@ fn run() -> Result<(), WgetError> {
     let mut current_url = opts.url.clone();
     let mut redirects_remaining = opts.max_redirects;
 
-    for attempt in 1..=opts.tries {
+    // `loop` with an explicit counter, not `for attempt in 1..=opts.tries`.
+    // The redirect arm below says "redirects don't count as a retry attempt"
+    // — but under a `for` loop it did count one, because following a
+    // redirect meant taking the next iteration. A URL behind four 302s was
+    // therefore reported as "too many tries" at the default `--tries 3`,
+    // long before `--max-redirect`'s budget of 10 was touched. Advancing the
+    // counter only in the error arm makes the code do what the comment says.
+    //
+    // The loop still terminates: every redirect spends one of
+    // `redirects_remaining`, and every failure spends one of `opts.tries`.
+    let mut attempt: u32 = 1;
+    loop {
         match do_request(&current_url, &opts, &output_filename, resume_offset) {
             Ok(None) => {
                 // Download complete.
@@ -1262,28 +1284,21 @@ fn run() -> Result<(), WgetError> {
                 }
                 redirects_remaining = redirects_remaining.saturating_sub(1);
                 current_url = redirect_url;
-                // Redirects don't count as a retry attempt.
-                continue;
             }
             Err(e) => {
-                if attempt < opts.tries {
-                    if opts.verbosity != Verbosity::Quiet {
-                        eprintln!(
-                            "wget: attempt {attempt}/{}: {e}",
-                            opts.tries
-                        );
-                        eprintln!("Retrying...");
-                    }
-                    // On retry, use the redirect chain so far, not the original URL,
-                    // since we already resolved the redirects.
-                    continue;
+                if attempt >= opts.tries {
+                    return Err(e);
                 }
-                return Err(e);
+                if opts.verbosity != Verbosity::Quiet {
+                    eprintln!("wget: attempt {attempt}/{}: {e}", opts.tries);
+                    eprintln!("Retrying...");
+                }
+                attempt = attempt.saturating_add(1);
+                // On retry, use the redirect chain so far, not the original URL,
+                // since we already resolved the redirects.
             }
         }
     }
-
-    Ok(())
 }
 
 fn main() {
@@ -1297,7 +1312,17 @@ fn main() {
 // Tests
 // ============================================================================
 
+// Panicking on bad data is what a test is *for*: a test that carefully
+// propagates an error instead of unwrapping just reports "ok" less loudly.
+// The defensive lints stay on for the production code above.
 #[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects
+)]
 mod tests {
     use super::*;
 
@@ -1464,6 +1489,32 @@ mod tests {
         assert_eq!(truncate_name(name, 20), name);
     }
 
+    /// Regression: `truncate_name` used to slice `&str` by byte index, so
+    /// any filename long enough to need shortening *and* containing a
+    /// multi-byte character panicked with "byte index is not a char
+    /// boundary" -- in the progress line, i.e. mid-download.
+    #[test]
+    fn truncate_long_name_with_multibyte_chars() {
+        // 30 characters, 60 bytes: every cut point is mid-character for a
+        // byte-indexing implementation.
+        let name = "ααααααααααββββββββββγγγγγγγγγγ";
+        assert_eq!(name.chars().count(), 30);
+        assert_eq!(name.len(), 60);
+
+        let result = truncate_name(name, 20);
+        assert_eq!(result.chars().count(), 20);
+        assert!(result.contains(".."));
+        assert!(result.starts_with('α'));
+        assert!(result.ends_with('γ'));
+    }
+
+    /// A budget under 5 takes the head-only branch, which was the other
+    /// byte-indexing site.
+    #[test]
+    fn truncate_tiny_budget_with_multibyte_chars() {
+        assert_eq!(truncate_name("αβγδε", 3), "αβγ");
+    }
+
     // --- HTTP status line parsing ---
 
     #[test]
@@ -1535,10 +1586,7 @@ mod tests {
         let resp = parse_http_response(data).unwrap();
         assert_eq!(resp.status.code, 200);
         assert_eq!(resp.headers.len(), 2);
-        assert_eq!(
-            get_header(&resp.headers, "content-length"),
-            Some("5")
-        );
+        assert_eq!(get_header(&resp.headers, "content-length"), Some("5"));
         assert_eq!(
             get_header(&resp.headers, "content-type"),
             Some("text/plain")
@@ -1552,8 +1600,7 @@ mod tests {
 
     #[test]
     fn parse_response_chunked() {
-        let data =
-            b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n0\r\n\r\n";
+        let data = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n0\r\n\r\n";
         let resp = parse_http_response(data).unwrap();
         assert_eq!(resp.status.code, 200);
         let te = get_header(&resp.headers, "transfer-encoding").unwrap_or("");

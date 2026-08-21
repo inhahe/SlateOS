@@ -158,33 +158,36 @@ fn tcp_send(handle: u64, data: &[u8]) -> Result<usize, CurlError> {
 
 /// Send all bytes, looping until the entire buffer is transmitted.
 fn tcp_send_all(handle: u64, data: &[u8]) -> Result<(), CurlError> {
-    let mut offset = 0;
-    while offset < data.len() {
-        let sent = tcp_send(handle, &data[offset..])?;
+    // The unsent tail is carried as a slice rather than as an offset into
+    // `data`: a kernel that over-reports what it sent then fails the send
+    // instead of producing an out-of-range index.
+    let mut rest = data;
+    while !rest.is_empty() {
+        let sent = tcp_send(handle, rest)?;
         if sent == 0 {
             return Err(CurlError::SendFailed);
         }
-        offset = offset.checked_add(sent).ok_or(CurlError::SendFailed)?;
+        rest = rest.get(sent..).ok_or(CurlError::SendFailed)?;
     }
     Ok(())
 }
 
-/// Receive data from a TCP connection. Returns 0 when the peer has closed.
-fn tcp_recv(handle: u64, buf: &mut [u8]) -> Result<usize, CurlError> {
+/// Receive data from a TCP connection.
+///
+/// Returns the prefix of `buf` the kernel filled — empty when the peer has
+/// closed. Returning the slice rather than a count means the kernel's number
+/// becomes a range in exactly one place, here, where a count larger than the
+/// buffer we handed over is a `RecvFailed` rather than a panic at the
+/// caller's `&buf[..n]`.
+fn tcp_recv(handle: u64, buf: &mut [u8]) -> Result<&[u8], CurlError> {
+    let cap = buf.len();
     // SAFETY: We pass a valid handle and a mutable buffer pointer with its
     // correct length. The kernel writes at most `buf.len()` bytes into the buffer.
-    let ret = unsafe {
-        syscall3(
-            SYS_TCP_RECV,
-            handle,
-            buf.as_mut_ptr() as u64,
-            buf.len() as u64,
-        )
-    };
+    let ret = unsafe { syscall3(SYS_TCP_RECV, handle, buf.as_mut_ptr() as u64, cap as u64) };
     if ret < 0 {
         return Err(CurlError::RecvFailed);
     }
-    Ok(ret as usize)
+    buf.get(..ret as usize).ok_or(CurlError::RecvFailed)
 }
 
 /// Close a TCP connection handle.
@@ -306,9 +309,16 @@ fn parse_url(url: &str) -> Result<ParsedUrl, CurlError> {
         ("http", url)
     };
 
-    // Split authority from path at the first '/'.
+    // Every split below is a `split_at`/`*split_once`, never a `find`
+    // followed by two ranges built from the index it returned. A URL is
+    // attacker-chosen text; the point is that there is no `idx + 1` for a
+    // later edit to get wrong, and no way to slice a `&str` at a byte that
+    // is not a character boundary.
+
+    // Split authority from path at the first '/'. `split_at` keeps the '/'
+    // at the head of the path, which is what the request line needs.
     let (authority, path_and_query) = match rest.find('/') {
-        Some(idx) => (&rest[..idx], &rest[idx..]),
+        Some(idx) => rest.split_at(idx),
         None => (rest, "/"),
     };
 
@@ -317,13 +327,9 @@ fn parse_url(url: &str) -> Result<ParsedUrl, CurlError> {
     }
 
     // Extract optional userinfo (user:pass@host).
-    let (userinfo, host_port) = if let Some(at_idx) = authority.rfind('@') {
-        (
-            Some(authority[..at_idx].to_string()),
-            &authority[at_idx + 1..],
-        )
-    } else {
-        (None, authority)
+    let (userinfo, host_port) = match authority.rsplit_once('@') {
+        Some((info, host_port)) => (Some(info.to_string()), host_port),
+        None => (None, authority),
     };
 
     if host_port.is_empty() {
@@ -331,25 +337,23 @@ fn parse_url(url: &str) -> Result<ParsedUrl, CurlError> {
     }
 
     // Split host from port.
-    let (host, port) = if let Some(colon_idx) = host_port.rfind(':') {
-        let port_str = &host_port[colon_idx + 1..];
-        let port: u16 = port_str.parse().map_err(|_| {
-            CurlError::InvalidUrl(format!("invalid port number '{port_str}'"))
-        })?;
-        (&host_port[..colon_idx], port)
-    } else {
-        let default_port = if scheme == "https" { 443 } else { 80 };
-        (host_port, default_port)
+    let (host, port) = match host_port.rsplit_once(':') {
+        Some((host, port_str)) => {
+            let port: u16 = port_str
+                .parse()
+                .map_err(|_| CurlError::InvalidUrl(format!("invalid port number '{port_str}'")))?;
+            (host, port)
+        }
+        None => {
+            let default_port = if scheme == "https" { 443 } else { 80 };
+            (host_port, default_port)
+        }
     };
 
     // Split path from query.
-    let (path, query) = if let Some(qm_idx) = path_and_query.find('?') {
-        (
-            &path_and_query[..qm_idx],
-            &path_and_query[qm_idx + 1..],
-        )
-    } else {
-        (path_and_query, "")
+    let (path, query) = match path_and_query.split_once('?') {
+        Some((path, query)) => (path, query),
+        None => (path_and_query, ""),
     };
 
     Ok(ParsedUrl {
@@ -373,13 +377,9 @@ fn url_encode(input: &str) -> String {
     let mut out = String::with_capacity(input.len());
     for byte in input.bytes() {
         match byte {
-            b'A'..=b'Z'
-            | b'a'..=b'z'
-            | b'0'..=b'9'
-            | b'-'
-            | b'_'
-            | b'.'
-            | b'~' => out.push(byte as char),
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(char::from(byte));
+            }
             _ => {
                 out.push('%');
                 out.push(hex_digit(byte >> 4));
@@ -394,86 +394,84 @@ fn url_encode(input: &str) -> String {
 #[allow(dead_code)] // Utility for future use (e.g., response body decoding).
 fn url_decode(input: &str) -> String {
     let mut out = Vec::with_capacity(input.len());
-    let bytes = input.as_bytes();
-    let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i] == b'%'
-            && i + 2 < bytes.len()
-            && let (Some(hi), Some(lo)) =
-                (from_hex_digit(bytes[i + 1]), from_hex_digit(bytes[i + 2]))
+    // Walked as a shrinking slice: the "%XX" case consumes three bytes and
+    // every other case consumes one, and neither can read past the end,
+    // which the old `i + 1` / `i + 2` reads relied on a separate bounds
+    // check to guarantee.
+    let mut rest = input.as_bytes();
+    while let Some((&byte, tail)) = rest.split_first() {
+        if byte == b'%'
+            && let [hi, lo, ..] = *tail
+            && let (Some(hi), Some(lo)) = (from_hex_digit(hi), from_hex_digit(lo))
         {
             out.push(hi << 4 | lo);
-            i += 3;
+            rest = tail.get(2..).unwrap_or_default();
             continue;
         }
-        if bytes[i] == b'+' {
-            out.push(b' ');
-        } else {
-            out.push(bytes[i]);
-        }
-        i += 1;
+        out.push(if byte == b'+' { b' ' } else { byte });
+        rest = tail;
     }
     String::from_utf8_lossy(&out).into_owned()
 }
 
 #[allow(dead_code)]
 fn hex_digit(nibble: u8) -> char {
-    match nibble {
-        0..=9 => (b'0' + nibble) as char,
-        10..=15 => (b'A' + nibble - 10) as char,
-        _ => '0',
-    }
+    // `from_digit` is the total form of the two add-and-offset arms this
+    // used to have, and keeps the same '0' fallback for out-of-range input.
+    char::from_digit(u32::from(nibble), 16).map_or('0', |c| c.to_ascii_uppercase())
 }
 
 #[allow(dead_code)]
 fn from_hex_digit(byte: u8) -> Option<u8> {
-    match byte {
-        b'0'..=b'9' => Some(byte - b'0'),
-        b'a'..=b'f' => Some(byte - b'a' + 10),
-        b'A'..=b'F' => Some(byte - b'A' + 10),
-        _ => None,
-    }
+    // `to_digit` is the total form of the three subtract-and-offset arms
+    // this used to have; the `try_from` cannot fail because a base-16 digit
+    // is at most 15.
+    u8::try_from(char::from(byte).to_digit(16)?).ok()
 }
 
 // ============================================================================
 // Base64 encoding (for HTTP Basic Auth)
 // ============================================================================
 
-const BASE64_CHARS: &[u8; 64] =
-    b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+const BASE64_CHARS: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 
 /// Encode bytes to base64.
 fn base64_encode(input: &[u8]) -> String {
-    let mut out = String::with_capacity(input.len().div_ceil(3) * 4);
-    let mut i = 0;
-    while i < input.len() {
-        let b0 = input[i];
-        let b1 = if i + 1 < input.len() {
-            input[i + 1]
-        } else {
-            0
+    /// Map a 6-bit group to its alphabet character.
+    ///
+    /// The mask makes the index unconditionally in range for the 64-entry
+    /// table, so the fallback is unreachable; `get` is how that is stated
+    /// without asking the reader to verify it at each of the four uses.
+    fn sextet(v: u8) -> char {
+        char::from(
+            BASE64_CHARS
+                .get(usize::from(v & 0x3F))
+                .copied()
+                .unwrap_or(b'A'),
+        )
+    }
+
+    let mut out = String::with_capacity(input.len().div_ceil(3).saturating_mul(4));
+    // `chunks(3)` is the same three-byte stride the index walk had, minus
+    // the three separate `i + n < input.len()` checks that had to stay in
+    // step with it. The final short chunk is what produces the '=' padding.
+    for chunk in input.chunks(3) {
+        let (b0, b1, b2) = match *chunk {
+            [b0] => (b0, 0, 0),
+            [b0, b1] => (b0, b1, 0),
+            [b0, b1, b2, ..] => (b0, b1, b2),
+            // `chunks` never yields an empty slice.
+            [] => continue,
         };
-        let b2 = if i + 2 < input.len() {
-            input[i + 2]
-        } else {
-            0
-        };
 
-        out.push(BASE64_CHARS[(b0 >> 2) as usize] as char);
-        out.push(BASE64_CHARS[((b0 & 0x03) << 4 | b1 >> 4) as usize] as char);
-
-        if i + 1 < input.len() {
-            out.push(BASE64_CHARS[((b1 & 0x0F) << 2 | b2 >> 6) as usize] as char);
+        out.push(sextet(b0 >> 2));
+        out.push(sextet((b0 & 0x03) << 4 | b1 >> 4));
+        out.push(if chunk.len() > 1 {
+            sextet((b1 & 0x0F) << 2 | b2 >> 6)
         } else {
-            out.push('=');
-        }
-        if i + 2 < input.len() {
-            out.push(BASE64_CHARS[(b2 & 0x3F) as usize] as char);
-        } else {
-            out.push('=');
-        }
-
-        i += 3;
+            '='
+        });
+        out.push(if chunk.len() > 2 { sextet(b2) } else { '=' });
     }
     out
 }
@@ -485,18 +483,19 @@ fn base64_encode(input: &[u8]) -> String {
 /// Parse a dotted-decimal IPv4 address string into a u32 in network byte order.
 fn parse_ipv4(s: &str) -> Option<u32> {
     let parts: Vec<&str> = s.split('.').collect();
-    if parts.len() != 4 {
+    // The slice pattern is both the "exactly four parts" check and the way
+    // the four are named, so the two cannot disagree. Parsing straight to
+    // `u8` is the range check: 256 fails to parse rather than needing a
+    // separate `> 255` test after the fact.
+    let [a, b, c, d] = parts.as_slice() else {
         return None;
-    }
-    let mut octets = [0u8; 4];
-    for (i, part) in parts.iter().enumerate() {
-        let val: u16 = part.parse().ok()?;
-        if val > 255 {
-            return None;
-        }
-        octets[i] = val as u8;
-    }
-    Some(u32::from_be_bytes(octets))
+    };
+    Some(u32::from_be_bytes([
+        a.parse().ok()?,
+        b.parse().ok()?,
+        c.parse().ok()?,
+        d.parse().ok()?,
+    ]))
 }
 
 /// Format a u32 IP (network byte order) as a dotted-quad string.
@@ -533,7 +532,7 @@ fn parse_http_response(data: &[u8]) -> Result<HttpResponse, CurlError> {
     let header_end = find_header_end(data)
         .ok_or_else(|| CurlError::InvalidResponse("incomplete headers".to_string()))?;
 
-    let header_bytes = &data[..header_end];
+    let header_bytes = data.get(..header_end).unwrap_or_default();
     let header_text = String::from_utf8_lossy(header_bytes);
     let mut lines = header_text.split("\r\n");
 
@@ -548,14 +547,14 @@ fn parse_http_response(data: &[u8]) -> Result<HttpResponse, CurlError> {
             break;
         }
         if let Some((name, value)) = line.split_once(':') {
-            headers.push((
-                name.trim().to_ascii_lowercase(),
-                value.trim().to_string(),
-            ));
+            headers.push((name.trim().to_ascii_lowercase(), value.trim().to_string()));
         }
     }
 
-    let body_offset = header_end + 4; // Skip \r\n\r\n
+    // Skip \r\n\r\n. `find_header_end` matched a four-byte window, so this is
+    // always within `data`; clamping says so rather than relying on the
+    // reader to re-derive it.
+    let body_offset = header_end.saturating_add(4).min(data.len());
 
     Ok(HttpResponse {
         status,
@@ -575,9 +574,9 @@ fn parse_status_line(line: &str) -> Result<HttpStatus, CurlError> {
         .ok_or_else(|| CurlError::InvalidResponse("missing status code".to_string()))?;
     let reason = parts.next().unwrap_or("").to_string();
 
-    let code: u16 = code_str.parse().map_err(|_| {
-        CurlError::InvalidResponse(format!("invalid status code '{code_str}'"))
-    })?;
+    let code: u16 = code_str
+        .parse()
+        .map_err(|_| CurlError::InvalidResponse(format!("invalid status code '{code_str}'")))?;
 
     Ok(HttpStatus { code, reason })
 }
@@ -648,73 +647,73 @@ impl ChunkedDecoder {
     /// Feed raw bytes from the network and return decoded body bytes.
     fn decode(&mut self, input: &[u8]) -> Result<Vec<u8>, CurlError> {
         let mut output = Vec::new();
-        let mut pos = 0;
 
-        while pos < input.len() && !self.finished {
+        // Walked as a shrinking slice rather than as an index into `input`.
+        // Chunked framing is chosen by the server — the chunk size is a hex
+        // number it supplies — so this is the parser most worth making
+        // incapable of stepping past its buffer: `split_at`, `split_first`
+        // and `strip_prefix` are now the only ways it advances, and none of
+        // them can.
+        let mut rest = input;
+
+        while !rest.is_empty() && !self.finished {
             if self.in_chunk {
-                let available = input.len() - pos;
-                let to_copy = available.min(self.remaining);
-                output.extend_from_slice(&input[pos..pos + to_copy]);
-                pos += to_copy;
-                self.remaining -= to_copy;
+                let (data, tail) = rest.split_at(rest.len().min(self.remaining));
+                output.extend_from_slice(data);
+                self.remaining = self.remaining.saturating_sub(data.len());
+                rest = tail;
 
                 if self.remaining == 0 {
                     self.in_chunk = false;
-                    // Skip trailing \r\n.
-                    if pos + 2 <= input.len()
-                        && input.get(pos) == Some(&b'\r')
-                        && input.get(pos + 1) == Some(&b'\n')
-                    {
-                        pos += 2;
-                    } else if pos < input.len() && input.get(pos) == Some(&b'\r') {
-                        pos += 1;
+                    // Skip trailing \r\n. If only the \r arrived, drop it and
+                    // take the \n on the next call; if neither did, the pair
+                    // spans a recv boundary and is handled next time.
+                    if let Some(tail) = rest.strip_prefix(b"\r\n".as_slice()) {
+                        rest = tail;
+                    } else if let Some(tail) = rest.strip_prefix(b"\r".as_slice()) {
+                        rest = tail;
                     }
                 }
             } else {
                 // Read a chunk-size line.
-                while pos < input.len() {
-                    let byte = input[pos];
-                    pos += 1;
+                while let Some((&byte, tail)) = rest.split_first() {
+                    rest = tail;
                     self.line_buf.push(byte);
 
-                    if self.line_buf.len() >= 2
-                        && self.line_buf[self.line_buf.len() - 2] == b'\r'
-                        && self.line_buf[self.line_buf.len() - 1] == b'\n'
-                    {
-                        let len = self.line_buf.len() - 2;
-                        let line = &self.line_buf[..len];
-                        let size_str = String::from_utf8_lossy(line);
-                        let hex_part = size_str.split(';').next().unwrap_or("");
-                        let hex_trimmed = hex_part.trim();
-
-                        if hex_trimmed.is_empty() {
-                            self.line_buf.clear();
-                            continue;
+                    if !self.line_buf.ends_with(b"\r\n") {
+                        if self.line_buf.len() > 256 {
+                            return Err(CurlError::ChunkedDecodeError(
+                                "chunk size line too long".to_string(),
+                            ));
                         }
+                        continue;
+                    }
 
-                        let chunk_size =
-                            usize::from_str_radix(hex_trimmed, 16).map_err(|_| {
-                                CurlError::ChunkedDecodeError(format!(
-                                    "invalid chunk size '{hex_trimmed}'"
-                                ))
-                            })?;
+                    // A complete line; drop the trailing \r\n.
+                    let len = self.line_buf.len().saturating_sub(2);
+                    let line = self.line_buf.get(..len).unwrap_or_default();
+                    let size_str = String::from_utf8_lossy(line);
+                    let hex_part = size_str.split(';').next().unwrap_or("");
+                    let hex_trimmed = hex_part.trim();
 
+                    if hex_trimmed.is_empty() {
                         self.line_buf.clear();
-
-                        if chunk_size == 0 {
-                            self.finished = true;
-                        } else {
-                            self.remaining = chunk_size;
-                            self.in_chunk = true;
-                        }
-                        break;
+                        continue;
                     }
 
-                    if self.line_buf.len() > 256 {
-                        return Err(CurlError::ChunkedDecodeError(
-                            "chunk size line too long".to_string(),
-                        ));
+                    let chunk_size = usize::from_str_radix(hex_trimmed, 16).map_err(|_| {
+                        CurlError::ChunkedDecodeError(format!("invalid chunk size '{hex_trimmed}'"))
+                    })?;
+
+                    self.line_buf.clear();
+
+                    if chunk_size == 0 {
+                        self.finished = true;
+                    } else {
+                        self.remaining = chunk_size;
+                        self.in_chunk = true;
                     }
+                    break;
                 }
             }
         }
@@ -819,13 +818,16 @@ fn load_cookie_jar(path: &str) -> Vec<Cookie> {
         if line.is_empty() || line.starts_with('#') {
             continue;
         }
+        // The slice pattern is both the "at least seven fields" check and
+        // the way the four we want are named — the `len() >= 7` test and the
+        // literal indices 0/2/5/6 can no longer drift apart.
         let fields: Vec<&str> = line.split('\t').collect();
-        if fields.len() >= 7 {
+        if let [domain, _flag, path, _secure, _expires, name, value, ..] = fields.as_slice() {
             cookies.push(Cookie {
-                domain: fields[0].to_string(),
-                path: fields[2].to_string(),
-                name: fields[5].to_string(),
-                value: fields[6].to_string(),
+                domain: (*domain).to_string(),
+                path: (*path).to_string(),
+                name: (*name).to_string(),
+                value: (*value).to_string(),
             });
         }
     }
@@ -948,54 +950,54 @@ struct WriteOutVars<'a> {
 fn expand_write_out(fmt: &str, vars: &WriteOutVars) -> String {
     let mut result = String::new();
     let chars: Vec<char> = fmt.chars().collect();
-    let mut i = 0;
-    while i < chars.len() {
-        if chars[i] == '%' && i + 1 < chars.len() && chars[i + 1] == '{' {
-            // Find closing '}'.
-            if let Some(close_idx) = chars[i + 2..].iter().position(|&c| c == '}') {
-                let var_name: String = chars[i + 2..i + 2 + close_idx].iter().collect();
-                let replacement = match var_name.as_str() {
-                    "http_code" | "response_code" => format!("{}", vars.status_code),
-                    "size_download" => format!("{}", vars.total_bytes),
-                    "speed_download" => format!("{:.3}", vars.speed),
-                    "time_total" => format!("{:.6}", vars.elapsed),
-                    "url_effective" => vars.url.to_string(),
-                    "content_type" => vars.content_type.to_string(),
-                    "num_redirects" => format!("{}", vars.num_redirects),
-                    _ => format!("%{{{var_name}}}"),
-                };
-                result.push_str(&replacement);
-                i += 2 + close_idx + 1; // Skip %{...}
-                continue;
-            }
+    // Walked as a shrinking slice. Each branch advances by handing on the
+    // tail the pattern it matched left behind, so the old
+    // `i += 2 + close_idx + 1` — a stride assembled by hand from three
+    // pieces of the pattern it had to mirror — has no counterpart here.
+    let mut rest = chars.as_slice();
+
+    while let Some((&c, tail)) = rest.split_first() {
+        // %{var_name}
+        if c == '%'
+            && let Some(body) = tail.strip_prefix(['{'].as_slice())
+            && let Some(close) = body.iter().position(|&ch| ch == '}')
+        {
+            let (name, after_name) = body.split_at(close);
+            let var_name: String = name.iter().collect();
+            let replacement = match var_name.as_str() {
+                "http_code" | "response_code" => format!("{}", vars.status_code),
+                "size_download" => format!("{}", vars.total_bytes),
+                "speed_download" => format!("{:.3}", vars.speed),
+                "time_total" => format!("{:.6}", vars.elapsed),
+                "url_effective" => vars.url.to_string(),
+                "content_type" => vars.content_type.to_string(),
+                "num_redirects" => format!("{}", vars.num_redirects),
+                _ => format!("%{{{var_name}}}"),
+            };
+            result.push_str(&replacement);
+            // `after_name` still begins with the '}' that `position` found.
+            rest = after_name.get(1..).unwrap_or_default();
+            continue;
         }
-        if chars[i] == '\\' && i + 1 < chars.len() {
-            match chars[i + 1] {
-                'n' => {
-                    result.push('\n');
-                    i += 2;
-                    continue;
-                }
-                't' => {
-                    result.push('\t');
-                    i += 2;
-                    continue;
-                }
-                'r' => {
-                    result.push('\r');
-                    i += 2;
-                    continue;
-                }
-                '\\' => {
-                    result.push('\\');
-                    i += 2;
-                    continue;
-                }
-                _ => {}
+
+        // Backslash escapes.
+        if c == '\\'
+            && let Some((&esc, after_esc)) = tail.split_first()
+            && let Some(decoded) = match esc {
+                'n' => Some('\n'),
+                't' => Some('\t'),
+                'r' => Some('\r'),
+                '\\' => Some('\\'),
+                _ => None,
             }
+        {
+            result.push(decoded);
+            rest = after_esc;
+            continue;
         }
-        result.push(chars[i]);
-        i += 1;
+
+        result.push(c);
+        rest = tail;
     }
     result
 }
@@ -1008,7 +1010,10 @@ fn expand_write_out(fmt: &str, vars: &WriteOutVars) -> String {
 /// Returns (boundary, body_bytes).
 fn build_multipart_body(fields: &[(String, String)]) -> (String, Vec<u8>) {
     // Use a fixed boundary derived from a simple hash to keep things deterministic.
-    let boundary = format!("------------------------slateos{:016x}", simple_hash(fields));
+    let boundary = format!(
+        "------------------------slateos{:016x}",
+        simple_hash(fields)
+    );
     let mut body = Vec::new();
 
     for (name, value) in fields {
@@ -1160,31 +1165,70 @@ fn print_usage() {
     let _ = writeln!(err, "Slate OS HTTP client.");
     let _ = writeln!(err);
     let _ = writeln!(err, "Options:");
-    let _ = writeln!(err, "  -X <METHOD>              HTTP method (GET, POST, PUT, DELETE, HEAD, PATCH)");
-    let _ = writeln!(err, "  -H <header>              Custom header (\"Name: Value\")");
+    let _ = writeln!(
+        err,
+        "  -X <METHOD>              HTTP method (GET, POST, PUT, DELETE, HEAD, PATCH)"
+    );
+    let _ = writeln!(
+        err,
+        "  -H <header>              Custom header (\"Name: Value\")"
+    );
     let _ = writeln!(err, "  -A <agent>               User-Agent string");
     let _ = writeln!(err, "  -e <url>                 Referer URL");
     let _ = writeln!(err, "  -d <data>, --data <data> HTTP POST data");
-    let _ = writeln!(err, "  -F <name=value>          Multipart form field (use @file for upload)");
+    let _ = writeln!(
+        err,
+        "  -F <name=value>          Multipart form field (use @file for upload)"
+    );
     let _ = writeln!(err, "  -o <file>                Write output to file");
-    let _ = writeln!(err, "  -O                       Write to file named from URL");
+    let _ = writeln!(
+        err,
+        "  -O                       Write to file named from URL"
+    );
     let _ = writeln!(err, "  -L, --location           Follow redirects");
-    let _ = writeln!(err, "  --max-redirs <num>       Maximum number of redirects (default: 50)");
+    let _ = writeln!(
+        err,
+        "  --max-redirs <num>       Maximum number of redirects (default: 50)"
+    );
     let _ = writeln!(err, "  -u <user:password>       HTTP basic authentication");
     let _ = writeln!(err, "  -v, --verbose            Verbose mode");
     let _ = writeln!(err, "  -s, --silent             Silent mode");
     let _ = writeln!(err, "  -I, --head               Show response headers only");
-    let _ = writeln!(err, "  -i, --include            Include response headers in output");
-    let _ = writeln!(err, "  -b <cookies>             Send cookies (\"name=val\" or filename)");
-    let _ = writeln!(err, "  -c <file>                Write cookies to file (cookie jar)");
-    let _ = writeln!(err, "  --connect-timeout <secs> Connection timeout in seconds");
-    let _ = writeln!(err, "  --max-time <secs>        Maximum time for the operation");
-    let _ = writeln!(err, "  -w <format>              Write-out format after transfer");
+    let _ = writeln!(
+        err,
+        "  -i, --include            Include response headers in output"
+    );
+    let _ = writeln!(
+        err,
+        "  -b <cookies>             Send cookies (\"name=val\" or filename)"
+    );
+    let _ = writeln!(
+        err,
+        "  -c <file>                Write cookies to file (cookie jar)"
+    );
+    let _ = writeln!(
+        err,
+        "  --connect-timeout <secs> Connection timeout in seconds"
+    );
+    let _ = writeln!(
+        err,
+        "  --max-time <secs>        Maximum time for the operation"
+    );
+    let _ = writeln!(
+        err,
+        "  -w <format>              Write-out format after transfer"
+    );
     let _ = writeln!(err, "  -#, --progress-bar       Show progress bar");
     let _ = writeln!(err, "  -h, --help               Show this help message");
     let _ = writeln!(err);
-    let _ = writeln!(err, "Write-out variables: %{{http_code}}, %{{size_download}},");
-    let _ = writeln!(err, "  %{{speed_download}}, %{{time_total}}, %{{url_effective}},");
+    let _ = writeln!(
+        err,
+        "Write-out variables: %{{http_code}}, %{{size_download}},"
+    );
+    let _ = writeln!(
+        err,
+        "  %{{speed_download}}, %{{time_total}}, %{{url_effective}},"
+    );
     let _ = writeln!(err, "  %{{content_type}}, %{{num_redirects}}");
 }
 
@@ -1199,19 +1243,28 @@ fn parse_args() -> Result<Options, CurlError> {
     let mut opts = Options::default();
     let mut explicit_method = false;
 
-    let mut i = 1;
-    while i < argv.len() {
-        let arg = &argv[i];
+    /// The value of a value-taking option, or a diagnostic naming the option.
+    fn value(it: &mut impl Iterator<Item = String>, message: &str) -> Result<String, CurlError> {
+        it.next()
+            .ok_or_else(|| CurlError::InvalidArgument(message.to_string()))
+    }
+
+    // Walked with an iterator rather than an index: an option's value comes
+    // from `it.next()`, so the "step past the value" that each of the
+    // fourteen value-taking arms did with `i += 1` -- which the loop then
+    // had to undo with a second `i += 1` at the bottom -- is now simply the
+    // act of reading it.
+    let mut it = argv.into_iter();
+    it.next(); // argv[0]
+
+    while let Some(arg) = it.next() {
         match arg.as_str() {
             "-h" | "--help" => {
                 print_usage();
                 process::exit(0);
             }
             "-X" | "--request" => {
-                i += 1;
-                let val = argv.get(i).ok_or_else(|| {
-                    CurlError::InvalidArgument("-X requires a method".to_string())
-                })?;
+                let val = value(&mut it, "-X requires a method")?;
                 opts.method = match val.to_ascii_uppercase().as_str() {
                     "GET" => Method::Get,
                     "POST" => Method::Post,
@@ -1228,13 +1281,10 @@ fn parse_args() -> Result<Options, CurlError> {
                 explicit_method = true;
             }
             "-H" | "--header" => {
-                i += 1;
-                let val = argv.get(i).ok_or_else(|| {
-                    CurlError::InvalidArgument("-H requires a header value".to_string())
-                })?;
-                if let Some((name, value)) = val.split_once(':') {
+                let val = value(&mut it, "-H requires a header value")?;
+                if let Some((name, header_value)) = val.split_once(':') {
                     opts.custom_headers
-                        .push((name.trim().to_string(), value.trim().to_string()));
+                        .push((name.trim().to_string(), header_value.trim().to_string()));
                 } else {
                     return Err(CurlError::InvalidArgument(format!(
                         "invalid header '{val}' (expected \"Name: Value\")"
@@ -1242,30 +1292,21 @@ fn parse_args() -> Result<Options, CurlError> {
                 }
             }
             "-A" | "--user-agent" => {
-                i += 1;
-                let val = argv.get(i).ok_or_else(|| {
-                    CurlError::InvalidArgument("-A requires a user-agent string".to_string())
-                })?;
-                opts.user_agent = val.clone();
+                let val = value(&mut it, "-A requires a user-agent string")?;
+                opts.user_agent = val;
             }
             "-e" | "--referer" => {
-                i += 1;
-                let val = argv.get(i).ok_or_else(|| {
-                    CurlError::InvalidArgument("-e requires a referer URL".to_string())
-                })?;
-                opts.referer = Some(val.clone());
+                let val = value(&mut it, "-e requires a referer URL")?;
+                opts.referer = Some(val);
             }
             "-d" | "--data" | "--data-raw" => {
-                i += 1;
-                let val = argv.get(i).ok_or_else(|| {
-                    CurlError::InvalidArgument("-d requires data".to_string())
-                })?;
+                let val = value(&mut it, "-d requires data")?;
                 // Append to existing data with & separator.
                 if let Some(ref mut existing) = opts.data {
                     existing.push('&');
-                    existing.push_str(val);
+                    existing.push_str(&val);
                 } else {
-                    opts.data = Some(val.clone());
+                    opts.data = Some(val);
                 }
                 // Implicitly set POST if no explicit method given.
                 if !explicit_method {
@@ -1273,13 +1314,10 @@ fn parse_args() -> Result<Options, CurlError> {
                 }
             }
             "-F" | "--form" => {
-                i += 1;
-                let val = argv.get(i).ok_or_else(|| {
-                    CurlError::InvalidArgument("-F requires name=value".to_string())
-                })?;
-                if let Some((name, value)) = val.split_once('=') {
+                let val = value(&mut it, "-F requires name=value")?;
+                if let Some((name, field_value)) = val.split_once('=') {
                     opts.form_fields
-                        .push((name.to_string(), value.to_string()));
+                        .push((name.to_string(), field_value.to_string()));
                 } else {
                     return Err(CurlError::InvalidArgument(format!(
                         "invalid form field '{val}' (expected name=value)"
@@ -1290,11 +1328,8 @@ fn parse_args() -> Result<Options, CurlError> {
                 }
             }
             "-o" | "--output" => {
-                i += 1;
-                let val = argv.get(i).ok_or_else(|| {
-                    CurlError::InvalidArgument("-o requires a filename".to_string())
-                })?;
-                opts.output_file = Some(val.clone());
+                let val = value(&mut it, "-o requires a filename")?;
+                opts.output_file = Some(val);
             }
             "-O" | "--remote-name" => {
                 // Output file will be derived from URL later.
@@ -1304,20 +1339,14 @@ fn parse_args() -> Result<Options, CurlError> {
                 opts.follow_redirects = true;
             }
             "--max-redirs" => {
-                i += 1;
-                let val = argv.get(i).ok_or_else(|| {
-                    CurlError::InvalidArgument("--max-redirs requires a number".to_string())
-                })?;
+                let val = value(&mut it, "--max-redirs requires a number")?;
                 opts.max_redirects = val.parse().map_err(|_| {
                     CurlError::InvalidArgument(format!("invalid redirect count '{val}'"))
                 })?;
             }
             "-u" | "--user" => {
-                i += 1;
-                let val = argv.get(i).ok_or_else(|| {
-                    CurlError::InvalidArgument("-u requires user:password".to_string())
-                })?;
-                opts.auth = Some(val.clone());
+                let val = value(&mut it, "-u requires user:password")?;
+                opts.auth = Some(val);
             }
             "-v" | "--verbose" => {
                 opts.verbose = true;
@@ -1335,10 +1364,7 @@ fn parse_args() -> Result<Options, CurlError> {
                 opts.include_headers = true;
             }
             "-b" | "--cookie" => {
-                i += 1;
-                let val = argv.get(i).ok_or_else(|| {
-                    CurlError::InvalidArgument("-b requires cookie string or file".to_string())
-                })?;
+                let val = value(&mut it, "-b requires cookie string or file")?;
                 // If the value contains '=' it's an inline cookie; if it looks
                 // like a file path (contains / or \ or ends in .txt) treat it
                 // as a cookie jar file.
@@ -1347,58 +1373,41 @@ fn parse_args() -> Result<Options, CurlError> {
                     || val.ends_with(".txt")
                     || val.ends_with(".jar")
                 {
-                    opts.cookie_jar_read = Some(val.clone());
+                    opts.cookie_jar_read = Some(val);
                 } else {
-                    opts.cookie_string = Some(val.clone());
+                    opts.cookie_string = Some(val);
                 }
             }
             "-c" | "--cookie-jar" => {
-                i += 1;
-                let val = argv.get(i).ok_or_else(|| {
-                    CurlError::InvalidArgument("-c requires a filename".to_string())
-                })?;
-                opts.cookie_jar_write = Some(val.clone());
+                let val = value(&mut it, "-c requires a filename")?;
+                opts.cookie_jar_write = Some(val);
             }
             "--connect-timeout" => {
-                i += 1;
-                let val = argv.get(i).ok_or_else(|| {
-                    CurlError::InvalidArgument(
-                        "--connect-timeout requires seconds".to_string(),
-                    )
-                })?;
-                opts.connect_timeout_secs = val.parse().map_err(|_| {
-                    CurlError::InvalidArgument(format!("invalid timeout '{val}'"))
-                })?;
+                let val = value(&mut it, "--connect-timeout requires seconds")?;
+                opts.connect_timeout_secs = val
+                    .parse()
+                    .map_err(|_| CurlError::InvalidArgument(format!("invalid timeout '{val}'")))?;
             }
             "--max-time" | "-m" => {
-                i += 1;
-                let val = argv.get(i).ok_or_else(|| {
-                    CurlError::InvalidArgument("--max-time requires seconds".to_string())
-                })?;
-                opts.max_time_secs = val.parse().map_err(|_| {
-                    CurlError::InvalidArgument(format!("invalid max-time '{val}'"))
-                })?;
+                let val = value(&mut it, "--max-time requires seconds")?;
+                opts.max_time_secs = val
+                    .parse()
+                    .map_err(|_| CurlError::InvalidArgument(format!("invalid max-time '{val}'")))?;
             }
             "-w" | "--write-out" => {
-                i += 1;
-                let val = argv.get(i).ok_or_else(|| {
-                    CurlError::InvalidArgument("-w requires a format string".to_string())
-                })?;
-                opts.write_out = Some(val.clone());
+                let val = value(&mut it, "-w requires a format string")?;
+                opts.write_out = Some(val);
             }
             "-#" | "--progress-bar" => {
                 opts.show_progress = true;
             }
             s if s.starts_with('-') => {
-                return Err(CurlError::InvalidArgument(format!(
-                    "unknown option '{s}'"
-                )));
+                return Err(CurlError::InvalidArgument(format!("unknown option '{s}'")));
             }
-            _ => {
-                opts.urls.push(arg.clone());
+            other => {
+                opts.urls.push(other.to_string());
             }
         }
-        i += 1;
     }
 
     if opts.urls.is_empty() {
@@ -1424,9 +1433,7 @@ fn build_request(
     let mut req = format!("{} {} HTTP/1.1\r\n", opts.method, target);
 
     // Host header: include port only if non-default.
-    if (url.scheme == "http" && url.port != 80)
-        || (url.scheme == "https" && url.port != 443)
-    {
+    if (url.scheme == "http" && url.port != 80) || (url.scheme == "https" && url.port != 443) {
         req.push_str(&format!("Host: {}:{}\r\n", url.host, url.port));
     } else {
         req.push_str(&format!("Host: {}\r\n", url.host));
@@ -1489,29 +1496,30 @@ fn resolve_redirect(current_url: &str, location: &str) -> String {
     if let Ok(parsed) = parse_url(current_url) {
         if location.starts_with('/') {
             // Absolute path on same host.
-            let port_part =
-                if (parsed.scheme == "http" && parsed.port == 80)
-                    || (parsed.scheme == "https" && parsed.port == 443)
-                {
-                    String::new()
-                } else {
-                    format!(":{}", parsed.port)
-                };
-            format!("{}://{}{}{}", parsed.scheme, parsed.host, port_part, location)
+            let port_part = if (parsed.scheme == "http" && parsed.port == 80)
+                || (parsed.scheme == "https" && parsed.port == 443)
+            {
+                String::new()
+            } else {
+                format!(":{}", parsed.port)
+            };
+            format!(
+                "{}://{}{}{}",
+                parsed.scheme, parsed.host, port_part, location
+            )
         } else {
             // Relative path: append to current directory.
             let dir = match parsed.path.rfind('/') {
                 Some(idx) => &parsed.path[..=idx],
                 None => "/",
             };
-            let port_part =
-                if (parsed.scheme == "http" && parsed.port == 80)
-                    || (parsed.scheme == "https" && parsed.port == 443)
-                {
-                    String::new()
-                } else {
-                    format!(":{}", parsed.port)
-                };
+            let port_part = if (parsed.scheme == "http" && parsed.port == 80)
+                || (parsed.scheme == "https" && parsed.port == 443)
+            {
+                String::new()
+            } else {
+                format!(":{}", parsed.port)
+            };
             format!(
                 "{}://{}{}{}{}",
                 parsed.scheme, parsed.host, port_part, dir, location
@@ -1546,14 +1554,14 @@ fn recv_headers(handle: u64) -> Result<Vec<u8>, CurlError> {
     let mut recv_buf = [0u8; 8192];
 
     loop {
-        let n = tcp_recv(handle, &mut recv_buf)?;
-        if n == 0 {
+        let received = tcp_recv(handle, &mut recv_buf)?;
+        if received.is_empty() {
             if buf.is_empty() {
                 return Err(CurlError::InvalidResponse("empty response".to_string()));
             }
             break;
         }
-        buf.extend_from_slice(&recv_buf[..n]);
+        buf.extend_from_slice(received);
 
         if find_header_end(&buf).is_some() {
             break;
@@ -1596,9 +1604,7 @@ fn do_request(
 
     // Resolve hostname.
     let ip = if is_ipv4_address(&url.host) {
-        parse_ipv4(&url.host).ok_or_else(|| {
-            CurlError::DnsFailure(url.host.clone())
-        })?
+        parse_ipv4(&url.host).ok_or_else(|| CurlError::DnsFailure(url.host.clone()))?
     } else {
         if opts.verbose {
             eprintln!("* Trying to resolve host '{}'...", url.host);
@@ -1613,7 +1619,12 @@ fn do_request(
     let handle = tcp_connect(ip, url.port)?;
 
     if opts.verbose {
-        eprintln!("* Connected to {} ({}) port {}", url.host, ip_to_string(ip), url.port);
+        eprintln!(
+            "* Connected to {} ({}) port {}",
+            url.host,
+            ip_to_string(ip),
+            url.port
+        );
     }
 
     // Prepare request body.
@@ -1639,8 +1650,13 @@ fn do_request(
 
     // Verbose: print request headers.
     if opts.verbose {
-        let header_end_pos = find_header_end(&request_bytes).unwrap_or(request_bytes.len());
-        let header_text = String::from_utf8_lossy(&request_bytes[..header_end_pos]);
+        // Falling back to the whole request, rather than to a length the next
+        // line re-slices with, keeps the "no blank-line terminator" case from
+        // being expressed as an index at all.
+        let header_bytes = find_header_end(&request_bytes)
+            .and_then(|end| request_bytes.get(..end))
+            .unwrap_or(&request_bytes);
+        let header_text = String::from_utf8_lossy(header_bytes);
         for line in header_text.lines() {
             eprintln!("> {line}");
         }
@@ -1707,8 +1723,8 @@ fn do_request(
     let content_type = get_header(&response.headers, "content-type")
         .unwrap_or("application/octet-stream")
         .to_string();
-    let content_length: Option<u64> = get_header(&response.headers, "content-length")
-        .and_then(|v| v.parse().ok());
+    let content_length: Option<u64> =
+        get_header(&response.headers, "content-length").and_then(|v| v.parse().ok());
     let is_chunked = get_header(&response.headers, "transfer-encoding")
         .map(|v| v.to_ascii_lowercase().contains("chunked"))
         .unwrap_or(false);
@@ -1749,7 +1765,7 @@ fn do_request(
     };
 
     // Process body bytes already in header buffer.
-    let initial_body = &raw_response[response.body_offset..];
+    let initial_body = raw_response.get(response.body_offset..).unwrap_or_default();
     if !initial_body.is_empty() {
         let body_data_chunk = if let Some(ref mut decoder) = chunked_decoder {
             decoder.decode(initial_body)?
@@ -1783,15 +1799,15 @@ fn do_request(
                 break;
             }
 
-            let n = tcp_recv(handle, &mut recv_buf)?;
-            if n == 0 {
+            let received = tcp_recv(handle, &mut recv_buf)?;
+            if received.is_empty() {
                 break;
             }
 
             let body_data_chunk = if let Some(ref mut decoder) = chunked_decoder {
-                decoder.decode(&recv_buf[..n])?
+                decoder.decode(received)?
             } else {
-                recv_buf[..n].to_vec()
+                received.to_vec()
             };
 
             if !body_data_chunk.is_empty() {
@@ -1973,7 +1989,17 @@ fn main() {
 // Tests
 // ============================================================================
 
+// Panicking on bad data is what a test is *for*: a test that carefully
+// propagates an error instead of unwrapping just reports "ok" less loudly.
+// The defensive lints stay on for the production code above.
 #[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects
+)]
 mod tests {
     use super::*;
 
@@ -2153,10 +2179,7 @@ mod tests {
     #[test]
     fn base64_auth_string() {
         // Standard curl basic auth test.
-        assert_eq!(
-            base64_encode(b"user:password"),
-            "dXNlcjpwYXNzd29yZA=="
-        );
+        assert_eq!(base64_encode(b"user:password"), "dXNlcjpwYXNzd29yZA==");
     }
 
     // --- IP address helpers ---
@@ -2220,7 +2243,10 @@ mod tests {
         assert_eq!(resp.status.reason, "OK");
         assert_eq!(resp.headers.len(), 2);
         assert_eq!(get_header(&resp.headers, "content-length"), Some("5"));
-        assert_eq!(get_header(&resp.headers, "content-type"), Some("text/plain"));
+        assert_eq!(
+            get_header(&resp.headers, "content-type"),
+            Some("text/plain")
+        );
         assert_eq!(&data[resp.body_offset..], b"hello");
     }
 

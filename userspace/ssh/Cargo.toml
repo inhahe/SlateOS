@@ -15,3 +15,15 @@ description = "SlateOS SSH-2 client"
 [dependencies]
 sha2 = { path = "../../sha2" }
 posix = { path = "../../posix" }
+
+# Inherit the workspace lint configuration. This crate carried its own
+# `#![deny(clippy::all)]` and nothing else, which is the easy half: it left
+# `unwrap_used`, `expect_used`, `indexing_slicing` and
+# `arithmetic_side_effects` off over code that parses SSH-2 binary packets --
+# including the ones exchanged before the server has been authenticated -- and
+# whose module header used to justify that with "panics are acceptable failure
+# modes (the process just exits)". For a network client a panic reachable from
+# a server's bytes is a remote denial of service, not a tidy exit.
+# See known-issues.md `TD-B-USERSPACE-CRATES-DO-NOT-INHERIT-THE-WORKSPACE-LINTS`.
+[lints]
+workspace = true

@@ -127,7 +127,12 @@ fn udp_send(handle: u64, ip: u32, port: u16, data: &[u8]) -> Result<usize, DigEr
     let dest = (u64::from(ip) << 16) | u64::from(port);
     // SAFETY: We pass a valid handle and pointer/length for the data buffer.
     let ret = unsafe {
-        syscall3(SYS_UDP_SEND, handle, data.as_ptr() as u64, (data.len() as u64) | (dest << 32))
+        syscall3(
+            SYS_UDP_SEND,
+            handle,
+            data.as_ptr() as u64,
+            (data.len() as u64) | (dest << 32),
+        )
     };
     if ret < 0 {
         return Err(DigError::Network(format!("udp_send failed: {ret}")));
@@ -185,21 +190,29 @@ fn tcp_send_all(handle: u64, data: &[u8]) -> Result<(), DigError> {
     Ok(())
 }
 
-/// Receive up to `buf.len()` bytes from a TCP connection.
-fn tcp_recv(handle: u64, buf: &mut [u8]) -> Result<usize, DigError> {
+/// Receive into `buf`, returning the prefix that was actually filled.
+///
+/// Returning the filled slice rather than its length is what keeps the count
+/// and the buffer it describes together. A caller given a bare `usize` has to
+/// re-derive the slice, and the obvious way to do that -- add the count to a
+/// running total and slice from there -- trusts a number that came from the
+/// kernel across a syscall boundary. Here the one place that number is turned
+/// into a slice is this function, and it rejects a length longer than the
+/// buffer it was handed instead of letting it propagate into the caller's
+/// arithmetic.
+fn tcp_recv(handle: u64, buf: &mut [u8]) -> Result<&[u8], DigError> {
+    let cap = buf.len();
     // SAFETY: Valid handle and mutable buffer pointer/length.
-    let ret = unsafe {
-        syscall3(
-            SYS_TCP_RECV,
-            handle,
-            buf.as_mut_ptr() as u64,
-            buf.len() as u64,
-        )
-    };
+    let ret = unsafe { syscall3(SYS_TCP_RECV, handle, buf.as_mut_ptr() as u64, cap as u64) };
     if ret < 0 {
         return Err(DigError::Network(format!("tcp_recv failed: {ret}")));
     }
-    Ok(ret as usize)
+    let n = ret as usize;
+    buf.get(..n).ok_or_else(|| {
+        DigError::Network(format!(
+            "tcp_recv reported {n} bytes into a {cap}-byte buffer"
+        ))
+    })
 }
 
 /// Close a TCP connection handle.
@@ -423,7 +436,9 @@ fn format_ipv4(ip: u32) -> String {
 fn reverse_name_v4(ip_str: &str) -> Result<String, DigError> {
     let parts: Vec<&str> = ip_str.split('.').collect();
     if parts.len() != 4 {
-        return Err(DigError::Usage(format!("'{ip_str}' is not a valid IPv4 address")));
+        return Err(DigError::Usage(format!(
+            "'{ip_str}' is not a valid IPv4 address"
+        )));
     }
     // Validate each octet.
     for part in &parts {
@@ -558,7 +573,7 @@ fn decode_domain_name(data: &[u8], start: usize) -> Result<(String, usize), DigE
             }
             pos = ptr;
             jumped = true;
-            hops += 1;
+            hops = hops.saturating_add(1);
             continue;
         }
 
@@ -570,11 +585,14 @@ fn decode_domain_name(data: &[u8], start: usize) -> Result<(String, usize), DigE
                 "label extends past end of packet".to_string(),
             ));
         }
-        let label =
-            String::from_utf8_lossy(data.get(pos + 1..label_end).unwrap_or_default()).to_string();
+        let label = String::from_utf8_lossy(
+            data.get(pos.saturating_add(1)..label_end)
+                .unwrap_or_default(),
+        )
+        .to_string();
         labels.push(label);
         pos = label_end;
-        hops += 1;
+        hops = hops.saturating_add(1);
     }
 
     if consumed == 0 && !jumped {
@@ -696,9 +714,15 @@ fn parse_rdata(
             Ok(format!(
                 "{}.{}.{}.{}",
                 data.get(rdata_offset).copied().unwrap_or(0),
-                data.get(rdata_offset.saturating_add(1)).copied().unwrap_or(0),
-                data.get(rdata_offset.saturating_add(2)).copied().unwrap_or(0),
-                data.get(rdata_offset.saturating_add(3)).copied().unwrap_or(0),
+                data.get(rdata_offset.saturating_add(1))
+                    .copied()
+                    .unwrap_or(0),
+                data.get(rdata_offset.saturating_add(2))
+                    .copied()
+                    .unwrap_or(0),
+                data.get(rdata_offset.saturating_add(3))
+                    .copied()
+                    .unwrap_or(0),
             ))
         }
 
@@ -710,12 +734,18 @@ fn parse_rdata(
             }
             let mut segments = [0u16; 8];
             for (i, seg) in segments.iter_mut().enumerate() {
-                *seg = read_u16(data, rdata_offset.saturating_add(i.saturating_mul(2)))
-                    .unwrap_or(0);
+                *seg =
+                    read_u16(data, rdata_offset.saturating_add(i.saturating_mul(2))).unwrap_or(0);
             }
             let addr = std::net::Ipv6Addr::new(
-                segments[0], segments[1], segments[2], segments[3],
-                segments[4], segments[5], segments[6], segments[7],
+                segments[0],
+                segments[1],
+                segments[2],
+                segments[3],
+                segments[4],
+                segments[5],
+                segments[6],
+                segments[7],
             );
             Ok(addr.to_string())
         }
@@ -769,9 +799,10 @@ fn parse_rdata(
             let end = rdata_offset.saturating_add(rdlen);
             let mut pos = rdata_offset;
             while pos < end {
-                let txt_len = *data.get(pos).ok_or_else(|| {
-                    DigError::DnsProtocol("truncated TXT record".to_string())
-                })? as usize;
+                let txt_len = *data
+                    .get(pos)
+                    .ok_or_else(|| DigError::DnsProtocol("truncated TXT record".to_string()))?
+                    as usize;
                 pos = pos.saturating_add(1);
                 let chunk_end = pos.saturating_add(txt_len);
                 if chunk_end > end {
@@ -830,12 +861,10 @@ fn parse_response(data: &[u8]) -> Result<DnsResponse, DigError> {
     for _ in 0..header.qdcount {
         let (name, name_len) = decode_domain_name(data, offset)?;
         offset = offset.saturating_add(name_len);
-        let qtype = read_u16(data, offset).ok_or_else(|| {
-            DigError::DnsProtocol("question section truncated".to_string())
-        })?;
-        let qclass = read_u16(data, offset.saturating_add(2)).ok_or_else(|| {
-            DigError::DnsProtocol("question section truncated".to_string())
-        })?;
+        let qtype = read_u16(data, offset)
+            .ok_or_else(|| DigError::DnsProtocol("question section truncated".to_string()))?;
+        let qclass = read_u16(data, offset.saturating_add(2))
+            .ok_or_else(|| DigError::DnsProtocol("question section truncated".to_string()))?;
         offset = offset.saturating_add(4);
         questions.push(DnsQuestion {
             name,
@@ -939,13 +968,32 @@ fn query_udp(
     Err(last_err)
 }
 
+/// Fill `buf` from the connection, returning how many bytes were read.
+///
+/// Stops early when the peer closes, so a short return means end-of-stream and
+/// the caller decides whether that is an error. This running total is the only
+/// addition in the receive path, and it cannot overflow: [`tcp_recv`] never
+/// reports more than the subslice it was handed, so `filled` is bounded above
+/// by `buf.len()`.
+fn tcp_recv_fill(handle: u64, buf: &mut [u8]) -> Result<usize, DigError> {
+    let mut filled = 0usize;
+    while let Some(dst) = buf.get_mut(filled..).filter(|d| !d.is_empty()) {
+        let n = tcp_recv(handle, dst)?.len();
+        if n == 0 {
+            break;
+        }
+        filled = filled.saturating_add(n);
+    }
+    Ok(filled)
+}
+
 /// Send a DNS query via TCP (RFC 1035 section 4.2.2: 2-byte length prefix).
 fn query_tcp(server_ip: u32, query_pkt: &[u8]) -> Result<Vec<u8>, DigError> {
     let handle = tcp_connect(server_ip, DNS_PORT)?;
 
     // TCP DNS: 2-byte big-endian length prefix.
     let len = query_pkt.len() as u16;
-    let mut tcp_pkt = Vec::with_capacity(2 + query_pkt.len());
+    let mut tcp_pkt = Vec::with_capacity(query_pkt.len().saturating_add(2));
     tcp_pkt.push((len >> 8) as u8);
     tcp_pkt.push(len as u8);
     tcp_pkt.extend_from_slice(query_pkt);
@@ -955,43 +1003,37 @@ fn query_tcp(server_ip: u32, query_pkt: &[u8]) -> Result<Vec<u8>, DigError> {
         return Err(e);
     }
 
-    // Read the 2-byte length prefix of the response.
+    // Read the 2-byte length prefix of the response. A short read here means
+    // the peer hung up mid-prefix, which is not a zero-length answer -- it is a
+    // truncated one, and parsing it as a length would invent a response size.
     let mut len_buf = [0u8; 2];
-    let mut len_read = 0;
-    while len_read < 2 {
-        // len_read < 2 is guaranteed by the loop condition.
-        match tcp_recv(handle, len_buf.get_mut(len_read..).unwrap_or(&mut [])) {
-            Ok(0) => {
-                tcp_close(handle);
-                return Err(DigError::Network(
-                    "connection closed before response length".to_string(),
-                ));
-            }
-            Ok(n) => len_read += n,
-            Err(e) => {
-                tcp_close(handle);
-                return Err(e);
-            }
+    match tcp_recv_fill(handle, &mut len_buf) {
+        Ok(n) if n == len_buf.len() => {}
+        Ok(_) => {
+            tcp_close(handle);
+            return Err(DigError::Network(
+                "connection closed before response length".to_string(),
+            ));
+        }
+        Err(e) => {
+            tcp_close(handle);
+            return Err(e);
         }
     }
 
     let resp_len = u16::from_be_bytes(len_buf) as usize;
     let mut resp_buf = vec![0u8; resp_len];
-    let mut total_read = 0;
-
-    while total_read < resp_len {
-        // total_read < resp_len is guaranteed by the loop condition.
-        match tcp_recv(handle, resp_buf.get_mut(total_read..).unwrap_or(&mut [])) {
-            Ok(0) => break,
-            Ok(n) => total_read += n,
-            Err(e) => {
-                tcp_close(handle);
-                return Err(e);
-            }
+    let total_read = match tcp_recv_fill(handle, &mut resp_buf) {
+        Ok(n) => n,
+        Err(e) => {
+            tcp_close(handle);
+            return Err(e);
         }
-    }
+    };
 
     tcp_close(handle);
+    // A short read is left to the DNS parser to reject: it knows which of the
+    // record counts in the header the missing bytes belonged to.
     resp_buf.truncate(total_read);
     Ok(resp_buf)
 }
@@ -1049,15 +1091,9 @@ fn perform_query(
 fn print_banner(args: &DigArgs) {
     let type_str = type_name(args.qtype);
     if args.reverse {
-        println!(
-            "\n; <<>> DiG 0.1.0 <<>> -x {}",
-            args.query_name
-        );
+        println!("\n; <<>> DiG 0.1.0 <<>> -x {}", args.query_name);
     } else {
-        println!(
-            "\n; <<>> DiG 0.1.0 <<>> {} {}",
-            args.query_name, type_str
-        );
+        println!("\n; <<>> DiG 0.1.0 <<>> {} {}", args.query_name, type_str);
     }
 }
 
@@ -1131,11 +1167,7 @@ fn print_short(resp: &DnsResponse) {
 }
 
 /// Print full dig-style output.
-fn print_full(
-    args: &DigArgs,
-    resp: &DnsResponse,
-    elapsed_ms: u64,
-) {
+fn print_full(args: &DigArgs, resp: &DnsResponse, elapsed_ms: u64) {
     print_banner(args);
     println!(";; global options: +cmd");
     print_header(resp);
@@ -1160,19 +1192,31 @@ const ROOT_SERVERS: &[(&str, &str)] = &[
 ];
 
 /// Perform an iterative trace from root servers to the final answer.
-fn trace_query(args: &DigArgs) -> Result<(), DigError> {
+///
+/// Returns nothing rather than a `Result`: every failure inside a trace is
+/// reported on stdout as part of the trace itself and the walk moves to the
+/// next server, so there was never a path that produced an `Err`. Advertising
+/// one told the caller that trace failures propagate when they do not.
+///
+/// That a failed trace still exits 0 is real -- `+trace` reports "no more
+/// servers to try" and succeeds -- but it is pre-existing behaviour, and
+/// changing an exit code is a user-visible change rather than a lint fix. See
+/// known-issues.md `TD-B-DIG-TRACE-EXITS-ZERO-WHEN-THE-TRACE-GOT-NOWHERE`.
+fn trace_query(args: &DigArgs) {
     let name = &args.query_name;
     let qtype = args.qtype;
 
-    println!("\n; <<>> DiG 0.1.0 <<>> +trace {} {}", name, type_name(qtype));
+    println!(
+        "\n; <<>> DiG 0.1.0 <<>> +trace {} {}",
+        name,
+        type_name(qtype)
+    );
     println!(";; global options: +cmd");
 
     // Start with root servers.
     let mut current_servers: Vec<(String, u32)> = ROOT_SERVERS
         .iter()
-        .filter_map(|(rname, ip_str)| {
-            parse_ipv4(ip_str).map(|ip| (rname.to_string(), ip))
-        })
+        .filter_map(|(rname, ip_str)| parse_ipv4(ip_str).map(|ip| (rname.to_string(), ip)))
         .collect();
 
     let mut depth = 0;
@@ -1219,7 +1263,12 @@ fn trace_query(args: &DigArgs) -> Result<(), DigError> {
                 // Print what we got.
                 if !resp.answers.is_empty() {
                     print_rr_section("", &resp.answers);
-                    println!(";; Received {} answer(s) from {} ({})", resp.answers.len(), server_name, server_str);
+                    println!(
+                        ";; Received {} answer(s) from {} ({})",
+                        resp.answers.len(),
+                        server_name,
+                        server_str
+                    );
                     print_footer(&server_str, elapsed, resp.raw_size);
                     break; // We have our answer.
                 }
@@ -1255,7 +1304,9 @@ fn trace_query(args: &DigArgs) -> Result<(), DigError> {
                     }
 
                     if next_servers.is_empty() {
-                        println!(";; No glue records for referred nameservers; cannot continue trace.");
+                        println!(
+                            ";; No glue records for referred nameservers; cannot continue trace."
+                        );
                         break;
                     }
 
@@ -1269,7 +1320,12 @@ fn trace_query(args: &DigArgs) -> Result<(), DigError> {
                 }
             }
             Err(e) => {
-                println!(";; Query to {} ({}) failed: {}", server_name, format_ipv4(server_ip), e);
+                println!(
+                    ";; Query to {} ({}) failed: {}",
+                    server_name,
+                    format_ipv4(server_ip),
+                    e
+                );
                 // Try next server.
                 if current_servers.len() > 1 {
                     current_servers.remove(0);
@@ -1279,10 +1335,8 @@ fn trace_query(args: &DigArgs) -> Result<(), DigError> {
             }
         }
 
-        depth += 1;
+        depth = depth.saturating_add(1);
     }
-
-    Ok(())
 }
 
 // ============================================================================
@@ -1351,17 +1405,22 @@ fn parse_args() -> Result<DigArgs, DigError> {
     let mut opts = DigOptions::default();
     let mut reverse_ip: Option<String> = None;
 
-    let mut i = 1;
-    while i < argv.len() {
-        let arg = argv.get(i).cloned().unwrap_or_default();
+    // Walked as an iterator rather than an index: the only option that needs a
+    // lookahead is `-x`, and `it.next()` both reads the argument and consumes
+    // it, so the read and the advance cannot disagree. The previous form
+    // indexed with `argv.get(i).cloned().unwrap_or_default()`, which turns a
+    // missing argument into an empty string -- a value the match arms below
+    // would then have had to be careful not to accept.
+    let mut it = argv.iter().skip(1);
+    while let Some(arg) = it.next() {
+        let arg = arg.as_str();
 
         if arg == "-h" || arg == "--help" {
             print_usage();
             process::exit(0);
         } else if arg == "-x" {
             reverse = true;
-            i += 1;
-            reverse_ip = argv.get(i).cloned();
+            reverse_ip = it.next().cloned();
             if reverse_ip.is_none() {
                 return Err(DigError::Usage("-x requires an IP address".to_string()));
             }
@@ -1391,36 +1450,29 @@ fn parse_args() -> Result<DigArgs, DigError> {
             return Err(DigError::Usage(format!("unknown option: '{arg}'")));
         } else {
             // Positional: could be name or type.
-            if parse_record_type(&arg).is_some() && name.is_some() {
+            if parse_record_type(arg).is_some() && name.is_some() {
                 // It is a record type and we already have a name.
-                qtype = parse_record_type(&arg);
+                qtype = parse_record_type(arg);
             } else if name.is_none() {
-                name = Some(arg.clone());
+                name = Some(arg.to_string());
             } else if qtype.is_none() {
                 // Try as a type; if not, treat as error.
-                if let Some(t) = parse_record_type(&arg) {
+                if let Some(t) = parse_record_type(arg) {
                     qtype = Some(t);
                 } else {
-                    return Err(DigError::Usage(format!(
-                        "unexpected argument: '{arg}'"
-                    )));
+                    return Err(DigError::Usage(format!("unexpected argument: '{arg}'")));
                 }
             } else {
-                return Err(DigError::Usage(format!(
-                    "unexpected argument: '{arg}'"
-                )));
+                return Err(DigError::Usage(format!("unexpected argument: '{arg}'")));
             }
         }
-
-        i += 1;
     }
 
     // Handle reverse lookup.
     let query_name;
     if reverse {
-        let ip_str = reverse_ip.ok_or_else(|| {
-            DigError::Usage("-x requires an IP address".to_string())
-        })?;
+        let ip_str =
+            reverse_ip.ok_or_else(|| DigError::Usage("-x requires an IP address".to_string()))?;
         query_name = reverse_name_v4(&ip_str)?;
         if qtype.is_none() {
             qtype = Some(TYPE_PTR);
@@ -1457,7 +1509,8 @@ fn run() -> Result<(), DigError> {
 
     // Trace mode handles its own output.
     if args.trace {
-        return trace_query(&args);
+        trace_query(&args);
+        return Ok(());
     }
 
     // Resolve server name to IP.
@@ -1469,12 +1522,8 @@ fn run() -> Result<(), DigError> {
     })?;
 
     // Perform the query.
-    let (response, elapsed_ms) = perform_query(
-        server_ip,
-        &args.query_name,
-        args.qtype,
-        &args.options,
-    )?;
+    let (response, elapsed_ms) =
+        perform_query(server_ip, &args.query_name, args.qtype, &args.options)?;
 
     // Handle CNAME chains: if we asked for a non-CNAME type and got a CNAME,
     // follow it (up to a reasonable depth).
@@ -1486,10 +1535,7 @@ fn run() -> Result<(), DigError> {
     if args.qtype != TYPE_CNAME {
         while cname_depth < MAX_CNAME_DEPTH {
             // Check if we only got CNAME records and no records of the requested type.
-            let has_target_type = final_response
-                .answers
-                .iter()
-                .any(|r| r.rtype == args.qtype);
+            let has_target_type = final_response.answers.iter().any(|r| r.rtype == args.qtype);
             let cname_rec = final_response
                 .answers
                 .iter()
@@ -1526,7 +1572,7 @@ fn run() -> Result<(), DigError> {
                 Err(_) => break,
             }
 
-            cname_depth += 1;
+            cname_depth = cname_depth.saturating_add(1);
         }
     }
 
@@ -1551,7 +1597,17 @@ fn main() {
 // Tests
 // ============================================================================
 
+// Panicking on bad data is what a test is *for*: an `unwrap` that fires is a
+// failure report, not a crash in someone's session. CLAUDE.md scopes the four
+// defensive lints to non-test code for exactly this reason.
 #[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects
+)]
 mod tests {
     use super::*;
 
@@ -1564,8 +1620,8 @@ mod tests {
         assert_eq!(
             buf,
             &[
-                3, b'w', b'w', b'w', 7, b'e', b'x', b'a', b'm', b'p', b'l', b'e', 3, b'c',
-                b'o', b'm', 0
+                3, b'w', b'w', b'w', 7, b'e', b'x', b'a', b'm', b'p', b'l', b'e', 3, b'c', b'o',
+                b'm', 0
             ]
         );
     }
@@ -1607,8 +1663,8 @@ mod tests {
     #[test]
     fn decode_simple_domain() {
         let data = [
-            3, b'w', b'w', b'w', 7, b'e', b'x', b'a', b'm', b'p', b'l', b'e', 3, b'c', b'o',
-            b'm', 0,
+            3, b'w', b'w', b'w', 7, b'e', b'x', b'a', b'm', b'p', b'l', b'e', 3, b'c', b'o', b'm',
+            0,
         ];
         let (name, consumed) = decode_domain_name(&data, 0).unwrap();
         assert_eq!(name, "www.example.com");
@@ -1770,7 +1826,9 @@ mod tests {
 
     #[test]
     fn type_name_round_trip() {
-        for &code in &[TYPE_A, TYPE_NS, TYPE_CNAME, TYPE_SOA, TYPE_PTR, TYPE_MX, TYPE_TXT, TYPE_AAAA, TYPE_SRV] {
+        for &code in &[
+            TYPE_A, TYPE_NS, TYPE_CNAME, TYPE_SOA, TYPE_PTR, TYPE_MX, TYPE_TXT, TYPE_AAAA, TYPE_SRV,
+        ] {
             let name = type_name(code);
             assert_eq!(parse_record_type(name), Some(code));
         }
@@ -1841,8 +1899,8 @@ mod tests {
     #[test]
     fn parse_rdata_cname() {
         let data = [
-            4, b'm', b'a', b'i', b'l', 7, b'e', b'x', b'a', b'm', b'p', b'l', b'e', 3, b'c',
-            b'o', b'm', 0,
+            4, b'm', b'a', b'i', b'l', 7, b'e', b'x', b'a', b'm', b'p', b'l', b'e', 3, b'c', b'o',
+            b'm', 0,
         ];
         let result = parse_rdata(TYPE_CNAME, &data, 0, data.len()).unwrap();
         assert_eq!(result, "mail.example.com.");
@@ -1851,8 +1909,8 @@ mod tests {
     #[test]
     fn parse_rdata_ns() {
         let data = [
-            3, b'n', b's', b'1', 7, b'e', b'x', b'a', b'm', b'p', b'l', b'e', 3, b'c', b'o',
-            b'm', 0,
+            3, b'n', b's', b'1', 7, b'e', b'x', b'a', b'm', b'p', b'l', b'e', 3, b'c', b'o', b'm',
+            0,
         ];
         let result = parse_rdata(TYPE_NS, &data, 0, data.len()).unwrap();
         assert_eq!(result, "ns1.example.com.");
@@ -1861,8 +1919,8 @@ mod tests {
     #[test]
     fn parse_rdata_ptr() {
         let data = [
-            3, b'w', b'w', b'w', 7, b'e', b'x', b'a', b'm', b'p', b'l', b'e', 3, b'c', b'o',
-            b'm', 0,
+            3, b'w', b'w', b'w', 7, b'e', b'x', b'a', b'm', b'p', b'l', b'e', 3, b'c', b'o', b'm',
+            0,
         ];
         let result = parse_rdata(TYPE_PTR, &data, 0, data.len()).unwrap();
         assert_eq!(result, "www.example.com.");
@@ -2209,7 +2267,9 @@ mod tests {
 
     #[test]
     fn build_query_for_all_types() {
-        for &qtype in &[TYPE_A, TYPE_AAAA, TYPE_MX, TYPE_NS, TYPE_CNAME, TYPE_TXT, TYPE_SOA, TYPE_PTR, TYPE_SRV] {
+        for &qtype in &[
+            TYPE_A, TYPE_AAAA, TYPE_MX, TYPE_NS, TYPE_CNAME, TYPE_TXT, TYPE_SOA, TYPE_PTR, TYPE_SRV,
+        ] {
             let pkt = build_query("test.example.com", qtype, true, 0x9999);
             let len = pkt.len();
             let encoded_type = u16::from(pkt[len - 4]) << 8 | u16::from(pkt[len - 3]);

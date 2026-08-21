@@ -101,6 +101,9 @@ pub use guiremote::control::CursorShape;
 // Re-exported because `Window::layer` is public and a caller reading it needs
 // to be able to name the type without depending on `guiremote` directly.
 pub use guiremote::control::Layer;
+// Same reason: `CompositorRequest::ShellControl` carries one, so a caller
+// building that request must be able to name it.
+pub use guiremote::control::ShellControlAction;
 use guiremote::control::WindowSpec;
 use guiremote::scene::{SceneFrame, SceneSession, WindowSnapshot};
 // Same reason: `window_list` returns these, and a shell reading one should not
@@ -2376,6 +2379,18 @@ pub enum CompositorRequest {
     StreamCapture { stream_id: u64 },
     /// End a remote draw-command stream session.
     StreamStop { stream_id: u64 },
+    /// Act on a window on a shell's behalf, rather than on its owner's.
+    ///
+    /// Every other window request here arrives having been checked against the
+    /// windows the sending connection owns (`ClientLink::resolve`). This one
+    /// cannot be — a taskbar button exists to act on somebody else's window —
+    /// so it is a separate variant precisely so that the exception is visible
+    /// at the point the compositor decides what to do, rather than hidden
+    /// inside a shared verb.
+    ShellControl {
+        window_id: WindowId,
+        action: ShellControlAction,
+    },
 }
 
 /// Responses from the compositor to clients.
@@ -4509,6 +4524,64 @@ impl Compositor {
         }
     }
 
+    /// Bring a window to the user: un-minimize it if it is minimized, then
+    /// focus and raise it within its band.
+    ///
+    /// What a taskbar button and an Alt-Tab switcher do, and the reason it is
+    /// one operation rather than two: [`focus_window`](Self::focus_window)
+    /// deliberately refuses a minimized window — a window nobody can see must
+    /// not hold the keyboard — so un-minimizing has to come *first*. A caller
+    /// issuing the two separately would be depending on that order without
+    /// anything stating it, and would silently do nothing to a minimized
+    /// window if it got them the wrong way round.
+    ///
+    /// Distinct from [`restore_window`](Self::restore_window), which also
+    /// un-*maximizes*. A taskbar button on a minimized-while-maximized window
+    /// must give the window back exactly as the user left it; restoring it
+    /// would un-maximize a window the user never asked to un-maximize.
+    ///
+    /// # Errors
+    ///
+    /// [`CompositorError::WindowNotFound`] if the window does not exist —
+    /// which for a shell is an ordinary race, not a fault: a window may close
+    /// between the list snapshot the button was drawn from and the click.
+    pub fn activate_window(&mut self, window_id: WindowId) -> CompositorResult<()> {
+        let window = self
+            .window_mut(window_id)
+            .ok_or(CompositorError::WindowNotFound(window_id))?;
+        if window.minimized {
+            window.minimized = false;
+            window.visible = true;
+            window.dirty = true;
+            self.full_recomposite = true;
+        }
+        self.damage_window(window_id);
+        self.focus_window(window_id);
+        Ok(())
+    }
+
+    /// Ask a window to close, as its own close button does.
+    ///
+    /// Sends the client [`EventNotification::WindowClose`] rather than
+    /// destroying the window: the client is being *told*, so an editor with
+    /// unsaved changes gets to put up its dialog. A shell that could destroy a
+    /// window outright would be able to discard a user's work from a context
+    /// menu.
+    ///
+    /// # Errors
+    ///
+    /// [`CompositorError::WindowNotFound`] if the window does not exist. The
+    /// check is what stops a notification being queued for an id nothing will
+    /// ever deliver.
+    pub fn request_close(&mut self, window_id: WindowId) -> CompositorResult<()> {
+        if self.window_ref(window_id).is_none() {
+            return Err(CompositorError::WindowNotFound(window_id));
+        }
+        self.pending_notifications
+            .push_back(EventNotification::WindowClose { window_id });
+        Ok(())
+    }
+
     /// Set a window's title.
     pub fn set_title(&mut self, window_id: WindowId, title: String) -> CompositorResult<()> {
         let window = self
@@ -5997,6 +6070,21 @@ impl Compositor {
                 // the user's settings to anyone allowed to ask for a reload.
                 CompositorResponse::Ok
             }
+            CompositorRequest::ShellControl { window_id, action } => {
+                let result = match action {
+                    ShellControlAction::Activate => self.activate_window(window_id),
+                    ShellControlAction::Minimize => self.minimize_window(window_id),
+                    ShellControlAction::Restore => self.restore_window(window_id),
+                    ShellControlAction::Maximize => self.maximize_window(window_id),
+                    ShellControlAction::Close => self.request_close(window_id),
+                };
+                match result {
+                    Ok(()) => CompositorResponse::Ok,
+                    Err(e) => CompositorResponse::Error {
+                        message: e.to_string(),
+                    },
+                }
+            }
             CompositorRequest::StreamStart => {
                 let stream_id = self.start_stream();
                 CompositorResponse::StreamStarted { stream_id }
@@ -7446,6 +7534,188 @@ mod tests {
         // that returned a bound for everything would satisfy the two above.
         comp.set_double_click_ms(250);
         assert_eq!(comp.double_click_interval, Duration::from_millis(250));
+    }
+
+    // ======================================================================
+    // Acting on a window on a shell's behalf
+    // ======================================================================
+
+    /// The whole point of the operation: a taskbar button on a minimized
+    /// window gives it back *and* focuses it.
+    ///
+    /// This is the ordering invariant `activate_window` exists to hold.
+    /// `focus_window` refuses a minimized window on purpose — a window nobody
+    /// can see must not hold the keyboard — so un-minimizing has to happen
+    /// first. Swap the two halves of `activate_window` and this fails on the
+    /// focus assertion while the visibility one still passes, which is exactly
+    /// the half-working button a user would report as "it comes back but I
+    /// have to click it again".
+    #[test]
+    fn activating_a_minimized_window_unminimizes_it_and_gives_it_focus() {
+        let (mut comp, id) = with_one_window();
+        comp.minimize_window(id).expect("minimize");
+        assert_ne!(comp.focused_window, Some(id), "minimizing dropped focus");
+
+        comp.activate_window(id).expect("activate");
+
+        let win = comp.window_ref(id).expect("window");
+        assert!(!win.minimized, "still minimized");
+        assert!(win.visible, "un-minimized but still hidden");
+        assert_eq!(comp.focused_window, Some(id), "un-minimized but not focused");
+    }
+
+    /// A taskbar button must give a window back exactly as the user left it.
+    ///
+    /// `restore_window` un-maximizes as well as un-minimizes, which is right
+    /// for the client's own `Restore` request and wrong here: a window the
+    /// user maximized and then minimized would come back at its old small
+    /// size, having silently lost a state it never asked to leave. That is why
+    /// `activate_window` is not a call to `restore_window`.
+    #[test]
+    fn activating_a_window_minimized_while_maximized_leaves_it_maximized() {
+        let (mut comp, id) = with_one_window();
+        comp.maximize_window(id).expect("maximize");
+        comp.minimize_window(id).expect("minimize");
+
+        comp.activate_window(id).expect("activate");
+        assert!(
+            maximized(&comp, id),
+            "activating un-maximized a window the user never un-maximized"
+        );
+
+        // And the contrast is real rather than asserted: `restore_window` on
+        // the same starting state does drop the maximize.
+        comp.minimize_window(id).expect("minimize again");
+        comp.restore_window(id).expect("restore");
+        assert!(!maximized(&comp, id), "restore is supposed to un-maximize");
+    }
+
+    /// Activation raises within the band and no further. A taskbar button that
+    /// lifted an application window over the taskbar would put the button
+    /// under the window it just summoned.
+    #[test]
+    fn activating_a_window_does_not_lift_it_over_the_shell() {
+        let mut comp = Compositor::new(800, 600, 60).expect("compositor");
+        let mut app = WindowSpec::new("App", 200, 150);
+        app.position = Some((100, 100));
+        let app_id = comp.create_window_from_spec(&app, 1);
+
+        let mut bar = WindowSpec::new("Taskbar", 800, 40);
+        bar.position = Some((0, 560));
+        bar.layer = Layer::Overlay;
+        let bar_id = comp.create_window_from_spec(&bar, 2);
+
+        comp.activate_window(app_id).expect("activate");
+
+        let app_at = comp.z_stack.iter().position(|&w| w == app_id);
+        let bar_at = comp.z_stack.iter().position(|&w| w == bar_id);
+        assert!(
+            app_at < bar_at,
+            "an activated application window climbed over the overlay band"
+        );
+    }
+
+    /// Activating a window that has already closed is a race, not a fault: the
+    /// click lands after the list the button was drawn from. It must report,
+    /// not panic, and must leave focus where it was.
+    #[test]
+    fn activating_a_window_that_has_gone_is_an_error_and_changes_nothing() {
+        let (mut comp, id) = with_one_window();
+        let ghost = WindowId::from_raw(id.raw().wrapping_add(999));
+        let before = comp.focused_window;
+
+        assert!(matches!(
+            comp.activate_window(ghost),
+            Err(CompositorError::WindowNotFound(_))
+        ));
+        assert_eq!(comp.focused_window, before);
+    }
+
+    /// Closing from a shell *asks*. The window is still there afterwards, and
+    /// its client has been told — which is what lets an editor with unsaved
+    /// changes put up its dialog instead of losing the user's work.
+    #[test]
+    fn a_shell_close_asks_the_window_rather_than_destroying_it() {
+        let (mut comp, id) = with_one_window();
+
+        comp.request_close(id).expect("close");
+
+        assert!(
+            comp.window_ref(id).is_some(),
+            "a shell close destroyed the window outright"
+        );
+        assert!(
+            comp.pending_notifications
+                .iter()
+                .any(|n| matches!(n, EventNotification::WindowClose { window_id } if *window_id == id)),
+            "the client was never told to close"
+        );
+    }
+
+    /// And a close aimed at a window that has gone queues nothing. A
+    /// notification addressed to a dead id is one no link will ever claim,
+    /// which is a slow leak in the pending queue rather than a visible bug.
+    #[test]
+    fn a_shell_close_of_a_window_that_has_gone_queues_no_notification() {
+        let (mut comp, id) = with_one_window();
+        let ghost = WindowId::from_raw(id.raw().wrapping_add(999));
+        let before = comp.pending_notifications.len();
+
+        assert!(matches!(
+            comp.request_close(ghost),
+            Err(CompositorError::WindowNotFound(_))
+        ));
+        assert_eq!(comp.pending_notifications.len(), before);
+    }
+
+    /// Every action reaches the operation it names.
+    ///
+    /// Listed rather than sampled: the dispatch is a five-arm match and an arm
+    /// wired to the wrong method is invisible to a test that only sends one
+    /// action. Each assertion is chosen to distinguish that arm from the other
+    /// four.
+    #[test]
+    fn every_shell_control_action_reaches_its_own_operation() {
+        let (mut comp, id) = with_one_window();
+
+        let send = |comp: &mut Compositor, action| {
+            comp.handle_request(CompositorRequest::ShellControl {
+                window_id: id,
+                action,
+            })
+        };
+
+        assert!(matches!(
+            send(&mut comp, ShellControlAction::Maximize),
+            CompositorResponse::Ok
+        ));
+        assert!(maximized(&comp, id), "Maximize");
+
+        assert!(matches!(
+            send(&mut comp, ShellControlAction::Restore),
+            CompositorResponse::Ok
+        ));
+        assert!(!maximized(&comp, id), "Restore");
+
+        assert!(matches!(
+            send(&mut comp, ShellControlAction::Minimize),
+            CompositorResponse::Ok
+        ));
+        assert!(comp.window_ref(id).expect("window").minimized, "Minimize");
+
+        assert!(matches!(
+            send(&mut comp, ShellControlAction::Activate),
+            CompositorResponse::Ok
+        ));
+        assert!(!comp.window_ref(id).expect("window").minimized, "Activate");
+
+        let before = comp.pending_notifications.len();
+        assert!(matches!(
+            send(&mut comp, ShellControlAction::Close),
+            CompositorResponse::Ok
+        ));
+        assert!(comp.window_ref(id).is_some(), "Close must not destroy");
+        assert!(comp.pending_notifications.len() > before, "Close");
     }
 
     #[test]

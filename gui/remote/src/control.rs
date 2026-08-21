@@ -224,6 +224,81 @@ impl Layer {
     }
 }
 
+// ============================================================================
+// Acting on somebody else's window
+// ============================================================================
+
+/// What a shell asks the compositor to do to a window it does not own.
+///
+/// Every other window request in this protocol is resolved against the sending
+/// connection's own windows, which is the whole ownership model: a client
+/// cannot name a window it did not create. A taskbar's entire job is the
+/// opposite — the button exists precisely to act on somebody else's window —
+/// so those verbs cannot be reused, and this is a separate request rather than
+/// a flag on them, so that "names a window I own" stays a property you can read
+/// off the variant.
+///
+/// The actions are the ones a shell surface actually offers: a taskbar button
+/// (activate, minimise), its context menu (maximise, restore, close), and an
+/// Alt-Tab switcher (activate). Deliberately not move/resize: placing windows
+/// is the compositor's, and a shell that could move any window would be a
+/// second window manager — the duplication this part of the tree exists to
+/// remove.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum ShellControlAction {
+    /// Un-minimise if minimised, then focus and raise within the window's band.
+    ///
+    /// One action rather than restore-then-focus because the two are not
+    /// independent: the compositor refuses to focus a minimised window, so a
+    /// shell issuing them separately would be relying on the order it happened
+    /// to send them in.
+    Activate,
+    /// Minimise to the taskbar.
+    Minimize,
+    /// Return from minimised or maximised to the previous geometry.
+    Restore,
+    /// Fill the work area.
+    Maximize,
+    /// *Ask* the window to close — the same request its own close button makes.
+    ///
+    /// Not a destroy: the client is told, and an editor with unsaved changes
+    /// gets to put up its dialog. A shell that could destroy a window would be
+    /// able to discard a user's work from a context menu.
+    Close,
+}
+
+impl ShellControlAction {
+    /// The wire byte for this action.
+    #[must_use]
+    pub const fn as_byte(self) -> u8 {
+        match self {
+            Self::Activate => 0,
+            Self::Minimize => 1,
+            Self::Restore => 2,
+            Self::Maximize => 3,
+            Self::Close => 4,
+        }
+    }
+
+    /// The action a wire byte names, or `None` if it names none of them.
+    ///
+    /// `None` rather than a default, for [`Layer::from_byte`]'s reason and one
+    /// of its own: the actions are not interchangeable, and guessing would let
+    /// a peer speaking a later protocol have a window minimised when it asked
+    /// for something else.
+    #[must_use]
+    pub const fn from_byte(b: u8) -> Option<Self> {
+        match b {
+            0 => Some(Self::Activate),
+            1 => Some(Self::Minimize),
+            2 => Some(Self::Restore),
+            3 => Some(Self::Maximize),
+            4 => Some(Self::Close),
+            _ => None,
+        }
+    }
+}
+
 /// What a client asks for when it creates a window.
 ///
 /// Every field is a *request*: the compositor answers with the id it assigned
@@ -407,6 +482,29 @@ pub enum RequestBody {
     /// way, and a client asking has no business learning what the user's
     /// settings say from the shape of the reply.
     ReloadAppearance,
+    /// Act on a window the sender does not own — the request a taskbar, an
+    /// Alt-Tab switcher or a window menu is made of.
+    ///
+    /// The only request in this protocol that names somebody else's window, and
+    /// therefore the only one the compositor does not resolve against the
+    /// sender's own. See [`ShellControlAction`] for why the ordinary verbs
+    /// could not be reused, and `ClientLink::require_shell` in the compositor
+    /// for the still-open question of *who* may send it.
+    ///
+    /// Answered with [`ResponseBody::Ok`], or an error. A shell acting on a
+    /// window that closed a moment ago is an ordinary race rather than a fault
+    /// — the click happens after the list snapshot the button was drawn from —
+    /// so the error is for the shell's log, not for the user.
+    ///
+    /// Unlike the owned-window requests, the error text here *does* distinguish
+    /// "no such window" from "that window refuses this" (a non-resizable window
+    /// cannot be maximised). That would be a way to probe which ids exist, were
+    /// the sender not already entitled to the whole window list by the same
+    /// privilege that let it send this at all.
+    ShellControl {
+        window: u64,
+        action: ShellControlAction,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -427,6 +525,7 @@ enum RequestTag {
     SetOpacity = 0x0D,
     SubscribeWindowList = 0x0E,
     ReloadAppearance = 0x0F,
+    ShellControl = 0x10,
 }
 
 impl RequestTag {
@@ -447,6 +546,7 @@ impl RequestTag {
             0x0D => Self::SetOpacity,
             0x0E => Self::SubscribeWindowList,
             0x0F => Self::ReloadAppearance,
+            0x10 => Self::ShellControl,
             _ => return None,
         })
     }
@@ -665,6 +765,11 @@ fn encode_request_body(out: &mut Vec<u8>, body: &RequestBody) {
             out.push(u8::from(*subscribe));
         }
         RequestBody::ReloadAppearance => out.push(RequestTag::ReloadAppearance as u8),
+        RequestBody::ShellControl { window, action } => {
+            out.push(RequestTag::ShellControl as u8);
+            write_u64(out, *window);
+            out.push(action.as_byte());
+        }
     }
 }
 
@@ -888,6 +993,15 @@ fn decode_request_body(r: &mut Reader<'_>) -> Result<RequestBody, DecodeError> {
             subscribe: read_bool(r)?,
         },
         RequestTag::ReloadAppearance => RequestBody::ReloadAppearance,
+        RequestTag::ShellControl => {
+            let window = r.read_u64()?;
+            let b = r.read_u8()?;
+            RequestBody::ShellControl {
+                window,
+                action: ShellControlAction::from_byte(b)
+                    .ok_or(DecodeError::BadShellAction(b))?,
+            }
+        }
     })
 }
 
@@ -1040,6 +1154,62 @@ mod tests {
             Request::new(16, RequestBody::ReloadAppearance),
         ];
         assert_eq!(round_trip_requests(&reqs), reqs);
+    }
+
+    /// Every action, not a sample: the action is one byte and an encoder that
+    /// wrote a constant would round-trip whichever one the sample happened to
+    /// pick. Listing them also makes adding a sixth action fail here until it
+    /// is added to the list, which is the point of an exhaustive test.
+    #[test]
+    fn every_shell_control_action_survives_the_wire() {
+        let actions = [
+            ShellControlAction::Activate,
+            ShellControlAction::Minimize,
+            ShellControlAction::Restore,
+            ShellControlAction::Maximize,
+            ShellControlAction::Close,
+        ];
+        let reqs: Vec<Request> = actions
+            .iter()
+            .enumerate()
+            .map(|(i, &action)| {
+                Request::new(
+                    u32::try_from(i).expect("small"),
+                    RequestBody::ShellControl { window: 7, action },
+                )
+            })
+            .collect();
+        assert_eq!(round_trip_requests(&reqs), reqs);
+
+        // And the bytes really are distinct, which is what the round trip
+        // above is relying on without saying so.
+        let mut seen: Vec<u8> = actions.iter().map(|a| a.as_byte()).collect();
+        seen.sort_unstable();
+        seen.dedup();
+        assert_eq!(seen.len(), actions.len(), "two actions share a wire byte");
+    }
+
+    /// An action byte this decoder does not know is refused, not guessed at.
+    /// Silently defaulting would let a peer speaking a later protocol have a
+    /// window minimized when it asked for something the peer had no word for.
+    #[test]
+    fn an_unknown_shell_control_action_is_refused() {
+        let bytes = encode_requests(&[Request::new(
+            1,
+            RequestBody::ShellControl {
+                window: 7,
+                action: ShellControlAction::Close,
+            },
+        )]);
+        // The action byte is the frame's last, after the tag and the u64.
+        let mut corrupt = bytes.clone();
+        let last = corrupt.len() - 1;
+        assert_eq!(corrupt[last], ShellControlAction::Close.as_byte());
+        corrupt[last] = 0xFE;
+        assert!(matches!(
+            decode_requests(&corrupt),
+            Err(DecodeError::BadShellAction(0xFE))
+        ));
     }
 
     #[test]

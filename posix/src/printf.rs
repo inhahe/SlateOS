@@ -164,8 +164,37 @@ va_trampoline!("dprintf", "vdprintf", "16", "rdx");
 va_trampoline!("snprintf", "vsnprintf", "24", "rcx");
 #[cfg(target_os = "none")]
 va_trampoline!("sprintf", "vsprintf", "16", "rdx");
+
+/// `asprintf` gets its own inline module, and therefore its own object file
+/// inside `libc.a`, because gnulib ships a replacement for it and every GNU
+/// package that vendors gnulib may define it itself.
+///
+/// If it shared a member with `printf`/`fprintf`/`snprintf` — which it did
+/// until 2026-08-20 — that member would be extracted for those (no C program
+/// avoids them), our `asprintf` would come along, and the program's own copy
+/// would collide with it. See `string.rs`'s module header and
+/// `design-decisions.md` §339 for the full mechanism; this is the same defect
+/// that stopped GNU make linking.
+///
+/// `vasprintf` below gets its own member too. They are deliberately *not*
+/// grouped: separate members can each be declined independently, so a program
+/// that replaces only one of the pair still links.
 #[cfg(target_os = "none")]
-va_trampoline!("asprintf", "vasprintf", "16", "rdx");
+mod gnu_asprintf {
+    // No `use super::*` here, unlike the `gnu_*` modules in `string.rs`: this
+    // macro expands to nothing but `global_asm!`, so it names no Rust items.
+    // `macro_rules!` is textually scoped and this module is written below the
+    // definition above, so `va_trampoline!` is already visible.
+    //
+    // That the `global_asm!` lands in *this* module's codegen unit -- and
+    // hence its own archive member -- is the part worth recording, because it
+    // is not obvious: assembly has no module semantics of its own, so one
+    // might reasonably expect it to be emitted crate-wide. rustc attributes it
+    // to the CGU of the module it is written in, which is the whole reason
+    // this wrapper works. Confirmed against the built archive by
+    // scripts/check-libc-shape.py.
+    va_trampoline!("asprintf", "vasprintf", "16", "rdx");
+}
 
 // ---------------------------------------------------------------------------
 // Rust entry points (called by the fortified `__*_chk` trampolines)
@@ -663,20 +692,30 @@ pub unsafe extern "C" fn vsprintf(buf: *mut u8, fmt: *const u8, ap: *mut VaList)
     _sprintf_impl(buf, fmt, &mut args)
 }
 
-/// `vasprintf(strp, fmt, ap)` — `asprintf` with a `va_list`.
-///
-/// # Safety
-/// As [`vprintf`]; `strp` must be a valid `char**` to receive the malloc'd
-/// result pointer.
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub unsafe extern "C" fn vasprintf(strp: *mut *mut u8, fmt: *const u8, ap: *mut VaList) -> i32 {
-    if ap.is_null() {
-        return -1;
+/// Own archive member — gnulib replaces `vasprintf`. See `gnu_asprintf` above.
+mod gnu_vasprintf {
+    use super::{VaList, _asprintf_impl};
+
+    /// `vasprintf(strp, fmt, ap)` — `asprintf` with a `va_list`.
+    ///
+    /// # Safety
+    /// As [`super::vprintf`]; `strp` must be a valid `char**` to receive the
+    /// malloc'd result pointer.
+    #[cfg_attr(target_os = "none", unsafe(no_mangle))]
+    pub unsafe extern "C" fn vasprintf(
+        strp: *mut *mut u8,
+        fmt: *const u8,
+        ap: *mut VaList,
+    ) -> i32 {
+        if ap.is_null() {
+            return -1;
+        }
+        // SAFETY: as for `vprintf`.  `asprintf` walks the format string twice,
+        // so it takes a snapshot by value and replays it (C's `va_copy`).
+        unsafe { _asprintf_impl(strp, fmt, Some(*ap)) }
     }
-    // SAFETY: as for `vprintf`.  `asprintf` walks the format string twice, so
-    // it takes a snapshot by value and replays it (C's `va_copy`).
-    unsafe { _asprintf_impl(strp, fmt, Some(*ap)) }
 }
+pub use gnu_vasprintf::vasprintf;
 
 // ---------------------------------------------------------------------------
 // Core formatting engine

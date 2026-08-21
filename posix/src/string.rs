@@ -16,6 +16,40 @@
 //!
 //! Exported as `extern "C"` with standard names so the linker finds
 //! them when C code calls `memcpy`, `memset`, `strlen`, etc.
+//!
+//! # Why some functions below sit in a one-function `mod gnu_*` block
+//!
+//! Static linking extracts archive members **whole**: a member is pulled in
+//! if it defines any still-undefined symbol, and then *every* symbol it
+//! defines becomes a definition in the output. So which functions share an
+//! object file is part of what programs can link against `libc.a` — it is an
+//! ABI property, not a layout detail. glibc puts (near enough) one function in
+//! one object for exactly this reason.
+//!
+//! That matters here because gnulib ships *replacements* for a specific set of
+//! these functions — `strndup`, `strverscmp`, `stpcpy`, `stpncpy`, `mempcpy`,
+//! `strchrnul`, `memrchr`, `rawmemchr`, `strcasestr`, `strnlen` — and every GNU
+//! package that vendors gnulib (coreutils, grep, sed, tar, gawk, gcc, binutils,
+//! make) may therefore define them itself. Normally that is harmless: the
+//! program's own copy resolves the reference and libc's member is never
+//! extracted. But if such a function shares its object with `memcpy` or
+//! `strlen`, the member is extracted for *those*, and its copy collides with
+//! the program's — a duplicate-symbol error the program cannot avoid, because
+//! no link order or `--start-group` can decline half a member.
+//!
+//! That is not hypothetical: it is exactly how GNU make failed to link, with
+//! 11 duplicate symbols and zero missing ones (`design-decisions.md` §339).
+//!
+//! rustc's codegen-unit partitioner works at **module** granularity, and
+//! `toolchain/build-sysroot.ps1` builds with `-C codegen-units=4096` so that it
+//! never merges. Wrapping one function in its own inline `mod` therefore gives
+//! it its own archive member. The `pub use` beside each block keeps the
+//! in-crate path (`string::strndup`) unchanged, so this costs call sites
+//! nothing.
+//!
+//! `scripts/check-libc-shape.py` asserts the resulting archive shape. If you
+//! add a function here that gnulib also replaces, give it the same treatment
+//! and add it to that script's `REPLACEABLE` set.
 
 use crate::types::SizeT;
 
@@ -146,20 +180,26 @@ pub unsafe extern "C" fn strlen(s: *const u8) -> SizeT {
     len
 }
 
-/// Compute the length of a C string, limited to `maxlen`.
-///
-/// # Safety
-///
-/// `s` must be valid for at least `maxlen` bytes, or be
-/// null-terminated before `maxlen`.
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub unsafe extern "C" fn strnlen(s: *const u8, maxlen: SizeT) -> SizeT {
-    let mut len: usize = 0;
-    while len < maxlen && unsafe { *s.add(len) } != 0 {
-        len = len.wrapping_add(1);
+/// Own archive member — gnulib replaces `strnlen`. See the module header.
+mod gnu_strnlen {
+    use super::*;
+
+    /// Compute the length of a C string, limited to `maxlen`.
+    ///
+    /// # Safety
+    ///
+    /// `s` must be valid for at least `maxlen` bytes, or be
+    /// null-terminated before `maxlen`.
+    #[cfg_attr(target_os = "none", unsafe(no_mangle))]
+    pub unsafe extern "C" fn strnlen(s: *const u8, maxlen: SizeT) -> SizeT {
+        let mut len: usize = 0;
+        while len < maxlen && unsafe { *s.add(len) } != 0 {
+            len = len.wrapping_add(1);
+        }
+        len
     }
-    len
 }
+pub use gnu_strnlen::strnlen;
 
 /// Compare two C strings.
 ///
@@ -277,27 +317,31 @@ pub unsafe extern "C" fn strchr(s: *const u8, c: i32) -> *const u8 {
     }
 }
 
-/// Like `strchr`, but returns a pointer to the null terminator if
-/// `c` is not found (instead of null).
-///
-/// GNU extension — commonly used by glibc-based programs.
-///
-/// # Safety
-///
-/// `s` must be a valid null-terminated string.
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub unsafe extern "C" fn strchrnul(s: *const u8, c: i32) -> *const u8 {
-    let val = c as u8;
-    let mut i: usize = 0;
-    loop {
-        // SAFETY: s is a valid null-terminated string.
-        let ch = unsafe { *s.add(i) };
-        if ch == val || ch == 0 {
-            return unsafe { s.add(i) };
+/// Own archive member — gnulib replaces `strchrnul`. See the module header.
+mod gnu_strchrnul {
+    /// Like `strchr`, but returns a pointer to the null terminator if
+    /// `c` is not found (instead of null).
+    ///
+    /// GNU extension — commonly used by glibc-based programs.
+    ///
+    /// # Safety
+    ///
+    /// `s` must be a valid null-terminated string.
+    #[cfg_attr(target_os = "none", unsafe(no_mangle))]
+    pub unsafe extern "C" fn strchrnul(s: *const u8, c: i32) -> *const u8 {
+        let val = c as u8;
+        let mut i: usize = 0;
+        loop {
+            // SAFETY: s is a valid null-terminated string.
+            let ch = unsafe { *s.add(i) };
+            if ch == val || ch == 0 {
+                return unsafe { s.add(i) };
+            }
+            i = i.wrapping_add(1);
         }
-        i = i.wrapping_add(1);
     }
 }
+pub use gnu_strchrnul::strchrnul;
 
 /// Find the last occurrence of `c` in string `s`.
 ///
@@ -794,60 +838,70 @@ pub unsafe extern "C" fn strdup(s: *const u8) -> *mut u8 {
     dest
 }
 
-/// Duplicate at most `n` bytes of a string.
-///
-/// Allocates memory for a copy of at most `n` bytes from `s`,
-/// plus a null terminator.  The result is always null-terminated.
-/// The caller must free the result with `free()`.
-///
-/// # Safety
-///
-/// `s` must be a valid null-terminated string (or valid for `n` bytes).
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub unsafe extern "C" fn strndup(s: *const u8, n: usize) -> *mut u8 {
-    if s.is_null() {
-        return core::ptr::null_mut();
-    }
+/// Own archive member — gnulib replaces `strndup`. See the module header.
+mod gnu_strndup {
+    use super::*;
 
-    // Find actual length (min of strlen and n).
-    let len = unsafe { strnlen(s, n) };
-    let size = len.wrapping_add(1);
-
-    // Allocate via malloc so the pointer has a valid header for free().
-    let dest = crate::malloc::malloc(size);
-    if dest.is_null() {
-        return core::ptr::null_mut();
-    }
-
-    // SAFETY: malloc returned valid memory of at least `size` bytes.
-    unsafe {
-        memcpy(dest, s, len);
-    }
-    unsafe {
-        *dest.add(len) = 0;
-    }
-    dest
-}
-
-/// Find the last occurrence of byte `c` in the first `n` bytes of `s`.
-///
-/// Scans backward from position `n-1`.
-///
-/// # Safety
-///
-/// `s` must be valid for `n` bytes.
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub unsafe extern "C" fn memrchr(s: *const u8, c: i32, n: usize) -> *const u8 {
-    let val = c as u8;
-    let mut i = n;
-    while i > 0 {
-        i = i.wrapping_sub(1);
-        if unsafe { *s.add(i) } == val {
-            return unsafe { s.add(i) };
+    /// Duplicate at most `n` bytes of a string.
+    ///
+    /// Allocates memory for a copy of at most `n` bytes from `s`,
+    /// plus a null terminator.  The result is always null-terminated.
+    /// The caller must free the result with `free()`.
+    ///
+    /// # Safety
+    ///
+    /// `s` must be a valid null-terminated string (or valid for `n` bytes).
+    #[cfg_attr(target_os = "none", unsafe(no_mangle))]
+    pub unsafe extern "C" fn strndup(s: *const u8, n: usize) -> *mut u8 {
+        if s.is_null() {
+            return core::ptr::null_mut();
         }
+
+        // Find actual length (min of strlen and n).
+        let len = unsafe { strnlen(s, n) };
+        let size = len.wrapping_add(1);
+
+        // Allocate via malloc so the pointer has a valid header for free().
+        let dest = crate::malloc::malloc(size);
+        if dest.is_null() {
+            return core::ptr::null_mut();
+        }
+
+        // SAFETY: malloc returned valid memory of at least `size` bytes.
+        unsafe {
+            memcpy(dest, s, len);
+        }
+        unsafe {
+            *dest.add(len) = 0;
+        }
+        dest
     }
-    core::ptr::null()
 }
+pub use gnu_strndup::strndup;
+
+/// Own archive member — gnulib replaces `memrchr`. See the module header.
+mod gnu_memrchr {
+    /// Find the last occurrence of byte `c` in the first `n` bytes of `s`.
+    ///
+    /// Scans backward from position `n-1`.
+    ///
+    /// # Safety
+    ///
+    /// `s` must be valid for `n` bytes.
+    #[cfg_attr(target_os = "none", unsafe(no_mangle))]
+    pub unsafe extern "C" fn memrchr(s: *const u8, c: i32, n: usize) -> *const u8 {
+        let val = c as u8;
+        let mut i = n;
+        while i > 0 {
+            i = i.wrapping_sub(1);
+            if unsafe { *s.add(i) } == val {
+                return unsafe { s.add(i) };
+            }
+        }
+        core::ptr::null()
+    }
+}
+pub use gnu_memrchr::memrchr;
 
 /// Copy `n` bytes from `src` to `dest`, guaranteeing non-overlap.
 ///
@@ -954,64 +1008,72 @@ pub unsafe extern "C" fn strncasecmp(s1: *const u8, s2: *const u8, n: usize) -> 
 // Additional string functions
 // ---------------------------------------------------------------------------
 
-/// Copy a string, returning a pointer to the END (the null terminator).
-///
-/// This is the BSD/POSIX `stpcpy` — unlike `strcpy`, it returns a
-/// pointer to the terminating null byte, making chained copies efficient.
-///
-/// # Safety
-///
-/// `dest` must have enough space for the full `src` string plus null.
-/// `src` must be a valid null-terminated string.
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub unsafe extern "C" fn stpcpy(dest: *mut u8, src: *const u8) -> *mut u8 {
-    let mut i: usize = 0;
-    loop {
-        let c = unsafe { *src.add(i) };
-        unsafe {
-            *dest.add(i) = c;
-        }
-        if c == 0 {
-            return unsafe { dest.add(i) };
-        }
-        i = i.wrapping_add(1);
-    }
-}
-
-/// Copy at most `n` bytes from `src` to `dest`, returning a pointer
-/// past the last character written.
-///
-/// If `src` is shorter than `n`, remaining bytes are filled with null
-/// and a pointer to the first null byte is returned.
-///
-/// # Safety
-///
-/// `dest` must have space for at least `n` bytes.
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub unsafe extern "C" fn stpncpy(dest: *mut u8, src: *const u8, n: usize) -> *mut u8 {
-    let mut i: usize = 0;
-    // Copy up to n chars from src.
-    while i < n {
-        let c = unsafe { *src.add(i) };
-        unsafe {
-            *dest.add(i) = c;
-        }
-        if c == 0 {
-            let result = unsafe { dest.add(i) };
-            // Fill remainder with nulls.
-            i = i.wrapping_add(1);
-            while i < n {
-                unsafe {
-                    *dest.add(i) = 0;
-                }
-                i = i.wrapping_add(1);
+/// Own archive member — gnulib replaces `stpcpy`. See the module header.
+mod gnu_stpcpy {
+    /// Copy a string, returning a pointer to the END (the null terminator).
+    ///
+    /// This is the BSD/POSIX `stpcpy` — unlike `strcpy`, it returns a
+    /// pointer to the terminating null byte, making chained copies efficient.
+    ///
+    /// # Safety
+    ///
+    /// `dest` must have enough space for the full `src` string plus null.
+    /// `src` must be a valid null-terminated string.
+    #[cfg_attr(target_os = "none", unsafe(no_mangle))]
+    pub unsafe extern "C" fn stpcpy(dest: *mut u8, src: *const u8) -> *mut u8 {
+        let mut i: usize = 0;
+        loop {
+            let c = unsafe { *src.add(i) };
+            unsafe {
+                *dest.add(i) = c;
             }
-            return result;
+            if c == 0 {
+                return unsafe { dest.add(i) };
+            }
+            i = i.wrapping_add(1);
         }
-        i = i.wrapping_add(1);
     }
-    unsafe { dest.add(n) }
 }
+pub use gnu_stpcpy::stpcpy;
+
+/// Own archive member — gnulib replaces `stpncpy`. See the module header.
+mod gnu_stpncpy {
+    /// Copy at most `n` bytes from `src` to `dest`, returning a pointer
+    /// past the last character written.
+    ///
+    /// If `src` is shorter than `n`, remaining bytes are filled with null
+    /// and a pointer to the first null byte is returned.
+    ///
+    /// # Safety
+    ///
+    /// `dest` must have space for at least `n` bytes.
+    #[cfg_attr(target_os = "none", unsafe(no_mangle))]
+    pub unsafe extern "C" fn stpncpy(dest: *mut u8, src: *const u8, n: usize) -> *mut u8 {
+        let mut i: usize = 0;
+        // Copy up to n chars from src.
+        while i < n {
+            let c = unsafe { *src.add(i) };
+            unsafe {
+                *dest.add(i) = c;
+            }
+            if c == 0 {
+                let result = unsafe { dest.add(i) };
+                // Fill remainder with nulls.
+                i = i.wrapping_add(1);
+                while i < n {
+                    unsafe {
+                        *dest.add(i) = 0;
+                    }
+                    i = i.wrapping_add(1);
+                }
+                return result;
+            }
+            i = i.wrapping_add(1);
+        }
+        unsafe { dest.add(n) }
+    }
+}
+pub use gnu_stpncpy::stpncpy;
 
 /// Extract token from string (reentrant, modifies input).
 ///
@@ -1075,142 +1137,150 @@ pub unsafe extern "C" fn strsep(stringp: *mut *mut u8, delim: *const u8) -> *mut
     }
 }
 
-/// Version-aware string comparison (GNU extension, `<string.h>`).
+/// Own archive member — gnulib replaces `strverscmp`. See the module header.
 ///
-/// Like `strcmp`, but when both strings contain a run of digits at the
-/// same position, the digit runs are compared *numerically* rather than
-/// lexicographically.  This gives the intuitive result for version
-/// strings: `"file9" < "file10"`, `"1.2.3" < "1.10.0"`.
-///
-/// Leading-zero handling follows the glibc convention: a digit run with
-/// a leading zero is compared as a fractional part (lexicographic, so
-/// longer run with same prefix is greater), while runs without leading
-/// zeros are compared by numeric value (shorter run with same digits is
-/// smaller).
-///
-/// Based on glibc `strverscmp` (`string/strverscmp.c`).
-///
-/// # Safety
-///
-/// Both pointers must be valid null-terminated strings.
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub unsafe extern "C" fn strverscmp(s1: *const u8, s2: *const u8) -> i32 {
-    let mut i: usize = 0;
+/// The two private helpers live in here with it: they are only ever called by
+/// `strverscmp`, so keeping them in the same member costs nothing and keeps the
+/// member self-contained (it references nothing from the main string module).
+mod gnu_strverscmp {
+    /// Version-aware string comparison (GNU extension, `<string.h>`).
+    ///
+    /// Like `strcmp`, but when both strings contain a run of digits at the
+    /// same position, the digit runs are compared *numerically* rather than
+    /// lexicographically.  This gives the intuitive result for version
+    /// strings: `"file9" < "file10"`, `"1.2.3" < "1.10.0"`.
+    ///
+    /// Leading-zero handling follows the glibc convention: a digit run with
+    /// a leading zero is compared as a fractional part (lexicographic, so
+    /// longer run with same prefix is greater), while runs without leading
+    /// zeros are compared by numeric value (shorter run with same digits is
+    /// smaller).
+    ///
+    /// Based on glibc `strverscmp` (`string/strverscmp.c`).
+    ///
+    /// # Safety
+    ///
+    /// Both pointers must be valid null-terminated strings.
+    #[cfg_attr(target_os = "none", unsafe(no_mangle))]
+    pub unsafe extern "C" fn strverscmp(s1: *const u8, s2: *const u8) -> i32 {
+        let mut i: usize = 0;
 
-    // Scan forward while characters are equal.
-    loop {
-        let a = unsafe { *s1.add(i) };
-        let b = unsafe { *s2.add(i) };
+        // Scan forward while characters are equal.
+        loop {
+            let a = unsafe { *s1.add(i) };
+            let b = unsafe { *s2.add(i) };
 
-        if a != b || a == 0 {
-            // Found the first difference (or end of both strings).
-            // If neither byte is a digit, fall through to plain compare.
-            // If at least one is a digit, we need version comparison.
+            if a != b || a == 0 {
+                // Found the first difference (or end of both strings).
+                // If neither byte is a digit, fall through to plain compare.
+                // If at least one is a digit, we need version comparison.
+                let a_dig = a.is_ascii_digit();
+                let b_dig = b.is_ascii_digit();
+
+                if !a_dig && !b_dig {
+                    // Neither is a digit — normal lexicographic result.
+                    // SAFETY: a and b are u8, so their i32 values are in [0, 255];
+                    // the difference is in [-255, 255] which cannot overflow i32.
+                    return i32::from(a).wrapping_sub(i32::from(b));
+                }
+
+                // At least one is a digit.  Walk back to find the start of
+                // the digit run that includes position `i`.
+                let mut start = i;
+                while start > 0 && unsafe { *s1.add(start.wrapping_sub(1)) }.is_ascii_digit() {
+                    start = start.wrapping_sub(1);
+                }
+
+                // If we're NOT inside a digit run (start == i) and only one
+                // side has a digit, fall back to plain byte comparison.  This
+                // matches glibc's state-machine behaviour in state S_N (normal):
+                // a lone digit vs a letter is compared by code point value.
+                if start == i && (!a_dig || !b_dig) {
+                    return i32::from(a).wrapping_sub(i32::from(b));
+                }
+
+                // Check for leading zeros in the shared digit run.
+                let has_leading_zero =
+                    unsafe { *s1.add(start) } == b'0' || unsafe { *s2.add(start) } == b'0';
+
+                if has_leading_zero {
+                    // Fractional comparison: compare digit-by-digit (lexicographic).
+                    // A digit beats a non-digit (non-digit means the run ended),
+                    // but a shorter fractional part with the same prefix is less.
+                    return strverscmp_frac(s1, s2, start);
+                }
+
+                // Integer comparison: longer digit run = larger number.
+                return strverscmp_int(s1, s2, start);
+            }
+
+            i = i.wrapping_add(1);
+        }
+    }
+
+    /// Fractional-style digit run comparison (leading-zero case).
+    ///
+    /// Compare digit-by-digit from `start`.  When one run ends (non-digit or NUL)
+    /// and the other continues, the continuing run is "greater."
+    fn strverscmp_frac(s1: *const u8, s2: *const u8, start: usize) -> i32 {
+        let mut j = start;
+        loop {
+            let a = unsafe { *s1.add(j) };
+            let b = unsafe { *s2.add(j) };
             let a_dig = a.is_ascii_digit();
             let b_dig = b.is_ascii_digit();
 
             if !a_dig && !b_dig {
-                // Neither is a digit — normal lexicographic result.
+                return 0; // Same digit run, same length.
+            }
+            if !a_dig {
+                return -1; // s1 run ended first → s1 < s2.
+            }
+            if !b_dig {
+                return 1; // s2 run ended first → s1 > s2.
+            }
+            if a != b {
                 // SAFETY: a and b are u8, so their i32 values are in [0, 255];
                 // the difference is in [-255, 255] which cannot overflow i32.
                 return i32::from(a).wrapping_sub(i32::from(b));
             }
-
-            // At least one is a digit.  Walk back to find the start of
-            // the digit run that includes position `i`.
-            let mut start = i;
-            while start > 0 && unsafe { *s1.add(start.wrapping_sub(1)) }.is_ascii_digit() {
-                start = start.wrapping_sub(1);
-            }
-
-            // If we're NOT inside a digit run (start == i) and only one
-            // side has a digit, fall back to plain byte comparison.  This
-            // matches glibc's state-machine behaviour in state S_N (normal):
-            // a lone digit vs a letter is compared by code point value.
-            if start == i && (!a_dig || !b_dig) {
-                return i32::from(a).wrapping_sub(i32::from(b));
-            }
-
-            // Check for leading zeros in the shared digit run.
-            let has_leading_zero =
-                unsafe { *s1.add(start) } == b'0' || unsafe { *s2.add(start) } == b'0';
-
-            if has_leading_zero {
-                // Fractional comparison: compare digit-by-digit (lexicographic).
-                // A digit beats a non-digit (non-digit means the run ended),
-                // but a shorter fractional part with the same prefix is less.
-                return strverscmp_frac(s1, s2, start);
-            }
-
-            // Integer comparison: longer digit run = larger number.
-            return strverscmp_int(s1, s2, start);
+            j = j.wrapping_add(1);
         }
+    }
 
-        i = i.wrapping_add(1);
+    /// Integer-style digit run comparison (no leading-zero case).
+    ///
+    /// The longer digit run represents a larger number.  If runs are the
+    /// same length, the first differing digit decides.
+    fn strverscmp_int(s1: *const u8, s2: *const u8, start: usize) -> i32 {
+        let mut j = start;
+        let mut first_diff: i32 = 0;
+        loop {
+            let a = unsafe { *s1.add(j) };
+            let b = unsafe { *s2.add(j) };
+            let a_dig = a.is_ascii_digit();
+            let b_dig = b.is_ascii_digit();
+
+            if !a_dig && !b_dig {
+                // Same length — use first differing digit.
+                return first_diff;
+            }
+            if !a_dig {
+                return -1; // s1 run shorter → smaller number.
+            }
+            if !b_dig {
+                return 1; // s2 run shorter → larger number.
+            }
+            if a != b && first_diff == 0 {
+                // SAFETY: a and b are u8, so their i32 values are in [0, 255];
+                // the difference is in [-255, 255] which cannot overflow i32.
+                first_diff = i32::from(a).wrapping_sub(i32::from(b));
+            }
+            j = j.wrapping_add(1);
+        }
     }
 }
-
-/// Fractional-style digit run comparison (leading-zero case).
-///
-/// Compare digit-by-digit from `start`.  When one run ends (non-digit or NUL)
-/// and the other continues, the continuing run is "greater."
-fn strverscmp_frac(s1: *const u8, s2: *const u8, start: usize) -> i32 {
-    let mut j = start;
-    loop {
-        let a = unsafe { *s1.add(j) };
-        let b = unsafe { *s2.add(j) };
-        let a_dig = a.is_ascii_digit();
-        let b_dig = b.is_ascii_digit();
-
-        if !a_dig && !b_dig {
-            return 0; // Same digit run, same length.
-        }
-        if !a_dig {
-            return -1; // s1 run ended first → s1 < s2.
-        }
-        if !b_dig {
-            return 1; // s2 run ended first → s1 > s2.
-        }
-        if a != b {
-            // SAFETY: a and b are u8, so their i32 values are in [0, 255];
-            // the difference is in [-255, 255] which cannot overflow i32.
-            return i32::from(a).wrapping_sub(i32::from(b));
-        }
-        j = j.wrapping_add(1);
-    }
-}
-
-/// Integer-style digit run comparison (no leading-zero case).
-///
-/// The longer digit run represents a larger number.  If runs are the
-/// same length, the first differing digit decides.
-fn strverscmp_int(s1: *const u8, s2: *const u8, start: usize) -> i32 {
-    let mut j = start;
-    let mut first_diff: i32 = 0;
-    loop {
-        let a = unsafe { *s1.add(j) };
-        let b = unsafe { *s2.add(j) };
-        let a_dig = a.is_ascii_digit();
-        let b_dig = b.is_ascii_digit();
-
-        if !a_dig && !b_dig {
-            // Same length — use first differing digit.
-            return first_diff;
-        }
-        if !a_dig {
-            return -1; // s1 run shorter → smaller number.
-        }
-        if !b_dig {
-            return 1; // s2 run shorter → larger number.
-        }
-        if a != b && first_diff == 0 {
-            // SAFETY: a and b are u8, so their i32 values are in [0, 255];
-            // the difference is in [-255, 255] which cannot overflow i32.
-            first_diff = i32::from(a).wrapping_sub(i32::from(b));
-        }
-        j = j.wrapping_add(1);
-    }
-}
+pub use gnu_strverscmp::strverscmp;
 
 /// Reentrant string tokenizer.
 ///
@@ -1496,43 +1566,49 @@ pub unsafe extern "C" fn strlcat(dst: *mut u8, src: *const u8, size: SizeT) -> S
 // strcasestr — case-insensitive substring search
 // ---------------------------------------------------------------------------
 
-/// Locate a case-insensitive substring.
-///
-/// Returns a pointer to the first occurrence of `needle` in
-/// `haystack`, ignoring ASCII case differences.  Returns null if not
-/// found.  If `needle` is empty, returns `haystack`.
-///
-/// # Safety
-///
-/// Both `haystack` and `needle` must be valid null-terminated strings.
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub unsafe extern "C" fn strcasestr(haystack: *const u8, needle: *const u8) -> *mut u8 {
-    if haystack.is_null() || needle.is_null() {
-        return core::ptr::null_mut();
-    }
+/// Own archive member — gnulib replaces `strcasestr`. See the module header.
+mod gnu_strcasestr {
+    use super::*;
 
-    // SAFETY: Both pointers are valid null-terminated strings.
-    let nlen = unsafe { strlen(needle) };
-    if nlen == 0 {
-        return haystack.cast_mut();
-    }
-
-    let hlen = unsafe { strlen(haystack) };
-    if nlen > hlen {
-        return core::ptr::null_mut();
-    }
-
-    let end = hlen.wrapping_sub(nlen);
-    let mut i: usize = 0;
-    while i <= end {
-        if unsafe { casecmp_n(haystack.add(i), needle, nlen) } {
-            return unsafe { haystack.add(i).cast_mut() };
+    /// Locate a case-insensitive substring.
+    ///
+    /// Returns a pointer to the first occurrence of `needle` in
+    /// `haystack`, ignoring ASCII case differences.  Returns null if not
+    /// found.  If `needle` is empty, returns `haystack`.
+    ///
+    /// # Safety
+    ///
+    /// Both `haystack` and `needle` must be valid null-terminated strings.
+    #[cfg_attr(target_os = "none", unsafe(no_mangle))]
+    pub unsafe extern "C" fn strcasestr(haystack: *const u8, needle: *const u8) -> *mut u8 {
+        if haystack.is_null() || needle.is_null() {
+            return core::ptr::null_mut();
         }
-        i = i.wrapping_add(1);
-    }
 
-    core::ptr::null_mut()
+        // SAFETY: Both pointers are valid null-terminated strings.
+        let nlen = unsafe { strlen(needle) };
+        if nlen == 0 {
+            return haystack.cast_mut();
+        }
+
+        let hlen = unsafe { strlen(haystack) };
+        if nlen > hlen {
+            return core::ptr::null_mut();
+        }
+
+        let end = hlen.wrapping_sub(nlen);
+        let mut i: usize = 0;
+        while i <= end {
+            if unsafe { casecmp_n(haystack.add(i), needle, nlen) } {
+                return unsafe { haystack.add(i).cast_mut() };
+            }
+            i = i.wrapping_add(1);
+        }
+
+        core::ptr::null_mut()
+    }
 }
+pub use gnu_strcasestr::strcasestr;
 
 /// Compare `n` bytes of two strings, case-insensitively.
 ///
@@ -1596,29 +1672,35 @@ pub unsafe extern "C" fn explicit_bzero(s: *mut u8, n: usize) {
 // mempcpy — copy with end-of-dest return
 // ---------------------------------------------------------------------------
 
-/// Copy `n` bytes from `src` to `dest`, returning a pointer past the
-/// last written byte.
-///
-/// Like `memcpy` but returns `dest + n` instead of `dest`.  This is a
-/// GNU extension commonly used for efficient buffer building (chain
-/// multiple mempcpy calls without tracking the offset manually).
-///
-/// # Safety
-///
-/// `dest` and `src` must be valid for `n` bytes and must not overlap.
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub unsafe extern "C" fn mempcpy(dest: *mut u8, src: *const u8, n: SizeT) -> *mut u8 {
-    let mut i: usize = 0;
-    while i < n {
-        // SAFETY: Caller guarantees both pointers valid for n bytes.
-        unsafe {
-            *dest.add(i) = *src.add(i);
+/// Own archive member — gnulib replaces `mempcpy`. See the module header.
+mod gnu_mempcpy {
+    use super::*;
+
+    /// Copy `n` bytes from `src` to `dest`, returning a pointer past the
+    /// last written byte.
+    ///
+    /// Like `memcpy` but returns `dest + n` instead of `dest`.  This is a
+    /// GNU extension commonly used for efficient buffer building (chain
+    /// multiple mempcpy calls without tracking the offset manually).
+    ///
+    /// # Safety
+    ///
+    /// `dest` and `src` must be valid for `n` bytes and must not overlap.
+    #[cfg_attr(target_os = "none", unsafe(no_mangle))]
+    pub unsafe extern "C" fn mempcpy(dest: *mut u8, src: *const u8, n: SizeT) -> *mut u8 {
+        let mut i: usize = 0;
+        while i < n {
+            // SAFETY: Caller guarantees both pointers valid for n bytes.
+            unsafe {
+                *dest.add(i) = *src.add(i);
+            }
+            i = i.wrapping_add(1);
         }
-        i = i.wrapping_add(1);
+        // SAFETY: dest + n is one-past-end, valid for pointer arithmetic.
+        unsafe { dest.add(n) }
     }
-    // SAFETY: dest + n is one-past-end, valid for pointer arithmetic.
-    unsafe { dest.add(n) }
 }
+pub use gnu_mempcpy::mempcpy;
 
 // ---------------------------------------------------------------------------
 // memmem — search for byte sequence in memory
@@ -1689,29 +1771,33 @@ pub unsafe extern "C" fn memmem(
 // rawmemchr — unbounded memchr (assumes byte is present)
 // ---------------------------------------------------------------------------
 
-/// Search for a byte in memory without a length bound.
-///
-/// Like `memchr` but assumes the byte `c` WILL be found somewhere in
-/// the buffer.  This is a GNU extension used by glibc internals and
-/// some programs for efficiency when the caller guarantees the
-/// sentinel exists (e.g., searching for `'\0'` in a C string).
-///
-/// # Safety
-///
-/// `s` must point to memory that contains at least one occurrence of
-/// `c` (as the low byte of the int).  If `c` is not present, this
-/// function reads past the end of valid memory (undefined behavior).
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub unsafe extern "C" fn rawmemchr(s: *const u8, c: i32) -> *const u8 {
-    let target = c as u8;
-    let mut p = s;
-    // SAFETY: Caller guarantees c exists in the buffer, so we will
-    // find it before reading invalid memory.
-    while unsafe { *p } != target {
-        p = unsafe { p.add(1) };
+/// Own archive member — gnulib replaces `rawmemchr`. See the module header.
+mod gnu_rawmemchr {
+    /// Search for a byte in memory without a length bound.
+    ///
+    /// Like `memchr` but assumes the byte `c` WILL be found somewhere in
+    /// the buffer.  This is a GNU extension used by glibc internals and
+    /// some programs for efficiency when the caller guarantees the
+    /// sentinel exists (e.g., searching for `'\0'` in a C string).
+    ///
+    /// # Safety
+    ///
+    /// `s` must point to memory that contains at least one occurrence of
+    /// `c` (as the low byte of the int).  If `c` is not present, this
+    /// function reads past the end of valid memory (undefined behavior).
+    #[cfg_attr(target_os = "none", unsafe(no_mangle))]
+    pub unsafe extern "C" fn rawmemchr(s: *const u8, c: i32) -> *const u8 {
+        let target = c as u8;
+        let mut p = s;
+        // SAFETY: Caller guarantees c exists in the buffer, so we will
+        // find it before reading invalid memory.
+        while unsafe { *p } != target {
+            p = unsafe { p.add(1) };
+        }
+        p
     }
-    p
 }
+pub use gnu_rawmemchr::rawmemchr;
 
 // ---------------------------------------------------------------------------
 // sys_errlist / sys_nerr — deprecated but widely referenced

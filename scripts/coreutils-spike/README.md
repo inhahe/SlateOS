@@ -1,112 +1,91 @@
 # coreutils-spike — does upstream GNU coreutils link against SlateOS's libc?
 
-**No. 106 of 107 links fail.** But the interesting part is *which* failures
-happened, because this run was built to test one specific prediction and that
-prediction came out **confirmed** — the failures are two problems it never
-covered.
+**No. 106 of 107 links fail, and 106 of them fail for one reason: nineteen
+functions our libc does not have.** The granularity problem that broke the make
+port is *almost* gone — it accounts for exactly one duplicate symbol.
 
-Run `./run.sh` from WSL to reproduce. It is the "try the port before you write a
-line" step from `roadmap-detailed.md`'s *Porting vs. Reimplementing* policy,
-applied to the `coreutils` third of the roadmap's `Enough of POSIX libc for
-gcc/coreutils/bash/CPython` item. It is deliberately shaped like
+Run `./run.sh` from WSL to reproduce, or `SLATE_RELINK_ONLY=1 ./run.sh` to redo
+just the relink against an existing build. It is the "try the port before you
+write a line" step from `roadmap-detailed.md`'s *Porting vs. Reimplementing*
+policy, applied to the `coreutils` third of the roadmap's `Enough of POSIX libc
+for gcc/coreutils/bash/CPython` item. It is deliberately shaped like
 `scripts/make-spike/run.sh`.
 
 ## What was measured
 
 GNU coreutils **9.5**, unmodified, `./configure --host=x86_64-linux-musl
 --disable-shared --disable-nls`, compiled with `zig cc` against zig's musl
-headers, then each of its binaries relinked `-nostdlib` against
+headers, then each binary relinked `-nostdlib` against
 `toolchain/sysroot/lib/libc.a` (commit `a1b26843b`, 12,564,980 bytes, shape
 check green).
 
 configure and the build both succeeded on the first attempt, producing 286
-gnulib objects and 107 link lines. Then:
+gnulib objects and 107 link lines.
 
 | | count |
 |---|---|
 | link lines harvested | 107 |
 | **linked OK** | **1** (`make-prime-list`, a build-time host tool) |
 | **failed** | **106** |
-| failed on undefined symbols only | **100** |
-| failed on duplicate symbols only | **6** |
-| failed on both | 0 |
 | distinct undefined symbols | **19** |
-| distinct duplicate symbols | **12** |
+| distinct duplicate symbols | **1** |
+| links that pulled in zig's musl | **0** |
 
 Note the shape of that table against the make spike's. make failed with
 `MISSING_COUNT=0` and 11 duplicates — a pure granularity problem. coreutils is
-the reverse: overwhelmingly a *missing functions* problem, with a granularity
-problem behind it. Reading either count alone would have given the wrong
-diagnosis, which is why `run.sh` prints both unconditionally.
+the reverse. Reading either count alone gives the wrong diagnosis, which is why
+`run.sh` prints both unconditionally.
 
 ## §340's prediction was right, and §340's fix works
 
 `design-decisions.md` §340 split seventeen `libc.a` archive members so that each
 held one function, because gnulib supplies its own replacements for exactly
-those names. Its text predicted the case: *"make missed them only because its
+those names. Its text predicted this case: *"make missed them only because its
 ./configure did not compile in those particular gnulib modules; **coreutils and
 tar** would have hit them."*
 
-That had never been tested against coreutils. It has now. coreutils vendored
-**six** of the seventeen:
+That had never been tested. It has now. coreutils vendored **six** of the
+seventeen:
 
-    lib/asprintf.o   lib/vasprintf.o   lib/libcoreutils_a-rawmemchr.o
-    lib/getopt.o     lib/fnmatch.o     lib/libcoreutils_a-error.o
+    lib/asprintf.o                 lib/vasprintf.o
+    lib/libcoreutils_a-rawmemchr.o lib/libcoreutils_a-getopt.o
+    lib/fnmatch.o                  lib/libcoreutils_a-error.o
 
 `getopt`, `fnmatch` and `error` are three of the four families that broke the
-make link in the first place. **None of the six appears in the duplicate list.**
-So the prediction was correct — coreutils does compile in those modules where
-make did not — and the fix holds against the program it was written for. That is
-the one thing this spike existed to find out.
+make link in the first place. **None of the six collided.** The prediction was
+correct — coreutils does compile in modules make did not — and the fix holds
+against the program it was written for. That is what this spike existed to find
+out, and it is the one unambiguously good news here.
 
-## What it also found: §340 fixed the symptoms, not the mechanism
+## The one duplicate that is ours: `wmempcpy`
 
-All 12 duplicates come from just **three** archive members, none of which §340
-touched:
+Five binaries (`ls`, `dir`, `vdir`, `du`, `dircolors`) fail on a single
+duplicate. They need `mbrtowc` from our libc; that extracts the member holding
+`posix::wchar`, which defines **78 external symbols**, one of which is
+`wmempcpy` — and gnulib supplies its own `wmempcpy` because musl lacks it. The
+collision is unavoidable from the caller's side, exactly as §339 describes.
 
-| member | module | external symbols | duplicates it caused |
-|---|---|---|---|
-| `…-cgu.005.rcgu.o` | `posix::wchar` | **79** | `wmempcpy` |
-| `…-cgu.013.rcgu.o` | `posix::stdio` | **76** | `__fpurge`, `clearerr`, `feof`, `ferror`, `fflush`, `fputs`, `fread`, `fwrite`, `putc_unlocked` |
-| `…-cgu.031.rcgu.o` | startup/crt | **46** | `__progname`, `__progname_full` |
+`-C codegen-units=4096` did not prevent this because **`codegen-units` is a
+ceiling, not a splitter**: rustc partitions at *module* granularity and will not
+divide a single module, so `wchar.rs` (156 KB, one module, no `gnu_*` blocks at
+all) is one codegen unit however high the ceiling goes. §340's actual mechanism
+was not the flag — it was wrapping each of seventeen functions in its own
+`mod gnu_<name> { … }`, which is why only those seventeen got their own members.
 
-A libc member holding 79 externally visible symbols is the defect §339
-described, still present. The reason `-C codegen-units=4096` did not prevent it
-is that **`codegen-units` is a ceiling, not a splitter**: rustc partitions at
-*module* granularity and will not divide a single module, so `wchar.rs` (156 KB,
-one module, no `gnu_*` blocks at all) is one codegen unit no matter how high the
-ceiling goes. §340's actual mechanism was not the flag — it was wrapping each of
-seventeen functions in its own `mod gnu_<name> { … }`, which is why only those
-seventeen got their own members.
+So the remaining fix is one more `mod gnu_wmempcpy` block, not a rebuild
+strategy.
 
-`ls` is the clearest example: it needs `mbrtowc` from our libc, which extracts
-the 79-symbol `wchar` member, which drags in `wmempcpy`, which gnulib also
-defines. Unavoidable from the caller's side, exactly as §339 says.
+### Why `check-libc-shape.py` passed on this archive
 
-### `scripts/check-libc-shape.py` passed on this archive, and was right to
+The guard's CHECK 2 fires only when a member defines a `REPLACEABLE` name
+*alongside* an `UNAVOIDABLE` one. `posix::wchar`'s member defines `wmempcpy`,
+which is in neither set. The two sets are drawn as if they were disjoint
+categories — replaceable things versus things every program needs — and the
+wide-character family is simply absent from both.
 
-The guard has two checks. CHECK 1 asserts four curated families own their member
-outright — `getopt`, `glob`, `fnmatch`, `error`. All four still do. CHECK 2 is
-the generalising one: no member may define a `REPLACEABLE` name alongside an
-`UNAVOIDABLE` one.
+## The nineteen missing symbols
 
-`posix::stdio`'s member defines `fopen`, `fclose`, `fread`, `fwrite`, `fflush` —
-five `UNAVOIDABLE` names. It defines nothing in `REPLACEABLE`, because
-`REPLACEABLE` lists no stdio names at all. So the intersection is empty and the
-check passes.
-
-That is not a coding error; it is the set being drawn from the wrong premise.
-`REPLACEABLE` and `UNAVOIDABLE` are written as if they were disjoint categories
-— replaceable things versus things every program needs. On a musl target they
-overlap heavily: gnulib replaces `fflush`, `fclose`, `fseek`, `fread`, `fwrite`,
-`feof`, `ferror` and friends precisely *because* they are unavoidable and musl's
-differ from glibc's. Any member holding the stdio family is therefore both at
-once, and a check requiring one of each can never see it.
-
-## The 19 missing symbols
-
-These are genuine libc gaps, independent of the packing problem, and they are
-what actually blocks 100 of the 106 binaries.
+These block 106 of the 106 failures and are the actual work.
 
 | group | symbols |
 |---|---|
@@ -115,20 +94,47 @@ what actually blocks 100 of the 106 binaries.
 | variadic exec wrappers | `execl`, `execlp` |
 | misc | `qsort_r`, `strtod_l`, `strtold_l`, `timespec_get` |
 
-Two details worth keeping. First, we already define `putc_unlocked` (it is in
-the duplicate list) but not `fputc_unlocked` — so the `_unlocked` family is
-half-present, which is how it escaped notice. Second, these were *declared* by
-zig's musl headers, so `./configure` concluded they existed and compiled code
-calling them; the gap only appears at link time against our archive. That is the
-same header/library split the spike itself relies on, working against us.
+Two details worth keeping. We already define `putc_unlocked` but not
+`fputc_unlocked`, so the `_unlocked` family is half-present, which is how it
+escaped notice. And all nineteen are *declared* by zig's musl headers, so
+`./configure` concluded they existed and compiled calls to them; the gap appears
+only at link time against our archive.
+
+## A defect in this script, found and fixed — worth reading before trusting a spike
+
+The first run reported **12** duplicate symbols, not 1. Eleven of them were an
+artifact of this script.
+
+`sort` is the only utility whose link line `configure` gave `-lpthread`. Because
+`zig cc --target=x86_64-linux-musl` resolves `-lpthread` against its **own
+bundled musl**, and musl folds pthread into `libc.a`, that single flag put a
+complete second libc on a `-nostdlib` link line. musl's stdio members were then
+extracted to satisfy the `X_unlocked` names our libc lacks, and each dragged its
+`X` in behind it — producing `fflush`, `fread`, `fwrite`, `feof`, `ferror`,
+`clearerr`, `fputs`, `__fpurge`, `putc_unlocked`, `__progname`,
+`__progname_full` as duplicates against ours.
+
+Every one of those was a fact about musl's packaging, not about our libc.
+`run.sh` now strips `-lpthread`/`-lrt`/`-ldl`/`-lm`/`-lcrypt`/`-lc` before
+appending our archives, and asserts `LINKS_THAT_PULLED_ZIG_MUSL=0` afterwards.
+
+The assertion matters more than the fix. A foreign libc on the link line fails
+*silently* in the direction that flatters us: it quietly satisfies symbols we do
+not have, so `MISSING_COUNT` becomes a lower bound of unknown size. These eleven
+only became visible because a few musl members happened to *also* collide. Had
+`sort` needed no colliding symbol, musl would have supplied the gaps and the
+spike would have reported a cleaner result than the truth.
+
+Checked: the make and pkgconf spikes are not affected. Both construct their link
+command from an object list with no `-l` flags at all, so zig's musl was never
+reachable. Their green results stand.
 
 ## Status
 
-Not staged on the image. Unlike pkgconf and make there is no binary to stage —
-the one that linked is coreutils' own build-time helper, not a utility.
+Nothing staged on the image. Unlike pkgconf and make there is no binary to stage
+— the one that linked is coreutils' own build-time helper, not a utility.
 
-`MISSING_COUNT=0` is not the bar for calling this done, and neither is a clean
-link: the same caveat as pkgconf and make applies and bites harder here, because
-`ls` is a VFS exerciser, `dd` is an I/O exerciser, and `stat` reads out the exact
-struct we are least sure about. A clean link would be permission to build a
-rootfs rung, not a port.
+A clean link would not be a port, either. The same caveat as pkgconf and make
+applies and bites harder here: `ls` is a VFS exerciser, `dd` is an I/O
+exerciser, and `stat` reads out the exact struct we are least sure about. Treat
+`MISSING_COUNT=0` as permission to build a rootfs rung, not as a port.

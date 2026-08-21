@@ -65,51 +65,77 @@ echo "COREUTILS_VERSION=$VER"
 echo "TARBALL=$SLATE_COREUTILS_TARBALL"
 
 mkdir -p "$WORK" && cd "$WORK" || exit 1
-rm -rf "coreutils-$VER" "$OUT"
-tar xf "$SLATE_COREUTILS_TARBALL" || exit 1
-cd "coreutils-$VER" || exit 1
+rm -rf "$OUT"
 
 export CC="$SLATE_CC" AR="$SLATE_AR" RANLIB="$SLATE_RANLIB"
 
-# --disable-shared: SlateOS has no dynamic loader on this path, so everything is
-# a static ET_EXEC.
+# SLATE_RELINK_ONLY=1 reuses an existing build tree and re-runs only the relink
+# loop below. That loop is the part that gets iterated — after a libc change, or
+# after fixing a defect in the harvest itself — and re-running ./configure to
+# get there costs ~25 minutes of gnulib's locale probes to reproduce bytes that
+# did not change.
 #
-# --disable-nls: gettext is not a libc facility, and letting configure find the
-# host's libintl would link a host library into a cross binary. This narrows
-# what is tested and the narrowing is deliberate — the question is about our
-# libc, not about message catalogues.
-#
-# FORCE_UNSAFE_CONFIGURE is not set and must not be: it is coreutils' guard
-# against being configured as root, and we are not root.
-#
-# Nothing else is overridden. The entire point is to let configure probe our
-# libc through zig's musl headers and reach its own conclusions, then see
-# whether the link agrees.
-./configure --host=x86_64-linux-musl --disable-shared --disable-nls \
-    >conf.log 2>&1
-echo "CONFIGURE_EXIT=$?"
-tail -5 conf.log
+# Guarded on make.log existing rather than on the directory existing, so it can
+# never quietly "reuse" a tree whose build failed or never ran. If the guard
+# fails we fall through to a full rebuild rather than erroring: a stale flag in
+# the environment should cost time, not correctness.
+if [ "${SLATE_RELINK_ONLY:-0}" = 1 ] && [ -f "coreutils-$VER/make.log" ]; then
+    cd "coreutils-$VER" || exit 1
+    echo "RELINK_ONLY=1 — reusing the existing build in $PWD"
+else
+    rm -rf "coreutils-$VER"
+    tar xf "$SLATE_COREUTILS_TARBALL" || exit 1
+    cd "coreutils-$VER" || exit 1
 
-# V=1 defeats automake's silent rules. This is not cosmetic: the whole relink
-# step below works by reading the real link command lines out of this log, and
-# with silent rules they are never printed. A run that forgets V=1 finds zero
-# link lines and reports LINK_LINES=0, which is why that is a hard failure
-# rather than an empty loop that exits 0.
-make -j8 V=1 >make.log 2>&1
-echo "MAKE_EXIT=$?"
-grep -iE "^[^ ]*error|warning: implicit" make.log | head -20
+    # --disable-shared: SlateOS has no dynamic loader on this path, so
+    # everything is a static ET_EXEC.
+    #
+    # --disable-nls: gettext is not a libc facility, and letting configure find
+    # the host's libintl would link a host library into a cross binary. This
+    # narrows what is tested and the narrowing is deliberate — the question is
+    # about our libc, not about message catalogues.
+    #
+    # FORCE_UNSAFE_CONFIGURE is not set and must not be: it is coreutils' guard
+    # against being configured as root, and we are not root.
+    #
+    # Nothing else is overridden. The entire point is to let configure probe our
+    # libc through zig's musl headers and reach its own conclusions, then see
+    # whether the link agrees.
+    ./configure --host=x86_64-linux-musl --disable-shared --disable-nls \
+        >conf.log 2>&1
+    echo "CONFIGURE_EXIT=$?"
+    tail -5 conf.log
+
+    # V=1 defeats automake's silent rules. This is not cosmetic: the whole
+    # relink step below works by reading the real link command lines out of this
+    # log, and with silent rules they are never printed. A run that forgets V=1
+    # finds zero link lines and reports LINK_LINES=0, which is why that is a
+    # hard failure rather than an empty loop that exits 0.
+    make -j8 V=1 >make.log 2>&1
+    echo "MAKE_EXIT=$?"
+    grep -iE "^[^ ]*error|warning: implicit" make.log | head -20
+fi
 
 # Which gnulib replacement modules configure decided to compile in. This is the
 # diagnostic that ties the run to §340: a gnulib .o here whose name matches one
 # of the seventeen functions that used to share an archive member is a live test
 # of that fix, and its ABSENCE would mean this run did not exercise §340 at all
 # and must not be read as confirming it.
+#
+# automake uses two names for these depending on whether the module needs
+# per-target flags — `lib/foo.o` and `lib/libcoreutils_a-foo.o`. Probing only
+# the first form finds six of the vendored modules and misses four, which is a
+# diagnostic that silently understates exactly the thing it exists to measure.
 echo "GNULIB_OBJECTS_BUILT=$(ls lib/*.o 2>/dev/null | wc -l)"
 echo "GNULIB_REPLACEMENTS_RELEVANT_TO_S340:"
 for f in asprintf vasprintf canonicalize_file_name getline getdelim fseeko \
          ftello strndup strverscmp stpcpy stpncpy mempcpy strchrnul memrchr \
          rawmemchr strcasestr strnlen getopt glob fnmatch error; do
-    [ -f "lib/$f.o" ] && echo "  lib/$f.o"
+    if [ -f "lib/$f.o" ]; then
+        echo "  lib/$f.o"
+    elif [ -f "lib/libcoreutils_a-$f.o" ]; then
+        echo "  lib/libcoreutils_a-$f.o"
+    fi
 done
 
 mkdir -p "$SPIKE_LIBS"
@@ -155,6 +181,29 @@ while IFS= read -r line; do
     # deliberately not linked — it and libc.a each carry a panic handler and
     # collide on __rustc::rust_begin_unwind.
     cmd="${line/ -o src\/$name/ -o $OUT/$name}"
+    # Drop the system-library flags configure detected, BEFORE appending ours.
+    #
+    # This is not tidying — leaving them in silently links a second, complete
+    # libc into a -nostdlib link. `zig cc --target=x86_64-linux-musl` resolves
+    # `-lpthread` against its own bundled musl, and musl folds pthread into
+    # libc.a, so that one flag puts all of musl on the line. Our libc.a is a
+    # single archive that already provides pthread/rt/dl/m/crypt, so nothing is
+    # lost by removing them.
+    #
+    # Measured, not assumed: `sort` is the only utility configure gave
+    # -lpthread, and it was the only one of the 107 to report musl's stdio
+    # colliding with ours — 11 duplicate symbols (fflush, fread, fwrite, feof,
+    # ferror, clearerr, fputs, __fpurge, putc_unlocked, __progname,
+    # __progname_full) that no other binary saw. Every one was musl's member
+    # being extracted for an `X_unlocked` name our libc lacks, dragging its `X`
+    # in behind it. Those 11 were an artifact of this script, not a fact about
+    # our libc, and reporting them as a libc defect would have been wrong.
+    #
+    # The `:a … ta` loop re-runs the substitution until it stops matching, so
+    # two adjacent flags (`-lpthread -lrt`) cannot hide one another by
+    # consuming the shared separating space.
+    cmd="$(printf '%s' "$cmd" \
+        | sed -E ':a; s/ -l(pthread|rt|dl|m|crypt|c)( |$)/ /; ta')"
     cmd="$cmd -nostdlib -static $SPIKE_LIBS/libc.a $SPIKE_LIBS/libc.a $SPIKE_LIBS/libunwind.a"
     eval "$cmd" >"$WORK/link-$name.log" 2>&1
     if [ $? -eq 0 ] && [ -x "$OUT/$name" ]; then
@@ -169,6 +218,24 @@ done <"$LINKS"
 
 echo "BINARIES_LINKED_OK=$OK"
 echo "BINARIES_FAILED=$BAD"
+
+# Assert the thing the -l stripping above is supposed to guarantee: that no link
+# consulted zig's bundled musl. If one did, then every symbol our libc lacks was
+# available from a second libc, and MISSING_COUNT below is an undercount of
+# unknown size — the run would be measuring "our libc plus musl", which is not a
+# question anyone asked.
+#
+# This is checked rather than assumed because the failure is silent: musl
+# quietly satisfying a missing symbol produces no diagnostic at all, and only
+# became visible here because a few of its members happened to also collide.
+FOREIGN="$(grep -l "cache/zig/o" "$WORK"/link-*.log 2>/dev/null | wc -l)"
+echo "LINKS_THAT_PULLED_ZIG_MUSL=$FOREIGN"
+if [ "$FOREIGN" -gt 0 ]; then
+    echo "WARNING — $FOREIGN link(s) resolved symbols against zig's bundled musl."
+    echo "          MISSING_COUNT is therefore a LOWER BOUND, not a measurement."
+    echo "          Offending binaries:"
+    grep -l "cache/zig/o" "$WORK"/link-*.log | sed 's|.*/link-|            |; s|\.log$||'
+fi
 
 # Both counts are printed unconditionally, even when zero, and neither is
 # allowed to stand in for "the link succeeded". The make spike's first run

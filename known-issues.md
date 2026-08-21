@@ -48107,6 +48107,39 @@ than leaving it file-wide.
 tooling reports, and every future consolidation like round 4 has to find its
 own orphans by hand.
 
+**Progress 2026-08-21 — `gui/desktop` cleared, and the prediction above was an
+understatement.** Making the shell a library removed all **54** module-level
+`#[allow(dead_code)]` in `gui/desktop`. The crate had been reporting zero
+warnings for its entire life; it immediately reported **119**.
+
+The entry above argued that a file-wide allow hides orphaned code. What the
+119 actually contained is worse than orphans:
+
+- **115 were dead palette constants** — and pulling on them exposed
+  `TD-C-FORTY-NINE-SHELL-MODULES-CARRY-THEIR-OWN-COPY-OF-THE-PALETTE`: 549
+  surviving constants, 33 distinct values, an entire settings page that the
+  desktop ignores. The unused-constant warning was the *only* signal that
+  duplication existed, and it had been suppressed 54 times.
+- **Three were live defects, not dead code:**
+  - `RememberedDecision::recorded_at_ms` was written and never read — a
+    security prompt answered "allow, remember this" was remembered for the
+    whole session with no expiry and no revocation UI. Fixed here (grants
+    expire after 8h, denials never; see `design-decisions.md` §496).
+  - `BannerStyle::description` had no caller — the notification settings page
+    offered a choice of banner styles and never showed what any of them did.
+    Fixed by rendering it as a hint line.
+  - `calendar::days_in_month` was a private identity wrapper over
+    `date::days_in_month`, justified by a doc comment claiming the toolkit
+    took `(month, year)`. `gui/toolkit/src/date.rs:402` takes `(year, month)`.
+    The wrapper was a second answer defended by a false statement about the
+    first. Deleted; 20 call sites requalified.
+
+**The lesson for the remaining ~66 files:** treat the warning burst as a
+*defect report*, not a cleanup list. The instinct on seeing 119 unused items
+is to delete all 119; three of these would have been deleted along with the
+bug they were evidence of. Read each one for *why* nothing calls it before
+deciding that nothing should.
+
 ---
 
 ### TD-C-ROUND-4-CRATES-CARRY-316-PRE-EXISTING-CLIPPY-WARNINGS (lane C, 2026-08-21)
@@ -48408,6 +48441,27 @@ popups) through `oswindow`, calls `watch_desktop(true)`, and on each
 `desktop_revision` change re-renders the five trees and submits them. Both
 named blockers are gone; nothing is waiting on another lane.
 
+**Progress 2026-08-21 (3) — `desktop` is a library.** The `[lib]` above now
+exists: `src/main.rs` became `src/lib.rs`, the crate declares both a `[lib]`
+and a `[[bin]]`, and the scripted demo that used to *be* the crate is now a
+135-line binary beside it. `DesktopShell` is reachable by name from outside for
+the first time. Removing the 54 module-level `#[allow(dead_code)]` this
+required surfaced 119 concealed warnings and, in them, three live defects and
+one very large one — see `TD-C-DEAD-CODE-IS-ALLOWED-WHOLESALE` (progress note)
+and `TD-C-FORTY-NINE-SHELL-MODULES-CARRY-THEIR-OWN-COPY-OF-THE-PALETTE`.
+
+**The one design question the loop still has to answer**, noted here so it is
+not discovered halfway through: `DesktopShell.windows` is a
+`BTreeMap<WindowId, ManagedWindow>` the shell maintains itself, with ids it
+mints itself in `take_window_id` — while `WindowId`'s own doc says the id is
+"assigned by compositor". That is two answers to one question, which is the
+shape this whole sweep exists to remove. The loop must not paper over it by
+keeping both and mapping between them. The shell's map has to become a
+*projection* of `desktop_windows()`, retaining only state that is genuinely the
+shell's own (virtual-desktop assignment being the real one). Doing that first
+is what stops the loop from being written against a model that disagrees with
+the compositor.
+
 ## TD-C-ANY-CLIENT-CAN-READ-EVERY-WINDOW-TITLE
 
 **In short:** Any program connected to the compositor can ask to be sent the
@@ -48460,6 +48514,75 @@ the feature is not near enough to specify an interface against.
 program the user runs, silently and continuously. The desktop works; the
 privacy property a user would assume it has is simply absent.
 
+## TD-C-FORTY-NINE-SHELL-MODULES-CARRY-THEIR-OWN-COPY-OF-THE-PALETTE
+
+**In short:** The desktop has a settings page where the user picks light or
+dark mode, an accent colour, and how transparent panels should be. Almost
+nothing obeys it. 49 of the shell's modules — every settings page, every
+dialog, the taskbar, the launcher, the login screen, the on-screen displays —
+each declare their own private list of colour constants and paint with those.
+The user can set the desktop to Light and watch the whole of it stay dark
+except the five surfaces `DesktopShell` renders itself. The setting is real,
+it is saved to disk, it is read back correctly, and then it is ignored.
+
+**Where:** `gui/desktop/src/*.rs` — 549 `const NAME: Color = …` declarations
+spread over 49 modules. They collapse to **33 distinct values**: `TEXT` is
+declared 31 times, `BLUE` 29, `BASE` 28, `SUBTEXT0` 28, `SURFACE0` and
+`SURFACE1` 27 each. `Color::from_hex(0x89B4FA)` is written out 47 separate
+times. The canonical answer lives in `gui/appearance/src/lib.rs`
+(`ThemeMode::is_light`, `AccentColor::color`/`color_light`,
+`TransparencyLevel::panel_alpha`, `AppearanceSettings::effective_accent`).
+
+**Reproduce:** set `theme.mode: light` in the appearance config and start the
+shell. `DesktopShell`'s own five render methods respond. Open any settings
+page, the launcher, or a dialog: unchanged, still Catppuccin Mocha. Same for
+a non-default accent — `effective_accent()` reaches nothing that draws.
+
+**Why it shipped:** every one of these 49 modules was behind
+`#[allow(dead_code)]` for the life of the crate (see
+`TD-C-DEAD-CODE-IS-ALLOWED-WHOLESALE`). The single symptom rustc could have
+shown — an unused constant — was suppressed 54 times over, so the duplication
+grew module by module with nothing to object. Removing those allows is what
+surfaced it: 119 warnings appeared at once in a crate that had been reporting
+zero.
+
+**This is the sweep's recurring shape, at its largest scale so far:** the tree
+held one correct answer that callers could not reach, so it grew wrong copies
+of it — 549 of them. The copies are not *wrong* today, because they agree with
+what the dark theme happens to be. They are wrong the moment the user changes
+anything.
+
+**Proper fix, in two parts — the second is the easy one:**
+
+1. **`gui/appearance` cannot currently answer the question.** It resolves
+   *accents* for both schemes (`color` / `color_light`) but the base, surface,
+   overlay and text colours exist only as the hardcoded dark values. Nothing in
+   the tree knows what a window background is in light mode. So the fix starts
+   by adding a resolved palette — a struct carrying the ~33 roles the shell
+   actually uses, built from a `ThemeMode` + `AccentColor` +
+   `TransparencyLevel` (Catppuccin Latte for light, Mocha for dark, which is
+   what the existing constants already are). Until that type exists there is
+   nothing to thread.
+2. Then thread `&Palette` through the render functions of the 49 modules and
+   delete the 549 constants. Mechanical, large, and safe: a module that no
+   longer declares a colour cannot disagree about one.
+
+Do **not** do part 2 without part 1 — threading a struct whose light variant
+does not exist yet just relocates the hardcoding into the struct's
+constructor.
+
+**Trigger:** this is not blocked on anything. It is sequenced after the shell
+event loop (`TD-C-THE-SHELL-CAN-DRAW-ITSELF-AND-NOBODY-CAN-ASK-IT-TO`) only
+because a shell that cannot be driven cannot demonstrate a theme change
+either — with the loop in place, changing the mode and watching the desktop
+repaint is the test that proves this fixed. It also subsumes
+`TD-FOUR-APPEARANCE-SETTINGS-THE-SHELL-STILL-IGNORES`, which is the same
+defect observed from the settings end.
+
+**If never fixed:** the appearance settings page stays decorative. A user who
+picks Light gets a desktop that is light in five places and dark in every
+other, which reads as a broken theme rather than an unimplemented one — worse
+than having no setting at all.
 ---
 
 ### B-THE-NATIVE-LIBC-AND-THE-LINUX-ABI-DISAGREE-ABOUT-WHAT-EXISTS, AND LIBC'S DOC COMMENTS EXPLAIN IT WITH A REASON THAT STOPPED BEING TRUE — 2026-08-21 — OPEN
@@ -48785,3 +48908,86 @@ have a swarm of these, so the shuffled soak is worth keeping as an occasional
 check rather than a standing CI cost. It is not currently wired into any script;
 re-run the invocation above by hand after adding tests that touch process
 globals.
+
+---
+
+## TD-C-THE-DESKTOP-AND-THE-COMPOSITOR-BOTH-DRAW-WINDOW-TITLE-BARS
+
+**In short:** Two different parts of the system each know how to draw a
+window's title bar, borders and close/maximise/minimise buttons, and they
+disagree about what one looks like. The compositor's version is the one that
+actually runs. The desktop shell's version has never drawn a pixel, because
+until today the shell could not be called by anything. Wiring the shell to the
+compositor — the next task — would put the second one on screen *on top of*
+the first, which is how this was found.
+
+**Where:**
+
+| | Compositor | Desktop shell |
+|---|---|---|
+| Entry point | `Compositor::render_title_bar` (`gui/compositor/src/lib.rs`), called from `render_window` | `DesktopShell::render_window_decorations` (`gui/desktop/src/lib.rs:2367`, 92 lines) |
+| Geometry | `Window::title_bar_layout` → `TitleBarLayout` | `DesktopShell::window_chrome` → `WindowChrome` |
+| Button size | `TITLE_BUTTON_SIZE = 20` | `WINDOW_BUTTON_SIZE = 16.0` |
+| Title bar height | `TITLE_BAR_HEIGHT = 30` | `TITLE_BAR_HEIGHT = 30.0` |
+| Display scaling | none | every dimension via `self.scale(…)` |
+| Rounded corners | none | `corner_radii()`, from the user's `WindowCorners` setting |
+| Drop shadow | none | yes |
+| Colours | `self.theme.title_bar_focused` / `close_button` / … | its own constants |
+| Is it on screen? | **yes** | no — no caller but the demo |
+
+**This is the sweep's recurring shape once more**, and the third instance
+found in two days: the tree held one correct answer that callers could not
+reach, so it grew a wrong copy. Here the copy is not merely unused — it has
+*drifted*, and the drift is invisible precisely because only one of the two
+ever runs. Nothing compares 16 against 20.
+
+**Which one is right: the compositor.** This is not a close call and is not an
+open question. `gui/compositor/src/lib.rs`'s own module doc states the policy —
+"Window decorations drawn server-side (consistent look, secure close button)" —
+and the security half of that is the real argument: the close button must be
+drawn and hit-tested by something the client cannot lie to. The compositor also
+already owns everything decoration *does* as opposed to looks like: drag-to-move
+(`title_bar_rect().contains`), resize edges, button hit testing, damage
+tracking, and fullscreen's decoration suppression. Moving those to the shell
+would mean moving input routing to the shell, which contradicts the
+architecture. The shell's copy is the one to delete.
+
+**But deleting it plainly would lose three real features**, which is the actual
+work in this entry:
+
+1. **Display scaling.** The shell scales every decoration dimension by the
+   user's scale factor; the compositor hardcodes pixels. On a HiDPI display the
+   compositor's title bar is 30 physical pixels — a sliver. The scale factor
+   lives in `AppearanceSettings` and has to reach the compositor.
+2. **Corner radius.** The user's `WindowCorners` setting (`Square`/`Rounded`/…)
+   is honoured only by the shell's version.
+3. **Shadows.**
+
+So the sequence is: teach the compositor the two settings it is missing, port
+the shadow, *then* delete `render_window_decorations` and `window_chrome` and
+the geometry fields on `ManagedWindow` that exist only to feed them. Not the
+other order — deleting first ships a visible regression on every HiDPI display.
+
+**Why this blocks the event loop** (`TD-C-THE-SHELL-CAN-DRAW-ITSELF-AND-NOBODY-CAN-ASK-IT-TO`):
+that entry says the loop should "re-render the five trees and submit them". Four
+of the five are genuine shell surfaces — taskbar, Alt-Tab, start menu, calendar.
+The fifth is `render_window_decorations`, and submitting it would double-draw
+every title bar in the desktop, at the wrong size. The loop must render four,
+not five, and this entry is why.
+
+**It also explains a hole in the window-list protocol that is not a hole.**
+`WindowInfo` (`gui/remote/src/window_list.rs`) carries no geometry — no x, y,
+width or height. That looks like an oversight the moment you try to decorate a
+window from a shell, and it is not one: a shell that does not decorate does not
+need window geometry, and a taskbar, Alt-Tab list, start menu and calendar
+between them need none of it. Do not add geometry to `WindowInfo` to make the
+shell's decorator work. That is the copy, not the original.
+
+**Trigger:** do this before the shell event loop, or at minimum render only the
+four shell surfaces in that loop and leave this entry open. Nothing is blocked
+on another lane — `gui/compositor` and `gui/desktop` are both lane C's.
+
+**If never fixed:** the shell keeps a 92-line renderer that cannot be correct
+because nothing exercises it, and the first person to wire the loop up
+naively gets doubled title bars and reasonably concludes the compositor is
+broken.

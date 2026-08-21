@@ -49,21 +49,14 @@ mod theme {
     use guitk::color::Color;
 
     pub const BASE: Color = Color::from_hex(0x1E1E2E);
-    pub const MANTLE: Color = Color::from_hex(0x181825);
-    pub const CRUST: Color = Color::from_hex(0x11111B);
-    pub const SURFACE0: Color = Color::from_hex(0x313244);
     pub const SURFACE1: Color = Color::from_hex(0x45475A);
     pub const SURFACE2: Color = Color::from_hex(0x585B70);
     pub const TEXT: Color = Color::from_hex(0xCDD6F4);
     pub const SUBTEXT0: Color = Color::from_hex(0xA6ADC8);
-    pub const SUBTEXT1: Color = Color::from_hex(0xBAC2DE);
-    pub const OVERLAY0: Color = Color::from_hex(0x6C7086);
     pub const BLUE: Color = Color::from_hex(0x89B4FA);
     pub const RED: Color = Color::from_hex(0xF38BA8);
-    pub const GREEN: Color = Color::from_hex(0xA6E3A1);
     pub const SHADOW: Color = Color::rgba(0, 0, 0, 120);
     pub const INPUT_BG: Color = Color::from_hex(0x11111B);
-    pub const INPUT_BORDER: Color = Color::from_hex(0x585B70);
     pub const INPUT_BORDER_FOCUS: Color = Color::from_hex(0x89B4FA);
     pub const BUTTON_BG: Color = Color::from_hex(0x45475A);
     pub const BUTTON_HOVER: Color = Color::from_hex(0x585B70);
@@ -1178,6 +1171,12 @@ impl RunDialog {
         } else {
             None
         };
+    }
+}
+
+impl Default for RunDialog {
+    fn default() -> Self {
+        Self::new()
     }
 }
 

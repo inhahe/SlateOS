@@ -28,8 +28,6 @@ const MOCHA_SURFACE0: Color = Color::from_hex(0x313244);
 const MOCHA_SURFACE1: Color = Color::from_hex(0x45475A);
 /// Catppuccin Mocha: surface2
 const MOCHA_SURFACE2: Color = Color::from_hex(0x585B70);
-/// Catppuccin Mocha: overlay0
-const MOCHA_OVERLAY0: Color = Color::from_hex(0x6C7086);
 /// Catppuccin Mocha: text
 const MOCHA_TEXT: Color = Color::from_hex(0xCDD6F4);
 /// Catppuccin Mocha: subtext0

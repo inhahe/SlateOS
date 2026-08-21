@@ -372,6 +372,12 @@ impl ClipboardHistory {
     }
 }
 
+impl Default for ClipboardHistory {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 // ============================================================================
 // Clipboard viewer widget
 // ============================================================================
@@ -844,6 +850,12 @@ impl ClipboardViewer {
         }
 
         cmds
+    }
+}
+
+impl Default for ClipboardViewer {
+    fn default() -> Self {
+        Self::new()
     }
 }
 

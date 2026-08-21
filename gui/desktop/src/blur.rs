@@ -731,25 +731,6 @@ impl BlurRenderer {
     // Internal: pixel packing helpers
     // ------------------------------------------------------------------
 
-    /// Unpack ARGB u32 into (R, G, B) as u32 for accumulation.
-    #[inline]
-    fn unpack(px: u32) -> (u32, u32, u32) {
-        let c = Rgb::from_argb(px);
-        (c.r, c.g, c.b)
-    }
-
-    /// Pack RGB channels using a pre-computed reciprocal (fixed-point multiply
-    /// instead of integer division).
-    #[inline]
-    fn pack_with_inv(sr: u32, sg: u32, sb: u32, inv: u32) -> u32 {
-        Rgb {
-            r: sr,
-            g: sg,
-            b: sb,
-        }
-        .average(inv)
-    }
-
     /// Alpha-blend `src` over `dst` with the given source alpha (0..255).
     #[inline]
     fn blend_pixel(src: u32, dst: u32, alpha: u32) -> u32 {
@@ -1525,27 +1506,6 @@ mod tests {
         assert_eq!(region.height, 0.0);
     }
 
-    // ======================================================================
-    // Pixel packing helpers
-    // ======================================================================
-
-    #[test]
-    fn test_unpack_pack_roundtrip() {
-        let px = 0xFF_AB_CD_EFu32;
-        let (r, g, b) = BlurRenderer::unpack(px);
-        assert_eq!(r, 0xAB);
-        assert_eq!(g, 0xCD);
-        assert_eq!(b, 0xEF);
-
-        // Pack with identity reciprocal (1<<16)/1 = 65536 — should reproduce
-        // the same values.
-        let repacked = BlurRenderer::pack_with_inv(r, g, b, reciprocal_table(1));
-        let (r2, g2, b2) = BlurRenderer::unpack(repacked);
-        assert_eq!(r2, 0xAB);
-        assert_eq!(g2, 0xCD);
-        assert_eq!(b2, 0xEF);
-    }
-
     #[test]
     fn test_blend_pixel_fully_opaque() {
         let src = 0xFF_FF_00_00u32; // red
@@ -1600,10 +1560,11 @@ mod tests {
     fn test_saturation_desaturate_to_gray() {
         let mut buf = vec![0xFF_FF_00_00u32]; // pure red
         BlurRenderer::apply_saturation(&mut buf, 0.0);
-        let (r, g, b) = BlurRenderer::unpack(buf[0]);
+        // Straight to `Rgb`, which is what the removed `unpack` wrapper called.
+        let c = Rgb::from_argb(buf[0]);
         // Factor 0 should collapse R=G=B to the luma value.
-        assert_eq!(r, g);
-        assert_eq!(g, b);
+        assert_eq!(c.r, c.g);
+        assert_eq!(c.g, c.b);
     }
 
     // ======================================================================

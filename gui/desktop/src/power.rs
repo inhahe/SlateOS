@@ -26,10 +26,6 @@ use guitk::text;
 // ============================================================================
 
 const COL_BASE: Color = Color::from_hex(0x1E1E2E);
-const COL_SURFACE0: Color = Color::from_hex(0x313244);
-const COL_SURFACE1: Color = Color::from_hex(0x45475A);
-const COL_SURFACE2: Color = Color::from_hex(0x585B70);
-const COL_OVERLAY0: Color = Color::from_hex(0x6C7086);
 const COL_TEXT: Color = Color::from_hex(0xCDD6F4);
 const COL_SUBTEXT0: Color = Color::from_hex(0xA6ADC8);
 const COL_BLUE: Color = Color::from_hex(0x89B4FA);
@@ -38,7 +34,6 @@ const COL_YELLOW: Color = Color::from_hex(0xF9E2AF);
 const COL_RED: Color = Color::from_hex(0xF38BA8);
 const COL_PEACH: Color = Color::from_hex(0xFAB387);
 const COL_LAVENDER: Color = Color::from_hex(0xB4BEFE);
-const COL_MANTLE: Color = Color::from_hex(0x181825);
 
 // ============================================================================
 // Power states and actions
@@ -836,6 +831,12 @@ impl PowerManager {
             self.transition_log.remove(0);
         }
         self.state = new_state;
+    }
+}
+
+impl Default for PowerManager {
+    fn default() -> Self {
+        Self::new()
     }
 }
 

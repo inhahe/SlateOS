@@ -417,6 +417,12 @@ impl StorageSettings {
     }
 }
 
+impl Default for StorageSettings {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 // ============================================================================
 // Settings panel rendering
 // ============================================================================
@@ -930,6 +936,12 @@ impl StorageSettingsUI {
             color: TEXT,
             corner_radii: CornerRadii::all(8.0),
         });
+    }
+}
+
+impl Default for StorageSettingsUI {
+    fn default() -> Self {
+        Self::new()
     }
 }
 

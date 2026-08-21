@@ -80,10 +80,6 @@ mod theme {
     pub const SUBTEXT: Color = Color::from_hex(0xA6ADC8);
     pub const BLUE: Color = Color::from_hex(0x89B4FA);
     pub const LAVENDER: Color = Color::from_hex(0xB4BEFE);
-    pub const RED: Color = Color::from_hex(0xF38BA8);
-    pub const GREEN: Color = Color::from_hex(0xA6E3A1);
-    pub const YELLOW: Color = Color::from_hex(0xF9E2AF);
-    pub const PEACH: Color = Color::from_hex(0xFAB387);
 }
 
 // ============================================================================
@@ -277,15 +273,6 @@ impl Default for CalendarConfig {
 // ============================================================================
 // Date arithmetic helpers
 // ============================================================================
-
-/// Number of days in the given month (1-indexed).
-///
-/// A thin alias for [`date::days_in_month`], kept because the argument order
-/// here is `(year, month)` and the toolkit's is `(month, year)` — the shared
-/// one follows the C convention `tzrules` was extracted from.
-fn days_in_month(year: i32, month: u32) -> u32 {
-    date::days_in_month(year, month)
-}
 
 /// Day-of-week for a given date. 0 = Sunday, 1 = Monday, ..., 6 = Saturday.
 fn day_of_week(year: i32, month: u32, day: u32) -> u32 {
@@ -2604,36 +2591,40 @@ mod tests {
 
     #[test]
     fn days_in_month_non_leap() {
-        assert_eq!(days_in_month(2023, 1), 31);
-        assert_eq!(days_in_month(2023, 2), 28);
-        assert_eq!(days_in_month(2023, 3), 31);
-        assert_eq!(days_in_month(2023, 4), 30);
-        assert_eq!(days_in_month(2023, 5), 31);
-        assert_eq!(days_in_month(2023, 6), 30);
-        assert_eq!(days_in_month(2023, 7), 31);
-        assert_eq!(days_in_month(2023, 8), 31);
-        assert_eq!(days_in_month(2023, 9), 30);
-        assert_eq!(days_in_month(2023, 10), 31);
-        assert_eq!(days_in_month(2023, 11), 30);
-        assert_eq!(days_in_month(2023, 12), 31);
+        assert_eq!(date::days_in_month(2023, 1), 31);
+        assert_eq!(date::days_in_month(2023, 2), 28);
+        assert_eq!(date::days_in_month(2023, 3), 31);
+        assert_eq!(date::days_in_month(2023, 4), 30);
+        assert_eq!(date::days_in_month(2023, 5), 31);
+        assert_eq!(date::days_in_month(2023, 6), 30);
+        assert_eq!(date::days_in_month(2023, 7), 31);
+        assert_eq!(date::days_in_month(2023, 8), 31);
+        assert_eq!(date::days_in_month(2023, 9), 30);
+        assert_eq!(date::days_in_month(2023, 10), 31);
+        assert_eq!(date::days_in_month(2023, 11), 30);
+        assert_eq!(date::days_in_month(2023, 12), 31);
     }
 
     #[test]
     fn days_in_month_leap_february() {
-        assert_eq!(days_in_month(2024, 2), 29);
-        assert_eq!(days_in_month(2000, 2), 29);
-        assert_eq!(days_in_month(1900, 2), 28);
+        assert_eq!(date::days_in_month(2024, 2), 29);
+        assert_eq!(date::days_in_month(2000, 2), 29);
+        assert_eq!(date::days_in_month(1900, 2), 28);
     }
 
     #[test]
     fn an_impossible_month_is_clamped_rather_than_being_zero_days_long() {
         // This used to answer 0, which is not a month length any caller could
-        // use: the recurrence walk stepped `while day > days_in_month(..)`,
+        // use: the recurrence walk stepped `while day > date::days_in_month(..)`,
         // and a zero there is a loop that never advances. Clamping means every
         // month number names a real month.
-        assert_eq!(days_in_month(2024, 0), 31, "month 0 reads as January");
-        assert_eq!(days_in_month(2024, 13), 31, "month 13 reads as December");
-        assert_eq!(days_in_month(2024, u32::MAX), 31);
+        assert_eq!(date::days_in_month(2024, 0), 31, "month 0 reads as January");
+        assert_eq!(
+            date::days_in_month(2024, 13),
+            31,
+            "month 13 reads as December"
+        );
+        assert_eq!(date::days_in_month(2024, u32::MAX), 31);
     }
 
     #[test]
@@ -2849,7 +2840,7 @@ mod tests {
                     );
                     assert_eq!(
                         full.len() as u32,
-                        days_in_month(year, month),
+                        date::days_in_month(year, month),
                         "{year}-{month:02} lost a day"
                     );
                 }
@@ -3182,7 +3173,7 @@ mod tests {
                 end_timestamp: start + 1800, // 30 min
                 all_day: false,
                 repeat: Some(Recurrence::Daily),
-                color: theme::GREEN,
+                color: theme::BLUE,
                 description: String::new(),
             },
         );
@@ -3208,7 +3199,7 @@ mod tests {
                 end_timestamp: start + 3600,
                 all_day: false,
                 repeat: Some(Recurrence::Weekly),
-                color: theme::PEACH,
+                color: theme::LAVENDER,
                 description: String::new(),
             },
         );
@@ -3234,7 +3225,7 @@ mod tests {
                 end_timestamp: start + 7200,
                 all_day: false,
                 repeat: Some(Recurrence::Monthly),
-                color: theme::YELLOW,
+                color: theme::SURFACE2,
                 description: String::new(),
             },
         );
@@ -3260,7 +3251,7 @@ mod tests {
                 end_timestamp: start + 3600,
                 all_day: false,
                 repeat: Some(Recurrence::Monthly),
-                color: theme::GREEN,
+                color: theme::BLUE,
                 description: String::new(),
             },
         );
@@ -3853,7 +3844,7 @@ description: Just a test";
                 end_timestamp: start + 3600,
                 all_day: false,
                 repeat: None,
-                color: theme::PEACH,
+                color: theme::LAVENDER,
                 description: String::new(),
             },
         );

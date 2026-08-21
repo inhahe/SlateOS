@@ -614,6 +614,18 @@ Roadmap:
   **CPython half measured and closed 2026-08-16:** CPython 3.12.3 links against
   our `libc.a` with zero missing symbols (`scripts/cpython-spike/README.md`).
   Linking, not running — the stdlib/rootfs and a real pty layer are still ahead.
+  **Stdlib and rootfs done 2026-08-21:** the earlier measurement was an
+  undercount — two `configure` defects meant most extension modules were never
+  compiled. With `MODULE_BUILDTYPE=static` and the host `pkg-config` shut out,
+  the count is **478** external libc symbols across 83 builtin modules, still
+  zero missing. Both artifacts now ship on `rootfs.ext4` (`IMG_SIZE` 256M →
+  384M): `/bin/python3` (11,210,656, `--strip-debug`) and
+  `/usr/local/lib/python312.zip` (20,498,464, `ZIP_STORED`), staged together
+  and never separately — an interpreter without its stdlib dies inside
+  `init_fs_encoding` before `main()`. See design-decisions.md §344.
+  **Still not run on SlateOS**; the ring-3 rung lives in lane A's tree and is
+  requested in `requests/b-a-cpython-path-z-self-test.md`. A real pty layer
+  remains ahead.
 - `[B]` Translate POSIX calls to native syscalls (line ~1738)
 - `[B]` gcc, cmake, make, pkg-config via the POSIX layer (line ~5343)
 - `[B]` Rust toolchain, CPython, fastpy compiler self-hosting (lines ~5344–5346)

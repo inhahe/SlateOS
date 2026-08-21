@@ -2543,6 +2543,7 @@ pub mod search;
 pub mod semaphore;
 pub mod setjmp;
 pub mod sha2;
+pub mod shadow;
 pub mod signal;
 pub mod socket;
 pub mod spawn;

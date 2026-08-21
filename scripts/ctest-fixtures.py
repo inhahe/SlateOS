@@ -131,8 +131,16 @@ Usage
 
 `build` needs zig and the fastpy `compiler` package importable (each fixture's
 own `build.py` documents this); `check` and `stamp` need neither, so the gate
-runs anywhere. Concretely, on this machine:
+runs anywhere.
 
+You do not normally have to arrange the import yourself: `build` looks for a
+fastpy checkout beside the repo root (and honours `$FASTPY_DIR`) and puts it on
+the child's `PYTHONPATH`. If it cannot find one it says so and names the two
+ways to fix it, rather than letting each fixture die with a bare
+`ModuleNotFoundError: No module named 'compiler'` -- which is nine identical
+tracebacks that do not mention fastpy at all. To override the search:
+
+    FASTPY_DIR="D:/visual studio projects/fastpy" python scripts/ctest-fixtures.py build
     PYTHONPATH="D:/visual studio projects/fastpy" python scripts/ctest-fixtures.py build
 
 **Rebuild through this script, not by running `services/<name>/build.py`
@@ -154,6 +162,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -221,18 +230,26 @@ TEXT_SUFFIXES = frozenset(
 ROOTFS = REPO / "rootfs.ext4"
 ROOTFS_MANIFEST = REPO / "rootfs.ext4.manifest"
 
-# Every locally built ELF the rootfs stages. Globs, not a list, for the same
-# reason `fixtures()` globs: a tenth fixture, or a second ported binary, is
+# Every locally built artifact the rootfs stages. Globs, not a list, for the
+# same reason `fixtures()` globs: a tenth fixture, or a second ported binary, is
 # covered the day it lands instead of the day somebody remembers this file.
 #
-# `build/spike/*.elf` is the ported-binary shelf (bash, pkgconf, CPython). Those
-# are gitignored build products, so unlike the ctest ELFs there is no content
-# stamp behind them at all — the manifest is the *only* thing that can catch a
-# relink that never reached the image.
+# `build/spike/*.elf` is the ported-binary shelf (bash, pkgconf, make, CPython).
+# Those are gitignored build products, so unlike the ctest ELFs there is no
+# content stamp behind them at all — the manifest is the *only* thing that can
+# catch a relink that never reached the image.
+#
+# `build/spike/*.zip` is not an executable and is here anyway: it is CPython's
+# entire standard library (`python312.zip`, ~20 MB), and an interpreter is not
+# meaningfully "the binary" — a `python3` running last week's stdlib is exactly
+# as stale as one that *is* last week's binary, and fails in ways that look like
+# interpreter bugs. Restricting the manifest to ELFs would have covered the
+# 11 MB half of the port and left the 20 MB half unchecked.
 STAGED_GLOBS = (
     "services/ctest-*/*.elf",
     "services/fastpy-*/*.elf",
     "build/spike/*.elf",
+    "build/spike/*.zip",
 )
 
 STAMP_VERSION = 2
@@ -633,10 +650,74 @@ def cmd_check(only: str | None) -> int:
     return rc
 
 
+def _fastpy_dir() -> Path | None:
+    """The fastpy checkout whose `compiler` package each build.py imports.
+
+    Searched, in order: $FASTPY_DIR, anything already on $PYTHONPATH, then a
+    sibling of the repo root named exactly `fastpy`. The sibling lookup is what
+    makes the common case need no configuration at all -- every worktree here
+    (`os`, `os-lane-a/b/c`) sits next to `fastpy` in the same parent directory.
+
+    The sibling must be named `fastpy`, not merely *contain* a `compiler`
+    package. An earlier draft accepted the first sibling that looked importable
+    and so selected `_fastpy_before` -- an old snapshot that sorts ahead of
+    `fastpy` -- silently cross-compiling nine fixtures against a stale
+    compiler. Picking a build input by "first directory that seems plausible"
+    is not a search, it is a guess; when the guess is wrong it produces working
+    binaries built from the wrong source, which no later check catches. Anyone
+    whose checkout lives elsewhere sets FASTPY_DIR.
+
+    A candidate only counts if it actually contains `compiler/__init__.py`, so
+    that a wrong path is reported here rather than nine times over as a bare
+    import error in the children.
+    """
+
+    def usable(p: Path) -> bool:
+        return (p / "compiler" / "__init__.py").is_file()
+
+    env_dir = os.environ.get("FASTPY_DIR")
+    if env_dir:
+        cand = Path(env_dir)
+        # An explicit FASTPY_DIR that is wrong is a mistake worth reporting,
+        # not something to silently fall through from into a sibling that
+        # happens to work -- that would build against a checkout the caller
+        # did not name.
+        if usable(cand):
+            return cand
+        print(f"[ctest] ERROR: FASTPY_DIR={env_dir} has no compiler/__init__.py")
+        return None
+
+    for entry in os.environ.get("PYTHONPATH", "").split(os.pathsep):
+        if entry and usable(Path(entry)):
+            return Path(entry)
+
+    sibling = REPO.parent / "fastpy"
+    return sibling if usable(sibling) else None
+
+
 def cmd_build(only: str | None) -> int:
     if not LIBC.is_file():
         print(f"[ctest] ERROR: missing {LIBC}; run toolchain/build-sysroot.ps1 first")
         return 1
+    # Resolve fastpy before building anything. Without it every fixture dies
+    # with `ModuleNotFoundError: No module named 'compiler'`, which names
+    # neither fastpy nor PYTHONPATH -- nine identical tracebacks that read like
+    # a broken toolchain rather than an unset variable.
+    fastpy = _fastpy_dir()
+    if fastpy is None:
+        print("[ctest] ERROR: cannot find a fastpy checkout (needs compiler/__init__.py).")
+        print("[ctest]        Each services/ctest-*/build.py imports fastpy's `compiler`")
+        print("[ctest]        package to drive the zig cross-compile. Point at it with:")
+        print("[ctest]          FASTPY_DIR=<path-to-fastpy> " f"{_self_cmd()} build")
+        print("[ctest]        or place the fastpy checkout beside this repo:")
+        print(f"[ctest]          {REPO.parent / 'fastpy'}")
+        return 1
+    child_env = dict(os.environ)
+    existing = child_env.get("PYTHONPATH", "")
+    child_env["PYTHONPATH"] = (
+        f"{fastpy}{os.pathsep}{existing}" if existing else str(fastpy)
+    )
+    print(f"[ctest] fastpy: {fastpy}")
     # Warning, not fatal, unlike `check`. Building against a stale libc.a is a
     # real defect, but refusing to build would leave no way to rebuild the
     # fixtures at all on a tree whose sysroot is behind - and the rebuild is
@@ -656,6 +737,7 @@ def cmd_build(only: str | None) -> int:
             capture_output=True,
             text=True,
             timeout=900,
+            env=child_env,
         )
         if result.returncode != 0:
             print(f"[ctest] ERROR {fixture.name}: build.py exited {result.returncode}")
@@ -672,8 +754,8 @@ def cmd_build(only: str | None) -> int:
     return cmd_stamp(only)
 
 
-def _staged_elfs() -> list[Path]:
-    """Every locally built ELF the rootfs stages, sorted, repo-relative order."""
+def _staged_artifacts() -> list[Path]:
+    """Every locally built file the rootfs stages, sorted, repo-relative order."""
     found: list[Path] = []
     for pattern in STAGED_GLOBS:
         found.extend(p for p in REPO.glob(pattern) if p.is_file())
@@ -682,7 +764,8 @@ def _staged_elfs() -> list[Path]:
 
 _IMAGE_HEADER = (
     "# rootfs.ext4 content manifest - generated by scripts/ctest-fixtures.py\n"
-    "# The sha256 of every locally built ELF that was staged into the image.\n"
+    "# The sha256 of every locally built artifact that was staged into the image\n"
+    "# (the ctest/fastpy ELFs, the ported binaries, and CPython's stdlib zip).\n"
     "# `image-check` compares this against the tree, so a fixture rebuilt after\n"
     "# the image was packed is caught BEFORE a boot test reports PASS about the\n"
     "# previous binary. Regenerate by rebuilding the image:\n"
@@ -694,11 +777,12 @@ def cmd_image_stamp() -> int:
     if not ROOTFS.is_file():
         print(f"[ctest] ERROR: no {ROOTFS.name} to stamp ({ROOTFS})")
         return 1
+    staged = _staged_artifacts()
     lines = [_IMAGE_HEADER, f"version {STAMP_VERSION}\n"]
-    for elf in _staged_elfs():
-        lines.append(f"staged {elf.relative_to(REPO).as_posix()} sha256 {sha256(elf)}\n")
+    for art in staged:
+        lines.append(f"staged {art.relative_to(REPO).as_posix()} sha256 {sha256(art)}\n")
     ROOTFS_MANIFEST.write_text("".join(lines), encoding="utf-8", newline="\n")
-    print(f"[ctest] stamped {ROOTFS_MANIFEST.name} ({len(_staged_elfs())} staged ELFs)")
+    print(f"[ctest] stamped {ROOTFS_MANIFEST.name} ({len(staged)} staged artifacts)")
     return 0
 
 
@@ -722,7 +806,7 @@ def cmd_image_check() -> int:
         if len(parts) == 4 and parts[0] == "staged":
             recorded[parts[1]] = parts[3]
 
-    actual = {p.relative_to(REPO).as_posix(): sha256(p) for p in _staged_elfs()}
+    actual = {p.relative_to(REPO).as_posix(): sha256(p) for p in _staged_artifacts()}
     drift: list[str] = []
     for key in sorted(set(recorded) | set(actual)):
         was, now = recorded.get(key), actual.get(key)
@@ -736,14 +820,14 @@ def cmd_image_check() -> int:
             drift.append(f"{key}: image has {was[:16]}..., tree has {now[:16]}...")
 
     if drift:
-        print(f"[ctest] ERROR: {ROOTFS.name} is STALE - it does not contain the ELFs in this tree.")
+        print(f"[ctest] ERROR: {ROOTFS.name} is STALE - it does not hold what this tree built.")
         for line in drift:
             print(f"[ctest]          {line}")
         print("[ctest]        A boot test against this image reports PASS about")
         print("[ctest]        binaries that are no longer the ones you built. Repack it:")
         print("[ctest]          wsl -d Ubuntu -- bash scripts/create-ext4-rootfs.sh")
         return 1
-    print(f"[ctest] ok {ROOTFS.name} ({len(actual)} staged ELFs match the tree)")
+    print(f"[ctest] ok {ROOTFS.name} ({len(actual)} staged artifacts match the tree)")
     return 0
 
 

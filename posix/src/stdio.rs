@@ -229,6 +229,104 @@ pub(crate) const STDIN_SENTINEL: usize = 0;
 pub(crate) const STDOUT_SENTINEL: usize = 1;
 pub(crate) const STDERR_SENTINEL: usize = 2;
 
+// ---------------------------------------------------------------------------
+// Cross-test serialisation for the standard streams
+// ---------------------------------------------------------------------------
+
+/// Cross-test lock for `STDIN_FILE` / `STDOUT_FILE` / `STDERR_FILE`.
+///
+/// These three are process-global `File`s, so every test that writes to a
+/// standard stream — including from other modules, e.g. `wchar`'s
+/// `fputwc(_, stdout)` tests — shares one buffer with every test that asserts
+/// on flush behaviour.
+///
+/// # Why residue on `stdout` is *fatal* on the host, but not on the target
+///
+/// This is a host-test artefact and must not be "fixed" in the library.  On
+/// the OS target `syscall2` issues a real `SYSCALL`, so `SYS_CONSOLE_WRITE`
+/// succeeds and flushing `stdout` works.  In a host `cargo test` build,
+/// `syscall2`'s `#[cfg(not(target_os = "none"))]` arm returns `HOST_ENOSYS`
+/// unconditionally, so `crate::file::write` to a `HandleKind::Console` fd
+/// **always fails**.  `file_flush` therefore returns `EOF` for any stream with
+/// pending bytes, and `fclose(stdout)` reports `EOF` in turn.
+///
+/// The consequence is that a test asserting `fclose(stdout) == 0` is only
+/// meaningful when the buffer is *empty*, and any test that leaves bytes in it
+/// breaks an unrelated test in another module.  That is exactly what happened:
+/// `wchar::tests::test_fputwc_ascii` running before
+/// `stdio::tests::test_fclose_stdout_flushes_only` failed it 100% of the time,
+/// which surfaced as a 26-in-30 flake under `--shuffle` while the default
+/// alphabetical order hid it completely.
+#[cfg(test)]
+pub static STD_STREAM_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Guard returned by [`lock_std_streams_for_test`].
+///
+/// Purges the standard streams' buffers **on drop as well as on acquisition**.
+/// The drop half is the point: a test that writes to `stdout` cannot leave
+/// residue for the next test even if its author never thought about cleanup,
+/// so correctness here does not depend on every future test remembering. A
+/// plain `MutexGuard` would leave that obligation with the caller — which is
+/// the same "looks sufficient, isn't" trap that the deleted `PersonalityGuard`
+/// fell into.
+#[cfg(test)]
+pub struct StdStreamTestGuard {
+    _inner: std::sync::MutexGuard<'static, ()>,
+}
+
+#[cfg(test)]
+impl Drop for StdStreamTestGuard {
+    fn drop(&mut self) {
+        // SAFETY: we still hold the lock, so no other test thread is
+        // touching the standard streams.
+        unsafe { purge_std_stream_buffers() };
+    }
+}
+
+/// Discard any buffered data on the three standard streams.
+///
+/// Discarding rather than flushing is deliberate: on the host the flush can
+/// never succeed (see `STD_STREAM_TEST_LOCK`), and test output is not data
+/// anyone wants written.
+///
+/// # Safety
+///
+/// Caller must hold `STD_STREAM_TEST_LOCK`.
+#[cfg(test)]
+unsafe fn purge_std_stream_buffers() {
+    // SAFETY: caller serialises access via the lock; the three statics are
+    // valid for the process lifetime.
+    unsafe {
+        for p in [
+            core::ptr::addr_of_mut!(STDIN_FILE),
+            core::ptr::addr_of_mut!(STDOUT_FILE),
+            core::ptr::addr_of_mut!(STDERR_FILE),
+        ] {
+            (*p).buf_dir = BUF_DIR_IDLE;
+            (*p).buf_pos = 0;
+            (*p).buf_len = 0;
+            (*p).flags &= !FLAG_ERR;
+        }
+    }
+}
+
+/// Acquire [`STD_STREAM_TEST_LOCK`] (recovering from poison) and start from
+/// empty standard-stream buffers.  Bind the guard to `_g` for the whole test.
+///
+/// Poison is recovered rather than propagated because a panicking test leaves
+/// the streams dirty, not unsound — and the guard's own `Drop` cleans that up
+/// on the way out. Propagating would turn one real failure into a cascade.
+#[cfg(test)]
+#[must_use = "the returned guard serialises standard-stream tests; bind it to `_g`"]
+pub fn lock_std_streams_for_test() -> StdStreamTestGuard {
+    let inner = STD_STREAM_TEST_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    // SAFETY: the lock is held.
+    unsafe { purge_std_stream_buffers() };
+    StdStreamTestGuard { _inner: inner }
+}
+
 /// Convert a C `FILE*` to our internal `File` pointer.
 ///
 /// Sentinel values 0/1/2 map to the static stdin/stdout/stderr FILEs.
@@ -3811,6 +3909,7 @@ mod tests {
 
     #[test]
     fn test_fclose_stdin_flushes_only() {
+        let _g = lock_std_streams_for_test();
         // fclose on stdin should flush but NOT actually close fd 0.
         let ret = fclose(STDIN_SENTINEL as *mut u8);
         // Standard streams are not freed; fclose returns 0 on success.
@@ -3819,12 +3918,14 @@ mod tests {
 
     #[test]
     fn test_fclose_stdout_flushes_only() {
+        let _g = lock_std_streams_for_test();
         let ret = fclose(STDOUT_SENTINEL as *mut u8);
         assert_eq!(ret, 0);
     }
 
     #[test]
     fn test_fclose_stderr_flushes_only() {
+        let _g = lock_std_streams_for_test();
         let ret = fclose(STDERR_SENTINEL as *mut u8);
         assert_eq!(ret, 0);
     }

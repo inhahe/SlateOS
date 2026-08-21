@@ -4552,6 +4552,7 @@ mod tests {
 
     #[test]
     fn test_fputwc_ascii() {
+        let _g = crate::stdio::lock_std_streams_for_test();
         // Writing an ASCII character to stdout should succeed.
         let ret = unsafe { fputwc(b'A' as WcharT, crate::stdio::STDOUT_SENTINEL as *mut u8) };
         // On test host, write to stdout may or may not succeed,
@@ -4561,6 +4562,7 @@ mod tests {
 
     #[test]
     fn test_fputwc_invalid_codepoint() {
+        let _g = crate::stdio::lock_std_streams_for_test();
         // Codepoints above U+10FFFF are invalid → WEOF + EILSEQ.
         crate::errno::set_errno(0);
         let ret = unsafe { fputwc(0x11_0000, crate::stdio::STDOUT_SENTINEL as *mut u8) };
@@ -4570,6 +4572,7 @@ mod tests {
 
     #[test]
     fn test_fputwc_two_byte_utf8() {
+        let _g = crate::stdio::lock_std_streams_for_test();
         // U+00E9 (é) encodes as 2-byte UTF-8 (0xC3 0xA9).
         let ret = unsafe { fputwc(0xE9, crate::stdio::STDOUT_SENTINEL as *mut u8) };
         assert!(ret == 0xE9 || ret == WEOF);
@@ -4577,6 +4580,7 @@ mod tests {
 
     #[test]
     fn test_fputwc_three_byte_utf8() {
+        let _g = crate::stdio::lock_std_streams_for_test();
         // U+4E16 (世) encodes as 3-byte UTF-8.
         let ret = unsafe { fputwc(0x4E16, crate::stdio::STDOUT_SENTINEL as *mut u8) };
         assert!(ret == 0x4E16 || ret == WEOF);
@@ -4584,6 +4588,7 @@ mod tests {
 
     #[test]
     fn test_fputwc_four_byte_utf8() {
+        let _g = crate::stdio::lock_std_streams_for_test();
         // U+1F600 (😀) encodes as 4-byte UTF-8.
         let ret = unsafe { fputwc(0x1F600, crate::stdio::STDOUT_SENTINEL as *mut u8) };
         assert!(ret == 0x1F600 || ret == WEOF);
@@ -4591,6 +4596,7 @@ mod tests {
 
     #[test]
     fn test_fputwc_max_valid_codepoint() {
+        let _g = crate::stdio::lock_std_streams_for_test();
         // U+10FFFF is the maximum valid codepoint.
         let ret = unsafe { fputwc(0x10_FFFF, crate::stdio::STDOUT_SENTINEL as *mut u8) };
         assert!(ret == 0x10_FFFF || ret == WEOF);
@@ -4608,6 +4614,7 @@ mod tests {
 
     #[test]
     fn test_putwc_ascii() {
+        let _g = crate::stdio::lock_std_streams_for_test();
         let ret = unsafe { putwc(b'X' as WcharT, crate::stdio::STDOUT_SENTINEL as *mut u8) };
         assert!(ret == b'X' as WcharT || ret == WEOF);
     }
@@ -4671,12 +4678,14 @@ mod tests {
 
     #[test]
     fn test_fputws_null_returns_error() {
+        let _g = crate::stdio::lock_std_streams_for_test();
         let ret = unsafe { fputws(core::ptr::null(), crate::stdio::STDOUT_SENTINEL as *mut u8) };
         assert_eq!(ret, -1);
     }
 
     #[test]
     fn test_fputws_empty_string_succeeds() {
+        let _g = crate::stdio::lock_std_streams_for_test();
         // An empty wide string (just null terminator) should succeed.
         let ws: [WcharT; 1] = [0];
         let ret = unsafe { fputws(ws.as_ptr(), crate::stdio::STDOUT_SENTINEL as *mut u8) };
@@ -4685,6 +4694,7 @@ mod tests {
 
     #[test]
     fn test_fputws_ascii_string() {
+        let _g = crate::stdio::lock_std_streams_for_test();
         let ws: [WcharT; 4] = [b'H' as WcharT, b'i' as WcharT, b'!' as WcharT, 0];
         let ret = unsafe { fputws(ws.as_ptr(), crate::stdio::STDOUT_SENTINEL as *mut u8) };
         // 0 = success, -1 = write failed on host

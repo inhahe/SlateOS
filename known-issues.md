@@ -49189,6 +49189,67 @@ The deletion: `DesktopShell::render_window_decorations`
 (`gui/desktop/src/lib.rs:2367`), `window_chrome` (`:1238`), and the
 `ManagedWindow` geometry fields that exist only to feed them.
 
+
+**Correction 2026-08-21 — there are five prerequisites, not two, and the entry
+undercounted the deletion as well.** Found by reading the shell's decorator line
+by line before deleting it, rather than trusting this entry's own summary of
+what it does. Two findings, both the same shape as everything else here:
+
+1. **The shell's decorator honours three more user settings than the
+   compositor does.** `render_window_decorations` draws its title bars from
+   `DesktopTheme::from_settings` (`gui/desktop/src/lib.rs:745`) and its title
+   text at `self.font_size(TextRole::Body)`, so it follows:
+   - `theme_mode` — the light palette gives a `0xCCD0DA` title bar, the dark one
+     `0x313244`. The compositor's `DecorationTheme` is one hardcoded set of
+     twelve Catppuccin Mocha colours, so a user in light mode gets dark title
+     bars.
+   - `accent_color` + **`accent_titlebars`** — a setting whose *entire subject*
+     is window title bars, ignored by the process that draws window title bars.
+     `from_settings` paints the focused bar in the accent and picks a readable
+     foreground for it; the inactive bar deliberately keeps the base palette.
+   - `fonts.ui_size` and `fonts.ui_font` — the compositor's title text is
+     `DEFAULT_FONT_SIZE * scale` in `Family::Ui`, a constant and a hardcoded
+     family. A user who enlarged the UI font for readability keeps small title
+     bars, which is an accessibility setting rather than a cosmetic one.
+
+   So the ordering argument this entry already makes for scaling and corners
+   applies unchanged to these three: **deleting first ships a visible
+   regression** for anyone in light mode, anyone with an accent colour, and
+   anyone who changed the UI font. They are prerequisites 3, 4 and 5.
+
+   The fix is *not* to copy `DesktopTheme::from_settings` into the compositor —
+   the light/dark table and the accent derivation would then exist twice, which
+   is `TD-THREE-INDEPENDENT-APPEARANCE-MODELS` reappearing in the place this
+   entry is trying to remove a duplicate from. It is to resolve the decoration
+   colours **in `gui/appearance`**, where the settings live, and have both
+   `DesktopTheme` and `DecorationTheme` read that one answer.
+
+2. **`window_chrome` has a second caller this entry does not mention:
+   `DesktopShell::hit_test` (`gui/desktop/src/lib.rs:1418`).** The shell does not
+   merely *draw* a duplicate title bar; it hit-tests one, resolving clicks into
+   `Hit::WindowClose` / `WindowMaximize` / `WindowMinimize` / `WindowTitleBar`
+   against button rectangles built from `WINDOW_BUTTON_SIZE = 16.0` while the
+   compositor hit-tests the same buttons at `TITLE_BUTTON_SIZE = 20`. That is
+   the same drift as the drawing and is invisible for the same reason. So the
+   deletion is: the renderer, `window_chrome`, `WindowChrome`, those four `Hit`
+   variants and their `handle_mouse` arms.
+
+   What **stays** is `ManagedWindow::frame_rect`, and the line is worth naming
+   because it is not arbitrary: the frame rect is the window's own outer
+   rectangle, arrives from the compositor in physical pixels and is not scaled
+   by the shell — its own doc says so. *Where* a window is may be known to a
+   shell (the taskbar and Alt-Tab need to say which window is which); *what its
+   title bar looks like* may not. Everything the shell puts through `self.scale`
+   here is chrome and goes.
+
+   Roughly fifteen tests in `gui/desktop/src/pointer_tests.rs` sit on the
+   deleted surface. Those asserting a *duplicate* (button rects, chrome radii,
+   chrome shadows) go with it; those asserting real shell behaviour reached
+   *through* a chrome click — `maximizing_and_restoring_returns_the_window_to_
+   where_it_was` and its neighbours, which pin `ManagedWindow::restored` — are
+   rewritten to call the API directly rather than deleted, because the
+   behaviour survives and only its trigger moves.
+
 ## B-SSHD-EXEC-REPLIED-WITH-THE-COMMAND-INSTEAD-OF-RUNNING-IT — 2026-08-21 — FIXED
 
 **In short:** `ssh host 'cat /etc/passwd'` used to come back with the text

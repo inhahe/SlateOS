@@ -1909,9 +1909,20 @@ pub fn block_current() {
             task.state = TaskState::Blocked;
         }
     }
-    // Yield without re-enqueuing (requeue = false).  Blocking is a
-    // voluntary context switch.
-    schedule_inner(false, SwitchKind::Voluntary);
+    // Park.  `requeue = true` reads as a contradiction but is not: the guard in
+    // `schedule_inner` only enqueues a *still-`Running`* task, and we set
+    // `Blocked` above, so the normal path parks exactly as `false` would.
+    //
+    // It matters when `wake()` lands in the window between the unlock above and
+    // `schedule_inner`'s own lock: an involuntary preempt there parks us
+    // off-queue (the guard declines to requeue a `Blocked` task), `wake()` then
+    // makes us `Ready` and enqueues us, and we are re-picked and set `Running` —
+    // arriving here with the wakeup already spent. `false` would then drop a
+    // `Running` task off every queue with nothing left to wake it: a permanent
+    // strand on the hottest path in the kernel. `true` re-enqueues it instead,
+    // so `block()` returns as a woken task should.  Blocking is a voluntary
+    // context switch.
+    schedule_inner(true, SwitchKind::Voluntary);
 }
 
 /// Wake a blocked task, making it runnable again.
@@ -4073,8 +4084,13 @@ pub fn suspend(task_id: TaskId) -> bool {
 
     // If we just suspended the current task, yield to another task.
     // Self-suspension is a voluntary context switch.
+    //
+    // `requeue = true` parks us all the same (the guard only enqueues a
+    // still-`Running` task, and `mark_suspended` set `Suspended`); it exists to
+    // catch a `resume()` that landed in the window above and already re-ran us.
+    // See `schedule_inner`'s `requeue` documentation.
     if task_id == load_current_task() {
-        schedule_inner(false, SwitchKind::Voluntary);
+        schedule_inner(true, SwitchKind::Voluntary);
     }
 
     true
@@ -4162,7 +4178,8 @@ pub fn suspend_pending(task_id: TaskId) -> bool {
 /// The residual window between this check and the context switch inside
 /// `schedule_inner` is the same one [`suspend`] has always had; this split does
 /// not widen it, and narrows the lost-wakeup window from "everything the caller
-/// does after announcing the stop" down to that minimum.
+/// does after announcing the stop" down to that minimum. That residual window is
+/// itself closed by passing `requeue = true` below — see the call site.
 pub fn park_if_suspended() -> bool {
     let current = load_current_task();
 
@@ -4196,7 +4213,14 @@ pub fn park_if_suspended() -> bool {
         }
     }
 
-    schedule_inner(false, SwitchKind::Voluntary);
+    // `requeue = true` closes the residual window named in the doc comment: we
+    // verified `Suspended` under the lock, then dropped it, and an involuntary
+    // preempt in between parks us off-queue. A `resume()` can then re-run us,
+    // and we arrive here `Running` with the resume already spent — where
+    // `requeue = false` would strand us off every queue permanently. In the
+    // ordinary case the state is still `Suspended`, the guard declines to
+    // enqueue, and we park exactly as before.
+    schedule_inner(true, SwitchKind::Voluntary);
     true
 }
 
@@ -5810,8 +5834,26 @@ fn account_cycles(state: &mut SchedState, outgoing_id: TaskId, cpu: usize) {
 
 /// The inner scheduling function.
 ///
-/// If `requeue` is true, the current task is placed back in its
-/// priority queue.  If false, it is not (used for blocking/exiting).
+/// `requeue` means **"re-enqueue the current task if it is still `Running`"** —
+/// not "re-enqueue unconditionally".  The distinction is the whole point: the
+/// guard below only acts on a `Running` task, so passing `true` from a *parking*
+/// call site is not a contradiction.  A parker has already written its own
+/// non-`Running` state (`Blocked`/`Suspended`/`Dead`) under the `SCHED` lock and
+/// then dropped that lock, so at this point:
+///
+/// * still non-`Running`  → nothing is enqueued, and the task parks. Identical
+///   to `requeue = false`.
+/// * back to `Running`    → the wake/resume it was parking for *already landed*,
+///   in the few-instruction window between the parker's unlock and ours, and
+///   re-ran the task.  Enqueueing is then exactly right: the task must not park,
+///   because nothing will ever wake it a second time.
+///
+/// That second case is why every self-parking call site passes `true`.  With
+/// `false` it is a permanent strand: the task leaves the CPU `Running`, off every
+/// run queue, with no wake outstanding.  See the `!requeue` diagnostic below.
+///
+/// Pass `false` only when the task genuinely must never be scheduled again
+/// (`exit`, which sets `Dead`).
 ///
 /// Uses per-CPU queues: first tries the local queue, then work-steals
 /// from other CPUs if the local queue is empty.
@@ -5913,6 +5955,32 @@ fn schedule_inner(requeue: bool, kind: SwitchKind) {
                 // don't re-enqueue — the task is being terminated or
                 // paused.  It will not run again (Dead) or will be
                 // re-enqueued by resume() (Suspended).
+            }
+        } else if !matches!(kind, SwitchKind::Uncounted) {
+            // Hardening: a non-requeueing switch of a task that is still
+            // `Running` strands it permanently — it leaves the CPU while owning
+            // no queue slot and with no wake outstanding, so nothing will ever
+            // schedule it again and every waiter on it blocks forever.
+            //
+            // Every legitimate parker writes its own non-`Running` state before
+            // getting here, so this can only mean the state was reverted in the
+            // parker's unlock→here window (a wake or resume that re-ran the
+            // task) — the case `requeue = true` exists to rescue.  `Uncounted`
+            // is exempt: that is `exit`, which sets `Dead`.
+            if let Some(task) = state.tasks.get(&current_id) {
+                if task.state == TaskState::Running {
+                    static WARNED: AtomicBool = AtomicBool::new(false);
+                    if !WARNED.swap(true, Ordering::Relaxed) {
+                        crate::serial_println!(
+                            "[sched] *** BUG: task {} (cpu {}) switched away Running \
+                             with requeue=false — it is now off every run queue and \
+                             will never be scheduled again. Pass requeue=true from \
+                             parking call sites. (one-shot warning)",
+                            current_id,
+                            cpu,
+                        );
+                    }
+                }
             }
         }
 

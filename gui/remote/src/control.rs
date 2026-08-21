@@ -1038,8 +1038,7 @@ fn decode_request_body(r: &mut Reader<'_>) -> Result<RequestBody, DecodeError> {
             let b = r.read_u8()?;
             RequestBody::ShellControl {
                 window,
-                action: ShellControlAction::from_byte(b)
-                    .ok_or(DecodeError::BadShellAction(b))?,
+                action: ShellControlAction::from_byte(b).ok_or(DecodeError::BadShellAction(b))?,
             }
         }
     })
@@ -1226,8 +1225,9 @@ mod tests {
         // Every byte the decoder accepts names an action that is in `ALL`, and
         // there are exactly as many of them. A variant reachable from the wire
         // but missing from `ALL` would be one no test above ever exercises.
-        let decodable: Vec<ShellControlAction> =
-            (0..=u8::MAX).filter_map(ShellControlAction::from_byte).collect();
+        let decodable: Vec<ShellControlAction> = (0..=u8::MAX)
+            .filter_map(ShellControlAction::from_byte)
+            .collect();
         assert_eq!(decodable.len(), ShellControlAction::ALL.len());
         for action in decodable {
             assert!(ShellControlAction::ALL.contains(&action));

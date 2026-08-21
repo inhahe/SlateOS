@@ -1129,6 +1129,159 @@ EOF
 
 echo "[rootfs] staged pkgconf .pc fixtures in /usr/lib/pkgconfig: slateos-simple, slateos-dep, slateos-badver"
 
+# --- Makefile fixtures for the make self-test ---------------------------------
+# Same reasoning as the .pc fixtures above, and the same trap to avoid.
+# `/bin/make --version` proves the binary loads, relocates, runs main and exits
+# 0 — and proves nothing whatever about make, because what make *does* is parse
+# a makefile, build a dependency graph, compare mtimes, and run recipes through
+# a shell. A --version run does none of those.
+#
+# make is a much heavier OS client than pkgconf, and the spike recorded exactly
+# which facilities it will use (scripts/make-spike/README.md, from src/config.h):
+#
+#   HAVE_POSIX_SPAWN 1 + HAVE_POSIX_SPAWNATTR_SETSIGMASK 1
+#       => recipes are launched with posix_spawn, NOT fork+exec.
+#   MAKE_JOBSERVER 1, HAVE_MKFIFO 1, HAVE_NAMED_SEMAPHORES absent
+#       => a -j build coordinates over a FIFO, not a named semaphore.
+#   HAVE_WAITPID 1 / HAVE_WAIT3 1
+#       => exit status comes back through wait, and make's own exit code
+#          depends on decoding it correctly.
+#
+# The fixtures below are chosen so that each one FAILS if the corresponding
+# facility is stubbed or wrong, rather than merely passing when it is right.
+# That is the lesson from slateos-badver: a suite of only-positive assertions
+# passes against a no-op. Each target is annotated with what its failure means.
+#
+# Staged in /usr/share/make-selftest. The recipes write into the *current*
+# directory, so the rung must chdir somewhere writable (/tmp) and drive these
+# with `make -f`; nothing here writes to /usr/share, which may be read-only.
+MK_DIR="$STAGE/usr/share/make-selftest"
+mkdir -p "$MK_DIR"
+
+# 1. Does a recipe run at all? This is the posix_spawn + shell + wait test, and
+#    it is the one that most plausibly fails first: make will call posix_spawn
+#    (not fork), the child is /bin/sh, and make must reap it and see status 0.
+#    Deliberately writes a file rather than just echoing, so the assertion can
+#    be "the artifact exists with the right bytes" rather than "some output
+#    appeared", which a stubbed spawn could fake by doing nothing successfully.
+cat > "$MK_DIR/01-recipe.mk" <<'EOF'
+# PASS => posix_spawn ran /bin/sh, the recipe executed, make reaped exit 0.
+# FAIL => spawn, exec, the shell, or wait-status decoding is broken.
+all: recipe-ran.txt
+
+recipe-ran.txt:
+	printf 'slateos-make-ok\n' > $@
+EOF
+
+# 2. Prerequisite ORDER, not just execution. `final` depends on `middle`
+#    depends on `first`; each appends its own name. The expected file content
+#    is the exact sequence, so a make that ran all three in the wrong order —
+#    or ran them concurrently and interleaved — fails. A make that ran only the
+#    top target also fails, because the file would be missing two lines.
+cat > "$MK_DIR/02-order.mk" <<'EOF'
+# PASS => the dependency graph was traversed depth-first, bottom-up.
+# FAIL => prerequisites are being ignored, reordered, or run concurrently.
+all: final
+
+first:
+	printf 'first\n' >> order.txt
+
+middle: first
+	printf 'middle\n' >> order.txt
+
+final: middle
+	printf 'final\n' >> order.txt
+EOF
+
+# 3. mtime staleness — the actual heart of make, and the one assertion here
+#    that tests the VFS rather than the process machinery. `stale-out.txt` is
+#    built from `stale-in.txt`; running make a SECOND time must do NOTHING,
+#    because the output is newer than the input. The recipe APPENDS, so a
+#    spurious rebuild shows up as a second line instead of being idempotent
+#    and therefore invisible.
+#
+#    Self-contained: `stale-in.txt` has its own rule, so the rung can run this
+#    in an empty directory without staging an input by hand. That also makes
+#    the first run exercise a two-level chain rather than a single edge.
+#
+#    Read the two directions as separate facts, because they fail separately:
+#      - "second run does nothing" fails if mtimes are non-monotonic or the
+#        output somehow lands older than the input.
+#      - "touch the input, and the third run DOES rebuild" is the direction
+#        that actually proves timestamps advance at all. A VFS that reports a
+#        constant mtime for every file passes the first and fails this one.
+#        See the request to lane A for why that assertion needs the rung's
+#        cooperation and what a failure there would mean.
+cat > "$MK_DIR/03-mtime.mk" <<'EOF'
+# PASS => st_mtime is fine-grained and monotonic enough for make to compare.
+# FAIL => the VFS reports timestamps that up-to-date checks cannot rely on.
+#
+# Assert on the LINE COUNT of stale-out.txt, not on make's wording. A no-op
+# run prints "Nothing to be done for 'all'." here (not "up to date") because
+# `all` itself has no recipe -- checked against GNU make 4.3. Message text is
+# not something make promises; the file is.
+#   run 1 -> 1 line   run 2 (unchanged) -> still 1 line
+#   rewrite stale-in.txt, run 3 -> 2 lines
+all: stale-out.txt
+
+stale-in.txt:
+	printf 'input\n' > $@
+
+stale-out.txt: stale-in.txt
+	printf 'rebuilt\n' >> $@
+EOF
+
+# 4. Variable expansion and $(shell ...). $(shell) is a second, independent
+#    spawn path inside make (it captures output through a pipe rather than
+#    letting the child inherit stdout), so it can fail while recipes work.
+#    The recursive variable proves expansion is deferred, not eager.
+cat > "$MK_DIR/04-vars.mk" <<'EOF'
+# PASS => variable expansion works and $(shell) spawns + captures via a pipe.
+# FAIL => the parser, or make's pipe-capture spawn path, is broken.
+GREETING = slateos
+SUBJECT  = $(GREETING)-make
+CAPTURED := $(shell printf 'captured-ok')
+
+all:
+	printf '%s %s\n' '$(SUBJECT)' '$(CAPTURED)' > vars.txt
+EOF
+
+# 5. FAILURE propagation — the negative test, and the direct analogue of
+#    slateos-badver. A recipe that exits 1 must make `make` itself exit
+#    non-zero. Without this the whole suite would pass against a make that
+#    treats every child as successful, which is precisely what a wait-status
+#    decoding bug looks like: wait() returns a raw status word, and reading it
+#    with the wrong macro turns exit(1) into "success".
+#
+#    `.DELETE_ON_ERROR:` is deliberate and is NOT decoration. The recipe
+#    creates the target and *then* fails, which is how a real interrupted
+#    build leaves a half-written object file behind. Without the directive
+#    upstream make keeps that partial file (verified against GNU make 4.3
+#    before this fixture was written — the first draft of this comment claimed
+#    the opposite, and running it is what caught that). With the directive
+#    make unlinks it, so the fixture buys a second, independent assertion.
+#
+#    The two assertions fail for different reasons; do not collapse them:
+#      - non-zero exit  => wait-status decoding
+#      - target absent  => make's error-cleanup path reached unlink(), and
+#                          unlink() through our VFS worked
+cat > "$MK_DIR/05-failure.mk" <<'EOF'
+# PASS => make exits NON-ZERO *and* should-not-exist.txt has been removed.
+# FAIL (exit 0)      => wait status decoded as success; every broken build
+#                       would silently "succeed", which is worse than make
+#                       not running at all.
+# FAIL (file exists) => .DELETE_ON_ERROR cleanup did not run, or unlink()
+#                       failed. Report separately from the exit code.
+.DELETE_ON_ERROR:
+
+all: should-not-exist.txt
+
+should-not-exist.txt:
+	printf 'this should never be committed\n' > $@ ; exit 1
+EOF
+
+echo "[rootfs] staged make fixtures in /usr/share/make-selftest: 01-recipe, 02-order, 03-mtime, 04-vars, 05-failure"
+
 # --- native C ring-3 fixtures (services/ctest-*) ------------------------------
 # A few self-tests need constructs only a C compiler emits — e.g. a `__thread`
 # access plus a `%fs:0x28` stack-protector canary load in a *child* thread (see

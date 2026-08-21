@@ -23,11 +23,18 @@
 //! Implements a subset of SSH-2 (RFC 4253, 4252, 4254):
 //! - Version exchange (SSH-2.0-SlateOS_SSHD_1.0)
 //! - Key exchange: diffie-hellman-group14-sha256
-//! - Host key: ssh-ed25519 (structured)
+//! - Host key: ssh-ed25519 (RFC 8032, via `posix::ed25519`)
 //! - Encryption: AES-128-CTR
 //! - MAC: HMAC-SHA256
-//! - User auth: password (against /etc/shadow), public key (`authorized_keys`)
+//! - User auth: password (against /etc/shadow), public key (`authorized_keys`,
+//!   with the RFC 4252 section 7 signature actually verified)
 //! - Session channels: `exec` requests run the command
+//!
+//! The host key is read from, or created at, `HostKeyFile`
+//! (`/etc/ssh/ssh_host_ed25519_key` by default) in OpenSSH private key format.
+//! A file that exists but cannot be parsed is fatal rather than replaced: see
+//! `HostKey::load_from_file` for why substituting a key is worse than refusing
+//! to start.
 //!
 //! # What a session can and cannot do
 //!
@@ -80,10 +87,10 @@ const SYS_CLOCK_MONOTONIC: u64 = 10;
 const SYS_PROCESS_SPAWN: u64 = 500;
 const SYS_PROCESS_ID: u64 = 502;
 const SYS_FS_READ_FILE: u64 = 600;
-#[allow(dead_code)]
 const SYS_FS_WRITE_FILE: u64 = 601;
 #[allow(dead_code)]
 const SYS_FS_STAT: u64 = 606;
+const SYS_FS_SET_PERMS: u64 = 631;
 #[allow(dead_code)]
 const SYS_TCP_CONNECT: u64 = 800;
 const SYS_TCP_SEND: u64 = 801;
@@ -223,6 +230,48 @@ fn fs_read_file(path: &str) -> Result<Vec<u8>, SshdError> {
     }
     buf.truncate(ret as usize);
     Ok(buf)
+}
+
+/// Write a whole file through the kernel filesystem, creating or truncating it.
+fn fs_write_file(path: &str, data: &[u8]) -> Result<(), SshdError> {
+    // SAFETY: We pass a valid path pointer+len and a valid data pointer+len.
+    // The kernel reads both and writes nothing back through them.
+    let ret = unsafe {
+        syscall4(
+            SYS_FS_WRITE_FILE,
+            path.as_ptr() as u64,
+            path.len() as u64,
+            data.as_ptr() as u64,
+            data.len() as u64,
+        )
+    };
+    if ret < 0 {
+        return Err(SshdError::IoError(io::Error::other(format!(
+            "cannot write {path}: error {ret}"
+        ))));
+    }
+    Ok(())
+}
+
+/// Set a file's permission bits.
+fn fs_set_mode(path: &str, mode: u32) -> Result<(), SshdError> {
+    // SAFETY: We pass a valid path pointer+len; `mode` and the no-follow flag
+    // are scalars. The kernel reads the path and writes nothing back.
+    let ret = unsafe {
+        syscall4(
+            SYS_FS_SET_PERMS,
+            path.as_ptr() as u64,
+            path.len() as u64,
+            u64::from(mode & 0o7777),
+            0,
+        )
+    };
+    if ret < 0 {
+        return Err(SshdError::IoError(io::Error::other(format!(
+            "cannot set mode on {path}: error {ret}"
+        ))));
+    }
+    Ok(())
 }
 
 /// Get the current monotonic clock in milliseconds.
@@ -1345,55 +1394,79 @@ fn dh_group14_generator() -> BigUint {
 /// Generate a deterministic-looking private key from available entropy sources.
 /// In a real implementation this would use a CSPRNG, but for this simplified
 /// daemon we derive from process-id and monotonic clock.
-fn generate_dh_private() -> BigUint {
-    let pid = get_pid();
-    let time = clock_monotonic_ms();
-    let mut seed = Vec::new();
-    seed.extend_from_slice(&pid.to_le_bytes());
-    seed.extend_from_slice(&time.to_le_bytes());
-    seed.extend_from_slice(b"sshd-dh-private-key-seed");
-    let h1 = sha256(&seed);
-    seed.extend_from_slice(&h1);
-    let h2 = sha256(&seed);
-
-    let mut key_bytes = Vec::with_capacity(64);
-    key_bytes.extend_from_slice(&h1);
-    key_bytes.extend_from_slice(&h2);
-    // Ensure it is shorter than the prime (256 bits < 2048 bits).
-    BigUint::from_bytes_be(&key_bytes[..32])
+fn generate_dh_private() -> Result<BigUint, SshdError> {
+    // 256 bits, per RFC 4419 section 6.2's guidance that the exponent be at
+    // least twice the 128-bit security level the group14 prime provides.
+    let mut bytes = [0u8; 32];
+    posix::random::fill(&mut bytes).map_err(|e| {
+        SshdError::ProtocolError(format!(
+            "cannot generate a Diffie-Hellman private key: CSPRNG errno {e}"
+        ))
+    })?;
+    // Set the top bit so the exponent is a full 256 bits rather than however
+    // many the leading zero bytes leave, and the bottom bit so it is odd. Both
+    // are what OpenSSH's BN_rand(..., BN_RAND_TOP_ONE, BN_RAND_BOTTOM_ODD) does.
+    bytes[0] |= 0x80;
+    bytes[31] |= 1;
+    Ok(BigUint::from_bytes_be(&bytes))
 }
 
 // ============================================================================
-// Host key (Ed25519 structured representation)
+// Host key (Ed25519, RFC 8032)
 //
-// We store a 32-byte seed and derive a public key. The actual Ed25519 math
-// (curve operations) would require a full implementation. Here we structure
-// the host key data and sign by hashing with the private seed, which is
-// sufficient for the protocol framing. A production server would use real
-// Ed25519.
+// This used to be a structural placeholder: the "public key" was SHA-256 of
+// the seed and `sign` returned an HMAC-SHA256 zero-extended to 64 bytes, both
+// labelled `ssh-ed25519` on the wire. Nothing about that is verifiable by a
+// real client, so no real client could ever complete a handshake with this
+// daemon -- and the failure would have appeared as a signature mismatch in
+// OpenSSH rather than as anything pointing here.
+//
+// The mathematics now lives in `posix::ed25519`, which is checked against the
+// RFC 8032 section 7.1 test vectors. See that module's header for why it is in
+// the libc rather than in each of the three programs that were faking it.
 // ============================================================================
 
 struct HostKey {
-    /// 32-byte private seed.
+    /// 32-byte private seed (RFC 8032 secret key).
     seed: [u8; 32],
-    /// 32-byte "public key" (SHA-256 of seed for this simplified impl).
+    /// 32-byte Ed25519 public key, derived from the seed.
     public_key: [u8; 32],
 }
 
 impl HostKey {
-    /// Create a host key from a 32-byte seed.
+    /// Create a host key from a 32-byte RFC 8032 seed.
     fn from_seed(seed: [u8; 32]) -> Self {
-        let public_key = sha256(&seed);
+        let public_key = posix::ed25519::public_key(&seed);
         Self { seed, public_key }
     }
 
-    /// Generate a deterministic host key from the daemon's identity.
-    fn generate_default() -> Self {
-        let mut material = Vec::new();
-        material.extend_from_slice(b"slateos-sshd-default-host-key");
-        material.extend_from_slice(&get_pid().to_le_bytes());
-        let seed = sha256(&material);
-        Self::from_seed(seed)
+    /// Generate a fresh host key from the kernel CSPRNG and write it to `path`
+    /// in OpenSSH private key format, so the next start reads back the same
+    /// identity.
+    ///
+    /// Persisting is the whole point. The previous version derived the seed
+    /// from `sha256("slateos-sshd-default-host-key" || pid)`, which is both
+    /// guessable — the search space is the pid, about 32000 values — and
+    /// different on every start, so every client's `known_hosts` entry went
+    /// stale at every reboot. A host key that changes constantly trains users
+    /// to accept the changed-key warning, which is precisely the warning that
+    /// distinguishes a reboot from a man in the middle.
+    ///
+    /// # Errors
+    ///
+    /// Fails if the kernel cannot supply random bytes, or if the key cannot be
+    /// written. Both are fatal: a daemon that runs with a key it could not
+    /// persist is a daemon whose identity changes silently.
+    fn generate_and_persist(path: &str) -> Result<Self, SshdError> {
+        let mut seed = [0u8; 32];
+        posix::random::fill(&mut seed).map_err(|e| {
+            SshdError::ConfigError(format!(
+                "cannot generate a host key: the kernel CSPRNG returned errno {e}"
+            ))
+        })?;
+        let key = Self::from_seed(seed);
+        write_openssh_private_key(path, &seed, &key.public_key)?;
+        Ok(key)
     }
 
     /// Encode the public key in SSH wire format: "ssh-ed25519" + `key_data`.
@@ -1404,43 +1477,58 @@ impl HostKey {
         blob
     }
 
-    /// Sign data using the host key seed (simplified: HMAC-SHA256 with seed).
+    /// Sign data with the host key, returning an RFC 4253 section 6.6 signature
+    /// blob: `string "ssh-ed25519" || string sig`, where `sig` is the 64-byte
+    /// RFC 8032 signature.
     fn sign(&self, data: &[u8]) -> Vec<u8> {
-        let sig_bytes = hmac_sha256(&self.seed, data);
+        let sig = posix::ed25519::sign(&self.seed, data);
         let mut sig_blob = Vec::new();
         sig_blob.extend_from_slice(&ssh_string(b"ssh-ed25519"));
-        // Ed25519 signatures are 64 bytes; pad our 32-byte HMAC to 64.
-        let mut sig64 = [0u8; 64];
-        sig64[..32].copy_from_slice(&sig_bytes);
-        // Derive the second half from additional hashing.
-        let extra = sha256(&sig_bytes);
-        sig64[32..].copy_from_slice(&extra);
-        sig_blob.extend_from_slice(&ssh_string(&sig64));
+        sig_blob.extend_from_slice(&ssh_string(&sig));
         sig_blob
     }
 
-    /// Compute the SHA-256 fingerprint of the public key.
+    /// Compute the SHA-256 fingerprint of the public key, in the form
+    /// `ssh-keygen -lf` prints: base64 of the digest with the `=` padding
+    /// removed. The padding matters — an operator comparing this line against
+    /// the one their client shows needs the two to be the same string.
     fn fingerprint(&self) -> String {
         let blob = self.public_key_blob();
         let hash = sha256(&blob);
         let encoded = base64_encode(&hash);
+        let encoded = encoded.trim_end_matches('=');
         format!("SHA256:{encoded}")
     }
 
-    /// Try to load a host key from a file. Supports a simplified format:
-    /// the file should contain 32 hex-encoded bytes (64 hex chars) or
-    /// 32 raw bytes.
+    /// Try to load a host key from a file.
+    ///
+    /// Three formats are accepted, in order: an OpenSSH private key (what
+    /// `ssh-keygen -t ed25519` writes), 32 raw seed bytes, or 64 hex digits.
+    ///
+    /// A file that matches none of them is an **error**. The previous version
+    /// fell back to `sha256(first_line)` — it invented a seed from a file it
+    /// could not parse, so `sshd -h /etc/ssh/ssh_host_rsa_key` started
+    /// successfully with a host key unrelated to the file named, and the
+    /// operator's only clue would have been that every client reported a
+    /// changed host key. Failing to parse a host key must stop the daemon.
     fn load_from_file(path: &str) -> Result<Self, SshdError> {
         let data = fs_read_file(path)?;
+        let text = String::from_utf8_lossy(&data);
+
+        if text.contains("BEGIN OPENSSH PRIVATE KEY") {
+            let seed = parse_openssh_private_key(&text)
+                .map_err(|e| SshdError::ConfigError(format!("{path}: {e}")))?;
+            return Ok(Self::from_seed(seed));
+        }
+
         if data.len() == 32 {
             let mut seed = [0u8; 32];
             seed.copy_from_slice(&data);
             return Ok(Self::from_seed(seed));
         }
-        // Try hex-encoded.
-        let text = String::from_utf8_lossy(&data);
+
         let hex_str: String = text.chars().filter(char::is_ascii_hexdigit).collect();
-        if hex_str.len() >= 64 {
+        if hex_str.len() == 64 {
             let mut seed = [0u8; 32];
             for i in 0..32 {
                 seed[i] = u8::from_str_radix(&hex_str[i * 2..i * 2 + 2], 16)
@@ -1448,24 +1536,195 @@ impl HostKey {
             }
             return Ok(Self::from_seed(seed));
         }
-        // Try OpenSSH format: look for base64 payload after the key type.
-        for line in text.lines() {
-            let line = line.trim();
-            if line.starts_with("-----") || line.is_empty() || line.starts_with('#') {
-                continue;
-            }
-            // OpenSSH private key: after headers, base64 data contains the seed.
-            // Simplified: hash the entire file content as the seed.
-            let seed = sha256(line.as_bytes());
-            return Ok(Self::from_seed(seed));
-        }
+
         Err(SshdError::ConfigError(format!(
-            "cannot parse host key from {path}"
+            "cannot parse host key from {path}: expected an OpenSSH private key, \
+             32 raw bytes, or 64 hex digits"
         )))
     }
 }
 
-/// Minimal base64 encoder (no padding variant for fingerprint display).
+/// Extract the Ed25519 seed from an unencrypted OpenSSH private key file.
+///
+/// The container (`PROTOCOL.key` in the OpenSSH distribution) is:
+///
+/// ```text
+/// "openssh-key-v1\0"
+/// string  ciphername
+/// string  kdfname
+/// string  kdfoptions
+/// uint32  number of keys N
+/// string  publickey[N]
+/// string  encrypted-private-section
+/// ```
+///
+/// and the private section, once decrypted (a no-op when `ciphername` is
+/// `none`), is:
+///
+/// ```text
+/// uint32  checkint
+/// uint32  checkint   (must equal the first: this is how a wrong passphrase
+///                     is detected, and it is a free integrity check for us)
+/// string  keytype
+/// string  public key
+/// string  private key
+/// string  comment
+/// byte[]  padding 1, 2, 3, ...
+/// ```
+///
+/// For `ssh-ed25519` the "private key" field is 64 bytes: the 32-byte seed
+/// followed by a copy of the public key. We take the seed and re-derive the
+/// public key rather than trusting the copy, so a corrupted file fails the
+/// consistency check below instead of producing a key whose halves disagree.
+fn parse_openssh_private_key(text: &str) -> Result<[u8; 32], String> {
+    let body: String = text
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.starts_with("-----") && !l.is_empty())
+        .collect();
+    let raw = base64_decode(&body);
+
+    const MAGIC: &[u8] = b"openssh-key-v1\0";
+    if raw.len() < MAGIC.len() || &raw[..MAGIC.len()] != MAGIC {
+        return Err("not an openssh-key-v1 container".into());
+    }
+    let mut off = MAGIC.len();
+
+    let (ciphername, next) = read_ssh_string(&raw, off).map_err(|_| "truncated ciphername")?;
+    off = next;
+    if ciphername != b"none" {
+        // Refusing is the honest answer: we have no passphrase prompt (sshd is
+        // started by init, with no terminal), and no bcrypt_pbkdf to derive the
+        // key with even if we had one.
+        return Err(format!(
+            "key is encrypted with {}; sshd cannot prompt for a passphrase, \
+             re-create it with an empty passphrase",
+            String::from_utf8_lossy(ciphername)
+        ));
+    }
+    let (_kdfname, next) = read_ssh_string(&raw, off).map_err(|_| "truncated kdfname")?;
+    off = next;
+    let (_kdfopts, next) = read_ssh_string(&raw, off).map_err(|_| "truncated kdfoptions")?;
+    off = next;
+
+    if off + 4 > raw.len() {
+        return Err("truncated key count".into());
+    }
+    let nkeys = u32::from_be_bytes([raw[off], raw[off + 1], raw[off + 2], raw[off + 3]]);
+    off += 4;
+    if nkeys != 1 {
+        return Err(format!(
+            "expected exactly one key in the file, found {nkeys}"
+        ));
+    }
+
+    let (_pubkey, next) = read_ssh_string(&raw, off).map_err(|_| "truncated public key")?;
+    off = next;
+    let (private, _) = read_ssh_string(&raw, off).map_err(|_| "truncated private section")?;
+
+    if private.len() < 8 {
+        return Err("private section too short".into());
+    }
+    let check1 = u32::from_be_bytes([private[0], private[1], private[2], private[3]]);
+    let check2 = u32::from_be_bytes([private[4], private[5], private[6], private[7]]);
+    if check1 != check2 {
+        return Err("private section checkints differ (corrupt or encrypted key)".into());
+    }
+
+    let (keytype, poff) = read_ssh_string(private, 8).map_err(|_| "truncated key type")?;
+    if keytype != b"ssh-ed25519" {
+        return Err(format!(
+            "unsupported host key type {}; only ssh-ed25519 is implemented",
+            String::from_utf8_lossy(keytype)
+        ));
+    }
+    let (stored_public, poff) = read_ssh_string(private, poff).map_err(|_| "truncated pubkey")?;
+    let (secret, _) = read_ssh_string(private, poff).map_err(|_| "truncated secret")?;
+    if secret.len() != 64 {
+        return Err(format!(
+            "ssh-ed25519 secret should be 64 bytes, found {}",
+            secret.len()
+        ));
+    }
+
+    let mut seed = [0u8; 32];
+    seed.copy_from_slice(&secret[..32]);
+    if posix::ed25519::public_key(&seed).as_slice() != stored_public {
+        return Err("public key in the file does not match the private seed".into());
+    }
+    Ok(seed)
+}
+
+/// Write an unencrypted OpenSSH-format Ed25519 private key to `path`, mode
+/// 0600.
+///
+/// The layout is the one [`parse_openssh_private_key`] documents, written back.
+/// Using the real container rather than a bare 32-byte seed file means a key
+/// this daemon generates can be inspected with `ssh-keygen -lf` and copied to
+/// another machine, and that the round trip through our own parser is exercised
+/// on the very next start.
+fn write_openssh_private_key(
+    path: &str,
+    seed: &[u8; 32],
+    public: &[u8; 32],
+) -> Result<(), SshdError> {
+    let mut pub_blob = Vec::new();
+    pub_blob.extend_from_slice(&ssh_string(b"ssh-ed25519"));
+    pub_blob.extend_from_slice(&ssh_string(public));
+
+    let mut secret = Vec::with_capacity(64);
+    secret.extend_from_slice(seed);
+    secret.extend_from_slice(public);
+
+    // The two checkints are compared on read to detect a wrong passphrase. We
+    // never encrypt, so any value works as long as they match; a random one
+    // keeps the file byte-identical in structure to what ssh-keygen writes.
+    let mut checkint = [0u8; 4];
+    posix::random::fill(&mut checkint).map_err(|e| {
+        SshdError::ConfigError(format!("cannot generate a host key: CSPRNG errno {e}"))
+    })?;
+
+    let mut private = Vec::new();
+    private.extend_from_slice(&checkint);
+    private.extend_from_slice(&checkint);
+    private.extend_from_slice(&ssh_string(b"ssh-ed25519"));
+    private.extend_from_slice(&ssh_string(public));
+    private.extend_from_slice(&ssh_string(&secret));
+    private.extend_from_slice(&ssh_string(b"slateos-sshd"));
+    // Pad to a multiple of 8 (the cipher block size that "none" nominally has)
+    // with the bytes 1, 2, 3, … as PROTOCOL.key specifies.
+    let mut pad: u8 = 1;
+    while private.len() % 8 != 0 {
+        private.push(pad);
+        pad += 1;
+    }
+
+    let mut raw = Vec::new();
+    raw.extend_from_slice(b"openssh-key-v1\0");
+    raw.extend_from_slice(&ssh_string(b"none")); // ciphername
+    raw.extend_from_slice(&ssh_string(b"none")); // kdfname
+    raw.extend_from_slice(&ssh_string(b"")); // kdfoptions
+    raw.extend_from_slice(&1u32.to_be_bytes()); // one key
+    raw.extend_from_slice(&ssh_string(&pub_blob));
+    raw.extend_from_slice(&ssh_string(&private));
+
+    let body = base64_encode(&raw);
+    let mut text = String::from("-----BEGIN OPENSSH PRIVATE KEY-----\n");
+    for chunk in body.as_bytes().chunks(70) {
+        text.push_str(&String::from_utf8_lossy(chunk));
+        text.push('\n');
+    }
+    text.push_str("-----END OPENSSH PRIVATE KEY-----\n");
+
+    fs_write_file(path, text.as_bytes())?;
+    // Order matters: the file is created by the write above with whatever the
+    // umask gives it, so tighten it immediately. A host key readable by other
+    // users is a host key that has already been compromised.
+    fs_set_mode(path, 0o600)?;
+    Ok(())
+}
+
+/// Minimal base64 encoder (RFC 4648, with `=` padding).
 fn base64_encode(data: &[u8]) -> String {
     const ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut result = String::new();
@@ -2513,7 +2772,21 @@ fn do_key_exchange(conn: &mut ConnectionState) -> Result<(), SshdError> {
     // Generate our DH keypair.
     let p = dh_group14_prime();
     let g = dh_group14_generator();
-    let y = generate_dh_private();
+
+    // RFC 4253 section 8: "values of e or f that are not in the range
+    // [1, p-1]" must be rejected. Without this a client can send e = 0 or
+    // e = 1 and pin the shared secret to 0 or 1 -- a value it knows, and
+    // therefore session keys it knows, with no need to break anything.
+    // e = p-1 is excluded too: it has order 2, so K is one of two values.
+    let p_minus_1 = p.sub_big(&BigUint::one());
+    if client_e.cmp_unsigned(&BigUint::one()) != std::cmp::Ordering::Greater
+        || client_e.cmp_unsigned(&p_minus_1) != std::cmp::Ordering::Less
+    {
+        return Err(SshdError::ProtocolError(
+            "client DH value out of range (RFC 4253 section 8)".into(),
+        ));
+    }
+    let y = generate_dh_private()?;
     let f = g.mod_pow(&y, &p); // f = g^y mod p
     let shared_secret_big = client_e.mod_pow(&y, &p); // K = e^y mod p
     let shared_secret = shared_secret_big.to_bytes_be();
@@ -2688,9 +2961,15 @@ fn do_user_auth(conn: &mut ConnectionState) -> Result<(), SshdError> {
         }
 
         let (username_bytes, off) = read_ssh_string(&payload, 1)?;
+        // The publickey signature is computed over the *bytes* the client sent
+        // for the user and service names, so those are kept alongside the lossy
+        // strings the rest of the loop uses for lookups and logging. A username
+        // that is not valid UTF-8 would otherwise be re-encoded with U+FFFD and
+        // every signature over it would fail for a reason nothing reports.
+        let user_bytes = username_bytes.to_vec();
         let username = String::from_utf8_lossy(username_bytes).into_owned();
         let (service_bytes, off) = read_ssh_string(&payload, off)?;
-        let _service = String::from_utf8_lossy(service_bytes);
+        let service_bytes = service_bytes.to_vec();
         let (method_bytes, off) = read_ssh_string(&payload, off)?;
         let method = String::from_utf8_lossy(method_bytes).into_owned();
 
@@ -2726,7 +3005,40 @@ fn do_user_auth(conn: &mut ConnectionState) -> Result<(), SshdError> {
                 handle_password_auth(&payload, off, &username)?
             }
             "publickey" if conn.config.pubkey_authentication => {
-                handle_pubkey_auth(&payload, off, &username, &conn.config)?
+                // Authentication runs after NEWKEYS, so the session ID always
+                // exists here; a client that got this far without a key
+                // exchange is speaking a protocol we do not implement.
+                let Some(session_id) = conn.session_id else {
+                    return Err(SshdError::ProtocolError(
+                        "publickey auth before key exchange".into(),
+                    ));
+                };
+                match handle_pubkey_auth(
+                    &payload,
+                    off,
+                    &user_bytes,
+                    &username,
+                    &service_bytes,
+                    &session_id,
+                    &conn.config,
+                )? {
+                    PubkeyOutcome::Accepted => true,
+                    PubkeyOutcome::Query {
+                        algorithm,
+                        key_blob,
+                    } => {
+                        let mut ok = Vec::new();
+                        ok.push(msg::SSH_MSG_USERAUTH_PK_OK);
+                        ok.extend_from_slice(&ssh_string(&algorithm));
+                        ok.extend_from_slice(&ssh_string(&key_blob));
+                        conn.send_packet(&ok)?;
+                        conn.debug_log("offered key is acceptable, awaiting signature");
+                        // A query is neither success nor failure: skip both the
+                        // attempt counter and the FAILURE reply below.
+                        continue;
+                    }
+                    PubkeyOutcome::Rejected => false,
+                }
             }
             _ => false,
         };
@@ -2772,46 +3084,184 @@ fn handle_password_auth(payload: &[u8], offset: usize, username: &str) -> Result
     Ok(false)
 }
 
-/// Handle public key authentication.
+/// The outcome of examining one `publickey` `SSH_MSG_USERAUTH_REQUEST`.
+enum PubkeyOutcome {
+    /// The client proved possession of an authorised key. Let it in.
+    Accepted,
+    /// The client asked, without a signature, whether this key would be
+    /// acceptable (RFC 4252 section 7). It is; the caller owes it an
+    /// `SSH_MSG_USERAUTH_PK_OK` carrying these two fields back verbatim.
+    ///
+    /// This is *not* an authentication failure and must not be counted as one
+    /// or answered with `SSH_MSG_USERAUTH_FAILURE` -- OpenSSH sends the query
+    /// first for every key in the agent, and a failure reply makes it give up
+    /// on a key it was about to sign with.
+    Query {
+        algorithm: Vec<u8>,
+        key_blob: Vec<u8>,
+    },
+    /// Not an authorised key, or the signature did not verify.
+    Rejected,
+}
+
+/// Handle public key authentication (RFC 4252 section 7).
+///
+/// # The bug this replaces
+///
+/// The previous implementation compared the offered public key against
+/// `authorized_keys` and, if it matched and a signature was present, returned
+/// success **without looking at the signature**. A public key is public: SSH
+/// sends it in the clear and it sits world-readable in `authorized_keys`, so
+/// anyone who had ever seen the user connect -- or who could read that file, or
+/// the user's `id_ed25519.pub` -- could log in as them by replaying it. The
+/// signature is the entire proof of possession; skipping it removes the only
+/// thing being authenticated.
+///
+/// # What is checked now
+///
+/// The signature must verify over the exact blob RFC 4252 section 7 specifies:
+///
+/// ```text
+/// string    session identifier
+/// byte      SSH_MSG_USERAUTH_REQUEST
+/// string    user name
+/// string    service name
+/// string    "publickey"
+/// boolean   TRUE
+/// string    public key algorithm name
+/// string    public key
+/// ```
+///
+/// Binding the session identifier is what stops a signature captured from one
+/// connection being replayed on another, and binding the user and service name
+/// is what stops a signature for one account being presented for a different
+/// one.
 fn handle_pubkey_auth(
     payload: &[u8],
     offset: usize,
+    user_bytes: &[u8],
     username: &str,
+    service_bytes: &[u8],
+    session_id: &[u8; 32],
     config: &SshdConfig,
-) -> Result<bool, SshdError> {
+) -> Result<PubkeyOutcome, SshdError> {
     let (has_sig, off) = read_bool(payload, offset)?;
-    let (key_type_bytes, off) = read_ssh_string(payload, off)?;
-    let _key_type = String::from_utf8_lossy(key_type_bytes);
-    let (key_blob, _off) = read_ssh_string(payload, off)?;
+    let (algorithm, off) = read_ssh_string(payload, off)?;
+    let (key_blob, sig_off) = read_ssh_string(payload, off)?;
 
     // Read authorized_keys for this user.
     let keys_path = format!("/home/{username}/{}", config.authorized_keys_file);
     let keys_content = match fs_read_file(&keys_path) {
         Ok(data) => String::from_utf8_lossy(&data).into_owned(),
-        Err(_) => return Ok(false),
+        Err(_) => return Ok(PubkeyOutcome::Rejected),
     };
 
     let authorized = parse_authorized_keys(&keys_content);
-
-    // Check if the offered key matches any authorized key.
-    let matched = authorized.iter().any(|ak| ak.key_data == key_blob);
-
-    if !matched {
-        return Ok(false);
+    if !authorized.iter().any(|ak| ak.key_data == key_blob) {
+        return Ok(PubkeyOutcome::Rejected);
     }
 
-    if has_sig {
-        // With signature -- full auth. We'd verify the signature here in a
-        // production implementation. For now we trust that the client possesses
-        // the key if the blob matches.
-        Ok(true)
+    // Only ssh-ed25519 can be verified here, so only ssh-ed25519 may be
+    // accepted. An RSA key listed in authorized_keys is refused rather than
+    // waved through: "we cannot check this one" must never resolve to "yes".
+    if algorithm != b"ssh-ed25519" {
+        return Ok(PubkeyOutcome::Rejected);
+    }
+    let Some(ed_public) = ed25519_key_from_blob(key_blob) else {
+        return Ok(PubkeyOutcome::Rejected);
+    };
+
+    if !has_sig {
+        return Ok(PubkeyOutcome::Query {
+            algorithm: algorithm.to_vec(),
+            key_blob: key_blob.to_vec(),
+        });
+    }
+
+    let (sig_blob, _) = read_ssh_string(payload, sig_off)?;
+    let verified = verify_pubkey_signature(
+        &ed_public,
+        sig_blob,
+        session_id,
+        user_bytes,
+        service_bytes,
+        algorithm,
+        key_blob,
+    );
+    if verified {
+        Ok(PubkeyOutcome::Accepted)
     } else {
-        // Query only -- client is asking if this key is acceptable.
-        // We'd send SSH_MSG_USERAUTH_PK_OK in the real flow, but since we're
-        // inside the auth loop, we return false to let the client re-submit
-        // with a signature.
-        Ok(false)
+        Ok(PubkeyOutcome::Rejected)
     }
+}
+
+/// Build the RFC 4252 section 7 signed blob and check `sig_blob` against it.
+///
+/// Split out from [`handle_pubkey_auth`] because that function reads
+/// `authorized_keys` from the filesystem, and the part worth testing
+/// exhaustively is this one: it is the whole of what authenticates the client.
+///
+/// `sig_blob` is the wire form `string algorithm || string signature`.
+fn verify_pubkey_signature(
+    ed_public: &[u8],
+    sig_blob: &[u8],
+    session_id: &[u8; 32],
+    user_bytes: &[u8],
+    service_bytes: &[u8],
+    algorithm: &[u8],
+    key_blob: &[u8],
+) -> bool {
+    let Ok((sig_algorithm, inner_off)) = read_ssh_string(sig_blob, 0) else {
+        return false;
+    };
+    if sig_algorithm != b"ssh-ed25519" {
+        return false;
+    }
+    let Ok((signature, _)) = read_ssh_string(sig_blob, inner_off) else {
+        return false;
+    };
+
+    let signed = pubkey_signed_blob(session_id, user_bytes, service_bytes, algorithm, key_blob);
+    posix::ed25519::verify_slices(ed_public, &signed, signature)
+}
+
+/// The exact byte sequence a `publickey` signature covers (RFC 4252 section 7).
+///
+/// Shared by the server's verification path and by the tests, so that a test
+/// asserting a signature verifies cannot pass by agreeing with a blob that
+/// only the test knows how to build.
+fn pubkey_signed_blob(
+    session_id: &[u8; 32],
+    user_bytes: &[u8],
+    service_bytes: &[u8],
+    algorithm: &[u8],
+    key_blob: &[u8],
+) -> Vec<u8> {
+    let mut signed = Vec::new();
+    signed.extend_from_slice(&ssh_string(session_id));
+    signed.push(msg::SSH_MSG_USERAUTH_REQUEST);
+    signed.extend_from_slice(&ssh_string(user_bytes));
+    signed.extend_from_slice(&ssh_string(service_bytes));
+    signed.extend_from_slice(&ssh_string(b"publickey"));
+    signed.push(1); // boolean TRUE
+    signed.extend_from_slice(&ssh_string(algorithm));
+    signed.extend_from_slice(&ssh_string(key_blob));
+    signed
+}
+
+/// Extract the raw 32-byte Ed25519 point from an SSH public key blob
+/// (`string "ssh-ed25519" || string key`). Returns `None` if the blob is not
+/// an Ed25519 key or is malformed.
+fn ed25519_key_from_blob(blob: &[u8]) -> Option<Vec<u8>> {
+    let (algorithm, off) = read_ssh_string(blob, 0).ok()?;
+    if algorithm != b"ssh-ed25519" {
+        return None;
+    }
+    let (key, _) = read_ssh_string(blob, off).ok()?;
+    if key.len() != 32 {
+        return None;
+    }
+    Some(key.to_vec())
 }
 
 /// Send `SSH_MSG_USERAUTH_FAILURE`.
@@ -3667,12 +4117,34 @@ fn main() {
         process::exit(0);
     }
 
-    // Load host key.
-    let host_key = if let Ok(hk) = HostKey::load_from_file(&config.host_key_file) {
-        hk
-    } else {
-        log_info("no host key found, generating default", opts.log_stderr);
-        HostKey::generate_default()
+    // Load the host key, or create one and keep it.
+    //
+    // The two failure modes are deliberately not the same. A *missing* file is
+    // a first start: generate a key and persist it, as `ssh-keygen -A` does. A
+    // file that exists but cannot be parsed is an operator error -- a wrong
+    // path, a truncated file, an encrypted key -- and running anyway under a
+    // substitute identity would present clients with a host key that is not the
+    // one the operator installed. That is indistinguishable, from the client's
+    // side, from the attack host key verification exists to detect, so we stop.
+    let host_key = match HostKey::load_from_file(&config.host_key_file) {
+        Ok(hk) => hk,
+        Err(SshdError::IoError(_)) => {
+            log_info(
+                &format!("no host key at {}, generating one", config.host_key_file),
+                opts.log_stderr,
+            );
+            match HostKey::generate_and_persist(&config.host_key_file) {
+                Ok(hk) => hk,
+                Err(e) => {
+                    log_error(&format!("cannot create a host key: {e}"), opts.log_stderr);
+                    process::exit(1);
+                }
+            }
+        }
+        Err(e) => {
+            log_error(&format!("host key unusable: {e}"), opts.log_stderr);
+            process::exit(1);
+        }
     };
 
     log_info(
@@ -4525,6 +4997,331 @@ DenyGroups nogroup
         let sig1 = key.sign(b"data1");
         let sig2 = key.sign(b"data2");
         assert_ne!(sig1, sig2);
+    }
+
+    /// The signature the daemon puts in KEX_DH_REPLY must verify against the
+    /// public key it puts in the same message. The old implementation passed
+    /// the two tests above -- it produced 64 bytes labelled ssh-ed25519 -- and
+    /// failed this one, which is why no real client could ever connect.
+    #[test]
+    fn the_host_key_signature_verifies_against_the_advertised_public_key() {
+        let key = HostKey::from_seed([7u8; 32]);
+        let exchange_hash = sha256(b"a plausible exchange hash");
+        let blob = key.sign(&exchange_hash);
+
+        let (sig_type, off) = read_ssh_string(&blob, 0).unwrap();
+        assert_eq!(sig_type, b"ssh-ed25519");
+        let (signature, _) = read_ssh_string(&blob, off).unwrap();
+
+        let advertised = key.public_key_blob();
+        let public = ed25519_key_from_blob(&advertised).expect("advertised key is ed25519");
+        assert!(posix::ed25519::verify_slices(
+            &public,
+            &exchange_hash,
+            signature
+        ));
+    }
+
+    #[test]
+    fn a_host_key_signature_does_not_verify_for_a_different_exchange_hash() {
+        let key = HostKey::from_seed([8u8; 32]);
+        let blob = key.sign(&sha256(b"hash one"));
+        let (_, off) = read_ssh_string(&blob, 0).unwrap();
+        let (signature, _) = read_ssh_string(&blob, off).unwrap();
+        let public = ed25519_key_from_blob(&key.public_key_blob()).unwrap();
+        assert!(!posix::ed25519::verify_slices(
+            &public,
+            &sha256(b"hash two"),
+            signature
+        ));
+    }
+
+    // ---- OpenSSH private key container ----
+
+    #[test]
+    fn an_openssh_private_key_round_trips() {
+        let seed = [0x42u8; 32];
+        let public = posix::ed25519::public_key(&seed);
+
+        // Build the container the same way write_openssh_private_key does,
+        // without touching the filesystem (there is none under `cargo test`).
+        let text = openssh_private_key_text(&seed, &public);
+        let recovered = parse_openssh_private_key(&text).expect("parses");
+        assert_eq!(recovered, seed);
+    }
+
+    #[test]
+    fn an_encrypted_openssh_private_key_is_refused_not_guessed() {
+        let mut raw = Vec::new();
+        raw.extend_from_slice(b"openssh-key-v1\0");
+        raw.extend_from_slice(&ssh_string(b"aes256-ctr"));
+        raw.extend_from_slice(&ssh_string(b"bcrypt"));
+        raw.extend_from_slice(&ssh_string(b"salt-and-rounds"));
+        raw.extend_from_slice(&1u32.to_be_bytes());
+        raw.extend_from_slice(&ssh_string(b"pubkey"));
+        raw.extend_from_slice(&ssh_string(b"ciphertext"));
+        let text = pem_wrap(&base64_encode(&raw));
+
+        let err = parse_openssh_private_key(&text).expect_err("must refuse");
+        assert!(err.contains("encrypted"), "{err}");
+    }
+
+    #[test]
+    fn an_openssh_key_whose_halves_disagree_is_refused() {
+        let seed = [0x11u8; 32];
+        // A public key belonging to a different seed entirely.
+        let wrong_public = posix::ed25519::public_key(&[0x22u8; 32]);
+        let text = openssh_private_key_text(&seed, &wrong_public);
+        let err = parse_openssh_private_key(&text).expect_err("must refuse");
+        assert!(err.contains("does not match"), "{err}");
+    }
+
+    #[test]
+    fn a_file_that_is_not_a_host_key_is_an_error_not_an_invented_key() {
+        // The old loader fell back to sha256(first_line), so this produced a
+        // valid-looking host key unrelated to the file.
+        let err = parse_openssh_private_key("-----BEGIN OPENSSH PRIVATE KEY-----\nZ\n")
+            .expect_err("must refuse");
+        assert!(err.contains("openssh-key-v1"), "{err}");
+    }
+
+    /// Build an OpenSSH private key file body for tests. Mirrors
+    /// `write_openssh_private_key` minus the I/O and the random checkint.
+    fn openssh_private_key_text(seed: &[u8; 32], public: &[u8; 32]) -> String {
+        let mut pub_blob = Vec::new();
+        pub_blob.extend_from_slice(&ssh_string(b"ssh-ed25519"));
+        pub_blob.extend_from_slice(&ssh_string(public));
+
+        let mut secret = Vec::with_capacity(64);
+        secret.extend_from_slice(seed);
+        secret.extend_from_slice(public);
+
+        let mut private = Vec::new();
+        private.extend_from_slice(&0xDEAD_BEEFu32.to_be_bytes());
+        private.extend_from_slice(&0xDEAD_BEEFu32.to_be_bytes());
+        private.extend_from_slice(&ssh_string(b"ssh-ed25519"));
+        private.extend_from_slice(&ssh_string(public));
+        private.extend_from_slice(&ssh_string(&secret));
+        private.extend_from_slice(&ssh_string(b"test"));
+        let mut pad: u8 = 1;
+        while private.len() % 8 != 0 {
+            private.push(pad);
+            pad += 1;
+        }
+
+        let mut raw = Vec::new();
+        raw.extend_from_slice(b"openssh-key-v1\0");
+        raw.extend_from_slice(&ssh_string(b"none"));
+        raw.extend_from_slice(&ssh_string(b"none"));
+        raw.extend_from_slice(&ssh_string(b""));
+        raw.extend_from_slice(&1u32.to_be_bytes());
+        raw.extend_from_slice(&ssh_string(&pub_blob));
+        raw.extend_from_slice(&ssh_string(&private));
+        pem_wrap(&base64_encode(&raw))
+    }
+
+    fn pem_wrap(body: &str) -> String {
+        let mut text = String::from("-----BEGIN OPENSSH PRIVATE KEY-----\n");
+        for chunk in body.as_bytes().chunks(70) {
+            text.push_str(&String::from_utf8_lossy(chunk));
+            text.push('\n');
+        }
+        text.push_str("-----END OPENSSH PRIVATE KEY-----\n");
+        text
+    }
+
+    // ---- publickey authentication (RFC 4252 section 7) ----
+
+    /// Everything a client needs to present for publickey auth, so the tests
+    /// below can vary one field at a time.
+    struct PubkeyAttempt {
+        seed: [u8; 32],
+        session_id: [u8; 32],
+        user: Vec<u8>,
+        service: Vec<u8>,
+    }
+
+    impl PubkeyAttempt {
+        fn valid() -> Self {
+            Self {
+                seed: [0x5Au8; 32],
+                session_id: [0x33u8; 32],
+                user: b"alice".to_vec(),
+                service: b"ssh-connection".to_vec(),
+            }
+        }
+
+        fn key_blob(&self) -> Vec<u8> {
+            let public = posix::ed25519::public_key(&self.seed);
+            let mut blob = Vec::new();
+            blob.extend_from_slice(&ssh_string(b"ssh-ed25519"));
+            blob.extend_from_slice(&ssh_string(&public));
+            blob
+        }
+
+        /// Sign as the client does, over the blob the *server* will rebuild.
+        fn sig_blob(&self) -> Vec<u8> {
+            let signed = pubkey_signed_blob(
+                &self.session_id,
+                &self.user,
+                &self.service,
+                b"ssh-ed25519",
+                &self.key_blob(),
+            );
+            let sig = posix::ed25519::sign(&self.seed, &signed);
+            let mut blob = Vec::new();
+            blob.extend_from_slice(&ssh_string(b"ssh-ed25519"));
+            blob.extend_from_slice(&ssh_string(&sig));
+            blob
+        }
+
+        /// Run the server's check, optionally against a different context than
+        /// the one the signature was made for.
+        fn verified_against(&self, server: &PubkeyAttempt) -> bool {
+            let public = ed25519_key_from_blob(&self.key_blob()).unwrap();
+            verify_pubkey_signature(
+                &public,
+                &self.sig_blob(),
+                &server.session_id,
+                &server.user,
+                &server.service,
+                b"ssh-ed25519",
+                &self.key_blob(),
+            )
+        }
+    }
+
+    #[test]
+    fn a_genuine_publickey_signature_is_accepted() {
+        let a = PubkeyAttempt::valid();
+        assert!(a.verified_against(&a));
+    }
+
+    /// The bypass. Before this change the server compared the offered public
+    /// key against `authorized_keys` and, finding a match, returned success
+    /// without reading the signature -- so an attacker who had only ever *seen*
+    /// the public key could log in. Here the attacker holds the right public
+    /// key and a signature made with a different private key.
+    #[test]
+    fn possessing_only_the_public_key_does_not_authenticate() {
+        let genuine = PubkeyAttempt::valid();
+        let attacker_seed = [0x99u8; 32];
+
+        // The attacker replays the victim's key blob but must produce a
+        // signature, and can only sign with a key it owns.
+        let signed = pubkey_signed_blob(
+            &genuine.session_id,
+            &genuine.user,
+            &genuine.service,
+            b"ssh-ed25519",
+            &genuine.key_blob(),
+        );
+        let sig = posix::ed25519::sign(&attacker_seed, &signed);
+        let mut sig_blob = Vec::new();
+        sig_blob.extend_from_slice(&ssh_string(b"ssh-ed25519"));
+        sig_blob.extend_from_slice(&ssh_string(&sig));
+
+        let public = ed25519_key_from_blob(&genuine.key_blob()).unwrap();
+        assert!(!verify_pubkey_signature(
+            &public,
+            &sig_blob,
+            &genuine.session_id,
+            &genuine.user,
+            &genuine.service,
+            b"ssh-ed25519",
+            &genuine.key_blob(),
+        ));
+    }
+
+    /// A signature captured from one connection must not work on another.
+    /// This is what binding the session identifier buys.
+    #[test]
+    fn a_signature_from_another_session_is_rejected() {
+        let client = PubkeyAttempt::valid();
+        let other_session = PubkeyAttempt {
+            session_id: [0x44u8; 32],
+            ..PubkeyAttempt::valid()
+        };
+        assert!(!client.verified_against(&other_session));
+    }
+
+    /// A signature for one account must not authenticate a different one.
+    #[test]
+    fn a_signature_for_another_user_is_rejected() {
+        let client = PubkeyAttempt::valid();
+        let as_root = PubkeyAttempt {
+            user: b"root".to_vec(),
+            ..PubkeyAttempt::valid()
+        };
+        assert!(!client.verified_against(&as_root));
+    }
+
+    #[test]
+    fn a_signature_for_another_service_is_rejected() {
+        let client = PubkeyAttempt::valid();
+        let other = PubkeyAttempt {
+            service: b"ssh-userauth".to_vec(),
+            ..PubkeyAttempt::valid()
+        };
+        assert!(!client.verified_against(&other));
+    }
+
+    #[test]
+    fn a_malformed_signature_blob_is_rejected_rather_than_erroring() {
+        let a = PubkeyAttempt::valid();
+        let public = ed25519_key_from_blob(&a.key_blob()).unwrap();
+        for truncate_to in [0usize, 1, 4, 8, 15, 20] {
+            let mut blob = a.sig_blob();
+            blob.truncate(truncate_to);
+            assert!(
+                !verify_pubkey_signature(
+                    &public,
+                    &blob,
+                    &a.session_id,
+                    &a.user,
+                    &a.service,
+                    b"ssh-ed25519",
+                    &a.key_blob(),
+                ),
+                "truncated to {truncate_to} bytes"
+            );
+        }
+    }
+
+    #[test]
+    fn a_signature_under_a_different_algorithm_name_is_rejected() {
+        let a = PubkeyAttempt::valid();
+        let public = ed25519_key_from_blob(&a.key_blob()).unwrap();
+        // Same 64 signature bytes, relabelled. Accepting this would let an
+        // algorithm-confusion attack pick whichever verifier is weakest.
+        let (_, off) = read_ssh_string(&a.sig_blob(), 0).unwrap();
+        let sig = read_ssh_string(&a.sig_blob(), off).unwrap().0.to_vec();
+        let mut blob = Vec::new();
+        blob.extend_from_slice(&ssh_string(b"ssh-rsa"));
+        blob.extend_from_slice(&ssh_string(&sig));
+        assert!(!verify_pubkey_signature(
+            &public,
+            &blob,
+            &a.session_id,
+            &a.user,
+            &a.service,
+            b"ssh-ed25519",
+            &a.key_blob(),
+        ));
+    }
+
+    #[test]
+    fn a_non_ed25519_key_blob_is_not_mistaken_for_one() {
+        let mut rsa_blob = Vec::new();
+        rsa_blob.extend_from_slice(&ssh_string(b"ssh-rsa"));
+        rsa_blob.extend_from_slice(&ssh_string(&[0u8; 32]));
+        assert!(ed25519_key_from_blob(&rsa_blob).is_none());
+
+        // Right algorithm, wrong key length.
+        let mut short = Vec::new();
+        short.extend_from_slice(&ssh_string(b"ssh-ed25519"));
+        short.extend_from_slice(&ssh_string(&[0u8; 31]));
+        assert!(ed25519_key_from_blob(&short).is_none());
     }
 
     // ---- Port validation ----

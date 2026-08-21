@@ -80,9 +80,17 @@
 //! assert!(!ed25519::verify(&public, b"tampered", &sig));
 //! ```
 
-#![allow(clippy::arithmetic_side_effects)] // Modular arithmetic over bounded limbs; see LIMB_BITS.
-#![allow(clippy::indexing_slicing)] // Fixed-size arrays indexed by compile-time-bounded loop counters.
-#![allow(clippy::cast_possible_truncation)] // Narrowing happens only at explicit limb boundaries.
+// Every arithmetic operation below is modular arithmetic over limbs whose
+// magnitude is bounded by construction; see `LIMB_BITS` and the precondition
+// documented on `Fe::add`.
+#![allow(clippy::arithmetic_side_effects)]
+// Fixed-size arrays indexed by compile-time-bounded loop counters. A `get()`
+// on each limb would add a branch that provably cannot be taken and would
+// obscure formulae that are otherwise written the way the RFC states them.
+#![allow(clippy::indexing_slicing)]
+// Narrowing happens only at explicit limb boundaries, where the value has just
+// been masked to the limb width.
+#![allow(clippy::cast_possible_truncation)]
 // `add`/`sub`/`mul`/`neg` here are field operations with limb-bound
 // preconditions that `core::ops` cannot state. Implementing the operator
 // traits would let `+` be written on values whose limbs have not been shown to
@@ -376,7 +384,9 @@ fn sqrt_minus_one() -> Fe {
 
 /// The curve parameter `d = -121665 / 121666` (RFC 8032 §5.1).
 fn curve_d() -> Fe {
-    Fe::from_u64(121_665).neg().mul(Fe::from_u64(121_666).invert())
+    Fe::from_u64(121_665)
+        .neg()
+        .mul(Fe::from_u64(121_666).invert())
 }
 
 // ===========================================================================
@@ -657,8 +667,7 @@ fn scalar_mul_add(a: &[u8; 32], b: &[u8; 32], c: &[u8; 32]) -> [u8; 32] {
     for i in 0..4 {
         let mut carry = 0u128;
         for j in 0..4 {
-            let acc =
-                u128::from(product[i + j]) + u128::from(a[i]) * u128::from(b[j]) + carry;
+            let acc = u128::from(product[i + j]) + u128::from(a[i]) * u128::from(b[j]) + carry;
             product[i + j] = acc as u64;
             carry = acc >> 64;
         }
@@ -914,9 +923,8 @@ mod tests {
     fn curve_d_matches_its_published_value() {
         // The one place a transcribed constant appears, precisely so that the
         // derived one can be checked against it. RFC 8032 section 5.1.
-        let published: [u8; 32] = hex(
-            "a3785913ca4deb75abd841414d0a700098e879777940c78c73fe6f2bee6c0352",
-        );
+        let published: [u8; 32] =
+            hex("a3785913ca4deb75abd841414d0a700098e879777940c78c73fe6f2bee6c0352");
         assert_eq!(curve_d().to_bytes(), published);
     }
 
@@ -926,9 +934,8 @@ mod tests {
     fn base_point_matches_its_published_encoding() {
         let d = curve_d();
         let base = base_point(d).expect("base point decompresses");
-        let published: [u8; 32] = hex(
-            "5866666666666666666666666666666666666666666666666666666666666666",
-        );
+        let published: [u8; 32] =
+            hex("5866666666666666666666666666666666666666666666666666666666666666");
         assert_eq!(base.compress(), published);
     }
 
@@ -1097,9 +1104,7 @@ mod tests {
         let expected_sig: [u8; 64] = hex(sig_hex);
 
         let message: Vec<u8> = (0..message_hex.len() / 2)
-            .map(|i| {
-                u8::from_str_radix(&message_hex[i * 2..i * 2 + 2], 16).expect("hex byte")
-            })
+            .map(|i| u8::from_str_radix(&message_hex[i * 2..i * 2 + 2], 16).expect("hex byte"))
             .collect();
 
         assert_eq!(public_key(&seed), expected_public, "public key");

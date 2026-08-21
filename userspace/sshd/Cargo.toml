@@ -8,8 +8,16 @@ description = "SlateOS sshd - SSH server daemon"
 # own SHA-256, as does the client in `userspace/ssh` -- two implementations of
 # one digest on the two ends of a connection, which is the arrangement where a
 # divergence hides best.
+#
+# `posix` for `ed25519` (host key signing, publickey signature verification) and
+# `crypt` (password verification against /etc/shadow). Both were previously
+# faked here: `sign` returned an HMAC labelled "ssh-ed25519", publickey auth
+# never looked at the signature at all, and the password check used a homebrew
+# hash that `passwd` does not write. Each of those is one implementation too
+# many of something that already exists in the libc.
 [dependencies]
 sha2 = { path = "../../sha2" }
+posix = { path = "../../posix" }
 
 [lints]
 workspace = true

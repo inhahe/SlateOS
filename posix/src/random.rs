@@ -544,6 +544,28 @@ pub(crate) fn reseed_after_fork() {
 // Internal API used by getrandom/getentropy
 // ---------------------------------------------------------------------------
 
+/// Fill `out` with cryptographically-secure bytes, or fail.
+///
+/// This is the safe-Rust entry point to [`secure_bytes`], for the Rust
+/// programs in `userspace/**` that need key material. They would otherwise
+/// have to call the C `getrandom`/`arc4random_buf` through a raw pointer,
+/// which is `unsafe` for no reason a Rust caller benefits from — and the
+/// alternative they actually reached for was hashing the clock and the pid,
+/// which is the bug this whole module exists to have removed.
+///
+/// Returns `Err(errno)` if no bytes could be obtained, in which case `out`
+/// holds unspecified contents and **must not be used**. There is no
+/// best-effort path on purpose: a caller handed an error can fail closed, a
+/// caller handed predictable bytes cannot.
+///
+/// # Errors
+///
+/// `EIO` when neither the kernel nor a hardware source can supply bytes;
+/// otherwise whatever errno the kernel's `getrandom` returned.
+pub fn fill(out: &mut [u8]) -> Result<(), i32> {
+    secure_bytes(out, 0)
+}
+
 /// Fill `out` with cryptographically-secure bytes.
 ///
 /// `flags` are the caller's `GRND_*` bits, passed to the kernel unchanged.

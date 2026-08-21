@@ -4538,6 +4538,19 @@ pub fn kill_task(task_id: TaskId) -> bool {
     TASKS_EXITED.fetch_add(1, Ordering::Relaxed);
     serial_println!("[sched] Killed task {}", task_id);
 
+    // A task killed while parked in a sleep never returns from
+    // `block_current()`, so it never runs its own `release_sleep_slot`.  Hand
+    // the slot back for it; otherwise it stays armed until a deadline nobody
+    // is waiting for.  See `release_sleep_slots_for_task`.
+    let freed = release_sleep_slots_for_task(task_id);
+    if freed != 0 {
+        serial_println!(
+            "[sched] Released {} sleep slot(s) held by killed task {}",
+            freed,
+            task_id
+        );
+    }
+
     // Notify exit hooks after the task is marked Dead and the lock
     // is released.  Hooks see the task as Dead if they check state.
     notify_exit_hooks(task_id);
@@ -5452,6 +5465,70 @@ fn release_sleep_slot(slot: SleepSlot) {
     entry.wake_tick.store(0, Ordering::Relaxed);
     entry.task_id.store(0, Ordering::Relaxed);
     entry.claim.store(0, Ordering::Release);
+}
+
+/// Release every sleep-queue slot owned by `task_id`, returning how many were
+/// freed.  For use when the task can no longer free them itself.
+///
+/// A sleeper hands its own slot back on the line *after* `block_current()`
+/// returns (see [`sleep_until_tick_interruptible`]).  A task killed while
+/// parked never reaches that line, so nothing releases its slot early: it stays
+/// armed until its deadline, at which point `process_sleep_wakeups` retires it.
+/// For a short sleep that is invisible, but timeouts here run to minutes —
+/// a boot dump showed two slots held by long-dead tasks with deadlines ~57
+/// minutes out — and `MAX_SLEEPERS` of those would push every subsequent
+/// sleeper into the spin-yield fallback, which pins a CPU.  So the killer
+/// releases them on the dying task's behalf.
+///
+/// Lock-free, so it is safe to call with or without `SCHED` held; call sites
+/// prefer without.
+fn release_sleep_slots_for_task(task_id: TaskId) -> usize {
+    let mut freed = 0usize;
+    for entry in &SLEEP_QUEUE {
+        let token = entry.claim.load(Ordering::Acquire);
+        if token == 0 || token == SLEEP_CLAIM_RELEASING {
+            continue;
+        }
+        // Take the slot into teardown *before* reading `task_id`, exactly as
+        // `process_sleep_wakeups` does: that locks out a concurrent
+        // `release_sleep_slot` and a re-claim, so the id we read is certainly
+        // the one this token owns.  Reading the id first would let the slot be
+        // recycled underneath us and free an unrelated task's sleep.
+        if entry
+            .claim
+            .compare_exchange(
+                token,
+                SLEEP_CLAIM_RELEASING,
+                Ordering::AcqRel,
+                Ordering::Relaxed,
+            )
+            .is_err()
+        {
+            continue;
+        }
+        if entry.task_id.load(Ordering::Relaxed) != task_id {
+            // Not ours.  Put the token back exactly as it was — the same
+            // restore `process_sleep_wakeups` performs on lock contention.
+            entry.claim.store(token, Ordering::Release);
+            continue;
+        }
+        entry.wake_tick.store(0, Ordering::Relaxed);
+        entry.task_id.store(0, Ordering::Relaxed);
+        entry.claim.store(0, Ordering::Release);
+        freed = freed.saturating_add(1);
+    }
+    freed
+}
+
+/// How many sleep-queue slots are currently claimed.
+///
+/// A slot mid-teardown (`SLEEP_CLAIM_RELEASING`) counts as occupied: its owner
+/// has not finished giving it back, so a claimer cannot have it yet.
+fn occupied_sleep_slots() -> usize {
+    SLEEP_QUEUE
+        .iter()
+        .filter(|e| e.claim.load(Ordering::Acquire) != 0)
+        .count()
 }
 
 // SAFETY: `SleepEntry` fields are `AtomicU64`, which are `Sync`.
@@ -7735,6 +7812,41 @@ fn test_kill_and_reap() -> KernelResult<()> {
     }
     serial_println!("[sched]   kill_task(Blocked): OK");
 
+    // Killing a task that is parked in a *sleep* must also hand back its
+    // sleep-queue slot.  The sleeper releases its own slot on the line after
+    // `block_current()` returns, which a killed task never reaches, so without
+    // `release_sleep_slots_for_task` the slot stays armed until its deadline.
+    // A boot dump caught two slots held by long-dead benchmark helpers with
+    // deadlines ~57 minutes out; `MAX_SLEEPERS` of those would push every
+    // subsequent sleeper into the spin-yield fallback and pin a CPU.
+    let occupied_before = occupied_sleep_slots();
+    let id_sleep = spawn(b"test-kill-sleep", 16, test_task_long_sleep, 0, 0)?;
+    // Let it run far enough to claim a slot and park on it.
+    yield_now();
+    yield_now();
+    if occupied_sleep_slots() != occupied_before.saturating_add(1) {
+        serial_println!(
+            "[sched]   FAIL: sleeper did not take a slot ({} -> {})",
+            occupied_before,
+            occupied_sleep_slots()
+        );
+        return Err(KernelError::InternalError);
+    }
+    if !kill_task(id_sleep) {
+        serial_println!("[sched]   FAIL: kill_task returned false for a sleeping task");
+        return Err(KernelError::InternalError);
+    }
+    let occupied_after = occupied_sleep_slots();
+    if occupied_after != occupied_before {
+        serial_println!(
+            "[sched]   FAIL: kill_task leaked a sleep slot ({} occupied, expected {})",
+            occupied_after,
+            occupied_before
+        );
+        return Err(KernelError::InternalError);
+    }
+    serial_println!("[sched]   kill_task(sleeping) releases the sleep slot: OK");
+
     // Now test reap_dead_tasks.
     let reaped = reap_dead_tasks();
     if reaped < 2 {
@@ -8961,6 +9073,17 @@ extern "C" fn test_task_block_self(_arg: u64) {
     serial_println!("[test-block] Blocking self...");
     block_current();
     // If we get here, someone woke us — just exit.
+}
+
+/// Test task: sleep for effectively forever, so it is holding a sleep-queue
+/// slot when the test kills it.
+///
+/// The deadline is far enough out that the timer ISR will not retire the slot
+/// during the test — the whole point is that only `kill_task` can free it.
+extern "C" fn test_task_long_sleep(_arg: u64) {
+    sleep_until_tick_interruptible(crate::apic::tick_count().saturating_add(10_000_000));
+    // Unreachable in the test: it is killed while parked.  If a stray wake does
+    // return us here, fall through and exit — the slot is released on the way.
 }
 
 // ---------------------------------------------------------------------------

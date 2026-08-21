@@ -46636,6 +46636,43 @@ changes; until then this note is why nobody should "tidy" these.
 `apps/**` opts into the workspace lints (all 142 crates do), but the defensive
 five are `warn`, not `deny`, so a warning backlog accumulates uncounted — the
 installer's `wrapping_sub` and `apps/backup`'s `days + 719_468` were both
-firing silently for months. A measured figure for `apps/**` (via
-`scripts/clippy-sites.py`, deduplicated by `(file, line, column, lint)` — never
-a raw total) is the next round's first step.
+firing silently for months.
+
+**Measured 2026-08-21** (`cargo clippy --workspace --exclude kernel
+--all-targets --keep-going --target x86_64-pc-windows-gnu`, counted with
+`scripts/clippy-sites.py`, deduplicated by `(file, line, column, lint)`):
+
+| Tree | Distinct sites |
+|---|---|
+| `apps/**` | **4986** |
+| `net*/**` | 87 |
+| `gui/**` | 1 |
+| `textfmt` | 0 |
+
+Within `apps/**` the defensive five are 4872 of the 4986 — **97.7%**:
+`indexing_slicing` 2195, `arithmetic_side_effects` 1887, `unwrap_used` 617,
+`expect_used` 117, `panic` 56. The remaining 114 are ordinary style lints.
+Worst files: `indexer` 196, `terminal/pty.rs` 162, `unitconverter` 159,
+`markdowneditor` 155, `paint` 136.
+
+The shape of that table is the finding, not the total. The shared code — the
+toolkit, the desktop, the extracted crates — is essentially clean, and the
+200 application crates hold effectively all of it. That is not because the
+apps are worse code; it is because **the shared crates are the only ones
+anything ever pointed a linter at.** `gui/**` was audited during the
+extractions that produced `guitk::grid`, `guitk::date` and `textfmt`;
+`apps/**` has never had a pass at all.
+
+Two cautions before anyone treats 4986 as a defect count:
+
+- **It is an upper bound on suspicion, not a bug count.** Most
+  `indexing_slicing` sites index a literal-sized array with a bounded loop
+  counter. The sweep's five real defects were each found by *reasoning about
+  a duplicated shape*, not by walking a lint list — none of the five would
+  have been top of this ranking.
+- **It includes test code, which is where the lints are least meaningful**
+  (panicking on bad data is the point of a test). The workspace lint table
+  allows the defensive five under `#[cfg(test)]` by convention, but that is a
+  convention applied by hand, not a `cfg` in the table, so test sites are
+  counted here. Splitting the figure by target is worth doing before using it
+  to prioritise.

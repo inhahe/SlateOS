@@ -295,11 +295,7 @@ impl Session {
     }
 
     fn tty_display(&self) -> &str {
-        if self.tty.is_empty() {
-            "-"
-        } else {
-            &self.tty
-        }
+        if self.tty.is_empty() { "-" } else { &self.tty }
     }
 
     /// Format detailed properties for show-session output.
@@ -314,14 +310,23 @@ impl Session {
         out.push_str(&format!("      Type={}\n", self.session_type.as_str()));
         out.push_str(&format!("     Class={}\n", self.class.as_str()));
         out.push_str(&format!("     State={}\n", self.state.as_str()));
-        out.push_str(&format!("    Locked={}\n", if self.locked { "yes" } else { "no" }));
-        out.push_str(&format!("      Idle={}\n", if self.idle { "yes" } else { "no" }));
+        out.push_str(&format!(
+            "    Locked={}\n",
+            if self.locked { "yes" } else { "no" }
+        ));
+        out.push_str(&format!(
+            "      Idle={}\n",
+            if self.idle { "yes" } else { "no" }
+        ));
         if self.idle && self.idle_since > 0 {
             out.push_str(&format!(" IdleSince={}\n", self.idle_since));
         }
         out.push_str(&format!("    Leader={}\n", self.leader_pid));
         out.push_str(&format!("       TTY={}\n", self.tty_display()));
-        out.push_str(&format!("    Remote={}\n", if self.remote { "yes" } else { "no" }));
+        out.push_str(&format!(
+            "    Remote={}\n",
+            if self.remote { "yes" } else { "no" }
+        ));
         if self.remote && !self.remote_host.is_empty() {
             out.push_str(&format!("RemoteHost={}\n", self.remote_host));
         }
@@ -373,12 +378,7 @@ impl User {
 
     /// Format as a single-line summary for list-users output.
     fn format_list_line(&self) -> String {
-        format!(
-            "{:<8} {:<16} {}",
-            self.uid,
-            self.name,
-            self.state,
-        )
+        format!("{:<8} {:<16} {}", self.uid, self.name, self.state,)
     }
 
     /// Format detailed properties for show-user output.
@@ -395,7 +395,10 @@ impl User {
                 self.sessions.join(" ")
             }
         ));
-        out.push_str(&format!("    Linger={}\n", if self.linger { "yes" } else { "no" }));
+        out.push_str(&format!(
+            "    Linger={}\n",
+            if self.linger { "yes" } else { "no" }
+        ));
         out.push_str(&format!("     Slice={}\n", self.slice));
         if self.logged_in_since > 0 {
             out.push_str(&format!("     Since={}\n", self.logged_in_since));
@@ -818,7 +821,10 @@ impl Daemon {
 
     /// Terminate a session by ID.
     fn terminate_session(&mut self, session_id: &str) -> Result<(), &'static str> {
-        let session = self.sessions.get_mut(session_id).ok_or("session not found")?;
+        let session = self
+            .sessions
+            .get_mut(session_id)
+            .ok_or("session not found")?;
         session.state = SessionState::Closing;
 
         let uid = session.uid;
@@ -826,12 +832,13 @@ impl Daemon {
 
         // Remove from seat.
         if !seat_id.is_empty()
-            && let Some(seat) = self.seats.get_mut(&seat_id) {
-                seat.sessions.retain(|s| s != session_id);
-                if seat.active_session == session_id {
-                    seat.active_session = seat.sessions.first().cloned().unwrap_or_default();
-                }
+            && let Some(seat) = self.seats.get_mut(&seat_id)
+        {
+            seat.sessions.retain(|s| s != session_id);
+            if seat.active_session == session_id {
+                seat.active_session = seat.sessions.first().cloned().unwrap_or_default();
             }
+        }
 
         // Remove from user tracking.
         if let Some(user) = self.users.get_mut(&uid) {
@@ -884,11 +891,13 @@ impl Daemon {
         let seat = self.seats.get(&seat_id).ok_or("seat not found")?;
         let prev_active = seat.active_session.clone();
 
-        if !prev_active.is_empty() && prev_active != session_id
+        if !prev_active.is_empty()
+            && prev_active != session_id
             && let Some(prev) = self.sessions.get_mut(&prev_active)
-                && prev.state == SessionState::Active {
-                    prev.state = SessionState::Background;
-                }
+            && prev.state == SessionState::Active
+        {
+            prev.state = SessionState::Background;
+        }
 
         // Activate the requested session.
         if let Some(sess) = self.sessions.get_mut(session_id) {
@@ -902,7 +911,10 @@ impl Daemon {
 
     /// Lock a session's screen.
     fn lock_session(&mut self, session_id: &str) -> Result<(), &'static str> {
-        let session = self.sessions.get_mut(session_id).ok_or("session not found")?;
+        let session = self
+            .sessions
+            .get_mut(session_id)
+            .ok_or("session not found")?;
         session.locked = true;
         // A lock revokes any unspent ticket. Otherwise a user who authenticated,
         // was interrupted before the unlock landed, and walked away would leave
@@ -957,7 +969,10 @@ impl Daemon {
     /// `apps/lockscreen`; see
     /// `requests/c-b-the-lock-screen-has-no-way-to-check-a-real-password.md`.
     fn unlock_session(&mut self, session_id: &str) -> Result<(), &'static str> {
-        let session = self.sessions.get_mut(session_id).ok_or("session not found")?;
+        let session = self
+            .sessions
+            .get_mut(session_id)
+            .ok_or("session not found")?;
         if !session.unlock_authorized {
             return Err("unlock requires a successful password check");
         }
@@ -978,15 +993,26 @@ impl Daemon {
     /// from the `loginctl` personality, which is a short-lived process
     /// operating on its own in-memory daemon.
     fn force_unlock_session(&mut self, session_id: &str) -> Result<(), &'static str> {
-        let session = self.sessions.get_mut(session_id).ok_or("session not found")?;
+        let session = self
+            .sessions
+            .get_mut(session_id)
+            .ok_or("session not found")?;
         session.unlock_authorized = false;
         session.locked = false;
         Ok(())
     }
 
     /// Mark a session as idle.
-    fn set_session_idle(&mut self, session_id: &str, idle: bool, timestamp: u64) -> Result<(), &'static str> {
-        let session = self.sessions.get_mut(session_id).ok_or("session not found")?;
+    fn set_session_idle(
+        &mut self,
+        session_id: &str,
+        idle: bool,
+        timestamp: u64,
+    ) -> Result<(), &'static str> {
+        let session = self
+            .sessions
+            .get_mut(session_id)
+            .ok_or("session not found")?;
         session.idle = idle;
         session.idle_since = if idle { timestamp } else { 0 };
         Ok(())
@@ -1025,7 +1051,9 @@ impl Daemon {
 
     /// Check whether a given action is inhibited.
     fn is_inhibited(&self, what: InhibitWhat, mode: InhibitMode) -> bool {
-        self.inhibitors.iter().any(|i| i.what == what && i.mode == mode)
+        self.inhibitors
+            .iter()
+            .any(|i| i.what == what && i.mode == mode)
     }
 
     /// Check whether a given action is inhibited (any mode).
@@ -1304,10 +1332,16 @@ fn run_daemon(args: &[String]) -> i32 {
         daemon.config.wall_message = false;
     }
 
-    let _ = writeln!(io::stderr(), "logind: starting session manager (v{VERSION})");
+    let _ = writeln!(
+        io::stderr(),
+        "logind: starting session manager (v{VERSION})"
+    );
 
     if !daemon_args.foreground {
-        let _ = writeln!(io::stderr(), "logind: would daemonize (not implemented in stub)");
+        let _ = writeln!(
+            io::stderr(),
+            "logind: would daemonize (not implemented in stub)"
+        );
     }
 
     // Create runtime directories (best-effort).
@@ -1609,7 +1643,11 @@ fn run_loginctl_command(daemon: &mut Daemon, cmd: &LoginctlCommand) -> i32 {
 
     match cmd {
         LoginctlCommand::ListSessions => {
-            let _ = writeln!(out, "{:<8} {:<6} {:<16} {:<12} TTY", "SESSION", "UID", "USER", "SEAT");
+            let _ = writeln!(
+                out,
+                "{:<8} {:<6} {:<16} {:<12} TTY",
+                "SESSION", "UID", "USER", "SEAT"
+            );
             let mut sessions: Vec<&Session> = daemon.sessions.values().collect();
             sessions.sort_by(|a, b| a.id.cmp(&b.id));
             for session in &sessions {
@@ -1923,8 +1961,10 @@ fn run_main() -> i32 {
 
     // Strip the subcommand if present to pass remaining args.
     let sub_args: Vec<String> = if args.len() > 1
-        && matches!(args.get(1).map(|s| s.as_str()), Some("ctl" | "loginctl" | "daemon"))
-    {
+        && matches!(
+            args.get(1).map(|s| s.as_str()),
+            Some("ctl" | "loginctl" | "daemon")
+        ) {
         args[2..].to_vec()
     } else if args.len() > 1 {
         args[1..].to_vec()
@@ -2039,7 +2079,11 @@ mod tests {
 
     #[test]
     fn test_detect_subcommand_ctl() {
-        let args = vec!["logind".to_string(), "ctl".to_string(), "list-sessions".to_string()];
+        let args = vec![
+            "logind".to_string(),
+            "ctl".to_string(),
+            "list-sessions".to_string(),
+        ];
         assert_eq!(detect_personality(&args), "loginctl");
     }
 
@@ -2065,7 +2109,12 @@ mod tests {
 
     #[test]
     fn test_session_type_roundtrip() {
-        for st in &[SessionType::Tty, SessionType::X11, SessionType::Wayland, SessionType::Unspecified] {
+        for st in &[
+            SessionType::Tty,
+            SessionType::X11,
+            SessionType::Wayland,
+            SessionType::Unspecified,
+        ] {
             assert_eq!(SessionType::from_str(st.as_str()), *st);
         }
     }
@@ -2079,7 +2128,11 @@ mod tests {
 
     #[test]
     fn test_session_class_roundtrip() {
-        for sc in &[SessionClass::User, SessionClass::Greeter, SessionClass::LockScreen] {
+        for sc in &[
+            SessionClass::User,
+            SessionClass::Greeter,
+            SessionClass::LockScreen,
+        ] {
             assert_eq!(SessionClass::from_str(sc.as_str()), *sc);
         }
     }
@@ -2094,8 +2147,11 @@ mod tests {
     #[test]
     fn test_session_state_roundtrip() {
         for ss in &[
-            SessionState::Opening, SessionState::Online, SessionState::Active,
-            SessionState::Background, SessionState::Closing,
+            SessionState::Opening,
+            SessionState::Online,
+            SessionState::Active,
+            SessionState::Background,
+            SessionState::Closing,
         ] {
             assert_eq!(SessionState::from_str(ss.as_str()), *ss);
         }
@@ -2361,7 +2417,7 @@ mod tests {
 
     #[test]
     fn test_unlock_session() {
-        let mut d = authenticating_daemon("test_unlock_session");
+        let (mut d, _dir) = authenticating_daemon("test_unlock_session");
         d.lock_session("1").unwrap();
         assert_eq!(
             d.authenticate_session("1", b"correct horse").unwrap(),
@@ -2397,29 +2453,78 @@ mod tests {
         format!("alice:{hash}:19000:0:99999:7:::\n")
     }
 
+    use scratchdir::ScratchDir;
+
     /// A `test_daemon` whose verifier reads a store this test wrote, with a
     /// clock frozen at zero so the rate limit is exercised deliberately
     /// rather than raced against.
-    fn authenticating_daemon(name: &str) -> Daemon {
-        let nanos = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .expect("clock")
-            .as_nanos();
-        let shadow = std::env::temp_dir()
-            .join(format!("logind_{}_{nanos}_{name}", std::process::id()));
+    ///
+    /// The returned [`ScratchDir`] is a guard and must stay bound for as long
+    /// as the `Daemon` is used: dropping it removes the shadow file the
+    /// verifier reads. Bind it as `_dir`, not `_`.
+    ///
+    /// It replaces a scheme that named the file after
+    /// `SystemTime::now().as_nanos()` and the pid, and removed it never. Both
+    /// halves were wrong. The clock is not a unique id at any resolution — it
+    /// is refreshed on a timer interrupt rather than per read, and `cargo test`
+    /// runs these tests as threads of one process, so two entering it in the
+    /// same tick wrote the same file; the pid separates concurrent *runs* of
+    /// the suite, not the threads inside one. Lane C measured the collision
+    /// rate at 13%. These tests decide whether a password unlocks a locked
+    /// screen, so a fixture two of them share can produce a false **green**
+    /// just as easily as the red that found it. See known-issues.md
+    /// `B-FTPD-SSHD-AUTH-TESTS-SHARE-TEMP-FILES-AND-FLAKE`.
+    fn authenticating_daemon(name: &str) -> (Daemon, ScratchDir) {
+        let dir = ScratchDir::new(&format!("logind_{name}"));
+        let shadow = dir.path("shadow");
         std::fs::write(&shadow, shadow_fixture()).expect("write shadow fixture");
 
         // No `users.yaml`: the verifier falls through to the shadow store when
         // the native one is absent, which is what this fixture wants to test.
-        let missing = shadow.with_extension("absent-users-yaml");
+        let missing = dir.path("absent-users-yaml");
         let mut d = test_daemon();
         d.set_verifier(authlib::Authenticator::with_stores(&missing, &shadow));
-        d
+        (d, dir)
+    }
+
+    /// The fixture's own wiring, which a shared guard cannot check for us.
+    ///
+    /// `ScratchDir` guarantees two guards never share a directory. What it
+    /// cannot know is whether *this* fixture keeps its guard alive for as long
+    /// as the `Daemon` needs the file behind it — and the daemon here reads the
+    /// store lazily, at each `authenticate_session`, so a guard dropped when
+    /// the fixture returns would leave every test authenticating against a file
+    /// that no longer exists.
+    #[test]
+    fn twenty_daemons_alive_at_once_each_read_their_own_store() {
+        let mut held: Vec<(usize, Daemon, ScratchDir)> = (0..20)
+            .map(|i| {
+                let (d, dir) = authenticating_daemon("wiring");
+                (i, d, dir)
+            })
+            .collect();
+
+        let mut seen = std::collections::HashSet::new();
+        for (i, _, dir) in &held {
+            assert!(
+                seen.insert(dir.path("shadow")),
+                "fixture {i} reused a path another fixture already owns"
+            );
+        }
+
+        for (i, d, _dir) in &mut held {
+            d.lock_session("1").expect("lock");
+            assert_eq!(
+                d.authenticate_session("1", b"correct horse").expect("auth"),
+                authlib::Outcome::Accepted,
+                "fixture {i} cannot read its own store"
+            );
+        }
     }
 
     #[test]
     fn an_unlock_without_a_password_check_is_refused() {
-        let mut d = authenticating_daemon("unlock_without_check");
+        let (mut d, _dir) = authenticating_daemon("unlock_without_check");
         d.lock_session("1").unwrap();
         assert!(
             d.unlock_session("1").is_err(),
@@ -2431,7 +2536,7 @@ mod tests {
 
     #[test]
     fn a_wrong_password_does_not_authorise_an_unlock() {
-        let mut d = authenticating_daemon("wrong_password");
+        let (mut d, _dir) = authenticating_daemon("wrong_password");
         d.lock_session("1").unwrap();
         assert_eq!(
             d.authenticate_session("1", b"correct hors").unwrap(),
@@ -2443,7 +2548,7 @@ mod tests {
 
     #[test]
     fn a_ticket_is_spent_by_the_unlock_it_authorises() {
-        let mut d = authenticating_daemon("ticket_is_spent");
+        let (mut d, _dir) = authenticating_daemon("ticket_is_spent");
         d.lock_session("1").unwrap();
         d.authenticate_session("1", b"correct horse").unwrap();
         d.unlock_session("1").unwrap();
@@ -2458,7 +2563,7 @@ mod tests {
 
     #[test]
     fn a_wrong_password_revokes_a_ticket_already_earned() {
-        let mut d = authenticating_daemon("wrong_revokes");
+        let (mut d, _dir) = authenticating_daemon("wrong_revokes");
         d.lock_session("1").unwrap();
         d.authenticate_session("1", b"correct horse").unwrap();
         // The user walks away without pressing anything; someone else guesses.
@@ -2476,7 +2581,7 @@ mod tests {
     #[test]
     fn a_session_whose_user_has_no_entry_admits_nobody() {
         // Session "2" belongs to `bob`, who is in no store.
-        let mut d = authenticating_daemon("no_entry");
+        let (mut d, _dir) = authenticating_daemon("no_entry");
         d.lock_session("2").unwrap();
         assert_eq!(
             d.authenticate_session("2", b"correct horse").unwrap(),
@@ -2487,13 +2592,13 @@ mod tests {
 
     #[test]
     fn authenticating_an_unknown_session_is_an_error_not_a_verdict() {
-        let mut d = authenticating_daemon("unknown_session");
+        let (mut d, _dir) = authenticating_daemon("unknown_session");
         assert!(d.authenticate_session("999", b"correct horse").is_err());
     }
 
     #[test]
     fn the_administrative_override_needs_no_password_and_leaves_no_ticket() {
-        let mut d = authenticating_daemon("force_unlock");
+        let (mut d, _dir) = authenticating_daemon("force_unlock");
         d.lock_session("1").unwrap();
         d.force_unlock_session("1").unwrap();
         assert!(!d.sessions.get("1").unwrap().locked);
@@ -2506,7 +2611,7 @@ mod tests {
 
     #[test]
     fn repeated_guesses_are_slowed_down() {
-        let mut d = authenticating_daemon("rate_limited");
+        let (mut d, _dir) = authenticating_daemon("rate_limited");
         d.lock_session("1").unwrap();
 
         // The clock is the real one here, so this asserts only that the
@@ -2582,7 +2687,15 @@ mod tests {
     #[test]
     fn test_add_inhibitor() {
         let mut d = Daemon::new(DaemonConfig::default());
-        d.add_inhibitor(InhibitWhat::Shutdown, "firefox", "downloading", InhibitMode::Block, 1000, 42).unwrap();
+        d.add_inhibitor(
+            InhibitWhat::Shutdown,
+            "firefox",
+            "downloading",
+            InhibitMode::Block,
+            1000,
+            42,
+        )
+        .unwrap();
         assert_eq!(d.inhibitors.len(), 1);
         assert_eq!(d.inhibitors[0].who, "firefox");
     }
@@ -2591,18 +2704,57 @@ mod tests {
     fn test_inhibitor_limit() {
         let mut d = Daemon::new(DaemonConfig::default());
         for i in 0..MAX_INHIBITORS {
-            d.add_inhibitor(InhibitWhat::Shutdown, "app", "reason", InhibitMode::Block, 1000, i as u32).unwrap();
+            d.add_inhibitor(
+                InhibitWhat::Shutdown,
+                "app",
+                "reason",
+                InhibitMode::Block,
+                1000,
+                i as u32,
+            )
+            .unwrap();
         }
-        let err = d.add_inhibitor(InhibitWhat::Shutdown, "app", "reason", InhibitMode::Block, 1000, 9999);
+        let err = d.add_inhibitor(
+            InhibitWhat::Shutdown,
+            "app",
+            "reason",
+            InhibitMode::Block,
+            1000,
+            9999,
+        );
         assert!(err.is_err());
     }
 
     #[test]
     fn test_remove_inhibitors_by_pid() {
         let mut d = Daemon::new(DaemonConfig::default());
-        d.add_inhibitor(InhibitWhat::Shutdown, "app1", "r1", InhibitMode::Block, 1000, 42).unwrap();
-        d.add_inhibitor(InhibitWhat::Sleep, "app2", "r2", InhibitMode::Delay, 1000, 42).unwrap();
-        d.add_inhibitor(InhibitWhat::Idle, "app3", "r3", InhibitMode::Block, 1001, 99).unwrap();
+        d.add_inhibitor(
+            InhibitWhat::Shutdown,
+            "app1",
+            "r1",
+            InhibitMode::Block,
+            1000,
+            42,
+        )
+        .unwrap();
+        d.add_inhibitor(
+            InhibitWhat::Sleep,
+            "app2",
+            "r2",
+            InhibitMode::Delay,
+            1000,
+            42,
+        )
+        .unwrap();
+        d.add_inhibitor(
+            InhibitWhat::Idle,
+            "app3",
+            "r3",
+            InhibitMode::Block,
+            1001,
+            99,
+        )
+        .unwrap();
         let removed = d.remove_inhibitors_by_pid(42);
         assert_eq!(removed, 2);
         assert_eq!(d.inhibitors.len(), 1);
@@ -2611,7 +2763,15 @@ mod tests {
     #[test]
     fn test_is_inhibited() {
         let mut d = Daemon::new(DaemonConfig::default());
-        d.add_inhibitor(InhibitWhat::Shutdown, "app", "reason", InhibitMode::Block, 1000, 42).unwrap();
+        d.add_inhibitor(
+            InhibitWhat::Shutdown,
+            "app",
+            "reason",
+            InhibitMode::Block,
+            1000,
+            42,
+        )
+        .unwrap();
         assert!(d.is_inhibited(InhibitWhat::Shutdown, InhibitMode::Block));
         assert!(!d.is_inhibited(InhibitWhat::Shutdown, InhibitMode::Delay));
         assert!(!d.is_inhibited(InhibitWhat::Sleep, InhibitMode::Block));
@@ -2620,7 +2780,15 @@ mod tests {
     #[test]
     fn test_is_inhibited_any() {
         let mut d = Daemon::new(DaemonConfig::default());
-        d.add_inhibitor(InhibitWhat::Shutdown, "app", "reason", InhibitMode::Delay, 1000, 42).unwrap();
+        d.add_inhibitor(
+            InhibitWhat::Shutdown,
+            "app",
+            "reason",
+            InhibitMode::Delay,
+            1000,
+            42,
+        )
+        .unwrap();
         assert!(d.is_inhibited_any(InhibitWhat::Shutdown));
         assert!(!d.is_inhibited_any(InhibitWhat::Sleep));
     }
@@ -2629,10 +2797,16 @@ mod tests {
 
     #[test]
     fn test_inhibit_what_from_str() {
-        assert_eq!(InhibitWhat::from_str("shutdown"), Some(InhibitWhat::Shutdown));
+        assert_eq!(
+            InhibitWhat::from_str("shutdown"),
+            Some(InhibitWhat::Shutdown)
+        );
         assert_eq!(InhibitWhat::from_str("sleep"), Some(InhibitWhat::Sleep));
         assert_eq!(InhibitWhat::from_str("idle"), Some(InhibitWhat::Idle));
-        assert_eq!(InhibitWhat::from_str("handle-power-key"), Some(InhibitWhat::HandlePowerKey));
+        assert_eq!(
+            InhibitWhat::from_str("handle-power-key"),
+            Some(InhibitWhat::HandlePowerKey)
+        );
         assert_eq!(InhibitWhat::from_str("bogus"), None);
     }
 
@@ -2648,27 +2822,67 @@ mod tests {
     #[test]
     fn test_power_action_allowed() {
         let d = Daemon::new(DaemonConfig::default());
-        assert_eq!(d.request_power_action(PowerAction::PowerOff, false), PowerActionResult::Allowed);
-        assert_eq!(d.request_power_action(PowerAction::Reboot, false), PowerActionResult::Allowed);
-        assert_eq!(d.request_power_action(PowerAction::Suspend, false), PowerActionResult::Allowed);
-        assert_eq!(d.request_power_action(PowerAction::Hibernate, false), PowerActionResult::Allowed);
+        assert_eq!(
+            d.request_power_action(PowerAction::PowerOff, false),
+            PowerActionResult::Allowed
+        );
+        assert_eq!(
+            d.request_power_action(PowerAction::Reboot, false),
+            PowerActionResult::Allowed
+        );
+        assert_eq!(
+            d.request_power_action(PowerAction::Suspend, false),
+            PowerActionResult::Allowed
+        );
+        assert_eq!(
+            d.request_power_action(PowerAction::Hibernate, false),
+            PowerActionResult::Allowed
+        );
     }
 
     #[test]
     fn test_power_action_inhibited() {
         let mut d = Daemon::new(DaemonConfig::default());
-        d.add_inhibitor(InhibitWhat::Shutdown, "app", "busy", InhibitMode::Block, 1000, 42).unwrap();
-        assert_eq!(d.request_power_action(PowerAction::PowerOff, false), PowerActionResult::Inhibited);
-        assert_eq!(d.request_power_action(PowerAction::Reboot, false), PowerActionResult::Inhibited);
+        d.add_inhibitor(
+            InhibitWhat::Shutdown,
+            "app",
+            "busy",
+            InhibitMode::Block,
+            1000,
+            42,
+        )
+        .unwrap();
+        assert_eq!(
+            d.request_power_action(PowerAction::PowerOff, false),
+            PowerActionResult::Inhibited
+        );
+        assert_eq!(
+            d.request_power_action(PowerAction::Reboot, false),
+            PowerActionResult::Inhibited
+        );
         // Suspend/hibernate use InhibitWhat::Sleep, not Shutdown.
-        assert_eq!(d.request_power_action(PowerAction::Suspend, false), PowerActionResult::Allowed);
+        assert_eq!(
+            d.request_power_action(PowerAction::Suspend, false),
+            PowerActionResult::Allowed
+        );
     }
 
     #[test]
     fn test_power_action_force_overrides_inhibitor() {
         let mut d = Daemon::new(DaemonConfig::default());
-        d.add_inhibitor(InhibitWhat::Shutdown, "app", "busy", InhibitMode::Block, 1000, 42).unwrap();
-        assert_eq!(d.request_power_action(PowerAction::PowerOff, true), PowerActionResult::Allowed);
+        d.add_inhibitor(
+            InhibitWhat::Shutdown,
+            "app",
+            "busy",
+            InhibitMode::Block,
+            1000,
+            42,
+        )
+        .unwrap();
+        assert_eq!(
+            d.request_power_action(PowerAction::PowerOff, true),
+            PowerActionResult::Allowed
+        );
     }
 
     #[test]
@@ -2678,7 +2892,10 @@ mod tests {
             ..DaemonConfig::default()
         };
         let d = Daemon::new(config);
-        assert_eq!(d.request_power_action(PowerAction::Suspend, false), PowerActionResult::Denied);
+        assert_eq!(
+            d.request_power_action(PowerAction::Suspend, false),
+            PowerActionResult::Denied
+        );
     }
 
     // --- Seat management ---
@@ -2896,13 +3113,19 @@ HandleSuspendKey=ignore
     #[test]
     fn test_parse_loginctl_show_session() {
         let args = vec!["show-session".to_string(), "1".to_string()];
-        assert_eq!(parse_loginctl_args(&args), LoginctlCommand::ShowSession("1".to_string()));
+        assert_eq!(
+            parse_loginctl_args(&args),
+            LoginctlCommand::ShowSession("1".to_string())
+        );
     }
 
     #[test]
     fn test_parse_loginctl_activate() {
         let args = vec!["activate".to_string(), "3".to_string()];
-        assert_eq!(parse_loginctl_args(&args), LoginctlCommand::Activate("3".to_string()));
+        assert_eq!(
+            parse_loginctl_args(&args),
+            LoginctlCommand::Activate("3".to_string())
+        );
     }
 
     #[test]
@@ -2919,8 +3142,15 @@ HandleSuspendKey=ignore
 
     #[test]
     fn test_parse_loginctl_kill_session_signal() {
-        let args = vec!["kill-session".to_string(), "5".to_string(), "--signal=9".to_string()];
-        assert_eq!(parse_loginctl_args(&args), LoginctlCommand::KillSession("5".to_string(), 9));
+        let args = vec![
+            "kill-session".to_string(),
+            "5".to_string(),
+            "--signal=9".to_string(),
+        ];
+        assert_eq!(
+            parse_loginctl_args(&args),
+            LoginctlCommand::KillSession("5".to_string(), 9)
+        );
     }
 
     #[test]
@@ -3000,7 +3230,15 @@ HandleSuspendKey=ignore
     #[test]
     fn test_loginctl_power_inhibited() {
         let mut d = Daemon::new(DaemonConfig::default());
-        d.add_inhibitor(InhibitWhat::Shutdown, "app", "busy", InhibitMode::Block, 1000, 42).unwrap();
+        d.add_inhibitor(
+            InhibitWhat::Shutdown,
+            "app",
+            "busy",
+            InhibitMode::Block,
+            1000,
+            42,
+        )
+        .unwrap();
         let rc = run_loginctl_command(&mut d, &LoginctlCommand::PowerOff(false));
         assert_eq!(rc, 1);
     }

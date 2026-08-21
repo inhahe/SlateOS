@@ -3037,36 +3037,73 @@ mod tests {
             .to_string()
     }
 
-    fn tmp_path(name: &str) -> PathBuf {
-        let nanos = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("clock")
-            .as_nanos();
-        env::temp_dir().join(format!("ftpd_{nanos}_{name}"))
-    }
+    use scratchdir::ScratchDir;
 
     /// An `Authenticator` over a throwaway `/etc/shadow` holding one line. The
     /// users.yaml path deliberately does not exist, so the shadow branch is
     /// the one under test.
-    fn authenticator_with_shadow(line: &str) -> (authlib::Authenticator, PathBuf) {
-        let shadow = tmp_path("shadow");
+    ///
+    /// The returned `ScratchDir` is a guard: it must stay bound for as long as the
+    /// `Authenticator` is used, because dropping it deletes the shadow file the
+    /// authenticator reads. Bind it as `_dir`, not `_`.
+    fn authenticator_with_shadow(line: &str) -> (authlib::Authenticator, ScratchDir) {
+        let dir = ScratchDir::new("ftpd_test");
+        let shadow = dir.path("shadow");
         fs::write(&shadow, line).expect("write shadow");
-        let missing = tmp_path("no_such_users.yaml");
-        (
-            authlib::Authenticator::with_stores(&missing, &shadow),
-            shadow,
-        )
+        let missing = dir.path("no_such_users.yaml");
+        (authlib::Authenticator::with_stores(&missing, &shadow), dir)
+    }
+
+    /// The fixture's own wiring, which a shared guard cannot check for us.
+    ///
+    /// `ScratchDir` guarantees two guards never share a directory, and its own
+    /// tests pin that under eight concurrent threads. What it cannot know is
+    /// whether *this* fixture holds its guard for as long as the authenticator
+    /// it handed back needs the file -- return the `PathBuf` and drop the
+    /// guard, and every test here reads a shadow file that no longer exists.
+    ///
+    /// So this asserts the end-to-end property the old helper broke: twenty
+    /// fixtures alive at once, each authenticating its *own* user. The failure
+    /// it replaces was a 13%-of-runs red somewhere else entirely -- an
+    /// assertion about `Rejected` vs `Unusable` — pointing at the
+    /// authenticator rather than at the fixture that lied to it.
+    #[test]
+    fn twenty_fixtures_alive_at_once_each_authenticate_their_own_user() {
+        let mut held: Vec<(usize, authlib::Authenticator, ScratchDir)> = (0..20)
+            .map(|i| {
+                let (auth, dir) = authenticator_with_shadow(&format!(
+                    "user{i}:{}:1:0:99999:7:::\n",
+                    shadow_entry_for("correct horse")
+                ));
+                (i, auth, dir)
+            })
+            .collect();
+
+        let mut seen = std::collections::HashSet::new();
+        for (i, _, dir) in &held {
+            assert!(
+                seen.insert(dir.path("shadow")),
+                "fixture {i} reused a path another fixture already owns"
+            );
+        }
+
+        for (i, auth, _dir) in &mut held {
+            assert_eq!(
+                auth.authenticate(&format!("user{i}"), b"correct horse"),
+                authlib::Outcome::Accepted,
+                "fixture {i} is authenticating against another fixture's shadow line"
+            );
+        }
     }
 
     #[test]
     fn test_validate_password_anonymous() {
-        let (mut auth, shadow) = authenticator_with_shadow("");
+        let (mut auth, _dir) = authenticator_with_shadow("");
         assert!(validate_password("anonymous", "", true, &mut auth).is_accepted());
         assert!(
             validate_password("anonymous", "user@example.com", true, &mut auth).is_accepted(),
             "anonymous FTP accepts any password by definition (RFC 1635)"
         );
-        let _ = fs::remove_file(shadow);
     }
 
     /// The bug this replaces, stated as a test: the old `validate_password`
@@ -3076,7 +3113,7 @@ mod tests {
     #[test]
     fn a_named_user_needs_the_right_password_not_merely_an_account() {
         let stored = shadow_entry_for("correct horse");
-        let (mut auth, shadow) =
+        let (mut auth, _dir) =
             authenticator_with_shadow(&format!("alice:{stored}:1:0:99999:7:::\n"));
 
         assert!(validate_password("alice", "correct horse", false, &mut auth).is_accepted());
@@ -3084,22 +3121,18 @@ mod tests {
             !validate_password("alice", "anything at all", false, &mut auth).is_accepted(),
             "an existing account must not be enough on its own"
         );
-
-        let _ = fs::remove_file(shadow);
     }
 
     #[test]
     fn a_locked_account_admits_no_password() {
         let stored = shadow_entry_for("correct horse");
-        let (mut auth, shadow) =
+        let (mut auth, _dir) =
             authenticator_with_shadow(&format!("alice:!{stored}:1:0:99999:7:::\n"));
 
         assert_eq!(
             validate_password("alice", "correct horse", false, &mut auth),
             authlib::Outcome::Locked
         );
-
-        let _ = fs::remove_file(shadow);
     }
 
     /// A plaintext or otherwise unrecomputable shadow field must be reported
@@ -3107,14 +3140,12 @@ mod tests {
     /// nobody, least of all whoever can read the file and retype it.
     #[test]
     fn an_unrecomputable_entry_is_broken_not_wrong() {
-        let (mut auth, shadow) = authenticator_with_shadow("alice:password123:1:0:99999:7:::\n");
+        let (mut auth, _dir) = authenticator_with_shadow("alice:password123:1:0:99999:7:::\n");
 
         let outcome = validate_password("alice", "password123", false, &mut auth);
         assert_eq!(outcome, authlib::Outcome::Unusable);
         assert!(!outcome.is_accepted());
         assert!(outcome.needs_administrator());
-
-        let _ = fs::remove_file(shadow);
     }
 
     /// An account that does not exist must answer exactly as a wrong password
@@ -3122,15 +3153,13 @@ mod tests {
     #[test]
     fn an_unknown_user_is_indistinguishable_from_a_wrong_password() {
         let stored = shadow_entry_for("correct horse");
-        let (mut auth, shadow) =
+        let (mut auth, _dir) =
             authenticator_with_shadow(&format!("alice:{stored}:1:0:99999:7:::\n"));
 
         let unknown = validate_password("mallory", "guess", false, &mut auth);
         let wrong = validate_password("alice", "guess", false, &mut auth);
         assert_eq!(unknown, wrong);
         assert_eq!(unknown.user_message(), wrong.user_message());
-
-        let _ = fs::remove_file(shadow);
     }
 
     /// FTP makes reconnecting free, so a limit that resets with the control
@@ -3138,7 +3167,7 @@ mod tests {
     #[test]
     fn repeated_guesses_are_rate_limited() {
         let stored = shadow_entry_for("correct horse");
-        let (mut auth, shadow) =
+        let (mut auth, _dir) =
             authenticator_with_shadow(&format!("alice:{stored}:1:0:99999:7:::\n"));
 
         for _ in 0..=authlib::FREE_ATTEMPTS {
@@ -3148,15 +3177,13 @@ mod tests {
             validate_password("alice", "nope", false, &mut auth),
             authlib::Outcome::RateLimited { .. }
         ));
-
-        let _ = fs::remove_file(shadow);
     }
 
     /// Anonymous logins must not be able to run a named user's tally up, and
     /// must not themselves be refused because someone else has been guessing.
     #[test]
     fn anonymous_login_never_reaches_the_verifier() {
-        let (mut auth, shadow) = authenticator_with_shadow("alice:!:1:0:99999:7:::\n");
+        let (mut auth, _dir) = authenticator_with_shadow("alice:!:1:0:99999:7:::\n");
 
         for _ in 0..20 {
             assert!(validate_password("anonymous", "a@b.c", true, &mut auth).is_accepted());
@@ -3166,8 +3193,6 @@ mod tests {
             0,
             "the anonymous branch must not touch the tallies"
         );
-
-        let _ = fs::remove_file(shadow);
     }
 
     // ---- Multiple .. traversals ----

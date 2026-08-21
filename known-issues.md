@@ -50232,7 +50232,7 @@ returns exactly three production call sites and requires each to be justified.
 
 ---
 
-## B-FTPD-SSHD-AUTH-TESTS-SHARE-TEMP-FILES-AND-FLAKE — 2026-08-21 — lane B
+## B-FTPD-SSHD-AUTH-TESTS-SHARE-TEMP-FILES-AND-FLAKE — 2026-08-21 — lane B — FIXED 2026-08-21, see Resolution at the end
 
 **In short:** The tests that check FTP and SSH password handling build their
 throwaway `/etc/shadow` files by stamping the current time into the filename.
@@ -50287,6 +50287,88 @@ cleanup together.
 
 **If never fixed:** an intermittent red in the shared merge gate that each lane
 pays for in turn, over exactly the code where a false green is most expensive.
+
+### Resolution — 2026-08-21 (lane B)
+
+**There were three copies of the helper, not two.** Lane C's request closed with
+a question — "please check that the on-disk tally directory is not itself derived
+from a clock-based name" — and the answer differs by where you look. In
+production it is a constant (`authlib::DEFAULT_FAILLOCK = "/var/run/authlib/tally"`),
+and `ftpd`/`sshd` never call `with_faillock` at all, so no tally reaches the
+filesystem from those two suites. But **`authlib`'s own tests**, the one suite
+that does exercise the on-disk tally, held a third copy of the same
+`SystemTime::now().as_nanos()` helper, feeding both the shadow fixtures and the
+tally fixtures — plus four more hand-rolled fixture paths in `faillock.rs`. All
+are now on the same guard, and `authlib`'s `tmp()` is a `thread_local!`
+directory, which is one directory per `#[test]` because cargo gives each test its
+own thread.
+
+That is the more useful statement of the defect: it was never "ftpd's helper is
+wrong", it was "this helper was copied", and the copy that mattered most sat in
+the crate that neither failing test lived in.
+
+**And in the end there were five, so it became a crate.** Sweeping the rest of
+the lane for the same idiom found it again in `doas` and `logind` -- also
+`authlib`-backed shadow fixtures, also security tests. By then four crates had
+each been given a locally-written `TempDir` guard carrying the same `Drop` and
+the same doc comment: the original defect reproduced inside its own repair. All
+five now use `userspace/scratchdir`, one shared and tested implementation,
+following the same convention as `textfind`, `byteread` and `randrange`. See
+design-decisions.md §349, and `TD-B-SCRATCH-PATH-HELPERS-NOT-YET-ON-SCRATCHDIR`
+for the seven non-auth crates still to convert.
+
+`ScratchDir` hands each test a private directory instead of a shared one, and
+the directory removes itself on `Drop`. Uniqueness comes from the pid and a
+process-wide `AtomicU64`, which cover the two axes exactly: the pid separates
+concurrent *runs* of the suite, the counter separates concurrent *threads*
+inside one run. Neither consults the clock, so neither depends on it having
+advanced.
+
+That last point is the substance of the fix and worth stating, because the
+obvious repair — more digits, a finer clock, `Instant` instead of `SystemTime`
+— would not have worked. The old scheme was not merely *low-resolution*; it
+was asking a periodically-refreshed value to serve as a unique id, which it is
+not, at any resolution. A counter is unique by construction.
+
+`get_pid()` was already present in sshd's version and was already correct; it
+was the nanosecond half that was load-bearing and wrong. It is kept.
+
+The secondary defect — a panicking test leaking its file, because
+`let _ = fs::remove_file(shadow)` sits at the *end* of the test body and an
+unwind goes straight past it — is fixed by the same change, since `Drop` runs
+during unwind. All nineteen manual cleanup tails are deleted.
+
+**Two regression tests, in each crate**, because the original defect was
+detectable only statistically and that is what let it live:
+
+- `two_fixtures_never_share_a_shadow_file` — creates twenty fixtures, holds all
+  twenty alive at once, and asserts both that the paths are distinct *and* that
+  each file still contains its own line. Distinct paths alone would not be
+  enough: a later `TempDir` clearing an earlier one's directory would produce
+  the same read-someone-else's-data symptom.
+- `the_temp_dir_is_removed_even_when_the_test_panics` — panics inside
+  `catch_unwind` carrying the path as the payload, then asserts the file is
+  gone. This pins the case the old cleanup tail structurally could not reach.
+
+Neither is load-dependent, which is the point: the property is now checked
+directly rather than inferred from the absence of a red.
+
+**The rate limiter itself was cleared of the second charge.** Lane C asked
+whether `sshd`'s `RateLimited`-became-`Rejected` failure meant a tally could be
+reset by an unrelated concurrent writer. It does not, and the failure needs no
+such mechanism: that test's tally is in-memory and daemon-wide, and what the
+colliding writer destroyed was the *shadow line*. With `alice`'s line clobbered
+each wrong guess is a lookup miss, which is `Rejected` without being counted, so
+the loop never accumulates a tally and the final assertion correctly sees
+`Rejected`. The limiter behaved correctly on the input it was handed; the input
+changed underneath it.
+
+`cargo test` on the five converted crates plus `scratchdir`: 112, 140, 90, 32,
+126 and 5 passed, 0 failed; clippy clean on all six; the full workspace gate
+green.
+
+---
+
 ## TD-C-RUSTDOC-LINKS-GO-NOWHERE-IN-FIVE-GUI-CRATES
 
 **In short:** The GUI crates' generated documentation has 55 broken or
@@ -50391,3 +50473,45 @@ gate, which is most of its value).
 name was not on the list. One such (`wmempcpy`) is a lesson; two is evidence
 that curation does not work, and the vendored-export-list version should be
 built at that point rather than debated.
+
+---
+
+## TD-B-SCRATCH-PATH-HELPERS-NOT-YET-ON-SCRATCHDIR (lane B, 2026-08-21)
+
+**In short:** Seven more crates build their own throwaway-file paths in their
+tests instead of using the shared `scratchdir` crate. None of them is
+authentication code, which is why the five that were went first. Two of them can
+still collide the way the original bug did.
+
+**Where.** Two shapes, with different exposure:
+
+| Shape | Sites | Can collide |
+|---|---|---|
+| Clock-derived, pid, no counter | `userspace/oils/src/interp.rs` — lines ~71986, ~72009, ~85697, ~85787, ~85824, ~97026, ~106665 | **Yes**, between threads of one run — the original mechanism, 13% per colliding pair |
+| Fixed name, no pid and no counter | `crond2` (`crond2_test_anacron`, `…2`, `…3`, `…_ts`), `du` (`du_test_walk`, `du_test_apparent`, `du_test_exclude`), `firejail` (eight `firejail_test_*`), `wc` (`wc-width-<pid>`) | Not between tests of one run (the names differ), but **yes between two concurrent runs** of the suite — e.g. the workspace gate and a `cargo test -p du` in another window |
+| Clock **and** counter | `coreutils/src/bin/touch.rs`, `coreutils/src/bin/realpath.rs`, `oils/src/interp.rs:64490` | No — the counter already makes these correct. They leak on a panicking test, and the clock in the name is dead weight, but neither is a correctness bug |
+
+`oils` additionally has its own `ScratchDir` type (`interp.rs` ~68606, ~93419)
+which is a fourth partial reimplementation of the same idea.
+
+**Why it wasn't done in the same change.** The five auth crates
+(`authlib`, `ftpd`, `sshd`, `doas`, `logind`) are the ones where a fixture
+collision produces a *false green over password checking*, which is a different
+severity from a flaky `du` test. They were converted, tested and merged first
+rather than held behind a mechanical sweep of eight more crates. `oils` alone is
+a 100k-line file with seven sites and a competing local type.
+
+**The proper fix.** Add `scratchdir = { path = "../scratchdir" }` to each
+crate's `[dev-dependencies]` and replace each helper with
+`ScratchDir::new("<crate>_test")` + `dir.path(name)`, deleting the manual
+cleanup tails — `Drop` covers the panicking case they never could. For `oils`,
+also delete its local `ScratchDir` in favour of the shared one. See
+design-decisions.md §349 for why this is a crate rather than a corrected copy in
+each place, and `scratchdir`'s module docs for why the clock cannot be made to
+work.
+
+**If never fixed:** `oils` carries the same intermittent-red risk the auth
+crates had, in a suite big enough that an occasional unexplained failure will be
+attributed to the shell rather than the fixture. The fixed-name group is benign
+until someone runs two suites at once, at which point it deletes the other run's
+files mid-test.

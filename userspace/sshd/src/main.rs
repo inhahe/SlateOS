@@ -4697,26 +4697,62 @@ DenyGroups nogroup
             .to_string()
     }
 
-    fn tmp_path(name: &str) -> std::path::PathBuf {
-        let nanos = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .expect("clock")
-            .as_nanos();
-        std::env::temp_dir().join(format!("sshd_{}_{nanos}_{name}", get_pid()))
-    }
+    use scratchdir::ScratchDir;
 
     /// An `Authenticator` over a throwaway `/etc/shadow` holding one line.
     ///
     /// The users.yaml path deliberately points at a file that does not exist,
     /// so the shadow branch is the one under test.
-    fn authenticator_with_shadow(line: &str) -> (authlib::Authenticator, std::path::PathBuf) {
-        let shadow = tmp_path("shadow");
+    ///
+    /// The returned `ScratchDir` is a guard: it must stay bound for as long as the
+    /// `Authenticator` is used, because dropping it deletes the shadow file the
+    /// authenticator reads. Bind it as `_dir`, not `_`.
+    fn authenticator_with_shadow(line: &str) -> (authlib::Authenticator, ScratchDir) {
+        let dir = ScratchDir::new("sshd_test");
+        let shadow = dir.path("shadow");
         std::fs::write(&shadow, line).expect("write shadow");
-        let missing = tmp_path("no_such_users.yaml");
-        (
-            authlib::Authenticator::with_stores(&missing, &shadow),
-            shadow,
-        )
+        let missing = dir.path("no_such_users.yaml");
+        (authlib::Authenticator::with_stores(&missing, &shadow), dir)
+    }
+
+    /// The fixture's own wiring, which a shared guard cannot check for us.
+    ///
+    /// `ScratchDir` guarantees two guards never share a directory, and its own
+    /// tests pin that under eight concurrent threads. What it cannot know is
+    /// whether *this* fixture holds its guard for as long as the authenticator
+    /// it handed back needs the file -- return the path and drop the guard, and
+    /// every test here reads a shadow file that no longer exists.
+    ///
+    /// So this asserts the end-to-end property the old helper broke: twenty
+    /// fixtures alive at once, each authenticating its *own* user. The failure
+    /// it replaces was a 13%-of-runs red somewhere else entirely, pointing at
+    /// the authenticator rather than at the fixture that lied to it.
+    #[test]
+    fn twenty_fixtures_alive_at_once_each_authenticate_their_own_user() {
+        let stored = shadow_entry_for("correct horse");
+        let mut held: Vec<(usize, authlib::Authenticator, ScratchDir)> = (0..20)
+            .map(|i| {
+                let (auth, dir) =
+                    authenticator_with_shadow(&format!("user{i}:{stored}:1:0:99999:7:::\n"));
+                (i, auth, dir)
+            })
+            .collect();
+
+        let mut seen = std::collections::HashSet::new();
+        for (i, _, dir) in &held {
+            assert!(
+                seen.insert(dir.path("shadow")),
+                "fixture {i} reused a path another fixture already owns"
+            );
+        }
+
+        for (i, auth, _dir) in &mut held {
+            assert_eq!(
+                auth.authenticate(&format!("user{i}"), b"correct horse"),
+                authlib::Outcome::Accepted,
+                "fixture {i} is authenticating against another fixture's shadow line"
+            );
+        }
     }
 
     /// The tail of an `SSH_MSG_USERAUTH_REQUEST` for the `password` method,
@@ -4730,28 +4766,24 @@ DenyGroups nogroup
     #[test]
     fn a_password_set_with_passwd_authenticates() {
         let stored = shadow_entry_for("correct horse");
-        let (mut auth, shadow) =
+        let (mut auth, _dir) =
             authenticator_with_shadow(&format!("alice:{stored}:1:0:99999:7:::\n"));
 
         let payload = password_request(b"correct horse");
         let outcome = handle_password_auth(&payload, 0, "alice", &mut auth).expect("parse");
         assert_eq!(outcome, authlib::Outcome::Accepted);
-
-        let _ = std::fs::remove_file(shadow);
     }
 
     #[test]
     fn a_wrong_password_does_not_authenticate() {
         let stored = shadow_entry_for("correct horse");
-        let (mut auth, shadow) =
+        let (mut auth, _dir) =
             authenticator_with_shadow(&format!("alice:{stored}:1:0:99999:7:::\n"));
 
         let payload = password_request(b"correct hors");
         let outcome = handle_password_auth(&payload, 0, "alice", &mut auth).expect("parse");
         assert_eq!(outcome, authlib::Outcome::Rejected);
         assert!(!outcome.is_accepted());
-
-        let _ = std::fs::remove_file(shadow);
     }
 
     /// The old hasher's last resort was to compare the password against the
@@ -4761,15 +4793,13 @@ DenyGroups nogroup
     /// what is in it.
     #[test]
     fn a_plaintext_shadow_field_no_longer_lets_anyone_in() {
-        let (mut auth, shadow) = authenticator_with_shadow("alice:password123:1:0:99999:7:::\n");
+        let (mut auth, _dir) = authenticator_with_shadow("alice:password123:1:0:99999:7:::\n");
 
         let payload = password_request(b"password123");
         let outcome = handle_password_auth(&payload, 0, "alice", &mut auth).expect("parse");
         assert_eq!(outcome, authlib::Outcome::Unusable);
         assert!(!outcome.is_accepted());
         assert!(outcome.needs_administrator());
-
-        let _ = std::fs::remove_file(shadow);
     }
 
     /// 64 hex digits under a `$5$` label is what this tree wrote before the
@@ -4782,27 +4812,23 @@ DenyGroups nogroup
         salted.extend_from_slice(b"mypass");
         salted.extend_from_slice(b"mysalt");
         let hex: String = sha256(&salted).iter().map(|b| format!("{b:02x}")).collect();
-        let (mut auth, shadow) =
+        let (mut auth, _dir) =
             authenticator_with_shadow(&format!("alice:$5$mysalt${hex}:1:0:99999:7:::\n"));
 
         let payload = password_request(b"mypass");
         let outcome = handle_password_auth(&payload, 0, "alice", &mut auth).expect("parse");
         assert_eq!(outcome, authlib::Outcome::Unusable);
-
-        let _ = std::fs::remove_file(shadow);
     }
 
     #[test]
     fn a_locked_account_admits_no_password() {
         let stored = shadow_entry_for("correct horse");
-        let (mut auth, shadow) =
+        let (mut auth, _dir) =
             authenticator_with_shadow(&format!("alice:!{stored}:1:0:99999:7:::\n"));
 
         let payload = password_request(b"correct horse");
         let outcome = handle_password_auth(&payload, 0, "alice", &mut auth).expect("parse");
         assert_eq!(outcome, authlib::Outcome::Locked);
-
-        let _ = std::fs::remove_file(shadow);
     }
 
     /// A user with no entry at all must be indistinguishable from a user with
@@ -4810,7 +4836,7 @@ DenyGroups nogroup
     #[test]
     fn an_unknown_user_is_rejected_exactly_as_a_wrong_password_is() {
         let stored = shadow_entry_for("correct horse");
-        let (mut auth, shadow) =
+        let (mut auth, _dir) =
             authenticator_with_shadow(&format!("alice:{stored}:1:0:99999:7:::\n"));
 
         let payload = password_request(b"anything");
@@ -4818,8 +4844,6 @@ DenyGroups nogroup
         let wrong = handle_password_auth(&payload, 0, "alice", &mut auth).expect("parse");
         assert_eq!(unknown, wrong);
         assert_eq!(unknown.user_message(), wrong.user_message());
-
-        let _ = std::fs::remove_file(shadow);
     }
 
     /// The password is whatever bytes the client sent. Forcing it through
@@ -4839,7 +4863,7 @@ DenyGroups nogroup
             .expect("hash")
             .to_string();
 
-        let (mut auth, shadow) =
+        let (mut auth, _dir) =
             authenticator_with_shadow(&format!("alice:{stored}:1:0:99999:7:::\n"));
         let payload = password_request(raw);
         let outcome = handle_password_auth(&payload, 0, "alice", &mut auth).expect("parse");
@@ -4855,8 +4879,6 @@ DenyGroups nogroup
         let payload = password_request(lossy.as_bytes());
         let outcome = handle_password_auth(&payload, 0, "alice", &mut auth).expect("parse");
         assert_eq!(outcome, authlib::Outcome::Rejected);
-
-        let _ = std::fs::remove_file(shadow);
     }
 
     /// `MaxAuthTries` bounds a conversation; the tally bounds the account.
@@ -4865,7 +4887,7 @@ DenyGroups nogroup
     #[test]
     fn guessing_is_rate_limited_across_connections_not_just_within_one() {
         let stored = shadow_entry_for("correct horse");
-        let (mut auth, shadow) =
+        let (mut auth, _dir) =
             authenticator_with_shadow(&format!("alice:{stored}:1:0:99999:7:::\n"));
 
         let wrong = password_request(b"nope");
@@ -4888,18 +4910,15 @@ DenyGroups nogroup
         let right = password_request(b"correct horse");
         let outcome = handle_password_auth(&right, 0, "alice", &mut auth).expect("parse");
         assert!(matches!(outcome, authlib::Outcome::RateLimited { .. }));
-
-        let _ = std::fs::remove_file(shadow);
     }
 
     #[test]
     fn a_truncated_password_request_is_an_error_not_an_acceptance() {
-        let (mut auth, shadow) = authenticator_with_shadow("alice:!:1:0:99999:7:::\n");
+        let (mut auth, _dir) = authenticator_with_shadow("alice:!:1:0:99999:7:::\n");
         for cut in 0..5 {
             let payload = vec![0u8; cut];
             assert!(handle_password_auth(&payload, 0, "alice", &mut auth).is_err());
         }
-        let _ = std::fs::remove_file(shadow);
     }
 
     // ---- /etc/passwd parsing ----

@@ -654,14 +654,58 @@ mod tests {
             .to_string()
     }
 
+    /// A path named `name` inside the **calling test's own** scratch directory.
+    ///
+    /// The directory is a thread-local, and that is the whole mechanism:
+    /// `cargo test` gives each `#[test]` its own thread, so one thread-local
+    /// is one directory per test, created on first use and removed when the
+    /// test's thread ends. Two tests therefore cannot name the same file even
+    /// when they ask for the same `name` — which several deliberately do.
+    ///
+    /// Calling this twice with the same `name` inside one test returns the
+    /// same path, which is what the call sites below expect (`tmp("absent.yaml")`
+    /// is used repeatedly to mean "the users.yaml that isn't there").
+    ///
+    /// It replaces a helper that derived uniqueness from
+    /// `SystemTime::now().as_nanos()`. That is not a unique id at any
+    /// resolution: the system clock is refreshed on a timer interrupt rather
+    /// than per read, so two test threads entering it in the same tick got the
+    /// same value, the same file, and each other's shadow lines. See
+    /// known-issues.md `B-FTPD-SSHD-AUTH-TESTS-SHARE-TEMP-FILES-AND-FLAKE`.
+    ///
+    /// Under `--test-threads=1` every test shares the main thread and hence one
+    /// directory. That is safe — the tests then run strictly in sequence, each
+    /// writing its file before reading it — and it is exactly the isolation the
+    /// old helper provided in *all* cases.
     fn tmp(name: &str) -> PathBuf {
-        let nanos = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .expect("clock")
-            .as_nanos();
-        std::env::temp_dir().join(format!("authlib_{}_{nanos}_{name}", std::process::id()))
+        thread_local! {
+            static DIR: scratchdir::ScratchDir = scratchdir::ScratchDir::new("authlib_test");
+        }
+        DIR.with(|d| d.path(name))
     }
 
+    // ---- the fixture's own wiring ----
+    //
+    // `ScratchDir` guarantees that two guards never share a directory, and its
+    // own tests pin that, including under eight concurrent threads. What a
+    // shared crate cannot guarantee is that *this* crate hands one out per
+    // test rather than per crate -- which is the half that was wrong here. That
+    // is what `tmp()` being a thread-local is for, so it gets a test of its own.
+
+    #[test]
+    fn tmp_gives_each_thread_its_own_directory_but_repeats_within_one() {
+        // Repeating within one thread is required, not incidental: several
+        // tests below call `tmp("absent.yaml")` more than once and mean the
+        // same path every time.
+        assert_eq!(tmp("shadow"), tmp("shadow"));
+
+        let mine = tmp("shadow");
+        let theirs = std::thread::spawn(|| tmp("shadow")).join().expect("thread");
+        assert_ne!(
+            mine, theirs,
+            "two threads shared a shadow fixture; cargo gives each `#[test]` its              own thread, so that is two tests asserting over one file"
+        );
+    }
     // ---- check_stored ----
 
     #[test]

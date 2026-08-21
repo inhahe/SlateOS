@@ -1082,6 +1082,7 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use scratchdir::ScratchDir;
     use std::path::PathBuf;
 
     // ========================================================================
@@ -1114,70 +1115,106 @@ mod tests {
         format!("{user}:{hashed}:19500:0:99999:7:::\n")
     }
 
-    /// A path in the OS temp directory that nothing else in this run will use.
-    fn tmp_path(tag: &str) -> std::path::PathBuf {
-        let unique = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_or(0, |d| d.as_nanos());
-        std::env::temp_dir().join(format!("doas-{tag}-{unique}-{}.test", process::id()))
-    }
-
+    /// A note on why this suite never went red despite holding a copy of the
+    /// same broken helper: every caller passed a distinct `tag`, so the safety
+    /// came from a hand-maintained naming convention that nothing checked, and
+    /// one copy-pasted test with a duplicated tag would have undone it. That is
+    /// why `ScratchDir::new`'s prefix plays no part in uniqueness.
     /// An [`authlib::Authenticator`] backed by a temporary shadow file holding
     /// `content`, and by a `users.yaml` that does not exist -- so the shadow
     /// file is the only thing that can answer.
-    fn authenticator_with_shadow(tag: &str, content: &str) -> (authlib::Authenticator, PathBuf) {
-        let shadow = tmp_path(tag);
+    ///
+    /// The returned [`ScratchDir`] must be held for as long as the authenticator
+    /// is used: dropping it removes the shadow file out from under it.
+    fn authenticator_with_shadow(content: &str) -> (authlib::Authenticator, ScratchDir) {
+        let dir = ScratchDir::new("doas_test");
+        let shadow = dir.path("shadow");
         fs::write(&shadow, content).expect("write temp shadow");
-        let missing = tmp_path(&format!("{tag}-no-users-yaml"));
-        (
-            authlib::Authenticator::with_stores(&missing, &shadow),
-            shadow,
-        )
+        let missing = dir.path("no-users-yaml");
+        (authlib::Authenticator::with_stores(&missing, &shadow), dir)
+    }
+
+    // ---- the fixture's own wiring ----
+    //
+    // `ScratchDir` guarantees two guards never share a directory, and its own
+    // tests pin that under eight concurrent threads. What it cannot know is
+    // whether *this* fixture holds its guard for as long as the authenticator
+    // it handed back needs the file. So this asserts the end-to-end property,
+    // which in `ftpd` failed as a red in roughly one run in eight, in an
+    // assertion pointing at the authenticator rather than at the fixture.
+
+    #[test]
+    fn twenty_fixtures_alive_at_once_each_authenticate_their_own_user() {
+        // Held alive at once on purpose: dropping each before making the next
+        // would let a fixture that reuses one directory name pass. Note they
+        // all pass the *same* content shape, which the old tag-based scheme
+        // relied on callers never doing.
+        let fixtures: Vec<(authlib::Authenticator, ScratchDir)> = (0..20)
+            .map(|i| authenticator_with_shadow(&shadow_line(&format!("user{i}"), "hunter2")))
+            .collect();
+        let paths: Vec<PathBuf> = fixtures.iter().map(|(_, d)| d.path("shadow")).collect();
+
+        let distinct: std::collections::BTreeSet<&PathBuf> = paths.iter().collect();
+        assert_eq!(
+            distinct.len(),
+            paths.len(),
+            "two fixtures alive at once produced the same path"
+        );
+
+        // Distinct paths alone would not be enough: a later guard that
+        // cleared an earlier one's directory would produce the same
+        // read-someone-else's-data symptom with all-distinct names. Assert on
+        // the authenticators rather than the bytes, since that is the thing the
+        // collision actually corrupted.
+        for (i, (auth, _dir)) in fixtures.into_iter().enumerate() {
+            let mut auth = auth;
+            assert_eq!(
+                auth.authenticate(&format!("user{i}"), b"hunter2"),
+                authlib::Outcome::Accepted,
+                "fixture {i} lost its own shadow line"
+            );
+        }
     }
 
     #[test]
     fn a_password_set_with_passwd_opens_a_doas_prompt() {
         // The whole point of the change: before it, this was `Rejected`, and
         // there was no password anyone could type that would not be.
-        let (mut auth, path) = authenticator_with_shadow("ok", &shadow_line("alice", "hunter2"));
+        let (mut auth, _dir) = authenticator_with_shadow(&shadow_line("alice", "hunter2"));
         assert_eq!(
             auth.authenticate("alice", b"hunter2"),
             authlib::Outcome::Accepted
         );
-        let _ = fs::remove_file(path);
     }
 
     #[test]
     fn a_wrong_password_does_not() {
-        let (mut auth, path) = authenticator_with_shadow("bad", &shadow_line("alice", "hunter2"));
+        let (mut auth, _dir) = authenticator_with_shadow(&shadow_line("alice", "hunter2"));
         assert_eq!(
             auth.authenticate("alice", b"hunter3"),
             authlib::Outcome::Rejected
         );
-        let _ = fs::remove_file(path);
     }
 
     #[test]
     fn a_locked_account_cannot_escalate() {
-        let (mut auth, path) = authenticator_with_shadow("locked", "alice:!:19500:0:99999:7:::\n");
+        let (mut auth, _dir) = authenticator_with_shadow("alice:!:19500:0:99999:7:::\n");
         // Not `Rejected`: no password opens it, and `is_accepted` is the only
         // thing `main` asks, so an `Outcome` that is not `Accepted` is a refusal
         // however it got there.
         let outcome = auth.authenticate("alice", b"hunter2");
         assert_eq!(outcome, authlib::Outcome::Locked);
         assert!(!outcome.is_accepted());
-        let _ = fs::remove_file(path);
     }
 
     #[test]
     fn an_account_with_no_password_cannot_escalate() {
         // `login` answers this one the other way for a console login. Escalation
         // is not a login: `nopass` in doas.conf is the only consent that counts.
-        let (mut auth, path) = authenticator_with_shadow("empty", "alice::19500:0:99999:7:::\n");
+        let (mut auth, _dir) = authenticator_with_shadow("alice::19500:0:99999:7:::\n");
         let outcome = auth.authenticate("alice", b"");
         assert_eq!(outcome, authlib::Outcome::NoPassword);
         assert!(!outcome.is_accepted());
-        let _ = fs::remove_file(path);
     }
 
     #[test]
@@ -1185,20 +1222,17 @@ mod tests {
         // A system that ran the old `doas`, or the old `passwd`, has entries in
         // this shape. They must be distinguishable from a typo, because no
         // amount of retyping will ever clear one.
-        let (mut auth, path) = authenticator_with_shadow(
-            "legacy",
+        let (mut auth, _dir) = authenticator_with_shadow(
             "alice:$sha256$battery_staple$0123456789abcdef:19500:0:99999:7:::\n",
         );
         let outcome = auth.authenticate("alice", b"correct_horse");
         assert_eq!(outcome, authlib::Outcome::Unusable);
         assert!(outcome.needs_administrator());
-        let _ = fs::remove_file(path);
     }
 
     #[test]
     fn a_caller_with_no_entry_looks_exactly_like_a_wrong_password() {
-        let (mut auth, path) =
-            authenticator_with_shadow("absent", &shadow_line("alice", "hunter2"));
+        let (mut auth, _dir) = authenticator_with_shadow(&shadow_line("alice", "hunter2"));
         assert_eq!(
             auth.authenticate("mallory", b"anything"),
             authlib::Outcome::Rejected
@@ -1208,7 +1242,6 @@ mod tests {
             authlib::Outcome::Rejected.user_message(),
             authlib::Outcome::Locked.user_message()
         );
-        let _ = fs::remove_file(path);
     }
 
     #[test]

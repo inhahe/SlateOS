@@ -16,3 +16,8 @@ authlib = { path = "../authlib" }
 # `passwd` uses, rather than pasting a constant that could drift away from it.
 [dev-dependencies]
 posix = { path = "../../posix" }
+# And `scratchdir` for the per-test shadow files themselves. This is the suite
+# where the clock-named fixture was first seen to fail: two tests landed on one
+# `/etc/shadow` stand-in and one read back the other's line. See known-issues.md
+# `B-FTPD-SSHD-AUTH-TESTS-SHARE-TEMP-FILES-AND-FLAKE`.
+scratchdir = { path = "../scratchdir" }

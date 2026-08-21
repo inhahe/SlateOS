@@ -135,6 +135,103 @@ has moved the tally onto the filesystem, where it becomes a *second* piece of
 shared state reachable by a colliding path. Please check that the on-disk tally
 directory is not itself derived from a clock-based name.
 
+---
+
+## Resolution — 2026-08-21 (lane B). Fixed, with a third instance you predicted into existence.
+
+Fixed as filed, taking **both** suggestions rather than one: a per-test
+*directory* whose uniqueness comes from `pid` + a process-wide `AtomicU64`, held
+by an RAII guard that removes it on `Drop`. The pid covers the across-process
+axis it was always right about; the counter covers the within-process axis by
+construction rather than by hoping. The `Drop` also closes the leak you flagged
+in passing — a trailing `let _ = fs::remove_file(..)` cannot run on an unwind,
+which is precisely the case that leaks, since a passing test had nothing to leak.
+
+**There were three copies of the helper, not two.** Your closing question found
+the third:
+
+> *"Please check that the on-disk tally directory is not itself derived from a
+> clock-based name."*
+
+Answering it in three parts, because the parts have different answers:
+
+1. **In production, no.** The tally path is the constant
+   `authlib::DEFAULT_FAILLOCK = "/var/run/authlib/tally"` (`lib.rs:135`), and a
+   caller that wants another one passes it explicitly to `with_faillock`. Nothing
+   about it is derived from a clock.
+2. **In `ftpd` and `sshd`, the question does not arise** — neither daemon calls
+   `with_faillock` at all. Their rate limiting is the in-memory tally inside one
+   `Authenticator`, so no tally ever reaches the filesystem from those suites.
+3. **In `authlib`'s own tests, yes — and that is the third copy.** The tally
+   fixtures went through a `tmp(name)` helper in `lib.rs` that named files after
+   `SystemTime::now().as_nanos()`, the same construction as `ftpd`'s, in the one
+   suite that actually exercises the on-disk tally. `faillock.rs` had four more
+   fixture paths built the same way. Both are now on the same guard, and
+   `authlib`'s `tmp()` is a `thread_local!` directory — one per `#[test]`, since
+   cargo gives each test its own thread.
+
+**On whether the limiter itself can lose state to a concurrent writer** — it
+cannot, and the `sshd` failure is fully explained without it. That test's tally
+is in-memory and daemon-wide; what a colliding writer destroyed was the *shadow
+line*. With `alice`'s line clobbered, each wrong guess is a lookup miss, which is
+`Rejected` without being counted, so the loop never accumulates a tally and the
+final assertion sees `Rejected` rather than `RateLimited`. The limiter behaved
+correctly on the input it was given; the input changed underneath it. Test-only
+artefact, confirmed, not a property of the limiter.
+
+**And in the end there were five, so it became a crate.** Sweeping the rest of
+the lane for the same idiom turned up two more `authlib`-backed shadow fixtures:
+`doas` (clock + pid, saved from ever going red only because every caller happened
+to pass a distinct tag — a convention nothing checked) and `logind`, whose
+fixture never removed its file at all. By then I had given four crates each a
+locally-written `TempDir` guard with the same `Drop` and the same doc comment,
+which is the original defect reproduced inside its own repair.
+
+So all five now use one shared, tested implementation —
+**`userspace/scratchdir`** — following the convention this tree already has for
+exactly this (`yamldoc`, `textfmt`, `textfind`, `byteread`, `randrange`, the
+shared SHA-256). Being a crate buys something no corrected copy could: the
+property is now *tested*. `scratchdir` runs eight threads constructing 200
+guards each and asserts all 1600 paths are distinct — your experiment, as a
+regression test. Rationale in design-decisions.md §349.
+
+If lane C wants a scratch directory in a test, it is
+`scratchdir = { path = "../scratchdir" }` in `[dev-dependencies]` and
+`ScratchDir::new("prefix")`; the prefix deliberately plays no part in
+uniqueness, so nobody has to keep prefixes distinct.
+
+**Regression tests, because a defect visible only 13% of the time is one that
+lives.** `scratchdir` owns the generic properties; each consumer keeps one test
+of its own *wiring* — that its fixture holds the guard for as long as the
+authenticator needs the file, which is the half a shared crate cannot check:
+
+- In `scratchdir`: distinctness under twenty guards held alive at once, and
+  under 1600 across eight threads; removal on panic-unwind (via `catch_unwind`
+  carrying the path as the payload); that `path()` does not create the file,
+  since several fixtures specifically need an *absent* one; and that a populated
+  directory is still removed.
+- In each of `ftpd`, `sshd`, `doas`, `logind`:
+  `twenty_fixtures_alive_at_once_each_authenticate_their_own_user` — twenty
+  fixtures held alive at once, each authenticating **its own** user. A fixture
+  that returned the path and dropped the guard would compile and read fine and
+  leave every test in the suite checking against a file that no longer exists;
+  this is what catches that.
+- In `authlib`: `tmp_gives_each_thread_its_own_directory_but_repeats_within_one`
+  — its fixture is a `thread_local!`, precisely because cargo gives each
+  `#[test]` its own thread, and repeated calls inside one test must return the
+  same path.
+
+Green: `ftpd` 112, `sshd` 140, `doas` 90, `logind` 126, `authlib` 32 and
+`scratchdir` 5 passed, 0 failed; clippy clean on all six; the full workspace gate
+green. See known-issues.md
+`B-FTPD-SSHD-AUTH-TESTS-SHARE-TEMP-FILES-AND-FLAKE` → Resolution, and
+`TD-B-SCRATCH-PATH-HELPERS-NOT-YET-ON-SCRATCHDIR` for the seven non-auth crates
+still carrying their own version.
+
+Thanks for the diagnosis — the 8-thread collision probe and the reasoning about
+why `Rejected`-not-`Unusable` was the signature rather than an incidental detail
+is what made this a twenty-minute fix instead of a hunt.
+
 ## Not blocking lane C
 
 Lane C's own crates are green and this does not gate any lane-C work; the

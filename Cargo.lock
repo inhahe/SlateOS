@@ -545,6 +545,7 @@ name = "authlib"
 version = "0.1.0"
 dependencies = [
  "posix",
+ "scratchdir",
  "userdb",
 ]
 
@@ -2513,6 +2514,7 @@ version = "0.1.0"
 dependencies = [
  "authlib",
  "posix",
+ "scratchdir",
 ]
 
 [[package]]
@@ -3540,6 +3542,7 @@ version = "0.1.0"
 dependencies = [
  "authlib",
  "posix",
+ "scratchdir",
 ]
 
 [[package]]
@@ -5685,6 +5688,7 @@ dependencies = [
  "authlib",
  "libservicebus",
  "posix",
+ "scratchdir",
 ]
 
 [[package]]
@@ -9253,6 +9257,10 @@ name = "scratch-cli"
 version = "0.1.0"
 
 [[package]]
+name = "scratchdir"
+version = "0.1.0"
+
+[[package]]
 name = "screen"
 version = "0.1.0"
 
@@ -10096,6 +10104,7 @@ version = "0.1.0"
 dependencies = [
  "authlib",
  "posix",
+ "scratchdir",
  "sha2",
 ]
 

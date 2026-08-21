@@ -328,11 +328,7 @@ fn terminate_session(daemon: &mut Daemon, id: &str, caller: Option<Credentials>)
 /// `Unusable`, but `Unusable` means the stored entry is in a format nothing on
 /// this system can recompute — the machine is broken, not the typist — and it
 /// needs to reach an administrator instead of being counted as a typo.
-fn authenticate_session(
-    daemon: &mut Daemon,
-    payload: &[u8],
-    caller: Option<Credentials>,
-) -> Reply {
+fn authenticate_session(daemon: &mut Daemon, payload: &[u8], caller: Option<Credentials>) -> Reply {
     let Some(args) = fields::decode_exact(payload, 2) else {
         return Reply::Error(ERR_INVALID_ARGUMENTS);
     };
@@ -398,11 +394,7 @@ fn set_idle_hint(daemon: &mut Daemon, payload: &[u8], caller: Option<Credentials
 /// than as wire bytes, and so that a future transport change touches one
 /// function.
 #[must_use]
-pub fn handle_message(
-    daemon: &mut Daemon,
-    call: &Message,
-    caller: Option<Credentials>,
-) -> Message {
+pub fn handle_message(daemon: &mut Daemon, call: &Message, caller: Option<Credentials>) -> Message {
     match dispatch(daemon, &call.member, &call.payload, caller) {
         Reply::Return(payload) => Message::reply(call).with_payload(&payload),
         Reply::Error(name) => Message::error(call, name),
@@ -460,7 +452,11 @@ mod tests {
     }
 
     const fn creds(uid: u32) -> Credentials {
-        Credentials { pid: 42, uid, gid: uid }
+        Credentials {
+            pid: 42,
+            uid,
+            gid: uid,
+        }
     }
 
     fn call(d: &mut Daemon, member: &str, args: &[&[u8]], who: Option<Credentials>) -> Reply {
@@ -532,7 +528,15 @@ mod tests {
     fn a_user_may_work_on_their_own_session() {
         let (mut d, alice, _) = two_user_daemon();
         assert!(!call(&mut d, "GetSession", &[alice.as_bytes()], Some(creds(1000))).is_error());
-        assert!(!call(&mut d, "LockSession", &[alice.as_bytes()], Some(creds(1000))).is_error());
+        assert!(
+            !call(
+                &mut d,
+                "LockSession",
+                &[alice.as_bytes()],
+                Some(creds(1000))
+            )
+            .is_error()
+        );
         assert!(d.sessions[&alice].locked);
     }
 
@@ -568,12 +572,7 @@ mod tests {
         let (mut d, _, _) = two_user_daemon();
         // Real session and imaginary session must give the same answer, or the
         // error code becomes a session-id oracle.
-        let real = call(
-            &mut d,
-            "ForceUnlockSession",
-            &[b"1"],
-            Some(creds(1000)),
-        );
+        let real = call(&mut d, "ForceUnlockSession", &[b"1"], Some(creds(1000)));
         let imaginary = call(
             &mut d,
             "ForceUnlockSession",
@@ -609,7 +608,12 @@ mod tests {
         // Not NoSuchSession: the client's correct reaction is to ask for a
         // password, not to re-look-up the session.
         assert_eq!(
-            call(&mut d, "UnlockSession", &[alice.as_bytes()], Some(creds(1000))),
+            call(
+                &mut d,
+                "UnlockSession",
+                &[alice.as_bytes()],
+                Some(creds(1000))
+            ),
             Reply::Error(ERR_NOT_AUTHENTICATED)
         );
         assert!(d.sessions[&alice].locked);
@@ -733,7 +737,10 @@ mod tests {
             &[alice.as_bytes(), &[0xff, 0xfe, 0x80]],
             Some(creds(1000)),
         );
-        assert!(!reply.is_error(), "non-UTF-8 password was refused as malformed");
+        assert!(
+            !reply.is_error(),
+            "non-UTF-8 password was refused as malformed"
+        );
     }
 
     // -- message plumbing ----------------------------------------------------

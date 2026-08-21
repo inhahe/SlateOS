@@ -6367,6 +6367,12 @@ fn bench_net_arp_lookup() {
 ///
 /// Computes the one's-complement checksum over a 20-byte IPv4 header.
 /// This operation runs on every sent and received packet.
+///
+/// Times [`crate::net::ipv4::ip_checksum`] itself. It used to time a
+/// `bench.rs`-local copy — see design-decisions.md §251 — which for this one
+/// benchmark was character-equivalent to the real function, so the series is
+/// continuous across the change. The other three copies were not, and theirs
+/// are not.
 fn bench_net_checksum() {
     // 20-byte IPv4 header (with checksum field zeroed for computation).
     let header: [u8; 20] = [
@@ -6376,7 +6382,7 @@ fn bench_net_checksum() {
     ];
 
     let result = run("net_ip_checksum_20b", 5000, || {
-        let _ = core::hint::black_box(internet_checksum(&header));
+        let _ = core::hint::black_box(crate::net::ipv4::ip_checksum(&header));
     });
 
     serial_println!(
@@ -6387,35 +6393,18 @@ fn bench_net_checksum() {
     score("net_checksum", &result, 500);
 }
 
-/// Internet checksum (RFC 1071) — one's complement sum of 16-bit words.
-///
-/// Duplicated here to avoid depending on a specific module's internal
-/// checksum function.  The benchmark measures pure computation, not
-/// module call overhead.
-fn internet_checksum(data: &[u8]) -> u16 {
-    let mut sum: u32 = 0;
-    let mut i = 0;
-    while i + 1 < data.len() {
-        let word = ((data[i] as u32) << 8) | (data[i + 1] as u32);
-        sum = sum.wrapping_add(word);
-        i += 2;
-    }
-    // Handle odd byte.
-    if i < data.len() {
-        sum = sum.wrapping_add((data[i] as u32) << 8);
-    }
-    // Fold 32-bit sum to 16 bits.
-    while sum >> 16 != 0 {
-        sum = (sum & 0xFFFF) + (sum >> 16);
-    }
-    !(sum as u16)
-}
-
 /// Benchmark TCP checksum computation (IPv4 pseudo-header).
 ///
 /// Computes the TCP checksum over a typical MSS-sized segment (1460 bytes)
 /// with the IPv4 12-byte pseudo-header.  This runs on every TCP segment
 /// sent or received — it is the single most frequent checksum operation.
+///
+/// Times [`crate::net::tcp::tcp_checksum`] itself. Until design-decisions.md
+/// §251 this timed a `bench.rs`-local copy that hand-unrolled the pseudo-header
+/// as six adds instead of building the 12-byte `pseudo` array and walking it
+/// with `chunks(2)`. Expect this number to *rise* against the pre-§251 history:
+/// the rise is pseudo-header cost that was always being paid and never being
+/// measured, not a regression.
 fn bench_net_tcp_checksum_v4() {
     // Build a 1460-byte TCP segment (20-byte header + 1440 payload).
     let mut segment = [0xABu8; 1460];
@@ -6435,7 +6424,7 @@ fn bench_net_tcp_checksum_v4() {
     let dst = crate::net::interface::Ipv4Addr([10, 0, 0, 2]);
 
     let result = run("net_tcp_checksum_v4_1460b", 2000, || {
-        let _ = core::hint::black_box(tcp_checksum_bench(&segment, src, dst));
+        let _ = core::hint::black_box(crate::net::tcp::tcp_checksum(&segment, src, dst));
     });
 
     serial_println!(
@@ -6447,42 +6436,18 @@ fn bench_net_tcp_checksum_v4() {
     score("tcp_checksum_v4", &result, 2000);
 }
 
-/// TCP checksum (duplicated to avoid depending on tcp module internals).
-fn tcp_checksum_bench(
-    segment: &[u8],
-    src: crate::net::interface::Ipv4Addr,
-    dst: crate::net::interface::Ipv4Addr,
-) -> u16 {
-    let len = segment.len();
-    let mut sum: u32 = 0;
-    // IPv4 pseudo-header (12 bytes).
-    sum = sum.wrapping_add(((src.0[0] as u32) << 8) | src.0[1] as u32);
-    sum = sum.wrapping_add(((src.0[2] as u32) << 8) | src.0[3] as u32);
-    sum = sum.wrapping_add(((dst.0[0] as u32) << 8) | dst.0[1] as u32);
-    sum = sum.wrapping_add(((dst.0[2] as u32) << 8) | dst.0[3] as u32);
-    sum = sum.wrapping_add(6); // protocol TCP
-    sum = sum.wrapping_add(len as u32);
-    // TCP segment.
-    let mut i = 0;
-    while i + 1 < len {
-        sum = sum.wrapping_add(((segment[i] as u32) << 8) | segment[i + 1] as u32);
-        i += 2;
-    }
-    if i < len {
-        sum = sum.wrapping_add((segment[i] as u32) << 8);
-    }
-    while sum >> 16 != 0 {
-        sum = (sum & 0xFFFF) + (sum >> 16);
-    }
-    !(sum as u16)
-}
-
 /// Benchmark TCP checksum computation (IPv6 pseudo-header).
 ///
 /// Same 1460-byte segment but with the 40-byte IPv6 pseudo-header
 /// (src addr 16 + dst addr 16 + length 4 + next_header 4).
 /// Compares directly against the IPv4 variant to show the overhead
 /// of the larger pseudo-header.
+///
+/// That comparison only became truthful at design-decisions.md §251. Before it,
+/// *both* sides of it were `bench.rs`-local copies, each hand-written to a
+/// different shape than the shipping function — so the "overhead of the larger
+/// pseudo-header" it reported was the difference between two functions that
+/// never ran. Both sides now time `crate::net::tcp`.
 fn bench_net_tcp_checksum_v6() {
     let mut segment = [0xABu8; 1460];
     segment[0] = 0x1F;
@@ -6504,8 +6469,16 @@ fn bench_net_tcp_checksum_v6() {
     dst[1] = 0x80;
     dst[15] = 0x02;
 
+    // Wrapped outside the closure: `Ipv6Addr` is a newtype over the array, so
+    // this costs nothing at run time, but building it inside the timed window
+    // would put construction in the measurement — the mistake four other
+    // benchmarks make with `Ipv4Addr` (see boot-test.sh's BENCH_COVERAGE note
+    // on net/interface.rs).
+    let src = crate::net::ipv6::Ipv6Addr(src);
+    let dst = crate::net::ipv6::Ipv6Addr(dst);
+
     let result = run("net_tcp_checksum_v6_1460b", 2000, || {
-        let _ = core::hint::black_box(tcp_checksum_v6_bench(&segment, &src, &dst));
+        let _ = core::hint::black_box(crate::net::tcp::tcp_checksum_v6(&segment, &src, &dst));
     });
 
     serial_println!(
@@ -6514,37 +6487,6 @@ fn bench_net_tcp_checksum_v6() {
         result.min_cycles
     );
     score("tcp_checksum_v6", &result, 2200);
-}
-
-/// TCP checksum with IPv6 pseudo-header (bench-local copy).
-fn tcp_checksum_v6_bench(segment: &[u8], src: &[u8; 16], dst: &[u8; 16]) -> u16 {
-    let len = segment.len();
-    let mut sum: u32 = 0;
-    // IPv6 pseudo-header: src(16) + dst(16) + length(4) + zero+NH(4).
-    let mut i = 0;
-    while i < 16 {
-        sum = sum.wrapping_add(((src[i] as u32) << 8) | src[i + 1] as u32);
-        sum = sum.wrapping_add(((dst[i] as u32) << 8) | dst[i + 1] as u32);
-        i += 2;
-    }
-    // Upper-layer packet length (u32, network order).
-    sum = sum.wrapping_add((len >> 16) as u32);
-    sum = sum.wrapping_add((len & 0xFFFF) as u32);
-    // Zero + next header (TCP = 6).
-    sum = sum.wrapping_add(6);
-    // TCP segment body.
-    i = 0;
-    while i + 1 < len {
-        sum = sum.wrapping_add(((segment[i] as u32) << 8) | segment[i + 1] as u32);
-        i += 2;
-    }
-    if i < len {
-        sum = sum.wrapping_add((segment[i] as u32) << 8);
-    }
-    while sum >> 16 != 0 {
-        sum = (sum & 0xFFFF) + (sum >> 16);
-    }
-    !(sum as u16)
 }
 
 /// Benchmark IPv6 packet parsing.
@@ -6640,13 +6582,19 @@ fn bench_net_firewall_check() {
 
 /// Benchmark DNS query packet building (label encoding).
 ///
-/// Constructs a DNS query packet locally, mimicking the internal
-/// `build_query_typed()` path.  This measures the label encoding
-/// (hostname → DNS wire format) plus the Vec allocation, which runs
-/// once per DNS resolution.
+/// Times [`crate::net::dns::build_query`] — the real A-record path. This
+/// measures the label encoding (hostname → DNS wire format) plus the Vec
+/// allocation, which runs once per DNS resolution.
+///
+/// It previously "mimick[ed] the internal `build_query_typed()` path" with a
+/// `bench.rs`-local copy, and that copy was the least faithful of the four
+/// design-decisions.md §251 removed: it lacked `encode_name`'s
+/// `.filter(|l| !l.is_empty())`, so it did strictly less work than the shipping
+/// code *and* would have built an invalid packet for a trailing-dot FQDN.
+/// Expect this number to move against the pre-§251 history.
 fn bench_net_dns_build_query() {
     let result = run("net_dns_build_a_query", 1000, || {
-        let _ = core::hint::black_box(build_dns_query_bench("www.example.com", 1));
+        let _ = core::hint::black_box(crate::net::dns::build_query("www.example.com", 0x1234));
     });
 
     // DNS query build includes a heap allocation (Vec::with_capacity) which
@@ -6658,27 +6606,6 @@ fn bench_net_dns_build_query() {
         result.min_ns,
         result.min_cycles
     );
-}
-
-/// Build a DNS query (bench-local copy of the internal label encoder).
-fn build_dns_query_bench(name: &str, qtype: u16) -> alloc::vec::Vec<u8> {
-    let mut buf = alloc::vec::Vec::with_capacity(64);
-    // Header: ID=0x1234, flags=0x0100 (recursion desired), qdcount=1.
-    buf.extend_from_slice(&[
-        0x12, 0x34, 0x01, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-    ]);
-    // Encode labels.
-    for label in name.split('.') {
-        let bytes = label.as_bytes();
-        let len = bytes.len().min(63);
-        buf.push(len as u8);
-        buf.extend_from_slice(&bytes[..len]);
-    }
-    buf.push(0x00); // Root label.
-    // QTYPE + QCLASS IN.
-    buf.extend_from_slice(&qtype.to_be_bytes());
-    buf.extend_from_slice(&1u16.to_be_bytes());
-    buf
 }
 
 /// Benchmark TCP connection table scan.

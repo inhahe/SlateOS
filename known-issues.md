@@ -46517,6 +46517,62 @@ check that the call is inside the `run(...)` closure and that the benchmark is
 Validated on a real boot: PASSED, streak 34, with the rot check running silently
 on the live `finish_pass` path under `set -euo pipefail`.
 
+**`[A]` 2026-08-21 — fix (3) done: the four copy-measuring benchmarks now measure
+the kernel.** design-decisions §251. `net_checksum`, `tcp_checksum_v4`,
+`tcp_checksum_v6` and `dns_build_query` each timed a hand-written copy of the
+function they named, living in `bench.rs`. All four copies are deleted; the
+benchmarks now call `net::ipv4::ip_checksum`, `net::tcp::tcp_checksum`,
+`net::tcp::tcp_checksum_v6` and `net::dns::build_query`, the last three widened
+to `pub(crate)` for exactly that reason and documented as such at their
+definitions. `BENCH_COVERAGE` in `boot-test.sh` gains the four rules and
+`kernel/src/net/dns.rs` as a covered file (net: 9 → 10 of 49).
+
+Only `net_checksum`'s copy was faithful (character-equivalent to
+`ipv4::ip_checksum`), so **only that series is continuous across §251**. The
+other three should step:
+
+| Benchmark | How the copy differed |
+|---|---|
+| `tcp_checksum_v4` | Hand-unrolled the pseudo-header into six adds; the real one builds a 12-byte array and walks it with `chunks(2)` + `.get(1).copied().unwrap_or(0)` |
+| `tcp_checksum_v6` | Summed src and dst in one interleaved 8-iteration loop; the real one walks each address separately |
+| `dns_build_query` | Lacked `encode_name`'s `.filter(\|l\| !l.is_empty())` — a *behavioural* difference, not just a cost one: without it a trailing-dot FQDN encodes as an invalid name |
+
+**Expect the next `--bench` run to flag one or more of these three as REGRESSED,
+and do not tune it away.** The step is real cost that the copies were hiding.
+Annotate the run, then treat the post-§251 level as the new baseline. The
+v4-vs-v6 comparison in particular was meaningless before: both of its sides were
+bench-local copies, so the "overhead of the larger pseudo-header" it advertised
+was the difference between two functions that never ran.
+
+**`[A]` 2026-08-21 — the inverse error: coverage that exists while the gate never
+asks for it.** Found by running the map *backwards* — asking which recorded
+benchmarks no file rule cites. `lock_uncontended` and `lock_tracked_nested` time
+`crate::sync`'s Mutex with lockdep active, so `kernel/src/sync.rs` and
+`kernel/src/lockdep.rs` are genuinely covered — but neither was in
+`BENCH_CRITICAL_PATHS`. A change to the kernel's lock, which sits on essentially
+every hot path, therefore produced "no perf-critical changes since the last
+benchmarked commit" and skipped a suite that would have caught it. This is the
+mirror image of §250 (which was about the gate *asking* for files nothing
+measures) and is arguably worse, because its failure is silent in the direction
+that matters. Both files added to `BENCH_CRITICAL_PATHS` and to
+`BENCH_COVERAGE`. `bench.rs` itself records that an `O(edges)` scan in
+`record_edge` "went unread" for two runs, so this is not hypothetical.
+
+The backwards check is worth re-running whenever benchmarks are added. After
+this fix it leaves two: `rdtsc_overhead`, correctly cited by nothing because it
+measures the harness rather than the kernel, and `hpet_read` — **open question**:
+`kernel/src/hpet.rs` is unwatched and unmapped. It has a scored benchmark, so
+adding it is cheap; whether HPET reads are hot enough to warrant gate attention
+depends on how often the timekeeping path reads the counter versus the TSC,
+which was not checked. Deliberately left undecided rather than guessed, since
+guessing is what produced the over-claims in the first place.
+
+Still open from this entry: fix (1), a ZFS read benchmark, and honest benchmarks
+for `mm/fault.rs` (the real `#PF` handler — `page_fault` hand-rolls map/unmap
+through `page_table` with the CPU exception explicitly excluded) and
+`kernel/src/idt.rs` (no benchmark's measurement window contains it;
+`isr_latency`'s opens inside `apic::handle_timer_irq`, well past the stub).
+
 ---
 
 ## `apps/**` bug-hunt sweep, round 1: four live defects and two latent (lane C)

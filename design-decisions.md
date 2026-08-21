@@ -24610,6 +24610,115 @@ noise, and the balance above flips. Likewise if execution-trace-derived coverage
 becomes available and can distinguish "executed" from "would detect a
 regression", the hand-written map should give way to it.
 
+## §251 — Four benchmarks timed a copy of the code; they now time the code
+
+**Date:** 2026-08-21
+**Decided by:** Claude (autonomous)
+
+**In short.** Four of the kernel's 86 benchmarks were not measuring the kernel.
+Each one had a private copy of the function it claimed to time, written out by
+hand inside `bench.rs`, and it timed the copy. So the two TCP-checksum numbers,
+the IP-checksum number and the DNS-query number described code that never runs
+on a real packet — you could have made the shipping versions ten times slower
+and all four would still have reported the same figure and passed. The fix is
+to delete the four copies and let the benchmarks call the real functions, which
+costs widening three functions from private to crate-visible. The consequence
+to expect: three of the four numbers will move when next recorded, because the
+real code does more work than the copies did. That movement is not a
+regression — it is cost that was always being paid and never being measured.
+
+**What was there.** Found while writing §250's coverage map, which is what
+forced the question "which kernel file does this benchmark actually run?" for
+every benchmark in turn.
+
+| Benchmark | Timed | Faithful to the real function? |
+|---|---|---|
+| `net_checksum` | `bench.rs::internet_checksum` | Yes — character-equivalent to `ipv4::ip_checksum` |
+| `tcp_checksum_v4` | `bench.rs::tcp_checksum_bench` | **No** |
+| `tcp_checksum_v6` | `bench.rs::tcp_checksum_v6_bench` | No |
+| `dns_build_query` | `bench.rs::build_dns_query_bench` | **No — differs in behaviour** |
+
+The stated justification, in `tcp_checksum_bench`'s own doc comment, was
+"duplicated to avoid depending on tcp module internals"; `internet_checksum`'s
+said it measured "pure computation, not module call overhead". Both are
+arguments for a benchmark that avoids depending on the code under test, which
+is a description of a benchmark that does not test it.
+
+**Why "not faithful" is the load-bearing part.** A faithful copy is merely
+redundant — it drifts eventually, but today's number is today's truth. These
+were not faithful, and the divergences fell exactly on the thing being measured:
+
+- `tcp_checksum` builds a 12-byte `pseudo` array and walks it with
+  `chunks(2)` and `.get(1).copied().unwrap_or(0)`. The copy hand-unrolled the
+  pseudo-header into six `wrapping_add`s and never built the array. The
+  pseudo-header is the *entire subject* of comparing v4 against v6 — the v6
+  benchmark's doc comment says it exists "to show the overhead of the larger
+  pseudo-header" — and it was the one part not measured. Both sides of that
+  comparison were hand-optimised copies, so the overhead it reported was the
+  difference between two functions that do not exist.
+- `tcp_checksum_v6` sums source and destination in one interleaved 8-iteration
+  loop; the real one walks each address in its own `for i in 0..8`.
+- `build_dns_query_bench` lacked `encode_name`'s `.filter(|l| !l.is_empty())`.
+  That is not a cost difference but a **behavioural** one: the filter is what
+  makes a trailing-dot FQDN (`example.com.`) encode legally instead of emitting
+  a zero-length label before the root terminator. The benchmark reported the
+  speed of a builder that would produce an invalid packet.
+
+**What changed.** `net::ipv4::ip_checksum` was already `pub`. Three functions
+were widened to `pub(crate)`, each with a doc comment saying that `crate::bench`
+is the only reason: `net::tcp::tcp_checksum`, `net::tcp::tcp_checksum_v6`,
+`net::dns::build_query`. The four copies are deleted.
+
+`net::dns::build_query` rather than `build_query_typed`: the benchmark wants the
+A-record path, `build_query` *is* the A-record path, and exposing it keeps
+`TYPE_A` and the other qtype constants private. Widening the narrower, more
+specific function costs one call site and leaks less.
+
+For the same reason the IPv6 address newtype is wrapped *before* the timed
+closure opens, not inside it — putting `Ipv6Addr(src)` in the window would
+re-introduce, in the act of fixing this, the exact error §250's map calls out
+for `net/interface.rs`.
+
+**On keeping the benchmark names.** The three unfaithful ones will step to a new
+level. The alternative was to rename them so the old series ends cleanly. Kept
+the names, because a name here denotes the *quantity of interest* ("TCP checksum
+over a 1460-byte segment with an IPv4 pseudo-header"), which has not changed —
+only the fidelity of the instrument has. Renaming would orphan ~30 runs of
+history for a measurement that is conceptually the same one, finally taken
+correctly.
+
+The risk in that choice is a silently-reinterpreted series, which is precisely
+§250's sin. It is answered by making the discontinuity loud rather than by
+renaming: each benchmark's doc comment says which direction to expect and why,
+`known-issues.md` records it, and the commit is the boundary. A step that trips
+the regression detector on the next `--bench` run is the *correct* outcome and
+should be annotated, not tuned away — the numbers genuinely got worse, because
+the real code is slower than the copies were.
+
+**Alternatives considered.**
+
+- *Keep the copies and add a test asserting copy and original agree.* Rejected:
+  it pins behaviour, not cost, so it would have caught the DNS divergence and
+  none of the three timing ones — the copies would still have been the things
+  measured.
+- *Leave them and note it in the coverage map.* This is what §250 did as an
+  interim, and it is honest, but it settles for a permanently blind spot in
+  four of 86 benchmarks when the fix is three visibility keywords.
+- *Move the real functions into a shared inner module both call.* More
+  machinery than the problem needs; `pub(crate)` on the function that already
+  exists is the smaller change and leaves the module boundary where the design
+  put it.
+
+**How to reverse.** Restore the four `fn *_bench` copies from this commit's
+parent, point the four `run(...)` closures back at them, and narrow the three
+functions to private. Nothing outside `bench.rs` depends on the wider
+visibility.
+
+**What would change this.** If `pub(crate)` on a hot function ever inhibited an
+optimisation the private version got — cross-crate inlining is unaffected here,
+but if it were measurable — the shared-inner-module alternative becomes the
+right answer rather than merely a heavier one.
+
 ## §463 — Two shared RNG crates merge into the dependency-free one
 
 **Date:** 2026-08-18

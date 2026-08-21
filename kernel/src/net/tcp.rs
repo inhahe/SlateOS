@@ -810,8 +810,18 @@ fn build_segment_with_options(
 }
 
 /// Compute TCP checksum including the IPv4 pseudo-header.
+///
+/// `pub(crate)` solely so `crate::bench` can time the function that actually
+/// runs. It previously timed a hand-unrolled copy living in `bench.rs`, whose
+/// stated justification was "to avoid depending on the tcp module internals" —
+/// but a benchmark that avoids depending on the code under test is not
+/// measuring it. The copy skipped the `pseudo` array and its `chunks(2)` walk
+/// entirely, so the pseudo-header cost — the whole point of comparing this
+/// against [`tcp_checksum_v6`] — was the one part it did not measure. Widening
+/// a module's surface by one function is the cheaper price. See
+/// design-decisions.md §251.
 #[allow(clippy::arithmetic_side_effects)]
-fn tcp_checksum(segment: &[u8], src_ip: Ipv4Addr, dst_ip: Ipv4Addr) -> u16 {
+pub(crate) fn tcp_checksum(segment: &[u8], src_ip: Ipv4Addr, dst_ip: Ipv4Addr) -> u16 {
     let mut sum: u32 = 0;
 
     // Pseudo-header: src IP, dst IP, zero, protocol (6), TCP length.
@@ -859,8 +869,12 @@ fn tcp_checksum(segment: &[u8], src_ip: Ipv4Addr, dst_ip: Ipv4Addr) -> u16 {
 /// The IPv6 pseudo-header is 40 bytes: source address (16), destination
 /// address (16), upper-layer packet length (4, u32), zero (3) + next
 /// header (1).
+///
+/// `pub(crate)` for the same reason as [`tcp_checksum`]: `crate::bench` timed a
+/// copy of this, which summed src and dst in one interleaved 8-iteration loop
+/// where this walks each address in its own. See design-decisions.md §251.
 #[allow(clippy::arithmetic_side_effects)]
-fn tcp_checksum_v6(segment: &[u8], src_ip: &Ipv6Addr, dst_ip: &Ipv6Addr) -> u16 {
+pub(crate) fn tcp_checksum_v6(segment: &[u8], src_ip: &Ipv6Addr, dst_ip: &Ipv6Addr) -> u16 {
     let mut sum: u32 = 0;
 
     // Pseudo-header: source address (16 bytes).

@@ -66,8 +66,14 @@
 //! | big-endian pool | `label::parse_uberblock`, `dmu::Reader::read_block` |
 //! | encryption | `dmu::Reader::read_block` |
 //! | Zstd compression | `zio::decompress` |
-//! | gang blocks | `dmu::Reader::read_block` |
 //! | external ZAP pointer tables | `zap::fat_lookup` |
+//!
+//! *Gang blocks* — the tree of smaller allocations ZFS substitutes when a pool
+//! is too fragmented to place a block contiguously — used to be on that list
+//! and are now read. They matter out of proportion to how exotic they sound:
+//! a pool acquires them precisely when it is nearly full, which is the state a
+//! pool is in when someone most wants to read their files off it. See
+//! `design-decisions.md` §248 and `dmu::Reader::read_block`.
 //!
 //! Read-only is a deliberate stopping point, for the same reason as Btrfs and
 //! NTFS: writing to a copy-on-write pool means allocating from space maps,

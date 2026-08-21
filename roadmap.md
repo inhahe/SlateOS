@@ -2170,7 +2170,10 @@ _Port ext4 first. Don't write a custom filesystem._
   `fs::f2fs`), ZFS read (**done 2026-08-20**, `fs::zfs` — one top-level vdev,
   which may be a single disk or **one leg of a mirror** (design-decisions §247),
   resolving file attributes through the pool's own SA registry rather than the
-  hardcoded ZPL offsets every ZFS bootloader uses; see design-decisions §245);
+  hardcoded ZPL offsets every ZFS bootloader uses (design-decisions §245), and
+  reassembling **gang blocks** — the split allocations a nearly-full pool
+  substitutes for a contiguous one, which is exactly the state a pool is in when
+  its owner most wants to read files off it (design-decisions §248));
   the write sides remain open
 
 ### 2.4 Networking stack (userspace)

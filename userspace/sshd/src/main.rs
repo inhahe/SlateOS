@@ -26,9 +26,20 @@
 //! - Host key: ssh-ed25519 (RFC 8032, via `posix::ed25519`)
 //! - Encryption: AES-128-CTR
 //! - MAC: HMAC-SHA256
-//! - User auth: password (against /etc/shadow), public key (`authorized_keys`,
-//!   with the RFC 4252 section 7 signature actually verified)
+//! - User auth: password (through `authlib`, the one verifier the system has),
+//!   public key (`authorized_keys`, with the RFC 4252 section 7 signature
+//!   actually verified)
 //! - Session channels: `exec` requests run the command
+//!
+//! # Two independent limits on guessing
+//!
+//! `MaxAuthTries` bounds one *conversation*: after that many refusals the
+//! daemon disconnects. On its own it bounds nothing at all, because the client
+//! may simply reconnect — which is why password attempts also go through a
+//! single daemon-wide [`authlib::Authenticator`] whose per-*user* failure tally
+//! survives the connection and answers with a doubling delay. The two limits
+//! are deliberately different things: one stops a conversation running forever,
+//! the other stops an account being ground down.
 //!
 //! The host key is read from, or created at, `HostKeyFile`
 //! (`/etc/ssh/ssh_host_ed25519_key` by default) in OpenSSH private key format.
@@ -1813,18 +1824,6 @@ fn base64_decode(input: &str) -> Vec<u8> {
     output
 }
 
-/// Lowercase hex encoding of a byte slice.
-fn hex_encode(bytes: &[u8]) -> String {
-    use std::fmt::Write as _;
-    bytes
-        .iter()
-        .fold(String::with_capacity(bytes.len() * 2), |mut s, b| {
-            // Writing to a String is infallible, so the Result is ignored.
-            let _ = write!(s, "{b:02x}");
-            s
-        })
-}
-
 // ============================================================================
 // Configuration
 // ============================================================================
@@ -2053,74 +2052,30 @@ fn parse_bool(value: &str) -> Result<bool, SshdError> {
 // User authentication
 // ============================================================================
 
-/// An entry from /etc/shadow.
-struct ShadowEntry {
-    username: String,
-    /// The password hash (e.g., "$6$salt$hash" or plain SHA-256 hex).
-    password_hash: String,
-}
-
-/// Parse /etc/shadow content into entries.
-fn parse_shadow(content: &str) -> Vec<ShadowEntry> {
-    let mut entries = Vec::new();
-    for line in content.lines() {
-        let line = line.trim();
-        if line.is_empty() || line.starts_with('#') {
-            continue;
-        }
-        let fields: Vec<&str> = line.split(':').collect();
-        if fields.len() >= 2 {
-            entries.push(ShadowEntry {
-                username: fields[0].into(),
-                password_hash: fields[1].into(),
-            });
-        }
-    }
-    entries
-}
-
-/// Verify a password against its SHA-256 hash.
-/// Supports: raw hex SHA-256, $5$ (SHA-256 crypt), or plain comparison for
-/// testing. Returns true if the password matches.
-fn verify_password(password: &str, stored_hash: &str) -> bool {
-    if stored_hash.is_empty() || stored_hash == "!" || stored_hash == "*" || stored_hash == "!!" {
-        return false; // Locked account.
-    }
-
-    // Check if it's a $5$salt$hash format (SHA-256 crypt).
-    if let Some(rest) = stored_hash.strip_prefix("$5$")
-        && let Some((salt, expected_hash)) = rest.rsplit_once('$')
-    {
-        let mut salted = Vec::new();
-        salted.extend_from_slice(password.as_bytes());
-        salted.extend_from_slice(salt.as_bytes());
-        let computed = sha256(&salted);
-        let computed_hex = hex_encode(&computed);
-        return constant_time_eq(computed_hex.as_bytes(), expected_hash.as_bytes());
-    }
-
-    // Check if it's a $6$salt$hash format (SHA-512 -- we approximate with SHA-256).
-    if let Some(rest) = stored_hash.strip_prefix("$6$")
-        && let Some((salt, expected_hash)) = rest.rsplit_once('$')
-    {
-        let mut salted = Vec::new();
-        salted.extend_from_slice(password.as_bytes());
-        salted.extend_from_slice(salt.as_bytes());
-        let computed = sha256(&salted);
-        let computed_hex = hex_encode(&computed);
-        return constant_time_eq(computed_hex.as_bytes(), expected_hash.as_bytes());
-    }
-
-    // Plain SHA-256 hex hash.
-    if stored_hash.len() == 64 && stored_hash.chars().all(|c| c.is_ascii_hexdigit()) {
-        let computed = sha256(password.as_bytes());
-        let computed_hex = hex_encode(&computed);
-        return constant_time_eq(computed_hex.as_bytes(), stored_hash.as_bytes());
-    }
-
-    // Plaintext comparison (development/testing only).
-    constant_time_eq(password.as_bytes(), stored_hash.as_bytes())
-}
+// Password verification lives in `authlib`, not here. What this crate used to
+// do instead is worth recording, because it is the shape of the bug rather than
+// one instance of it:
+//
+//   - It parsed `/etc/shadow` itself, taking field 1 and splitting the salt out
+//     of it by hand -- the exact manoeuvre `design-decisions.md` section 329
+//     found at the root of all three earlier copies. A stored crypt entry *is*
+//     its own setting; the only correct way to check it is to recompute it
+//     whole, which is what `posix::crypt::verify` does and what taking it apart
+//     makes impossible.
+//   - For `$5$` and `$6$` it computed `sha256(password || salt)` and hex-encoded
+//     it. That is not SHA-crypt by any reading: not the right digest for `$6$`,
+//     not the thousands of rounds, not the base-64 output alphabet. A password
+//     set with `passwd` could therefore never be used to log in over ssh, and no
+//     error said so -- it looked exactly like a wrong password.
+//   - Anything else fell through to comparing the password against the stored
+//     field as *plaintext*. A `$y$` (yescrypt) or `$1$` (MD5) entry -- formats
+//     this tree does not implement -- silently became a plaintext comparison
+//     rather than a refusal, which is the wrong answer to "I cannot check this".
+//
+// `authlib` also brings the two properties a network-facing password oracle
+// needs and that no amount of local hashing provides: per-user failure counting
+// with a growing delay that outlives a single connection, and a constant cost
+// for users that do not exist, so the daemon cannot be timed to enumerate them.
 
 /// An entry from an `authorized_keys` file.
 #[derive(Clone, Debug)]
@@ -2628,7 +2583,13 @@ impl ConnectionState {
 }
 
 /// Handle a single SSH connection.
-fn handle_connection(handle: u64, config: &SshdConfig, host_key: &HostKey, debug_mode: bool) {
+fn handle_connection(
+    handle: u64,
+    config: &SshdConfig,
+    host_key: &HostKey,
+    debug_mode: bool,
+    auth: &mut authlib::Authenticator,
+) {
     let peer = tcp_peer_addr(handle).map_or_else(
         |_| "unknown".into(),
         |(ip, port)| format!("{}:{}", format_ip(ip), port),
@@ -2641,7 +2602,7 @@ fn handle_connection(handle: u64, config: &SshdConfig, host_key: &HostKey, debug
     let hk = HostKey::from_seed(host_key.seed);
     let mut conn = ConnectionState::new(handle, config.clone(), hk, debug_mode);
 
-    let result = run_connection(&mut conn);
+    let result = run_connection(&mut conn, auth);
 
     if let Err(e) = &result
         && debug_mode
@@ -2657,7 +2618,10 @@ fn handle_connection(handle: u64, config: &SshdConfig, host_key: &HostKey, debug
 }
 
 /// Main connection protocol flow.
-fn run_connection(conn: &mut ConnectionState) -> Result<(), SshdError> {
+fn run_connection(
+    conn: &mut ConnectionState,
+    auth: &mut authlib::Authenticator,
+) -> Result<(), SshdError> {
     // 1. Version exchange.
     do_version_exchange(conn)?;
 
@@ -2668,7 +2632,7 @@ fn run_connection(conn: &mut ConnectionState) -> Result<(), SshdError> {
     handle_service_request(conn)?;
 
     // 4. User authentication.
-    do_user_auth(conn)?;
+    do_user_auth(conn, auth)?;
 
     // 5. Channel handling loop.
     handle_channels(conn)?;
@@ -2945,7 +2909,15 @@ fn handle_service_request(conn: &mut ConnectionState) -> Result<(), SshdError> {
 }
 
 /// Perform user authentication loop.
-fn do_user_auth(conn: &mut ConnectionState) -> Result<(), SshdError> {
+///
+/// `auth` is borrowed from the daemon rather than created here on purpose: its
+/// per-user failure tally has to outlive the connection, or an attacker gets an
+/// unlimited number of guesses simply by reconnecting after each `max_auth_tries`
+/// refusal. `max_auth_tries` bounds one conversation; `auth` bounds the account.
+fn do_user_auth(
+    conn: &mut ConnectionState,
+    auth: &mut authlib::Authenticator,
+) -> Result<(), SshdError> {
     loop {
         // Check login grace time.
         let elapsed_s = (clock_monotonic_ms() - conn.connection_start_ms) / 1000;
@@ -3002,7 +2974,37 @@ fn do_user_auth(conn: &mut ConnectionState) -> Result<(), SshdError> {
 
         let success = match method.as_str() {
             "password" if conn.config.password_authentication => {
-                handle_password_auth(&payload, off, &username)?
+                let outcome = handle_password_auth(&payload, off, &username, auth)?;
+                // The person typing is told one thing for every kind of no --
+                // which one it was is exactly what an attacker wants to learn.
+                // The *log* distinguishes them, because an unusable entry is a
+                // broken system that nobody finds out about otherwise, and a
+                // rate-limited user is the daemon working as intended rather
+                // than someone forgetting their password.
+                match outcome {
+                    authlib::Outcome::Accepted => {}
+                    authlib::Outcome::RateLimited { retry_after_secs } => {
+                        log_error(
+                            &format!(
+                                "user {username} is rate limited for another \
+                                 {retry_after_secs}s after repeated failures"
+                            ),
+                            false,
+                        );
+                    }
+                    authlib::Outcome::Unusable => {
+                        log_error(
+                            &format!(
+                                "user {username} has a stored password entry this \
+                                 system cannot recompute; no password can ever match \
+                                 it and an administrator must set a new one"
+                            ),
+                            false,
+                        );
+                    }
+                    other => conn.debug_log(&format!("password auth for {username}: {other:?}")),
+                }
+                outcome.is_accepted()
             }
             "publickey" if conn.config.pubkey_authentication => {
                 // Authentication runs after NEWKEYS, so the session ID always
@@ -3061,27 +3063,38 @@ fn do_user_auth(conn: &mut ConnectionState) -> Result<(), SshdError> {
     }
 }
 
-/// Handle password authentication.
-fn handle_password_auth(payload: &[u8], offset: usize, username: &str) -> Result<bool, SshdError> {
-    // Skip the "change password" boolean.
+/// Handle password authentication (RFC 4252 section 8).
+///
+/// The whole of the decision belongs to `authlib`; this function's job is to
+/// get the password off the wire without damaging it and to hand back what
+/// `authlib` said.
+///
+/// # The password is bytes
+///
+/// It is passed to [`authlib::Authenticator::authenticate`] as the exact bytes
+/// the client sent. RFC 4252 says a password is UTF-8, but a client is free to
+/// be wrong about that, and running it through `String::from_utf8_lossy` first
+/// -- as this did -- replaces every invalid byte with U+FFFD. That silently
+/// changes the password, so a user whose password contains a byte their
+/// terminal encoded differently could never log in, and two *different*
+/// passwords could hash to the same thing.
+///
+/// # Errors
+///
+/// Fails only if the request packet is malformed.
+fn handle_password_auth(
+    payload: &[u8],
+    offset: usize,
+    username: &str,
+    auth: &mut authlib::Authenticator,
+) -> Result<authlib::Outcome, SshdError> {
+    // RFC 4252 section 8 also defines a password-*change* request, carrying a
+    // second string. We do not implement changing a password over ssh, so the
+    // flag is read and the request treated as an ordinary attempt; the client
+    // is told the attempt failed, which is true.
     let (_change, off) = read_bool(payload, offset)?;
     let (password_bytes, _) = read_ssh_string(payload, off)?;
-    let password = String::from_utf8_lossy(password_bytes);
-
-    // Read /etc/shadow.
-    let shadow_content = match fs_read_file("/etc/shadow") {
-        Ok(data) => String::from_utf8_lossy(&data).into_owned(),
-        Err(_) => return Ok(false),
-    };
-
-    let entries = parse_shadow(&shadow_content);
-    for entry in &entries {
-        if entry.username == username {
-            return Ok(verify_password(&password, &entry.password_hash));
-        }
-    }
-
-    Ok(false)
+    Ok(auth.authenticate(username, password_bytes))
 }
 
 /// The outcome of examining one `publickey` `SSH_MSG_USERAUTH_REQUEST`.
@@ -4180,6 +4193,11 @@ fn main() {
         opts.log_stderr,
     );
 
+    // One verifier for the whole daemon, not one per connection: it holds the
+    // per-user failure tallies, and a tally that is discarded when the
+    // connection closes counts nothing an attacker cannot reset at will.
+    let mut auth = authlib::Authenticator::new();
+
     // Accept connections.
     loop {
         let conn_handle = match tcp_accept(listener) {
@@ -4190,7 +4208,7 @@ fn main() {
             }
         };
 
-        handle_connection(conn_handle, &config, &host_key, opts.debug_mode);
+        handle_connection(conn_handle, &config, &host_key, opts.debug_mode, &mut auth);
     }
 }
 
@@ -4655,68 +4673,233 @@ DenyGroups nogroup
         assert!(is_root_login_allowed("publickey", &config));
     }
 
-    // ---- Password verification ----
+    // ---- Password authentication ----
+    //
+    // sshd no longer hashes anything: it hands the bytes off the wire to
+    // `authlib`, which is the only thing on the system that knows what a
+    // stored entry means. What is tested here is therefore the wire path --
+    // that the password reaches the verifier intact -- plus the two facts a
+    // reader would otherwise have to take on trust: that an entry `passwd`
+    // wrote now works, and that the formats the old homebrew hasher used to
+    // wave through no longer authenticate anyone.
 
-    #[test]
-    fn test_verify_password_sha256_hex() {
-        let hash = sha256(b"secret");
-        let hex: String = hash.iter().map(|b| format!("{b:02x}")).collect();
-        assert!(verify_password("secret", &hex));
-        assert!(!verify_password("wrong", &hex));
+    /// A real `$6$` entry, computed rather than pasted so this cannot drift
+    /// from the hasher `passwd` uses.
+    fn shadow_entry_for(password: &str) -> String {
+        let mut setting_buf = posix::crypt::buf();
+        let setting =
+            posix::crypt::setting_into(posix::crypt::Method::Sha512, b"sshdtest", &mut setting_buf)
+                .expect("setting")
+                .to_string();
+        let mut hash_buf = posix::crypt::buf();
+        posix::crypt::hash_into(password.as_bytes(), setting.as_bytes(), &mut hash_buf)
+            .expect("hash")
+            .to_string()
+    }
+
+    fn tmp_path(name: &str) -> std::path::PathBuf {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        std::env::temp_dir().join(format!("sshd_{}_{nanos}_{name}", get_pid()))
+    }
+
+    /// An `Authenticator` over a throwaway `/etc/shadow` holding one line.
+    ///
+    /// The users.yaml path deliberately points at a file that does not exist,
+    /// so the shadow branch is the one under test.
+    fn authenticator_with_shadow(line: &str) -> (authlib::Authenticator, std::path::PathBuf) {
+        let shadow = tmp_path("shadow");
+        std::fs::write(&shadow, line).expect("write shadow");
+        let missing = tmp_path("no_such_users.yaml");
+        (
+            authlib::Authenticator::with_stores(&missing, &shadow),
+            shadow,
+        )
+    }
+
+    /// The tail of an `SSH_MSG_USERAUTH_REQUEST` for the `password` method,
+    /// starting at the boolean that `handle_password_auth` is handed.
+    fn password_request(password: &[u8]) -> Vec<u8> {
+        let mut p = vec![0u8]; // FALSE: not a password-change request
+        p.extend_from_slice(&ssh_string(password));
+        p
     }
 
     #[test]
-    fn test_verify_password_locked_account() {
-        assert!(!verify_password("any", "!"));
-        assert!(!verify_password("any", "*"));
-        assert!(!verify_password("any", "!!"));
-        assert!(!verify_password("any", ""));
+    fn a_password_set_with_passwd_authenticates() {
+        let stored = shadow_entry_for("correct horse");
+        let (mut auth, shadow) =
+            authenticator_with_shadow(&format!("alice:{stored}:1:0:99999:7:::\n"));
+
+        let payload = password_request(b"correct horse");
+        let outcome = handle_password_auth(&payload, 0, "alice", &mut auth).expect("parse");
+        assert_eq!(outcome, authlib::Outcome::Accepted);
+
+        let _ = std::fs::remove_file(shadow);
     }
 
     #[test]
-    fn test_verify_password_crypt5() {
-        // $5$salt$hash format.
+    fn a_wrong_password_does_not_authenticate() {
+        let stored = shadow_entry_for("correct horse");
+        let (mut auth, shadow) =
+            authenticator_with_shadow(&format!("alice:{stored}:1:0:99999:7:::\n"));
+
+        let payload = password_request(b"correct hors");
+        let outcome = handle_password_auth(&payload, 0, "alice", &mut auth).expect("parse");
+        assert_eq!(outcome, authlib::Outcome::Rejected);
+        assert!(!outcome.is_accepted());
+
+        let _ = std::fs::remove_file(shadow);
+    }
+
+    /// The old hasher's last resort was to compare the password against the
+    /// stored field as plaintext. An entry that is not a hash must now be
+    /// reported as unusable -- a broken system somebody has to fix -- and must
+    /// admit nobody, least of all the person who can read the file and type
+    /// what is in it.
+    #[test]
+    fn a_plaintext_shadow_field_no_longer_lets_anyone_in() {
+        let (mut auth, shadow) = authenticator_with_shadow("alice:password123:1:0:99999:7:::\n");
+
+        let payload = password_request(b"password123");
+        let outcome = handle_password_auth(&payload, 0, "alice", &mut auth).expect("parse");
+        assert_eq!(outcome, authlib::Outcome::Unusable);
+        assert!(!outcome.is_accepted());
+        assert!(outcome.needs_administrator());
+
+        let _ = std::fs::remove_file(shadow);
+    }
+
+    /// 64 hex digits under a `$5$` label is what this tree wrote before the
+    /// hashers were unified. It is not SHA-256 crypt, nothing can recompute
+    /// it, and saying "wrong password" about it would hide the real problem
+    /// forever.
+    #[test]
+    fn the_old_homebrew_entry_format_is_reported_broken_not_wrong() {
         let mut salted = Vec::new();
         salted.extend_from_slice(b"mypass");
         salted.extend_from_slice(b"mysalt");
-        let hash = sha256(&salted);
-        let hex: String = hash.iter().map(|b| format!("{b:02x}")).collect();
-        let stored = format!("$5$mysalt${hex}");
-        assert!(verify_password("mypass", &stored));
-        assert!(!verify_password("wrong", &stored));
+        let hex: String = sha256(&salted).iter().map(|b| format!("{b:02x}")).collect();
+        let (mut auth, shadow) =
+            authenticator_with_shadow(&format!("alice:$5$mysalt${hex}:1:0:99999:7:::\n"));
+
+        let payload = password_request(b"mypass");
+        let outcome = handle_password_auth(&payload, 0, "alice", &mut auth).expect("parse");
+        assert_eq!(outcome, authlib::Outcome::Unusable);
+
+        let _ = std::fs::remove_file(shadow);
     }
 
     #[test]
-    fn test_verify_password_plaintext() {
-        assert!(verify_password("hello", "hello"));
-        assert!(!verify_password("hello", "world"));
+    fn a_locked_account_admits_no_password() {
+        let stored = shadow_entry_for("correct horse");
+        let (mut auth, shadow) =
+            authenticator_with_shadow(&format!("alice:!{stored}:1:0:99999:7:::\n"));
+
+        let payload = password_request(b"correct horse");
+        let outcome = handle_password_auth(&payload, 0, "alice", &mut auth).expect("parse");
+        assert_eq!(outcome, authlib::Outcome::Locked);
+
+        let _ = std::fs::remove_file(shadow);
     }
 
-    // ---- Shadow parsing ----
-
+    /// A user with no entry at all must be indistinguishable from a user with
+    /// the wrong password, or the daemon is an account-enumeration oracle.
     #[test]
-    fn test_parse_shadow() {
-        let content =
-            "root:$5$salt$hash:18000:0:99999:7:::\nalice:password123:18000:0:99999:7:::\n";
-        let entries = parse_shadow(content);
-        assert_eq!(entries.len(), 2);
-        assert_eq!(entries[0].username, "root");
-        assert_eq!(entries[0].password_hash, "$5$salt$hash");
-        assert_eq!(entries[1].username, "alice");
+    fn an_unknown_user_is_rejected_exactly_as_a_wrong_password_is() {
+        let stored = shadow_entry_for("correct horse");
+        let (mut auth, shadow) =
+            authenticator_with_shadow(&format!("alice:{stored}:1:0:99999:7:::\n"));
+
+        let payload = password_request(b"anything");
+        let unknown = handle_password_auth(&payload, 0, "mallory", &mut auth).expect("parse");
+        let wrong = handle_password_auth(&payload, 0, "alice", &mut auth).expect("parse");
+        assert_eq!(unknown, wrong);
+        assert_eq!(unknown.user_message(), wrong.user_message());
+
+        let _ = std::fs::remove_file(shadow);
+    }
+
+    /// The password is whatever bytes the client sent. Forcing it through
+    /// UTF-8 first -- as this daemon did -- rewrites every invalid byte as
+    /// U+FFFD, which both locks out a user whose password contains one and
+    /// makes two different passwords hash identically.
+    #[test]
+    fn a_password_that_is_not_utf8_survives_the_wire_intact() {
+        let raw = b"p\xffssw\xferd";
+        let mut setting_buf = posix::crypt::buf();
+        let setting =
+            posix::crypt::setting_into(posix::crypt::Method::Sha512, b"sshdtest", &mut setting_buf)
+                .expect("setting")
+                .to_string();
+        let mut hash_buf = posix::crypt::buf();
+        let stored = posix::crypt::hash_into(raw, setting.as_bytes(), &mut hash_buf)
+            .expect("hash")
+            .to_string();
+
+        let (mut auth, shadow) =
+            authenticator_with_shadow(&format!("alice:{stored}:1:0:99999:7:::\n"));
+        let payload = password_request(raw);
+        let outcome = handle_password_auth(&payload, 0, "alice", &mut auth).expect("parse");
+        assert_eq!(
+            outcome,
+            authlib::Outcome::Accepted,
+            "lossy UTF-8 conversion would have changed the password"
+        );
+
+        // And the lossy form -- what the old code would have hashed -- must not
+        // also work, or the two are interchangeable.
+        let lossy = String::from_utf8_lossy(raw).into_owned();
+        let payload = password_request(lossy.as_bytes());
+        let outcome = handle_password_auth(&payload, 0, "alice", &mut auth).expect("parse");
+        assert_eq!(outcome, authlib::Outcome::Rejected);
+
+        let _ = std::fs::remove_file(shadow);
+    }
+
+    /// `MaxAuthTries` bounds a conversation; the tally bounds the account.
+    /// Reconnecting must not hand the guesser a fresh budget, which it does if
+    /// the verifier is created per connection.
+    #[test]
+    fn guessing_is_rate_limited_across_connections_not_just_within_one() {
+        let stored = shadow_entry_for("correct horse");
+        let (mut auth, shadow) =
+            authenticator_with_shadow(&format!("alice:{stored}:1:0:99999:7:::\n"));
+
+        let wrong = password_request(b"nope");
+        for _ in 0..=authlib::FREE_ATTEMPTS {
+            let outcome = handle_password_auth(&wrong, 0, "alice", &mut auth).expect("parse");
+            assert!(!outcome.is_accepted());
+        }
+
+        // The daemon-wide verifier now refuses without even looking, and would
+        // do so for a brand new connection: nothing about `conn` is consulted.
+        let outcome = handle_password_auth(&wrong, 0, "alice", &mut auth).expect("parse");
+        assert!(
+            matches!(outcome, authlib::Outcome::RateLimited { .. }),
+            "expected a rate limit, got {outcome:?}"
+        );
+
+        // And the *correct* password is refused too while the delay stands --
+        // that is the cost of the protection, and it is why the delay is
+        // capped rather than unbounded.
+        let right = password_request(b"correct horse");
+        let outcome = handle_password_auth(&right, 0, "alice", &mut auth).expect("parse");
+        assert!(matches!(outcome, authlib::Outcome::RateLimited { .. }));
+
+        let _ = std::fs::remove_file(shadow);
     }
 
     #[test]
-    fn test_parse_shadow_empty() {
-        let entries = parse_shadow("");
-        assert!(entries.is_empty());
-    }
-
-    #[test]
-    fn test_parse_shadow_comments() {
-        let content = "# This is a comment\nroot:hash:0:0:::::";
-        let entries = parse_shadow(content);
-        assert_eq!(entries.len(), 1);
-        assert_eq!(entries[0].username, "root");
+    fn a_truncated_password_request_is_an_error_not_an_acceptance() {
+        let (mut auth, shadow) = authenticator_with_shadow("alice:!:1:0:99999:7:::\n");
+        for cut in 0..5 {
+            let payload = vec![0u8; cut];
+            assert!(handle_password_auth(&payload, 0, "alice", &mut auth).is_err());
+        }
+        let _ = std::fs::remove_file(shadow);
     }
 
     // ---- /etc/passwd parsing ----

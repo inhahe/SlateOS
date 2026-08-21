@@ -2,8 +2,31 @@
 //!
 //! A comprehensive RFC 959 FTP server for SlateOS. Supports both active (PORT)
 //! and passive (PASV) data transfer modes, ASCII and binary transfer types,
-//! anonymous FTP, user authentication via `/etc/passwd`, chroot to user home
-//! directories, transfer rate limiting, and configurable via `/etc/ftpd.conf`.
+//! anonymous FTP, password authentication through `authlib`, chroot to user
+//! home directories, transfer rate limiting, and configurable via
+//! `/etc/ftpd.conf`.
+//!
+//! # Authentication
+//!
+//! `PASS` is answered by [`authlib`], the one place on the system that decides
+//! whether a password is a user's password. This daemon previously decided for
+//! itself, and its decision was `lookup_user(username).is_some()` — the
+//! password was never read. Every account in the world-readable `/etc/passwd`
+//! was therefore reachable with any password at all, and `/etc/passwd` also
+//! served as the list of which accounts to try.
+//!
+//! Anonymous login remains "any password is accepted", because that is what
+//! anonymous FTP is (RFC 1635); it is a separate, config-gated branch that
+//! named users can never fall into, and it never touches the verifier.
+//!
+//! # Warning: FTP sends the password in the clear
+//!
+//! Verifying it correctly does not change that. `ftpd` has no TLS, so `PASS`
+//! travels the network readable by anything in the path, and a real password
+//! spent on it is a password spent everywhere it is reused. This is a property
+//! of the protocol, not of this implementation — it is why the world moved to
+//! `sftp` — and it is recorded here so that nobody reads the authentication
+//! fix as making the daemon safe to expose.
 //!
 //! # Usage
 //!
@@ -183,7 +206,9 @@ fn tcp_bind(port: u16) -> Result<u64, FtpdError> {
     // SAFETY: SYS_TCP_BIND takes one scalar argument (port number).
     let ret = unsafe { syscall1(SYS_TCP_BIND, u64::from(port)) };
     if ret < 0 {
-        Err(FtpdError::Network(format!("tcp_bind failed on port {port}: {ret}")))
+        Err(FtpdError::Network(format!(
+            "tcp_bind failed on port {port}: {ret}"
+        )))
     } else {
         Ok(ret as u64)
     }
@@ -213,14 +238,7 @@ fn tcp_peer_addr(handle: u64) -> Result<(u32, u16), FtpdError> {
     let mut buf = [0u8; 6];
     // SAFETY: handle is valid. buf is a stack-allocated 6-byte buffer
     // with sufficient lifetime for the kernel to write into.
-    let ret = unsafe {
-        syscall3(
-            SYS_TCP_PEER_ADDR,
-            handle,
-            buf.as_mut_ptr() as u64,
-            0,
-        )
-    };
+    let ret = unsafe { syscall3(SYS_TCP_PEER_ADDR, handle, buf.as_mut_ptr() as u64, 0) };
     if ret < 0 {
         return Err(FtpdError::Network(format!("tcp_peer_addr failed: {ret}")));
     }
@@ -405,9 +423,9 @@ fn parse_config_file(path: &str) -> Result<Config, FtpdError> {
 
         match key {
             "port" => {
-                cfg.port = value.parse().map_err(|_| {
-                    FtpdError::Config(format!("{path}: invalid port '{value}'"))
-                })?;
+                cfg.port = value
+                    .parse()
+                    .map_err(|_| FtpdError::Config(format!("{path}: invalid port '{value}'")))?;
             }
             "pasv_min" => {
                 cfg.pasv_min = value.parse().map_err(|_| {
@@ -470,9 +488,7 @@ fn parse_config_file(path: &str) -> Result<Config, FtpdError> {
     }
 
     if cfg.pasv_min > cfg.pasv_max {
-        return Err(FtpdError::Config(
-            "pasv_min must be <= pasv_max".into(),
-        ));
+        return Err(FtpdError::Config("pasv_min must be <= pasv_max".into()));
     }
 
     Ok(cfg)
@@ -537,18 +553,20 @@ fn parse_cli() -> Result<CliArgs, FtpdError> {
             }
             "-p" | "--port" => {
                 idx = idx.saturating_add(1);
-                let val = args.get(idx).ok_or_else(|| {
-                    FtpdError::Config("-p requires a port number".into())
-                })?;
-                result.port_override = Some(val.parse().map_err(|_| {
-                    FtpdError::Config(format!("invalid port: {val}"))
-                })?);
+                let val = args
+                    .get(idx)
+                    .ok_or_else(|| FtpdError::Config("-p requires a port number".into()))?;
+                result.port_override = Some(
+                    val.parse()
+                        .map_err(|_| FtpdError::Config(format!("invalid port: {val}")))?,
+                );
             }
             "-c" | "--config" => {
                 idx = idx.saturating_add(1);
-                result.config_path = args.get(idx).ok_or_else(|| {
-                    FtpdError::Config("-c requires a config file path".into())
-                })?.clone();
+                result.config_path = args
+                    .get(idx)
+                    .ok_or_else(|| FtpdError::Config("-c requires a config file path".into()))?
+                    .clone();
             }
             "-d" | "--debug" => {
                 result.debug = true;
@@ -627,24 +645,46 @@ fn lookup_user(username: &str) -> Option<UserEntry> {
             continue;
         }
         if let Some(entry) = parse_passwd_line(line)
-            && entry.username == username {
-                return Some(entry);
-            }
+            && entry.username == username
+        {
+            return Some(entry);
+        }
     }
     None
 }
 
-/// Validate a password against /etc/shadow (simplified: accept any non-empty
-/// password for now since our OS does not yet have a full shadow mechanism).
+/// Decide whether a `PASS` command is accepted.
 ///
-/// In production this would compare hashed passwords. For anonymous users
-/// any password (including empty) is accepted.
-fn validate_password(username: &str, _password: &str, is_anonymous: bool) -> bool {
+/// # The bug this replaces
+///
+/// The previous version took the password as `_password` and never looked at
+/// it. Its whole test was `lookup_user(username).is_some()` — the account
+/// exists in `/etc/passwd`, a world-readable file — so **any** password logged
+/// in **any** real user, and the list of targets was published by the system
+/// itself. The comment called it "simplified ... since our OS does not yet have
+/// a full shadow mechanism"; the shadow mechanism had in fact existed for some
+/// time in `posix::crypt`, and `authlib` was built over it precisely so that no
+/// daemon would need to make this decision on its own again.
+///
+/// # Anonymous is a different question, not a weaker version of this one
+///
+/// An anonymous login is accepted with any password because that is what
+/// anonymous FTP *is* — RFC 1635 asks for an e-mail address by convention and
+/// nothing verifies it. It is a deliberate policy, gated by `allow_anonymous`,
+/// and it is kept on a separate branch from real authentication so that the
+/// "accept anything" case can never be reached by a named user. It also never
+/// reaches the verifier, so it costs the daemon nothing and cannot be used to
+/// probe the failure tallies.
+fn validate_password(
+    username: &str,
+    password: &str,
+    is_anonymous: bool,
+    auth: &mut authlib::Authenticator,
+) -> authlib::Outcome {
     if is_anonymous {
-        return true;
+        return authlib::Outcome::Accepted;
     }
-    // Check that the user exists in /etc/passwd
-    lookup_user(username).is_some()
+    auth.authenticate(username, password.as_bytes())
 }
 
 // ============================================================================
@@ -841,18 +881,12 @@ fn format_list_entry(name: &str, metadata: &Metadata) -> String {
         .map(|d| d.as_secs())
         .unwrap_or(0);
 
-    let permissions = if is_dir {
-        "drwxr-xr-x"
-    } else {
-        "-rw-r--r--"
-    };
+    let permissions = if is_dir { "drwxr-xr-x" } else { "-rw-r--r--" };
 
     let links = if is_dir { 2u32 } else { 1 };
     let date_str = format_mtime(mtime);
 
-    format!(
-        "{permissions} {links:>4} ftp      ftp      {size:>12} {date_str} {name}"
-    )
+    format!("{permissions} {links:>4} ftp      ftp      {size:>12} {date_str} {name}")
 }
 
 /// Format a modification time in "Mon DD HH:MM" or "Mon DD  YYYY" format.
@@ -1062,9 +1096,16 @@ fn log_debug(config: &Config, msg: &str) {
 // ============================================================================
 
 /// Per-client FTP session state.
-struct FtpSession {
+struct FtpSession<'a> {
     /// TCP handle for the control connection.
     control_handle: u64,
+    /// The daemon's password verifier, borrowed rather than owned.
+    ///
+    /// It holds the per-user failure tallies, so it has to outlive the
+    /// session: a tally that is discarded when the control connection closes
+    /// counts nothing an attacker cannot reset by reconnecting, and FTP makes
+    /// reconnecting trivial.
+    auth: &'a mut authlib::Authenticator,
     /// Server configuration (shared reference).
     config: Config,
     /// Whether the user is authenticated.
@@ -1103,11 +1144,17 @@ struct FtpSession {
     next_pasv_port: u16,
 }
 
-impl FtpSession {
-    fn new(control_handle: u64, config: Config, peer_ip: u32) -> Self {
+impl<'a> FtpSession<'a> {
+    fn new(
+        control_handle: u64,
+        config: Config,
+        peer_ip: u32,
+        auth: &'a mut authlib::Authenticator,
+    ) -> Self {
         let pasv_start = config.pasv_min;
         Self {
             control_handle,
+            auth,
             rate_limiter: RateLimiter::new(config.rate_limit),
             stats: SessionStats::new(peer_ip),
             config,
@@ -1150,7 +1197,10 @@ impl FtpSession {
                 response.push_str(&format!("{code} {line}\r\n"));
             }
         }
-        log_debug(&self.config, &format!("-> [{code} multiline, {} lines]", lines.len()));
+        log_debug(
+            &self.config,
+            &format!("-> [{code} multiline, {} lines]", lines.len()),
+        );
         tcp_send_all(self.control_handle, response.as_bytes())
     }
 
@@ -1240,9 +1290,7 @@ impl FtpSession {
             "PASS" => self.cmd_pass(&cmd.arg),
 
             // These commands require authentication
-            _ if !self.authenticated => {
-                self.send_response(530, "Please login with USER and PASS.")
-            }
+            _ if !self.authenticated => self.send_response(530, "Please login with USER and PASS."),
 
             // Navigation
             "CWD" => self.cmd_cwd(&cmd.arg),
@@ -1327,7 +1375,42 @@ impl FtpSession {
             }
         };
 
-        if !validate_password(&username, arg, self.is_anonymous) {
+        let outcome = validate_password(&username, arg, self.is_anonymous, self.auth);
+        if !outcome.is_accepted() {
+            // The client is told one thing for every kind of no: which one it
+            // was is exactly what someone probing for accounts wants to learn.
+            // The *log* distinguishes them, because a stored entry nothing can
+            // recompute is a broken system that no one otherwise finds out
+            // about, and a rate limit is the daemon working rather than a user
+            // forgetting.
+            match outcome {
+                authlib::Outcome::RateLimited { retry_after_secs } => log_info(
+                    &self.config,
+                    &format!(
+                        "user '{username}' rate limited for another {retry_after_secs}s \
+                         after repeated failures (from {})",
+                        format_ip(self.stats.peer_ip)
+                    ),
+                ),
+                authlib::Outcome::Unusable => log_info(
+                    &self.config,
+                    &format!(
+                        "user '{username}' has a stored password entry this system \
+                         cannot recompute; no password can ever match it and an \
+                         administrator must set a new one"
+                    ),
+                ),
+                _ => log_debug(
+                    &self.config,
+                    &format!("failed login for '{username}': {outcome:?}"),
+                ),
+            }
+            // 421 rather than 530 when rate limited, because RFC 959's 530 is
+            // "not logged in" and invites an immediate retry, which is the one
+            // thing the limit exists to slow down.
+            if matches!(outcome, authlib::Outcome::RateLimited { .. }) {
+                return self.send_response(421, "Too many failed attempts. Try again later.");
+            }
             return self.send_response(530, "Login incorrect.");
         }
 
@@ -1484,7 +1567,9 @@ impl FtpSession {
         };
 
         let ip = u32::from_be_bytes([h1, h2, h3, h4]);
-        let port = u16::from(p1).saturating_mul(256).saturating_add(u16::from(p2));
+        let port = u16::from(p1)
+            .saturating_mul(256)
+            .saturating_add(u16::from(p2));
 
         // Close any existing passive listener
         close_passive_listener(&mut self.data_mode);
@@ -1500,7 +1585,11 @@ impl FtpSession {
         // Try ports in the configured range
         let mut listener = None;
         let mut bound_port = 0u16;
-        let range_size = self.config.pasv_max.saturating_sub(self.config.pasv_min).saturating_add(1);
+        let range_size = self
+            .config
+            .pasv_max
+            .saturating_sub(self.config.pasv_min)
+            .saturating_add(1);
 
         for _ in 0..range_size {
             let try_port = self.next_pasv_port();
@@ -1517,10 +1606,7 @@ impl FtpSession {
         let listener = match listener {
             Some(l) => l,
             None => {
-                return self.send_response(
-                    421,
-                    "Cannot allocate passive port.",
-                );
+                return self.send_response(421, "Cannot allocate passive port.");
             }
         };
 
@@ -1555,10 +1641,7 @@ impl FtpSession {
         match arg.parse::<u64>() {
             Ok(offset) => {
                 self.rest_offset = offset;
-                self.send_response(
-                    350,
-                    &format!("Restarting at {offset}. Send STOR or RETR."),
-                )
+                self.send_response(350, &format!("Restarting at {offset}. Send STOR or RETR."))
             }
             Err(_) => self.send_response(501, "Invalid REST offset."),
         }
@@ -1697,7 +1780,10 @@ impl FtpSession {
         // Handle REST offset
         if self.rest_offset > 0 {
             use std::io::Seek;
-            if file.seek(std::io::SeekFrom::Start(self.rest_offset)).is_err() {
+            if file
+                .seek(std::io::SeekFrom::Start(self.rest_offset))
+                .is_err()
+            {
                 self.rest_offset = 0;
                 return self.send_response(550, "Cannot seek to restart position.");
             }
@@ -1816,7 +1902,10 @@ impl FtpSession {
 
         self.send_response(
             150,
-            &format!("Opening {} mode data connection for {}.", self.transfer_type, arg),
+            &format!(
+                "Opening {} mode data connection for {}.",
+                self.transfer_type, arg
+            ),
         )?;
 
         let data_handle = match open_data_connection(&self.data_mode) {
@@ -2001,9 +2090,7 @@ impl FtpSession {
         }
 
         match fs::metadata(&real_path) {
-            Ok(meta) if !meta.is_dir() => {
-                self.send_response(213, &format!("{}", meta.len()))
-            }
+            Ok(meta) if !meta.is_dir() => self.send_response(213, &format!("{}", meta.len())),
             Ok(_) => self.send_response(550, "Not a regular file."),
             Err(_) => self.send_response(550, "File not found."),
         }
@@ -2051,10 +2138,14 @@ impl FtpSession {
                 &format!("     Connected as: {}", self.username),
                 &format!("     Session time: {} seconds", uptime),
                 &format!("     Commands run: {}", self.stats.commands_processed),
-                &format!("     Downloaded: {} bytes ({} files)",
-                    self.stats.bytes_downloaded, self.stats.files_downloaded),
-                &format!("     Uploaded: {} bytes ({} files)",
-                    self.stats.bytes_uploaded, self.stats.files_uploaded),
+                &format!(
+                    "     Downloaded: {} bytes ({} files)",
+                    self.stats.bytes_downloaded, self.stats.files_downloaded
+                ),
+                &format!(
+                    "     Uploaded: {} bytes ({} files)",
+                    self.stats.bytes_uploaded, self.stats.files_uploaded
+                ),
                 &format!("     Transfer type: {}", self.transfer_type),
                 "End of status.",
             ];
@@ -2221,9 +2312,8 @@ fn network_to_ascii(data: &[u8]) -> Vec<u8> {
 fn read_directory_listing(path: &Path) -> Result<Vec<(String, Metadata)>, FtpdError> {
     let mut entries = Vec::new();
 
-    let dir = fs::read_dir(path).map_err(|e| {
-        FtpdError::Io(format!("cannot read directory {}: {e}", path.display()))
-    })?;
+    let dir = fs::read_dir(path)
+        .map_err(|e| FtpdError::Io(format!("cannot read directory {}: {e}", path.display())))?;
 
     for entry in dir {
         let entry = match entry {
@@ -2287,6 +2377,11 @@ fn run_server(config: Config) -> Result<(), FtpdError> {
         let _ = writeln!(f, "ftpd");
     }
 
+    // One verifier for the whole daemon, not one per session: it holds the
+    // per-user failure tallies, and a tally that dies with the control
+    // connection counts nothing, since reconnecting is free.
+    let mut auth = authlib::Authenticator::new();
+
     loop {
         let conn = match tcp_accept(listener) {
             Ok(c) => c,
@@ -2296,16 +2391,11 @@ fn run_server(config: Config) -> Result<(), FtpdError> {
             }
         };
 
-        let peer_ip = tcp_peer_addr(conn)
-            .map(|(ip, _)| ip)
-            .unwrap_or(0);
+        let peer_ip = tcp_peer_addr(conn).map(|(ip, _)| ip).unwrap_or(0);
 
-        log_info(
-            &config,
-            &format!("connection from {}", format_ip(peer_ip)),
-        );
+        log_info(&config, &format!("connection from {}", format_ip(peer_ip)));
 
-        let mut session = FtpSession::new(conn, config.clone(), peer_ip);
+        let mut session = FtpSession::new(conn, config.clone(), peer_ip, &mut auth);
         if let Err(e) = session.run() {
             log_info(&config, &format!("session error: {e}"));
         }
@@ -2443,7 +2533,10 @@ mod tests {
 
     #[test]
     fn test_is_within_root_yes() {
-        assert!(is_within_root("/srv/ftp", Path::new("/srv/ftp/pub/file.txt")));
+        assert!(is_within_root(
+            "/srv/ftp",
+            Path::new("/srv/ftp/pub/file.txt")
+        ));
     }
 
     #[test]
@@ -2798,7 +2891,10 @@ mod tests {
         let now = now_secs();
         let result = format_mtime(now);
         // Should contain HH:MM format, not year
-        assert!(result.contains(':'), "recent time should have HH:MM: {result}");
+        assert!(
+            result.contains(':'),
+            "recent time should have HH:MM: {result}"
+        );
     }
 
     #[test]
@@ -2806,7 +2902,10 @@ mod tests {
         // A very old timestamp (1970)
         let result = format_mtime(0);
         // Should contain the year, not HH:MM
-        assert!(result.contains("1970"), "old time should show year: {result}");
+        assert!(
+            result.contains("1970"),
+            "old time should show year: {result}"
+        );
     }
 
     // ---- Transfer type display ----
@@ -2922,12 +3021,153 @@ mod tests {
         assert!(parse_passwd_line("").is_none());
     }
 
-    // ---- Anonymous validation ----
+    // ---- Password validation ----
+
+    /// A real `$6$` entry, computed rather than pasted so this cannot drift
+    /// from the hasher `passwd` uses.
+    fn shadow_entry_for(password: &str) -> String {
+        let mut setting_buf = posix::crypt::buf();
+        let setting =
+            posix::crypt::setting_into(posix::crypt::Method::Sha512, b"ftpdtest", &mut setting_buf)
+                .expect("setting")
+                .to_string();
+        let mut hash_buf = posix::crypt::buf();
+        posix::crypt::hash_into(password.as_bytes(), setting.as_bytes(), &mut hash_buf)
+            .expect("hash")
+            .to_string()
+    }
+
+    fn tmp_path(name: &str) -> PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        env::temp_dir().join(format!("ftpd_{nanos}_{name}"))
+    }
+
+    /// An `Authenticator` over a throwaway `/etc/shadow` holding one line. The
+    /// users.yaml path deliberately does not exist, so the shadow branch is
+    /// the one under test.
+    fn authenticator_with_shadow(line: &str) -> (authlib::Authenticator, PathBuf) {
+        let shadow = tmp_path("shadow");
+        fs::write(&shadow, line).expect("write shadow");
+        let missing = tmp_path("no_such_users.yaml");
+        (
+            authlib::Authenticator::with_stores(&missing, &shadow),
+            shadow,
+        )
+    }
 
     #[test]
     fn test_validate_password_anonymous() {
-        assert!(validate_password("anonymous", "", true));
-        assert!(validate_password("anonymous", "user@example.com", true));
+        let (mut auth, shadow) = authenticator_with_shadow("");
+        assert!(validate_password("anonymous", "", true, &mut auth).is_accepted());
+        assert!(
+            validate_password("anonymous", "user@example.com", true, &mut auth).is_accepted(),
+            "anonymous FTP accepts any password by definition (RFC 1635)"
+        );
+        let _ = fs::remove_file(shadow);
+    }
+
+    /// The bug this replaces, stated as a test: the old `validate_password`
+    /// named its password argument `_password` and returned
+    /// `lookup_user(username).is_some()`, so every account in the
+    /// world-readable `/etc/passwd` opened to any password typed at it.
+    #[test]
+    fn a_named_user_needs_the_right_password_not_merely_an_account() {
+        let stored = shadow_entry_for("correct horse");
+        let (mut auth, shadow) =
+            authenticator_with_shadow(&format!("alice:{stored}:1:0:99999:7:::\n"));
+
+        assert!(validate_password("alice", "correct horse", false, &mut auth).is_accepted());
+        assert!(
+            !validate_password("alice", "anything at all", false, &mut auth).is_accepted(),
+            "an existing account must not be enough on its own"
+        );
+
+        let _ = fs::remove_file(shadow);
+    }
+
+    #[test]
+    fn a_locked_account_admits_no_password() {
+        let stored = shadow_entry_for("correct horse");
+        let (mut auth, shadow) =
+            authenticator_with_shadow(&format!("alice:!{stored}:1:0:99999:7:::\n"));
+
+        assert_eq!(
+            validate_password("alice", "correct horse", false, &mut auth),
+            authlib::Outcome::Locked
+        );
+
+        let _ = fs::remove_file(shadow);
+    }
+
+    /// A plaintext or otherwise unrecomputable shadow field must be reported
+    /// as a broken system, not answered as a wrong password — and must admit
+    /// nobody, least of all whoever can read the file and retype it.
+    #[test]
+    fn an_unrecomputable_entry_is_broken_not_wrong() {
+        let (mut auth, shadow) = authenticator_with_shadow("alice:password123:1:0:99999:7:::\n");
+
+        let outcome = validate_password("alice", "password123", false, &mut auth);
+        assert_eq!(outcome, authlib::Outcome::Unusable);
+        assert!(!outcome.is_accepted());
+        assert!(outcome.needs_administrator());
+
+        let _ = fs::remove_file(shadow);
+    }
+
+    /// An account that does not exist must answer exactly as a wrong password
+    /// does, or the daemon tells anyone who asks which usernames are real.
+    #[test]
+    fn an_unknown_user_is_indistinguishable_from_a_wrong_password() {
+        let stored = shadow_entry_for("correct horse");
+        let (mut auth, shadow) =
+            authenticator_with_shadow(&format!("alice:{stored}:1:0:99999:7:::\n"));
+
+        let unknown = validate_password("mallory", "guess", false, &mut auth);
+        let wrong = validate_password("alice", "guess", false, &mut auth);
+        assert_eq!(unknown, wrong);
+        assert_eq!(unknown.user_message(), wrong.user_message());
+
+        let _ = fs::remove_file(shadow);
+    }
+
+    /// FTP makes reconnecting free, so a limit that resets with the control
+    /// connection limits nothing. The verifier is daemon-wide for this reason.
+    #[test]
+    fn repeated_guesses_are_rate_limited() {
+        let stored = shadow_entry_for("correct horse");
+        let (mut auth, shadow) =
+            authenticator_with_shadow(&format!("alice:{stored}:1:0:99999:7:::\n"));
+
+        for _ in 0..=authlib::FREE_ATTEMPTS {
+            assert!(!validate_password("alice", "nope", false, &mut auth).is_accepted());
+        }
+        assert!(matches!(
+            validate_password("alice", "nope", false, &mut auth),
+            authlib::Outcome::RateLimited { .. }
+        ));
+
+        let _ = fs::remove_file(shadow);
+    }
+
+    /// Anonymous logins must not be able to run a named user's tally up, and
+    /// must not themselves be refused because someone else has been guessing.
+    #[test]
+    fn anonymous_login_never_reaches_the_verifier() {
+        let (mut auth, shadow) = authenticator_with_shadow("alice:!:1:0:99999:7:::\n");
+
+        for _ in 0..20 {
+            assert!(validate_password("anonymous", "a@b.c", true, &mut auth).is_accepted());
+        }
+        assert_eq!(
+            auth.failures("anonymous"),
+            0,
+            "the anonymous branch must not touch the tallies"
+        );
+
+        let _ = fs::remove_file(shadow);
     }
 
     // ---- Multiple .. traversals ----
@@ -2976,7 +3216,8 @@ mod tests {
     #[test]
     fn test_ftp_session_defaults() {
         let config = Config::default();
-        let session = FtpSession::new(0, config.clone(), 0);
+        let mut auth = authlib::Authenticator::new();
+        let session = FtpSession::new(0, config.clone(), 0, &mut auth);
         assert!(!session.authenticated);
         assert!(!session.is_anonymous);
         assert!(session.pending_user.is_none());
@@ -2997,7 +3238,8 @@ mod tests {
             pasv_max: 50002,
             ..Config::default()
         };
-        let mut session = FtpSession::new(0, config, 0);
+        let mut auth = authlib::Authenticator::new();
+        let mut session = FtpSession::new(0, config, 0, &mut auth);
 
         assert_eq!(session.next_pasv_port(), 50000);
         assert_eq!(session.next_pasv_port(), 50001);
@@ -3022,10 +3264,7 @@ mod tests {
 
     #[test]
     fn test_normalize_path_complex() {
-        assert_eq!(
-            normalize_path("/a/./b/../c/./d/../e"),
-            "/a/c/e"
-        );
+        assert_eq!(normalize_path("/a/./b/../c/./d/../e"), "/a/c/e");
     }
 
     // ---- PORT command parsing edge cases ----

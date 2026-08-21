@@ -3534,6 +3534,10 @@ version = "0.1.0"
 [[package]]
 name = "ftpd"
 version = "0.1.0"
+dependencies = [
+ "authlib",
+ "posix",
+]
 
 [[package]]
 name = "fullstory-cli"
@@ -10087,6 +10091,7 @@ dependencies = [
 name = "sshd"
 version = "0.1.0"
 dependencies = [
+ "authlib",
  "posix",
  "sha2",
 ]

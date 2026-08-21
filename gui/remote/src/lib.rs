@@ -124,6 +124,9 @@ pub use zones::{
     WorkArea, ZONE_GAP, ZoneId, drop_at, drop_at_edge, edge_at,
 };
 
+pub mod reserve;
+pub use reserve::{MAX_RESERVED_FRACTION, PanelEdge, ReservedEdges};
+
 pub mod frame;
 pub use frame::{Frame, decode_any, try_decode_any};
 

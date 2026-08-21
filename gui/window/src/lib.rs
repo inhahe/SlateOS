@@ -633,7 +633,9 @@ impl<T: Transport> EventLoop<T> {
         match self.conn.round_trip(RequestBody::GetDisplayInfo)? {
             ResponseBody::Display(info) => Ok(info),
             ResponseBody::Error { message } => Err(ClientError::Refused(message)),
-            ResponseBody::Ok | ResponseBody::WindowCreated { .. } => Err(ClientError::Mismatched),
+            ResponseBody::Ok
+            | ResponseBody::WindowCreated { .. }
+            | ResponseBody::WorkArea { .. } => Err(ClientError::Mismatched),
         }
     }
 

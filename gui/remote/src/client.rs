@@ -491,7 +491,45 @@ impl<T: Transport> Connection<T> {
         match self.round_trip(RequestBody::CreateWindow(spec))? {
             ResponseBody::WindowCreated { window } => Ok(window),
             ResponseBody::Error { message } => Err(ClientError::Refused(message)),
-            ResponseBody::Ok | ResponseBody::Display(_) => Err(ClientError::Mismatched),
+            ResponseBody::Ok | ResponseBody::Display(_) | ResponseBody::WorkArea { .. } => {
+                Err(ClientError::Mismatched)
+            }
+        }
+    }
+
+    /// Reserve a strip along one edge of the monitor `window` is on, and get
+    /// back the work area that leaves.
+    ///
+    /// This is the call a taskbar or dock makes so that tiled windows stop
+    /// short of it. A `size` of zero releases a reservation made earlier. The
+    /// area returned is what the compositor actually granted, which may be less
+    /// than was asked for — see
+    /// [`RequestBody::ReserveEdge`](crate::control::RequestBody::ReserveEdge).
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::round_trip`], plus [`ClientError::Refused`] if the compositor
+    /// declined — which for this request means the window is not the caller's
+    /// or the caller is not entitled to reserve at all — and
+    /// [`ClientError::Mismatched`] if it answered with something other than an
+    /// area.
+    pub fn reserve_edge(
+        &mut self,
+        window: u64,
+        edge: crate::reserve::PanelEdge,
+        size: u32,
+    ) -> Result<(i32, i32, u32, u32), ClientError<T::Error>> {
+        match self.round_trip(RequestBody::ReserveEdge { window, edge, size })? {
+            ResponseBody::WorkArea {
+                x,
+                y,
+                width,
+                height,
+            } => Ok((x, y, width, height)),
+            ResponseBody::Error { message } => Err(ClientError::Refused(message)),
+            ResponseBody::Ok | ResponseBody::WindowCreated { .. } | ResponseBody::Display(_) => {
+                Err(ClientError::Mismatched)
+            }
         }
     }
 
@@ -509,9 +547,9 @@ impl<T: Transport> Connection<T> {
         match self.round_trip(body)? {
             ResponseBody::Ok => Ok(()),
             ResponseBody::Error { message } => Err(ClientError::Refused(message)),
-            ResponseBody::WindowCreated { .. } | ResponseBody::Display(_) => {
-                Err(ClientError::Mismatched)
-            }
+            ResponseBody::WindowCreated { .. }
+            | ResponseBody::Display(_)
+            | ResponseBody::WorkArea { .. } => Err(ClientError::Mismatched),
         }
     }
 

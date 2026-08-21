@@ -380,6 +380,24 @@ fn to_compositor_request(
                 action,
             }
         }
+        // The only request that is **both** resolved against the sender's own
+        // windows *and* privileged, and it needs both for different reasons.
+        // `resolve` because the window named is the panel's own and a client
+        // reserving out of somebody else's window would be nonsense — the
+        // monitor and the lifetime are read off it. `require_shell` because the
+        // *effect* lands on every other client: an unprivileged program could
+        // take a third of each edge and leave the whole desktop unable to tile.
+        // Ownership is checked first, so a program that is not a shell learns
+        // nothing about which window ids exist that it did not already know.
+        RequestBody::ReserveEdge { window, edge, size } => {
+            let window_id = link.resolve(window)?;
+            link.require_shell()?;
+            CompositorRequest::ReserveEdge {
+                window_id,
+                edge,
+                size,
+            }
+        }
     })
 }
 
@@ -409,6 +427,17 @@ fn to_response_body(response: CompositorResponse) -> ResponseBody {
             refresh_rate,
             scale_factor,
         }),
+        CompositorResponse::WorkArea {
+            x,
+            y,
+            width,
+            height,
+        } => ResponseBody::WorkArea {
+            x,
+            y,
+            width,
+            height,
+        },
         CompositorResponse::StreamStarted { .. } | CompositorResponse::StreamFrame { .. } => {
             ResponseBody::Error {
                 message: "stream responses have no client-facing wire form".to_string(),

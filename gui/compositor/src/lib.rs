@@ -534,6 +534,22 @@ pub enum InputEvent {
 // Window
 // ---------------------------------------------------------------------------
 
+/// Which half of the work area a snapped window fills.
+///
+/// The *edge* is what is stored, not the rectangle it currently implies. A
+/// stored rectangle would be wrong the moment the display resolution changed or
+/// a monitor was unplugged, and would be wrong silently — the window would keep
+/// filling half of a screen that no longer exists. Storing the intent means the
+/// geometry is re-derived from the current bounds, which is the same reason
+/// `maximized` is a flag rather than a saved full-screen rectangle.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum SnapEdge {
+    /// The left half.
+    Left,
+    /// The right half.
+    Right,
+}
+
 /// A managed window in the compositor.
 #[derive(Clone, Debug)]
 pub struct Window {
@@ -583,8 +599,17 @@ pub struct Window {
     /// Geometry saved before entering fullscreen (for restore). Kept separate
     /// from `restore_rect` so fullscreen and maximize don't clobber each other.
     pub fs_restore_rect: Option<Rect>,
-    /// Position and size before maximizing (for restore).
+    /// Position and size before maximizing *or snapping* (for restore).
     pub restore_rect: Option<Rect>,
+    /// Which half of the work area this window is snapped to, if any.
+    ///
+    /// A separate state from [`maximized`](Self::maximized) rather than a
+    /// second flag beside it, because the three are mutually exclusive and a
+    /// pair of booleans can represent a window that is both — which
+    /// [`restore_window`](Compositor::restore_window) would then have to pick
+    /// between. `Option` makes the illegal state unrepresentable and gives
+    /// "snapped, and to which side" one answer instead of two.
+    pub snapped: Option<SnapEdge>,
     /// Whether the window needs to be redrawn.
     pub dirty: bool,
     /// Whether the compositor draws a title bar and borders for this window.
@@ -688,6 +713,7 @@ impl Window {
             fullscreen: false,
             fs_restore_rect: None,
             restore_rect: None,
+            snapped: None,
             dirty: true,
             decorations: spec.decorations,
             resizable: spec.resizable,
@@ -4303,13 +4329,18 @@ impl Compositor {
                 .window_mut(window_id)
                 .ok_or(CompositorError::WindowNotFound(window_id))?;
 
-            if !window.maximized {
+            // Not merely `!window.maximized`: a *snapped* window's geometry is
+            // also not its own, so recording it here would make "restore" return
+            // to half the screen rather than to where the window was before the
+            // user started tiling it.
+            if !window.maximized && window.snapped.is_none() {
                 // Save current geometry for restore.
                 window.restore_rect =
                     Some(Rect::new(window.x, window.y, window.width, window.height));
             }
 
             window.maximized = true;
+            window.snapped = None;
             // Inset by this window's own frame, not by the constants: an
             // undecorated window has no frame to leave room for and should
             // fill the display exactly rather than being pushed 30px down.
@@ -4340,7 +4371,90 @@ impl Compositor {
         Ok(())
     }
 
-    /// Restore a window from minimized or maximized state.
+    /// Snap a window to one half of the display.
+    ///
+    /// The shell asks for the *edge*; the rectangle is worked out here, from the
+    /// compositor's own bounds. That split is the point of the operation
+    /// existing at all — a shell that computed the rectangle itself would be
+    /// placing windows, which is the compositor's job, and would be doing it
+    /// against a display size it learned second-hand.
+    ///
+    /// Refused for a non-resizable window, for
+    /// [`maximize_window`](Self::maximize_window)'s reason: snapping is a
+    /// resize, and a window that declared one working size means it.
+    ///
+    /// Snapping a maximized window replaces the maximized state rather than
+    /// stacking on top of it, and keeps the *original* `restore_rect` — so
+    /// maximize, then snap, then restore returns to where the window was before
+    /// any of it, not to the full-screen rectangle it had in between.
+    pub fn snap_window(&mut self, window_id: WindowId, edge: SnapEdge) -> CompositorResult<()> {
+        if !self
+            .window_ref(window_id)
+            .ok_or(CompositorError::WindowNotFound(window_id))?
+            .resizable
+        {
+            return Err(CompositorError::NotResizable(window_id));
+        }
+
+        self.damage_window(window_id);
+
+        let bounds = self.display_manager.virtual_bounds();
+        // Halve by splitting at the midpoint rather than by giving each side
+        // `width / 2`: on an odd width the latter leaves a one-pixel column
+        // belonging to neither half, which is a permanently visible seam down
+        // the middle of the screen.
+        let mid = bounds.width / 2;
+        let half = match edge {
+            SnapEdge::Left => Rect::new(bounds.x, bounds.y, mid, bounds.height),
+            SnapEdge::Right => Rect::new(
+                bounds.x.saturating_add(i32::try_from(mid).unwrap_or(i32::MAX)),
+                bounds.y,
+                bounds.width.saturating_sub(mid),
+                bounds.height,
+            ),
+        };
+
+        let (final_w, final_h) = {
+            let window = self
+                .window_mut(window_id)
+                .ok_or(CompositorError::WindowNotFound(window_id))?;
+
+            // Only the first departure from free-floating geometry records where
+            // to come back to. Re-snapping an already-snapped window, or
+            // snapping a maximized one, must not overwrite it with the geometry
+            // it has *because* of the previous snap.
+            if !window.maximized && window.snapped.is_none() {
+                window.restore_rect =
+                    Some(Rect::new(window.x, window.y, window.width, window.height));
+            }
+
+            window.maximized = false;
+            window.snapped = Some(edge);
+
+            let (x, y, fit_w, fit_h) = window.client_geometry_for_frame(half);
+            window.x = x;
+            window.y = y;
+            let (w, h) = window.clamp_size(fit_w, fit_h);
+            window.width = w;
+            window.height = h;
+            window.dirty = true;
+            (w, h)
+        };
+
+        self.damage_window(window_id);
+        self.full_recomposite = true;
+
+        self.pending_notifications
+            .push_back(EventNotification::WindowResized {
+                window_id,
+                width: final_w,
+                height: final_h,
+            });
+
+        Ok(())
+    }
+
+    /// Restore a window from minimized, maximized or snapped state.
     pub fn restore_window(&mut self, window_id: WindowId) -> CompositorResult<()> {
         self.damage_window(window_id);
 
@@ -4353,8 +4467,14 @@ impl Compositor {
             window.visible = true;
         }
 
-        if window.maximized {
+        // Maximized and snapped are alternatives, not stages: either one is a
+        // departure from the window's own geometry, and either one is undone by
+        // putting `restore_rect` back. Testing them together rather than in
+        // sequence is what stops a snapped window from being left in place
+        // because it did not happen to also be maximized.
+        if window.maximized || window.snapped.is_some() {
             window.maximized = false;
+            window.snapped = None;
             if let Some(restore) = window.restore_rect.take() {
                 window.x = restore.x;
                 window.y = restore.y;
@@ -6077,6 +6197,8 @@ impl Compositor {
                     ShellControlAction::Restore => self.restore_window(window_id),
                     ShellControlAction::Maximize => self.maximize_window(window_id),
                     ShellControlAction::Close => self.request_close(window_id),
+                    ShellControlAction::SnapLeft => self.snap_window(window_id, SnapEdge::Left),
+                    ShellControlAction::SnapRight => self.snap_window(window_id, SnapEdge::Right),
                 };
                 match result {
                     Ok(()) => CompositorResponse::Ok,
@@ -7709,6 +7831,30 @@ mod tests {
         ));
         assert!(!comp.window_ref(id).expect("window").minimized, "Activate");
 
+        assert!(matches!(
+            send(&mut comp, ShellControlAction::SnapLeft),
+            CompositorResponse::Ok
+        ));
+        assert_eq!(
+            comp.window_ref(id).expect("window").snapped,
+            Some(SnapEdge::Left),
+            "SnapLeft"
+        );
+
+        assert!(matches!(
+            send(&mut comp, ShellControlAction::SnapRight),
+            CompositorResponse::Ok
+        ));
+        assert_eq!(
+            comp.window_ref(id).expect("window").snapped,
+            Some(SnapEdge::Right),
+            "SnapRight"
+        );
+        assert!(matches!(
+            send(&mut comp, ShellControlAction::Restore),
+            CompositorResponse::Ok
+        ));
+
         let before = comp.pending_notifications.len();
         assert!(matches!(
             send(&mut comp, ShellControlAction::Close),
@@ -7716,6 +7862,182 @@ mod tests {
         ));
         assert!(comp.window_ref(id).is_some(), "Close must not destroy");
         assert!(comp.pending_notifications.len() > before, "Close");
+    }
+
+    /// The two halves must tile: together they cover the display exactly, with
+    /// no gap and no overlap.
+    ///
+    /// Asserted on the *frame* rectangles rather than the client ones, because
+    /// the client areas are inset by the decorations and legitimately do not
+    /// touch. The seam this catches is the one an odd display width produces if
+    /// each side is given `width / 2` independently — a one-pixel column
+    /// belonging to neither half, straight down the middle of the screen, for
+    /// the whole life of the session.
+    #[test]
+    fn the_two_snapped_halves_tile_the_display_with_no_seam() {
+        // Odd width on purpose: an even one cannot show the bug.
+        let mut comp = Compositor::new(801, 600, 60).expect("compositor");
+        let mut spec = WindowSpec::new("Left", 200, 150);
+        spec.position = Some((10, 10));
+        spec.decorations = false;
+        let left = comp.create_window_from_spec(&spec, 1);
+        let mut spec = WindowSpec::new("Right", 200, 150);
+        spec.position = Some((20, 20));
+        spec.decorations = false;
+        let right = comp.create_window_from_spec(&spec, 1);
+
+        comp.snap_window(left, SnapEdge::Left).expect("snap left");
+        comp.snap_window(right, SnapEdge::Right).expect("snap right");
+
+        let l = comp.window_ref(left).expect("left");
+        let r = comp.window_ref(right).expect("right");
+        let bounds = comp.display_manager.virtual_bounds();
+
+        assert_eq!(l.x, bounds.x, "the left half starts at the left edge");
+        assert_eq!(
+            l.x.saturating_add(i32::try_from(l.width).expect("small")),
+            r.x,
+            "the halves must meet exactly — a gap here is a visible seam"
+        );
+        assert_eq!(
+            r.x.saturating_add(i32::try_from(r.width).expect("small")),
+            bounds
+                .x
+                .saturating_add(i32::try_from(bounds.width).expect("small")),
+            "the right half must reach the right edge"
+        );
+        assert_eq!(
+            l.width.saturating_add(r.width),
+            bounds.width,
+            "together the halves are the whole display"
+        );
+    }
+
+    /// Snapping remembers where the window was, and restoring puts it back.
+    ///
+    /// The interesting half is that this works at all: `restore_window` used to
+    /// test `maximized` alone, so a snapped window — which is not maximized —
+    /// was left exactly where it was and Super+Down appeared to do nothing.
+    #[test]
+    fn restoring_a_snapped_window_returns_it_to_where_it_was() {
+        let (mut comp, id) = with_one_window();
+        let before = {
+            let w = comp.window_ref(id).expect("window");
+            Rect::new(w.x, w.y, w.width, w.height)
+        };
+
+        comp.snap_window(id, SnapEdge::Left).expect("snap");
+        assert_ne!(
+            comp.window_ref(id).expect("window").width,
+            before.width,
+            "the snap did not resize anything, so the restore proves nothing"
+        );
+
+        comp.restore_window(id).expect("restore");
+        let after = {
+            let w = comp.window_ref(id).expect("window");
+            Rect::new(w.x, w.y, w.width, w.height)
+        };
+        assert_eq!(after, before);
+        assert_eq!(comp.window_ref(id).expect("window").snapped, None);
+    }
+
+    /// Maximize, then snap, then restore returns to the window's *own*
+    /// geometry — not to the full-screen rectangle it had in between.
+    ///
+    /// Each of the three transitions is a chance to overwrite `restore_rect`
+    /// with geometry the window only has because of the previous one, and the
+    /// user-visible result is a window that can never be got back to its
+    /// original size again.
+    #[test]
+    fn tiling_a_window_repeatedly_still_restores_to_where_it_started() {
+        let (mut comp, id) = with_one_window();
+        let before = {
+            let w = comp.window_ref(id).expect("window");
+            Rect::new(w.x, w.y, w.width, w.height)
+        };
+
+        comp.maximize_window(id).expect("maximize");
+        comp.snap_window(id, SnapEdge::Left).expect("snap left");
+        comp.snap_window(id, SnapEdge::Right).expect("snap right");
+        comp.maximize_window(id).expect("maximize again");
+        comp.restore_window(id).expect("restore");
+
+        let w = comp.window_ref(id).expect("window");
+        assert_eq!(Rect::new(w.x, w.y, w.width, w.height), before);
+    }
+
+    /// Snapping and maximizing are alternatives, so entering one leaves the
+    /// other. A window recorded as both would leave `restore_window` choosing
+    /// between two answers.
+    /// Each direction has to *enter from the other state* to prove anything.
+    /// Snapping a window that was never maximized cannot show that snapping
+    /// clears `maximized`, because there was nothing to clear — the first
+    /// version of this test made exactly that mistake and passed with the
+    /// assignment deleted.
+    #[test]
+    fn a_window_is_never_snapped_and_maximized_at_once() {
+        let (mut comp, id) = with_one_window();
+
+        comp.maximize_window(id).expect("maximize");
+        assert!(comp.window_ref(id).expect("window").maximized);
+        comp.snap_window(id, SnapEdge::Left).expect("snap");
+        assert!(
+            !comp.window_ref(id).expect("window").maximized,
+            "snapping a maximized window left it recorded as maximized too"
+        );
+
+        comp.maximize_window(id).expect("maximize again");
+        assert_eq!(
+            comp.window_ref(id).expect("window").snapped,
+            None,
+            "maximizing a snapped window left it recorded as snapped too"
+        );
+    }
+
+    /// A window that declared itself non-resizable is not snapped, for the same
+    /// reason it is not maximized: tiling it is a resize it said it cannot take.
+    #[test]
+    fn a_non_resizable_window_refuses_to_be_snapped() {
+        let mut comp = Compositor::new(800, 600, 60).expect("compositor");
+        let mut spec = WindowSpec::new("Fixed", 200, 150);
+        spec.position = Some((100, 100));
+        spec.resizable = false;
+        let id = comp.create_window_from_spec(&spec, 1);
+        let before = {
+            let w = comp.window_ref(id).expect("window");
+            Rect::new(w.x, w.y, w.width, w.height)
+        };
+
+        assert!(matches!(
+            comp.snap_window(id, SnapEdge::Left),
+            Err(CompositorError::NotResizable(_))
+        ));
+        let w = comp.window_ref(id).expect("window");
+        assert_eq!(Rect::new(w.x, w.y, w.width, w.height), before);
+        assert_eq!(w.snapped, None);
+    }
+
+    /// The client is told its new size. A snap that resized the window in the
+    /// compositor's records but never notified it would leave the program
+    /// drawing at its old size inside a differently-sized frame.
+    #[test]
+    fn a_snapped_client_is_told_its_new_size() {
+        let (mut comp, id) = with_one_window();
+        comp.pending_notifications.clear();
+
+        comp.snap_window(id, SnapEdge::Left).expect("snap");
+
+        let width = comp.window_ref(id).expect("window").width;
+        let height = comp.window_ref(id).expect("window").height;
+        assert!(
+            comp.pending_notifications.iter().any(|n| matches!(
+                n,
+                EventNotification::WindowResized { window_id, width: w, height: h }
+                    if *window_id == id && *w == width && *h == height
+            )),
+            "the client was never told the snap resized it"
+        );
     }
 
     #[test]

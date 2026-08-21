@@ -46845,6 +46845,80 @@ one out-of-line function, and it is checked rather than assumed; if a future
 LLVM diverges again the disassembly command above is the check, and
 `#[inline(never)]` is the fix.
 
+**Postscript 3, 2026-08-21: the prediction this entry recorded was wrong, and
+the baseline it was measured against was never valid.**
+
+The prediction was that unifying the checksum would close the v4/v6 gap, since
+the gap was an artifact of the two sides being compiled to different unroll
+factors. The first `--bench` boot after the unification (`e98846a78`) says
+otherwise:
+
+| Boot | v4 | v6 | v4/v6 | `net_checksum` (20 B) |
+|---|---|---|---|---|
+| `4dd776c46` 02:18 | 1717 ns | 1604 ns | **1.07** | 18 ns |
+| `6b60dd0d9` 03:19 | 1713 ns | 1604 ns | **1.07** | 19 ns |
+| `fe9882a55` 04:40 | 2290 ns | 18 ns | 127 | 21 ns |
+| `d4b03ce54` 05:20 | 2115 ns | 1435 ns | **1.47** | 54 ns |
+| `e1de4aaaa` 05:38 | 1904 ns | 1417 ns | **1.34** | 53 ns |
+| `e98846a78` 06:52 | 3101 ns | 2009 ns | **1.54** | 54 ns |
+
+The gap *widened*, from 1.07 to 1.34–1.54. And it now points the wrong way
+physically: v6 sums a 40-byte pseudo-header against v4's 12, so v6 does strictly
+more work per call and should be the *slower* of the two.
+
+Three things have to be said in the right order here, because the tempting
+reading — "the unification made it worse" — is not what happened.
+
+*The 1.07 baseline was measured on partially-hoisted code, so it was never a
+number to return to.* The same commit that guarded these two also guarded
+`net_ip_checksum_20b`, and that one moved 19 ns → 54 ns (80 → 202 cycles). A
+2.9× jump from adding `black_box` to the *input* is proof the old figure was
+computed at least partly outside the timed loop. The v4/v6 pair got the same
+guard in the same commit. Comparing today's guarded 1.34 against yesterday's
+unguarded 1.07 compares a measurement to a non-measurement — the same error
+this whole entry exists to document, committed one level up.
+
+*The unroll claim above still holds; it was re-verified on this build, not
+carried over.* `tcp_checksum_v6` is out-of-line (`0x1f4` bytes) and
+`tcp_checksum` has no symbol at all, so the two sides are still inlined
+differently — but their loop bodies are now equivalent instruction for
+instruction: 4× unrolled, `movzwl`+`rolw` 16-bit big-endian loads on indexed
+addressing, `addq $0x8` / `addq $-0x4` / `jne`, no spills on either side, 20
+instructions against 19. Whatever remains is not the unroll artifact.
+
+*The 1.54 reading is contaminated and 1.34 is the honest one.* v4's window has
+mean 90043 cycles against a min of 11510 (7.8×) and a max of 146,380,043 — and
+`net_ipv4_parse`, three benchmarks earlier in the same window, carries the
+matching signature (mean 89854, max 179,037,442). v6's mean is 1.17× its min.
+That is a host stall landing on part of the suite, and it matters more than it
+looks: **under TCG the guest TSC tracks host wall-clock, so a host deschedule
+inflates every iteration in the affected window, the minimum included.**
+Min-of-N does not filter it, and the split check cannot see it because both
+halves sit inside the same disturbed window. This is the same root cause as the
+428-cycle floor sample — host load contaminating a measurement — reaching the
+scored numbers rather than the floor.
+
+So the residual is ~1.34 with provably identical inner loops. The live
+hypothesis is **code placement**, not code: v4 is inlined into `bench::run_all`
+(195,815 bytes) while v6 is a call to a 500-byte function, and the suite already
+has three unexplained placement-shaped moves on record (`vfs_stat_deep` +39%,
+`vfs_stat_3comp` +37%, `isr_latency` −38% — mixed directions, the signature of
+layout rather than work). `scripts/straddle-check.py --compare <old> <new>` is
+the tool. Not yet run; this is the next thing to do on this thread, and it is
+recorded here rather than presented as resolved.
+
+Two corollaries for the harness itself:
+
+- **Mean/min ratio is a usable contamination detector and is not currently
+  checked.** v4 at 7.8× and `net_ipv4_parse` at ~394× stand out sharply against
+  v6's 1.17×. A scorecard line flagging windows whose mean is some large
+  multiple of their min would have marked both of these as untrustworthy
+  *before* anyone reasoned about the numbers. Worth adding next to the
+  below-floor check, which catches the opposite failure.
+- **A benchmark pair meant to be compared should be measured adjacently and
+  reported with its dispersion**, since the pair's whole value is the ratio and
+  a stall on one side forges it.
+
 **Two general lessons, both of which cost a full measure-and-conclude cycle
 here:**
 

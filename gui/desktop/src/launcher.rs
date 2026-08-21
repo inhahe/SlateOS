@@ -432,7 +432,7 @@ impl LauncherState {
             && !ch.is_control()
         {
             self.query.insert(self.cursor, ch);
-            self.cursor += ch.len_utf8();
+            self.cursor = self.cursor.saturating_add(ch.len_utf8());
             self.selected_index = 0;
             self.update_results();
         }

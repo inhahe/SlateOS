@@ -358,7 +358,7 @@ impl LoginScreen {
     pub fn auth_failure(&mut self, message: &str) {
         self.phase = LoginPhase::Failed;
         self.error_message = Some(message.to_string());
-        self.failed_attempts += 1;
+        self.failed_attempts = self.failed_attempts.saturating_add(1);
         self.shake_timer = 1.0; // start shake animation
 
         // Check lockout.

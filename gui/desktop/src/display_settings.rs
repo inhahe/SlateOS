@@ -351,8 +351,13 @@ impl TestPattern {
         let steps = 16u32;
         let step_width = width / steps as f32;
         let mut cmds = Vec::with_capacity(steps as usize);
+        // The ramp spans the ends inclusively, so it is divided by the number
+        // of *gaps* between steps rather than the number of steps. `steps` is
+        // a literal 16 here; the saturating form keeps that from being the
+        // reason this is correct.
+        let gaps = steps.saturating_sub(1).max(1);
         for i in 0..steps {
-            let gray = (i * 255 / (steps - 1).max(1)) as u8;
+            let gray = i.saturating_mul(255).checked_div(gaps).unwrap_or(0) as u8;
             cmds.push(RenderCommand::FillRect {
                 x: x + i as f32 * step_width,
                 y,
@@ -414,10 +419,12 @@ impl TestPattern {
         let cell_size = 20.0_f32;
         let cols = (width / cell_size).ceil() as u32;
         let rows = (height / cell_size).ceil() as u32;
-        let mut cmds = Vec::with_capacity((cols * rows) as usize);
+        let mut cmds = Vec::with_capacity(cols.saturating_mul(rows) as usize);
         for row in 0..rows {
             for col in 0..cols {
-                let is_white = (row + col) % 2 == 0;
+                // Parity of the sum, so a wrap would invert the whole board
+                // from that point on rather than merely miscolour one cell.
+                let is_white = row.saturating_add(col) % 2 == 0;
                 let color = if is_white {
                     Color::rgb(255, 255, 255)
                 } else {

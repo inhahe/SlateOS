@@ -729,8 +729,10 @@ impl InputSettingsUI {
         });
 
         // Fill
-        let range = (max - min).max(1) as f32;
-        let frac = ((value - min) as f32 / range).clamp(0.0, 1.0);
+        // A track whose `max` is below its `min` is a caller error, not a
+        // reason to underflow: it yields an empty range and a fill of zero.
+        let range = max.saturating_sub(min).max(1) as f32;
+        let frac = (value.saturating_sub(min) as f32 / range).clamp(0.0, 1.0);
         cmds.push(RenderCommand::FillRect {
             x: track_x,
             y: y + 4.0,

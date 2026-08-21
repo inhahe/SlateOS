@@ -343,7 +343,7 @@ impl FocusAssistManager {
 
     /// Record a suppressed notification.
     pub fn record_suppressed(&mut self) {
-        self.suppressed_count += 1;
+        self.suppressed_count = self.suppressed_count.saturating_add(1);
     }
 
     /// Evaluate auto rules given current time and system state.

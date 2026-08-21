@@ -73,15 +73,13 @@ impl DragDataType {
     /// [`render_drag_overlay`] elides it to that width instead.
     pub fn description(&self) -> String {
         match self {
-            Self::Files(paths) => {
-                if paths.len() == 1 {
-                    // Extract filename from path.
-                    let name = paths[0].rsplit('/').next().unwrap_or(&paths[0]);
-                    name.to_string()
-                } else {
-                    format!("{} files", paths.len())
-                }
-            }
+            // Matching the one-element slice binds the path *and* carries
+            // the length condition, instead of testing the length in one
+            // statement and indexing on the strength of it in the next.
+            Self::Files(paths) => match paths.as_slice() {
+                [only] => only.rsplit('/').next().unwrap_or(only).to_string(),
+                other => format!("{} files", other.len()),
+            },
             Self::Text(t) => format!("\"{t}\""),
             Self::Uris(uris) => format!("{} links", uris.len()),
             Self::Raw { mime, size } => format!("{mime} ({size} bytes)"),

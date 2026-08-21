@@ -329,8 +329,11 @@ pub fn compute_grid_layout(
 
     let mut out = Vec::with_capacity(count);
     for (i, thumb) in thumbnails.iter().enumerate() {
-        let col = i % cols;
-        let row = i / cols;
+        // `cols` is `count.min(max_cols)` with both at least one, so these
+        // are total; `checked_*` is what makes that visible here rather than
+        // fifteen lines up.
+        let col = i.checked_rem(cols).unwrap_or(0);
+        let row = i.checked_div(cols).unwrap_or(0);
 
         let cx = bx + pad + col as f32 * (cell_w + pad);
         let cy = by + pad + row as f32 * (cell_h + pad);

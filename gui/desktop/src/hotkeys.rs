@@ -605,23 +605,27 @@ impl HotkeyConfig {
             // separator's position never has to be carried in a variable and
             // re-applied — which is where an off-by-one or a mid-character
             // split would come from if the separator were ever multi-byte.
+            // One-based for the human reading the error; saturating so the
+            // number reported for an implausibly long file is wrong by one
+            // rather than wrapping to zero.
+            let line_number = line_idx.saturating_add(1);
             let (key_part, value_part) =
                 line.split_once('=')
                     .ok_or_else(|| HotkeyError::ParseError {
-                        line_number: line_idx + 1,
+                        line_number,
                         message: "expected '=' separator".to_string(),
                     })?;
             let key_part = key_part.trim();
             let value_part = value_part.trim();
 
             let hotkey = parse_hotkey_string(key_part).map_err(|e| HotkeyError::ParseError {
-                line_number: line_idx + 1,
+                line_number,
                 message: format!("{}", e),
             })?;
 
             let action = HotkeyAction::from_config_value(value_part).map_err(|e| {
                 HotkeyError::ParseError {
-                    line_number: line_idx + 1,
+                    line_number,
                     message: format!("{}", e),
                 }
             })?;
@@ -947,7 +951,8 @@ pub fn render_settings_panel(
     let panel_height = content_height;
     let radii = CornerRadii::all(PANEL_RADIUS);
 
-    let mut cmds: Vec<RenderCommand> = Vec::with_capacity(binding_count * 6 + 8);
+    let mut cmds: Vec<RenderCommand> =
+        Vec::with_capacity(binding_count.saturating_mul(6).saturating_add(8));
 
     // Shadow.
     cmds.push(RenderCommand::BoxShadow {

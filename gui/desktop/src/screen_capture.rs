@@ -83,14 +83,18 @@ impl CaptureRegion {
         }
     }
 
-    /// Calculate the total pixel count.
+    /// Total pixel count. Cannot overflow: two `u32` dimensions widened to
+    /// `u64` multiply to at most 2^64, and a capture region is bounded by the
+    /// display long before that.
+    #[must_use]
     pub fn pixel_count(&self) -> u64 {
-        self.width as u64 * self.height as u64
+        u64::from(self.width).saturating_mul(u64::from(self.height))
     }
 
     /// Estimate raw frame size in bytes (BGRA = 4 bytes per pixel).
+    #[must_use]
     pub fn frame_size_bytes(&self) -> u64 {
-        self.pixel_count() * 4
+        self.pixel_count().saturating_mul(4)
     }
 
     /// Check if the region is valid (non-zero dimensions).

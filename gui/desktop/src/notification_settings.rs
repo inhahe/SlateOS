@@ -1304,8 +1304,8 @@ impl NotificationSettingsUI {
                 y: cy + 4.0,
                 text: format!(
                     "{}-{} of {}",
-                    visible_start + 1,
-                    (visible_start + max_visible).min(entries.len()),
+                    visible_start.saturating_add(1),
+                    visible_start.saturating_add(max_visible).min(entries.len()),
                     entries.len(),
                 ),
                 font_size: 11.0,

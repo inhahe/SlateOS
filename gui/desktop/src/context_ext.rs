@@ -247,7 +247,7 @@ impl ContextMenuExtension {
 
     /// Record an invocation time for rate-limiting tracking.
     pub fn record_invocation(&mut self, duration_ms: f64) {
-        self.invocation_count += 1;
+        self.invocation_count = self.invocation_count.saturating_add(1);
         // Exponential moving average.
         let alpha = 0.3;
         self.response_time_avg_ms = alpha * duration_ms + (1.0 - alpha) * self.response_time_avg_ms;
@@ -382,7 +382,10 @@ impl ContextMenuExtensionManager {
     pub fn unregister_app(&mut self, app_name: &str) -> usize {
         let len_before = self.extensions.len();
         self.extensions.retain(|e| e.app_name != app_name);
-        len_before - self.extensions.len()
+        // `retain` only ever shrinks, so this cannot go negative — written
+        // saturating so that is a property of the expression rather than of
+        // the reader's memory of what `retain` does.
+        len_before.saturating_sub(self.extensions.len())
     }
 
     /// Enable or disable a specific extension.
@@ -432,7 +435,7 @@ impl ContextMenuExtensionManager {
                 .iter_mut()
                 .find(|(name, _)| name == &ext.app_name)
             {
-                entry.1 += 1;
+                entry.1 = entry.1.saturating_add(1);
             } else {
                 app_counts.push((ext.app_name.clone(), 1));
             }

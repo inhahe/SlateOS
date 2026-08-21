@@ -609,7 +609,8 @@ impl PrintManager {
     pub fn purge_terminal_jobs(&mut self) -> usize {
         let before = self.jobs.len();
         self.jobs.retain(|j| !j.state.is_terminal());
-        before - self.jobs.len()
+        // `retain` only shrinks; saturating says so in the expression itself.
+        before.saturating_sub(self.jobs.len())
     }
 
     /// Total pages printed across all completed jobs.

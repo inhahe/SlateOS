@@ -20,6 +20,7 @@
 //! icon_layer.handle_double_click(x, y);
 //! ```
 
+use core::num::NonZeroU32;
 use guitk::color::Color;
 use guitk::idseq::IdSeq;
 use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
@@ -232,10 +233,16 @@ pub enum IconEvent {
 /// There was even a test for the zero grid, which called only the two guarded
 /// methods. Making the state unrepresentable is what removes the question:
 /// there is one place a cell size is admitted, and it clamps.
+///
+/// It is `NonZeroU32` rather than a `u32` that the constructor happens to
+/// clamp, because those are not the same claim. The second is a promise kept
+/// by one function that a reader has to go and find; the first is a fact the
+/// compiler carries to every division in this file, and it is what lets
+/// [`GridConfig::columns_in`] divide without a guard of its own.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct GridConfig {
-    cell_width: u32,
-    cell_height: u32,
+    cell_width: NonZeroU32,
+    cell_height: NonZeroU32,
 }
 
 impl Default for GridConfig {
@@ -254,31 +261,37 @@ impl GridConfig {
     #[must_use]
     pub const fn new(cell_width: u32, cell_height: u32) -> Self {
         Self {
-            cell_width: if cell_width == 0 { 1 } else { cell_width },
-            cell_height: if cell_height == 0 { 1 } else { cell_height },
+            cell_width: match NonZeroU32::new(cell_width) {
+                Some(w) => w,
+                None => NonZeroU32::MIN,
+            },
+            cell_height: match NonZeroU32::new(cell_height) {
+                Some(h) => h,
+                None => NonZeroU32::MIN,
+            },
         }
     }
 
     /// Cell width in pixels. Never zero.
     #[must_use]
     pub const fn cell_width(&self) -> u32 {
-        self.cell_width
+        self.cell_width.get()
     }
 
     /// Cell height in pixels. Never zero.
     #[must_use]
     pub const fn cell_height(&self) -> u32 {
-        self.cell_height
+        self.cell_height.get()
     }
 
     /// Cell width as a signed value, for mixing with pixel positions.
     fn cell_width_i32(&self) -> i32 {
-        i32::try_from(self.cell_width).unwrap_or(i32::MAX)
+        i32::try_from(self.cell_width.get()).unwrap_or(i32::MAX)
     }
 
     /// Cell height as a signed value.
     fn cell_height_i32(&self) -> i32 {
-        i32::try_from(self.cell_height).unwrap_or(i32::MAX)
+        i32::try_from(self.cell_height.get()).unwrap_or(i32::MAX)
     }
 
     /// Snap a position to the origin of the cell containing it.
@@ -318,14 +331,20 @@ impl GridConfig {
     }
 
     /// Number of whole columns that fit within a given width.
+    ///
+    /// Dividing by the `NonZeroU32` itself rather than by `.get()` uses the
+    /// `Div<NonZeroU32> for u32` impl, which cannot panic. Calling `.get()`
+    /// first would hand the compiler a plain `u32` and throw the proof away
+    /// one expression before the division that needs it. That costs `const`,
+    /// since operator impls are not const — and no caller wanted it.
     #[must_use]
-    pub const fn columns_in(&self, width: u32) -> u32 {
+    pub fn columns_in(&self, width: u32) -> u32 {
         width / self.cell_width
     }
 
     /// Number of whole rows that fit within a given height.
     #[must_use]
-    pub const fn rows_in(&self, height: u32) -> u32 {
+    pub fn rows_in(&self, height: u32) -> u32 {
         height / self.cell_height
     }
 }

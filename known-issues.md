@@ -48460,8 +48460,14 @@ corresponding bug is reintroduced. A taskbar can now be told what to list.
 **What remains is exactly one thing: the loop itself.** `desktop` gains a
 `[lib]`, a binary opens three `Layer`-banded windows (wallpaper, taskbar,
 popups) through `oswindow`, calls `watch_desktop(true)`, and on each
-`desktop_revision` change re-renders the five trees and submits them. Both
+`desktop_revision` change re-renders the four trees and submits them. Both
 named blockers are gone; nothing is waiting on another lane.
+
+*(Was "five trees" when written. It is four: the fifth was
+`render_window_decorations`, and submitting it would have double-drawn every
+title bar in the desktop. It has since been deleted — see
+`TD-C-THE-DESKTOP-AND-THE-COMPOSITOR-BOTH-DRAW-WINDOW-TITLE-BARS`, resolved —
+so the loop can now render everything the shell has without qualification.)*
 
 **Progress 2026-08-21 (3) — `desktop` is a library.** The `[lib]` above now
 exists: `src/main.rs` became `src/lib.rs`, the crate declares both a `[lib]`
@@ -48544,7 +48550,7 @@ nothing obeys it. 49 of the shell's modules — every settings page, every
 dialog, the taskbar, the launcher, the login screen, the on-screen displays —
 each declare their own private list of colour constants and paint with those.
 The user can set the desktop to Light and watch the whole of it stay dark
-except the five surfaces `DesktopShell` renders itself. The setting is real,
+except the four surfaces `DesktopShell` renders itself. The setting is real,
 it is saved to disk, it is read back correctly, and then it is ignored.
 
 **Where:** `gui/desktop/src/*.rs` — 549 `const NAME: Color = …` declarations
@@ -48556,7 +48562,7 @@ times. The canonical answer lives in `gui/appearance/src/lib.rs`
 `TransparencyLevel::panel_alpha`, `AppearanceSettings::effective_accent`).
 
 **Reproduce:** set `theme.mode: light` in the appearance config and start the
-shell. `DesktopShell`'s own five render methods respond. Open any settings
+shell. `DesktopShell`'s own four render methods respond. Open any settings
 page, the launcher, or a dialog: unchanged, still Catppuccin Mocha. Same for
 a non-default accent — `effective_accent()` reaches nothing that draws.
 
@@ -49019,6 +49025,12 @@ The fifth is `render_window_decorations`, and submitting it would double-draw
 every title bar in the desktop, at the wrong size. The loop must render four,
 not five, and this entry is why.
 
+*(Resolved: the decorator is deleted, so the shell now has exactly four public
+`render_*` methods and the qualification is no longer needed — the loop
+renders all of them. The note is left standing because it is the reason the
+count in that entry changed, and a future reader comparing the two entries
+would otherwise have to rediscover it.)*
+
 **It also explains a hole in the window-list protocol that is not a hole.**
 `WindowInfo` (`gui/remote/src/window_list.rs`) carries no geometry — no x, y,
 width or height. That looks like an oversight the moment you try to decorate a
@@ -49286,6 +49298,131 @@ the four `Hit::Window{Close,Maximize,Minimize,TitleBar}` variants and their
 `handle_mouse` arms, the `gui/desktop/src/main.rs:45` demo caller, and the
 `pointer_tests.rs` tests that assert the duplicate. `ManagedWindow::frame_rect`
 stays.
+
+## RESOLVED 2026-08-21 — the duplicate is gone, and one feature moved rather than died
+
+✅ **The deletion is done and this entry is closed.** All five prerequisites had
+been met, so the shell's copy came out exactly as scoped: the 92-line
+`render_window_decorations`, `window_chrome`, `WindowChrome`, the
+`TITLE_BAR_HEIGHT`/`WINDOW_BUTTON_*` constant block, `top_corner_radii`, the
+four `Hit::Window{Close,Maximize,Minimize,TitleBar}` variants with their
+`handle_mouse` arms, the `main.rs` demo caller, and six `pointer_tests.rs` tests
+that asserted the duplicate. `ManagedWindow::frame_rect` stays, as specified.
+`Hit` is now `WindowContent(id)` for a window and nothing finer, because
+everything finer belonged to the compositor and was consumed before this shell
+heard about the press. Two processes now draw one title bar. Net −467/+425 lines
+across five files.
+
+**Two things the deletion would have silently taken with it were caught by
+reading the duplicate line by line first, and were moved rather than dropped.**
+This is the third time in this entry that reading beat trusting the entry's own
+summary, and it is why the deletion was done last rather than first:
+
+1. **Double-click-to-maximize was only ever implemented in the shell.** The
+   `Hit::WindowTitleBar` arm was its sole home, and the compositor never
+   produces `MouseEventKind::DoubleClick` at all — its own comment says so:
+   `Enter`/`Leave` and `DoubleClick` "exist only on the client side and are
+   never produced here". So deleting the arm would have removed the gesture
+   from the product with nothing to notice. It now lives in
+   `Compositor::handle_mouse_button`, beside the hit test that already resolves
+   a press on the same strip. See `design-decisions.md` §502 for the three
+   sub-decisions it needed (keying on the window, breaking the pair on an
+   intervening press, and not re-arming after a completed double-click).
+2. **The shell's decorator test was the only WCAG contrast check in the tree.**
+   `accented_title_bars_still_mark_only_the_focused_window` measured real
+   contrast *ratios* (≥ 4.5 focused, ≥ 3.0 unfocused) across 14 accents × 2
+   modes. The surviving `gui/appearance` tests asserted only the *identity*
+   `title_focused_fg == readable_on(accent)`, which a drifted luma threshold
+   satisfies perfectly while returning the wrong extreme. The ratio assertions
+   moved to `gui/appearance` as
+   `a_title_is_readable_on_every_bar_the_settings_can_produce`, and the
+   distinction is not theoretical: drifting `readable_on`'s threshold from 140
+   to 200 leaves `readable_on_answers_with_the_palettes_own_extremes` passing
+   and produces a **1.86:1** blue title bar, which the new test catches.
+
+**One survivor was renamed, because the deletion revealed it was misnamed.**
+`DesktopTheme::window_border_color` is still read — by the start menu and the
+power menu — but the shell draws no window borders any more, so it is now
+`panel_border_color`. It is still sourced from `DecorationColors::border_focused`
+on purpose: a panel outlined in a different shade from the window beside it
+looks like a bug, and would be one, because two processes had each picked a
+colour. `window_fields_from` shrank from six fields to two and is now
+`frame_fields_from`. The scaffold test named in the notes above
+(`the_shells_window_colours_are_the_compositors_window_colours`) was deleted
+with the decorator as instructed, replaced by
+`the_shell_reads_its_frame_colours_rather_than_choosing_them`, which guards the
+two fields that remain.
+
+**Eleven reintroductions, eleven caught — but one only after the test was
+repaired**, and that failure is the more useful half of the exercise.
+`a_double_click_is_the_same_event_to_this_shell_as_a_single_one` originally
+asserted that a double-click returns `Pass` and does not maximize. Both remain
+true of a `DoubleClick` arm that silently returns `Pass` without dispatching
+anything — so the test would have watched the shell drop click-to-focus and
+every menu it opens on a press, and said nothing. It now asserts the *positive*:
+that a double-click focuses a background window and opens the start menu, on
+both kinds of surface the shell hit-tests. The general lesson, which has now bitten
+three times in this entry's history: **a test that asserts the absence of the
+behaviour you just deleted is satisfied by deleting too much.** Assert what
+survives, not what went.
+
+---
+
+## TD-C-THE-MOUSE-SETTINGS-PANEL-REACHES-NOTHING
+
+**In short:** Settings has a mouse panel with sliders for double-click speed,
+pointer speed and so on. Moving them changes a number in a file and nothing
+else. The compositor — the only thing in the tree that actually acts on a
+double-click — has never heard of that file and uses its own built-in default.
+So the double-click-speed slider does nothing today, and it is the one setting
+on the panel that now has a real consumer sitting right there ignoring it.
+
+**Where:**
+
+| | |
+|---|---|
+| The setting | `desktop::mouse_settings` (`gui/desktop/src/mouse_settings.rs`), `double_click_ms`, default **400**, clamped 100–2000 (`:185`, `:205`) |
+| The consumer | `Compositor::double_click_interval` (`gui/compositor/src/lib.rs`), default `DEFAULT_DOUBLE_CLICK_MS = 400`, clamped by `set_double_click_ms` to `MIN_DOUBLE_CLICK_MS`..=`MAX_DOUBLE_CLICK_MS` = 100–2000 |
+| What connects them | nothing |
+
+The two defaults and the two clamp ranges were deliberately made to match when
+the double-click gesture moved into the compositor, precisely so that **a user
+who never touches the slider sees no change when this is wired up**. That is the
+mitigation, not the fix: a user who *does* move it still sees nothing.
+
+**Why it is not simply a missing function call.** `set_double_click_ms` is
+public and takes the value the panel already produces, so the compositor end is
+done. The missing piece is the same one that blocks the appearance settings from
+reloading live: **`apps/settings` has no compositor connection at all**
+(`TD-NO-APP-CONNECTS-TO-THE-COMPOSITOR`). The appearance half of this problem
+was solved by adding a `ReloadAppearance` control verb (tag `0x0F`, no payload,
+no `link.resolve` — see `TD-C-THE-DESKTOP-AND-THE-COMPOSITOR-BOTH-DRAW-WINDOW-TITLE-BARS`
+above), and the mouse settings want the same shape.
+
+**The design question to answer first, and it is a real one:** should this be a
+second verb (`ReloadInput`), or should the input settings move *into*
+`AppearanceSettings` so the existing `ReloadAppearance` carries both? The second
+is tempting because it needs no protocol change, but "appearance" is the wrong
+home for pointer behaviour, and a struct that accretes every settings panel
+because it happens to have a reload verb is how a settings blob becomes
+untyped. Lean toward a second verb reading a second file.
+
+**Scope beyond double-click.** `mouse_settings` also holds pointer speed,
+acceleration, scroll direction/lines and left-handed button swap. The compositor
+consumes none of them, and unlike double-click speed most have no consumer
+anywhere — pointer acceleration in particular has nothing to apply it to,
+because the compositor is fed absolute coordinates by
+`handle_mouse_button`/`handle_mouse_move` rather than raw deltas. Wiring
+double-click alone is honest and small; wiring the rest is a larger question
+about where input transformation belongs and should not be bundled in.
+
+**Trigger:** do this when `apps/settings` gains a compositor connection — the
+same moment `ReloadAppearance` gets its first real caller. Both are lane C's.
+
+**If never fixed:** a slider that lies. The user moves it, the panel writes the
+file, and the double-click speed is whatever the compositor's constant says.
+Worse than an absent setting, because an absent one cannot be misread as tried
+and rejected.
 
 ## B-SSHD-EXEC-REPLIED-WITH-THE-COMMAND-INSTEAD-OF-RUNNING-IT — 2026-08-21 — FIXED
 
@@ -49818,3 +49955,62 @@ into the ability to pass a `doas` prompt. So: real, bounded, not urgent.
 `requests/c-b-passwd-and-login-disagree-about-etc-shadow.md` —
 `grep -rn 'crypt::verify' posix/src userspace/*/src services init`, which
 returns exactly three production call sites and requires each to be justified.
+
+
+---
+
+## B-FTPD-SSHD-AUTH-TESTS-SHARE-TEMP-FILES-AND-FLAKE — 2026-08-21 — lane B
+
+**In short:** The tests that check FTP and SSH password handling build their
+throwaway `/etc/shadow` files by stamping the current time into the filename.
+The clock is not fine-grained enough for that: when cargo runs the tests side by
+side, two of them get the *same* file, one overwrites the other, and whichever
+reads second is authenticating against the wrong data. Measured collision rate
+on this machine: **13%**. It shows up as an occasional red in a full-workspace
+run and is otherwise invisible.
+
+**Found by:** lane C, during the full-workspace gate for the window-decorator
+deletion. Not lane C's change — `ftpd` depends only on `authlib`, and the
+change touched nothing outside `gui/**`. Filed to lane B as
+`requests/c-b-ftpd-sshd-auth-tests-share-tmp-files-and-flake.md`, which carries
+the full diagnosis and three suggested fixes; this entry exists so the bug is
+tracked rather than living only in a request another lane may not merge for a
+while.
+
+**Where:** `userspace/ftpd/src/main.rs:3040` (`tmp_path`), and the same helper at
+`userspace/sshd/src/main.rs:4700`. sshd's copy adds a `get_pid()` prefix, which
+does **not** help — every test in a binary shares one process, so it separates
+concurrent *runs* of the suite and not the concurrent *threads* inside one.
+
+**Symptom:**
+
+```
+---- tests::an_unrecomputable_entry_is_broken_not_wrong stdout ----
+assertion `left == right` failed
+  left: Rejected
+ right: Unusable
+```
+
+`Rejected` instead of `Unusable` is the diagnostic, not noise: the test writes a
+plaintext shadow field (which must report `Unusable`) and reads back some other
+test's line — a locked or validly-hashed one — which it then correctly
+rejects. The assertion is right; the file under it changed.
+
+**Reproduce:** `cargo test --workspace --target x86_64-pc-windows-gnu`. It is
+load-dependent — `cargo test -p ftpd --bin ftpd` alone was 8/8 green across
+eight consecutive runs.
+
+**Why it matters more than an ordinary flake.** These tests pin *authentication
+outcomes*: locked accounts, plaintext shadow fields, unknown users, rate
+limiting. A test reading another test's shadow file can fail spuriously — which
+is what was seen — but it can just as easily **pass** spuriously, and a green
+run is precisely the evidence that would be cited for "auth is covered". Until
+this is fixed the suite is not a reliable witness to its own claims.
+
+**Secondary defect in the same helper:** cleanup is `let _ =
+fs::remove_file(shadow)` at the end of each test body, so a panicking test leaks
+its file. No `Drop` guard. A per-test temp *directory* would fix uniqueness and
+cleanup together.
+
+**If never fixed:** an intermittent red in the shared merge gate that each lane
+pays for in turn, over exactly the code where a false green is most expensive.

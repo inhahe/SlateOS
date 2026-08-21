@@ -126,6 +126,23 @@ const TITLE_BUTTON_SIZE: u32 = 20;
 /// Spacing between title bar buttons.
 const TITLE_BUTTON_SPACING: u32 = 4;
 
+/// How close together two title-bar clicks must be to be one double-click.
+///
+/// The same 400 ms the mouse settings panel offers as its default, so that
+/// wiring the user's choice through later changes nothing for a user who never
+/// touched it.
+const DEFAULT_DOUBLE_CLICK_MS: u64 = 400;
+
+/// The narrowest and widest double-click intervals that can be set.
+///
+/// The same range the mouse settings panel offers, so a value from there cannot
+/// arrive out of range. The floor is what stops a caller passing zero from
+/// making a double-click impossible to perform; the ceiling stops two unrelated
+/// clicks a second apart from being read as one gesture.
+const MIN_DOUBLE_CLICK_MS: u32 = 100;
+/// See [`MIN_DOUBLE_CLICK_MS`].
+const MAX_DOUBLE_CLICK_MS: u32 = 2000;
+
 /// Default window opacity (fully opaque).
 const DEFAULT_OPACITY: f32 = 1.0;
 
@@ -3898,6 +3915,20 @@ pub struct Compositor {
     cursor_shape: CursorShape,
     /// Active drag operation (if any).
     drag: Option<DragState>,
+    /// The previous left-press on a title bar, for recognising a double-click.
+    ///
+    /// The window is part of it, not just the time: two quick clicks on two
+    /// different title bars are two clicks, and maximising the second window
+    /// because the first was clicked recently is a window moving on its own.
+    last_title_press: Option<(WindowId, Instant)>,
+    /// How close together two title-bar clicks must be to count as one
+    /// double-click.
+    ///
+    /// Matches the default of the mouse settings panel
+    /// (`desktop::mouse_settings`). Nothing wires the user's choice through to
+    /// here yet — see `known-issues.md`
+    /// `TD-C-THE-MOUSE-SETTINGS-PANEL-REACHES-NOTHING`.
+    double_click_interval: Duration,
     /// Rendering engine instance.
     render_engine: RenderEngine,
     /// Decoration theme.
@@ -3966,6 +3997,8 @@ impl Compositor {
             cursor_y: height as i32 / 2,
             cursor_shape: CursorShape::Arrow,
             drag: None,
+            last_title_press: None,
+            double_click_interval: Duration::from_millis(DEFAULT_DOUBLE_CLICK_MS),
             render_engine: RenderEngine::new(),
             theme: DecorationTheme::default(),
             // The defaults, not the user's file: a constructor that read
@@ -4011,6 +4044,15 @@ impl Compositor {
         // on eleven colours, and they change only when this is called.
         self.theme = DecorationTheme::from_settings(&self.appearance);
         self.full_recomposite = true;
+    }
+
+    /// How close together two title-bar clicks must be to maximize the window.
+    ///
+    /// Clamped to [`MIN_DOUBLE_CLICK_MS`]..=[`MAX_DOUBLE_CLICK_MS`].
+    pub fn set_double_click_ms(&mut self, ms: u32) {
+        self.double_click_interval = Duration::from_millis(u64::from(
+            ms.clamp(MIN_DOUBLE_CLICK_MS, MAX_DOUBLE_CLICK_MS),
+        ));
     }
 
     /// Re-read the user's `appearance.yaml` and adopt whatever it now says.
@@ -4752,6 +4794,12 @@ impl Compositor {
 
         // Left button press: check window decorations first, then client area.
         if button == MouseButton::Left {
+            // Taken and cleared before anything is dispatched, so that only a
+            // title-bar press can leave one behind. Two title clicks with a
+            // press on the desktop between them are two clicks, however fast:
+            // the user went somewhere else and came back.
+            let previous_title_press = self.last_title_press.take();
+
             // Check windows from top to bottom z-order.
             let hit_window = self.window_at_with_decorations(x, y);
 
@@ -4781,14 +4829,38 @@ impl Compositor {
                         let _ = self.minimize_window(window_id);
                         return;
                     }
-                    // Title bar drag?
+                    // Title bar: a double-click toggles maximize, a single one
+                    // begins a move.
                     if win.title_bar_rect().is_some_and(|r| r.contains(x, y)) {
+                        let now = Instant::now();
+                        let doubled = previous_title_press.is_some_and(|(prev, at)| {
+                            prev == window_id
+                                && now.duration_since(at) <= self.double_click_interval
+                        });
+                        if doubled {
+                            // Left cleared by the `take` above rather than
+                            // replaced: otherwise a third click pairs with the
+                            // second and un-maximizes what the user just
+                            // maximized.
+                            let maximized = win.maximized;
+                            if maximized {
+                                let _ = self.restore_window(window_id);
+                            } else {
+                                let _ = self.maximize_window(window_id);
+                            }
+                            return;
+                        }
+                        // Read off the window before recording the press: the
+                        // record is a write to `self`, and `win` borrows it.
+                        let start_window_pos = Point::new(win.x, win.y);
+                        let start_window_size = (win.width, win.height);
+                        self.last_title_press = Some((window_id, now));
                         self.drag = Some(DragState {
                             window_id,
                             mode: DragMode::MoveWindow,
                             start_mouse: Point::new(x, y),
-                            start_window_pos: Point::new(win.x, win.y),
-                            start_window_size: (win.width, win.height),
+                            start_window_pos,
+                            start_window_size,
                         });
                         return;
                     }
@@ -7230,6 +7302,150 @@ mod tests {
                 "dragging the {name} edge"
             );
         }
+    }
+
+    // ---- double-click the title bar to maximize ---------------------------
+    //
+    // The gesture every desktop has. It used to live in the desktop shell,
+    // which drew a second copy of every title bar and hit-tested its own copy;
+    // when that duplicate was deleted the gesture came here, beside the hit
+    // test that already turns a press on this same strip into a move, a close
+    // or a resize. Timing lives here too — the shell no longer has to be told
+    // which press was a "double" one.
+
+    /// A full click near the left end of `id`'s title bar, away from the
+    /// buttons at its right-hand end. Asked of the window each time because a
+    /// maximized window's title bar is somewhere else.
+    fn click_title_bar(comp: &mut Compositor, id: WindowId) {
+        let bar = comp
+            .window_ref(id)
+            .expect("window")
+            .title_bar_rect()
+            .expect("a decorated window has a title bar");
+        let x = bar.x + 10;
+        let y = bar.y + bar.height as i32 / 2;
+        comp.handle_mouse_button(MouseButton::Left, true, x, y);
+        comp.handle_mouse_button(MouseButton::Left, false, x, y);
+    }
+
+    fn maximized(comp: &Compositor, id: WindowId) -> bool {
+        comp.window_ref(id).expect("window").maximized
+    }
+
+    /// A compositor with one resizable window at (100, 100), and a
+    /// double-click interval long enough that no scheduling delay between two
+    /// synchronous calls can exceed it.
+    fn with_one_window() -> (Compositor, WindowId) {
+        let mut comp = Compositor::new(800, 600, 60).expect("compositor");
+        comp.set_double_click_ms(2000);
+        let mut spec = WindowSpec::new("Resizable", 200, 150);
+        spec.position = Some((100, 100));
+        let id = comp.create_window_from_spec(&spec, 1);
+        (comp, id)
+    }
+
+    #[test]
+    fn a_double_click_on_the_title_bar_maximizes_and_a_second_one_restores() {
+        let (mut comp, id) = with_one_window();
+
+        click_title_bar(&mut comp, id);
+        assert!(!maximized(&comp, id), "one click is not the gesture");
+        click_title_bar(&mut comp, id);
+        assert!(maximized(&comp, id), "two quick clicks must maximize");
+
+        click_title_bar(&mut comp, id);
+        assert!(
+            maximized(&comp, id),
+            "the third click pairs with nothing — the second consumed the pair"
+        );
+        click_title_bar(&mut comp, id);
+        assert!(!maximized(&comp, id), "the gesture toggles");
+    }
+
+    /// The first click of a pair still begins a move. A title bar that only
+    /// responded on the second click could not be dragged at all.
+    #[test]
+    fn the_first_click_of_the_pair_still_starts_a_move() {
+        let (mut comp, id) = with_one_window();
+        let bar = comp
+            .window_ref(id)
+            .expect("window")
+            .title_bar_rect()
+            .expect("title bar");
+        comp.handle_mouse_button(MouseButton::Left, true, bar.x + 10, bar.y + 5);
+        let drag = comp.drag.as_ref().expect("a title press starts a move");
+        assert_eq!(drag.window_id, id);
+        assert!(matches!(drag.mode, DragMode::MoveWindow));
+    }
+
+    /// Two clicks minutes apart are two clicks. Nothing else in the compositor
+    /// measures elapsed time, so the interval has to actually be consulted.
+    #[test]
+    fn two_title_clicks_far_enough_apart_are_two_separate_clicks() {
+        let (mut comp, id) = with_one_window();
+        // The shortest interval the setter allows; the sleep is comfortably
+        // past it, and can only ever overshoot, never undershoot.
+        comp.set_double_click_ms(100);
+
+        click_title_bar(&mut comp, id);
+        std::thread::sleep(Duration::from_millis(160));
+        click_title_bar(&mut comp, id);
+        assert!(
+            !maximized(&comp, id),
+            "clicks outside the interval must not pair"
+        );
+    }
+
+    /// Two windows, one click each, as fast as the machine can manage. Pairing
+    /// them would maximize a window the user clicked exactly once — a window
+    /// moving on its own.
+    #[test]
+    fn a_quick_click_on_each_of_two_title_bars_maximizes_neither() {
+        let (mut comp, first) = with_one_window();
+        let mut spec = WindowSpec::new("Second", 200, 150);
+        spec.position = Some((400, 100));
+        let second = comp.create_window_from_spec(&spec, 2);
+
+        click_title_bar(&mut comp, first);
+        click_title_bar(&mut comp, second);
+        assert!(!maximized(&comp, first));
+        assert!(!maximized(&comp, second));
+    }
+
+    /// The user went somewhere else and came back. However fast that was, it
+    /// was not a double-click.
+    #[test]
+    fn a_press_somewhere_else_between_two_title_clicks_breaks_the_pair() {
+        let (mut comp, id) = with_one_window();
+
+        click_title_bar(&mut comp, id);
+        // The bare desktop, well clear of the window and its shadow.
+        comp.handle_mouse_button(MouseButton::Left, true, 700, 500);
+        comp.handle_mouse_button(MouseButton::Left, false, 700, 500);
+        click_title_bar(&mut comp, id);
+        assert!(!maximized(&comp, id));
+    }
+
+    /// A value from the mouse settings panel arrives as a `u32` of milliseconds
+    /// and is not this crate's to trust. Zero in particular would make the
+    /// gesture impossible to perform rather than merely hard.
+    #[test]
+    fn the_double_click_interval_is_clamped_to_a_performable_range() {
+        let mut comp = Compositor::new(800, 600, 60).expect("compositor");
+        comp.set_double_click_ms(0);
+        assert_eq!(
+            comp.double_click_interval,
+            Duration::from_millis(u64::from(MIN_DOUBLE_CLICK_MS))
+        );
+        comp.set_double_click_ms(u32::MAX);
+        assert_eq!(
+            comp.double_click_interval,
+            Duration::from_millis(u64::from(MAX_DOUBLE_CLICK_MS))
+        );
+        // And a value inside the range is passed through untouched — a clamp
+        // that returned a bound for everything would satisfy the two above.
+        comp.set_double_click_ms(250);
+        assert_eq!(comp.double_click_interval, Duration::from_millis(250));
     }
 
     #[test]

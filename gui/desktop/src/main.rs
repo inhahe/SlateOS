@@ -41,10 +41,6 @@ fn main() {
     let taskbar = desktop.render_taskbar();
     println!("Taskbar rendered: {} commands", taskbar.len());
 
-    // Render window decorations
-    let decorations = desktop.render_window_decorations();
-    println!("Window decorations: {} commands", decorations.len());
-
     // Test keyboard shortcuts
     let alt_f4 = KeyEvent {
         key: Key::F4,

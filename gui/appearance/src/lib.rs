@@ -1768,6 +1768,67 @@ mod tests {
         );
     }
 
+    /// The WCAG contrast ratio between two opaque colours.
+    ///
+    /// 4.5 is the AA threshold for body text and 3.0 the one for large text;
+    /// a title bar's own label is large and bold enough for the latter.
+    fn contrast(a: Color, b: Color) -> f32 {
+        fn channel(c: u8) -> f32 {
+            let c = f32::from(c) / 255.0;
+            if c <= 0.039_28 {
+                c / 12.92
+            } else {
+                ((c + 0.055) / 1.055).powf(2.4)
+            }
+        }
+        fn luminance(c: Color) -> f32 {
+            0.2126 * channel(c.r) + 0.7152 * channel(c.g) + 0.0722 * channel(c.b)
+        }
+        let (l1, l2) = (luminance(a), luminance(b));
+        let (hi, lo) = if l1 > l2 { (l1, l2) } else { (l2, l1) };
+        (hi + 0.05) / (lo + 0.05)
+    }
+
+    /// Every title bar the settings can produce is one you can read the title
+    /// on.
+    ///
+    /// Stronger than checking that `readable_on` was *called*: this measures
+    /// what it produced. A `readable_on` whose luma threshold drifted would
+    /// still be called from the right place and would still return one of the
+    /// two palette extremes — it would just return the wrong one, on some
+    /// accents and not others, and only a ratio catches that.
+    #[test]
+    fn a_title_is_readable_on_every_bar_the_settings_can_produce() {
+        for &accent in AccentColor::presets() {
+            for (mode, base_light) in [(ThemeMode::Dark, false), (ThemeMode::Light, true)] {
+                for accent_titlebars in [false, true] {
+                    let settings = AppearanceSettings {
+                        theme_mode: mode,
+                        accent_color: accent,
+                        accent_titlebars,
+                        ..AppearanceSettings::default()
+                    };
+                    let colors = DecorationColors::from_settings(&settings);
+                    let what = format!("{mode:?} {accent:?} accented={accent_titlebars}");
+
+                    let focused = contrast(colors.title_focused_fg, colors.title_focused_bg);
+                    assert!(focused >= 4.5, "{what}: focused title {focused:.2}");
+                    let unfocused = contrast(colors.title_unfocused_fg, colors.title_unfocused_bg);
+                    assert!(unfocused >= 3.0, "{what}: unfocused title {unfocused:.2}");
+
+                    // An accent that marked every bar would mark none of them,
+                    // and the two ratios above would then hold for one bar
+                    // twice rather than for both.
+                    let base = DecorationColors::for_mode(base_light);
+                    assert_eq!(colors.title_unfocused_bg, base.title_unfocused_bg, "{what}");
+                    if accent_titlebars {
+                        assert_ne!(colors.title_focused_bg, colors.title_unfocused_bg, "{what}");
+                    }
+                }
+            }
+        }
+    }
+
     #[test]
     fn the_mode_still_decides_the_palette_when_the_accent_is_off() {
         // `from_settings` with nothing accented must be exactly `for_mode`, or

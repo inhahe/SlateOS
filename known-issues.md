@@ -49087,3 +49087,23 @@ Every rounded rectangle any client or the shell has ever submitted has been
 rasterised square. So this needs rounded-rectangle fill and stroke implemented
 in the rasteriser first — which also fixes a silent, tree-wide bug of its own,
 independent of window decorations.
+
+**Progress 2026-08-21 — the rasteriser now draws them.** ✅ The tree-wide half
+of the paragraph above is fixed: `RenderEngine::fill_round_rect` and
+`stroke_round_rect` rasterise rounded rectangles as scanline spans, and
+`execute_command` passes each command's radii to them instead of discarding
+them — `FillRect`, `StrokeRect` and `BoxShadow` alike. That restores rounding
+for every producer in the tree at once, not only window frames: toolkit widget
+borders, the SVG renderer's `rx`/`ry`, the tab strip, the launcher's search
+field, the power menu and the resource monitor were all being drawn square.
+See `design-decisions.md` §498. Twelve tests, each proved a real regression
+test by reintroducing the bug it guards (eleven reintroductions, all caught —
+and three tests had to be *repaired* first, because the first pass proved they
+were guarding nothing; §498 records which and why).
+
+**What is left of prerequisite 2 is now the settings channel**, not the
+drawing: the compositor still has no connection to `AppearanceSettings`, so it
+does not know the user's `WindowCorners` choice (its own decorations are still
+drawn with the flat primitives) nor the `drop_shadows` toggle, and it still
+draws a shadow on maximized windows. Note that `gui/appearance` depends only on
+`guitk` and `yamldoc`, so `compositor` can depend on it without a cycle.

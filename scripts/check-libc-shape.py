@@ -115,9 +115,29 @@ for _stream in (sys.stdout, sys.stderr):
 # both known to hold and known to matter, so that a failure is unambiguous --
 # it means the partitioner started merging again.
 #
-# Each entry is the complete set of externally visible names the module owns,
-# including its data symbols (`optarg` and friends are as much a duplicate-
-# definition hazard as the functions are, and gnulib defines those too).
+# Each entry is the set of externally visible names that are ALLOWED to share
+# the family's member -- not an assertion that all of them exist. The check is
+# "this member defines nothing outside the family", so a name listed here but
+# absent from libc costs nothing, while a name missing from this list would be
+# reported as an intruder the moment we implement it.
+#
+# Some listed names are in fact absent today, deliberately: `optreset` is a
+# BSD-ism we do not provide, `__getopt_initialized` is glibc-internal, and
+# `glob64`/`globfree64` are the large-file aliases (our off_t is already 64-bit,
+# so there is nothing for them to alias). Listing them anyway means that if any
+# is added later it must land in its family's member, which is the correct
+# constraint -- an LFS alias in a different object file from the function it
+# aliases would be a duplicate-definition hazard of exactly the kind this
+# script exists to catch.
+#
+# Data symbols are listed alongside the functions on purpose: `optarg` and
+# friends are as much a duplicate-definition hazard as `getopt` itself, and
+# gnulib defines those too.
+#
+# NOTE what this therefore does NOT check: that the family is fully present.
+# A libc that lost `optarg` would still pass. That is intentional -- a missing
+# symbol is a link error at the first use, i.e. loud and immediate, which is
+# the opposite of the silent failure mode this script guards.
 STRICT_FAMILIES: dict[str, frozenset[str]] = {
     "getopt": frozenset(
         {

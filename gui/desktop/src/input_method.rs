@@ -10,6 +10,7 @@
 //! - Custom layout support
 
 use guitk::color::Color;
+use guitk::cycle;
 use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::style::CornerRadii;
 
@@ -287,20 +288,12 @@ impl InputMethodManager {
 
     /// Cycle to the next layout.
     pub fn next_layout(&mut self) {
-        if !self.layouts.is_empty() {
-            self.active_index = (self.active_index + 1) % self.layouts.len();
-        }
+        self.active_index = cycle::after(self.layouts.len(), self.active_index);
     }
 
     /// Cycle to the previous layout.
     pub fn prev_layout(&mut self) {
-        if !self.layouts.is_empty() {
-            self.active_index = if self.active_index == 0 {
-                self.layouts.len() - 1
-            } else {
-                self.active_index - 1
-            };
-        }
+        self.active_index = cycle::before(self.layouts.len(), self.active_index);
     }
 
     /// Switch to a specific layout by id.
@@ -329,9 +322,11 @@ impl InputMethodManager {
         }
         if let Some(idx) = self.layouts.iter().position(|l| l.id == *id) {
             self.layouts.remove(idx);
-            if self.active_index >= self.layouts.len() {
-                self.active_index = self.layouts.len() - 1;
-            }
+            // Clamp rather than subtract: the `len() <= 1` guard above is four
+            // statements and one `remove` away from this line, which is where
+            // the proof that the list is still non-empty would have to come
+            // from.
+            self.active_index = self.active_index.min(self.layouts.len().saturating_sub(1));
             true
         } else {
             false

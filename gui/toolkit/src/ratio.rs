@@ -168,6 +168,10 @@ mod tests {
     /// The guard the fifteen copies each wrote as a separate statement, now
     /// the only value the function can return for an empty whole — so a
     /// caller cannot divide without having answered it.
+    // Exact comparison is the assertion here, not an accident of it: the point
+    // is that `unwrap_or` handed back the *literal* fallback untouched, so an
+    // epsilon window would weaken the test into "something near zero".
+    #[allow(clippy::float_cmp)]
     #[test]
     fn there_is_no_percentage_of_nothing() {
         assert_eq!(fraction(0_u64, 0_u64), None);

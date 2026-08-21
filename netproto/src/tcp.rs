@@ -8,7 +8,7 @@
 //! slice rather than decoded.
 
 use crate::checksum;
-use crate::ipv4::PROTO_TCP;
+use crate::ipv4::{self, PROTO_TCP};
 use crate::ipv6::{self, Ipv6Addr};
 use crate::Ipv4Addr;
 
@@ -61,15 +61,14 @@ impl<'a> Segment<'a> {
 
 /// Accumulate the IPv4 TCP pseudo-header (src IP, dst IP, protocol, TCP length)
 /// into a running checksum sum.
+///
+/// Was a local copy of the pseudo-header layout, byte-identical to `udp.rs`'s
+/// apart from the protocol constant. It now names
+/// [`ipv4::pseudo_header_sum`], mirroring how [`pseudo_header_sum_v6`] has
+/// always named [`ipv6::pseudo_header_sum`].
 #[must_use]
 fn pseudo_header_sum(src: &Ipv4Addr, dst: &Ipv4Addr, tcp_len: u16) -> u32 {
-    let mut ph = [0u8; 12];
-    ph[0..4].copy_from_slice(src);
-    ph[4..8].copy_from_slice(dst);
-    ph[8] = 0; // zero
-    ph[9] = PROTO_TCP;
-    ph[10..12].copy_from_slice(&tcp_len.to_be_bytes());
-    checksum::accumulate(0, &ph)
+    ipv4::pseudo_header_sum(src, dst, tcp_len, PROTO_TCP)
 }
 
 /// Accumulate the IPv6 TCP pseudo-header (src IP, dst IP, upper-layer length,

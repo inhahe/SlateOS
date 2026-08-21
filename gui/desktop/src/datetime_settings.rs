@@ -159,6 +159,14 @@ pub fn default_timezones() -> Vec<TimezoneInfo> {
     // typo in the literals above, and `test_default_timezones_count` fails when
     // it happens.
     [
+        // UTC first, and by that name. The table used to have no entry a user
+        // could select to mean "no offset": `Atlantic/Reykjavik` reads the same
+        // clock, but nobody administering a server, reading a log, or comparing
+        // a timestamp with a colleague goes looking for Iceland. It is also the
+        // zone the shell falls back to when the configured one cannot be
+        // resolved, and a fallback that cannot be named is a state the user
+        // cannot deliberately return to.
+        TimezoneInfo::new("UTC", "Coordinated Universal Time", "UTC0", "UTC"),
         TimezoneInfo::new("Pacific/Honolulu", "Hawaii", "HST10", "Honolulu"),
         TimezoneInfo::new(
             "America/Anchorage",
@@ -1219,7 +1227,23 @@ mod tests {
     fn test_default_timezones_count() {
         // Also the guard on the rule strings: an entry whose POSIX `TZ` fails
         // to parse is dropped by `flatten`, so a typo shows up here.
-        assert_eq!(default_timezones().len(), 20);
+        assert_eq!(default_timezones().len(), 21);
+    }
+
+    /// The picker must offer UTC under its own name, not only as Iceland.
+    #[test]
+    fn the_picker_offers_utc_by_name() {
+        let utc = shipped("UTC");
+        assert_eq!(utc.offset_secs_at(JAN), 0);
+        assert_eq!(utc.offset_secs_at(JUL), 0, "UTC does not observe DST");
+        assert_eq!(utc.local_time(43_200), (12, 0));
+
+        // A search for it must find it, since the picker is search-driven.
+        let settings = DateTimeSettings::default();
+        assert!(
+            settings.search_timezones("utc").iter().any(|t| t.tz_id == "UTC"),
+            "typing the most common name for the zone must offer the zone"
+        );
     }
 
     /// The bug this struct used to have: one stored offset is right for at most

@@ -30,7 +30,6 @@
 #![allow(dead_code)]
 
 use guitk::color::Color;
-use guitk::date;
 use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::style::CornerRadii;
 use guitk::text;
@@ -1503,20 +1502,28 @@ fn format_number(n: i64) -> String {
 /// age, and no clamp could have caught it, because every value it produced was
 /// in range — just not the right one. Old files are exactly the ones a user
 /// sorts by date to find.
+///
+/// The date half of that has been right since it started deriving from
+/// `guitk::date`; what remained was the *other* half, `epoch_secs % 86400`
+/// for the time of day, written out here rather than taken from the same
+/// place as the date. Four other programs render a file's modification time —
+/// the archive manager, the undelete tool, the indexer and the task
+/// scheduler — and each had its own copy of these four lines.
+/// [`guitk::datetime`] holds the one answer now.
+///
+/// A timestamp comes off the filesystem, so it is bounded by nothing this
+/// program controls. `guitk::datetime` saturates rather than wraps, landing a
+/// nonsense value in the far future rather than before the epoch, which is
+/// the failure a reader would notice: a file dated 1969 sorts to the top of a
+/// list ordered by date.
+///
+/// UTC, explicitly, because there is no per-process zone plumbing yet
+/// (known-issues `TD-NO-SYSTEM-DEFAULT-ZONE-WITHOUT-TZ`).
 fn format_datetime(epoch_secs: u64) -> String {
-    let days = epoch_secs / 86400;
-    let time_of_day = epoch_secs % 86400;
-    let hours = time_of_day / 3600;
-    let minutes = (time_of_day % 3600) / 60;
-
-    // A timestamp comes off the filesystem, so it is bounded by nothing this
-    // program controls. Saturating lands in the year 5 881 580 rather than
-    // wrapping into the past, which is the failure a reader would notice: a
-    // file dated before the epoch sorts to the top of a list ordered by date.
-    let (year, month, day) =
-        date::Date::from_days_since_epoch(i32::try_from(days).unwrap_or(i32::MAX)).ymd();
-
-    format!("{year:04}-{month:02}-{day:02} {hours:02}:{minutes:02}")
+    guitk::datetime::stamp(
+        i64::try_from(epoch_secs).unwrap_or(i64::MAX),
+        &guitk::tzrules::Tz::utc(),
+    )
 }
 
 /// Format seconds as "m:ss" or "h:mm:ss".

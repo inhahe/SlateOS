@@ -48765,7 +48765,7 @@ their definitions:
 - `require_shell` still checks nothing, so the subscription the loop depends on
   is open to any client: `TD-C-ANY-CLIENT-CAN-READ-EVERY-WINDOW-TITLE`, below.
 
-## TD-C-THE-KEYBOARD-SHORTCUTS-STILL-PRETEND (lane C, 2026-08-21)
+## TD-C-THE-KEYBOARD-SHORTCUTS-STILL-PRETEND (lane C, 2026-08-21) — RESOLVED 2026-08-21 (see the final note)
 
 **In short:** Alt+F4, Super+D, Super+Up, Super+Left and Alt+Tab appear to work
 and do nothing. They change the desktop *the shell has in its head* instead of
@@ -48826,6 +48826,84 @@ geometry from its own work area. So the fix is `ShellControlAction::SnapLeft` /
 **If never fixed:** five of the desktop's most-used keyboard shortcuts are
 decorative on a real session, and the shell keeps a second, divergent answer to
 "what windows exist" alive purely to receive edits nobody will ever see.
+
+**RESOLVED 2026-08-21.** `handle_hotkey` returns `HotkeyOutcome { consumed,
+requests }` and every arm that names a window hands back a `WindowRequest`
+instead of editing the local model. `ShellSession` forwards them through the
+same `request` helper the pointer path now uses, so a taskbar click and Alt+F4
+are literally the same code past the point where the intent is formed. The
+protocol verb the snap arm needed was added first, in `207c49e6` —
+`ShellControlAction::SnapLeft`/`SnapRight`, named placements rather than
+rectangles, dispatching to the compositor's new `snap_window`.
+
+Two things came out differently from the plan above:
+
+- **`ShellAction::Control` was changed to hold the same `WindowRequest`** rather
+  than a second struct-variant of the same two fields. The alternative — a new
+  type for the keyboard path beside the existing inline variant — would have
+  been a second place to forget an action, and the two paths converge on one
+  `control_window` call anyway. Six call sites, all in this crate.
+- **`switch_desktop` and `finish_alt_tab` now return `Option<WindowRequest>`**
+  rather than staying `()` and being special-cased. Both were doing the same
+  thing wrong — calling `focus_window`, which is the compositor's decision —
+  and both are called from outside `run_desktop_action` (the demo, the tests),
+  so hiding the request inside the hotkey path would have left those callers
+  still lying.
+
+Guarded by ten reintroduced defects, each of which failed a test that names it:
+the close arm mutating locally, Super+D naming only the focused window, Super+D
+ignoring the desktop filter, Super+Down never restoring, the shell's SnapLeft
+wired to SnapRight, an unfocused-desktop shortcut falling through to the app,
+the switcher and the desktop switch focusing instead of asking, the session
+dropping a shortcut's requests, and the session sending only the first of a
+batch. 2502 tests green, clippy `--all-targets` clean.
+
+Still open, and both now stated in the crate doc: the geometry half of the old
+private window manager (`add_window`, `focus_window`, `minimize_window`,
+`maximize_window`, `restore_window`, `toggle_maximize`, `remove_window`,
+`snap_window`, `snap_window_to_zone`, `take_window_id`) has no caller outside
+the demo and the tests and should go; and `TD-C-VIRTUAL-DESKTOPS-HIDE-NOTHING`
+below, which this work made visible.
+
+## TD-C-VIRTUAL-DESKTOPS-HIDE-NOTHING (lane C, 2026-08-21)
+
+**What:** switching virtual desktop changes which windows the *taskbar lists*
+and nothing else. On a live session the windows of the desktop you just left
+stay on screen, because the compositor has never heard of virtual desktops and
+the shell has no verb that would tell it to unmap anything.
+
+**Where:** `gui/desktop/src/lib.rs` — `DesktopShell::switch_desktop` sets
+`current_desktop`, and `visible_windows()` filters on it. That filter is the
+entire implementation. `gui/remote/src/control.rs` `ShellControlAction` has no
+hide/show-without-minimizing action, and `RequestBody` has nothing that would
+carry a desktop assignment.
+
+**How it looks:** open a window, press Ctrl+Super+Right. The taskbar empties and
+`switch_desktop` asks for the topmost window on the new desktop to be raised —
+correct as far as it goes — but the window from desktop 1 is still drawn, still
+takes clicks, and is not reachable from the taskbar any more. Worse than not
+having the feature.
+
+**Why it was not noticed sooner:** every test drives `DesktopShell` with no
+compositor, where "visible" means "in `visible_windows()`" and the two notions
+of visible cannot be told apart. It became a real defect at the same moment the
+keyboard shortcuts did — when `ShellSession` gave the shell a live connection.
+
+**Proper fix, and the fork in it:** either (a) the compositor learns about
+workspaces, holding the assignment itself and unmapping a whole set at once,
+which is what wlroots-based compositors do and what makes switching one
+atomic recomposite rather than N requests; or (b) the shell keeps the
+assignment and gets a `SetVisible`-for-a-window-it-does-not-own verb, which is
+cheaper but hands a shell the power to hide any client's window — the same
+ambient authority the whole `ShellControl` design exists to avoid. (a) is
+almost certainly right, and it is a compositor change, so it belongs with the
+rest of the compositor's window-state work rather than here. Not filed as an
+open question yet because nothing is blocked on the answer: the feature is
+incomplete, not wrong-when-used.
+
+**If never fixed:** the virtual-desktop shortcuts and the desktop indicator are
+worse than absent — they promise a switch and deliver a taskbar that disagrees
+with the screen.
 
 ## TD-C-ANY-CLIENT-CAN-READ-EVERY-WINDOW-TITLE
 

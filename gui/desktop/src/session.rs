@@ -68,7 +68,7 @@ use oswindow::{
 };
 
 use crate::wallpaper::WallpaperManager;
-use crate::{DesktopShell, ShellAction};
+use crate::{DesktopShell, ShellAction, WindowRequest};
 
 /// One window the shell draws on, and where it sits on screen.
 ///
@@ -464,8 +464,16 @@ impl<T: Transport> ShellSession<T> {
         match event {
             Event::Mouse(mouse) => self.pointer(&surface.to_screen(&mouse))?,
             Event::Key(key) => {
-                if self.shell.handle_hotkey(&key) {
+                let outcome = self.shell.handle_hotkey(&key);
+                if outcome.consumed {
                     self.dirty = true;
+                }
+                // Sent in the order the shortcut named them, and every one is
+                // sent even if an earlier one is refused — Super+D minimizes
+                // every window on the desktop, and one of them having just
+                // closed is no reason to leave the rest on screen.
+                for request in outcome.requests {
+                    self.request(request)?;
                 }
             }
             // The background surface is screen-sized by construction, so the
@@ -492,20 +500,33 @@ impl<T: Transport> ShellSession<T> {
                 self.launches.push(path);
                 self.dirty = true;
             }
-            ShellAction::Control { window, action } => {
-                self.dirty = true;
-                match self.events.control_window(window.0, action) {
-                    Ok(()) => {}
-                    // A refusal means the window went away between the list the
-                    // button was drawn from and the click. That is an ordinary
-                    // race on a live desktop, not a fault: the next window list
-                    // is already on its way and the repaint above will drop the
-                    // button. Anything else — a dead transport, a frame that
-                    // will not decode — is fatal and propagates.
-                    Err(ConnectionError::Refused(_)) => {}
-                    Err(other) => return Err(other),
-                }
-            }
+            ShellAction::Control(request) => self.request(request)?,
+        }
+        Ok(())
+    }
+
+    /// Send one thing the shell asked for on to the compositor.
+    ///
+    /// Both input paths land here: a taskbar click and Alt+F4 are the same ask
+    /// about the same window, and the compositor cannot tell them apart. The
+    /// repaint is unconditional because the shell has drawn something that
+    /// depends on the answer — a pressed button, a closed switcher — even when
+    /// the answer turns out to be no.
+    fn request(&mut self, request: WindowRequest) -> Result<(), Error<T>> {
+        self.dirty = true;
+        match self
+            .events
+            .control_window(request.window.0, request.action)
+        {
+            Ok(()) => {}
+            // A refusal means the window went away between the list the
+            // button was drawn from and the click. That is an ordinary
+            // race on a live desktop, not a fault: the next window list
+            // is already on its way and the repaint above will drop the
+            // button. Anything else — a dead transport, a frame that
+            // will not decode — is fatal and propagates.
+            Err(ConnectionError::Refused(_)) => {}
+            Err(other) => return Err(other),
         }
         Ok(())
     }

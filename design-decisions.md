@@ -30153,3 +30153,93 @@ two surfaces down a code path the translated one never takes, which is exactly
 the arrangement in which the two directions get to disagree without any test
 noticing. `a_surface_at_the_screens_origin_is_translated_the_same_way_as_any_
 other` exists to keep the branch from coming back.
+
+## 504. Snapping a window is a named edge sent to the compositor, not a rectangle computed by the shell
+
+**Date:** 2026-08-21
+**Decided by:** Claude (autonomous)
+
+**In short:** pressing Super+Left should tile the focused window to the left
+half of the screen. The desktop shell used to work out the rectangle for that
+itself and write it into its own copy of the window list — which the compositor
+never saw, so nothing moved. The fix needed the shell to ask the compositor
+instead, and the question was *what to ask for*: "put this window at x=0, y=0,
+960 by 1080", or just "put this window on the left". We chose the second.
+
+The shell's request vocabulary (`ShellControlAction` in
+`gui/remote/src/control.rs`) deliberately has no move or resize. That exclusion
+is the line between a shell and a second window manager: a client that can put
+any window at any rectangle owns the layout, and then two things own it and they
+drift. Adding `SnapLeft`/`SnapRight` looked at first like an exception to that
+rule and is in fact an instance of it — `Maximize` was always of this shape.
+Every action in the enum names an *intent* and lets the compositor derive the
+geometry from bounds only it knows.
+
+- *For a rectangle from the shell:* the shell already computes snap zones for
+  its drag-to-edge overlay, so the arithmetic exists; and a rectangle can
+  express layouts a fixed vocabulary cannot (thirds, quadrants, a custom grid).
+- *Against it, decisively:* the shell's idea of the work area is a copy. It is
+  right until a monitor is unplugged, a resolution changes, or the taskbar
+  moves — and then the shell tiles a window to half of a screen that no longer
+  exists, silently, with no error path to notice on. The compositor's bounds are
+  the only ones that cannot be stale. The test the shell now carries for this
+  asserts the *edge* that was asked for and nothing about pixels; the tiling
+  arithmetic is asserted once, in the compositor, against a display with an odd
+  width.
+
+**The state is stored as `snapped: Option<SnapEdge>`, not as a bool beside
+`maximized`, and not as the rectangle.** Two bools can represent a window that
+is both maximized and snapped, which `restore_window` would then have to pick
+between; the `Option` makes that unrepresentable and turns "snapping clears
+maximized" into an assignment rather than an invariant to remember. Storing the
+edge rather than the resulting rectangle is the same staleness argument one
+level down: a stored rectangle is wrong after a display change and cannot be
+recomputed, an edge always can be.
+
+**The wire encoding is one byte per action, so left and right are separate
+variants rather than `Snap(SnapEdge)`.** A nested payload would make this the
+only action carrying one, and every reader and writer of the frame would grow a
+special case for a two-valued field. The cost is two enum variants instead of
+one; the guard is `ShellControlAction::ALL` plus a test that decodes every byte
+value and checks the count, so adding a variant without wiring it breaks the
+build.
+
+## 505. A keyboard shortcut returns a *list* of requests, and the shell's two input paths converge on one request type
+
+**Date:** 2026-08-21
+**Decided by:** Claude (autonomous)
+
+**In short:** the desktop's keyboard shortcuts (Alt+F4, Super+D, Super+Left…)
+used to change the shell's own picture of the windows, which on a real session
+is a picture the compositor overwrites a moment later — so the shortcuts did
+nothing visible. They now hand back what they want done, for the event loop to
+send on. The two choices worth recording are that a shortcut hands back a
+*list* rather than one item, and that this list holds the same type a mouse
+click already produced rather than a new one.
+
+**A list, because one shortcut names every window.** Super+D minimises
+everything on the current desktop. Options considered: return
+`Option<WindowRequest>` and special-case Super+D by having it act locally
+(rejected — that is the bug, restated); give the shell a callback to send
+through (rejected — it puts the connection inside the model half of the crate,
+which is what keeps every test in it offline); return a `Vec`. The `Vec` costs
+an allocation on every consumed keystroke, which is nothing at keyboard rates,
+and it makes the batch visible to a test: `super_d_asks_for_every_window_to_be_
+minimised` asserts three requests in order, and a reintroduced
+`take(1)` in the session's send loop fails it.
+
+**One request type for both paths.** `ShellAction::Control` was an inline
+struct variant carrying `{ window, action }`; the obvious cheap move was to add
+a separate `WindowRequest` struct for the keyboard and leave it alone.
+Rejected: they are the same ask, they end at the same `control_window` call,
+and two spellings of one concept is a second place to forget an action when the
+vocabulary grows. `ShellAction::Control` now holds a `WindowRequest`. Six call
+sites, all inside this crate.
+
+**Consumed and asked-for are independent, which is not obvious.** A shortcut
+pressed with nothing focused is *consumed and asks for nothing* — the key must
+not fall through to an application, because the user pressed a desktop
+shortcut and the desktop is what should have swallowed it. An early version
+collapsed the two (no request ⇒ not consumed) and broke the virtual-desktop
+shortcuts on an empty desktop; that mistake is now a reintroduced defect in the
+sweep, failing four tests.

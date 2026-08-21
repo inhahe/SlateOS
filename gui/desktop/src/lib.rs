@@ -19,8 +19,10 @@
 //! connection, no display and no window system — which is what keeps every test
 //! around it offline. It is *told* what windows exist
 //! ([`DesktopShell::apply_window_list`]) rather than keeping its own answer, and
-//! a taskbar click comes back out as [`ShellAction::Control`] — a request to be
-//! sent on, not a change already made.
+//! what a click or a keystroke wants done to a window comes back out as a
+//! [`WindowRequest`] — in [`ShellAction::Control`] from the pointer, in
+//! [`HotkeyOutcome::requests`] from the keyboard — which is a request to be sent
+//! on, not a change already made.
 //!
 //! [`session::ShellSession`] is the loop that does the sending: it opens the
 //! shell's three compositor surfaces, feeds input in, submits the render trees
@@ -44,6 +46,11 @@
 //!   [`toggle_maximize`](DesktopShell::toggle_maximize)) predate
 //!   `apply_window_list`, and are now used only by the demo and by tests, which
 //!   have no compositor to be told by. They should go.
+//! - **Virtual desktops are a taskbar filter and nothing more.** Switching
+//!   desktop changes which windows the shell *lists*, but the compositor has no
+//!   notion of desktops and nothing unmaps the windows of the one being left, so
+//!   on a live session they stay on screen. See `known-issues.md`
+//!   `TD-C-VIRTUAL-DESKTOPS-HIDE-NOTHING`.
 //! - **Theme support reaches five surfaces, not the desktop.** The appearance
 //!   settings are read and honoured by [`DesktopShell`]'s own render methods.
 //!   The 49 modules beside it — every settings page, dialog and OSD — each hold
@@ -520,10 +527,87 @@ pub enum ShellAction {
     /// the shell's own state changes here, which is why a click that is refused
     /// — the window closed between the list the button was drawn from and the
     /// click — needs no undo.
-    Control {
-        window: WindowId,
-        action: ShellControlAction,
-    },
+    Control(WindowRequest),
+}
+
+/// Something the shell wants done to a window it does not own.
+///
+/// One type for both input paths on purpose. The pointer path produces these
+/// singly, wrapped in [`ShellAction::Control`]; the keyboard path produces them
+/// in batches, in [`HotkeyOutcome::requests`] — Super+D asks for every window on
+/// the desktop to be minimised, so a shortcut cannot be limited to one. Both end
+/// up at the same `control_window` call, and a second struct meaning the same
+/// pair would be a second place to forget a new action.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct WindowRequest {
+    /// The window to act on, in the compositor's numbering.
+    pub window: WindowId,
+    /// What to ask for.
+    pub action: ShellControlAction,
+}
+
+impl WindowRequest {
+    /// Ask for `action` on `window`.
+    #[must_use]
+    pub const fn new(window: WindowId, action: ShellControlAction) -> Self {
+        Self { window, action }
+    }
+}
+
+/// What a keyboard shortcut did, and what it wants the compositor to do.
+///
+/// The `consumed` flag is what [`DesktopShell::handle_hotkey`] used to return on
+/// its own: false means no shortcut matched and the key belongs to the focused
+/// window. `requests` is the half that was missing — the shortcuts that act on a
+/// window used to act on the shell's *own* copy of the window list, which on a
+/// live session is a copy the next
+/// [`apply_window_list`](DesktopShell::apply_window_list) overwrites. Alt+F4
+/// removed a taskbar button and the window stayed open.
+///
+/// An empty `requests` with `consumed` set is normal and means the shortcut was
+/// genuinely shell-local: opening the start menu, stepping the Alt-Tab switcher,
+/// dismissing a popup. Nothing here is ordered against anything else the shell
+/// does — the requests are independent asks, and the compositor may refuse any
+/// of them without the others being wrong.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[must_use]
+pub struct HotkeyOutcome {
+    /// Whether the shell claimed the key. When false no window should be denied
+    /// the event.
+    pub consumed: bool,
+    /// What to ask the compositor for, in the order the shortcut named it.
+    pub requests: Vec<WindowRequest>,
+}
+
+impl HotkeyOutcome {
+    /// The key was not a shortcut; pass it to the focused window.
+    fn ignored() -> Self {
+        Self::default()
+    }
+
+    /// The shell claimed the key and wants nothing from the compositor.
+    fn consumed() -> Self {
+        Self {
+            consumed: true,
+            requests: Vec::new(),
+        }
+    }
+
+    /// The shell claimed the key and wants one thing.
+    fn ask(request: Option<WindowRequest>) -> Self {
+        Self {
+            consumed: true,
+            requests: request.into_iter().collect(),
+        }
+    }
+
+    /// The shell claimed the key and wants several things.
+    fn ask_all(requests: Vec<WindowRequest>) -> Self {
+        Self {
+            consumed: true,
+            requests,
+        }
+    }
 }
 
 /// A left-button press at a point — the first event a click delivers.
@@ -1536,12 +1620,12 @@ impl DesktopShell {
             Hit::StartMenuPanel | Hit::PowerMenuPanel | Hit::TaskbarPanel => ShellAction::Consumed,
             Hit::TaskbarButton(index) => {
                 match self.visible_windows().get(index).map(|w| w.id) {
-                    Some(id) => ShellAction::Control {
-                        window: id,
+                    Some(id) => ShellAction::Control(WindowRequest::new(
+                        id,
                         // The button of the window you are already looking at
                         // minimises it — the taskbar button is a toggle, not a
                         // second way to focus what is already focused.
-                        action: if self.focused_window == Some(id) {
+                        if self.focused_window == Some(id) {
                             ShellControlAction::Minimize
                         } else {
                             // `Activate`, not `Restore`: a window minimised
@@ -1551,7 +1635,7 @@ impl DesktopShell {
                             // `activate_window`.
                             ShellControlAction::Activate
                         },
-                    },
+                    )),
                     // The button is gone from under the click — the window
                     // closed between the frame it was drawn in and this press.
                     // Consumed rather than passed on: the click landed on the
@@ -2061,16 +2145,29 @@ impl DesktopShell {
         self.current_desktop.saturating_add(1)
     }
 
-    pub fn switch_desktop(&mut self, desktop: u32) {
-        if desktop < self.num_desktops {
-            self.current_desktop = desktop;
-            self.focused_window = None;
-            // Focus topmost window on new desktop
-            if let Some(w) = self.visible_windows().last() {
-                let id = w.id;
-                self.focus_window(id);
-            }
+    /// Show a different virtual desktop, and say which window should now have
+    /// the keyboard.
+    ///
+    /// Which desktop is showing is one of the few things here that really is the
+    /// shell's own: the compositor has no notion of virtual desktops, so nothing
+    /// else holds a second copy of it to drift from. *Focus* is not — so the
+    /// window that should come forward is returned as a request rather than
+    /// focused here. Returns `None` if the desktop does not exist, or exists and
+    /// is empty.
+    pub fn switch_desktop(&mut self, desktop: u32) -> Option<WindowRequest> {
+        if desktop >= self.num_desktops {
+            return None;
         }
+        self.current_desktop = desktop;
+        // Cleared rather than left pointing at a window on the desktop we just
+        // left: until the compositor answers the request below, the honest
+        // answer to "what is focused *here*" is nothing.
+        self.focused_window = None;
+        // The topmost window on the new desktop — `visible_windows` is ordered
+        // bottom to top and already filtered to the current desktop, which the
+        // assignment above has just changed.
+        let id = self.visible_windows().last()?.id;
+        Some(WindowRequest::new(id, ShellControlAction::Activate))
     }
 
     pub fn move_window_to_desktop(&mut self, id: WindowId, desktop: u32) {
@@ -2123,15 +2220,19 @@ impl DesktopShell {
         }
     }
 
-    pub fn finish_alt_tab(&mut self) {
-        if self.alt_tab_active {
-            let windows = self.visible_windows();
-            if let Some(w) = windows.get(self.alt_tab_index) {
-                let id = w.id;
-                self.focus_window(id);
-            }
-            self.alt_tab_active = false;
+    /// Close the switcher and say which window it landed on.
+    ///
+    /// Returns `None` when the switcher was not open, or was open on an index
+    /// that no longer names a window because it closed while the user was
+    /// holding Alt. Closing the switcher is the shell's own business; raising
+    /// the window it chose is the compositor's.
+    pub fn finish_alt_tab(&mut self) -> Option<WindowRequest> {
+        if !self.alt_tab_active {
+            return None;
         }
+        self.alt_tab_active = false;
+        let id = self.visible_windows().get(self.alt_tab_index)?.id;
+        Some(WindowRequest::new(id, ShellControlAction::Activate))
     }
 
     pub fn cancel_alt_tab(&mut self) {
@@ -2144,31 +2245,44 @@ impl DesktopShell {
 
     /// Handle a keyboard shortcut at the desktop level.
     ///
-    /// Returns true if the shortcut was consumed.
-    pub fn handle_hotkey(&mut self, key: &KeyEvent) -> bool {
+    /// Returns whether the key was consumed and what the shell wants done about
+    /// it; see [`HotkeyOutcome`]. The caller has to send the requests on — a
+    /// shortcut that acts on a window does not act on it here, for the same
+    /// reason a taskbar click does not: the compositor owns which windows exist
+    /// and what state they are in, and the shell finds out from the next window
+    /// list like everything else.
+    pub fn handle_hotkey(&mut self, key: &KeyEvent) -> HotkeyOutcome {
         if !key.pressed {
             // Key release — check for Alt+Tab completion
             if (key.key == Key::LeftAlt || key.key == Key::RightAlt) && self.alt_tab_active {
-                self.finish_alt_tab();
-                return true;
+                return HotkeyOutcome::ask(self.finish_alt_tab());
             }
-            return false;
+            return HotkeyOutcome::ignored();
         }
 
         match DesktopAction::for_chord(key.modifiers, key.key) {
             Some(action) => self.run_desktop_action(action),
-            None => false,
+            None => HotkeyOutcome::ignored(),
         }
     }
 
     /// Carry out a shortcut that has already been recognised.
     ///
-    /// Returns whether the press is consumed. Every binding but
-    /// [`DismissPopup`](DesktopAction::DismissPopup) always is; that one is
-    /// bare Escape, and a key the shell claims unconditionally is a key no
-    /// window can ever see. Closing a dialog is what Escape does far more
-    /// often than closing the start menu.
-    fn run_desktop_action(&mut self, action: DesktopAction) -> bool {
+    /// Every binding but [`DismissPopup`](DesktopAction::DismissPopup) consumes
+    /// the press; that one is bare Escape, and a key the shell claims
+    /// unconditionally is a key no window can ever see. Closing a dialog is what
+    /// Escape does far more often than closing the start menu.
+    ///
+    /// The arms divide into two kinds, and the division is the whole point of
+    /// the return type. The start menu, the Alt-Tab switcher's *stepping*, and
+    /// popup dismissal are the shell's own surfaces and are done here. Anything
+    /// naming a window — close, minimise, maximise, tile, raise — is a
+    /// [`WindowRequest`] handed back for the caller to send. This method used to
+    /// do the second kind itself, against the shell's private copy of the window
+    /// list, which on a live session the next
+    /// [`apply_window_list`](DesktopShell::apply_window_list) discards: Alt+F4
+    /// removed a taskbar button and left the window open.
+    fn run_desktop_action(&mut self, action: DesktopAction) -> HotkeyOutcome {
         match action {
             DesktopAction::CycleWindows => {
                 if self.alt_tab_active {
@@ -2176,6 +2290,7 @@ impl DesktopShell {
                 } else {
                     self.start_alt_tab();
                 }
+                HotkeyOutcome::consumed()
             }
             DesktopAction::CycleWindowsBackwards => {
                 if !self.alt_tab_active {
@@ -2184,58 +2299,73 @@ impl DesktopShell {
                 if self.alt_tab_active {
                     self.prev_alt_tab();
                 }
+                HotkeyOutcome::consumed()
             }
             DesktopAction::CloseFocused => {
-                if let Some(id) = self.focused_window {
-                    self.remove_window(id);
-                }
+                HotkeyOutcome::ask(self.request_on_focused(ShellControlAction::Close))
             }
-            DesktopAction::ToggleStartMenu => self.toggle_start_menu(),
-            DesktopAction::ShowDesktop => {
-                let ids: Vec<WindowId> = self
-                    .windows
+            DesktopAction::ToggleStartMenu => {
+                self.toggle_start_menu();
+                HotkeyOutcome::consumed()
+            }
+            // The one shortcut that names more than one window, and the reason
+            // `handle_hotkey` cannot return a single request.
+            DesktopAction::ShowDesktop => HotkeyOutcome::ask_all(
+                self.windows
                     .values()
                     .filter(|w| w.visible && w.desktop == self.current_desktop)
-                    .map(|w| w.id)
-                    .collect();
-                for id in ids {
-                    self.minimize_window(id);
-                }
+                    .map(|w| WindowRequest::new(w.id, ShellControlAction::Minimize))
+                    .collect(),
+            ),
+            DesktopAction::SnapLeft => {
+                HotkeyOutcome::ask(self.request_on_focused(ShellControlAction::SnapLeft))
             }
-            DesktopAction::SnapLeft | DesktopAction::SnapRight => {
-                if let Some(id) = self.focused_window {
-                    self.snap_window(id, action == DesktopAction::SnapLeft);
-                }
+            DesktopAction::SnapRight => {
+                HotkeyOutcome::ask(self.request_on_focused(ShellControlAction::SnapRight))
             }
             DesktopAction::Maximize => {
-                if let Some(id) = self.focused_window {
-                    self.maximize_window(id);
-                }
+                HotkeyOutcome::ask(self.request_on_focused(ShellControlAction::Maximize))
             }
             DesktopAction::RestoreOrMinimize => {
-                if let Some(id) = self.focused_window
-                    && let Some(w) = self.windows.get(&id)
-                {
-                    if w.state == WindowState::Maximized {
-                        self.restore_window(id);
-                    } else {
-                        self.minimize_window(id);
-                    }
-                }
+                // Which of the two it is depends on the state the *compositor*
+                // last reported, not on anything the shell decided: Super+Down
+                // un-maximizes a maximized window and minimizes an ordinary one,
+                // so the same key walks a window down one step each press.
+                let restore = self
+                    .focused_window
+                    .and_then(|id| self.windows.get(&id))
+                    .is_some_and(|w| w.state == WindowState::Maximized);
+                let want = if restore {
+                    ShellControlAction::Restore
+                } else {
+                    ShellControlAction::Minimize
+                };
+                HotkeyOutcome::ask(self.request_on_focused(want))
             }
             DesktopAction::PreviousDesktop => {
-                if let Some(target) = self.previous_desktop() {
-                    self.switch_desktop(target);
-                }
+                HotkeyOutcome::ask(self.previous_desktop().and_then(|d| self.switch_desktop(d)))
             }
             DesktopAction::NextDesktop => {
-                if let Some(target) = self.next_desktop() {
-                    self.switch_desktop(target);
+                HotkeyOutcome::ask(self.next_desktop().and_then(|d| self.switch_desktop(d)))
+            }
+            DesktopAction::DismissPopup => {
+                if self.dismiss_popups() {
+                    HotkeyOutcome::consumed()
+                } else {
+                    HotkeyOutcome::ignored()
                 }
             }
-            DesktopAction::DismissPopup => return self.dismiss_popups(),
         }
-        true
+    }
+
+    /// `action` aimed at whatever is focused, or `None` if nothing is.
+    ///
+    /// Every window shortcut acts on the focused window and on nothing else, so
+    /// "there is no focused window" is answered once here rather than in each
+    /// arm — a shortcut pressed on an empty desktop is consumed and asks for
+    /// nothing, which is not the same as not being a shortcut.
+    fn request_on_focused(&self, action: ShellControlAction) -> Option<WindowRequest> {
+        Some(WindowRequest::new(self.focused_window?, action))
     }
 }
 
@@ -3242,7 +3372,10 @@ mod window_manager_tests {
         clippy::arithmetic_side_effects
     )]
 
-    use super::{DesktopShell, Key, KeyEvent, Modifiers, TextRole, WindowId, WindowState, text};
+    use super::{
+        DesktopShell, Key, KeyEvent, Modifiers, ShellControlAction, TextRole, WindowId,
+        WindowRequest, WindowState, text,
+    };
 
     fn shell() -> DesktopShell {
         DesktopShell::new(1920, 1080)
@@ -3675,16 +3808,24 @@ mod window_manager_tests {
         let last = shell.num_desktops - 1;
 
         assert_eq!(shell.previous_desktop(), None);
-        assert!(shell.handle_hotkey(&press(Key::Left, ctrl_super())));
+        assert!(shell.handle_hotkey(&press(Key::Left, ctrl_super())).consumed);
         assert_eq!(shell.current_desktop, 0);
 
         for expected in 1..=last {
-            assert!(shell.handle_hotkey(&press(Key::Right, ctrl_super())));
+            assert!(
+                shell
+                    .handle_hotkey(&press(Key::Right, ctrl_super()))
+                    .consumed
+            );
             assert_eq!(shell.current_desktop, expected);
         }
 
         assert_eq!(shell.next_desktop(), None);
-        assert!(shell.handle_hotkey(&press(Key::Right, ctrl_super())));
+        assert!(
+            shell
+                .handle_hotkey(&press(Key::Right, ctrl_super()))
+                .consumed
+        );
         assert_eq!(shell.current_desktop, last);
     }
 
@@ -3697,8 +3838,12 @@ mod window_manager_tests {
 
         assert_eq!(shell.previous_desktop(), None);
         assert_eq!(shell.next_desktop(), None);
-        assert!(shell.handle_hotkey(&press(Key::Left, ctrl_super())));
-        assert!(shell.handle_hotkey(&press(Key::Right, ctrl_super())));
+        assert!(shell.handle_hotkey(&press(Key::Left, ctrl_super())).consumed);
+        assert!(
+            shell
+                .handle_hotkey(&press(Key::Right, ctrl_super()))
+                .consumed
+        );
         assert_eq!(shell.current_desktop, 0);
     }
 
@@ -3707,7 +3852,7 @@ mod window_manager_tests {
         let mut shell = shell();
         assert_eq!(shell.current_desktop_number(), 1);
 
-        shell.switch_desktop(2);
+        assert_eq!(shell.switch_desktop(2), None, "nothing there to raise");
         assert_eq!(shell.current_desktop_number(), 3);
     }
 
@@ -3716,7 +3861,7 @@ mod window_manager_tests {
         let mut shell = shell();
         let id = open(&mut shell, "app");
 
-        shell.switch_desktop(1);
+        assert_eq!(shell.switch_desktop(1), None);
         assert!(shell.visible_windows().is_empty());
         assert_eq!(shell.focused_window, None);
 
@@ -3757,12 +3902,22 @@ mod window_manager_tests {
         assert_eq!(shell.focused_window, Some(second));
 
         shell.start_alt_tab();
-        shell.finish_alt_tab();
-        assert_eq!(shell.focused_window, Some(first));
+        assert_eq!(
+            shell.finish_alt_tab(),
+            Some(WindowRequest::new(first, ShellControlAction::Activate)),
+        );
+        // Standing in for the compositor doing as it was asked. The switcher
+        // *asks* for the window to be raised; nothing about the shell's own
+        // focus has moved at the point of the assertion above, which is the
+        // whole difference between this and what it used to do.
+        shell.focus_window(first);
 
         shell.start_alt_tab();
-        shell.finish_alt_tab();
-        assert_eq!(shell.focused_window, Some(second), "and back again");
+        assert_eq!(
+            shell.finish_alt_tab(),
+            Some(WindowRequest::new(second, ShellControlAction::Activate)),
+            "and back again"
+        );
     }
 
     #[test]
@@ -3807,9 +3962,12 @@ mod window_manager_tests {
         shell.next_alt_tab();
         assert!(shell.alt_tab_index < shell.visible_windows().len());
 
-        shell.finish_alt_tab();
+        assert_eq!(
+            shell.finish_alt_tab(),
+            Some(WindowRequest::new(ids[0], ShellControlAction::Activate)),
+            "the one window left is the one it lands on"
+        );
         assert!(!shell.alt_tab_active);
-        assert_eq!(shell.focused_window, Some(ids[0]));
     }
 
     #[test]
@@ -3820,7 +3978,7 @@ mod window_manager_tests {
         assert!(!shell.alt_tab_active);
 
         shell.next_alt_tab();
-        shell.finish_alt_tab();
+        assert_eq!(shell.finish_alt_tab(), None);
         assert_eq!(shell.focused_window, None);
     }
 
@@ -3831,7 +3989,9 @@ mod window_manager_tests {
         let mut shell = shell();
         let id = open(&mut shell, "only");
 
-        assert!(shell.handle_hotkey(&press(Key::Tab, Modifiers::alt())));
+        let outcome = shell.handle_hotkey(&press(Key::Tab, Modifiers::alt()));
+        assert!(outcome.consumed);
+        assert!(outcome.requests.is_empty(), "and asks for nothing");
         assert!(!shell.alt_tab_active);
         assert_eq!(shell.focused_window, Some(id));
     }
@@ -3847,34 +4007,43 @@ mod window_manager_tests {
     fn snapping_and_switching_desktops_are_different_shortcuts() {
         let mut shell = shell();
         let id = open(&mut shell, "app");
-        let (wx, _, ww, _) = shell.work_area();
 
-        assert!(shell.handle_hotkey(&press(Key::Right, super_only())));
+        // Which pixels the halves occupy is not asserted here any more, because
+        // the shell no longer decides: it names the edge and the compositor
+        // works the rectangle out from its own bounds. That the two halves tile
+        // the display exactly is `compositor`'s
+        // `the_two_snapped_halves_tile_the_display_with_no_seam`.
+        let right = shell.handle_hotkey(&press(Key::Right, super_only()));
+        assert!(right.consumed);
+        assert_eq!(
+            right.requests,
+            vec![WindowRequest::new(id, ShellControlAction::SnapRight)],
+            "plain Super+Right tiles the focused window"
+        );
         assert_eq!(
             shell.current_desktop, 0,
             "plain Super+Right snaps; it must not switch desktop"
         );
-        // Stated as "it occupies the right half", not as a literal x. The exact
-        // coordinate is `snap.rs`'s business — it depends on the zone gap, and
-        // pinning it here is what made this test fail for a reason that had
-        // nothing to do with the two chords it exists to keep apart.
-        let w = shell.windows.get(&id).unwrap();
-        assert!(shell.is_snapped(id), "and it must actually have snapped");
-        assert!(
-            w.x > wx + i32::try_from(ww / 2).unwrap() - 1,
-            "to the right half, not the left: x={} of {ww}",
-            w.x
-        );
+
+        let left = shell.handle_hotkey(&press(Key::Left, super_only()));
         assert_eq!(
-            w.x + i32::try_from(w.width).unwrap(),
-            wx + i32::try_from(ww).unwrap(),
-            "flush with the right edge of the work area"
+            left.requests,
+            vec![WindowRequest::new(id, ShellControlAction::SnapLeft)],
+            "and Super+Left tiles it the other way, not the same way"
         );
 
-        assert!(shell.handle_hotkey(&press(Key::Right, ctrl_super())));
+        let switch = shell.handle_hotkey(&press(Key::Right, ctrl_super()));
+        assert!(switch.consumed);
         assert_eq!(
             shell.current_desktop, 1,
             "Ctrl+Super+Right switches desktop; it must not snap"
+        );
+        assert!(
+            !switch.requests.iter().any(|request| matches!(
+                request.action,
+                ShellControlAction::SnapLeft | ShellControlAction::SnapRight
+            )),
+            "and it must not tile anything on the way there"
         );
     }
 
@@ -3891,8 +4060,8 @@ mod window_manager_tests {
             super_key: true,
             ..Modifiers::NONE
         };
-        assert!(!shell.handle_hotkey(&press(Key::Left, shift_super)));
-        assert!(!shell.handle_hotkey(&press(Key::Up, ctrl_super())));
+        assert!(!shell.handle_hotkey(&press(Key::Left, shift_super)).consumed);
+        assert!(!shell.handle_hotkey(&press(Key::Up, ctrl_super())).consumed);
     }
 
     /// A key release is never a shortcut — except the Alt that ends a window
@@ -3900,7 +4069,7 @@ mod window_manager_tests {
     #[test]
     fn a_key_release_only_ends_the_window_switcher() {
         let mut shell = shell();
-        open(&mut shell, "one");
+        let first = open(&mut shell, "one");
         let second = open(&mut shell, "two");
 
         let release = KeyEvent {
@@ -3909,12 +4078,20 @@ mod window_manager_tests {
             modifiers: Modifiers::NONE,
             text: None,
         };
-        assert!(!shell.handle_hotkey(&release), "nothing to finish yet");
+        let idle = shell.handle_hotkey(&release);
+        assert!(!idle.consumed, "nothing to finish yet");
+        assert!(idle.requests.is_empty());
 
         shell.start_alt_tab();
-        assert!(shell.handle_hotkey(&release));
+        let finished = shell.handle_hotkey(&release);
+        assert!(finished.consumed);
         assert!(!shell.alt_tab_active);
-        assert_ne!(shell.focused_window, Some(second));
+        assert_eq!(
+            finished.requests,
+            vec![WindowRequest::new(first, ShellControlAction::Activate)],
+            "the window it landed on, which is not the one already focused"
+        );
+        assert_eq!(shell.focused_window, Some(second), "not yet, anyway");
     }
 
     #[test]
@@ -3924,9 +4101,17 @@ mod window_manager_tests {
             open(&mut shell, &format!("w{i}"));
         }
 
-        assert!(shell.handle_hotkey(&press(Key::Tab, Modifiers::alt())));
+        assert!(
+            shell
+                .handle_hotkey(&press(Key::Tab, Modifiers::alt()))
+                .consumed
+        );
         let forwards = shell.alt_tab_index;
-        assert!(shell.handle_hotkey(&press(Key::Tab, Modifiers::alt())));
+        assert!(
+            shell
+                .handle_hotkey(&press(Key::Tab, Modifiers::alt()))
+                .consumed
+        );
         assert_eq!(shell.alt_tab_index, forwards + 1);
 
         let shift_alt = Modifiers {
@@ -3934,7 +4119,7 @@ mod window_manager_tests {
             alt: true,
             ..Modifiers::NONE
         };
-        assert!(shell.handle_hotkey(&press(Key::Tab, shift_alt)));
+        assert!(shell.handle_hotkey(&press(Key::Tab, shift_alt)).consumed);
         assert_eq!(shell.alt_tab_index, forwards);
     }
 
@@ -3960,8 +4145,8 @@ mod window_manager_tests {
     #[test]
     fn super_d_minimizes_everything_on_the_current_desktop() {
         let mut shell = shell();
-        open(&mut shell, "one");
-        open(&mut shell, "two");
+        let one = open(&mut shell, "one");
+        let two = open(&mut shell, "two");
         let elsewhere = open(&mut shell, "elsewhere");
         shell.move_window_to_desktop(elsewhere, 1);
 
@@ -3969,12 +4154,124 @@ mod window_manager_tests {
             super_key: true,
             ..Modifiers::NONE
         };
-        assert!(shell.handle_hotkey(&press(Key::D, super_d)));
+        let outcome = shell.handle_hotkey(&press(Key::D, super_d));
+        assert!(outcome.consumed);
 
-        assert!(shell.visible_windows().is_empty());
+        let mut asked: Vec<WindowId> = outcome
+            .requests
+            .iter()
+            .inspect(|request| assert_eq!(request.action, ShellControlAction::Minimize))
+            .map(|request| request.window)
+            .collect();
+        asked.sort_unstable();
+        assert_eq!(
+            asked,
+            vec![one, two],
+            "every window on this desktop, and only those — another desktop's \
+             windows are not this shortcut's business"
+        );
+    }
+
+    /// The shortcut that names more than one window is the reason
+    /// [`HotkeyOutcome`] carries a list, so an empty desktop has to come back
+    /// consumed-and-empty rather than not-a-shortcut.
+    #[test]
+    fn super_d_on_an_empty_desktop_is_still_a_shortcut() {
+        let mut shell = shell();
+        let outcome = shell.handle_hotkey(&press(
+            Key::D,
+            Modifiers {
+                super_key: true,
+                ..Modifiers::NONE
+            },
+        ));
+        assert!(outcome.consumed);
+        assert!(outcome.requests.is_empty());
+    }
+
+    /// Every shortcut that acts on a window acts on the focused one, so with
+    /// nothing focused each must be claimed and ask for nothing — not fall
+    /// through to an application that is not there.
+    #[test]
+    fn a_window_shortcut_with_nothing_focused_asks_for_nothing() {
+        for (key, modifiers) in [
+            (Key::F4, Modifiers::alt()),
+            (Key::Left, super_only()),
+            (Key::Right, super_only()),
+            (Key::Up, super_only()),
+            (Key::Down, super_only()),
+        ] {
+            let mut shell = shell();
+            let outcome = shell.handle_hotkey(&press(key, modifiers));
+            assert!(outcome.consumed, "{key:?} must still be claimed");
+            assert!(outcome.requests.is_empty(), "{key:?} must ask for nothing");
+        }
+    }
+
+    /// Super+Down walks a window down one step per press: a maximized window
+    /// un-maximizes, anything else minimizes. Which it is depends on the state
+    /// the compositor last reported, so it is read and not decided.
+    #[test]
+    fn super_down_restores_a_maximized_window_and_minimizes_any_other() {
+        let mut shell = shell();
+        let id = open(&mut shell, "app");
+
+        assert_eq!(
+            shell.handle_hotkey(&press(Key::Down, super_only())).requests,
+            vec![WindowRequest::new(id, ShellControlAction::Minimize)],
+        );
+
+        // Standing in for the compositor having maximized it.
+        shell.windows.get_mut(&id).unwrap().state = WindowState::Maximized;
+        assert_eq!(
+            shell.handle_hotkey(&press(Key::Down, super_only())).requests,
+            vec![WindowRequest::new(id, ShellControlAction::Restore)],
+        );
+    }
+
+    /// Alt+F4 asks; it does not close. The shell's own list is unchanged until
+    /// the compositor sends the next one, which is what makes a refusal — the
+    /// program showing a "save changes?" dialog — need no undo here.
+    #[test]
+    fn alt_f4_asks_the_compositor_and_changes_nothing_itself() {
+        let mut shell = shell();
+        let id = open(&mut shell, "app");
+
+        let outcome = shell.handle_hotkey(&press(Key::F4, Modifiers::alt()));
+        assert_eq!(
+            outcome.requests,
+            vec![WindowRequest::new(id, ShellControlAction::Close)],
+        );
         assert!(
-            shell.windows.get(&elsewhere).unwrap().visible,
-            "another desktop's windows are not this shortcut's business"
+            shell.windows.contains_key(&id),
+            "the window is the compositor's to remove, and it has not answered yet"
+        );
+    }
+
+    /// Switching desktop raises whatever is topmost on the one arrived at —
+    /// asked for, not done, because focus is the compositor's.
+    #[test]
+    fn switching_desktop_asks_for_the_topmost_window_there() {
+        let mut shell = shell();
+        let stays = open(&mut shell, "stays");
+        let moves = open(&mut shell, "moves");
+        shell.move_window_to_desktop(moves, 1);
+
+        let outcome = shell.handle_hotkey(&press(Key::Right, ctrl_super()));
+        assert_eq!(shell.current_desktop, 1);
+        assert_eq!(
+            outcome.requests,
+            vec![WindowRequest::new(moves, ShellControlAction::Activate)],
+        );
+        assert_eq!(
+            shell.focused_window, None,
+            "and until it answers, nothing here is focused"
+        );
+
+        let back = shell.handle_hotkey(&press(Key::Left, ctrl_super()));
+        assert_eq!(
+            back.requests,
+            vec![WindowRequest::new(stays, ShellControlAction::Activate)],
         );
     }
 

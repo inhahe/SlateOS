@@ -596,6 +596,16 @@ impl WorkArea {
     pub fn bottom(self) -> f32 {
         self.y + self.height
     }
+
+    /// Whether `(x, y)` is inside the area.
+    ///
+    /// Half-open on the far edges, exactly as [`SnapZone::contains`] is: the
+    /// point at `right()` belongs to whatever is beyond, so a work area and the
+    /// bar below it cannot both claim the same row of pixels.
+    #[must_use]
+    pub fn contains(self, x: f32, y: f32) -> bool {
+        x >= self.x && x < self.right() && y >= self.y && y < self.bottom()
+    }
 }
 
 #[cfg(test)]

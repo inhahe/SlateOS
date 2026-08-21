@@ -349,6 +349,11 @@ impl<T: Transport> ShellSession<T> {
             for part in [
                 self.shell.render_start_menu(),
                 self.shell.render_calendar(),
+                // Over the menus, under Alt-Tab: opening the tiling overlay
+                // dismisses them (`toggle_zone_overlay`), so the order between
+                // the three above is a statement of the invariant rather than a
+                // case that arises.
+                self.shell.render_zone_overlay(),
                 self.shell.render_alt_tab(),
             ]
             .into_iter()
@@ -369,7 +374,10 @@ impl<T: Transport> ShellSession<T> {
     /// (`close_start_menu`), so a `power_menu_open` term here could only ever
     /// be redundant — or, if that invariant broke, could hide the break.
     fn popups_open(&self) -> bool {
-        self.shell.start_menu_open || self.shell.calendar.visible || self.shell.alt_tab_active
+        self.shell.start_menu_open
+            || self.shell.calendar.visible
+            || self.shell.alt_tab_active
+            || self.shell.snap.is_overlay_visible()
     }
 
     /// Handle everything waiting, without blocking. Reports whether anything

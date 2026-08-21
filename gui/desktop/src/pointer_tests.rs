@@ -21,6 +21,7 @@
 use crate::calendar;
 use crate::datetime_settings::AdditionalClock;
 use crate::launcher::{self, Category};
+use crate::snap;
 use crate::{
     DesktopShell, Hit, Key, KeyEvent, Layer, ManagedWindow, Modifiers, MouseButton, MouseEvent,
     MouseEventKind, Rect, START_MENU_ROW_HEIGHT, ShellAction, ShellControlAction, TextRole,
@@ -1627,5 +1628,283 @@ fn every_drawn_string_follows_the_users_font_size() {
             (large - small * 2.0).abs() < 0.01,
             "a draw call ignored the font size: {small} did not become {large}"
         );
+    }
+}
+
+// ---- the zone-tiling chooser ----------------------------------------------
+
+/// Super+Z, the chord that opens the chooser.
+fn zone_key() -> KeyEvent {
+    KeyEvent {
+        key: Key::Z,
+        pressed: true,
+        modifiers: Modifiers {
+            super_key: true,
+            ..Modifiers::default()
+        },
+        text: None,
+    }
+}
+
+/// A 1000x800 shell with one focused window, the chooser open over it, and
+/// `preset` selected.
+fn chooser(preset: snap::SnapLayoutPreset) -> (DesktopShell, WindowId) {
+    let mut shell = shell();
+    let id = open(&mut shell, "Editor");
+    assert!(shell.handle_hotkey(&zone_key()).consumed);
+    assert!(shell.snap.is_overlay_visible(), "Super+Z did not open it");
+    shell.snap.set_layout(preset);
+    (shell, id)
+}
+
+/// Where the chooser drew each zone of the selected layout: id and centre.
+fn drawn_zones(shell: &DesktopShell) -> Vec<(snap::ZoneId, f32, f32)> {
+    shell
+        .snap
+        .layout()
+        .zones
+        .iter()
+        .map(|zone| {
+            let (cx, cy) = zone.center();
+            (zone.id, cx, cy)
+        })
+        .collect()
+}
+
+fn motion(x: f32, y: f32) -> MouseEvent {
+    MouseEvent {
+        x,
+        y,
+        kind: MouseEventKind::Move,
+    }
+}
+
+/// The whole point of the feature, end to end: a click on a drawn zone becomes
+/// a request naming that zone, aimed at the focused window.
+///
+/// Every zone of every layout the picker offers, clicked at the centre of the
+/// rectangle the overlay actually drew -- so a click can only pass by landing
+/// where the user sees the zone, and the hit test and the renderer cannot drift
+/// apart without this failing.
+///
+/// What it replaced: the shell used to *compute the snapped rectangle* and
+/// return it to a caller with nothing to do with it. The shell moves no
+/// windows, so the numbers were returned and dropped while the window stayed
+/// where it was, and no assertion about the returned numbers could tell.
+#[test]
+fn clicking_a_zone_asks_for_the_focused_window_to_be_tiled_into_it() {
+    for &preset in snap::SnapLayoutPreset::all() {
+        let (probe, _) = chooser(preset);
+        let zones = drawn_zones(&probe);
+        assert_eq!(
+            zones.len(),
+            preset.zone_count() as usize,
+            "{preset:?} drew a different number of zones than it claims"
+        );
+
+        for (zone_id, cx, cy) in zones {
+            let (mut shell, id) = chooser(preset);
+            let slot = snap::SnapSlot::new(preset, u8::try_from(zone_id).unwrap())
+                .expect("every drawn zone must name a slot");
+            assert_eq!(
+                shell.handle_mouse(&click(cx, cy)),
+                ShellAction::Control(WindowRequest::new(id, ShellControlAction::SnapToZone(slot))),
+                "clicking zone {zone_id} of {preset:?} at ({cx}, {cy})"
+            );
+            assert!(
+                !shell.snap.is_overlay_visible(),
+                "the chooser stayed up after the choice was made"
+            );
+        }
+    }
+}
+
+/// The chooser places the window the user is looking at, not the one that was
+/// focused when the layout was last changed.
+#[test]
+fn the_tiled_window_is_whichever_one_is_focused_now() {
+    let (mut shell, first) = chooser(snap::SnapLayoutPreset::TwoEqualHalves);
+    let second = open(&mut shell, "Terminal");
+    assert_ne!(first, second);
+    assert_eq!(shell.focused_window, Some(second));
+
+    let (_, cx, cy) = drawn_zones(&shell)[0];
+    match shell.handle_mouse(&click(cx, cy)) {
+        ShellAction::Control(request) => assert_eq!(request.window, second),
+        other => panic!("expected a request for the focused window, got {other:?}"),
+    }
+}
+
+/// With nothing focused there is nothing to place, so the chord does not put a
+/// chooser on screen whose every zone would decline the click. It still claims
+/// the key: a shortcut that sometimes types a `z` is worse than one that
+/// sometimes does nothing.
+#[test]
+fn the_chooser_does_not_open_over_an_empty_desktop() {
+    let mut shell = shell();
+    assert_eq!(shell.focused_window, None);
+    assert!(shell.handle_hotkey(&zone_key()).consumed);
+    assert!(!shell.snap.is_overlay_visible());
+    assert!(shell.render_zone_overlay().is_none());
+}
+
+/// Super+Z is a toggle, Escape closes the chooser like every other popup, and a
+/// press on the scrim abandons the choice without asking for anything.
+#[test]
+fn the_chooser_closes_the_ways_a_popup_closes() {
+    let (mut shell, _) = chooser(snap::SnapLayoutPreset::FourQuadrants);
+    assert!(shell.handle_hotkey(&zone_key()).consumed);
+    assert!(!shell.snap.is_overlay_visible(), "Super+Z did not toggle");
+
+    let (mut shell, _) = chooser(snap::SnapLayoutPreset::FourQuadrants);
+    let escape = KeyEvent {
+        key: Key::Escape,
+        pressed: true,
+        modifiers: Modifiers::default(),
+        text: None,
+    };
+    assert!(shell.handle_hotkey(&escape).consumed);
+    assert!(!shell.snap.is_overlay_visible(), "Escape did not close it");
+
+    // The gutter between two zones is the overlay's own space: it is inside the
+    // work area and inside no zone, which is exactly what `SnapOverlay` means.
+    let (mut shell, _) = chooser(snap::SnapLayoutPreset::FourQuadrants);
+    let area = shell.snap.work_area();
+    let (x, y) = (area.x + area.width / 2.0, area.y + area.height / 2.0);
+    assert_eq!(shell.hit_test(x, y), Hit::SnapOverlay);
+    assert_eq!(shell.handle_mouse(&click(x, y)), ShellAction::Consumed);
+    assert!(!shell.snap.is_overlay_visible());
+}
+
+/// The chooser is drawn only while it is open, and what it draws follows the
+/// layout the picker has selected.
+#[test]
+fn the_chooser_draws_the_layout_it_will_place_into() {
+    let mut shell = shell();
+    open(&mut shell, "Editor");
+    assert!(shell.render_zone_overlay().is_none(), "drawn while closed");
+
+    assert!(shell.handle_hotkey(&zone_key()).consumed);
+    shell
+        .snap
+        .set_layout(snap::SnapLayoutPreset::TwoEqualHalves);
+    let halves = shell.render_zone_overlay().expect("open, so drawn");
+    shell.snap.set_layout(snap::SnapLayoutPreset::SixGrid);
+    let grid = shell.render_zone_overlay().expect("still open");
+    assert!(
+        grid.commands.len() > halves.commands.len(),
+        "six zones did not draw more than two"
+    );
+}
+
+/// Hovering a zone lights it, and what is lit is what a press would place: the
+/// highlight and the hit test are one answer, not two.
+#[test]
+fn the_lit_zone_is_the_one_a_press_would_place_into() {
+    const PRESET: snap::SnapLayoutPreset = snap::SnapLayoutPreset::ThreeColumns;
+
+    let (unlit, _) = chooser(PRESET);
+    assert_eq!(unlit.snap.hovered_zone(), None);
+    let plain = unlit
+        .render_zone_overlay()
+        .expect("open, so drawn")
+        .commands
+        .len();
+
+    for (zone_id, cx, cy) in drawn_zones(&unlit) {
+        let (mut shell, id) = chooser(PRESET);
+        assert_eq!(
+            shell.handle_mouse(&motion(cx, cy)),
+            ShellAction::Consumed,
+            "motion over the chooser reached a window"
+        );
+        assert_eq!(shell.snap.hovered_zone(), Some(zone_id));
+        assert!(
+            shell.render_zone_overlay().expect("open").commands.len() > plain,
+            "the hovered zone drew no highlight"
+        );
+
+        let slot = snap::SnapSlot::new(PRESET, u8::try_from(zone_id).unwrap()).unwrap();
+        assert_eq!(
+            shell.handle_mouse(&click(cx, cy)),
+            ShellAction::Control(WindowRequest::new(id, ShellControlAction::SnapToZone(slot))),
+            "the zone that was lit is not the zone the press placed into"
+        );
+    }
+}
+
+/// The layout picker rises from the top band of the *work area* and is clicked
+/// against the same rectangle it is drawn from -- so every thumbnail selects
+/// the preset it shows, and a press on the panel never places a window.
+#[test]
+fn each_thumbnail_selects_the_layout_it_pictures() {
+    let summon = |shell: &DesktopShell| {
+        let area = shell.snap.work_area();
+        motion(area.x + area.width / 2.0, area.y + 1.0)
+    };
+
+    let (mut shell, _) = chooser(snap::SnapLayoutPreset::TwoEqualHalves);
+    assert!(!shell.snap.is_picker_visible(), "up before it was summoned");
+    let band = summon(&shell);
+    shell.handle_mouse(&band);
+    assert!(
+        shell.snap.is_picker_visible(),
+        "the top band did not summon the picker"
+    );
+    let (px, py, w, h) = shell.snap.picker_rect();
+    assert_eq!(
+        shell.hit_test(px + w / 2.0, py + h / 2.0),
+        Hit::SnapPicker,
+        "the panel does not claim its own middle"
+    );
+
+    for &preset in snap::SnapLayoutPreset::all() {
+        let (mut shell, _) = chooser(snap::SnapLayoutPreset::TwoEqualHalves);
+        let band = summon(&shell);
+        shell.handle_mouse(&band);
+        let (tx, ty, size) = shell
+            .snap
+            .thumbnail_rect(preset)
+            .expect("every preset has a thumbnail");
+        assert_eq!(
+            shell.handle_mouse(&click(tx + size / 2.0, ty + size / 2.0)),
+            ShellAction::Consumed,
+            "a press on the picker asked the compositor for something"
+        );
+        assert_eq!(
+            shell.snap.active_preset(),
+            preset,
+            "the thumbnail selected a different layout than it pictures"
+        );
+        assert!(
+            shell.snap.is_overlay_visible(),
+            "choosing a layout closed the chooser it was chosen in"
+        );
+    }
+}
+
+/// The zones follow the taskbar. A chooser measured against the whole screen
+/// would draw its bottom row under the bar, and place a window there.
+#[test]
+fn the_chooser_tiles_the_work_area_and_not_the_screen() {
+    let (mut shell, _) = chooser(snap::SnapLayoutPreset::SixGrid);
+    let bar = shell.taskbar_rect();
+    assert_eq!(shell.snap.work_area().bottom(), bar.y);
+    for zone in &shell.snap.layout().zones {
+        assert!(
+            zone.y + zone.height <= bar.y,
+            "zone {} runs under the taskbar",
+            zone.id
+        );
+    }
+
+    // And they follow it when it moves: a taller bar is a shorter work area,
+    // re-derived at the next gesture rather than cached from the last one.
+    shell.taskbar_height = 120;
+    let taller = shell.taskbar_rect();
+    shell.handle_mouse(&motion(10.0, 10.0));
+    assert_eq!(shell.snap.work_area().bottom(), taller.y);
+    for zone in &shell.snap.layout().zones {
+        assert!(zone.y + zone.height <= taller.y);
     }
 }

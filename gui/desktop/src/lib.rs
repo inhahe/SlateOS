@@ -42,12 +42,13 @@
 //!   about *how* a program starts belongs to the process server, not to the
 //!   window manager. See `known-issues.md`
 //!   `TD-SHELL-HAS-NOWHERE-TO-SEND-A-LAUNCH`.
-//! - **Zone tiling has no path to a window.** [`snap`] computes the rectangles
-//!   for six multi-window layouts and is thoroughly tested, but nothing calls
-//!   it: the compositor knows only the two-half `SnapLeft`/`SnapRight` edges, and
-//!   the shell-to-compositor protocol has no verb for "put this window in zone 3
-//!   of a three-column layout". See `known-issues.md`
-//!   `TD-C-ZONE-SNAPPING-HAS-NO-PATH-TO-A-WINDOW`.
+//! - **Edge-drag tiling has no drag to fire on.** Super+Z opens the zone
+//!   chooser and a click in it tiles the focused window, but the *other* way
+//!   every desktop offers the same thing — drag a window to an edge and drop —
+//!   needs the compositor to tell the shell where an interactive move is, and
+//!   it does not. [`snap::SnapManager::action_for_edge`] and
+//!   [`snap::SnapManager::edge_snap_hit`] are the two halves waiting for it.
+//!   See `known-issues.md` `TD-C-EDGE-DRAG-TILING-HAS-NO-DRAG-TO-FIRE-ON`.
 //! - **Virtual desktops are a taskbar filter and nothing more.** Switching
 //!   desktop changes which windows the shell *lists*, but the compositor has no
 //!   notion of desktops and nothing unmaps the windows of the one being left, so
@@ -444,6 +445,25 @@ pub enum Hit {
     /// and must **not** dismiss it. A point off the popup is not this variant
     /// at all, which is how the two are told apart.
     CalendarControl(calendar::CalendarHit),
+    /// A zone of the open tiling overlay, by
+    /// [`snap::ZoneId`] within the layout the picker currently has selected.
+    ///
+    /// Carries the id and not the rectangle, for the same reason the request
+    /// does: the rectangle the shell drew is a picture of the compositor's
+    /// answer, not the answer, and a click that reported pixels would be asking
+    /// the compositor to trust the shell's arithmetic about a display the shell
+    /// does not own.
+    SnapZone(snap::ZoneId),
+    /// The open layout picker's panel — a thumbnail, or its own inert margin.
+    ///
+    /// One variant for both, because a click on either must stay on the picker:
+    /// selecting is driven by which thumbnail is hovered, and a press in the
+    /// margin selects nothing while still not dismissing the panel it landed
+    /// on.
+    SnapPicker,
+    /// The tiling overlay's own space — the scrim, and the gutters between
+    /// zones. A press here cancels the gesture without placing anything.
+    SnapOverlay,
     /// Not the shell's: a window, or the bare desktop behind them all.
     ///
     /// One variant for both because the shell cannot tell them apart and does
@@ -693,6 +713,24 @@ pub struct DesktopShell {
     /// not a place to keep them — the reminder path and any future agenda
     /// surface read the same store.
     pub events: calendar::EventStore,
+    /// The zone-tiling overlay: which layout is chosen, and whether it is up.
+    ///
+    /// State only. The rectangles it draws are a *picture* of what the user is
+    /// choosing between; the window is placed by the compositor, from the
+    /// [`SnapSlot`](snap::SnapSlot) this shell names in a
+    /// [`ShellControlAction::SnapToZone`]. An earlier version of this field had
+    /// the shell computing the snapped rectangle itself and returning it to a
+    /// caller that could not use it — the shell moves no windows — so the
+    /// geometry was computed, returned and dropped while the window stayed put.
+    ///
+    /// Its work area is **not** kept in sync by notification.
+    /// [`screen_width`](Self::screen_width), `taskbar_height` and `appearance`
+    /// are all public fields that anything may assign, and `work_area()`
+    /// derives from all three, so an "update on change" scheme would be one
+    /// forgotten call site away from tiling a screen size that no longer
+    /// exists. [`sync_snap_area`](Self::sync_snap_area) re-seeds it at the top
+    /// of every gesture that reads it instead.
+    pub snap: snap::SnapManager,
 }
 
 /// Desktop visual theme — every colour the shell paints with.
@@ -885,7 +923,7 @@ fn taskbar_alpha(settings: &AppearanceSettings) -> u8 {
 
 impl DesktopShell {
     pub fn new(screen_width: u32, screen_height: u32) -> Self {
-        Self {
+        let mut shell = Self {
             windows: BTreeMap::new(),
             focused_window: None,
             current_desktop: 0,
@@ -905,6 +943,40 @@ impl DesktopShell {
             datetime: datetime_settings::DateTimeSettings::default(),
             calendar: calendar::CalendarView::new(calendar::CalendarConfig::default()),
             events: calendar::EventStore::new(),
+            // Placeholder: the real area needs `taskbar_rect()`, which needs
+            // the appearance scaling that is only set two fields up. Seeded
+            // immediately below rather than left to the first gesture, so that
+            // a caller reading `shell.snap.layout()` before ever opening the
+            // overlay gets the screen it is actually on.
+            snap: snap::SnapManager::new(snap::WorkArea::whole_screen(0.0, 0.0)),
+        };
+        shell.sync_snap_area();
+        shell
+    }
+
+    /// The work area as the snap module wants it.
+    #[allow(
+        clippy::cast_precision_loss,
+        reason = "screen dimensions are far inside f32's exact-integer range"
+    )]
+    fn snap_area(&self) -> snap::WorkArea {
+        let (x, y, width, height) = self.work_area();
+        snap::WorkArea::new(x as f32, y as f32, width as f32, height as f32)
+    }
+
+    /// Re-seed the snap manager's work area from the shell's current geometry.
+    ///
+    /// Called at the top of every gesture that reads the zone layout. See the
+    /// field's doc for why this is pull-on-use rather than push-on-change.
+    ///
+    /// Guarded on inequality because [`snap::SnapManager::set_work_area`]
+    /// rebuilds the layout: an unconditional call would rebuild eleven
+    /// rectangles on every pointer motion over the overlay to arrive at the
+    /// eleven that were already there.
+    fn sync_snap_area(&mut self) {
+        let area = self.snap_area();
+        if self.snap.work_area() != area {
+            self.snap.set_work_area(area);
         }
     }
 
@@ -1280,6 +1352,28 @@ impl DesktopShell {
     /// What is under a point, topmost surface first.
     #[must_use]
     pub fn hit_test(&self, x: f32, y: f32) -> Hit {
+        // The tiling overlay is tested before everything else because it is
+        // drawn over everything else, and because opening it closes the menus
+        // (`open_zone_overlay`) — so a point that matched both would be a point
+        // on a menu that is not on screen.
+        //
+        // It claims the work area only. The taskbar is outside that rectangle
+        // by construction, so a point on the bar still reports the bar's own
+        // control — which is what lets `press_on_zone_overlay` tell "abandoned
+        // the choice by clicking away" from "chose a zone" without having to
+        // re-derive the geometry the overlay was drawn from.
+        if self.snap.is_overlay_visible() {
+            if self.snap.picker_hit(x, y) {
+                return Hit::SnapPicker;
+            }
+            if let Some(zone) = self.snap.hit_test(x, y) {
+                return Hit::SnapZone(zone.id);
+            }
+            if self.snap.work_area().contains(x, y) {
+                return Hit::SnapOverlay;
+            }
+        }
+
         // The power menu is tested first because it is drawn last: it rises
         // over the start menu's own rows, and a point inside both belongs to
         // the surface on top.
@@ -1379,9 +1473,17 @@ impl DesktopShell {
                     ShellAction::Pass
                 }
             }
-            // Motion is not the shell's until it grows window dragging; until
-            // then forwarding it is what keeps hover states alive in clients.
+            // Motion is not the shell's until it grows window dragging, with
+            // the one exception below; forwarding the rest is what keeps hover
+            // states alive in clients.
             MouseEventKind::Move | MouseEventKind::Enter | MouseEventKind::Leave => {
+                // The tiling overlay is the shell's only hover-driven surface,
+                // and while it is up nothing behind it can be hovered anyway.
+                if self.snap.is_overlay_visible() {
+                    self.sync_snap_area();
+                    self.hover_zone_overlay(event.x, event.y);
+                    return ShellAction::Consumed;
+                }
                 ShellAction::Pass
             }
         }
@@ -1405,7 +1507,16 @@ impl DesktopShell {
     }
 
     fn handle_press(&mut self, x: f32, y: f32, button: MouseButton) -> ShellAction {
+        self.sync_snap_area();
         let hit = self.hit_test(x, y);
+
+        // The tiling overlay answers its own presses and nothing else's. It is
+        // a modal choice — the user is picking where one window goes — so every
+        // press while it is up either makes that choice or abandons it, and
+        // none of the dismiss rules below can fire underneath it.
+        if self.snap.is_overlay_visible() {
+            return self.press_on_zone_overlay(x, y, hit, button);
+        }
 
         // A click anywhere outside an open menu dismisses it, and is spent
         // doing so rather than also reaching what it landed on. Dismissing is
@@ -1526,7 +1637,131 @@ impl DesktopShell {
             // shell holds no window rectangles — and a change to a list the
             // next one from the compositor would overwrite.
             Hit::Desktop => ShellAction::Pass,
+            // Not reachable: `hit_test` only reports these while the overlay is
+            // up, and the branch at the top of this method answers every press
+            // in that case. Consumed rather than `unreachable!()` because the
+            // cost of being wrong is then a swallowed click rather than a dead
+            // shell, and the two conditions live in different methods.
+            Hit::SnapZone(_) | Hit::SnapPicker | Hit::SnapOverlay => ShellAction::Consumed,
         }
+    }
+
+    // ======================================================================
+    // Zone tiling
+    //
+    // The shell's whole part in it: choose a tile and name it. The rectangle
+    // the chosen slot resolves to is the compositor's, worked out against the
+    // display the window is actually on — see `snap_window_to_zone` there, and
+    // `guiremote::zones::SnapSlot` for why a name crosses the wire rather than
+    // four numbers.
+    // ======================================================================
+
+    /// Open the tiling overlay over the focused window, or close it if it is
+    /// already up.
+    ///
+    /// Returns whether it is now open. With nothing focused there is nothing to
+    /// place, so the overlay does not open: a full-screen chooser whose every
+    /// zone would decline the click is worse than no chooser, because only one
+    /// of the two tells the user immediately that the gesture was pointless.
+    pub fn toggle_zone_overlay(&mut self) -> bool {
+        if self.snap.is_overlay_visible() {
+            self.snap.hide_overlay();
+            return false;
+        }
+        if self.focused_window.is_none() {
+            return false;
+        }
+        self.sync_snap_area();
+        // The overlay covers the work area and is drawn over everything, so a
+        // menu left open beneath it would be a menu the user can neither see
+        // nor click. Dismissed rather than drawn on top for that reason.
+        self.dismiss_popups();
+        self.snap.show_overlay();
+        true
+    }
+
+    /// Follow the cursor while the tiling overlay is up.
+    ///
+    /// The layout picker is summoned by the top-edge band rather than shown
+    /// with the overlay, because it is a 340×284 panel over the middle of the
+    /// top of the work area and several presets put a zone's centre under it:
+    /// a picker that were always up would cover the very zone the user is
+    /// aiming at, and the click would change the layout instead of placing the
+    /// window.
+    fn hover_zone_overlay(&mut self, x: f32, y: f32) {
+        if self.snap.is_in_picker_trigger(x, y) {
+            self.snap.show_picker();
+        } else if !self.snap.picker_hit(x, y) {
+            // Leaving both the band and the panel puts it away. Asked in this
+            // order so that a cursor moving *down* off the band and onto the
+            // panel keeps it — the panel hangs below the band it rises from.
+            self.snap.hide_picker();
+        }
+        // After the visibility, never before: `update_hover` gives the picker
+        // precedence where the two overlap, so a hover taken first would light
+        // a zone under a panel that is about to appear over it.
+        self.snap.update_hover(x, y);
+    }
+
+    /// Answer one press while the tiling overlay is up.
+    ///
+    /// Every press either makes the choice or abandons it; nothing falls
+    /// through to a window, because a modal chooser that let clicks past it
+    /// would place a window *and* press a button in it.
+    fn press_on_zone_overlay(
+        &mut self,
+        x: f32,
+        y: f32,
+        hit: Hit,
+        button: MouseButton,
+    ) -> ShellAction {
+        // A non-primary press abandons the choice rather than making one.
+        // Right-clicking a zone to snap into it is not a gesture any desktop
+        // has, and guessing at one here would be a second way to move a window.
+        if button != MouseButton::Left {
+            self.snap.hide_overlay();
+            return ShellAction::Consumed;
+        }
+
+        match hit {
+            // Hover is re-derived from this very press rather than trusted from
+            // the last motion event: a press is a position, and a pointer that
+            // was warped — or a caller that reports presses without motion —
+            // would otherwise select whichever thumbnail the cursor last
+            // crossed.
+            Hit::SnapPicker => {
+                self.snap.update_hover(x, y);
+                self.snap.picker_select();
+                ShellAction::Consumed
+            }
+            Hit::SnapZone(zone_id) => match self.zone_request(zone_id) {
+                Some(request) => {
+                    self.snap.hide_overlay();
+                    ShellAction::Control(request)
+                }
+                // The zone is not one the active layout has, or nothing is
+                // focused any more — the window closed while the overlay was
+                // up. Neither is a reason to leave a chooser on screen that
+                // cannot choose.
+                None => {
+                    self.snap.hide_overlay();
+                    ShellAction::Consumed
+                }
+            },
+            _ => {
+                self.snap.hide_overlay();
+                ShellAction::Consumed
+            }
+        }
+    }
+
+    /// Ask for the focused window to be tiled into `zone_id` of the active
+    /// layout.
+    ///
+    /// `None` when there is no focused window or the layout has no such zone.
+    fn zone_request(&self, zone_id: snap::ZoneId) -> Option<WindowRequest> {
+        let slot = self.snap.slot_for_zone(zone_id)?;
+        self.request_on_focused(ShellControlAction::SnapToZone(slot))
     }
 
     fn handle_scroll(&mut self, x: f32, y: f32, dy: f32) -> ShellAction {
@@ -1862,6 +2097,14 @@ impl DesktopShell {
             DesktopAction::Maximize => {
                 HotkeyOutcome::ask(self.request_on_focused(ShellControlAction::Maximize))
             }
+            // Consumed whether or not the overlay opened. Super+Z is the
+            // shell's key in either case, and letting it through to the focused
+            // window on an empty desktop would make a shortcut that sometimes
+            // types a `z`.
+            DesktopAction::ToggleZoneOverlay => {
+                self.toggle_zone_overlay();
+                HotkeyOutcome::consumed()
+            }
             DesktopAction::RestoreOrMinimize => {
                 // Which of the two it is depends on the state the *compositor*
                 // last reported, not on anything the shell decided: Super+Down
@@ -1931,6 +2174,13 @@ enum DesktopAction {
     SnapLeft,
     SnapRight,
     Maximize,
+    /// Open (or close) the multi-zone tiling chooser for the focused window.
+    ///
+    /// Distinct from [`SnapLeft`](Self::SnapLeft) and its neighbours, which are
+    /// one keystroke each and place the window immediately. This one opens a
+    /// chooser, because there are twenty-two zones across the six layouts and
+    /// no plausible set of chords for them.
+    ToggleZoneOverlay,
     RestoreOrMinimize,
     PreviousDesktop,
     NextDesktop,
@@ -1967,6 +2217,10 @@ impl DesktopAction {
             (false, false, false, true, Key::Right) => Some(Self::SnapRight),
             (false, false, false, true, Key::Up) => Some(Self::Maximize),
             (false, false, false, true, Key::Down) => Some(Self::RestoreOrMinimize),
+            // Super+Z, as in "zones". Super plus an arrow is already taken by
+            // the four one-press placements above, and the chooser needs a key
+            // that is not one of them.
+            (false, false, false, true, Key::Z) => Some(Self::ToggleZoneOverlay),
             (false, true, false, true, Key::Left) => Some(Self::PreviousDesktop),
             (false, true, false, true, Key::Right) => Some(Self::NextDesktop),
             // Bare Escape. The shell had no binding for it at all, so the only
@@ -2558,10 +2812,14 @@ impl DesktopShell {
     /// with nothing open must reach the focused window, whose own dialog may
     /// be what the user meant to dismiss.
     pub fn dismiss_popups(&mut self) -> bool {
-        let any = self.start_menu_open || self.power_menu_open || self.calendar.visible;
+        let any = self.start_menu_open
+            || self.power_menu_open
+            || self.calendar.visible
+            || self.snap.is_overlay_visible();
         self.start_menu_open = false;
         self.power_menu_open = false;
         self.calendar.set_visible(false);
+        self.snap.hide_overlay();
         any
     }
 
@@ -2581,6 +2839,27 @@ impl DesktopShell {
             self.calendar
                 .render(x, y, self.calendar_scale(), now, &self.events),
         );
+        Some(tree)
+    }
+
+    /// Render the zone-tiling overlay, if it is open.
+    ///
+    /// Three layers in the order they are stacked: the zones, the highlight on
+    /// the one under the cursor, and the layout picker over both. The highlight
+    /// is drawn from [`snap::SnapManager::hovered_zone`] rather than from a
+    /// cursor position passed in here, so that what is lit and what a press
+    /// would place are the same answer to the same question.
+    #[must_use]
+    pub fn render_zone_overlay(&self) -> Option<RenderTree> {
+        if !self.snap.is_overlay_visible() {
+            return None;
+        }
+        let mut tree = RenderTree::new();
+        tree.commands.extend(self.snap.render_overlay());
+        if let Some(zone) = self.snap.hovered_zone() {
+            tree.commands.extend(self.snap.render_zone_highlight(zone));
+        }
+        tree.commands.extend(self.snap.render_picker());
         Some(tree)
     }
 }

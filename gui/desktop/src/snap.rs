@@ -4,8 +4,8 @@
 //! windows near screen edges or corners, or invoke a zone picker via the top
 //! edge. Each [`SnapLayout`] defines a set of non-overlapping [`SnapZone`]s
 //! covering the work area; the [`SnapManager`] tracks the active layout,
-//! performs hit-testing, renders overlays, and maintains per-window snap
-//! history so windows can be restored to their pre-snap geometry.
+//! performs hit-testing, renders overlays, and turns a chosen zone into the
+//! [`ShellControlAction`] that asks the compositor to tile the window there.
 //!
 //! # What is here, and what is in `guiremote`
 //!
@@ -19,8 +19,18 @@
 //!
 //! What stays here is everything that is the *shell's* rather than the
 //! protocol's: the drag overlay and layout picker (render trees), edge
-//! detection at the cursor, and the per-window history of where a window was
-//! before it was snapped.
+//! detection at the cursor, and the translation from "the user aimed here" to
+//! "ask for that slot".
+//!
+//! # The shell names a tile; it never places one
+//!
+//! Nothing in this module returns a rectangle to act on, and that is the
+//! point. The shell has no window geometry — `apply_window_list` overwrites
+//! whatever it thought it knew on the compositor's next snapshot — so a shell
+//! that computed a placement would be computing a number it cannot use and the
+//! compositor will not read. What it produces instead is a
+//! [`ShellControlAction`], and the compositor resolves it against the display
+//! bounds only the compositor has.
 //!
 //! # Usage from the desktop shell
 //!
@@ -28,7 +38,7 @@
 //! let mut snap = SnapManager::new(WorkArea::new(0.0, 0.0, 1920.0, 1032.0));
 //! snap.set_layout(SnapLayoutPreset::TwoEqualHalves);
 //!
-//! // While user is dragging a window:
+//! // While the user is dragging a window:
 //! if cursor_near_top_edge {
 //!     snap.show_overlay();
 //! }
@@ -37,9 +47,10 @@
 //!     // draw highlight commands
 //! }
 //!
-//! // On drop:
-//! let (x, y, w, h) = snap.snap_window(window_id, zone.id);
-//! // apply geometry to the window
+//! // On drop: ask the compositor to tile it there.
+//! if let Some(slot) = snap.slot_for_zone(zone.id) {
+//!     send(WindowRequest::new(window_id, ShellControlAction::SnapToZone(slot)));
+//! }
 //! ```
 
 use guitk::color::Color;
@@ -47,14 +58,17 @@ use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::style::CornerRadii;
 use guitk::text;
 
-use std::collections::HashMap;
 use std::num::NonZeroUsize;
 
 // Re-exported rather than merely imported so that `snap::SnapZone` keeps
 // resolving for this crate's callers and tests. The move is a change of *home*,
 // not of vocabulary: the shell still talks about zones and presets in exactly
 // the words it did.
-pub use guiremote::zones::{SnapLayout, SnapLayoutPreset, SnapZone, WorkArea, ZONE_GAP, ZoneId};
+pub use guiremote::zones::{
+    SnapLayout, SnapLayoutPreset, SnapSlot, SnapZone, WorkArea, ZONE_GAP, ZoneId,
+};
+
+use guiremote::control::ShellControlAction;
 
 // ============================================================================
 // Theme -- Catppuccin Mocha palette
@@ -101,77 +115,6 @@ const PICKER_PADDING: f32 = 12.0;
 const THUMB_SIZE: f32 = 72.0;
 /// Gap between thumbnails.
 const THUMB_GAP: f32 = 10.0;
-
-// ============================================================================
-// SnapHistory -- per-window pre-snap geometry
-// ============================================================================
-
-/// Saved window geometry before snapping, so the window can be restored.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct SavedGeometry {
-    pub x: f32,
-    pub y: f32,
-    pub width: f32,
-    pub height: f32,
-}
-
-/// Tracks pre-snap geometry for every snapped window, keyed by window id.
-#[derive(Clone, Debug, Default)]
-pub struct SnapHistory {
-    entries: HashMap<u64, SnapHistoryEntry>,
-}
-
-/// A single history record.
-#[derive(Clone, Copy, Debug, PartialEq)]
-struct SnapHistoryEntry {
-    /// The zone the window was snapped to.
-    zone_id: ZoneId,
-    /// Geometry before the snap.
-    saved: SavedGeometry,
-}
-
-impl SnapHistory {
-    /// Record that `window_id` was snapped to `zone_id` from `geometry`.
-    pub fn record(&mut self, window_id: u64, zone_id: ZoneId, geometry: SavedGeometry) {
-        self.entries.insert(
-            window_id,
-            SnapHistoryEntry {
-                zone_id,
-                saved: geometry,
-            },
-        );
-    }
-
-    /// Retrieve and remove the saved geometry for a window (unsnap).
-    pub fn restore(&mut self, window_id: u64) -> Option<SavedGeometry> {
-        self.entries.remove(&window_id).map(|e| e.saved)
-    }
-
-    /// Check which zone a window is currently snapped to (if any).
-    pub fn snapped_zone(&self, window_id: u64) -> Option<ZoneId> {
-        self.entries.get(&window_id).map(|e| e.zone_id)
-    }
-
-    /// Remove a window from history (e.g. on close).
-    pub fn remove(&mut self, window_id: u64) {
-        self.entries.remove(&window_id);
-    }
-
-    /// Number of tracked windows.
-    pub fn len(&self) -> usize {
-        self.entries.len()
-    }
-
-    /// Whether no windows are tracked.
-    pub fn is_empty(&self) -> bool {
-        self.entries.is_empty()
-    }
-
-    /// Clear all entries.
-    pub fn clear(&mut self) {
-        self.entries.clear();
-    }
-}
 
 // ============================================================================
 // Edge & corner detection
@@ -277,8 +220,13 @@ pub struct SnapManager {
     /// Which preset in the picker is currently hovered (index into
     /// `SnapLayoutPreset::all()`), or `None`.
     picker_hover_index: Option<usize>,
-    /// Per-window snap history.
-    pub history: SnapHistory,
+    /// Which zone the cursor is over, or `None`.
+    ///
+    /// Held here rather than on the shell because it is derived from `layout`,
+    /// which is rebuilt whenever the work area changes; a hover kept beside a
+    /// layout it was not measured against is a highlight drawn over a zone that
+    /// has moved.
+    hovered_zone: Option<ZoneId>,
 }
 
 impl SnapManager {
@@ -293,7 +241,7 @@ impl SnapManager {
             overlay_visible: false,
             picker_visible: false,
             picker_hover_index: None,
-            history: SnapHistory::default(),
+            hovered_zone: None,
         }
     }
 
@@ -322,14 +270,25 @@ impl SnapManager {
         self.picker_visible
     }
 
+    /// The zone the cursor is over, if any.
+    #[must_use]
+    pub fn hovered_zone(&self) -> Option<ZoneId> {
+        self.hovered_zone
+    }
+
     // ======================================================================
     // Layout management
     // ======================================================================
 
     /// Switch to a different layout preset, rebuilding zones.
+    ///
+    /// Drops the hovered zone: it was an index into the layout being replaced,
+    /// and six of the seven presets have a different number of zones, so
+    /// keeping it would light a highlight the cursor is not over.
     pub fn set_layout(&mut self, preset: SnapLayoutPreset) {
         self.active_preset = preset;
         self.layout = preset.build(self.area);
+        self.hovered_zone = None;
     }
 
     /// Recalculate zones after the work area changes.
@@ -340,6 +299,9 @@ impl SnapManager {
     pub fn set_work_area(&mut self, area: WorkArea) {
         self.area = area;
         self.layout = self.active_preset.build(area);
+        // Same reasoning as `set_layout`: the zones just moved, so the last
+        // cursor position no longer says which one it is over.
+        self.hovered_zone = None;
     }
 
     // ======================================================================
@@ -357,6 +319,7 @@ impl SnapManager {
         self.overlay_visible = false;
         self.picker_visible = false;
         self.picker_hover_index = None;
+        self.hovered_zone = None;
     }
 
     /// Show the three-way zone layout picker (hover near top while
@@ -422,9 +385,26 @@ impl SnapManager {
         cursor_y >= self.area.y && cursor_y < self.area.y + TOP_PICKER_THRESHOLD
     }
 
+    /// Follow the cursor: update both the hovered zone and the hovered picker
+    /// thumbnail. `cursor_x` / `cursor_y` are absolute screen coordinates.
+    ///
+    /// One door for both, so that a caller cannot update one and forget the
+    /// other and leave a highlight lit under a cursor that has left it. The
+    /// picker wins where the two overlap, because the picker is drawn over the
+    /// zones: highlighting the zone *behind* an open panel would promise a
+    /// placement that the press is going to spend selecting a layout instead.
+    pub fn update_hover(&mut self, cursor_x: f32, cursor_y: f32) {
+        self.update_picker_hover(cursor_x, cursor_y);
+        self.hovered_zone = if self.picker_hit(cursor_x, cursor_y) {
+            None
+        } else {
+            self.hit_test(cursor_x, cursor_y).map(|z| z.id)
+        };
+    }
+
     /// Update the picker hover state. `cursor_x` / `cursor_y` are
     /// absolute screen coordinates.
-    pub fn update_picker_hover(&mut self, cursor_x: f32, cursor_y: f32) {
+    fn update_picker_hover(&mut self, cursor_x: f32, cursor_y: f32) {
         if !self.picker_visible {
             self.picker_hover_index = None;
             return;
@@ -461,61 +441,40 @@ impl SnapManager {
     }
 
     // ======================================================================
-    // Snapping
+    // Choosing a tile
     // ======================================================================
 
-    /// Snap a window to the given zone. Returns the target geometry
-    /// `(x, y, width, height)`.
+    /// The [`SnapSlot`] naming a zone of the active layout, for the request the
+    /// shell will send.
     ///
-    /// The caller should record the window's pre-snap geometry via
-    /// `history.record()` before calling this if restore-on-unsnap
-    /// is desired.
-    pub fn snap_window(&mut self, window_id: u64, zone_id: ZoneId) -> Option<(f32, f32, f32, f32)> {
-        let zone = self.zone_by_id(zone_id)?;
-        let geom = (zone.x, zone.y, zone.width, zone.height);
-        // Ensure zone_id is tracked in history. If the caller already
-        // recorded pre-snap geometry we just update the zone reference;
-        // if not we record a zero-geometry placeholder (the caller is
-        // responsible for providing real geometry via `history.record()`).
-        if self.history.snapped_zone(window_id).is_none() {
-            self.history.record(
-                window_id,
-                zone_id,
-                SavedGeometry {
-                    x: 0.0,
-                    y: 0.0,
-                    width: 0.0,
-                    height: 0.0,
-                },
-            );
-        }
-        Some(geom)
+    /// A *name*, not a rectangle. This method used to return the zone's
+    /// `(x, y, width, height)` and the shell had nothing to do with it: the
+    /// shell cannot move a window, so the geometry was computed, returned and
+    /// dropped, while the window stayed where it was. The rectangle is the
+    /// compositor's to work out, from bounds only it knows, which is why what
+    /// crosses the wire is the slot.
+    ///
+    /// Returns `None` for a zone id the active layout does not have.
+    #[must_use]
+    pub fn slot_for_zone(&self, zone_id: ZoneId) -> Option<SnapSlot> {
+        let zone = u8::try_from(zone_id).ok()?;
+        SnapSlot::new(self.active_preset, zone)
     }
 
-    /// Snap a window using edge/corner detection instead of the layout
-    /// overlay. Returns the same `(x, y, width, height)` tuple on
-    /// success.
-    pub fn snap_window_to_edge(
-        &mut self,
-        window_id: u64,
-        cursor_x: f32,
-        cursor_y: f32,
-    ) -> Option<(f32, f32, f32, f32)> {
-        let (_edge, zone) = self.edge_snap_hit(cursor_x, cursor_y)?;
-        let geom = (zone.x, zone.y, zone.width, zone.height);
-        if self.history.snapped_zone(window_id).is_none() {
-            self.history.record(
-                window_id,
-                zone.id,
-                SavedGeometry {
-                    x: 0.0,
-                    y: 0.0,
-                    width: 0.0,
-                    height: 0.0,
-                },
-            );
-        }
-        Some(geom)
+    /// What dropping a window at `(cursor_x, cursor_y)` should ask for, using
+    /// the implicit edge and corner rules rather than the layout overlay.
+    ///
+    /// `None` when the cursor is not near an edge, so the drop is an ordinary
+    /// move and nothing should be asked for at all.
+    #[must_use]
+    pub fn action_for_edge(&self, cursor_x: f32, cursor_y: f32) -> Option<ShellControlAction> {
+        let edge = detect_edge(cursor_x, cursor_y, self.area)?;
+        Some(match edge_to_default_snap(edge)? {
+            EdgeSnap::Maximize => ShellControlAction::Maximize,
+            EdgeSnap::Zone(preset, zone_id) => {
+                ShellControlAction::SnapToZone(SnapSlot::new(preset, u8::try_from(zone_id).ok()?)?)
+            }
+        })
     }
 
     // ======================================================================
@@ -675,19 +634,64 @@ impl SnapManager {
         )
     }
 
+    /// The picker popup's rectangle, as `(x, y, width, height)`.
+    ///
+    /// Answered whether or not the picker is showing, because a rectangle is a
+    /// fact about the grid and not about its visibility; the callers that care
+    /// ask [`is_picker_visible`](Self::is_picker_visible) first.
+    ///
+    /// Shared by [`render_picker`](Self::render_picker) and by the shell's hit
+    /// test, for the reason [`thumb_origin`](Self::thumb_origin) gives: a panel
+    /// drawn from one height and clicked against another is a panel whose lower
+    /// rows either swallow clicks aimed past them or leak clicks aimed at them,
+    /// and nothing about either failure says which of the two copies is wrong.
+    #[must_use]
+    pub fn picker_rect(&self) -> (f32, f32, f32, f32) {
+        let (px, py) = self.picker_origin();
+        let rows = SnapLayoutPreset::all()
+            .len()
+            .div_ceil(self.picker_items_per_row().get());
+        let height =
+            PICKER_PADDING * 2.0 + 24.0 + rows as f32 * (THUMB_SIZE + THUMB_GAP) - THUMB_GAP;
+        (px, py, PICKER_WIDTH, height)
+    }
+
+    /// Where the picker draws `preset`'s thumbnail, as `(x, y, size)`, or
+    /// `None` if `preset` is not one the picker offers.
+    ///
+    /// Derived from [`thumb_origin`](Self::thumb_origin) — the same grid
+    /// [`render_picker`](Self::render_picker) and `update_picker_hover` walk —
+    /// so a caller aiming at a thumbnail cannot aim at a rectangle the picker
+    /// never drew.
+    #[must_use]
+    pub fn thumbnail_rect(&self, preset: SnapLayoutPreset) -> Option<(f32, f32, f32)> {
+        let index = SnapLayoutPreset::all().iter().position(|&p| p == preset)?;
+        let (x, y) = self.thumb_origin(index);
+        Some((x, y, THUMB_SIZE))
+    }
+
+    /// Whether `(x, y)` lands on the open picker popup.
+    ///
+    /// False when the picker is hidden: a point cannot be on a panel that is
+    /// not there, and answering otherwise would let the strip of screen the
+    /// picker *would* occupy swallow clicks meant for the zone beneath it.
+    #[must_use]
+    pub fn picker_hit(&self, x: f32, y: f32) -> bool {
+        if !self.picker_visible {
+            return false;
+        }
+        let (px, py, w, h) = self.picker_rect();
+        x >= px && x < px + w && y >= py && y < py + h
+    }
+
     /// Render the layout picker popup.
     pub fn render_picker(&self) -> Vec<RenderCommand> {
         if !self.picker_visible {
             return Vec::new();
         }
 
-        let (px, py) = self.picker_origin();
+        let (px, py, _, picker_h) = self.picker_rect();
         let presets = SnapLayoutPreset::all();
-        let per_row = self.picker_items_per_row();
-
-        let rows = presets.len().div_ceil(per_row.get());
-        let picker_h =
-            PICKER_PADDING * 2.0 + 24.0 + rows as f32 * (THUMB_SIZE + THUMB_GAP) - THUMB_GAP;
 
         // Saturating, because this is a capacity hint: a wrong answer costs a
         // reallocation, and an overflow panic on a hint would be absurd.
@@ -1128,33 +1132,108 @@ mod tests {
     }
 
     // ======================================================================
-    // SnapManager -- snap_window
+    // SnapManager -- choosing a tile
     // ======================================================================
 
+    /// A chosen zone becomes a slot naming *that zone of the active layout*.
+    /// Switching layout must change what the same zone number means, or the
+    /// picker's whole purpose -- choosing among layouts -- is decorative.
     #[test]
-    fn snap_window_returns_zone_geometry() {
+    fn a_zone_names_a_slot_in_whichever_layout_is_active() {
         let mut mgr = make_manager();
-        let result = mgr.snap_window(42, 0);
-        assert!(result.is_some());
-        let (x, y, w, h) = result.expect("already checked");
-        assert!((x - 0.0).abs() < 0.1);
-        assert!((y - 0.0).abs() < 0.1);
-        assert!(w > 900.0); // roughly half of 1920
-        assert!((h - 1080.0).abs() < 0.1);
+
+        assert_eq!(
+            mgr.slot_for_zone(1),
+            SnapSlot::new(SnapLayoutPreset::TwoEqualHalves, 1)
+        );
+
+        mgr.set_layout(SnapLayoutPreset::SixGrid);
+        assert_eq!(
+            mgr.slot_for_zone(1),
+            SnapSlot::new(SnapLayoutPreset::SixGrid, 1)
+        );
+        assert_ne!(
+            mgr.slot_for_zone(1),
+            SnapSlot::new(SnapLayoutPreset::TwoEqualHalves, 1),
+            "zone 1 named the same tile in two different layouts"
+        );
     }
 
+    /// A zone the active layout does not have names nothing, rather than
+    /// naming zone 0 or the last zone -- either of which would tile a window
+    /// somewhere the user did not click.
     #[test]
-    fn snap_window_records_history() {
-        let mut mgr = make_manager();
-        mgr.snap_window(42, 0);
-        assert_eq!(mgr.history.snapped_zone(42), Some(0));
+    fn a_zone_the_layout_does_not_have_names_no_slot() {
+        let mgr = make_manager();
+        assert_eq!(
+            mgr.slot_for_zone(2),
+            None,
+            "the two-half layout has 0 and 1"
+        );
+        assert_eq!(mgr.slot_for_zone(99), None);
+        assert_eq!(mgr.slot_for_zone(ZoneId::MAX), None, "and does not wrap");
     }
 
+    /// Every zone of every layout the picker offers can be named. A layout
+    /// whose zones had no slots would be drawn, clickable, and inert.
     #[test]
-    fn snap_window_invalid_zone_returns_none() {
+    fn every_zone_of_every_offered_layout_can_be_asked_for() {
         let mut mgr = make_manager();
-        let result = mgr.snap_window(42, 99);
-        assert!(result.is_none());
+        for &preset in SnapLayoutPreset::all() {
+            mgr.set_layout(preset);
+            for zone in &mgr.layout().zones {
+                assert!(
+                    mgr.slot_for_zone(zone.id).is_some(),
+                    "{preset:?} draws zone {} and cannot ask for it",
+                    zone.id
+                );
+            }
+        }
+    }
+
+    /// Dropping at an edge asks for a tile, and at a corner for a quadrant.
+    /// The top edge is the exception the rules make on purpose: it maximizes,
+    /// which is a different verb and not a zone at all.
+    #[test]
+    fn an_edge_drop_asks_for_the_tile_that_edge_means() {
+        let mgr = make_manager();
+
+        assert_eq!(
+            mgr.action_for_edge(2.0, 540.0),
+            SnapSlot::new(SnapLayoutPreset::TwoEqualHalves, 0).map(ShellControlAction::SnapToZone),
+            "the left edge"
+        );
+        assert_eq!(
+            mgr.action_for_edge(1916.0, 3.0),
+            SnapSlot::new(SnapLayoutPreset::FourQuadrants, 1).map(ShellControlAction::SnapToZone),
+            "the top-right corner"
+        );
+        assert_eq!(
+            mgr.action_for_edge(960.0, 3.0),
+            Some(ShellControlAction::Maximize),
+            "the top edge maximizes rather than tiling"
+        );
+    }
+
+    /// A drop away from every edge asks for nothing. Returning some default
+    /// tile here would snap a window the user was merely moving.
+    #[test]
+    fn a_drop_in_open_space_asks_for_nothing() {
+        let mgr = make_manager();
+        assert_eq!(mgr.action_for_edge(960.0, 540.0), None);
+    }
+
+    /// The edge rules are the *implicit* ones and do not follow the picker:
+    /// dragging to the left edge means the left half whatever layout happens
+    /// to be selected, which is what makes the gesture predictable.
+    #[test]
+    fn an_edge_drop_ignores_the_layout_the_picker_has_selected() {
+        let mut mgr = make_manager();
+        mgr.set_layout(SnapLayoutPreset::SixGrid);
+        assert_eq!(
+            mgr.action_for_edge(2.0, 540.0),
+            SnapSlot::new(SnapLayoutPreset::TwoEqualHalves, 0).map(ShellControlAction::SnapToZone),
+        );
     }
 
     // ======================================================================
@@ -1184,71 +1263,6 @@ mod tests {
     fn edge_snap_hit_centre_returns_none() {
         let mgr = make_manager();
         assert!(mgr.edge_snap_hit(960.0, 540.0).is_none());
-    }
-
-    // ======================================================================
-    // SnapHistory
-    // ======================================================================
-
-    #[test]
-    fn history_record_and_restore() {
-        let mut hist = SnapHistory::default();
-        let geom = SavedGeometry {
-            x: 100.0,
-            y: 200.0,
-            width: 800.0,
-            height: 600.0,
-        };
-        hist.record(1, 0, geom);
-        assert_eq!(hist.len(), 1);
-        assert_eq!(hist.snapped_zone(1), Some(0));
-
-        let restored = hist.restore(1);
-        assert_eq!(restored, Some(geom));
-        assert!(hist.is_empty());
-    }
-
-    #[test]
-    fn history_restore_nonexistent_returns_none() {
-        let mut hist = SnapHistory::default();
-        assert!(hist.restore(999).is_none());
-    }
-
-    #[test]
-    fn history_remove_clears_entry() {
-        let mut hist = SnapHistory::default();
-        hist.record(
-            1,
-            0,
-            SavedGeometry {
-                x: 0.0,
-                y: 0.0,
-                width: 100.0,
-                height: 100.0,
-            },
-        );
-        hist.remove(1);
-        assert!(hist.is_empty());
-    }
-
-    #[test]
-    fn history_clear_removes_all() {
-        let mut hist = SnapHistory::default();
-        for i in 0..5 {
-            hist.record(
-                i,
-                0,
-                SavedGeometry {
-                    x: 0.0,
-                    y: 0.0,
-                    width: 100.0,
-                    height: 100.0,
-                },
-            );
-        }
-        assert_eq!(hist.len(), 5);
-        hist.clear();
-        assert!(hist.is_empty());
     }
 
     // ======================================================================

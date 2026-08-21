@@ -1064,6 +1064,31 @@ impl TextCursor {
         self.byte
     }
 
+    /// The caret stop at or before this one in `text`, and never past its end.
+    ///
+    /// Every offset this type holds is *supposed* to be on a character
+    /// boundary. This is what makes that a property rather than an assumption:
+    /// a cursor that has drifted — restored from a saved session, carried
+    /// across an edit that shortened the text, computed by older code that
+    /// stepped bytes rather than characters — lands on a real caret stop
+    /// instead of panicking inside `String::remove` or a slicing expression.
+    ///
+    /// Callers wrote this as a `while !text.is_char_boundary(at) { at -= 1 }`
+    /// loop copied next to each use, which is the same hazard as the one
+    /// [`TextCursor::prev_in`] describes: a subtraction whose safety lives in
+    /// a `> 0` test in another statement. There is one correct answer to
+    /// "where is the nearest caret stop"; this is it.
+    #[must_use]
+    pub fn snapped_in(self, text: &str) -> Self {
+        // `caret_offsets` always yields 0, so the fallback is unreachable —
+        // but writing it as an unwrap would be a panic path in a function
+        // whose entire purpose is not to have one.
+        caret_offsets(text)
+            .rev()
+            .find(|offset| *offset <= self.byte)
+            .map_or_else(Self::default, Self::from)
+    }
+
     /// The cursor one character earlier in `text`, or `None` at the start.
     ///
     /// *Logical* motion — backwards through the string, which on text that runs
@@ -1735,6 +1760,53 @@ mod tests {
     )]
 
     use super::*;
+
+    /// The three `TextCursor` motions are the answer every text field in the
+    /// system now defers to, so their edges are worth stating outright: a
+    /// drifted offset is repaired rather than propagated, and neither end of
+    /// the text is a place a caret can walk off.
+    #[test]
+    fn a_cursor_inside_a_character_is_repaired_to_the_stop_that_contains_it() {
+        // "né" — 'n' at 0, 'é' at 1..3. Byte 2 is inside 'é' and is exactly
+        // the offset that makes `String::remove` panic.
+        let text = "né";
+        assert_eq!(TextCursor::from(2).snapped_in(text).byte(), 1);
+        // A stop is its own snap, and past-the-end lands on the end.
+        for (offset, expected) in [(0, 0), (1, 1), (3, 3), (4, 3), (9_999, 3)] {
+            assert_eq!(
+                TextCursor::from(offset).snapped_in(text).byte(),
+                expected,
+                "snapping {offset}",
+            );
+        }
+    }
+
+    #[test]
+    fn stepping_a_cursor_walks_characters_not_bytes_and_stops_at_the_ends() {
+        // One 1-byte, one 2-byte, one 3-byte and one 4-byte character, so a
+        // byte-stepping implementation disagrees at every stop but the first.
+        let text = "aé€🔒";
+        let stops = [0, 1, 3, 6, 10];
+        assert_eq!(text.len(), 10);
+
+        for pair in stops.windows(2) {
+            let (here, next) = (pair[0], pair[1]);
+            assert_eq!(TextCursor::from(here).next_in(text).unwrap().byte(), next);
+            assert_eq!(TextCursor::from(next).prev_in(text).unwrap().byte(), here);
+        }
+        assert!(TextCursor::from(0).prev_in(text).is_none());
+        assert!(TextCursor::from(text.len()).next_in(text).is_none());
+    }
+
+    #[test]
+    fn an_empty_text_has_exactly_one_place_a_caret_can_be() {
+        let cursor = TextCursor::from(0);
+        assert_eq!(cursor.snapped_in("").byte(), 0);
+        assert!(cursor.prev_in("").is_none());
+        assert!(cursor.next_in("").is_none());
+        // And a cursor left over from longer text collapses onto it.
+        assert_eq!(TextCursor::from(7).snapped_in("").byte(), 0);
+    }
 
     /// A surface pre-filled with an obvious background, so any changed pixel
     /// is unambiguously something the text drew.

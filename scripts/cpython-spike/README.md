@@ -30,10 +30,27 @@ scripts/cpython-spike/slatelink.sh  # link it against SlateOS's own libc.a
 scripts/cpython-spike/stdlib.sh     # pack the stdlib, and prove it runs
 ```
 
-Both derive every path from `scripts/lib/worktree.sh`, so they work in any of
-the four checkouts and cannot link one lane's objects against another lane's
+All three derive every path from `scripts/lib/worktree.sh`, so they work in any
+of the four checkouts and cannot link one lane's objects against another lane's
 libc. Scratch lives in `/tmp/cpython-spike-$SLATE_LANE`; delete it to redo
 `configure`.
+
+Two more scripts answer a narrower question — *how much of the 20 MB archive
+does a run actually read?* — and are documented under "How much of the archive a
+run actually reads" below:
+
+```bash
+PYTHONHOME=<prefix> <prefix>/bin/python3 scripts/cpython-spike/pymeasure.py
+PYTHONHOME=<prefix> <prefix>/bin/python3 scripts/cpython-spike/pyworkload.py
+```
+
+`pymeasure.py` measures what `Py_Initialize` alone reads; `pyworkload.py` adds
+the imports the proposed Path-Z rung performs. Both default to whichever `.zip`
+is on the running interpreter's `sys.path`, so neither can quietly describe a
+different file from the one that produced its module list. They must be run
+against a real `<prefix>/bin/python3` + `<prefix>/lib/python312.zip` layout: an
+interpreter run out of its build tree keeps `sys.prefix = /usr/local` whatever
+`PYTHONHOME` says, and then measures a stdlib *directory* instead of an archive.
 
 Artifacts land on the gitignored shelf in `build/spike/`, and
 `scripts/create-ext4-rootfs.sh` stages both of them:
@@ -164,6 +181,47 @@ The two methods are worth keeping side by side because they bound the answer
 from opposite directions: the linker only reports symbols on paths it actually
 pulled in (a lower bound on what a *fuller* CPython would need), while the set
 difference covers every member (an upper bound). Here they coincide.
+
+## How much of the archive a run actually reads
+
+`requests/b-a-cpython-path-z-self-test.md` originally worried, in prose, that
+CPython "opens a 20 MB zip and reads its central directory". `pymeasure.py` and
+`pyworkload.py` replace that with a count of bytes, taken under the musl control
+interpreter against the identical archive:
+
+| | bytes | note |
+|---|---:|---|
+| Central directory | 66,083 | read once, 1,034 entries, at the *end* of the file |
+| `Py_Initialize` members | 20,372 | 3 members, all `encodings` — the part that must work before `main()` |
+| The Path-Z rung's imports | 409,311 | 19 more members: `json`, `base64`, `struct` and their closure (`re`, `enum`, `collections`, `functools`, …) |
+| **Total** | **495,766** | **2.42% of the 20,498,464-byte archive** |
+
+Under half a megabyte across ~22 members, plus one 66 KB read near EOF. If the
+rung ever hangs, bulk throughput is not the suspect: a seek, a short read near
+the end of the file, or an `mmap` of a large file that is mostly never touched
+are. That is a much narrower thing to look at than "it reads 20 MB".
+
+**Two traps, both of which I fell into first.**
+
+1. **Snapshot `sys.modules` before the measuring script imports anything of its
+   own.** The first version did `import zipfile` at the top and *then* reported
+   the startup set, counting zipfile's dependency closure — pathlib, urllib,
+   ipaddress, shutil, threading — as startup work, inflating the answer ~2x.
+   `sys` is the only safe thing to touch above the snapshot: it is a builtin and
+   is already imported before any user code runs.
+
+2. **`__file__` is not the authority on "came from the zip".**
+   `importlib._bootstrap` and `importlib._bootstrap_external` are frozen into
+   the interpreter — they have to be, they *are* the import system — yet CPython
+   still points their `__file__` at where the source would have lived, inside
+   the archive. Believing it credits them with **117,451 bytes of reads that
+   never happen**, on the two modules guaranteed never to be read that way. The
+   loader is the authority: a member is read from the archive only when its
+   `__spec__.loader` is zipimport's. `pymeasure.py` prints that overcount
+   underneath the real figure, so the error is visible rather than asserted.
+
+The check that the filter is right is that the two scripts arrive at the startup
+figure independently and agree: 3 members, 20,372 bytes.
 
 ## The nineteen symbols CPython cost us
 

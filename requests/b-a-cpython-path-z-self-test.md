@@ -145,13 +145,45 @@ host and record it here so it costs nobody a second debugging session.)
 otherwise.** bash gets 1,048,576 yields, described in its own comment as 4x
 dash's budget for locale tables and a larger builtin table. CPython's startup
 is a different order of work again: it initialises the type system, unmarshals
-frozen modules, opens a 20 MB zip and reads its central directory, then imports
-eight modules out of it before it will run a line of user code. `8_388_608` (8x
+frozen modules, opens the zip and reads its central directory, then imports
+modules out of it before it will run a line of user code. `8_388_608` (8x
 bash) is my suggestion, not a measurement. **If it times out, please raise it
 and see whether it completes rather than assuming a hang** — and if it does
 complete at some large number, that number is itself a useful result and worth
 putting in the comment, because it is a first measurement of our ext4 read path
 under a real workload.
+
+**What I *can* give you is the I/O half, measured.** I ran this exact workload
+under the musl control interpreter against the identical zip and counted what
+the archive is actually asked for:
+
+| | bytes | note |
+|---|---:|---|
+| Central directory | 66,083 | read once, 1,034 entries, at the *end* of the file |
+| `Py_Initialize` members | 20,372 | 3 members, all `encodings` — this is the part that must work before `main()` |
+| The rung's own imports | 409,311 | 19 more members (`json`, `base64`, `struct`, and their closure: `re`, `enum`, `collections`, `functools`, …) |
+| **Total** | **495,766** | **2.42% of the 20,498,464-byte archive** |
+
+So the rung reads **under half a megabyte across ~22 members plus one
+66 KB central-directory read** — not 20 MB. If it hangs, it is not bulk
+throughput; it is a seek, a short read near EOF, or an `mmap` of a large file
+that is mostly never touched. That is a much narrower thing to look at, and it
+is why I have reworded the "Hang partway through startup" row below.
+
+Two corrections I had to make to my own measurement, in case you repeat it:
+counting from `__file__` credits `importlib._bootstrap` and
+`_bootstrap_external` with 117,451 bytes of reads that never happen — they are
+frozen into the binary (they have to be; they *are* the import system) but
+CPython still sets their `__file__` to where the source would have lived,
+inside the zip. Filter on `__spec__.loader` being `zipimporter` instead. And
+take the module snapshot before your measuring script imports anything of its
+own, or you count `zipfile`'s dependency closure as startup work. The scripts
+are `scripts/cpython-spike/pymeasure.py` and
+`scripts/cpython-spike/pyworkload.py` — both tracked, both runnable against any
+`<prefix>/bin/python3` + `<prefix>/lib/python312.zip` layout. They agree on the
+startup figure, which is how I know the filter is right, and `pymeasure.py`
+prints the 117,451-byte overcount next to the real number rather than asking you
+to take my word for it.
 
 **3. Staging 31 MB through `Vfs::read_file` + `Vfs::write_file` may be the
 slowest thing in the rung.** The bash rung reads the whole binary into a `Vec`
@@ -172,7 +204,7 @@ this is the first time any of these paths carry a load like this:
 |---|---|
 | `init_fs_encoding` fatal error | The zip was not staged, or `PYTHONHOME` is wrong. Not a kernel bug. |
 | `No module named 'zlib'` from `<frozen zipimport>` | The zip got repacked compressed. `create-ext4-rootfs.sh` asserts against this, so it would mean the assert was bypassed. Not a kernel bug. |
-| Hang partway through startup | Our `mmap`, `read` or `lseek` on a 20 MB file through the ext4 driver — CPython seeks around the zip's central directory rather than reading it linearly. |
+| Hang partway through startup | A **seek**, not throughput. The whole run reads 495,766 bytes — 2.42% of the archive (measured; see above). Suspect `lseek` to near-EOF for the central directory, or an `mmap` of a 20 MB file whose pages are overwhelmingly never touched. Bulk `read` bandwidth is not the thing under test. |
 | Crash in `Py_Initialize` | A `getrandom` interaction — CPython seeds its hash randomisation at startup. **Not TLS; see below.** |
 | Wrong output, correct exit code | A libc function that returns plausibly rather than correctly. This is the failure the specific expected lines above exist to catch. |
 

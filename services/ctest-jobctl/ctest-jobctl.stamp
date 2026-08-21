@@ -9,5 +9,5 @@
 version 2
 input  build.py sha256 2927a2d221ee7c68bc51108bccb17549764c9cbcefa374d886073d037e52e5c7
 input  main.c sha256 e27d1821c98f937ac33f1653a09ac0a56f536427ce6336bbb568a70f86b91371
-input  toolchain/sysroot/lib/libc.a sha256 5452152d19a00555a4ba99de5f3f6168fa5df3c8214aa89d87b9fa9fa5a68dbd
-output ctest-jobctl.elf sha256 3bd19d242b9ce9a85567dd4dae888bb063529e7c6cb829158e4bcd7578b84297 size 1393336
+input  toolchain/sysroot/lib/libc.a sha256 5e252d0d790a2194853cbf874faefa41feb57e436bdb277243279dadf340bb01
+output ctest-jobctl.elf sha256 95883c06b30825491d0386f32f1c9180bf6872f8b56d2e942deb16faba428ab9 size 1393576

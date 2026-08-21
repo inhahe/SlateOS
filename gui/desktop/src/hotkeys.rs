@@ -601,13 +601,18 @@ impl HotkeyConfig {
                 continue;
             }
 
-            let eq_pos = line.find('=').ok_or_else(|| HotkeyError::ParseError {
-                line_number: line_idx + 1,
-                message: "expected '=' separator".to_string(),
-            })?;
-
-            let key_part = line[..eq_pos].trim();
-            let value_part = line[eq_pos + 1..].trim();
+            // `split_once` is `find` plus both slices in one step, so the
+            // separator's position never has to be carried in a variable and
+            // re-applied — which is where an off-by-one or a mid-character
+            // split would come from if the separator were ever multi-byte.
+            let (key_part, value_part) =
+                line.split_once('=')
+                    .ok_or_else(|| HotkeyError::ParseError {
+                        line_number: line_idx + 1,
+                        message: "expected '=' separator".to_string(),
+                    })?;
+            let key_part = key_part.trim();
+            let value_part = value_part.trim();
 
             let hotkey = parse_hotkey_string(key_part).map_err(|e| HotkeyError::ParseError {
                 line_number: line_idx + 1,
@@ -1140,6 +1145,40 @@ mod tests {
     )]
 
     use super::*;
+
+    /// The config line splits at its *first* `=`, and the position of that
+    /// separator is never carried in a variable that a later expression has to
+    /// re-apply with an offset.
+    #[test]
+    fn a_config_line_splits_at_its_first_separator_only() {
+        // A line with no separator is reported against the line it was on —
+        // comments and blanks are skipped but still counted.
+        assert!(matches!(
+            HotkeyConfig::load("# comment\n\nCtrl+Q\n"),
+            Err(HotkeyError::ParseError { line_number: 3, .. })
+        ));
+
+        // Whitespace around the separator belongs to neither side.
+        match (
+            HotkeyConfig::load("  Ctrl+Q  =  close_window  \n"),
+            HotkeyConfig::load("Ctrl+Q=close_window\n"),
+        ) {
+            (Ok(spaced), Ok(tight)) => {
+                assert_eq!(spaced.bindings.len(), 1);
+                assert_eq!(spaced.save(), tight.save());
+            }
+            _ => panic!("a well-formed line failed to parse"),
+        }
+
+        // The value may itself contain a separator: only the first one splits.
+        match HotkeyConfig::load("Super+E=launch:a=b\n") {
+            Ok(cfg) => assert_eq!(
+                cfg.bindings.first().map(|(_, a)| a.to_config_value()),
+                Some("launch:a=b".to_owned()),
+            ),
+            Err(e) => panic!("{e}"),
+        }
+    }
 
     // --- key badge sizing ---
 

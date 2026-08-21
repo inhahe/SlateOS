@@ -136,15 +136,26 @@ impl Ipv4Addr {
 
     /// Parse from dotted decimal string.
     pub fn parse(s: &str) -> Option<Self> {
-        let parts: Vec<&str> = s.split('.').collect();
-        if parts.len() != 4 {
+        let mut parts = s.split('.');
+        // Pulling exactly four fields out of the iterator makes "an address
+        // has four octets" a property of this expression, rather than a
+        // length check standing three lines away from the indexing it
+        // justifies — and it drops the intermediate `Vec` allocation that
+        // collecting only existed to count. `split` yields at least one
+        // field, so a short address fails on a missing part's `?`; the
+        // trailing `next` is what rejects a fifth.
+        let (a, b, c, d) = (parts.next()?, parts.next()?, parts.next()?, parts.next()?);
+        if parts.next().is_some() {
             return None;
         }
-        let mut octets = [0u8; 4];
-        for (i, part) in parts.iter().enumerate() {
-            octets[i] = part.parse().ok()?;
-        }
-        Some(Self { octets })
+        Some(Self {
+            octets: [
+                a.parse().ok()?,
+                b.parse().ok()?,
+                c.parse().ok()?,
+                d.parse().ok()?,
+            ],
+        })
     }
 
     /// Check if this is a private address.
@@ -2510,6 +2521,40 @@ mod tests {
     #![allow(clippy::float_cmp)]
 
     use super::*;
+
+    /// An address has exactly four fields. The count and the reads used to be
+    /// separate statements; these are the inputs that tell them apart.
+    #[test]
+    fn an_address_is_four_fields_and_a_field_is_one_octet() {
+        assert_eq!(
+            Ipv4Addr::parse("192.168.1.1").map(|a| a.octets),
+            Some([192, 168, 1, 1]),
+        );
+        assert_eq!(Ipv4Addr::parse("0.0.0.0").map(|a| a.octets), Some([0; 4]));
+        assert_eq!(
+            Ipv4Addr::parse("255.255.255.255").map(|a| a.octets),
+            Some([255; 4]),
+        );
+
+        for bad in [
+            "",                  // no fields at all
+            "1",                 // one
+            "1.2.3",             // three
+            "1.2.3.4.5",         // five
+            "1.2.3.",            // four, the last empty
+            ".1.2.3",            // four, the first empty
+            "1.2.3.256",         // in range for the parse, not for a u8
+            "1.2.3.-1",          // signed
+            "1.2.3.4 ",          // trailing space is not whitespace-tolerated
+            "1.2.3.0x4",         // not decimal
+            "192.168.1.1.1.1.1", // seven
+        ] {
+            assert!(
+                Ipv4Addr::parse(bad).is_none(),
+                "{bad:?} parsed as an address",
+            );
+        }
+    }
 
     // IPv4 tests
     #[test]

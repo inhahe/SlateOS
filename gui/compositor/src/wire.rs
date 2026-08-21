@@ -321,6 +321,11 @@ fn to_compositor_request(
             opacity,
         },
         RequestBody::GetDisplayInfo => CompositorRequest::GetDisplayInfo,
+        // Unlike every window request above there is no `link.resolve` here,
+        // and nothing to resolve: a reload names no window and carries no
+        // settings, so there is no ownership question to ask. It is the one
+        // request whose whole safety argument is what it does *not* contain.
+        RequestBody::ReloadAppearance => CompositorRequest::ReloadAppearance,
         // Handled by `answer_requests` before it reaches here, because it
         // changes the *link*, not the compositor: nothing about a subscription
         // belongs in the window/display state a `CompositorRequest` describes,
@@ -1371,5 +1376,66 @@ mod tests {
                 .any(|e: &InputEvent| matches!(e.event, Event::Resize { .. })),
             "the resize the client asked for comes back as the event that confirms it"
         );
+    }
+
+    #[test]
+    fn a_reload_request_off_the_wire_reaches_the_users_settings_file() {
+        // The whole point of the verb, end to end: bytes a client wrote, over
+        // the same decode path every other request takes, ending in the
+        // compositor holding what the *file* says. Asserted here rather than in
+        // `lib.rs` because this is the only test module with both halves of the
+        // protocol in scope, and the two halves are exactly where a new verb
+        // gets half-wired — a variant that encodes but never decodes, or one
+        // that decodes to a request nothing maps.
+        appearance::config::testing::with_scratch_config("wire-reload", |_root| {
+            let (mut comp, mut link) = wired();
+            assert!(
+                comp.appearance().drop_shadows,
+                "the compositor should start from the defaults"
+            );
+
+            let mut file = appearance::AppearanceFile::new();
+            file.settings.drop_shadows = false;
+            file.save().expect("write scratch appearance.yaml");
+
+            let responses = exchange(&mut comp, &mut link, vec![RequestBody::ReloadAppearance]);
+            assert!(
+                matches!(
+                    responses.as_slice(),
+                    [Response {
+                        body: ResponseBody::Ok,
+                        ..
+                    }]
+                ),
+                "a reload is answered Ok, got {responses:?}"
+            );
+            assert!(
+                !comp.appearance().drop_shadows,
+                "the reload request did not reach the settings the compositor draws from"
+            );
+        });
+    }
+
+    #[test]
+    fn a_reload_request_names_no_window_and_so_needs_no_window_to_name() {
+        // Every other request that reaches the compositor carries a window id
+        // the link must vouch for. This one carries nothing, which means a
+        // client that has never opened a window can still send it — and should,
+        // because the Settings app is exactly such a client. If someone later
+        // routes it through the ownership check by reflex, this fails.
+        appearance::config::testing::with_scratch_config("wire-reload-windowless", |_root| {
+            let (mut comp, mut link) = wired();
+            let responses = exchange(&mut comp, &mut link, vec![RequestBody::ReloadAppearance]);
+            assert!(
+                matches!(
+                    responses.as_slice(),
+                    [Response {
+                        body: ResponseBody::Ok,
+                        ..
+                    }]
+                ),
+                "a windowless client's reload was refused: {responses:?}"
+            );
+        });
     }
 }

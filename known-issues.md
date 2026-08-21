@@ -31723,6 +31723,28 @@ wired yet, and because a window whose pixels never reach a screen is not yet a
 usable desktop — `TD-COMPOSITOR-HAS-NO-SCANOUT` is now the last link in the
 chain from an app's `RenderTree` to a photon.
 
+
+**One of the 137 now has something specific it cannot call (2026-08-21).**
+`apps/settings` is the only application in the tree that edits the user's
+appearance settings, and the compositor now accepts a `ReloadAppearance`
+request so that a change to window corners or drop shadows reaches windows that
+are already open (`design-decisions.md` §500). The sender API exists —
+`oswindow::EventLoop::appearance_changed()` — and Settings cannot call it,
+because it is one of the unwired 137: its `Cargo.toml` names only `guitk` and
+`appearance`, and its `main()` says *"In a real Slate OS environment, this
+would enter the compositor event loop. For now, render one frame to verify the
+UI builds correctly."*
+
+So the live-reload path is complete on the compositor's side and has no caller.
+That is recorded here rather than papered over: opening a socket inside a
+program with no event loop to service it would put a connection in a process
+that cannot answer anything that arrives on it, which is the `oswindow`
+simulation mistake of (d½) in a new place. Until Settings is wired, changing an
+appearance setting still requires restarting the compositor, and the fix is
+step (e) applied to Settings — an `oswindow` event loop, a window, and one
+`appearance_changed()` call after `AppearanceFile::save()` in
+`save_appearance` (`apps/settings/src/main.rs`, ~line 880).
+
 ## TD-ONLY-ONE-KEYBOARD-LAYOUT (lane C, 2026-08-17)
 
 **What.** `gui/compositor/src/keymap.rs` holds one hard-coded US-QWERTY
@@ -49089,6 +49111,144 @@ rasterised square. So this needs rounded-rectangle fill and stroke implemented
 in the rasteriser first — which also fixes a silent, tree-wide bug of its own,
 independent of window decorations.
 
+**Progress 2026-08-21 — the rasteriser now draws them.** ✅ The tree-wide half
+of the paragraph above is fixed: `RenderEngine::fill_round_rect` and
+`stroke_round_rect` rasterise rounded rectangles as scanline spans, and
+`execute_command` passes each command's radii to them instead of discarding
+them — `FillRect`, `StrokeRect` and `BoxShadow` alike. That restores rounding
+for every producer in the tree at once, not only window frames: toolkit widget
+borders, the SVG renderer's `rx`/`ry`, the tab strip, the launcher's search
+field, the power menu and the resource monitor were all being drawn square.
+See `design-decisions.md` §498. Twelve tests, each proved a real regression
+test by reintroducing the bug it guards (eleven reintroductions, all caught —
+and three tests had to be *repaired* first, because the first pass proved they
+were guarding nothing; §498 records which and why).
+
+**What is left of prerequisite 2 is now the settings channel**, not the
+drawing: the compositor still has no connection to `AppearanceSettings`, so it
+does not know the user's `WindowCorners` choice (its own decorations are still
+drawn with the flat primitives) nor the `drop_shadows` toggle, and it still
+draws a shadow on maximized windows. Note that `gui/appearance` depends only on
+`guitk` and `yamldoc`, so `compositor` can depend on it without a cycle.
+
+**Progress 2026-08-21 — prerequisite 2 is done, except for live reload.** ✅
+The compositor now depends on `gui/appearance` and holds an
+`AppearanceSettings` (the whole record, not the two fields it can act on — see
+`design-decisions.md` §499 for why that is the point rather than an oversight).
+All three items above are closed:
+
+- **`WindowCorners` reaches the frame.** `Compositor::decoration_radius` scales
+  the user's radius by the display factor and feeds the title bar's fill, the
+  border's stroke, the title-bar buttons and every ring of the shadow. All four
+  corner choices now produce four different windows; before this they produced
+  one. Note the radius deliberately does *not* inherit `scale_dimension`'s
+  non-zero floor: a radius of 0 is the user having chosen `Square`, not a
+  rounding accident, and must survive scaling as a square corner.
+- **`drop_shadows` is honoured.** `render_window` consults it before calling
+  `render_shadow`.
+- **A maximized window casts no shadow.** The compositor's reason is *not* the
+  shell's, and §499 records the difference: the shell suppresses a fill-based
+  `BoxShadow` that would bleed over the screen border; the compositor's
+  concentric rings cannot bleed — a maximized frame is fitted to the display
+  exactly, so every ring is either clipped off-display or drawn underneath the
+  window's own frame. It is pure overdraw on an opaque window and a dark smear
+  along the top and left on a translucent one.
+
+Ten tests, each proved a real regression test by reintroducing the bug it names
+— 10/10 caught on the first pass. Two of the ten were wrong before they were
+right, and §499 records both, because neither error would have announced
+itself: one asserted an absolute pixel count that is simply false (a "square"
+20×20 corner block also contains the border stroke and the first letters of the
+title), and one was reading `compose_frame`'s vsync gate instead of its damage
+state, so its middle assertion passed for entirely the wrong reason.
+
+**Progress 2026-08-21 — the startup-only channel is now a live one.** ✅ The
+`ReloadAppearance` verb described here as "the last piece before the deletion"
+is built, exactly to the shape this entry specified: tag `0x0F` in
+`gui/remote/src/control.rs`, **no payload**, mapped in `to_compositor_request`
+with no `link.resolve` (it names no window, so a client that has never opened
+one may still send it — which matters, because Settings is such a client), and
+handled by `Compositor::reload_appearance`, which re-reads the user's file.
+`main` now calls the same method at startup instead of loading the file itself,
+so startup and reload cannot disagree about where the settings live. Adopting
+settings that turn out to be identical does *nothing*, so an unlimited-rate
+notification cannot become an unlimited-rate full-screen repaint. The
+application-facing sender is `oswindow::EventLoop::appearance_changed()`.
+Rationale in `design-decisions.md` §500; seven tests, each proved a real
+regression test by reinstating its bug and watching the named test fail.
+
+**What remains before the deletion is a caller, and it belongs to another
+entry.** `apps/settings` cannot send the request: it has no compositor
+connection at all, which is `TD-NO-APP-CONNECTS-TO-THE-COMPOSITOR` (noted there
+under "One of the 137 now has something specific it cannot call"). Nothing in
+*this* entry's scope is blocked by that — the compositor draws the user's
+corners and shadows, and adopts a change the moment anyone tells it to — so the
+deletion below is unblocked.
+
+The deletion: `DesktopShell::render_window_decorations`
+(`gui/desktop/src/lib.rs:2367`), `window_chrome` (`:1238`), and the
+`ManagedWindow` geometry fields that exist only to feed them.
+
+
+**Correction 2026-08-21 — there are five prerequisites, not two, and the entry
+undercounted the deletion as well.** Found by reading the shell's decorator line
+by line before deleting it, rather than trusting this entry's own summary of
+what it does. Two findings, both the same shape as everything else here:
+
+1. **The shell's decorator honours three more user settings than the
+   compositor does.** `render_window_decorations` draws its title bars from
+   `DesktopTheme::from_settings` (`gui/desktop/src/lib.rs:745`) and its title
+   text at `self.font_size(TextRole::Body)`, so it follows:
+   - `theme_mode` — the light palette gives a `0xCCD0DA` title bar, the dark one
+     `0x313244`. The compositor's `DecorationTheme` is one hardcoded set of
+     twelve Catppuccin Mocha colours, so a user in light mode gets dark title
+     bars.
+   - `accent_color` + **`accent_titlebars`** — a setting whose *entire subject*
+     is window title bars, ignored by the process that draws window title bars.
+     `from_settings` paints the focused bar in the accent and picks a readable
+     foreground for it; the inactive bar deliberately keeps the base palette.
+   - `fonts.ui_size` and `fonts.ui_font` — the compositor's title text is
+     `DEFAULT_FONT_SIZE * scale` in `Family::Ui`, a constant and a hardcoded
+     family. A user who enlarged the UI font for readability keeps small title
+     bars, which is an accessibility setting rather than a cosmetic one.
+
+   So the ordering argument this entry already makes for scaling and corners
+   applies unchanged to these three: **deleting first ships a visible
+   regression** for anyone in light mode, anyone with an accent colour, and
+   anyone who changed the UI font. They are prerequisites 3, 4 and 5.
+
+   The fix is *not* to copy `DesktopTheme::from_settings` into the compositor —
+   the light/dark table and the accent derivation would then exist twice, which
+   is `TD-THREE-INDEPENDENT-APPEARANCE-MODELS` reappearing in the place this
+   entry is trying to remove a duplicate from. It is to resolve the decoration
+   colours **in `gui/appearance`**, where the settings live, and have both
+   `DesktopTheme` and `DecorationTheme` read that one answer.
+
+2. **`window_chrome` has a second caller this entry does not mention:
+   `DesktopShell::hit_test` (`gui/desktop/src/lib.rs:1418`).** The shell does not
+   merely *draw* a duplicate title bar; it hit-tests one, resolving clicks into
+   `Hit::WindowClose` / `WindowMaximize` / `WindowMinimize` / `WindowTitleBar`
+   against button rectangles built from `WINDOW_BUTTON_SIZE = 16.0` while the
+   compositor hit-tests the same buttons at `TITLE_BUTTON_SIZE = 20`. That is
+   the same drift as the drawing and is invisible for the same reason. So the
+   deletion is: the renderer, `window_chrome`, `WindowChrome`, those four `Hit`
+   variants and their `handle_mouse` arms.
+
+   What **stays** is `ManagedWindow::frame_rect`, and the line is worth naming
+   because it is not arbitrary: the frame rect is the window's own outer
+   rectangle, arrives from the compositor in physical pixels and is not scaled
+   by the shell — its own doc says so. *Where* a window is may be known to a
+   shell (the taskbar and Alt-Tab need to say which window is which); *what its
+   title bar looks like* may not. Everything the shell puts through `self.scale`
+   here is chrome and goes.
+
+   Roughly fifteen tests in `gui/desktop/src/pointer_tests.rs` sit on the
+   deleted surface. Those asserting a *duplicate* (button rects, chrome radii,
+   chrome shadows) go with it; those asserting real shell behaviour reached
+   *through* a chrome click — `maximizing_and_restoring_returns_the_window_to_
+   where_it_was` and its neighbours, which pin `ManagedWindow::restored` — are
+   rewritten to call the API directly rather than deleted, because the
+   behaviour survives and only its trigger moves.
 
 ## B-SSHD-EXEC-REPLIED-WITH-THE-COMMAND-INSTEAD-OF-RUNNING-IT — 2026-08-21 — FIXED
 

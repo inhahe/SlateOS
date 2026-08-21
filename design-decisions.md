@@ -29213,3 +29213,480 @@ removing the refresh from `compose_frame` and from `handle_input`; restoring
 `scale_dimension`; switching `display_for` to the top-left-corner rule;
 damaging only the new box rather than both; and looping `render_shadow` over the
 raw `SHADOW_SIZE`.
+
+---
+
+## §498 — Rounded rectangles are rasterized as scanline spans inside the compositor, with coverage carried on the existing opacity channel rather than a new backend primitive
+
+**Date:** 2026-08-21
+**Decided by:** Claude (autonomous)
+
+**In short:** Lots of things on screen are supposed to have rounded corners —
+buttons, tabs, menus, the window frames themselves. Every one of them was
+asking for rounding, that request was being carried faithfully all the way
+across to the display server, and then the very last piece of code — the one
+that actually colours pixels — threw the request away and drew a square. So
+nothing in the entire graphical system has ever had a round corner. This entry
+records how the drawing was implemented and the three judgement calls it
+needed.
+
+**The bug.** `RenderEngine::execute_command` in `gui/compositor/src/lib.rs`
+matched `RenderCommand::FillRect`, `StrokeRect` and `BoxShadow` and bound
+`corner_radii: _` on all three — the Rust spelling of "there is a field here
+and I am deliberately ignoring it". Producers were everywhere and correct:
+`guitk`'s widget borders, the SVG renderer's `rx`/`ry`, the tab strip, the
+launcher's search field, the power menu, the resource monitor, and the desktop
+shell's `corner_radii()` fed from the user's `WindowCorners` setting. The wire
+protocol serialized them faithfully (`gui/remote/src/lib.rs`'s `write_radii` /
+`read_radii`). There is exactly one rasterizer, and it discarded them.
+
+**This is the sweep's recurring shape yet again**, with a twist worth naming:
+usually the tree holds one correct answer that callers cannot reach. Here every
+*caller* was correct and the single implementation was the one that had quietly
+opted out — and because a square corner is a perfectly plausible-looking
+rectangle, nothing about the output announced that a setting was being ignored.
+A user who chose `Square` and a user who chose `ExtraRounded` got identical
+pixels.
+
+### Decision 1 — spans in the render engine, not a new `RenderTarget` method
+
+`RenderTarget` is the seam between the compositor and its backends (software
+`Framebuffer`, `RenderBackend`, the test `Recorder`, and a GPU path later). A
+rounded rectangle could have been a new trait method, letting a GPU backend
+draw it in one shader pass.
+
+| | Trait method | Scanline spans above the seam |
+|---|---|---|
+| Backends to implement | every one, now and future | none |
+| GPU quality | ideal — analytic in a shader | quads, as good as the CPU path |
+| Draw calls, 48×48 at r=12 | 1 | ~1 + 3 per corner scanline ≈ 76 |
+| Risk of two backends disagreeing | real | none — one implementation |
+
+Chosen: **spans above the seam.** The decisive argument is not the effort of
+implementing it four times, it is that implementing it four times means four
+chances for the arc to differ, and this codebase has just spent three entries
+on bugs that were exactly "the same shape computed two ways". A GPU backend
+that wants the shader version can add the trait method later as an
+*optimisation of a behaviour that is already defined and tested*, which is a
+much safer thing to add than a behaviour.
+
+The cost is bounded by construction and that is what makes it affordable:
+`RoundRect::new` returns `None` for any radius under half a pixel, so
+`CornerRadii::ZERO` — which is what almost every command in the tree carries —
+falls through to the flat `fill_rect` completely untouched. And the rounded
+path only walks scanlines *in the corner bands*; the straight middle of a
+window, which is nearly all of it, stays a single quad. A tall window's border
+costs three quads plus its corners, not one per row.
+
+### Decision 2 — coverage rides in on `opacity`, and only horizontal coverage is measured
+
+An arc drawn to whole pixels is visibly jagged at the 16 px radius that
+`WindowCorners::ExtraRounded` asks for. Antialiasing needs a way to say "this
+pixel is 40% covered", and there was no coverage channel.
+
+There did not need to be one. For a solid colour, a pixel 40% covered by an
+opaque fill and a pixel fully covered by a 40%-transparent fill composite to
+exactly the same result, and `RenderTarget::fill_rect` already blends by
+opacity. So a 1×1 fill at `opacity × coverage` *is* an antialiased pixel, and
+every backend already implements it. No new channel, no new method.
+
+The approximation taken: **horizontal coverage only.** Each scanline of the
+shape is one span, and the pixel at each end is blended by the fraction of it
+the span covers. Where the arc runs steeply — the middle of each quadrant —
+this is very nearly exact. Where it runs flat, at the extreme top and bottom of
+a corner, it understates the smoothing. The exact alternative is per-pixel area
+sampling over each corner's bounding box, which is `radius²` blends per corner
+instead of two per scanline: 1024 blends for a single 16 px corner against 32.
+At the three radii this codebase actually uses (4, 8, 16 — `WindowCorners`) the
+difference is not visible, and the cost ratio is thirty-fold.
+
+All of it goes through one function, `RenderEngine::fill_span_row`. Both the
+fill and the outline reduce to spans and route through it, so a curve cannot be
+smooth in a fill and jagged in the outline drawn on top of it.
+
+### Decision 3 — the outline is "outer shape minus inner shape", sharing the fill's arc code
+
+`stroke_round_rect` could have drawn four arcs of its own. Instead it builds
+the inset shape with `RoundRect::inset_by` and, per scanline, paints the two
+gaps between the outer span and the inner one.
+
+The reason is the failure mode, not the line count: an outline whose curve is
+computed differently from the fill it surrounds parts company with that fill by
+a pixel somewhere along the arc, and the result is a border that floats free of
+its own window at the corners. Sharing `RoundRect::span` makes that
+unrepresentable. There is a test for it — the outline may not paint a single
+pixel the fill does not cover — and it is a real one: reintroducing a
+separately-computed outer curve fails it.
+
+The straight middle is still coalesced into two vertical bars rather than walked
+per row, with a guard for the case where a border thick enough to meet in the
+middle would otherwise blend the overlap twice and leave a darker stripe.
+
+### Decision 4 — a shadow's rounding grows with the shadow
+
+`BoxShadow` is drawn as a solid rectangle expanded by `spread + blur`. Its
+radii are now expanded by the same amount rather than used as-is, because a
+shadow is a copy of its box pushed outward: at the same radius as the box it
+would be visibly *squarer* than the thing casting it, and its corners would
+stick out past the curve they are meant to sit behind.
+
+### Two clamps that are not cosmetic
+
+- **Overlapping radii.** A client picks the radii and is under no obligation to
+  pick sensible ones. `RoundRect::new` applies CSS Backgrounds 3 §5.5: two radii
+  sharing a side may not together exceed it, and when any pair does, *every*
+  radius is scaled by the same worst-case factor — scaling only the offending
+  pair rounds one corner of a small box and leaves its neighbour square, which
+  reads as a bug rather than as a clamp. Without this, `r² - dy²` stays positive
+  far outside the box and the span walks off the shape.
+- **Corner bands that would cross.** The side rule above does not imply it:
+  radii on opposite ends of a diagonal each satisfy it at a full `height` yet
+  together span twice it. Unclamped, the middle quad's height underflows to
+  roughly four billion rows.
+
+### Verification
+
+Twelve tests, and — as in §497 — each was put to a reintroduction of the bug it
+claims to guard. The first pass caught 8 of 11 and the three misses were worth
+more than the eight hits:
+
+- **The hollow-outline test probed only the centre of the shape**, which lies
+  in the straight middle band — code that coalesces into two bars and never
+  consults the inner shape at all. An outline that had entirely forgotten to
+  hollow itself out still left that pixel bare and passed. Fixed by probing a
+  scanline that runs through the rounded corners too.
+- **The "a tiny radius draws what the flat path draws" test cannot fail**, for
+  the structural reason that a tiny radius takes the flat path — so it never
+  enters the scanline code and no arithmetic error inside it can reach the
+  assertion. It is kept, because what it does pin (the fall-through, on which
+  every pre-existing decoration test depends) is worth pinning, but a second
+  test was added that actually runs the rounded path and compares its straight
+  middle against the flat primitive row for row. That one catches a band
+  boundary off by one, which shows up as a seam down a window's side where no
+  corner assertion would ever look.
+- **The nonsense-radius test does not guard the `sane` filter**, and this is
+  recorded rather than papered over. Removing the filter leaves the behaviour
+  unchanged, because degradation to a square is overdetermined three ways at
+  once: `f32::max` discards NaN in favour of its other operand, `NaN > 0.0` is
+  false so the overlap clamp skips it, and `NaN as u32` saturates to zero,
+  collapsing both corner bands. The filter is kept anyway — "correct by
+  accident along three independent paths" is not a property anyone can
+  maintain, and the next edit to any one of them would break it silently — but
+  the test is documented as pinning the user-visible behaviour rather than the
+  line, which is the honest claim.
+
+The other reintroductions, each failing deterministically and naming the right
+test: discarding a client's radii in `execute_command` (the original bug);
+drawing a chamfer instead of a quarter circle; snapping spans to whole pixels
+so nothing is antialiased; dropping the overlap clamp; never hollowing an
+outline; giving the outline its own curve; forcing every corner to the largest
+radius; sending a span straight to the framebuffer past the clip stack;
+disabling rounding entirely; starting the middle band a row late; and making
+the middle quad a pixel narrow.
+
+## 499. The compositor reads the user's appearance settings from the shared model, and reads the whole of it
+
+**Date:** 2026-08-21
+**Decided by:** Claude (autonomous)
+
+**In short:** The Settings app has a switch for how round window corners should
+be — Square, Subtle, Rounded, Extra Rounded — and another for whether windows
+cast shadows. The program that actually draws window frames, the compositor, had
+never been told about either one. So all four corner choices produced the same
+square window, and turning shadows off left every shadow exactly where it was.
+The decision here is *how* the compositor learns those settings: it depends on
+the same small crate the Settings app writes them with, and holds the user's
+whole settings record rather than copying out the two fields it can act on
+today.
+
+### The problem
+
+`gui/appearance` exists specifically so that one user preference has one owner.
+Its own module doc says so: the shell paints from these values, the Settings
+application edits them, and both read and write the same `appearance.yaml`,
+because two crates that disagree about what "Rounded" means corrupt the user's
+settings between them.
+
+The compositor was outside that arrangement entirely. It drew every frame from a
+hardcoded `DecorationTheme` — twelve colour constants and nothing else — and had
+no dependency on `appearance` at all. Two of the settings in that file are
+*about* what the compositor draws:
+
+| Setting | What the user expects | What happened |
+|---|---|---|
+| `window_corners` | Square / Subtle (4px) / Rounded (8px) / Extra Rounded (16px) | every window square, all four choices identical |
+| `drop_shadows` | windows cast a shadow, or don't | shadow always drawn |
+
+This is the same shape of fault as §498 one layer up, and it was hidden the same
+way: a square window looks perfectly plausible. Nothing about the picture said a
+setting was being ignored.
+
+### Decision 1 — depend on `gui/appearance`, rather than passing the two values in
+
+The alternative was to keep the compositor free of the dependency and have
+whoever starts it pass in a radius and a boolean — two plain arguments, no new
+crate edge.
+
+*What changes:* nothing visible. The difference is where the meaning of
+"Rounded" lives.
+
+| | Depend on `appearance` | Pass a radius and a flag |
+|---|---|---|
+| Where `Rounded == 8px` is decided | once, in `appearance` | in whoever calls, and it must agree |
+| New crate edge | yes (`compositor` → `appearance`) | no |
+| Cost of adding the *next* setting | a field read | a new parameter through every caller |
+| Failure mode | none obvious | the display server and the settings panel disagree about a value the user picked |
+
+The dependency is safe: `appearance` depends only on `guitk` and `yamldoc`, both
+of which the compositor either already has or does not conflict with, so there
+is no cycle. And the alternative's failure mode is precisely the one
+`known-issues.md` `TD-THREE-INDEPENDENT-APPEARANCE-MODELS` was filed about.
+
+### Decision 2 — hold the whole `AppearanceSettings`, not the two fields used
+
+The compositor can act on two of that struct's sixteen fields today. Copying
+those two into compositor-local state (`corner_radius: f32`, `shadows: bool`)
+would be a smaller footprint and would make the struct's other fourteen fields
+obviously irrelevant to this process.
+
+*What changes:* nothing visible today; it decides what the *next* setting costs.
+
+Holding the whole record wins because the two-field version is a third
+independent appearance model in miniature — a compositor-local copy of settings
+whose canonical form lives elsewhere, which is the exact thing `appearance` was
+created to stop. The twelve colours in `DecorationTheme` are the next things
+that should come from this record (they currently duplicate the Catppuccin
+palette by hand), and they will be a field read rather than four more
+parameters.
+
+### Decision 3 — the corner radius scales with the display, and has no non-zero floor
+
+Every other decoration dimension goes through `scale_dimension`, which
+deliberately never rounds a visible dimension away to nothing: a 1px border at
+0.6× must not become a 0px border, because hit-testing derives from the same
+number and a 0px border is a window that cannot be grabbed to resize.
+
+The radius is scaled the same way but must *not* inherit that floor. A radius of
+zero is not a rounding accident — it is the user having chosen `Square`, and it
+has to survive scaling as a square corner rather than being promoted to a 1px
+curve. So `decoration_radius` multiplies and clamps to zero, and does not borrow
+`scale_dimension`'s minimum.
+
+### Decision 4 — a maximized window casts no shadow
+
+*What changes:* a maximized window loses a dark smear along its top and left
+edges (visible only when it is translucent), and stops doing a full shadow's
+worth of stroking every frame.
+
+A maximized frame is fitted to the display exactly (`maximize_window` →
+`client_geometry_for_frame(display_bounds)`), so every ring of its shadow is
+either clipped off the display or drawn *underneath the window's own frame*.
+On an opaque window it is therefore invisible — pure overdraw, eight stroked
+rounded rectangles per frame for nothing, on the one window state that is the
+common case. On a translucent or `transparent` window the frame does not cover
+what is beneath it, so the rings show through as a dark smear along the top and
+left and nowhere else, which is worse than no shadow.
+
+Worth recording precisely because the reasoning is *not* the shell's. The
+shell's duplicate decorator suppresses the same shadow with the comment that one
+drawn anyway "would bleed over the screen border" — true of its `BoxShadow`,
+which fills, and not true of the compositor's rings, which do not. Two correct
+decisions for two different reasons; a future reader who assumes they are the
+same case will draw the wrong conclusion about one of them.
+
+Fullscreen needs no such test: `Window::has_title_bar` is `decorations &&
+!fullscreen`, so a fullscreen window never reaches the decoration path at all.
+
+### Decision 5 — adopting settings forces a full recomposite
+
+*What changes:* the setting takes effect on the next frame instead of whenever
+something else happens to repaint that part of the screen.
+
+The compositor normally redraws only damaged rectangles, and damage is generated
+by windows moving, resizing and submitting. An appearance change generates none
+— no window moved — yet it changes pixels *outside* every window's extent: the
+quarter-disc of frame colour a squared corner reclaims, and the strip of desktop
+a removed shadow vacates. So `set_appearance` sets `full_recomposite`. Without
+it the user drags the corner-style control and the screen does not change, which
+reads as the control being broken rather than as a stale frame.
+
+### Where the settings enter the process
+
+`main` reads `appearance.yaml` at startup and calls `set_appearance`;
+`Compositor::new` deliberately does not. A constructor that consulted `$HOME`
+would make every test in this crate depend on the machine running it — the same
+split `AppearanceFile::new` vs `AppearanceFile::load` already draws, for the same
+reason.
+
+**This is a startup-only channel, and that is a known gap, not a decision.**
+Changing a setting in the Settings app does not reach a running compositor; the
+user must restart it. The fix is a protocol verb, and the shape it should take
+is already clear: a `ReloadAppearance` request carrying *no data*, so that the
+compositor re-reads the user's own file rather than being told what to draw. A
+setter would let any connected client restyle the whole desktop; a reload
+notification lets a hostile client at worst force a redundant re-read of a file
+it cannot write. Tracked in `known-issues.md`.
+
+### Verification
+
+Ten tests, and all ten were proved regression tests by reintroducing the bug
+each one names and confirming a deterministic failure that names it back:
+storing the settings without reading them; giving every window one hardcoded
+radius; dropping the display scale from the radius; filling the title bar
+square; leaving the buttons square; tracing a square border around a rounded
+frame; keeping square corners on the shadow's rings; drawing the maximized
+shadow; ignoring the `drop_shadows` flag; and dropping the forced recomposite.
+**10/10 caught on the first pass.**
+
+Two of the tests were wrong before they were right, and both errors are worth
+recording because neither would have announced itself:
+
+- **A corner test that asserted an absolute pixel count.** "A square corner
+  paints its whole 20×20 corner block" is false: it paints 339 of 400, because
+  the block also contains the border stroke down its left edge and the first
+  letters of the window title. The count is a sound *relative* measure — the
+  contaminants do not move with the corner setting — and an unsound absolute
+  one. The test now probes a single pixel two in from the corner, which is
+  inside the border and clear of the text, and the helper's doc says why an
+  absolute assertion is not available.
+- **A test that was reading the vsync gate instead of the damage state.**
+  `compose_frame` declines both when there is nothing to draw *and* when it is
+  too soon for another frame, and three calls in a row at 60 Hz are all inside
+  one 16 ms interval. The test's middle assertion — "an unchanged desktop has
+  nothing to redraw" — was passing for entirely the wrong reason, and its last
+  one failed for that reason too. It now runs on a zero-length frame budget so
+  that what it measures is damage.
+
+One thing deliberately *not* claimed as tested: the shadow's rings grow their
+radius by their own distance out, so that the shadow is an offset curve rather
+than a stack of same-shaped outlines. Removing the growth leaves the rings
+rounded, just increasingly square-shouldered further out, and no test here
+distinguishes that from the correct shape. It is a real property with no guard.
+
+## 500. A settings change reaches a running compositor as a notification that carries nothing
+
+**Date:** 2026-08-21
+**Decided by:** Claude (autonomous)
+
+**In short:** After §499 the compositor finally drew window corners and drop
+shadows the way the user asked — but it read the user's file once, at startup.
+Change the setting in Settings and nothing happened until you logged out and
+back in. This adds a message the Settings app can send saying "your appearance
+file changed"; the compositor then re-reads the file itself. The message
+deliberately does not contain the settings, because a message that *did* would
+let any program on the machine dictate how every window is drawn.
+
+### The setter that was not written
+
+The obvious message is `SetAppearance(AppearanceSettings)`: the sender already
+has the settings in hand, and sending them saves the compositor a file read.
+It was rejected on both of its terms.
+
+**Security.** Anything that can open the display socket can send any request on
+it. If the request carried settings, every such program could restyle the whole
+desktop — and a hostile set of settings is not an abstraction: title-bar text
+the colour of the title bar, a close button the colour of the bar behind it, a
+corner radius that eats the button. None of that is a crash, which is what
+makes it a good attack; it is a desktop that quietly stops being operable.
+A *notification* inverts the trust: the compositor re-reads the user's own
+file, which the sender may have no permission to write, so the worst a hostile
+client achieves is making the compositor read a file and repaint a screen that
+already looks the way it looks.
+
+**Ownership.** `AppearanceSettings` has one owner (`gui/appearance`) precisely
+so that the shell, the Settings app and now the compositor cannot drift into
+three interpretations of one preference — that is the whole of §499. A wire
+encoding for the settings would be a fourth copy of the model, in a place where
+it must also be versioned; the day someone adds a field, a compositor and a
+Settings app of different vintages disagree about a struct rather than about a
+file that both parse with the same code.
+
+So: `RequestBody::ReloadAppearance`, tag `0x0F`, no payload. A test in
+`gui/remote/src/control.rs` asserts the *encoded length* — header, sequence,
+tag byte, nothing else — so that "just a corner radius, to save a file read"
+fails at the point where it is added rather than in review.
+
+### Why a protocol verb and not a file watch
+
+The alternative with no protocol surface at all is for the compositor to watch
+`appearance.yaml` and reload when it changes. That is strictly better in one
+respect: it works no matter *who* wrote the file, including a user editing it
+in a text editor, which the notification does not.
+
+It was not chosen because nothing in this OS can watch a file yet — there is no
+change-notification interface a userspace process can subscribe to, so a watch
+today means the compositor stat-ing a path on a timer, which is a poll in the
+one process that must not spend its frame budget on bookkeeping. The verb is
+also not wasted work if the watch arrives later: a watch would make the verb
+*redundant*, not wrong, and a compositor that both watches and accepts the
+notification is correct, because the reload is idempotent by construction (see
+below). Revisit when the filesystem gains change notifications; the trigger is
+`fs/`'s change-notification work landing.
+
+### The comparison lives in `set_appearance`
+
+Any client may send `ReloadAppearance` at any rate. If each one forced the
+full-screen recomposite that a settings change genuinely needs, the request
+would still be an unlimited-rate way to keep the compositor redrawing the whole
+desktop — a notification that carries no data but costs plenty. So
+`set_appearance` early-returns when the new settings equal the old, and only a
+real difference sets `full_recomposite`.
+
+That comparison belongs there and not in the handler: `reload_appearance` is
+not the only caller (startup calls it too, and a future file watch would), and
+a guard in the handler would be a guard one caller has and the others do not.
+`AppearanceSettings` already derives `PartialEq`, so this is a comparison of
+the model rather than a hand-written field-by-field check that could forget the
+field added next week.
+
+### The reply is `Ok` whether or not anything changed
+
+A reply that distinguished "reloaded, and it differed" from "reloaded, no
+change" would be more informative and was rejected for being exactly that: it
+tells whoever asked something about the contents of the user's settings file.
+A program that cannot read `~/.config/slateos/appearance.yaml` could learn
+whether a given guess matches it by writing nothing and watching the reply
+change. That is a small leak, but it is a leak bought for no benefit — the
+sender is the program that just wrote the file, and it already knows.
+
+What the `Ok` asserts is true either way: the compositor has re-read the file.
+
+### The sender is in `oswindow`, and the Settings app still cannot call it
+
+`oswindow::EventLoop::appearance_changed()` is the public API; applications
+never name `guiremote` directly, exactly as `watch_desktop` fronts
+`subscribe_window_list`. The one application that should call it — Settings —
+cannot: it has no compositor connection at all, because its `main` is a
+one-frame smoke test. That is `TD-NO-APP-CONNECTS-TO-THE-COMPOSITOR` (142 app
+crates in the same position), not something to paper over here by opening a
+socket in a program that has no event loop to service it. Recorded there rather
+than left implied.
+
+### Verification
+
+Seven tests, each proved a real regression test by putting its bug back and
+watching it fail:
+
+| Test | Bug reinstated |
+|---|---|
+| `a_reload_request_carries_nothing_a_client_could_restyle_the_desktop_with` | a payload byte appended to the encoding |
+| `telling_the_compositor_the_settings_changed_sends_it_nothing_but_the_news` | `appearance_changed` returns `Ok` without sending anything |
+| `a_reload_adopts_what_the_users_file_now_says` | `reload_appearance` does not re-read the file |
+| `a_reload_that_changed_something_repaints_the_whole_screen` | adopting settings does not set `full_recomposite` |
+| `a_reload_that_finds_nothing_changed_costs_nothing` | the equality early-return removed |
+| `a_reload_request_off_the_wire_reaches_the_users_settings_file` | the handler arm stubbed to reply `Ok` and do nothing |
+| `a_reload_request_names_no_window_and_so_needs_no_window_to_name` | the request routed through the window-ownership check |
+
+The two `wire.rs` tests are the ones that matter for a new verb: they run the
+real bytes through the real decode path, and a verb that encodes but never
+decodes — or decodes to a request nothing maps — is the characteristic way a
+protocol addition is half-wired.
+
+`$HOME` is not read by `Compositor::new` and is read by `reload_appearance`.
+That asymmetry is deliberate: a constructor that consulted the environment
+would make every compositor test depend on the machine running it, while
+re-reading the user's file is the entire meaning of a reload. The tests point
+it somewhere harmless with `appearance::config::testing::with_scratch_config`,
+and `main` now calls `reload_appearance()` at startup rather than loading the
+file itself, so startup and reload cannot come to disagree about where the
+settings live or what a missing file means.

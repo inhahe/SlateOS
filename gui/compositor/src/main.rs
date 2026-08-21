@@ -175,6 +175,14 @@ fn main() {
         }
     };
 
+    // The user's window-corner and drop-shadow choices. Read here rather than
+    // in `Compositor::new` so that the library's *constructor* has no opinion
+    // about `$HOME` and its tests do not depend on the machine running them.
+    // The same call a `ReloadAppearance` request makes later, so that startup
+    // and reload cannot come to disagree about where the settings live or what
+    // a missing file means — which on a fresh install is simply the defaults.
+    compositor.reload_appearance();
+
     let mut server = match Server::bind(&addr) {
         Ok(s) => s,
         Err(e) => {

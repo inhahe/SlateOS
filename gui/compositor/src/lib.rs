@@ -40,6 +40,7 @@ use std::collections::VecDeque;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
+pub use appearance::{AppearanceSettings, WindowCorners};
 #[allow(unused_imports)]
 use guitk::color::Color;
 // Aliased because this crate has its own `MouseButton` and `MouseEventKind`
@@ -2349,6 +2350,13 @@ pub enum CompositorRequest {
     SetOpacity { window_id: WindowId, opacity: f32 },
     /// Query display information.
     GetDisplayInfo,
+    /// Re-read the user's `appearance.yaml` and adopt whatever it now says.
+    ///
+    /// Carries no settings: see
+    /// [`guiremote::control::RequestBody::ReloadAppearance`] for why a
+    /// notification rather than a setter, and [`Compositor::reload_appearance`]
+    /// for what it does.
+    ReloadAppearance,
     /// Begin a remote draw-command stream session (returns a stream id).
     StreamStart,
     /// Capture the current scene for a stream session as an encoded wire frame.
@@ -2920,13 +2928,22 @@ impl RenderEngine {
                 width,
                 height,
                 color,
-                corner_radii: _,
+                corner_radii,
             } => {
                 let px = (*x + tx) as i32;
                 let py = (*y + ty) as i32;
                 let w = *width as u32;
                 let h = *height as u32;
-                self.fill_rect(fb, px, py, w, h, color_to_argb(color), opacity);
+                self.fill_round_rect(
+                    fb,
+                    px,
+                    py,
+                    w,
+                    h,
+                    corner_radii,
+                    color_to_argb(color),
+                    opacity,
+                );
             }
             RenderCommand::StrokeRect {
                 x,
@@ -2935,14 +2952,24 @@ impl RenderEngine {
                 height,
                 color,
                 line_width,
-                corner_radii: _,
+                corner_radii,
             } => {
                 let px = (*x + tx) as i32;
                 let py = (*y + ty) as i32;
                 let w = *width as u32;
                 let h = *height as u32;
                 let lw = (*line_width).max(1.0) as u32;
-                self.stroke_rect(fb, px, py, w, h, lw, color_to_argb(color), opacity);
+                self.stroke_round_rect(
+                    fb,
+                    px,
+                    py,
+                    w,
+                    h,
+                    lw,
+                    corner_radii,
+                    color_to_argb(color),
+                    opacity,
+                );
             }
             RenderCommand::Text {
                 x,
@@ -3052,7 +3079,7 @@ impl RenderEngine {
                 blur,
                 spread,
                 color,
-                corner_radii: _,
+                corner_radii,
             } => {
                 // Simplified shadow: draw a semi-transparent rectangle expanded by spread+blur.
                 //
@@ -3067,7 +3094,21 @@ impl RenderEngine {
                 let py = ((*y + ty + *offset_y) as i32).saturating_sub(expand);
                 let w = u32::try_from((*width as i32).saturating_add(grow)).unwrap_or(0);
                 let h = u32::try_from((*height as i32).saturating_add(grow)).unwrap_or(0);
-                self.fill_rect(fb, px, py, w, h, color_to_argb(color), opacity);
+                // The shadow grows with the box, and so does its rounding: a
+                // square shadow under a rounded window shows its own corners
+                // sticking out past the curve they are supposed to sit behind.
+                #[allow(
+                    clippy::cast_precision_loss,
+                    reason = "an expansion in pixels; f32 is exact well past any of them"
+                )]
+                let grown = expand as f32;
+                let radii = CornerRadii {
+                    top_left: (corner_radii.top_left + grown).max(0.0),
+                    top_right: (corner_radii.top_right + grown).max(0.0),
+                    bottom_right: (corner_radii.bottom_right + grown).max(0.0),
+                    bottom_left: (corner_radii.bottom_left + grown).max(0.0),
+                };
+                self.fill_round_rect(fb, px, py, w, h, &radii, color_to_argb(color), opacity);
             }
         }
     }
@@ -3133,6 +3174,231 @@ impl RenderEngine {
             color,
             opacity,
         );
+    }
+
+    /// Fill a rectangle whose corners are rounded by `radii`.
+    ///
+    /// Square corners fall through to [`RenderEngine::fill_rect`] untouched, so
+    /// the overwhelmingly common case is bit-identical to what was drawn before
+    /// rounding existed and costs nothing to have gained it. That fall-through
+    /// is also what keeps this affordable: the rounded path emits one draw per
+    /// scanline *of the corner bands only*, and the flat middle — almost all of
+    /// a window — stays a single quad.
+    fn fill_round_rect<T: RenderTarget + ?Sized>(
+        &self,
+        fb: &mut T,
+        x: i32,
+        y: i32,
+        width: u32,
+        height: u32,
+        radii: &CornerRadii,
+        color: u32,
+        opacity: f32,
+    ) {
+        let Some(shape) = RoundRect::new(x, y, width, height, radii) else {
+            self.fill_rect(fb, x, y, width, height, color, opacity);
+            return;
+        };
+
+        for row in shape.top_rows() {
+            if let Some((left, right)) = shape.span(row) {
+                self.fill_span_row(fb, row, left, right, color, opacity);
+            }
+        }
+
+        let middle = shape.middle_rows();
+        let middle_height = u32::try_from(middle.end.saturating_sub(middle.start)).unwrap_or(0);
+        if middle_height > 0 {
+            self.fill_rect(fb, x, middle.start, width, middle_height, color, opacity);
+        }
+
+        for row in shape.bottom_rows() {
+            if let Some((left, right)) = shape.span(row) {
+                self.fill_span_row(fb, row, left, right, color, opacity);
+            }
+        }
+    }
+
+    /// Outline a rectangle whose corners are rounded by `radii`.
+    ///
+    /// The whole outline is "the outer shape minus the inner shape", evaluated
+    /// one scanline at a time, which is why it reuses [`RoundRect::span`]
+    /// rather than growing arc code of its own: an outline whose curve is
+    /// computed differently from the fill it surrounds is an outline that
+    /// misses its own fill by a pixel somewhere.
+    fn stroke_round_rect<T: RenderTarget + ?Sized>(
+        &self,
+        fb: &mut T,
+        x: i32,
+        y: i32,
+        width: u32,
+        height: u32,
+        line_width: u32,
+        radii: &CornerRadii,
+        color: u32,
+        opacity: f32,
+    ) {
+        let Some(outer) = RoundRect::new(x, y, width, height, radii) else {
+            self.stroke_rect(fb, x, y, width, height, line_width, color, opacity);
+            return;
+        };
+        let inner = outer.inset_by(line_width);
+
+        // The two straight side bars, coalesced. Between the corner bands both
+        // the outer and the inner edge are vertical, so these rows need no
+        // per-scanline work — and for a tall window they are nearly every row.
+        let middle = outer.middle_rows();
+        let middle_height = u32::try_from(middle.end.saturating_sub(middle.start)).unwrap_or(0);
+        if middle_height > 0 {
+            if line_width.saturating_mul(2) >= width {
+                // The bars meet or overlap: one solid run, because drawing two
+                // overlapping ones would blend the overlap twice and leave a
+                // darker stripe down the middle of a translucent border.
+                self.fill_rect(fb, x, middle.start, width, middle_height, color, opacity);
+            } else {
+                let right_bar = x.saturating_add_unsigned(width.saturating_sub(line_width));
+                self.fill_rect(
+                    fb,
+                    x,
+                    middle.start,
+                    line_width,
+                    middle_height,
+                    color,
+                    opacity,
+                );
+                self.fill_rect(
+                    fb,
+                    right_bar,
+                    middle.start,
+                    line_width,
+                    middle_height,
+                    color,
+                    opacity,
+                );
+            }
+        }
+
+        for row in outer.top_rows().chain(outer.bottom_rows()) {
+            let Some((outer_left, outer_right)) = outer.span(row) else {
+                continue;
+            };
+            match inner.as_ref().and_then(|shape| shape.span(row)) {
+                // Two arcs of the ring on this scanline, one per side.
+                Some((inner_left, inner_right)) => {
+                    self.fill_span_row(fb, row, outer_left, inner_left, color, opacity);
+                    self.fill_span_row(fb, row, inner_right, outer_right, color, opacity);
+                }
+                // Above or below the inner shape entirely — the cap of the
+                // ring, which is solid across.
+                None => self.fill_span_row(fb, row, outer_left, outer_right, color, opacity),
+            }
+        }
+    }
+
+    /// Paint `[left, right)` of one scanline, feathering the pixel at each end
+    /// by how much of it the span actually covers.
+    ///
+    /// **The single place antialiasing happens.** Both rounded primitives above
+    /// reduce to spans and route through here, so a curve cannot be smooth in a
+    /// fill and jagged in the outline drawn over it.
+    ///
+    /// Coverage rides in on `opacity` rather than on a separate channel because
+    /// that is exactly what it means for a solid colour: a pixel half-covered
+    /// by an opaque fill and a pixel fully covered by a half-transparent one
+    /// composite identically, and [`RenderTarget::fill_rect`] already blends by
+    /// opacity. A one-pixel-wide fill is therefore an antialiased edge, and
+    /// every backend gets it without a new trait method to implement.
+    ///
+    /// Only horizontal coverage is measured. Where the arc runs steeply — the
+    /// middle of each quadrant — that is very nearly exact; where it runs flat,
+    /// at the extreme top and bottom of a corner, it understates the smoothing.
+    /// The alternative is per-pixel area sampling over the corner boxes, which
+    /// costs `radius²` blends per corner instead of two, and at the radii this
+    /// codebase actually uses (4, 8 and 16 px, from `WindowCorners`) the
+    /// difference is not visible.
+    fn fill_span_row<T: RenderTarget + ?Sized>(
+        &self,
+        fb: &mut T,
+        row_y: i32,
+        left: f32,
+        right: f32,
+        color: u32,
+        opacity: f32,
+    ) {
+        if right <= left {
+            return;
+        }
+        // `as i32` on `f32` saturates rather than wrapping, so a nonsense
+        // coordinate from a client becomes a far-offscreen one that the clip
+        // discards — not a wrapped one that lands back on screen.
+        #[allow(
+            clippy::cast_possible_truncation,
+            reason = "saturating float-to-int cast; out-of-range coordinates are \
+                      clipped away rather than wrapped"
+        )]
+        let to_px = |v: f32| v as i32;
+
+        let first = left.floor();
+        // Entirely inside a single pixel: one blend at its partial coverage,
+        // not a zero-width solid run flanked by two.
+        if right <= first + 1.0 {
+            self.fill_rect(
+                fb,
+                to_px(first),
+                row_y,
+                1,
+                1,
+                color,
+                opacity * (right - left),
+            );
+            return;
+        }
+
+        let solid_start = left.ceil();
+        let solid_end = right.floor();
+
+        let left_coverage = solid_start - left;
+        if left_coverage > 0.0 {
+            self.fill_rect(
+                fb,
+                to_px(first),
+                row_y,
+                1,
+                1,
+                color,
+                opacity * left_coverage,
+            );
+        }
+        #[allow(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            reason = "`solid_end >= solid_start` holds by construction and both \
+                      are bounded by the primitive's own i32 extent"
+        )]
+        let solid_width = (solid_end - solid_start) as u32;
+        if solid_width > 0 {
+            self.fill_rect(
+                fb,
+                to_px(solid_start),
+                row_y,
+                solid_width,
+                1,
+                color,
+                opacity,
+            );
+        }
+        let right_coverage = right - solid_end;
+        if right_coverage > 0.0 {
+            self.fill_rect(
+                fb,
+                to_px(solid_end),
+                row_y,
+                1,
+                1,
+                color,
+                opacity * right_coverage,
+            );
+        }
     }
 
     /// Draw a run of text with its **top-left** at `(x, y)`.
@@ -3282,6 +3548,233 @@ impl RenderEngine {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Rounded rectangles
+// ---------------------------------------------------------------------------
+
+/// A rectangle with per-corner rounding, resolved once into the form the
+/// scanline loops want.
+///
+/// Constructing this is where every *question* about the shape is settled —
+/// are the radii finite, do they overlap, is the rounding even visible, which
+/// rows contain an arc — so that [`RoundRect::span`], which runs once per
+/// scanline, is pure arithmetic with no branches on validity. The radii come
+/// from a client over the wire and the client is under no obligation to send
+/// sane ones.
+#[derive(Clone, Copy)]
+struct RoundRect {
+    /// Continuous coordinates of the edges: `left`/`top` inclusive,
+    /// `right`/`bottom` exclusive, matching [`Rect`]'s own convention.
+    left: f32,
+    top: f32,
+    right: f32,
+    bottom: f32,
+    top_left: f32,
+    top_right: f32,
+    bottom_right: f32,
+    bottom_left: f32,
+    /// First scanline of the shape, and the row past its last.
+    first_row: i32,
+    end_row: i32,
+    /// The row past the top corner band, and the first row of the bottom one.
+    /// Between them every scanline is the full width and can be one quad.
+    top_band_end: i32,
+    bottom_band_start: i32,
+}
+
+impl RoundRect {
+    /// Resolve a rounding request, or `None` if it does not describe a curve.
+    ///
+    /// `None` is the signal to take the flat path, and it deliberately covers
+    /// more than `CornerRadii::ZERO`: a sub-half-pixel radius cannot move a
+    /// single pixel, so treating it as square is not an approximation, it is
+    /// the same image for less work. Degenerate and hostile inputs — zero
+    /// extent, infinities, NaN — land here too rather than reaching the square
+    /// roots, where a NaN would poison every comparison it took part in and
+    /// silently erase the shape.
+    fn new(x: i32, y: i32, width: u32, height: u32, radii: &CornerRadii) -> Option<Self> {
+        if width == 0 || height == 0 {
+            return None;
+        }
+        let sane = |r: f32| if r.is_finite() && r > 0.0 { r } else { 0.0 };
+        let mut top_left = sane(radii.top_left);
+        let mut top_right = sane(radii.top_right);
+        let mut bottom_right = sane(radii.bottom_right);
+        let mut bottom_left = sane(radii.bottom_left);
+        if top_left.max(top_right).max(bottom_right).max(bottom_left) < 0.5 {
+            return None;
+        }
+
+        #[allow(
+            clippy::cast_precision_loss,
+            reason = "extents are screen-sized; f32 is exact well past any of them"
+        )]
+        let (w, h) = (width as f32, height as f32);
+
+        // CSS's overlap rule (CSS Backgrounds 3 §5.5): two radii sharing a side
+        // may not together exceed it, and when any pair does, *every* radius is
+        // scaled by the same worst-case factor. Scaling only the offending pair
+        // would round one corner of a small box and leave its neighbour square,
+        // which looks like a bug rather than like a clamp.
+        let shrink = [
+            (w, top_left + top_right),
+            (w, bottom_left + bottom_right),
+            (h, top_left + bottom_left),
+            (h, top_right + bottom_right),
+        ]
+        .into_iter()
+        .filter(|&(_, sum)| sum > 0.0)
+        .map(|(side, sum)| side / sum)
+        .fold(1.0_f32, f32::min);
+        if shrink < 1.0 {
+            top_left *= shrink;
+            top_right *= shrink;
+            bottom_right *= shrink;
+            bottom_left *= shrink;
+        }
+
+        let end_row = y.saturating_add_unsigned(height);
+        #[allow(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            reason = "radii are clamped to the extent above, so each ceiling is \
+                      at most `height`, which is a `u32`"
+        )]
+        let (top_band, bottom_band) = (
+            top_left.max(top_right).ceil() as u32,
+            bottom_left.max(bottom_right).ceil() as u32,
+        );
+        // Clamping the *pair* is not implied by the clamp above: radii on
+        // opposite corners of a diagonal (top-left and bottom-right, say) each
+        // satisfy the side rule at a full `height` yet together span twice it.
+        // The bands must not cross, or the middle quad would have negative
+        // height and the two loops would paint the same rows.
+        let top_band = top_band.min(height);
+        let bottom_band = bottom_band.min(height.saturating_sub(top_band));
+
+        #[allow(
+            clippy::cast_precision_loss,
+            reason = "screen coordinates; f32 is exact well past any of them"
+        )]
+        let (left, top) = (x as f32, y as f32);
+
+        Some(Self {
+            left,
+            top,
+            right: left + w,
+            bottom: top + h,
+            top_left,
+            top_right,
+            bottom_right,
+            bottom_left,
+            first_row: y,
+            end_row,
+            top_band_end: y.saturating_add_unsigned(top_band),
+            bottom_band_start: end_row.saturating_sub_unsigned(bottom_band),
+        })
+    }
+
+    /// Scanlines containing the top corners' arcs.
+    fn top_rows(&self) -> core::ops::Range<i32> {
+        self.first_row..self.top_band_end
+    }
+
+    /// Scanlines containing the bottom corners' arcs.
+    fn bottom_rows(&self) -> core::ops::Range<i32> {
+        self.bottom_band_start..self.end_row
+    }
+
+    /// Scanlines where the shape is the full width — one quad, not a loop.
+    fn middle_rows(&self) -> core::ops::Range<i32> {
+        self.top_band_end..self.bottom_band_start
+    }
+
+    /// The shape's horizontal extent on the scanline `row_y`, or `None` if the
+    /// scanline misses it.
+    ///
+    /// Sampled at the pixel's *centre*, which is what makes the coverage the
+    /// caller derives from these edges symmetric: sampling at the top of the
+    /// pixel would bias every arc half a pixel upwards, and the bias would be
+    /// visible as a seam where a rounded fill meets the outline around it.
+    fn span(&self, row_y: i32) -> Option<(f32, f32)> {
+        #[allow(
+            clippy::cast_precision_loss,
+            reason = "screen coordinates; f32 is exact well past any of them"
+        )]
+        let centre = row_y as f32 + 0.5;
+        if centre < self.top || centre >= self.bottom {
+            return None;
+        }
+        let left = self.left + self.inset(centre, self.top_left, self.bottom_left);
+        let right = self.right - self.inset(centre, self.top_right, self.bottom_right);
+        if right <= left {
+            None
+        } else {
+            Some((left, right))
+        }
+    }
+
+    /// How far in from one vertical edge that edge's outline lies, on the
+    /// scanline whose centre is `centre`.
+    ///
+    /// Zero everywhere between the two arcs, which is most of a window and is
+    /// why the middle band needs no per-row work at all.
+    fn inset(&self, centre: f32, top_radius: f32, bottom_radius: f32) -> f32 {
+        // Each arc is a quarter of a circle whose centre sits one radius in
+        // from the corner along both axes; `dy` is the distance from that
+        // centre's scanline.
+        let (dy, radius) = if centre < self.top + top_radius {
+            (self.top + top_radius - centre, top_radius)
+        } else if centre > self.bottom - bottom_radius {
+            (centre - (self.bottom - bottom_radius), bottom_radius)
+        } else {
+            return 0.0;
+        };
+        // `max(0.0)` guards the square root against the rounding that can make
+        // `r² - dy²` a very small negative at the extreme tip of an arc, where
+        // `dy` and `r` are equal to within one ulp.
+        radius - (radius * radius - dy * dy).max(0.0).sqrt()
+    }
+
+    /// The shape `distance` pixels inside this one — the hole an outline of
+    /// that width leaves — or `None` when the outline is thick enough to close
+    /// it entirely and the "outline" is really a fill.
+    fn inset_by(&self, distance: u32) -> Option<Self> {
+        #[allow(
+            clippy::cast_precision_loss,
+            reason = "a line width in pixels; f32 is exact well past any of them"
+        )]
+        let d = distance as f32;
+        let left = self.left + d;
+        let top = self.top + d;
+        let right = self.right - d;
+        let bottom = self.bottom - d;
+        if right <= left || bottom <= top {
+            return None;
+        }
+        Some(Self {
+            left,
+            top,
+            right,
+            bottom,
+            // A corner tighter than the outline is thick has no hole left in
+            // it: the inner shape simply squares off there, which is what a
+            // real rounded border does.
+            top_left: (self.top_left - d).max(0.0),
+            top_right: (self.top_right - d).max(0.0),
+            bottom_right: (self.bottom_right - d).max(0.0),
+            bottom_left: (self.bottom_left - d).max(0.0),
+            // Never iterated — `stroke_round_rect` walks the *outer* shape's
+            // rows and only asks this one for spans — but kept consistent so a
+            // future caller that does iterate it is not surprised.
+            first_row: self.first_row.saturating_add_unsigned(distance),
+            end_row: self.end_row.saturating_sub_unsigned(distance),
+            top_band_end: self.top_band_end,
+            bottom_band_start: self.bottom_band_start,
+        })
+    }
+}
+
 /// Convert a guitk Color to ARGB u32 format.
 #[inline]
 fn color_to_argb(color: &Color) -> u32 {
@@ -3390,6 +3883,16 @@ pub struct Compositor {
     render_engine: RenderEngine,
     /// Decoration theme.
     theme: DecorationTheme,
+    /// The user's appearance preferences, as far as the compositor can act on
+    /// them: how round window corners are and whether windows cast shadows.
+    ///
+    /// Held as the whole [`AppearanceSettings`] rather than as the two fields
+    /// used today, because the settings are one document with one owner
+    /// (`gui/appearance`), and copying two of its fields out into compositor-
+    /// local state is how a third independent appearance model gets started —
+    /// the exact thing that crate exists to prevent. The colours in
+    /// [`DecorationTheme`] are the next thing to come from here.
+    appearance: AppearanceSettings,
     /// Outbound event notifications for clients (stub queue).
     pending_notifications: VecDeque<EventNotification>,
     /// Reused encoding buffer for
@@ -3446,6 +3949,10 @@ impl Compositor {
             drag: None,
             render_engine: RenderEngine::new(),
             theme: DecorationTheme::default(),
+            // The defaults, not the user's file: a constructor that read
+            // `$HOME` would make every test of this crate depend on the machine
+            // running it. `main` loads the file and calls `set_appearance`.
+            appearance: AppearanceSettings::default(),
             pending_notifications: VecDeque::new(),
             window_list_scratch: Vec::new(),
             modifiers: ModifierState::new(),
@@ -3455,6 +3962,73 @@ impl Compositor {
             stream_sessions: BTreeMap::new(),
             next_stream_id: 1,
         })
+    }
+
+    // -----------------------------------------------------------------------
+    // Appearance
+    // -----------------------------------------------------------------------
+
+    /// Adopt the user's appearance preferences.
+    ///
+    /// Forces a full recomposite, because the settings that reach here change
+    /// pixels *outside* any window's damage: turning shadows off leaves the old
+    /// shadow lying on the desktop until something else happens to repaint that
+    /// strip, and squaring a corner leaves the quarter-disc of frame colour that
+    /// used to fill it. Nothing marks those regions dirty — no window moved —
+    /// so the repaint has to be asked for here.
+    ///
+    /// *Unless nothing changed*, in which case there is nothing to repaint and
+    /// the damage state is left alone. This is the one place that comparison
+    /// belongs: [`reload_appearance`](Self::reload_appearance) can be sent by
+    /// any connected client at any rate, and a full-screen repaint per request
+    /// would make a harmless notification into a way to keep the compositor
+    /// redrawing the whole desktop for nothing.
+    pub fn set_appearance(&mut self, settings: AppearanceSettings) {
+        if settings == self.appearance {
+            return;
+        }
+        self.appearance = settings;
+        self.full_recomposite = true;
+    }
+
+    /// Re-read the user's `appearance.yaml` and adopt whatever it now says.
+    ///
+    /// This is the only place in the library that touches the filesystem, and
+    /// the asymmetry with [`Compositor::new`] is deliberate rather than
+    /// inconsistent: a *constructor* that consulted `$HOME` would make every
+    /// test in this crate depend on the machine running it, whereas re-reading
+    /// the user's file is the entire meaning of this call — a caller that did
+    /// not want it would not have made it. Tests point it somewhere harmless
+    /// with `appearance::config::testing::with_scratch_config`.
+    ///
+    /// A missing or unreadable file yields the defaults, exactly as at startup:
+    /// a user who has never opened the Personalization page is the ordinary
+    /// case, not a failure to report.
+    pub fn reload_appearance(&mut self) {
+        self.set_appearance(appearance::AppearanceFile::load().settings);
+    }
+
+    /// The appearance preferences currently in force.
+    #[must_use]
+    pub fn appearance(&self) -> &AppearanceSettings {
+        &self.appearance
+    }
+
+    /// The corner radius for decorations on a display of the given scale.
+    ///
+    /// Scaled like every other decoration dimension, and for the same reason: a
+    /// frame that grows with the display while its corners keep an 8px curve
+    /// reads as a frame with sharper corners, not as one drawn at the same size.
+    /// Unlike [`scale_dimension`] there is no non-zero floor — a radius of 0 is
+    /// the user having chosen [`WindowCorners::Square`], which must survive
+    /// scaling as a square corner rather than becoming a 1px curve.
+    fn decoration_radius(&self, scale: f32) -> f32 {
+        let radius = self.appearance.corner_radius() * scale;
+        if radius.is_finite() && radius > 0.0 {
+            radius
+        } else {
+            0.0
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -4854,6 +5428,7 @@ impl Compositor {
                 win.buffer.is_some(),
                 win.title_bar_layout(),
                 win.transparent,
+                win.maximized,
             ),
             _ => return,
         };
@@ -4870,14 +5445,30 @@ impl Compositor {
             has_buffer,
             title_bar,
             transparent,
+            maximized,
         ) = win_data;
 
         // Undecorated and fullscreen windows get no frame: the first asked to
         // be a bare surface (a menu, a tooltip, a splash screen), the second
         // owns the whole display. Both report it by having no title bar.
         if let Some(bar) = title_bar {
-            // 1. Draw window shadow.
-            self.render_shadow(bar.frame, bar.scale, opacity);
+            // 1. Draw window shadow — if the user wants shadows, and if this
+            //    window has an edge to cast one from. A maximized window's frame
+            //    is fitted to the display exactly (`maximize_window`), so every
+            //    ring of its shadow is either clipped off the display or drawn
+            //    under the window's own frame and painted over: on an opaque
+            //    window it is invisible, and always it is a full shadow's worth
+            //    of stroking per frame for nothing — on the one window state
+            //    that is the common case. It is not merely wasted, either: a
+            //    translucent or `transparent` window does not cover what is
+            //    beneath it, so the rings show through as a dark smear along the
+            //    top and left of a maximized window and nowhere else.
+            //
+            //    Fullscreen needs no test here — `Window::has_title_bar` is
+            //    false for it, so a fullscreen window never reaches this branch.
+            if self.appearance.drop_shadows && !maximized {
+                self.render_shadow(bar.frame, bar.scale, opacity);
+            }
 
             // 2. Draw window border.
             let border_color = if focused {
@@ -4958,6 +5549,13 @@ impl Compositor {
 
     /// Render the window shadow: concentric outlines around the frame box,
     /// offset down-right and fading with distance.
+    ///
+    /// Each ring is rounded by the window's own radius *grown by that ring's
+    /// distance out*, which is what an offset curve actually is: a shadow whose
+    /// rings all shared the frame's radius would be a stack of same-shaped
+    /// outlines at increasing sizes, and its corners would bulge squarer the
+    /// further out they went until the outermost ring poked past the curve it
+    /// is supposed to be sitting behind.
     fn render_shadow(&mut self, frame: Rect, scale: f32, opacity: f32) {
         /// How far down and right the shadow is cast from the frame, at 1×.
         const SHADOW_OFFSET: u32 = 3;
@@ -4986,20 +5584,29 @@ impl Compositor {
             reason = "a scaled 3px offset cannot approach i32::MAX"
         )]
         let base = frame.offset(offset as i32, offset as i32);
+        let radius = self.decoration_radius(scale);
         for layer in 0..extent {
             let alpha = SHADOW_ALPHA
                 .saturating_sub(layer.saturating_mul(falloff))
                 .min(255);
             let ring = base.inflate(layer);
+            #[allow(
+                clippy::cast_precision_loss,
+                reason = "the layer index is bounded by the scaled shadow extent \
+                          — a handful of pixels, exact in f32"
+            )]
+            let grown = radius + layer as f32;
+            let radii = CornerRadii::all(grown);
             // Only the outline of each layer: the interior is covered by the
             // window itself or by the next layer in.
-            self.render_engine.stroke_rect(
+            self.render_engine.stroke_round_rect(
                 &mut self.backend,
                 ring.x,
                 ring.y,
                 ring.width,
                 ring.height,
                 1,
+                &radii,
                 alpha << 24,
                 opacity,
             );
@@ -5022,13 +5629,19 @@ impl Compositor {
             frame.width,
             frame.height.saturating_add(width),
         );
-        self.render_engine.stroke_rect(
+        // The border traces the outside of the frame, so it takes the frame's
+        // radius as-is — the same curve the title bar's top corners are drawn
+        // with, from the same call, which is what keeps the two from parting
+        // company by a pixel at the join.
+        let radii = CornerRadii::all(self.decoration_radius(scale));
+        self.render_engine.stroke_round_rect(
             &mut self.backend,
             border.x,
             border.y,
             border.width,
             border.height,
             width,
+            &radii,
             color,
             opacity,
         );
@@ -5052,12 +5665,17 @@ impl Compositor {
         } else {
             self.theme.title_bar_unfocused
         };
-        self.render_engine.fill_rect(
+        // Rounded across the top only: the title bar shares its lower edge with
+        // the client area, and curving that edge would cut two notches out of
+        // the middle of the window where the bar meets the content beneath it.
+        let radius = self.decoration_radius(bar.scale);
+        self.render_engine.fill_round_rect(
             &mut self.backend,
             tb_x,
             tb_y,
             tb_width,
             bar.bar.height,
+            &CornerRadii::top(radius),
             bg_color,
             opacity,
         );
@@ -5117,18 +5735,33 @@ impl Compositor {
         // Buttons: close (red), maximize (green), minimize (yellow). Each is
         // drawn exactly where the hit test will look for it, and skipped
         // entirely when the window does not have it.
+        //
+        // The buttons are round when the windows are: a square close button
+        // beside a curved corner is the mismatch, not the consistency. Capped at
+        // half the button, which is the radius at which it becomes a circle —
+        // past that the clamp inside the rasterizer would take over anyway, and
+        // capping here means the three buttons agree with each other even when
+        // they are not all the same size.
+        let button_size = scale_dimension(TITLE_BUTTON_SIZE, bar.scale);
+        #[allow(
+            clippy::cast_precision_loss,
+            reason = "a title-bar button is tens of pixels; exact in f32"
+        )]
+        let button_radius = radius.min(button_size as f32 / 2.0);
+        let button_radii = CornerRadii::all(button_radius);
         for (rect, color) in [
             (bar.close, self.theme.close_button),
             (bar.maximize, self.theme.maximize_button),
             (bar.minimize, self.theme.minimize_button),
         ] {
             if let Some(r) = rect {
-                self.render_engine.fill_rect(
+                self.render_engine.fill_round_rect(
                     &mut self.backend,
                     r.x,
                     r.y,
                     r.width,
                     r.height,
+                    &button_radii,
                     color,
                     opacity,
                 );
@@ -5253,6 +5886,14 @@ impl Compositor {
                         message: "no primary display".to_string(),
                     }
                 }
+            }
+            CompositorRequest::ReloadAppearance => {
+                self.reload_appearance();
+                // `Ok` whether or not anything changed. The client is being
+                // told the compositor has re-read the file, which is true
+                // either way, and a reply that differed would leak the state of
+                // the user's settings to anyone allowed to ask for a reload.
+                CompositorResponse::Ok
             }
             CompositorRequest::StreamStart => {
                 let stream_id = self.start_stream();
@@ -9242,5 +9883,1152 @@ mod tests {
             comp.window_ref(id).expect("window").frame_insets().0,
             TITLE_BAR_HEIGHT * 2
         );
+    }
+
+    // ---------------------------------------------------------------------
+    // Rounded rectangles
+    //
+    // The defect these exist for: `execute_command` destructured
+    // `corner_radii: _` on `FillRect`, `StrokeRect` and `BoxShadow`. Every
+    // rounded corner the toolkit, the SVG renderer, the tab strip, the
+    // launcher and the shell had ever asked for was rasterized square, and
+    // nothing anywhere compared the request against the result — the radii
+    // were produced, serialized faithfully over the wire, and then dropped
+    // by the one piece of code that could act on them.
+    // ---------------------------------------------------------------------
+
+    const ROUND_SIDE: u32 = 64;
+    const ROUND_BG: u32 = 0xFF_00_00_00;
+    const ROUND_FG: u32 = 0xFF_FF_FF_FF;
+    /// The box every test below draws, inset from the canvas so that "nothing
+    /// spilled" has somewhere to be observed.
+    const BOX_X: i32 = 8;
+    const BOX_Y: i32 = 8;
+    const BOX_SIDE: u32 = 48;
+
+    fn round_canvas() -> (RenderEngine, Framebuffer) {
+        let mut fb = Framebuffer::new(ROUND_SIDE, ROUND_SIDE).expect("framebuffer");
+        fb.clear(ROUND_BG);
+        (RenderEngine::new(), fb)
+    }
+
+    /// How much ink a pixel got, `0..=255`.
+    ///
+    /// White on black, so any one colour channel *is* the coverage the
+    /// rasterizer decided on — which is what lets these tests check
+    /// antialiasing at all rather than only presence or absence.
+    fn ink(fb: &Framebuffer, x: u32, y: u32) -> u32 {
+        fb.get_pixel(x, y).unwrap_or(0) & 0xFF
+    }
+
+    /// Every pixel with any ink in it.
+    fn inked(fb: &Framebuffer) -> Vec<(u32, u32)> {
+        let mut out = Vec::new();
+        for y in 0..ROUND_SIDE {
+            for x in 0..ROUND_SIDE {
+                if ink(fb, x, y) > 0 {
+                    out.push((x, y));
+                }
+            }
+        }
+        out
+    }
+
+    /// A radius that cannot move a pixel must not cost one either: these two
+    /// inputs have to produce the *framebuffer* the flat path produces, not
+    /// merely something that looks similar. The fall-through in
+    /// `RoundRect::new` is what every existing decoration test depends on
+    /// still being true.
+    #[test]
+    fn a_radius_too_small_to_see_draws_exactly_what_the_flat_path_draws() {
+        for radius in [0.0_f32, 0.49] {
+            let (engine, mut flat) = round_canvas();
+            engine.fill_rect(&mut flat, BOX_X, BOX_Y, BOX_SIDE, BOX_SIDE, ROUND_FG, 1.0);
+
+            let (engine, mut rounded) = round_canvas();
+            engine.fill_round_rect(
+                &mut rounded,
+                BOX_X,
+                BOX_Y,
+                BOX_SIDE,
+                BOX_SIDE,
+                &CornerRadii::all(radius),
+                ROUND_FG,
+                1.0,
+            );
+
+            for y in 0..ROUND_SIDE {
+                for x in 0..ROUND_SIDE {
+                    assert_eq!(
+                        rounded.get_pixel(x, y),
+                        flat.get_pixel(x, y),
+                        "radius {radius} changed the pixel at ({x}, {y})"
+                    );
+                }
+            }
+        }
+    }
+
+    /// Rounding the corners must not disturb anything between them.
+    ///
+    /// The test above it cannot check this, and that is worth spelling out
+    /// because it looks as though it does: a radius under half a pixel takes
+    /// the flat path, so that test never enters the scanline code at all and
+    /// no arithmetic error inside it can make that test fail. This one runs
+    /// the rounded path and compares its straight middle against the flat
+    /// primitive row for row — which is where a band boundary off by one
+    /// shows up, as a seam along a window's side that no corner assertion
+    /// would ever look at.
+    #[test]
+    fn rounding_a_corner_leaves_the_straight_edges_exactly_where_they_were() {
+        let radius = 12.0_f32;
+        let (engine, mut flat) = round_canvas();
+        engine.fill_rect(&mut flat, BOX_X, BOX_Y, BOX_SIDE, BOX_SIDE, ROUND_FG, 1.0);
+
+        let (engine, mut rounded) = round_canvas();
+        engine.fill_round_rect(
+            &mut rounded,
+            BOX_X,
+            BOX_Y,
+            BOX_SIDE,
+            BOX_SIDE,
+            &CornerRadii::all(radius),
+            ROUND_FG,
+            1.0,
+        );
+
+        // Every row strictly between the two corner bands, full width.
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        let band = radius.ceil() as u32;
+        #[allow(clippy::cast_sign_loss, reason = "the box is at a positive origin")]
+        let by = BOX_Y as u32;
+        let mut compared = 0_u32;
+        // The full canvas width, not just the box's: a rounded fill that
+        // spilled sideways would show up out here, where the flat one is bare.
+        for y in by + band..by + BOX_SIDE - band {
+            for x in 0..ROUND_SIDE {
+                assert_eq!(
+                    rounded.get_pixel(x, y),
+                    flat.get_pixel(x, y),
+                    "rounding the corners changed the pixel at ({x}, {y}), which \
+                     lies on a straight side"
+                );
+                compared += 1;
+            }
+        }
+        assert!(
+            compared > 0,
+            "the bands swallowed the whole shape; nothing was compared"
+        );
+    }
+
+    /// The whole point: a corner asked to be round is not painted.
+    #[test]
+    fn a_rounded_fill_leaves_its_corners_bare() {
+        let (engine, mut fb) = round_canvas();
+        engine.fill_round_rect(
+            &mut fb,
+            BOX_X,
+            BOX_Y,
+            BOX_SIDE,
+            BOX_SIDE,
+            &CornerRadii::all(12.0),
+            ROUND_FG,
+            1.0,
+        );
+
+        // Each of the four corner pixels of the bounding box.
+        let far = BOX_SIDE - 1;
+        #[allow(clippy::cast_sign_loss, reason = "the box is at a positive origin")]
+        let (bx, by) = (BOX_X as u32, BOX_Y as u32);
+        for (x, y) in [
+            (bx, by),
+            (bx + far, by),
+            (bx, by + far),
+            (bx + far, by + far),
+        ] {
+            assert_eq!(
+                ink(&fb, x, y),
+                0,
+                "the corner pixel at ({x}, {y}) was painted by a rounded fill"
+            );
+        }
+
+        // ...while the parts that are still square are solid.
+        let mid = BOX_SIDE / 2;
+        for (x, y, what) in [
+            (bx + mid, by, "top edge"),
+            (bx + mid, by + far, "bottom edge"),
+            (bx, by + mid, "left edge"),
+            (bx + far, by + mid, "right edge"),
+            (bx + mid, by + mid, "centre"),
+        ] {
+            assert_eq!(ink(&fb, x, y), 0xFF, "the {what} should be solid");
+        }
+    }
+
+    /// A corner has to be a quarter *circle*, not a chamfer.
+    ///
+    /// Checked by area rather than by re-deriving the arc: a test that
+    /// recomputed `r - sqrt(r² - dy²)` would be a second copy of the code it
+    /// is checking, and would agree with it however wrong it was. The area a
+    /// quarter circle leaves out of its bounding square is `r²(1 - π/4)`,
+    /// which a chamfer (`r²/2`) and a square corner (`0`) both miss by far
+    /// more than the tolerance here.
+    #[test]
+    fn a_rounded_corner_is_a_quarter_circle_and_not_a_chamfer() {
+        let radius = 16.0_f32;
+        let (engine, mut fb) = round_canvas();
+        engine.fill_round_rect(
+            &mut fb,
+            BOX_X,
+            BOX_Y,
+            BOX_SIDE,
+            BOX_SIDE,
+            &CornerRadii::all(radius),
+            ROUND_FG,
+            1.0,
+        );
+
+        // Sum the *missing* coverage over the top-left corner's bounding box.
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        let r = radius as u32;
+        let mut missing = 0.0_f32;
+        #[allow(clippy::cast_sign_loss, reason = "the box is at a positive origin")]
+        let (bx, by) = (BOX_X as u32, BOX_Y as u32);
+        for y in by..by + r {
+            for x in bx..bx + r {
+                #[allow(clippy::cast_precision_loss, reason = "a byte of coverage")]
+                let covered = ink(&fb, x, y) as f32 / 255.0;
+                missing += 1.0 - covered;
+            }
+        }
+
+        let expected = radius * radius * (1.0 - core::f32::consts::FRAC_PI_4);
+        let chamfer = radius * radius / 2.0;
+        assert!(
+            (missing - expected).abs() < radius,
+            "the corner cut out {missing:.1} px² where a quarter circle of \
+             radius {radius} cuts out {expected:.1} (a chamfer would cut \
+             {chamfer:.1}, a square corner 0)"
+        );
+    }
+
+    /// The arc is smoothed, not stair-stepped.
+    ///
+    /// Without this, `fill_span_row` could round its span to whole pixels and
+    /// every assertion above would still pass — the shape would be right and
+    /// the edge would be visibly jagged.
+    #[test]
+    fn a_rounded_corner_is_antialiased() {
+        let (engine, mut fb) = round_canvas();
+        engine.fill_round_rect(
+            &mut fb,
+            BOX_X,
+            BOX_Y,
+            BOX_SIDE,
+            BOX_SIDE,
+            &CornerRadii::all(12.0),
+            ROUND_FG,
+            1.0,
+        );
+
+        let partial = inked(&fb)
+            .into_iter()
+            .filter(|&(x, y)| {
+                let level = ink(&fb, x, y);
+                level > 0 && level < 0xFF
+            })
+            .count();
+        assert!(
+            partial >= 12,
+            "only {partial} pixels along the arcs were partially covered; a \
+             smoothed corner of this radius has one per scanline per corner"
+        );
+    }
+
+    /// A client picks the radii and is not obliged to pick reasonable ones.
+    ///
+    /// The failure guarded against is not ugliness: an unclamped radius makes
+    /// `r² - dy²` positive far outside the box, so the span walks off the
+    /// shape, and an unchecked band height makes the middle quad's height
+    /// underflow to roughly four billion rows.
+    #[test]
+    fn a_radius_larger_than_the_box_is_clamped_rather_than_escaping_it() {
+        for radius in [f32::from(u16::MAX), 1.0e30] {
+            let (engine, mut fb) = round_canvas();
+            engine.fill_round_rect(
+                &mut fb,
+                BOX_X,
+                BOX_Y,
+                BOX_SIDE,
+                BOX_SIDE,
+                &CornerRadii::all(radius),
+                ROUND_FG,
+                1.0,
+            );
+
+            let centre = BOX_SIDE / 2;
+            #[allow(clippy::cast_sign_loss, reason = "the box is at a positive origin")]
+            let (bx, by) = (BOX_X as u32, BOX_Y as u32);
+            assert_eq!(
+                ink(&fb, bx + centre, by + centre),
+                0xFF,
+                "radius {radius} erased the middle of the shape"
+            );
+            assert_eq!(ink(&fb, bx, by), 0, "radius {radius} left a square corner");
+            for (x, y) in inked(&fb) {
+                assert!(
+                    x >= bx && x < bx + BOX_SIDE && y >= by && y < by + BOX_SIDE,
+                    "radius {radius} painted ({x}, {y}), outside the box"
+                );
+            }
+        }
+    }
+
+    /// A radius that is not a number, or not positive, must leave a square —
+    /// never an empty hole where a window was.
+    ///
+    /// **Honest note on what this pins.** Deleting the `sane` filter in
+    /// `RoundRect::new` does *not* make this fail, and that was checked rather
+    /// than assumed. The degradation to a square is overdetermined: `f32::max`
+    /// discards NaN in favour of its other operand, `NaN > 0.0` is false so
+    /// the overlap clamp skips it, and `NaN as u32` saturates to zero, which
+    /// collapses both corner bands and leaves the middle quad covering the
+    /// whole shape. Three independent accidents arrive at the right answer.
+    ///
+    /// The filter stays anyway, because "right by accident along three paths
+    /// at once" is not a property anyone can maintain — the next edit to any
+    /// of those three would break it silently. So this test pins the
+    /// user-visible behaviour, which is what actually matters, and the filter
+    /// makes that behaviour deliberate. It is deliberately not claimed to be
+    /// a regression test for the filter itself.
+    #[test]
+    fn a_nonsense_radius_falls_back_to_a_square_rather_than_vanishing() {
+        for radius in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY, -8.0] {
+            let (engine, mut fb) = round_canvas();
+            engine.fill_round_rect(
+                &mut fb,
+                BOX_X,
+                BOX_Y,
+                BOX_SIDE,
+                BOX_SIDE,
+                &CornerRadii::all(radius),
+                ROUND_FG,
+                1.0,
+            );
+            #[allow(clippy::cast_sign_loss, reason = "the box is at a positive origin")]
+            let (bx, by) = (BOX_X as u32, BOX_Y as u32);
+            assert_eq!(
+                ink(&fb, bx, by),
+                0xFF,
+                "radius {radius} left the shape unpainted instead of square"
+            );
+            assert_eq!(
+                inked(&fb).len(),
+                (BOX_SIDE * BOX_SIDE) as usize,
+                "radius {radius} did not draw the whole square"
+            );
+        }
+    }
+
+    /// An outline is hollow, and its corners are round.
+    #[test]
+    fn a_rounded_stroke_is_hollow_and_its_corners_are_bare() {
+        let (engine, mut fb) = round_canvas();
+        engine.stroke_round_rect(
+            &mut fb,
+            BOX_X,
+            BOX_Y,
+            BOX_SIDE,
+            BOX_SIDE,
+            3,
+            &CornerRadii::all(12.0),
+            ROUND_FG,
+            1.0,
+        );
+
+        #[allow(clippy::cast_sign_loss, reason = "the box is at a positive origin")]
+        let (bx, by) = (BOX_X as u32, BOX_Y as u32);
+        let mid = BOX_SIDE / 2;
+        assert_eq!(
+            ink(&fb, bx + mid, by + mid),
+            0,
+            "the middle of an outline was filled in"
+        );
+        // Probed inside the *corner band* as well, not only the straight
+        // middle. Those are two different code paths — the middle coalesces
+        // into two bars without ever consulting the inner shape, so a stroke
+        // that had forgotten to hollow itself out at all still left this
+        // shape's centre bare and passed on that assertion alone.
+        assert_eq!(
+            ink(&fb, bx + mid, by + 6),
+            0,
+            "the outline was solid across a scanline that runs through its \
+             rounded corners"
+        );
+        assert_eq!(ink(&fb, bx, by), 0, "the outline left a square corner");
+        assert_eq!(
+            ink(&fb, bx + mid, by),
+            0xFF,
+            "the top edge of the outline is missing"
+        );
+        assert_eq!(
+            ink(&fb, bx, by + mid),
+            0xFF,
+            "the left edge of the outline is missing"
+        );
+        assert_eq!(
+            ink(&fb, bx + BOX_SIDE - 1, by + mid),
+            0xFF,
+            "the right edge of the outline is missing"
+        );
+    }
+
+    /// **The regression that matters for the pair.** The outline is drawn
+    /// around the fill it belongs to, so every pixel the outline touches must
+    /// be one the fill would have touched. If the two derive their curve
+    /// differently they part company by a pixel somewhere along the arc, and
+    /// the result is a border that floats free of its own window at the
+    /// corners — the exact defect that made `stroke_round_rect` reuse
+    /// `RoundRect::span` instead of growing arc code of its own.
+    #[test]
+    fn a_rounded_stroke_never_paints_outside_the_fill_it_surrounds() {
+        let radii = CornerRadii {
+            top_left: 14.0,
+            top_right: 6.0,
+            bottom_right: 18.0,
+            bottom_left: 0.0,
+        };
+
+        let (engine, mut filled) = round_canvas();
+        engine.fill_round_rect(
+            &mut filled,
+            BOX_X,
+            BOX_Y,
+            BOX_SIDE,
+            BOX_SIDE,
+            &radii,
+            ROUND_FG,
+            1.0,
+        );
+
+        let (engine, mut stroked) = round_canvas();
+        engine.stroke_round_rect(
+            &mut stroked,
+            BOX_X,
+            BOX_Y,
+            BOX_SIDE,
+            BOX_SIDE,
+            2,
+            &radii,
+            ROUND_FG,
+            1.0,
+        );
+
+        let escaped: Vec<(u32, u32)> = inked(&stroked)
+            .into_iter()
+            .filter(|&(x, y)| ink(&filled, x, y) == 0)
+            .collect();
+        assert!(
+            escaped.is_empty(),
+            "the outline painted {} pixels the fill does not cover, e.g. {:?}",
+            escaped.len(),
+            &escaped[..escaped.len().min(6)]
+        );
+    }
+
+    /// Asymmetric radii must be honoured per corner, not averaged into one.
+    #[test]
+    fn each_corner_takes_its_own_radius() {
+        let (engine, mut fb) = round_canvas();
+        engine.fill_round_rect(
+            &mut fb,
+            BOX_X,
+            BOX_Y,
+            BOX_SIDE,
+            BOX_SIDE,
+            &CornerRadii {
+                top_left: 16.0,
+                top_right: 0.0,
+                bottom_right: 0.0,
+                bottom_left: 0.0,
+            },
+            ROUND_FG,
+            1.0,
+        );
+
+        #[allow(clippy::cast_sign_loss, reason = "the box is at a positive origin")]
+        let (bx, by) = (BOX_X as u32, BOX_Y as u32);
+        let far = BOX_SIDE - 1;
+        assert_eq!(
+            ink(&fb, bx, by),
+            0,
+            "the rounded top-left corner was painted"
+        );
+        for (x, y, which) in [
+            (bx + far, by, "top-right"),
+            (bx, by + far, "bottom-left"),
+            (bx + far, by + far, "bottom-right"),
+        ] {
+            assert_eq!(
+                ink(&fb, x, y),
+                0xFF,
+                "the {which} corner asked to stay square and was rounded anyway"
+            );
+        }
+    }
+
+    /// **The bug itself.** Everything above tests the rasterizer; this tests
+    /// that a client's radii ever reach it. They did not: `execute_command`
+    /// bound `corner_radii: _` and called the flat primitives, so the whole
+    /// rounded path could have existed and been correct and still never run.
+    /// A test that only calls `fill_round_rect` directly would have passed
+    /// against the broken tree.
+    #[test]
+    fn a_clients_corner_radii_reach_the_rasterizer() {
+        let radii = CornerRadii::all(12.0);
+        let white = Color::rgb(255, 255, 255);
+        // Window-local coordinates: `execute` translates by the window origin.
+        let commands = [
+            RenderCommand::FillRect {
+                x: 0.0,
+                y: 0.0,
+                width: 20.0,
+                height: 20.0,
+                color: white,
+                corner_radii: radii,
+            },
+            RenderCommand::StrokeRect {
+                x: 24.0,
+                y: 0.0,
+                width: 20.0,
+                height: 20.0,
+                color: white,
+                line_width: 3.0,
+                corner_radii: radii,
+            },
+        ];
+
+        let (mut engine, mut fb) = round_canvas();
+        engine.execute(&mut fb, &commands, BOX_X, BOX_Y, BOX_SIDE, BOX_SIDE, 1.0);
+
+        #[allow(clippy::cast_sign_loss, reason = "the box is at a positive origin")]
+        let (bx, by) = (BOX_X as u32, BOX_Y as u32);
+        assert_eq!(
+            ink(&fb, bx, by),
+            0,
+            "a client's FillRect radii were discarded and the corner drawn square"
+        );
+        assert_eq!(
+            ink(&fb, bx + 24, by),
+            0,
+            "a client's StrokeRect radii were discarded and the corner drawn square"
+        );
+        // ...and the shapes were actually drawn, so that "no ink in the
+        // corner" cannot be satisfied by drawing nothing at all.
+        assert_eq!(ink(&fb, bx + 10, by + 10), 0xFF, "the fill is missing");
+        assert_eq!(ink(&fb, bx + 34, by), 0xFF, "the outline is missing");
+    }
+
+    /// A new primitive is a new chance to paint straight at the framebuffer
+    /// and forget the clip stack, which is how a menu escapes its own window.
+    #[test]
+    fn a_rounded_fill_still_obeys_the_clip_stack() {
+        let (mut engine, mut fb) = round_canvas();
+        let clip = Rect::new(BOX_X, BOX_Y, BOX_SIDE / 2, BOX_SIDE);
+        engine.clip_stack.push(clip);
+        engine.fill_round_rect(
+            &mut fb,
+            BOX_X,
+            BOX_Y,
+            BOX_SIDE,
+            BOX_SIDE,
+            &CornerRadii::all(10.0),
+            ROUND_FG,
+            1.0,
+        );
+        engine.clip_stack.pop();
+
+        for (x, y) in inked(&fb) {
+            assert!(
+                clip.contains(x as i32, y as i32),
+                "a rounded fill painted ({x}, {y}), outside its clip {clip:?}"
+            );
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // The user's appearance settings reaching the decorations
+    //
+    // The compositor drew its own window frames from a hardcoded
+    // `DecorationTheme` and nothing else. Two of the user's choices in the
+    // Settings app — how round window corners are, and whether windows cast
+    // shadows — had no route into the process that draws the frames, so both
+    // were ignored outright: `Square` and `ExtraRounded` produced the same
+    // square frame, and turning shadows off left every shadow exactly where it
+    // was. These tests assert on the composited pixels, because "the field is
+    // stored" is precisely what was true before and was not enough.
+    // -----------------------------------------------------------------------
+
+    /// The display these tests composite onto. Large enough that a window can
+    /// sit well inside it with room for its shadow to fall on the desktop.
+    const DECOR_W: u32 = 400;
+    /// See [`DECOR_W`].
+    const DECOR_H: u32 = 300;
+
+    /// A compositor with one decorated window at a known place, rendered once
+    /// onto a cleared desktop under the given appearance settings.
+    ///
+    /// Renders one window rather than composing a frame so that what lands in
+    /// the buffer is exactly this window's decorations over a known background
+    /// — the same idiom as `a_scaled_shadow_is_actually_drawn_to_its_scaled_extent`.
+    fn decorated(settings: AppearanceSettings) -> (Compositor, WindowId) {
+        let mut comp = Compositor::new(DECOR_W, DECOR_H, 60).expect("compositor");
+        comp.set_appearance(settings);
+        let mut spec = WindowSpec::new("Framed", 160, 120);
+        spec.position = Some((120, 100));
+        let id = comp.create_window_from_spec(&spec, 1);
+        comp.refresh_window_scales();
+        let bg = comp.theme.desktop_background;
+        comp.backend.clear(bg);
+        comp.render_window(id);
+        (comp, id)
+    }
+
+    /// Settings that differ from the defaults only in their corner style.
+    fn with_corners(corners: WindowCorners) -> AppearanceSettings {
+        AppearanceSettings {
+            window_corners: corners,
+            ..AppearanceSettings::default()
+        }
+    }
+
+    /// How many pixels of `rect`'s top-left `size`×`size` block are painted in
+    /// exactly `color`.
+    ///
+    /// A count over a block rather than a probe at one coordinate, because it
+    /// measures *how much* of the corner was cut away. That is what lets one
+    /// measurement tell `Subtle` from `ExtraRounded`, without this test carrying
+    /// a second copy of the arc arithmetic that could agree with a wrong
+    /// original. Exact equality is deliberate: the antialiased rim pixels are
+    /// blends and do not count, so what is counted is the solid interior, which
+    /// is unambiguous.
+    ///
+    /// It is a *relative* measure only. A block over a window frame also
+    /// contains the border stroke down its left edge and the first letters of
+    /// the title, neither of which is frame colour — so the count sits well
+    /// below the block's area even for a perfectly square corner (339 of 400,
+    /// when this was written). Those contaminants do not move with the corner
+    /// setting, which is why comparing two counts over the same block is sound
+    /// and asserting an absolute one is not.
+    fn corner_ink(comp: &Compositor, rect: Rect, size: u32, color: u32) -> u32 {
+        let mut count: u32 = 0;
+        for dy in 0..size {
+            for dx in 0..size {
+                #[allow(
+                    clippy::cast_sign_loss,
+                    reason = "the sampled block is inside the window, which is \
+                              inside the buffer"
+                )]
+                let (x, y) = ((rect.x + dx as i32) as u32, (rect.y + dy as i32) as u32);
+                if working_pixel(&comp.backend, x, y) == Some(color) {
+                    count = count.saturating_add(1);
+                }
+            }
+        }
+        count
+    }
+
+    /// The title bar's own rectangle and background colour, for a focused
+    /// window. Read from the window rather than recomputed, so a change to the
+    /// layout cannot leave these tests probing empty desktop.
+    fn title_bar_of(comp: &Compositor, id: WindowId) -> (Rect, u32) {
+        let bar = comp
+            .window_ref(id)
+            .expect("window")
+            .title_bar_layout()
+            .expect("a decorated window has a title bar");
+        let focused = comp.window_ref(id).expect("window").focused;
+        let color = if focused {
+            comp.theme.title_bar_focused
+        } else {
+            comp.theme.title_bar_unfocused
+        };
+        (bar.bar, color)
+    }
+
+    /// How big a block to measure a corner over. Larger than the largest radius
+    /// the settings offer (16), so `ExtraRounded` still leaves solid pixels in
+    /// the block and the counts stay comparable.
+    const CORNER_BLOCK: u32 = 20;
+
+    #[test]
+    fn the_users_corner_setting_reaches_the_window_frame() {
+        // The bug: it did not. Every window was drawn with a square frame no
+        // matter what the user chose, because the compositor had no connection
+        // to the appearance settings at all — `Square` and `ExtraRounded` were
+        // the same picture.
+        //
+        // Probed two pixels in from the frame's top-left rather than counted
+        // over a block, because this one pixel is unambiguous: it is inside the
+        // border stroke and well clear of the title text, so the only thing
+        // that decides its colour is whether the corner was cut away. A square
+        // corner paints it; a 16px arc is still 8px away from it at that depth.
+        let corner_painted = |corners| {
+            let (comp, id) = decorated(with_corners(corners));
+            let (bar, color) = title_bar_of(&comp, id);
+            #[allow(
+                clippy::cast_sign_loss,
+                reason = "the window is placed well inside the 400x300 buffer"
+            )]
+            let probe = ((bar.x + 2) as u32, (bar.y + 2) as u32);
+            working_pixel(&comp.backend, probe.0, probe.1) == Some(color)
+        };
+        assert!(
+            corner_painted(WindowCorners::Square),
+            "a square corner left its own corner pixel unpainted"
+        );
+        assert!(
+            !corner_painted(WindowCorners::ExtraRounded),
+            "the user asked for extra-rounded windows and the corner pixel was \
+             painted anyway — the setting never reached the frame"
+        );
+    }
+
+    #[test]
+    fn a_deeper_corner_setting_cuts_more_of_the_corner_away() {
+        // Not just "some rounding happened": the *amount* has to follow the
+        // setting. A compositor that rounded every window by one hardcoded
+        // radius would pass the test above and fail this one, and would ignore
+        // three of the four choices the settings panel offers.
+        let inks: Vec<(WindowCorners, u32)> = [
+            WindowCorners::Square,
+            WindowCorners::Subtle,
+            WindowCorners::Rounded,
+            WindowCorners::ExtraRounded,
+        ]
+        .into_iter()
+        .map(|corners| {
+            let (comp, id) = decorated(with_corners(corners));
+            let (bar, color) = title_bar_of(&comp, id);
+            (corners, corner_ink(&comp, bar, CORNER_BLOCK, color))
+        })
+        .collect();
+
+        for pair in inks.windows(2) {
+            let [(shallow, more), (deep, less)] = pair else {
+                unreachable!("windows(2) yields pairs")
+            };
+            assert!(
+                less < more,
+                "{deep:?} (radius {}) left {less} painted pixels, which is not fewer \
+                 than {shallow:?} (radius {}) at {more}",
+                deep.radius(),
+                shallow.radius(),
+            );
+        }
+    }
+
+    #[test]
+    fn the_border_rounds_with_the_frame_it_traces() {
+        // The border is a separate call from the title bar, so rounding one
+        // does not round the other — and a square border around a rounded frame
+        // is not a subtle defect: it is a hard rectangular outline standing off
+        // the window's curved corners with desktop showing between them.
+        let border_at_the_corner = |corners| {
+            let (comp, id) = decorated(with_corners(corners));
+            let frame = comp.window_ref(id).expect("window").frame_rect();
+            let width = scale_dimension(
+                BORDER_WIDTH,
+                comp.window_ref(id).expect("window").scale_factor,
+            );
+            // The border box starts one stroke above the frame; see
+            // `render_border`. Its own top-left is the pixel a square stroke
+            // paints and a rounded one leaves alone.
+            #[allow(
+                clippy::cast_sign_loss,
+                reason = "the window is placed well inside the 400x300 buffer"
+            )]
+            let probe = (frame.x as u32, (frame.y - width as i32) as u32);
+            let focused = comp.window_ref(id).expect("window").focused;
+            let expected = if focused {
+                comp.theme.border_focused
+            } else {
+                comp.theme.border_unfocused
+            };
+            working_pixel(&comp.backend, probe.0, probe.1) == Some(expected)
+        };
+        assert!(
+            border_at_the_corner(WindowCorners::Square),
+            "a square border did not paint its own corner pixel"
+        );
+        assert!(
+            !border_at_the_corner(WindowCorners::ExtraRounded),
+            "the border stayed square while the frame rounded"
+        );
+    }
+
+    #[test]
+    fn the_shadow_rounds_with_the_window_it_falls_from() {
+        // A shadow is the window's own silhouette, offset and blurred. Rings
+        // that kept square corners under a rounded window would show as dark
+        // right angles poking diagonally out past the curve they are supposed
+        // to be sitting behind — the one place a shadow is most visible.
+        let shadow_ink = |corners| {
+            let (comp, id) = decorated(with_corners(corners));
+            let frame = comp.window_ref(id).expect("window").frame_rect();
+            let bg = comp.theme.desktop_background;
+            // The block diagonally off the frame's bottom-right, which is
+            // shadow and nothing else: the window does not reach it and the
+            // desktop behind it is a flat colour.
+            #[allow(
+                clippy::cast_sign_loss,
+                reason = "the window is placed well inside the 400x300 buffer"
+            )]
+            let origin = (
+                (frame.x + frame.width as i32) as u32,
+                (frame.y + frame.height as i32) as u32,
+            );
+            let mut painted = 0u32;
+            for dy in 0..SHADOW_SIZE {
+                for dx in 0..SHADOW_SIZE {
+                    let (x, y) = (origin.0.saturating_add(dx), origin.1.saturating_add(dy));
+                    if working_pixel(&comp.backend, x, y).is_some_and(|p| p != bg) {
+                        painted = painted.saturating_add(1);
+                    }
+                }
+            }
+            painted
+        };
+        let square = shadow_ink(WindowCorners::Square);
+        let rounded = shadow_ink(WindowCorners::ExtraRounded);
+        assert!(square > 0, "no shadow was drawn at all beside the window");
+        assert!(
+            rounded < square,
+            "the shadow's corner stayed square ({rounded} painted pixels) under a \
+             rounded window; the square one painted {square}"
+        );
+    }
+
+    #[test]
+    fn the_corner_radius_grows_with_the_display_scale() {
+        // Every other decoration dimension is scaled to the display
+        // (`scale_dimension`). A radius that was not would leave a 2x window —
+        // twice the frame, twice the title bar, twice the border — wearing the
+        // same 8px curve, which reads as a window with sharper corners rather
+        // than as the same window drawn larger.
+        //
+        // Measured as the depth at which the title bar's top row starts being
+        // painted, rather than predicted from the radius: re-deriving the arc
+        // here would be a second copy of it that can agree with a wrong
+        // original.
+        let corner_depth = |scale: f32| {
+            let mut comp = Compositor::new(DECOR_W, DECOR_H, 60).expect("compositor");
+            if let Some(d) = comp.display_manager.displays.first_mut() {
+                d.scale_factor = scale;
+            }
+            comp.set_appearance(with_corners(WindowCorners::ExtraRounded));
+            let mut spec = WindowSpec::new("Framed", 160, 120);
+            spec.position = Some((120, 100));
+            let id = comp.create_window_from_spec(&spec, 1);
+            comp.refresh_window_scales();
+            comp.backend.clear(comp.theme.desktop_background);
+            comp.render_window(id);
+
+            let (bar, color) = title_bar_of(&comp, id);
+            #[allow(
+                clippy::cast_sign_loss,
+                reason = "the window is placed well inside the 400x300 buffer"
+            )]
+            let row = bar.y as u32;
+            #[allow(
+                clippy::cast_sign_loss,
+                reason = "the window is placed well inside the 400x300 buffer"
+            )]
+            let left = bar.x as u32;
+            (0..bar.width)
+                .find(|&dx| {
+                    working_pixel(&comp.backend, left.saturating_add(dx), row) == Some(color)
+                })
+                .expect("the title bar's top row is painted somewhere")
+        };
+        let single = corner_depth(1.0);
+        let double = corner_depth(2.0);
+        assert!(
+            single > 0,
+            "an extra-rounded corner cut nothing from the top row"
+        );
+        assert!(
+            double > single,
+            "the corner bit {double} pixels into the top row at 2x and {single} at \
+             1x — the radius did not scale with the display"
+        );
+    }
+
+    #[test]
+    fn the_window_buttons_round_with_the_windows() {
+        // A square close button beside a curved frame corner is the mismatch,
+        // not the consistency — and the buttons are drawn by a different call
+        // than the frame, so rounding one does not round the other.
+        let button_of = |corners| {
+            let (comp, id) = decorated(with_corners(corners));
+            let close = comp
+                .window_ref(id)
+                .expect("window")
+                .close_button_rect()
+                .expect("an ordinary window has a close button");
+            let ink = corner_ink(
+                &comp,
+                close,
+                close.width.min(close.height),
+                comp.theme.close_button,
+            );
+            (close, ink)
+        };
+        let (square_rect, square_ink) = button_of(WindowCorners::Square);
+        let (round_rect, round_ink) = button_of(WindowCorners::ExtraRounded);
+        assert_eq!(
+            square_rect, round_rect,
+            "the button geometry must not move, or the two counts are of different things"
+        );
+        assert!(
+            round_ink < square_ink,
+            "the close button stayed square ({round_ink} painted pixels) while the \
+             frame rounded; square's was {square_ink}"
+        );
+    }
+
+    #[test]
+    fn turning_drop_shadows_off_leaves_the_desktop_beside_the_window_bare() {
+        let settings = |drop_shadows| AppearanceSettings {
+            drop_shadows,
+            ..AppearanceSettings::default()
+        };
+        let (with, id) = decorated(settings(true));
+        let (without, _) = decorated(settings(false));
+
+        let frame = with.window_ref(id).expect("window").frame_rect();
+        let bg = with.theme.desktop_background;
+        // A row through the middle of the window, sampled to the right of the
+        // frame: shadow country, and nothing else is drawn out there.
+        #[allow(
+            clippy::cast_sign_loss,
+            reason = "the window is placed well inside the 400x300 buffer"
+        )]
+        let row = (frame.y + frame.height as i32 / 2) as u32;
+        #[allow(
+            clippy::cast_sign_loss,
+            reason = "the window is placed well inside the 400x300 buffer"
+        )]
+        let right = (frame.x + frame.width as i32) as u32;
+        let band = right..right.saturating_add(SHADOW_SIZE);
+
+        let shaded = band
+            .clone()
+            .filter(|&x| working_pixel(&with.backend, x, row) != Some(bg))
+            .count();
+        assert!(
+            shaded > 0,
+            "with shadows on, nothing was painted in the shadow band — this test \
+             cannot tell suppression from an empty band"
+        );
+        let unshaded = band
+            .filter(|&x| working_pixel(&without.backend, x, row) != Some(bg))
+            .count();
+        assert_eq!(
+            unshaded, 0,
+            "the user turned drop shadows off and {unshaded} shadow pixels were \
+             still painted beside the window"
+        );
+    }
+
+    #[test]
+    fn a_maximized_window_casts_no_shadow_it_could_only_smear_over_itself() {
+        // A maximized frame is fitted to the display exactly, so every ring of
+        // its shadow is clipped away or drawn under the window's own frame. On
+        // an opaque window that is pure overdraw; on a translucent one the
+        // rings show through as a dark smear along the top and left edges,
+        // which is what this test can see. The comparison is against the same
+        // scene with shadows turned off: if the suppression works, maximizing
+        // is indistinguishable from having asked for no shadows at all.
+        let scene = |drop_shadows| {
+            let mut comp = Compositor::new(DECOR_W, DECOR_H, 60).expect("compositor");
+            comp.set_appearance(AppearanceSettings {
+                drop_shadows,
+                ..AppearanceSettings::default()
+            });
+            let id = comp.create_window("Framed".to_string(), 160, 120, 1);
+            // Translucent, so the frame blends over whatever is beneath it
+            // instead of hiding it. An opaque maximized window would look
+            // identical either way and prove nothing.
+            comp.set_opacity(id, 0.5).expect("opacity");
+            comp.maximize_window(id).expect("maximize");
+            comp.refresh_window_scales();
+            comp.backend.clear(comp.theme.desktop_background);
+            comp.render_window(id);
+            comp.backend.working_pixels().to_vec()
+        };
+        assert_eq!(
+            scene(true),
+            scene(false),
+            "a maximized window was drawn differently with shadows on than with \
+             them off, which means a shadow it can only smear over itself was drawn"
+        );
+    }
+
+    #[test]
+    fn an_ordinary_window_still_casts_one() {
+        // Non-vacuity for the test above: the comparison it makes must be
+        // capable of coming out unequal.
+        let scene = |drop_shadows| {
+            let (comp, _) = decorated(AppearanceSettings {
+                drop_shadows,
+                ..AppearanceSettings::default()
+            });
+            comp.backend.working_pixels().to_vec()
+        };
+        assert_ne!(
+            scene(true),
+            scene(false),
+            "an ordinary window looked the same with shadows on and off"
+        );
+    }
+
+    #[test]
+    fn changing_the_appearance_repaints_what_is_already_on_screen() {
+        // A settings change moves pixels that no window's damage covers: the
+        // quarter-disc a squared corner reclaims, and the strip a removed
+        // shadow vacates. Nothing marks those dirty, so without a forced
+        // recomposite the user changes the setting and the screen does not
+        // change until something else happens to repaint that area.
+        //
+        // A refresh rate past 1 MHz, because `frame_interval_for` divides into
+        // it and lands on a zero-length frame budget: `compose_frame` also
+        // declines when it is *too soon* for another frame, and at 60 Hz three
+        // calls in a row are all inside one 16 ms interval — so the assertions
+        // below would be reading the vsync gate rather than the damage state,
+        // and the middle one would pass for entirely the wrong reason.
+        let mut comp = Compositor::new(DECOR_W, DECOR_H, 2_000_000).expect("compositor");
+        comp.create_window("Framed".to_string(), 160, 120, 1);
+        assert!(comp.compose_frame(), "the first frame draws the new window");
+        assert!(
+            !comp.compose_frame(),
+            "an unchanged desktop should have nothing to redraw"
+        );
+        comp.set_appearance(with_corners(WindowCorners::Square));
+        assert!(
+            comp.compose_frame(),
+            "the corner setting changed and nothing was redrawn"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Live reload
+    //
+    // Reading the settings once at startup left the user changing a setting and
+    // watching nothing happen until they logged out. These tests cover the
+    // reload path itself; that a wire request reaches it is covered in
+    // `wire.rs`, where both halves of the protocol are in scope.
+    // -----------------------------------------------------------------------
+
+    /// Write `settings` to the scratch configuration directory as the user's
+    /// own `appearance.yaml`, through the same type the Settings app saves
+    /// with.
+    ///
+    /// Deliberately not a hand-written YAML literal: the file's key spellings
+    /// belong to `gui/appearance`, and a literal here would be a second copy of
+    /// them that could agree with a wrong reader or drift from a renamed key
+    /// and fail for a reason that has nothing to do with the compositor.
+    fn save_user_appearance(settings: AppearanceSettings) {
+        let mut file = appearance::AppearanceFile::new();
+        file.settings = settings;
+        file.save().expect("write scratch appearance.yaml");
+    }
+
+    #[test]
+    fn a_reload_adopts_what_the_users_file_now_says() {
+        // The gap this closes: the settings were read once, in `main`, before
+        // the first frame. Everything after that ran on whatever the file said
+        // at login, so the Settings app could write a change the running
+        // compositor would never see.
+        appearance::config::testing::with_scratch_config("compositor-reload", |_root| {
+            let mut comp = Compositor::new(DECOR_W, DECOR_H, 60).expect("compositor");
+            assert_eq!(
+                comp.appearance().window_corners,
+                WindowCorners::Rounded,
+                "the constructor should start from the defaults, not the disk"
+            );
+
+            save_user_appearance(AppearanceSettings {
+                window_corners: WindowCorners::Square,
+                drop_shadows: false,
+                ..AppearanceSettings::default()
+            });
+            comp.reload_appearance();
+
+            assert_eq!(
+                comp.appearance().window_corners,
+                WindowCorners::Square,
+                "the corner setting written to the file did not reach the compositor"
+            );
+            assert!(
+                !comp.appearance().drop_shadows,
+                "the shadow setting written to the file did not reach the compositor"
+            );
+        });
+    }
+
+    #[test]
+    fn a_reload_that_changed_something_repaints_the_whole_screen() {
+        // The same argument as `changing_the_appearance_repaints_what_is_
+        // already_on_screen`, asserted through the reload path: the pixels a
+        // corner or shadow change moves are outside every window's damage, so
+        // without a forced recomposite the file changes and the screen does
+        // not.
+        appearance::config::testing::with_scratch_config("compositor-reload-damage", |_root| {
+            // See `changing_the_appearance_repaints_what_is_already_on_screen`
+            // for why the refresh rate is absurd: at 60 Hz these three calls
+            // fall inside one frame interval and would measure the vsync gate.
+            let mut comp = Compositor::new(DECOR_W, DECOR_H, 2_000_000).expect("compositor");
+            comp.create_window("Framed".to_string(), 160, 120, 1);
+            assert!(comp.compose_frame(), "the first frame draws the new window");
+            assert!(
+                !comp.compose_frame(),
+                "an unchanged desktop should have nothing to redraw"
+            );
+
+            save_user_appearance(with_corners(WindowCorners::Square));
+            comp.reload_appearance();
+
+            assert!(
+                comp.compose_frame(),
+                "the reload changed the corners and nothing was redrawn"
+            );
+        });
+    }
+
+    #[test]
+    fn a_reload_that_finds_nothing_changed_costs_nothing() {
+        // Any client that can open the display socket can ask for a reload, as
+        // often as it likes. If each one repainted the screen, a request whose
+        // whole safety argument is that it carries no data would still be a way
+        // to hold the compositor at a full-screen redraw indefinitely. So the
+        // damage state must survive a reload that read the same settings back.
+        appearance::config::testing::with_scratch_config("compositor-reload-noop", |_root| {
+            let mut comp = Compositor::new(DECOR_W, DECOR_H, 2_000_000).expect("compositor");
+            comp.create_window("Framed".to_string(), 160, 120, 1);
+            assert!(comp.compose_frame(), "the first frame draws the new window");
+
+            // No file written at all: a fresh install, where `load` yields the
+            // defaults the compositor is already holding.
+            for _ in 0..3 {
+                comp.reload_appearance();
+                assert!(
+                    !comp.compose_frame(),
+                    "a reload that changed nothing forced a full repaint"
+                );
+            }
+        });
     }
 }

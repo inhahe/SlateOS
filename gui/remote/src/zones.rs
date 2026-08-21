@@ -608,6 +608,150 @@ impl WorkArea {
     }
 }
 
+// ============================================================================
+// Edge drops -- what dragging a window to an edge and letting go should do
+// ============================================================================
+
+/// How close (pixels) the cursor must be to an edge of the work area for a drop
+/// there to count as an edge snap.
+///
+/// Eight, not more: the band is armed for the whole of a drag, and a generous
+/// one turns "I moved my window near the left of the screen" into "my window
+/// filled the left half", which is a surprise the user cannot undo by aiming
+/// better.
+pub const EDGE_THRESHOLD: f32 = 8.0;
+
+/// Which edge or corner of the work area a point is near.
+///
+/// Corners take precedence over the edges they are made of — a point that is
+/// both near the left and near the top is `TopLeft` and not `Left`, because a
+/// corner is the more specific answer and is the one the user aimed at.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum ScreenEdge {
+    Left,
+    Right,
+    Top,
+    Bottom,
+    TopLeft,
+    TopRight,
+    BottomLeft,
+    BottomRight,
+}
+
+/// Which edge or corner of `area` the point `(x, y)` is near, if any.
+///
+/// Measured against the **work area**, not the screen. Against the screen, the
+/// bottom edge and both bottom corners sit inside the taskbar's strip: the
+/// cursor does travel there during a drag, but it is over the taskbar, and a
+/// drag onto the taskbar is a taskbar interaction, not a snap. So the bottom
+/// three regions would be simultaneously unreachable as snaps and stealing
+/// input from the bar. Against the work area they sit just above it, where a
+/// user aiming at "the bottom of my desktop" actually points.
+#[must_use]
+pub fn edge_at(x: f32, y: f32, area: WorkArea) -> Option<ScreenEdge> {
+    let near_left = x >= area.x && x < area.x + EDGE_THRESHOLD;
+    let near_right = x < area.right() && x >= area.right() - EDGE_THRESHOLD;
+    let near_top = y >= area.y && y < area.y + EDGE_THRESHOLD;
+    let near_bottom = y < area.bottom() && y >= area.bottom() - EDGE_THRESHOLD;
+
+    match (near_left, near_right, near_top, near_bottom) {
+        (true, _, true, _) => Some(ScreenEdge::TopLeft),
+        (true, _, _, true) => Some(ScreenEdge::BottomLeft),
+        (_, true, true, _) => Some(ScreenEdge::TopRight),
+        (_, true, _, true) => Some(ScreenEdge::BottomRight),
+        (true, _, _, _) => Some(ScreenEdge::Left),
+        (_, true, _, _) => Some(ScreenEdge::Right),
+        (_, _, true, _) => Some(ScreenEdge::Top),
+        (_, _, _, true) => Some(ScreenEdge::Bottom),
+        _ => None,
+    }
+}
+
+/// What letting go of a dragged window at an edge should do to it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum EdgeDrop {
+    /// Fill the whole work area.
+    Maximize,
+    /// Tile into one slot of a preset layout.
+    Zone(SnapSlot),
+}
+
+impl EdgeDrop {
+    /// The rectangle this drop places a window in, within `area`.
+    ///
+    /// The preview drawn while the cursor hovers the edge and the placement
+    /// made when it is released are both this rectangle, so a preview cannot
+    /// promise a shape the drop does not deliver.
+    #[must_use]
+    pub fn rect(self, area: WorkArea) -> Option<SnapZone> {
+        match self {
+            Self::Maximize => Some(SnapZone {
+                id: 0,
+                x: area.x,
+                y: area.y,
+                width: area.width,
+                height: area.height,
+                label: "Maximize",
+            }),
+            Self::Zone(slot) => slot.rect(area),
+        }
+    }
+}
+
+/// What dropping a window at `edge` means, or `None` for "no snap — this is an
+/// ordinary window move".
+///
+/// **Deliberately independent of whichever layout the zone picker has
+/// selected.** Dragging to the left edge means *the left half* whatever grid is
+/// chosen, which is what makes the gesture predictable: an edge drop is a
+/// coarse gesture aimed with the whole arm, and having it mean something
+/// different depending on a menu the user set last week would make it
+/// unlearnable.
+///
+/// # What this replaced
+///
+/// The original mapping sent the *vertical* edges to the *horizontal* halves:
+/// `Top` to the left half (commented "maximize hint", which it was not) and
+/// `Bottom` to the right half. So dragging a window to the top of the screen
+/// moved it to the left, and dragging it to the bottom moved it to the right —
+/// with no relationship between the direction the user dragged and the place
+/// the window went. The test in place could not see it: it asserted only that
+/// each edge maps to a zone that *exists*.
+///
+/// `Top` now maximizes, which is what every desktop this imitates does, and
+/// `Bottom` does nothing — also matching, and the honest answer given that a
+/// half-height bottom strip is not one of the presets.
+#[must_use]
+pub fn drop_at_edge(edge: ScreenEdge) -> Option<EdgeDrop> {
+    // `SnapSlot::new` cannot fail for any of these: two-halves has zones 0-1
+    // and four-quadrants has 0-3. Written with `?` rather than an unwrap so the
+    // function is total without a panicking branch, and
+    // `every_edge_that_snaps_names_a_slot_that_exists` proves the arms are the
+    // ones intended rather than merely constructible.
+    let zone = |preset, id| Some(EdgeDrop::Zone(SnapSlot::new(preset, id)?));
+    match edge {
+        ScreenEdge::Left => zone(SnapLayoutPreset::TwoEqualHalves, 0),
+        ScreenEdge::Right => zone(SnapLayoutPreset::TwoEqualHalves, 1),
+        ScreenEdge::Top => Some(EdgeDrop::Maximize),
+        ScreenEdge::Bottom => None,
+        ScreenEdge::TopLeft => zone(SnapLayoutPreset::FourQuadrants, 0),
+        ScreenEdge::TopRight => zone(SnapLayoutPreset::FourQuadrants, 1),
+        ScreenEdge::BottomLeft => zone(SnapLayoutPreset::FourQuadrants, 2),
+        ScreenEdge::BottomRight => zone(SnapLayoutPreset::FourQuadrants, 3),
+    }
+}
+
+/// What dropping a window whose drag has reached `(x, y)` should do, if
+/// anything.
+///
+/// The whole gesture in one call: [`edge_at`] then [`drop_at_edge`]. Both
+/// halves stay public because the preview wants to know *which* edge is armed
+/// (to draw the right affordance) and the drop only wants to know what to do.
+#[must_use]
+pub fn drop_at(x: f32, y: f32, area: WorkArea) -> Option<EdgeDrop> {
+    drop_at_edge(edge_at(x, y, area)?)
+}
+
 #[cfg(test)]
 mod tests {
     // A test module's job is to fail loudly the instant the code under test is
@@ -837,7 +981,7 @@ mod tests {
 
     #[test]
     fn six_grid_ids_run_row_major_and_match_their_labels() {
-        // The id is what `edge_to_default_snap` and the caller's persisted
+        // The id is what `drop_at_edge` and the caller's persisted
         // window state refer to, and it is now the label array's index rather
         // than a separately-computed `row * 3 + col`. Pin the correspondence:
         // renumbering these silently sends every remembered window to a
@@ -1187,5 +1331,282 @@ mod tests {
             wide.y
         );
         assert!(inset.height < wide.height);
+    }
+
+    // ======================================================================
+    // Edge drops
+    // ======================================================================
+
+    /// A point `inset` pixels in from the left edge of `area`, vertically
+    /// centred so nothing but the horizontal band can be responsible.
+    fn from_left(area: WorkArea, inset: f32) -> (f32, f32) {
+        (area.x + inset, area.y + area.height / 2.0)
+    }
+
+    /// A point `inset` pixels up from the bottom edge of `area`, horizontally
+    /// centred for the same reason.
+    fn from_bottom(area: WorkArea, inset: f32) -> (f32, f32) {
+        (area.x + area.width / 2.0, area.bottom() - inset)
+    }
+
+    #[test]
+    fn the_middle_of_the_desktop_is_no_edge_at_all() {
+        // The band is armed for the whole of a drag, so the common case — a
+        // user moving a window from one part of the desktop to another — has
+        // to mean nothing at all.
+        assert_eq!(
+            edge_at(DESK.x + DESK.width / 2.0, DESK.y + DESK.height / 2.0, DESK),
+            None
+        );
+        assert_eq!(
+            drop_at(DESK.x + DESK.width / 2.0, DESK.y + DESK.height / 2.0, DESK),
+            None
+        );
+    }
+
+    #[test]
+    fn the_band_ends_where_the_threshold_says_it_does() {
+        // Both boundaries of both bands, to the pixel. A band that is a pixel
+        // wide at one end and a pixel short at the other is still a band of
+        // the right *size*, so testing only the width would not see it.
+        //
+        // Near bands run from the work area's own edge inward; far bands run
+        // from the last pixel inward, because the far edge itself is one past
+        // the area (`WorkArea::contains` is half-open there) and belongs to
+        // whatever is beyond.
+        let (x_first, y) = from_left(DESK, 0.0);
+        assert_eq!(
+            edge_at(x_first, y, DESK),
+            Some(ScreenEdge::Left),
+            "the work area's own left column is inside the left band"
+        );
+        let (x_last, y) = from_left(DESK, EDGE_THRESHOLD - 1.0);
+        assert_eq!(edge_at(x_last, y, DESK), Some(ScreenEdge::Left));
+        let (x_past, y) = from_left(DESK, EDGE_THRESHOLD);
+        assert_eq!(edge_at(x_past, y, DESK), None);
+
+        let (x, y_first) = from_bottom(DESK, EDGE_THRESHOLD);
+        assert_eq!(
+            edge_at(x, y_first, DESK),
+            Some(ScreenEdge::Bottom),
+            "the band is {EDGE_THRESHOLD} rows deep counting from the last one"
+        );
+        let (x, y_last) = from_bottom(DESK, 1.0);
+        assert_eq!(edge_at(x, y_last, DESK), Some(ScreenEdge::Bottom));
+        let (x, y_past) = from_bottom(DESK, EDGE_THRESHOLD + 1.0);
+        assert_eq!(edge_at(x, y_past, DESK), None);
+    }
+
+    #[test]
+    fn a_point_outside_the_work_area_is_on_no_edge() {
+        // A drag can leave the work area entirely — over the taskbar, or past
+        // the display's own edge on a machine that allows it. "Just outside
+        // the left edge" must not read as "on the left edge", or a window
+        // dragged onto the taskbar would snap.
+        assert_eq!(edge_at(SIDE_BAR_DESK.x - 1.0, 500.0, SIDE_BAR_DESK), None);
+        assert_eq!(
+            edge_at(SIDE_BAR_DESK.right(), 500.0, SIDE_BAR_DESK),
+            None,
+            "right() is one past the last column and belongs to whatever is beyond"
+        );
+        assert_eq!(
+            edge_at(500.0, DESK.bottom(), DESK),
+            None,
+            "bottom() is one past the last row, so it is the taskbar's, not the desktop's"
+        );
+        assert_eq!(edge_at(500.0, DESK.bottom() + 1.0, DESK), None);
+        assert_eq!(edge_at(500.0, TOP_BAR_DESK.y - 1.0, TOP_BAR_DESK), None);
+    }
+
+    #[test]
+    fn a_corner_beats_the_two_edges_it_is_made_of() {
+        // Every corner, because a match arm ordering that gets three of them
+        // right is exactly what a single-corner test would pass.
+        let near = EDGE_THRESHOLD / 2.0;
+        let cases = [
+            (DESK.x + near, DESK.y + near, ScreenEdge::TopLeft),
+            (DESK.right() - near, DESK.y + near, ScreenEdge::TopRight),
+            (DESK.x + near, DESK.bottom() - near, ScreenEdge::BottomLeft),
+            (
+                DESK.right() - near,
+                DESK.bottom() - near,
+                ScreenEdge::BottomRight,
+            ),
+        ];
+        for (x, y, expected) in cases {
+            assert_eq!(
+                edge_at(x, y, DESK),
+                Some(expected),
+                "({x}, {y}) should be {expected:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_edge_band_is_measured_against_the_work_area_not_the_screen() {
+        // The bug this rules out: measuring against the display. The bottom
+        // band would then sit *under* the taskbar, where a drag is a taskbar
+        // interaction and never a snap — making the bottom three regions both
+        // unreachable and input-stealing.
+        //
+        // All four bands, each against a work area inset on *that* side, and
+        // each cross-checked against the full screen. Three sides measured
+        // correctly and one against the display is a plausible way to get this
+        // wrong, and a test that probes one side cannot see it.
+        let inset = 4.0;
+        let mid_x = SCREEN.width / 2.0;
+        let mid_y = SCREEN.height / 2.0;
+        let cases = [
+            (
+                DESK,
+                (mid_x, DESK.bottom() - inset),
+                ScreenEdge::Bottom,
+                "the row just above a bottom taskbar",
+            ),
+            (
+                TOP_BAR_DESK,
+                (mid_x, TOP_BAR_DESK.y + inset),
+                ScreenEdge::Top,
+                "the row just below a top taskbar",
+            ),
+            (
+                SIDE_BAR_DESK,
+                (SIDE_BAR_DESK.x + inset, mid_y),
+                ScreenEdge::Left,
+                "the column just right of a left dock",
+            ),
+            (
+                SIDE_BAR_DESK,
+                (SIDE_BAR_DESK.right() - inset, mid_y),
+                ScreenEdge::Right,
+                "the column just left of a right sidebar",
+            ),
+        ];
+        for (area, (x, y), expected, what) in cases {
+            assert_eq!(
+                edge_at(x, y, area),
+                Some(expected),
+                "{what} is the {expected:?} edge of the desktop"
+            );
+            assert_eq!(
+                edge_at(x, y, SCREEN),
+                None,
+                "{what} is nowhere near the edge of the screen itself"
+            );
+        }
+    }
+
+    #[test]
+    fn every_edge_that_snaps_names_a_slot_that_exists() {
+        // `drop_at_edge` builds its slots with `?` rather than an unwrap, so a
+        // mistyped zone number would silently become "this edge does nothing"
+        // instead of a panic. Only `Bottom` is allowed to be nothing.
+        let edges = [
+            ScreenEdge::Left,
+            ScreenEdge::Right,
+            ScreenEdge::Top,
+            ScreenEdge::TopLeft,
+            ScreenEdge::TopRight,
+            ScreenEdge::BottomLeft,
+            ScreenEdge::BottomRight,
+        ];
+        for edge in edges {
+            let drop = drop_at_edge(edge).unwrap_or_else(|| panic!("{edge:?} should snap"));
+            assert!(
+                drop.rect(DESK).is_some(),
+                "{edge:?} names a slot that resolves to no rectangle"
+            );
+        }
+        assert_eq!(drop_at_edge(ScreenEdge::Bottom), None);
+    }
+
+    #[test]
+    fn a_dropped_window_goes_where_the_user_dragged_it() {
+        // The defect this replaced: `Top` mapped to the *left* half and
+        // `Bottom` to the *right* one, so the direction of the gesture had no
+        // relationship to where the window landed. Comparing against the
+        // layout's own zones, by rectangle, is what makes that visible — the
+        // old test asserted only that each edge named a zone that existed,
+        // which the wrong zones did too.
+        let halves = SnapLayoutPreset::TwoEqualHalves.build(DESK).zones;
+        let quads = SnapLayoutPreset::FourQuadrants.build(DESK).zones;
+        let cases = [
+            (ScreenEdge::Left, halves[0]),
+            (ScreenEdge::Right, halves[1]),
+            (ScreenEdge::TopLeft, quads[0]),
+            (ScreenEdge::TopRight, quads[1]),
+            (ScreenEdge::BottomLeft, quads[2]),
+            (ScreenEdge::BottomRight, quads[3]),
+        ];
+        for (edge, expected) in cases {
+            let got = drop_at_edge(edge)
+                .unwrap_or_else(|| panic!("{edge:?} should snap"))
+                .rect(DESK)
+                .expect("resolves");
+            assert_eq!(
+                (got.x, got.y, got.width, got.height),
+                (expected.x, expected.y, expected.width, expected.height),
+                "{edge:?} places a window at {}, which is the {} zone",
+                got.label,
+                got.label
+            );
+        }
+    }
+
+    #[test]
+    fn the_top_edge_maximizes_and_fills_the_work_area() {
+        // Top is the one edge that is not a zone: it means the whole desktop,
+        // and the whole desktop is the work area rather than the display, or a
+        // maximized window would hide its own bottom edge behind the taskbar.
+        assert_eq!(drop_at_edge(ScreenEdge::Top), Some(EdgeDrop::Maximize));
+        let rect = EdgeDrop::Maximize.rect(TOP_BAR_DESK).expect("resolves");
+        assert_eq!(
+            (rect.x, rect.y, rect.width, rect.height),
+            (
+                TOP_BAR_DESK.x,
+                TOP_BAR_DESK.y,
+                TOP_BAR_DESK.width,
+                TOP_BAR_DESK.height
+            )
+        );
+    }
+
+    #[test]
+    fn an_edge_drop_means_the_same_thing_whatever_layout_is_selected() {
+        // Edge drops are aimed with the whole arm and have to be predictable,
+        // so they are wired to fixed presets rather than to whichever grid the
+        // zone picker last selected. This test is the guard on that: it
+        // asserts the halves and quadrants specifically, so re-pointing an
+        // edge at "the current preset" cannot pass.
+        assert_eq!(
+            drop_at_edge(ScreenEdge::Left),
+            Some(EdgeDrop::Zone(
+                SnapSlot::new(SnapLayoutPreset::TwoEqualHalves, 0).expect("exists")
+            ))
+        );
+        assert_eq!(
+            drop_at_edge(ScreenEdge::BottomRight),
+            Some(EdgeDrop::Zone(
+                SnapSlot::new(SnapLayoutPreset::FourQuadrants, 3).expect("exists")
+            ))
+        );
+    }
+
+    #[test]
+    fn drop_at_is_the_two_halves_run_together() {
+        // The compositor calls `drop_at` on release and `edge_at` during the
+        // drag to draw the preview. If they could disagree, the preview would
+        // promise a shape the drop does not deliver.
+        let probes = [
+            from_left(DESK, 2.0),
+            from_bottom(DESK, 2.0),
+            (DESK.x + 2.0, DESK.y + 2.0),
+            (DESK.right() - 2.0, DESK.bottom() - 2.0),
+            (DESK.x + DESK.width / 2.0, DESK.y + DESK.height / 2.0),
+        ];
+        for (x, y) in probes {
+            let expected = edge_at(x, y, DESK).and_then(drop_at_edge);
+            assert_eq!(drop_at(x, y, DESK), expected, "at ({x}, {y})");
+        }
     }
 }

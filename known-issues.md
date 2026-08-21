@@ -51725,7 +51725,7 @@ window to an edge and drop — still has no drag to fire on. See
 
 ---
 
-## TD-C-EDGE-DRAG-TILING-HAS-NO-DRAG-TO-FIRE-ON (lane C, 2026-08-21) — OPEN
+## TD-C-EDGE-DRAG-TILING-HAS-NO-DRAG-TO-FIRE-ON (lane C, 2026-08-21) — RESOLVED 2026-08-21
 
 **In short:** There are two ways every desktop lets you tile a window: press a
 keyboard shortcut and pick a slot from a menu, or drag the window to the edge
@@ -51758,26 +51758,41 @@ an edge drop ignores the layout the picker has selected (dragging left means
 exactly the "re-writing it later would be strictly worse" argument that §506
 already made about `snap.rs` as a whole.
 
-**The proper fix:**
+**The fix as originally proposed — and why it was rejected.** The plan above
+was to teach `gui/remote`'s event stream a "the user is moving window N, the
+pointer is at (x, y)" notification, so the shell could keep its two functions
+and drive them from the compositor's grab. That was written before anyone
+counted what it costs: it puts a **socket round trip inside the part of the
+gesture the user is watching.** The preview has to follow the cursor at pointer
+rate, and every frame of it would be compositor → shell → compositor. The
+compositor already holds the grab, the geometry and the display bounds; it can
+answer the same question locally in a function call. The shell's copy was
+therefore **deleted, not connected** — see `design-decisions.md` §508.
 
-1. Add an interactive-move notification to `gui/remote`'s event stream — the
-   window id and the pointer position, sent while the compositor has a move
-   grab, plus the drop. The compositor is the sender; this is lane C's tree on
-   both ends.
-2. Have the shell show the overlay on move-start, call `edge_snap_hit` per
-   motion to draw the preview, and `action_for_edge` on drop to emit the
-   request. Both functions already return exactly what those three moments
-   need.
-3. Decide whether the *zone* overlay (not just the edge preview) should appear
-   during a drag, as Windows' FancyZones does. That is a user-visible policy
-   call and belongs in `open-questions.md` if it is not obvious when the time
-   comes.
+**RESOLVED 2026-08-21.** Four commits, each proved by reintroducing every
+defect its tests name and confirming a deterministic failure that names the
+test back (39 defects, 39 failures):
 
-**If never fixed:** no breakage and no regression — Super+Z reaches every zone
-of every layout, so the feature is usable. What remains is a discoverability
-gap (edge-drag is the gesture most users try first) and two tested public
-functions with no caller, which is the same stale-code smell §506 named,
-narrowed from a whole module to two functions. It does not get worse with time.
+| Stage | Commit | What landed |
+|---|---|---|
+| 1 | `63bf975ba` | The rules moved into the protocol crate: `ScreenEdge` (8 variants; the compositor's own 2-variant `SnapEdge` already had the name), `edge_at`, `drop_at` and `EdgeDrop` in `gui/remote/src/zones.rs`, beside the `SnapSlot` table they resolve against. 10 tests, 12 defects, 214 guiremote tests green. |
+| 2 | `5baa11864` | The compositor acts on a drop: `drop_intent` off the live `DragState`, routed through the existing `maximize_window` / `snap_window_to_zone` so the fixed-size refusal, the restore rectangle and the `WindowResized` notification all still apply. 10 tests, 7 defects, 290 green. |
+| 3 | `3aa6e8b43` | The preview: a translucent wash plus a border, damaged up and down as the intent changes, torn down on release and on destroy. Included a real bug fix — `rect_outline`'s four bands **overlapped** on rectangles shorter than twice the border, double-blending exactly the small previews where it shows most. 9 tests, 10 defects, 299 green. |
+| 4 | `9771783c4` | The shell's copy deleted — 498 lines out of `gui/desktop/src/snap.rs` (`SnapEdge`, `detect_edge`, `EdgeSnap`, `edge_to_default_snap`, `edge_snap_hit`, `action_for_edge` and their tests), module docs in `snap.rs` and `lib.rs` repointed at `guiremote::zones::drop_at`. |
+
+**The deleted code had already drifted**, which is the argument against keeping
+a second opinion around: the shell's `edge_to_default_snap` mapped a drop
+against the **top** edge to the *left half*, where the surviving rules maximize.
+Nothing caught it, because the shell's tests only asserted that the result named
+a zone that exists. The replacements in `guiremote` compare the returned
+rectangle against the layout's own zone, so the same drift cannot recur silently.
+
+**Point 3 of the old plan — should the full zone overlay appear during a drag,
+as FancyZones does? — was not carried forward as an open question.** What
+shipped shows the single rectangle the drop will produce, which is what the
+Windows and GNOME edge gestures show; the grid overlay is a *different* feature
+(drag-into-a-grid, not drag-to-an-edge) and would be a new roadmap item, not an
+unanswered fork in this one.
 
 
 ---
@@ -52316,3 +52331,150 @@ not get worse with time on its own. But it is the one remaining defect in ssh
 that a rewrite cannot be argued out of: every other finding from the lint sweep
 was fixed in place, and this one was left because the correct fix is a new
 primitive rather than an edit.
+
+---
+
+## TD-C-COMPOSITOR-TILES-UNDER-THE-TASKBAR (lane C, 2026-08-21) — OPEN
+
+**In short:** When you tile a window — drag it to the left edge, or press
+Super+Left, or pick a slot from the Super+Z chooser — it is made to fill exactly
+half (or a third, or a quarter) of the *entire screen*, including the strip at
+the bottom where the taskbar lives. So the bottom of a tiled window slides
+underneath the taskbar and whatever is down there — a status line, a scrollbar's
+bottom arrow, the last row of a list — is covered up. A window the user drags
+and sizes by hand is unaffected; only the tiling paths do this.
+
+**Where.** `gui/compositor/src/lib.rs:4618` `Compositor::snap_area()`, which is
+one line:
+
+```rust
+fn snap_area(&self) -> WorkArea {
+    work_area_of(self.display_manager.virtual_bounds())
+}
+```
+
+`virtual_bounds()` is the full display arrangement, and `work_area_of` only
+converts the type — it subtracts nothing. Every tiling route funnels through
+here (`snap_window`, `snap_window_to_zone`, and the new `drop_at` edge-drag
+path), so the defect is uniform rather than per-gesture, and the method is
+already commented as the one place a fix lands.
+
+**Why it is like this.** The compositor has no concept of a *strut* — a client
+declaring "reserve N pixels along this edge for me, and keep everyone else out
+of it." X11 has `_NET_WM_STRUT_PARTIAL`, Wayland has `zwlr_layer_shell`'s
+exclusive zone; `gui/remote`'s protocol has neither. The shell does know the
+number — `Shell::taskbar_height` (`gui/desktop/src/lib.rs:648`, default 40
+logical px, scaled by `taskbar_height_px()`) — and `icons.rs` already subtracts
+it for desktop-icon layout. But it has no way to *tell* the compositor, and in
+fact does not connect to it at all yet (`TD-NO-APP-CONNECTS-TO-THE-COMPOSITOR`).
+So the one component that knows the answer and the one component that needs it
+have no channel between them.
+
+**The proper fix** — in the order the pieces have to exist:
+
+1. Add a reserved-area request to `gui/remote`: a client asks for `n` pixels
+   along one edge of one output, and the compositor answers with the work area
+   that leaves. Model it on `zwlr_layer_shell`'s exclusive zone, not on
+   `_NET_WM_STRUT_PARTIAL` — the X11 form encodes start/end offsets along the
+   edge, which exists to support multiple panels sharing one edge and is the
+   part of that protocol everyone gets wrong. Reject a reservation larger than
+   some fraction of the output (a client asking for 100% of the screen must not
+   be able to shrink the work area to nothing).
+2. Track the reservations per output in the compositor and make `snap_area()`
+   return bounds minus them. Because it is derived on every call rather than
+   cached, nothing else needs to change for tiled windows to follow a taskbar
+   that moves or changes height — but *already-tiled* windows will need
+   re-placing when the work area changes, the same way they are re-placed on a
+   display hotplug.
+3. Gate the request on a capability. Any client being able to carve a strip out
+   of every other client's tiling is `TD-C-ANY-CLIENT-CAN-READ-EVERY-WINDOW-TITLE`
+   in a more damaging form, and this one is worth getting right the first time
+   rather than adding the check afterwards.
+4. Have the shell make the reservation for its taskbar — which requires the
+   shell to be a compositor client, i.e. `TD-NO-APP-CONNECTS-TO-THE-COMPOSITOR`
+   first. Until then steps 1–2 are testable but unreachable in a running system.
+
+**Related but not the same:** maximizing has the identical problem through the
+identical method, and so does the "restore rectangle" bookkeeping that remembers
+where a window was before it was tiled. Fixing `snap_area()` fixes all of them
+at once; there is no second place to patch.
+
+**If never fixed:** a cosmetic-but-constant annoyance — the bottom ~40 px of
+every tiled window is obscured — and no data loss or crash. It does not get
+worse with time. It *will* look like a regression the day the shell first draws
+on a real screen next to the compositor, because today nothing composites the
+two together and so nobody has seen it happen.
+
+## TD-C-TILING-MEASURED-EVERY-MONITOR-AT-ONCE (lane C, 2026-08-21) — RESOLVED 2026-08-21
+
+**What was wrong.** Every tiling operation in the compositor — maximize, the
+`SnapEdge` half-screen snap, the `SnapSlot` zone snap, and the edge-drag drop
+that had just been built on top of them — measured itself against the *union of
+all connected displays* rather than against the monitor the window was on. The
+one place it was decided was:
+
+```rust
+fn snap_area(&self) -> WorkArea {
+    work_area_of(self.display_manager.virtual_bounds())
+}
+```
+
+`virtual_bounds()` is the bounding box of every `Display`, which is the correct
+answer for "how big is the desktop" and the wrong one for "how big may this
+window get". On a two-monitor desktop of an 800x600 primary and a 1024x768
+secondary to its right, maximizing a window sitting on the *second* monitor
+moved it to `x = 0` and made it 1824 px wide — it filled both screens and its
+title bar landed on the one the user was not using. Snapping it left gave it the
+whole first monitor plus a 112 px strip of the second.
+
+**Why nothing caught it.** A single-monitor compositor cannot tell the two
+readings apart: with one display, `virtual_bounds()` *is* that display's bounds.
+Every existing tiling test built a one-display `Compositor::new(800, 600, …)`,
+so all of them agreed with the buggy code and would have agreed with any correct
+one. `DisplayManager::display_for(&Rect)` — largest-intersection lookup with a
+primary-display fallback — had existed the whole time and was used by the
+per-monitor DPI scaling path; the tiling paths simply never called it. This is
+the failure mode where the fixture, not the assertion, is what is missing.
+
+**The fix** (commit below). `snap_area()` is gone. In its place:
+
+| Method | Answers |
+| `work_bounds_for(rect)` | the bounds of the display holding most of `rect`, falling back to `virtual_bounds()` only when *no* display is connected |
+| `work_area_for(rect)` | the same as a `WorkArea` |
+| `work_area_at(x, y)` | the work area of the monitor under a point |
+| `work_area_of_window(id)` | the work area of the monitor under a window's frame |
+| `work_rect(area)` (free fn) | the inverse of `work_area_of`, so a work area can go back to whole pixels |
+
+`maximize_window` and `snap_window_to_zone` each split into a public form that
+resolves the window's own monitor and a private `_within` form taking a
+caller-chosen area. The edge drop uses the `_within` forms, because the drop
+must follow the monitor **under the pointer** — see `design-decisions.md` §509 —
+and `DropIntent` now carries the `WorkArea` the preview was drawn against so
+that preview and drop cannot disagree.
+
+**Coverage added** — eight tests, and every one of them fails against the old
+code, checked by reintroducing each defect individually:
+`maximizing_fills_the_windows_own_monitor_and_not_every_monitor`,
+`snapping_takes_half_of_the_windows_own_monitor`,
+`a_zone_snap_resolves_against_the_windows_own_monitor`,
+`an_edge_drop_uses_the_monitor_the_pointer_is_over`,
+`the_preview_crosses_the_seam_with_the_pointer`,
+`the_interior_seam_is_two_edges_and_not_a_middle`,
+`a_drop_tiles_the_monitor_the_pointer_is_over_even_when_the_window_is_not`,
+`a_work_area_survives_the_round_trip_back_to_pixels`. The shared `two_monitors`
+fixture is the thing that was missing; prefer it over `Compositor::new` for any
+future geometry test, since a one-display compositor cannot distinguish "this
+screen" from "all screens".
+
+Two traps that cost time and are worth knowing before writing the ninth such
+test: (1) a zone rectangle carries the layout's gap, so a hand-computed "half of
+1024" (512) is not the number a drop produces (509) — derive expectations from
+`guiremote::zones` itself, which is what the `edge_drop_rect` helper does; and
+(2) two synchronous drags of the same title bar fall inside the default
+double-click interval, so the second press is read as a maximize and starts no
+drag — use a fresh compositor per case or `set_double_click_ms(2000)`.
+
+**What remains.** The work area is still the *whole* of the correct monitor,
+including the strip the taskbar occupies — that is
+`TD-C-COMPOSITOR-TILES-UNDER-THE-TASKBAR`, still open, and `work_bounds_for` is
+now the single place its fix has to land.

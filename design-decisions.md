@@ -32510,3 +32510,189 @@ Nothing degrades. The one thing to watch is the reverse of the first decision:
 if a third program ever needs zone geometry *without* speaking the shell
 protocol, `guiremote` becomes the wrong home and `gui/zones` becomes right.
 Nothing on the roadmap implies such a program.
+
+---
+
+## 508. Edge-drag tiling lives in the compositor; the shell's copy was deleted rather than connected
+
+**Date:** 2026-08-21
+**Decided by:** Claude (autonomous) — lane C
+
+**In short:** Dragging a window to the edge of the screen and letting go should
+tile it — half the screen on the left or right edge, full screen at the top, a
+quarter in each corner. Two programs could have implemented that gesture: the
+shell (the taskbar-and-desktop program) or the compositor (the program that owns
+the screen and the mouse). The shell already had the arithmetic written, but no
+way to know a drag was even happening — the compositor moves windows by itself
+and tells nobody. The choice was between teaching the compositor to narrate
+every mouse move to the shell, or moving the ~200 lines of arithmetic into the
+compositor and deleting the shell's copy. The second was taken. The shell's
+version was then deleted outright rather than left in place as a spare, because
+it had already quietly gone wrong in a way nothing noticed.
+
+### Why the compositor and not the shell
+
+The gesture has three moments — the drag starts, the cursor moves, the button is
+released — and the middle one is the problem. A preview rectangle has to follow
+the cursor at pointer rate, and the user is looking directly at it. Under the
+shell design each of those frames is a round trip: compositor sees the motion →
+sends it over the socket → shell computes an intent → sends back an overlay
+request → compositor draws. Under the compositor design it is a function call
+against state the compositor already holds.
+
+| Option | *What changes* |
+|---|---|
+| Shell owns it (the original plan in `known-issues.md`) | the preview lags the cursor by one socket round trip, on the one gesture where lag is most visible; `gui/remote` grows a per-motion notification whose only consumer is this feature |
+| **Compositor owns it (taken)** | the preview tracks the cursor exactly as the dragged window does, because it is computed in the same event handler; no protocol change at all |
+
+Three facts settled it beyond the latency argument:
+
+1. **The compositor already holds everything the decision needs** — the drag
+   grab (`DragState`), the window geometry, and `display_manager.virtual_bounds()`,
+   which is the *only* place the screen arrangement is known. The shell would
+   have had to be told all three.
+2. **The rules were already shared.** Stage 1 put `edge_at` / `drop_at` /
+   `EdgeDrop` in `gui/remote/src/zones.rs` beside the `SnapSlot` table they
+   resolve against (§507's home), so "the compositor owns the gesture" does not
+   mean "the compositor owns a private copy of the rules." Either program can
+   still read them; only one acts on them.
+3. **The drop routes through the tiling that already existed** —
+   `maximize_window` and `snap_window_to_zone` — so the fixed-size-window
+   refusal, the restore-rectangle bookkeeping and the `WindowResized`
+   notification all apply to an edge drop without being restated. A shell-side
+   implementation would have sent a `ShellControlAction` that lands in the same
+   two functions anyway, one round trip later.
+
+The counter-argument, which is real: **policy in the compositor is policy the
+user cannot replace.** Swapping the shell for a different one leaves edge-drag
+behaving exactly as before. That is accepted here because the *layouts* remain
+the shell's to choose (Super+Z, §507) and only the edge gesture is fixed — and
+because a compositor that cannot answer "where does this window go" without
+asking another process is a compositor that cannot function when that process
+is not running.
+
+### Why the shell's copy was deleted rather than kept
+
+`gui/desktop/src/snap.rs` had `SnapEdge`, `detect_edge`, `edge_to_default_snap`,
+`edge_snap_hit` and `action_for_edge` — tested, public, and called by nothing.
+`known-issues.md` had argued for keeping them, on the grounds that re-deriving
+the thresholds later would be strictly worse.
+
+That argument did not survive contact with the code. **The shell's copy had
+already drifted:** `edge_to_default_snap` mapped a drop against the *top* edge
+to the **left half**, where the rules that shipped maximize. Its tests were
+green throughout, because they only asserted that the result named a zone that
+exists. So the "spare copy" was not a safety net — it was a second, wrong answer
+that the test suite endorsed, waiting for someone to wire it up.
+
+| Option | *What changes* |
+|---|---|
+| Keep it as reference | 498 lines of tested, uncallable, already-wrong code stay in the tree, and the next reader has two answers to choose between |
+| **Delete it (taken)** | one implementation, in one place, that the compositor actually runs |
+
+The replacement tests are strictly stronger for the same reason the old ones
+were weak: they compare the returned rectangle against the layout's own zone
+rather than checking that a name resolves, so the top-edge drift could not
+recur silently.
+
+### If this is never revisited
+
+Nothing degrades. The condition that would reopen it is a second shell, or a
+user-configurable edge-gesture policy — at which point the *action* (not the
+geometry) would need to become a value the shell can set, and the natural shape
+is a per-edge table the compositor reads at startup rather than a per-motion
+notification. That is a much smaller protocol addition than the one rejected
+here, and it keeps the preview local either way.
+
+## 509. A tiling drop follows the monitor under the *pointer*, not the one under the window
+
+**Date:** 2026-08-21
+**Decided by:** Claude (autonomous) — lane C
+
+**In short:** When you drag a window to the edge of a screen and let go, the
+compositor tiles it. On a desktop with two monitors it has to decide *which*
+monitor "the edge of the screen" meant. The window and the mouse pointer are not
+always on the same one — while the window is crossing the join between the two
+screens it is on both, and if you grabbed a wide window near the right-hand end
+of its title bar the window trails a long way behind your mouse. The choice was
+whether to answer from where the pointer is or from where the window is. It
+answers from the pointer, and the highlight outline you see while dragging is
+drawn from the same answer, so what you are shown is always what you get.
+
+**The situation.** `Compositor::drop_intent` runs on every mouse-move during a
+window drag. It asks `guiremote::zones::drop_at(x, y, area)` whether the pointer
+has entered one of the screen-edge bands, and if so what tiling that band means
+(maximize at the top, halves at the sides, quarters in the corners). It needs a
+`WorkArea` to ask against. Then, on mouse-up, `finish_drag` has to actually place
+the window — and it needs a work area too.
+
+Before the per-monitor fix (`known-issues.md`
+`TD-C-TILING-MEASURED-EVERY-MONITOR-AT-ONCE`) this was not a question, because
+there was exactly one work area: the union of every display. Once the work area
+became per-monitor, both "which monitor" and "does the release re-decide"
+became real questions with different answers.
+
+**Decision 1 — the pointer's monitor, not the window's.**
+
+| Option | *What changes:* |
+|---|---|
+| **The pointer's monitor** (chosen) | dragging a window into the top band of your second monitor maximizes it on the second monitor, whatever the window is currently overlapping |
+| The window's monitor (largest intersection) | the same gesture can maximize it back onto the *first* monitor — the one you just dragged it off — because the window's body has not caught up with your mouse |
+
+The pointer wins for one reason: the edge band that fired is a band *of a
+specific monitor*, and the pointer is the thing that entered it. Choosing the
+window's monitor means the gesture's trigger and the gesture's effect are read
+off two different objects, which is exactly how a user ends up watching a
+highlight on screen two and getting a window on screen one.
+
+The two answers coincide for the ordinary case — a move drag carries the window
+with the pointer — which is precisely why this was worth pinning down with a
+test rather than leaving to whichever lookup a future edit happened to reach
+for. They diverge in two configurations, both reachable without trying:
+
+- **At the seam.** A window crossing the join is on both monitors, and the one
+  holding the larger part is not the one being aimed at. Covered by
+  `the_interior_seam_is_two_edges_and_not_a_middle`.
+- **With a large grab offset.** Grab a 900 px window two-thirds along its title
+  bar and it sits ~600 px to the left of the pointer for the whole drag; the
+  pointer can be well inside monitor two's top band while the window is still
+  wholly on monitor one. Covered by
+  `a_drop_tiles_the_monitor_the_pointer_is_over_even_when_the_window_is_not`.
+
+**Decision 2 — the work area travels with the intent instead of being looked up
+twice.**
+
+| Option | *What changes:* |
+|---|---|
+| **`DropIntent` carries the `WorkArea`** (chosen) | the release places the window in the identical rectangle the outline was drawn in — it is not possible to write a version where they differ |
+| Re-resolve at release from the pointer | the same rectangle in practice, but the guarantee is an invariant two call sites must agree on rather than a fact about the type |
+| Re-resolve at release from the window | the bug decision 1 rejects, re-entering by the back door |
+
+Carrying the area costs one `WorkArea` (four floats) in a struct that already
+exists and lives for the length of a drag. In exchange, "the preview does not
+lie" stops being something a test checks and becomes something the code cannot
+express otherwise. That is the whole argument, and it is the reason
+`maximize_window` and `snap_window_to_zone` were split into public forms (which
+resolve the window's monitor — right for a keyboard shortcut or a menu item,
+where there is no pointer gesture to speak of) and private `_within` forms
+taking an explicit area, which the drop uses.
+
+The third option is not hypothetical: `finish_drag` originally called the public
+`maximize_window`, and the reintroduction sweep found that reverting to it was
+caught by **no test at all** until the large-grab-offset fixture above was
+written. A guarantee no test can fail is not a guarantee.
+
+**Cost accepted.** There is one arguable case on the other side: a user who
+drags a window mostly onto monitor two but whose pointer is still, at the moment
+of release, back over the seam on monitor one gets monitor one. That is correct
+under decision 1 and might momentarily surprise. It is also self-correcting —
+the preview outline is showing monitor one at that instant, so the user sees the
+answer before committing to it — which is exactly the property decision 2 buys.
+
+**If this is never revisited.** Nothing degrades. The reopening condition is a
+tiling gesture that is *not* pointer-driven — a keyboard "snap left" that acts
+on a window the pointer is nowhere near, or a touch/pen drag where the contact
+point and the intended target differ by design. Those want the public forms
+(window's monitor) and already have them; what would need rethinking is only a
+gesture that has a pointer *and* wants to ignore it, which no current input path
+does.

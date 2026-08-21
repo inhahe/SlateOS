@@ -6265,6 +6265,13 @@ fn schedule_inner(requeue: bool, kind: SwitchKind) {
         // Also: if the task is throttled (CPU bandwidth exceeded), mark
         // it Ready but do NOT enqueue.  It stays parked until
         // `unthrottle_expired()` re-enqueues it at the next period reset.
+        //
+        // `requeued_current` records whether *this* call actually put the
+        // current task back in a run queue.  It is the only thing that makes
+        // resuming it in place legal when the pick below comes up empty; see
+        // the `picked == None` arm.
+        let mut requeued_current = false;
+
         if requeue {
             if let Some(task) = state.tasks.get_mut(&current_id) {
                 if task.state == TaskState::Running {
@@ -6275,6 +6282,7 @@ fn schedule_inner(requeue: bool, kind: SwitchKind) {
                     } else {
                         let prio = task.effective_priority();
                         PER_CPU_SCHED.enqueue(current_id, prio, cpu);
+                        requeued_current = true;
                     }
                 }
                 // If state is Dead/Suspended (set by another CPU),
@@ -6355,7 +6363,37 @@ fn schedule_inner(requeue: bool, kind: SwitchKind) {
         }
 
         let Some(picked_id) = picked else {
-            if !requeue {
+            // Nothing to run.  The question this arm answers is "may we simply
+            // `return`, and thus keep executing the current task?" — and the
+            // answer is a property of *that task*, never of `requeue`.
+            //
+            // `requeue` means only "re-enqueue me if I am still `Running`".
+            // Using it here as well made a parking call site that passes
+            // `requeue = true` (which `block_current` has done since
+            // 0f9f912e5) skip the idle fallback entirely: with an empty run
+            // queue, `schedule_inner` returned to a task it had just marked
+            // `Blocked`.  `block_current()` then behaved as a no-op, its
+            // caller's wait loop re-checked its condition, re-parked, and spun
+            // — 13.7 million parks in one boot, `ctx_switches` frozen, no HLT,
+            // and the wedge dump below never reached because the fallback was
+            // never entered.  Worse, the *first* task to do it (the BSP idle
+            // task, which is also the boot/self-test context) ran on while
+            // flagged `Blocked`, so the next real `yield_now()` declined to
+            // requeue it and switched away, stranding it off every queue
+            // forever.  See known-issues.md `BUG-BLOCKED-TASK-RESUMED-IN-PLACE`.
+            //
+            // Resuming in place is legal iff the current task is still
+            // `Running`, or iff this very call put it back in a run queue (in
+            // which case it is `Ready`, the pick pathologically missed it, and
+            // running it is both safe and the best recovery).  Every other
+            // state — `Blocked`, `Dead`, `Suspended`, or `Ready` because it was
+            // throttled — means the task must not execute, so we fall into the
+            // idle fallback and HLT until something genuinely becomes runnable.
+            let resume_in_place = state.tasks.get(&current_id).is_some_and(|t| {
+                t.state == TaskState::Running || (requeued_current && t.state == TaskState::Ready)
+            });
+
+            if !resume_in_place {
                 // No task ready and we can't re-enqueue the current one
                 // (it's exiting or blocking).
                 //
@@ -6644,6 +6682,35 @@ fn schedule_inner(requeue: bool, kind: SwitchKind) {
                     // `Some` here.  Kept as a defensive no-op for the borrow
                     // checker's exhaustiveness.
                     drop(s);
+                }
+            }
+
+            // Resuming the current task in place, having established above that
+            // it is allowed to run.  Commit that: if this call requeued it, it
+            // is `Ready` and holds a queue slot nothing will ever consume (the
+            // pick already missed it), so put it back to `Running` — the same
+            // thing the `picked_id == current_id` arm below does for the case
+            // where the pick *did* find it.
+            if let Some(task) = state.tasks.get_mut(&current_id) {
+                if task.state == TaskState::Ready {
+                    // Reaching here means the pick missed a task this very call
+                    // had just enqueued — a run-queue bug, not a scheduling
+                    // decision.  Recovering is easy (keep running it); noticing
+                    // is not, so say so once.
+                    static WARNED: AtomicBool = AtomicBool::new(false);
+                    if !WARNED.swap(true, Ordering::Relaxed) {
+                        crate::serial_println!(
+                            "[sched] *** BUG: task {} (cpu {}, prio {}) was enqueued by this \
+                             schedule_inner call but pick_next_local/try_steal both missed it. \
+                             Resuming it in place. (one-shot warning)",
+                            current_id,
+                            cpu,
+                            task.effective_priority(),
+                        );
+                    }
+                    PER_CPU_SCHED.dequeue(current_id, task.effective_priority(), cpu);
+                    task.record_dispatch(crate::apic::tick_count());
+                    task.state = TaskState::Running;
                 }
             }
             return;

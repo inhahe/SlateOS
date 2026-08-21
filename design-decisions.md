@@ -28176,6 +28176,29 @@ in this same function (§ the `SIGCONT`-beats-`SIGSTOP` race) was *caused* by
 believing a misordered log. An atomic region emits them as a faithful trace. The
 cost is one deferred tick on one CPU.
 
+### Amendment, same day: this decision was right and its implementation was not
+
+Passing `requeue = true` from the parking sites is correct and stays. But
+`requeue` was gating a **second** thing 300 lines further down `schedule_inner`,
+which the change above did not look at: whether an empty run queue means "idle
+until something is runnable" or "just return to the caller". Under
+`requeue = true` it meant the latter, so `block_current()` on an empty run queue
+returned to a task it had just marked `Blocked` — a busy spin, and, for the
+first task it happened to, a permanent strand. It hung the next boot in the
+barrier self-test.
+
+Fixed by deciding that question from the current task's *state* instead of from
+`requeue`, which also fixes a quieter bug of the same origin (a throttled task
+was resumed rather than idled, so CPU bandwidth control was ignored whenever the
+run queue was empty). Full write-up: `known-issues.md`
+→ `BUG-BLOCKED-TASK-RESUMED-IN-PLACE`.
+
+The transferable part: **a boolean parameter that gates two different decisions
+is two parameters sharing a name**, and changing what callers pass requires
+reading every use of it in the callee, not only the use the change is about. The
+commit message for `0f9f912e5` is a careful and correct argument about the one
+use it examined.
+
 ## §254 — The fixture stamp records the out-of-tree linker, and a stamp that predates the record is a note rather than a failure
 
 **Date:** 2026-08-21

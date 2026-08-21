@@ -2460,8 +2460,23 @@ pub const PIDFD_SIG_MAX: i32 = 64;
 ///
 /// We replicate the *argument*-domain checks so callers (e.g. container
 /// runtimes' probing code) get the same `EINVAL`/`ENOSYS` shape they
-/// expect.  After arguments are accepted, we fall back to `ENOSYS`
-/// because the spawn/lookup subsystem isn't wired up here.
+/// expect.
+///
+/// # Why `ENOSYS` after the arguments pass (corrected 2026-08-21)
+///
+/// Not because the kernel lacks the machinery.  This comment used to say the
+/// "spawn/lookup subsystem isn't wired up here", which is no longer true:
+/// `kernel/src/syscall/linux.rs` (`sys_pidfd_open`) looks the target task up,
+/// allocates a real pidfd and returns it.
+///
+/// The reason is narrower, and is about *this* ABI.  SlateOS has two syscall
+/// tables (`kernel/src/syscall/entry.rs` routes on `AbiMode`), and a binary
+/// linked against this libc is `AbiMode::Native`, whose table has no number
+/// for `pidfd_open` — so there is nothing for the stub to call, however
+/// complete the Linux-side implementation is.  Whether the native ABI *should*
+/// gain a number for it is an open design question tracked in
+/// `known-issues.md` under
+/// `B-THE-NATIVE-LIBC-AND-THE-LINUX-ABI-DISAGREE-ABOUT-WHAT-EXISTS`.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn pidfd_open(pid: PidT, flags: u32) -> i32 {
     // Linux's pidfd_open prologue checks the flag mask BEFORE pid:
@@ -2724,14 +2739,34 @@ pub const X86_64_CANONICAL_MAX: u64 = 0x0000_7FFF_FFFF_FFFF;
 /// * For ENABLE_TAGGED_ADDR: `addr` (the width) > 6        → `EINVAL`
 ///   (LAM57 supports 6 mask bits; anything wider is not implementable)
 ///
-/// After arguments validate we return `ENOSYS` because none of these
-/// CPU-state knobs are implemented in our microkernel design (FS/GS
-/// base is set at thread spawn by the kernel; CET/LAM are not yet
-/// supported on our target hardware abstraction).
+/// After arguments validate we return `ENOSYS`.
 ///
-/// **Architectural rationale** (matches Linux on `CONFIG_X86_64` kernels
-/// with the CET/LAM features compiled out — the canonical "syscall
-/// exists but feature unavailable" shape).
+/// # Why (corrected 2026-08-21)
+///
+/// Not because "none of these CPU-state knobs are implemented in our
+/// microkernel design", which is what this comment used to say and is only
+/// half true.  CET and LAM really are unsupported — but `ARCH_SET_FS`,
+/// `ARCH_GET_FS`, `ARCH_SET_GS`, `ARCH_GET_GS` and the `ARCH_*_CPUID` pair are
+/// all implemented in `kernel/src/syscall/linux.rs` (`sys_arch_prctl`), which
+/// writes and reads the real `FS`/`GS` base MSRs.
+///
+/// The reason `ENOSYS` is nonetheless correct *here* is the ABI split: SlateOS
+/// has two syscall tables (`kernel/src/syscall/entry.rs` routes on `AbiMode`),
+/// and the native table — the one every binary linked against this libc uses —
+/// has no number for `arch_prctl`.  Native threads get their `FS` base set by
+/// the kernel at thread spawn instead, which is why nothing linked against
+/// this libc has needed the call.
+///
+/// Whether the native ABI should gain a way to set `FS`/`GS` at runtime is
+/// open, and the answer is probably *not* `arch_prctl` — a specific TLS-base
+/// call would express the one thing userspace actually wants without also
+/// being a general per-thread-CPU-state escape hatch.  Tracked in
+/// `known-issues.md` under
+/// `B-THE-NATIVE-LIBC-AND-THE-LINUX-ABI-DISAGREE-ABOUT-WHAT-EXISTS`.
+///
+/// The returned shape still matches Linux on `CONFIG_X86_64` kernels with the
+/// CET/LAM features compiled out — the canonical "syscall exists but feature
+/// unavailable" shape.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn arch_prctl(code: i32, addr: u64) -> i32 {
     match code {
@@ -3609,10 +3644,30 @@ unsafe fn process_vm_validate(
 ///
 /// Linux 3.2+.  See [`process_vm_validate`] for the full
 /// argument-domain check matrix.  After validation, returns `-1`
-/// with `errno = ENOSYS`: cross-process memory access isn't part of
-/// the microkernel's IPC model (programs use channel handles to
-/// transfer pages explicitly rather than peeking at another task's
-/// address space).
+/// with `errno = ENOSYS`.
+///
+/// # Why `ENOSYS`, and what it does *not* mean (corrected 2026-08-21)
+///
+/// It does **not** mean the kernel cannot do this.  This comment used to say
+/// cross-process memory access "isn't part of the microkernel's IPC model",
+/// and that stopped being true: `kernel/src/syscall/linux.rs`
+/// (`sys_process_vm_readv`) implements both directions, with a
+/// same-address-space fast path and a cross-address-space path gated on a
+/// `Process` capability carrying the `DEBUG` right (design-decisions §24),
+/// transferring the remote side through `copy_from_user_as` /
+/// `copy_to_user_as` against the target's PML4.
+///
+/// The real reason is narrower and is about *this* ABI: the native syscall
+/// table has no number for it.  `kernel/src/syscall/entry.rs` routes each
+/// process to one of two dispatchers by its `AbiMode`, and a binary linked
+/// against our `libc.a` is `AbiMode::Native`, so Linux number 310 is not
+/// reachable from here however well the kernel implements it.
+///
+/// Consensual sharing between cooperating peers is a separate path
+/// (channel + shared-memory IPC) and is what most programs should use — that
+/// part of the old comment was right, it just was not the reason for the
+/// `ENOSYS`.  See `known-issues.md` →
+/// `B-THE-NATIVE-LIBC-AND-THE-LINUX-ABI-DISAGREE-ABOUT-WHAT-EXISTS`.
 ///
 /// # Authority (§314; was a Phase-200 `CAP_SYS_PTRACE` gate)
 ///
@@ -3628,6 +3683,11 @@ unsafe fn process_vm_validate(
 /// privilege — telling a port to go find a capability when what it actually
 /// needs is for the call to be written.  `ENOSYS` is the answer that is true,
 /// and it is now returned regardless of the capability words.
+///
+/// Note that the kernel's Linux-side implementation *does* gate on a
+/// capability, and would answer `EPERM`.  The two are not in conflict: a
+/// native caller has no syscall to reach, so it never gets as far as the
+/// question of authority.
 ///
 /// Argument validation is unaffected and still runs first: a caller passing
 /// bad flags or a bad pid sees `EINVAL`/`ESRCH`, because those are questions
@@ -3665,7 +3725,9 @@ pub extern "C" fn process_vm_readv(
 ///
 /// Linux 3.2+.  Mirrors [`process_vm_readv`] but transfers in the
 /// opposite direction — same argument-domain checks apply via
-/// [`process_vm_validate`].
+/// [`process_vm_validate`], and the `ENOSYS` means the same thing: the
+/// native syscall table has no number for it, *not* that the kernel cannot
+/// do it.  See [`process_vm_readv`] for the full correction.
 ///
 /// # Authority (§314; was a Phase-200 `CAP_SYS_PTRACE` gate)
 ///
@@ -3767,15 +3829,28 @@ pub const KCMP_TYPES: i32 = 8;
 /// Two of them, in this case — kcmp's predicate is a conjunction over *both*
 /// targets.
 ///
-/// Since the comparison is unimplemented, an `EPERM` would report a privilege
-/// failure for something no privilege enables.  `ENOSYS` is returned
+/// So libc cannot evaluate the gate, and an `EPERM` from here would report a
+/// privilege failure it never actually tested.  `ENOSYS` is returned
 /// regardless of the capability words.  Argument-domain checks (ESRCH,
 /// EINVAL, EBADF, EFAULT) still run first and are unaffected.
 ///
-/// After validation we return `ENOSYS`: the microkernel doesn't
-/// expose kernel-object identity to userspace through this debugging
-/// interface — process introspection happens via capability handles
-/// with explicit semantics.
+/// # Why `ENOSYS` after validation (corrected 2026-08-21)
+///
+/// Not because the comparison is unimplemented.  This comment used to say the
+/// microkernel "doesn't expose kernel-object identity to userspace through
+/// this debugging interface", and that is no longer true:
+/// `kernel/src/syscall/linux.rs` (`sys_kcmp`) implements the comparison and
+/// returns real orderings.
+///
+/// The reason is that SlateOS has two syscall tables
+/// (`kernel/src/syscall/entry.rs` routes on `AbiMode`) and the native one —
+/// which every binary linked against this libc uses — has no number for
+/// `kcmp`.  There is nothing for this stub to call.  Whether it *should* gain
+/// one is undecided and deliberately not obvious: `kcmp` identifies resources
+/// of two processes named by bare pid, which is ambient authority of exactly
+/// the kind the capability model exists to replace.  Tracked in
+/// `known-issues.md` under
+/// `B-THE-NATIVE-LIBC-AND-THE-LINUX-ABI-DISAGREE-ABOUT-WHAT-EXISTS`.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn kcmp(pid1: i32, pid2: i32, type_: i32, idx1: u64, idx2: u64) -> i32 {
     // (1)/(2) Both pids must name real tasks.  Linux checks pid1

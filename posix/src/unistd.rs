@@ -2872,6 +2872,42 @@ pub const PERSONALITY_QUERY: u32 = 0xFFFF_FFFF;
 /// Linux execution domain.
 static PERSONALITY_STATE: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
 
+/// Cross-test serialisation lock for the process-global
+/// `PERSONALITY_STATE`.  Every test that reads *or* writes the
+/// personality — in this file and in `sys_personality` — must hold this
+/// for its whole duration.
+///
+/// `sys_personality`'s tests previously relied on a `reset_personality()`
+/// call plus an RAII `PersonalityGuard` that snapshot the value and
+/// restored it on drop.  That is not isolation: cargo runs the test
+/// binary's tests on parallel threads in one process, so a snapshot /
+/// restore pair does nothing about a *concurrent* writer, and can itself
+/// clobber another test's setup on drop.  It failed exactly as you would
+/// expect — `test_phase78_combined_flags_round_trip` sets
+/// `PER_LINUX|ADDR_NO_RANDOMIZE|MMAP_PAGE_ZERO|READ_IMPLIES_EXEC`
+/// (`0x54_0000`), and `unistd::tests::test_personality_query`, which
+/// asserts it reads `0`, intermittently observed precisely that value.
+///
+/// Same shape as `environ::ENV_TEST_LOCK`, and for the same reason.
+#[cfg(test)]
+pub static PERSONALITY_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Acquire the personality test lock, recovering from poison.
+///
+/// Poison is recovered rather than propagated because a panicking test
+/// leaves the personality at an arbitrary value, not an *unsafe* one —
+/// every holder resets the value it depends on after taking the lock, so
+/// the next test is unaffected by what the panicking one left behind.
+/// Propagating the poison would instead turn one genuine failure into a
+/// cascade of unrelated ones.
+#[cfg(test)]
+#[must_use = "the returned guard serialises personality tests; bind it to `_g`"]
+pub fn lock_personality_for_test() -> std::sync::MutexGuard<'static, ()> {
+    PERSONALITY_TEST_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
 /// Read the current personality without altering it.
 ///
 /// Internal helper used by `posix::sys_personality` tests and by the
@@ -8216,6 +8252,11 @@ mod tests {
 
     #[test]
     fn test_personality_query() {
+        // PERSONALITY_STATE is process-global, so hold the cross-test lock
+        // and establish the value this test depends on rather than assuming
+        // whatever the previous test left behind.
+        let _g = lock_personality_for_test();
+        personality(0); // PER_LINUX
         // 0xFFFFFFFF queries current personality.
         let ret = personality(0xFFFF_FFFF);
         assert_eq!(ret, 0, "Should return PER_LINUX (0)");
@@ -8223,6 +8264,9 @@ mod tests {
 
     #[test]
     fn test_personality_set() {
+        let _g = lock_personality_for_test();
+        personality(0);
+        // Setting PER_LINUX over PER_LINUX returns the previous value, 0.
         let ret = personality(0);
         assert_eq!(ret, 0, "Setting PER_LINUX should succeed");
     }

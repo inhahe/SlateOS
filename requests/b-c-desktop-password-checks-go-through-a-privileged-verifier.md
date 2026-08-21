@@ -104,6 +104,54 @@ caller-credential check yet because there is no socket to get credentials from;
 `todo.txt` records that the check has to land in the same change as the
 transport.
 
+### Update 2026-08-20 — the transport now exists. It refuses everyone, and that is not a bug you can wait out
+
+`logind` has a resident event loop and a bus interface as of today
+(`userspace/logind/src/bus.rs`, `serve()` in `main.rs`; rationale in
+`design-decisions.md` §342). It registers the well-known name **`system.logind`**
+on the service registry, so `libservicebus::Connection::connect("system.logind")`
+reaches it. The methods you want:
+
+| Member | Arguments | Reply |
+|---|---|---|
+| `AuthenticateSession` | `[session_id, password]` | `[code: u8, retry_after_secs: u64 LE, message]` |
+| `UnlockSession` | `[session_id]` | empty |
+| `LockSession` | `[session_id]` | empty |
+| `GetSession` | `[session_id]` | `[properties text]` |
+| `ListSessions` | — | one field per session |
+
+Arguments and replies are `libservicebus::fields` — a length-prefixed list of
+**byte strings**, not text, so a password that is not valid UTF-8 survives the
+trip. The `code` byte is `0` accepted, `1` rejected, `2` locked, `3` no
+password, `4` unusable, `5` rate-limited; the constants are
+`logind::bus::OUTCOME_*` and they are deliberately explicit rather than the
+enum's discriminants, so reordering a variant here cannot silently turn
+`Rejected` into `Accepted` in a client you built last month.
+
+`ForceUnlockSession` exists and is **root-only** — see the warning below. It is
+not for you, and the interface now enforces that rather than asking you nicely.
+
+**And every one of those currently answers
+`system.logind.Error.UnknownCaller`.** The kernel has no way to tell a service
+who connected to it — `SYS_SERVICE_ACCEPT` returns a bare channel handle and
+records nothing about the peer, and there is no `SO_PEERCRED` equivalent
+anywhere in `kernel/src/ipc/`. Every method here is authorised against the
+caller's uid, so with no uid there is no authorisation, and the honest answer
+to every request is no. Treating an unidentified caller as the session's owner
+would have made the daemon work today and would have made `ForceUnlockSession`
+a password-free unlock for anything that can open a channel.
+
+Requested from lane A as
+`requests/b-a-a-service-cannot-find-out-who-is-calling-it.md`. When it lands,
+nothing in your code or mine changes except one function body in
+`libservicebus`.
+
+So: **build against the interface above now** — it is the final shape, and it
+is tested — but keep `PasswordValidator` as the interim path until lane A
+replies, because until then a real call gets a refusal rather than a verdict.
+
+### Original note (superseded by the update above)
+
 **The transport is not built yet.** `logind` has no resident event loop — it
 is a `loginctl` control personality over in-memory state (its own header says
 so, and `todo.txt` tracks it). So today the gate exists and is tested, but

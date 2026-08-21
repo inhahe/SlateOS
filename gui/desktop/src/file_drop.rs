@@ -20,15 +20,11 @@ use guitk::text;
 // ============================================================================
 
 const MOCHA_BASE: Color = Color::from_hex(0x1E1E2E);
-const MOCHA_SURFACE0: Color = Color::from_hex(0x313244);
 const MOCHA_TEXT: Color = Color::from_hex(0xCDD6F4);
-const MOCHA_SUBTEXT0: Color = Color::from_hex(0xA6ADC8);
 const MOCHA_BLUE: Color = Color::from_hex(0x89B4FA);
 const MOCHA_GREEN: Color = Color::from_hex(0xA6E3A1);
 const MOCHA_RED: Color = Color::from_hex(0xF38BA8);
-const MOCHA_YELLOW: Color = Color::from_hex(0xF9E2AF);
 const MOCHA_PEACH: Color = Color::from_hex(0xFAB387);
-const MOCHA_OVERLAY0: Color = Color::from_hex(0x6C7086);
 
 // ============================================================================
 // Drag-cursor card geometry

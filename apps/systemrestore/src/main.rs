@@ -2518,7 +2518,13 @@ impl SystemRestoreUI {
     /// Render the timeline view with chronological entries and type dots.
     fn render_timeline_view(&self, rt: &mut RenderTree, y: f32, _height: f32) {
         let ids = self.visible_ids();
-        let timeline_x = 60.0;
+        // The gutter left of the timeline line holds each snapshot's date. It
+        // was 60px wide because the date it held was `D20683` — a day count
+        // from the epoch. A real `2026-08-18` needs about 66px at
+        // `FONT_SIZE_SMALL`, so the gutter grew with the thing it holds
+        // rather than the date being ellipsised to fit a width chosen for a
+        // placeholder.
+        let timeline_x = 92.0;
         let mut entry_y = y + PADDING - self.scroll_offset;
 
         // Timeline vertical line.
@@ -2608,7 +2614,7 @@ impl SystemRestoreUI {
                     color: COLOR_OVERLAY0,
                     font_size: FONT_SIZE_SMALL,
                     font_weight: FontWeightHint::Regular,
-                    max_width: Some(50.0),
+                    max_width: Some(80.0),
                     overflow: TextOverflow::Ellipsis,
                 });
 
@@ -4245,10 +4251,26 @@ fn format_duration_short(secs: u64) -> String {
     }
 }
 
-/// Format a timestamp to a short display string (day offset from epoch).
+/// The date a snapshot was taken, for the timeline's left gutter.
+///
+/// This used to render `D20683` — the number of days since 1 January 1970.
+/// A restore point is the most consequence-laden thing in the system to pick
+/// by date, and `D20683` is not a date; it is an internal counter shown to
+/// the user because turning it into one was work nobody had done.
+///
+/// [`guitk::datetime::iso_date`] rather than a fuller stamp because this is a
+/// gutter beside a list, and the time of day is in the detail panel. The ISO
+/// shape also sorts lexicographically in the order it sorts chronologically,
+/// which is what a *timeline* wants.
+///
+/// UTC, explicitly: there is no per-process zone plumbing yet (known-issues
+/// `TD-NO-SYSTEM-DEFAULT-ZONE-WITHOUT-TZ`). Writing it as `Tz::utc()` leaves
+/// a mark that can be found when there is one.
 fn format_timestamp_short(ts: u64) -> String {
-    let day = ts / 86_400;
-    format!("D{}", day)
+    guitk::datetime::iso_date(
+        i64::try_from(ts).unwrap_or(i64::MAX),
+        &guitk::tzrules::Tz::utc(),
+    )
 }
 
 /// The width one ancestry link occupies, given the width of its drawn name and
@@ -5546,11 +5568,18 @@ mod tests {
         assert_eq!(format_duration_short(86_400 * 5), "5 days");
     }
 
+    /// A restore point is dated, not numbered.
+    ///
+    /// The assertions this replaces were `"D0"`, `"D1"` and `"D100"` — and
+    /// they were correct, which is the point: the test proved the function
+    /// did what it did, and never asked whether what it did was a date.
     #[test]
     fn test_format_timestamp_short() {
-        assert_eq!(format_timestamp_short(0), "D0");
-        assert_eq!(format_timestamp_short(86_400), "D1");
-        assert_eq!(format_timestamp_short(86_400 * 100), "D100");
+        assert_eq!(format_timestamp_short(0), "1970-01-01");
+        assert_eq!(format_timestamp_short(86_400), "1970-01-02");
+        assert_eq!(format_timestamp_short(86_400 * 100), "1970-04-11");
+        // 2026-08-18 16:30:45 UTC — the gutter used to read "D20683".
+        assert_eq!(format_timestamp_short(1_787_070_645), "2026-08-18");
     }
 
     // --- ViewMode tests ---

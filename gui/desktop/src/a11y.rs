@@ -22,16 +22,7 @@ use guitk::style::CornerRadii;
 // Catppuccin Mocha theme
 // ============================================================================
 
-const COL_BASE: Color = Color::from_hex(0x1E1E2E);
-const COL_SURFACE0: Color = Color::from_hex(0x313244);
-const COL_SURFACE1: Color = Color::from_hex(0x45475A);
-const COL_TEXT: Color = Color::from_hex(0xCDD6F4);
-const COL_SUBTEXT0: Color = Color::from_hex(0xA6ADC8);
 const COL_BLUE: Color = Color::from_hex(0x89B4FA);
-const COL_GREEN: Color = Color::from_hex(0xA6E3A1);
-const COL_YELLOW: Color = Color::from_hex(0xF9E2AF);
-const COL_RED: Color = Color::from_hex(0xF38BA8);
-const COL_PEACH: Color = Color::from_hex(0xFAB387);
 
 // ============================================================================
 // High contrast theme
@@ -479,6 +470,12 @@ impl Magnifier {
     }
 }
 
+impl Default for Magnifier {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 // ============================================================================
 // Sticky keys
 // ============================================================================
@@ -623,6 +620,12 @@ impl StickyKeys {
     }
 }
 
+impl Default for StickyKeys {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 // ============================================================================
 // Filter keys
 // ============================================================================
@@ -692,6 +695,12 @@ impl FilterKeys {
     /// Reset all tracked key times.
     pub fn reset(&mut self) {
         self.last_key_time.clear();
+    }
+}
+
+impl Default for FilterKeys {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -781,6 +790,12 @@ impl MouseKeys {
     /// Reset speed (call when no movement key is held).
     pub fn reset_speed(&mut self) {
         self.current_speed = 0.0;
+    }
+}
+
+impl Default for MouseKeys {
+    fn default() -> Self {
+        Self::new()
     }
 }
 

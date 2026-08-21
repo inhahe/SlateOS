@@ -20,15 +20,28 @@
 //! let mut cal = CalendarView::new(CalendarConfig::default());
 //! let mut store = EventStore::new();
 //! let mut clock = ClockDisplay::new();
+//! clock.show_date = true;
 //!
-//! // Taskbar renders clock:
-//! let clock_cmds = clock.render(x, y);
+//! // The taskbar draws the reading itself, into its own themed render tree,
+//! // and sizes the tray from `reading_width` so it is never clipped:
+//! let slot = clock.reading_width(font_size);
+//! let reading = clock.format_taskbar(utc_now, &local_zone);
 //!
-//! // Click on clock opens the calendar popup:
+//! // Click on the clock opens the calendar popup:
 //! cal.set_visible(true);
 //!
-//! // Each frame, if visible:
-//! let cmds = cal.render(x, y, &store);
+//! // Each frame, if visible. `scale` is the shell's device scale: the popup
+//! // is laid out in physical pixels because it is anchored to shell chrome
+//! // that already is, and `utc_now` is a parameter so the clock band across
+//! // its head reads the current second rather than the second it opened on.
+//! let cmds = cal.render(x, y, scale, utc_now, &store);
+//!
+//! // A click anywhere while it is open, tested against the same layout the
+//! // render came from:
+//! match cal.hit_test(x, y, scale, click_x, click_y, &store) {
+//!     Some(hit) => { cal.apply(hit); }
+//!     None => cal.set_visible(false), // outside the popup: dismiss
+//! }
 //! ```
 
 use guitk::color::Color;
@@ -45,6 +58,13 @@ use guitk::text;
 // The same zone engine the libc's `localtime` and osh's `printf '%(…)T'` use.
 use tzrules::Tz;
 
+// The shell's rectangle, not one of this module's own. A second rectangle type
+// in the same binary would be a second answer to "is this point inside?" —
+// and the answer that matters here is the half-open one `Rect::contains`
+// documents, which is what lets two adjacent day cells share an edge without
+// both claiming the pixel on it.
+use crate::Rect;
+
 // ============================================================================
 // Theme — Catppuccin Mocha palette
 // ============================================================================
@@ -60,10 +80,6 @@ mod theme {
     pub const SUBTEXT: Color = Color::from_hex(0xA6ADC8);
     pub const BLUE: Color = Color::from_hex(0x89B4FA);
     pub const LAVENDER: Color = Color::from_hex(0xB4BEFE);
-    pub const RED: Color = Color::from_hex(0xF38BA8);
-    pub const GREEN: Color = Color::from_hex(0xA6E3A1);
-    pub const YELLOW: Color = Color::from_hex(0xF9E2AF);
-    pub const PEACH: Color = Color::from_hex(0xFAB387);
 }
 
 // ============================================================================
@@ -82,8 +98,48 @@ const WEEK_NUM_WIDTH: f32 = 28.0;
 /// Height of the navigation header (month/year + arrows).
 const NAV_HEIGHT: f32 = 44.0;
 
+/// Height of the arrows-and-title row at the top of the navigation header.
+///
+/// The rest of [`NAV_HEIGHT`] is the "Today" button's row. Splitting the header
+/// in two is what lets the arrows and the button have hit boxes that do not
+/// overlap; a single 44px band would make the whole header one target.
+const NAV_ARROW_HEIGHT: f32 = 28.0;
+
+/// Width of the box around each navigation arrow — its hit target, and the
+/// box the glyph is centred in.
+///
+/// The glyph itself is ~10px wide at 18pt, which is a punishing thing to ask
+/// anyone to hit. It is drawn centred in this box rather than at its left
+/// edge, so what is clickable is what looks clickable.
+const NAV_ARROW_WIDTH: f32 = 24.0;
+
+/// Slack around the "Today" label, so the button can be hit either side of the
+/// word rather than only on the letters.
+const TODAY_BUTTON_PADDING: f32 = 8.0;
+
+/// What the jump-to-this-month button says. Named because the layout measures
+/// it and the renderer draws it, and a button sized for one string and
+/// labelled with another is a button that is clickable off its own edge.
+const TODAY_LABEL: &str = "Today";
+
 /// Height of the day-of-week header row (S M T W T F S).
 const DOW_HEADER_HEIGHT: f32 = 28.0;
+
+/// Columns in the month grid — one per day of the week.
+const GRID_COLS: usize = 7;
+
+/// Rows in the month grid. Always six, so the popup does not change height
+/// between a month that spans five weeks and one that spans six.
+const GRID_ROWS: usize = 6;
+
+/// Cells in the month grid.
+const GRID_CELLS: usize = GRID_COLS * GRID_ROWS;
+
+/// Mini months per row of the year view.
+const YEAR_COLS: usize = 4;
+
+/// Rows of mini months in the year view.
+const YEAR_ROWS: usize = 3;
 
 /// Padding inside the popup.
 const PADDING: f32 = 12.0;
@@ -100,6 +156,12 @@ const DOT_RADIUS: f32 = 3.0;
 /// Height of a single event row in the detail popup.
 const EVENT_ROW_HEIGHT: f32 = 28.0;
 
+/// Height of the detail popup's own "Aug 21" header.
+const EVENT_HEADER_HEIGHT: f32 = 28.0;
+
+/// Gap between the calendar card and the event-detail card below it.
+const DETAIL_GAP: f32 = 4.0;
+
 /// Maximum events shown in the detail popup before scrolling.
 const MAX_VISIBLE_EVENTS: usize = 6;
 
@@ -108,6 +170,60 @@ const MINI_CELL: f32 = 12.0;
 
 /// Mini year-view month label height.
 const MINI_MONTH_LABEL_HEIGHT: f32 = 18.0;
+
+/// Padding around a mini month's grid, inside its own box.
+const MINI_MONTH_PADDING: f32 = 8.0;
+
+/// Gap between neighbouring mini months.
+const MINI_MONTH_GAP: f32 = 8.0;
+
+// --- Type sizes -------------------------------------------------------------
+//
+// Named rather than written at the draw call because the layout has to measure
+// some of the same strings the renderer draws — the month title and the "Today"
+// button are both centred, and a measurement taken at a different size than the
+// drawing produces a control that sits off its own hit box.
+
+/// The `<` and `>` navigation glyphs.
+const NAV_ARROW_FONT: f32 = 18.0;
+/// "September 2026" across the top of the month view.
+const NAV_TITLE_FONT: f32 = 15.0;
+/// The "Today" button.
+const TODAY_FONT: f32 = 11.0;
+/// The S M T W T F S column headings.
+const DOW_HEADER_FONT: f32 = 11.0;
+/// The day numbers in the grid.
+const DAY_FONT: f32 = 13.0;
+/// The ISO week numbers in the gutter.
+const WEEK_NUM_FONT: f32 = 10.0;
+/// The event card's date heading.
+const EVENT_HEADER_FONT: f32 = 13.0;
+/// An event's start time.
+const EVENT_TIME_FONT: f32 = 10.0;
+/// An event's title.
+const EVENT_TITLE_FONT: f32 = 12.0;
+/// The year across the top of the year view.
+const YEAR_TITLE_FONT: f32 = 16.0;
+/// A mini month's name.
+const MINI_LABEL_FONT: f32 = 11.0;
+/// A day number inside a mini month.
+const MINI_DAY_FONT: f32 = 8.0;
+
+// --- Clock band -------------------------------------------------------------
+
+/// Drop from the clock band's time line to the date beneath it.
+const CLOCK_DATE_OFFSET: f32 = 16.0;
+
+/// Drop from the clock band's time line to its first extra-zone row.
+const CLOCK_ZONES_OFFSET: f32 = 34.0;
+
+/// Height of one extra-zone row in the clock band.
+const CLOCK_ZONE_ROW: f32 = 14.0;
+
+/// The clock band's own type sizes: the time, the long date, an extra zone.
+const CLOCK_TIME_FONT: f32 = 13.0;
+const CLOCK_DATE_FONT: f32 = 11.0;
+const CLOCK_ZONE_FONT: f32 = 10.0;
 
 /// Seconds per minute.
 const SECS_PER_MIN: u64 = 60;
@@ -157,15 +273,6 @@ impl Default for CalendarConfig {
 // ============================================================================
 // Date arithmetic helpers
 // ============================================================================
-
-/// Number of days in the given month (1-indexed).
-///
-/// A thin alias for [`date::days_in_month`], kept because the argument order
-/// here is `(year, month)` and the toolkit's is `(month, year)` — the shared
-/// one follows the C convention `tzrules` was extracted from.
-fn days_in_month(year: i32, month: u32) -> u32 {
-    date::days_in_month(year, month)
-}
 
 /// Day-of-week for a given date. 0 = Sunday, 1 = Monday, ..., 6 = Saturday.
 fn day_of_week(year: i32, month: u32, day: u32) -> u32 {
@@ -769,11 +876,16 @@ pub struct TimezoneEntry {
 }
 
 /// Digital clock for the taskbar.
+#[derive(Clone, Debug)]
 pub struct ClockDisplay {
     /// Whether to use 24-hour format.
     pub use_24h: bool,
     /// Whether to show seconds.
     pub show_seconds: bool,
+    /// Whether the taskbar reading is prefixed with the day of the week.
+    pub show_day_of_week: bool,
+    /// Whether the taskbar reading includes the calendar date.
+    pub show_date: bool,
     /// Additional timezone displays (up to 3).
     pub extra_timezones: Vec<TimezoneEntry>,
 }
@@ -791,10 +903,19 @@ fn local_secs(utc_timestamp: u64, tz: &Tz) -> u64 {
 }
 
 impl ClockDisplay {
+    /// A clock showing nothing but the time of day.
+    ///
+    /// These are the *widget's* defaults, not the desktop's: what the taskbar
+    /// actually ships with lives in `DateTimeSettings::default`, and the shell
+    /// copies all four switches out of it on every read. A caller that builds a
+    /// clock without a settings panel behind it gets a bare `HH:MM`, which is
+    /// the reading that needs no explanation.
     pub fn new() -> Self {
         Self {
             use_24h: true,
             show_seconds: false,
+            show_day_of_week: false,
+            show_date: false,
             extra_timezones: Vec::new(),
         }
     }
@@ -850,22 +971,154 @@ impl ClockDisplay {
         }
     }
 
-    /// Format a date string: "DayOfWeek, Month DD, YYYY".
-    pub fn format_date(&self, utc_timestamp: u64, tz: &Tz) -> String {
+    /// The weekday the instant falls on in `tz`, written out: "Monday".
+    pub fn format_day_of_week(&self, utc_timestamp: u64, tz: &Tz) -> &'static str {
         let (year, month, day, _, _, _) = timestamp_to_date(local_secs(utc_timestamp, tz));
-        let dow = day_of_week(year, month, day);
-        let dow_name = day_of_week_name(dow);
-        let month_str = month_name(month);
-        format!("{dow_name}, {month_str} {day}, {year}")
+        day_of_week_name(day_of_week(year, month, day))
     }
 
-    /// Render the clock display for the taskbar.
+    /// The calendar date **without** the weekday: "January 1, 2024".
     ///
-    /// Returns render commands positioned at `(x, y)`.
-    /// `utc_now` is the current UTC timestamp and `local` is the machine's
-    /// zone — the same [`Tz`] the libc's `localtime` and the shell's
-    /// `printf '%(…)T'` use, so the taskbar cannot disagree with `date`.
-    pub fn render(&self, x: f32, y: f32, utc_now: u64, local: &Tz) -> Vec<RenderCommand> {
+    /// Split from [`format_date`](Self::format_date) because the Date & Time
+    /// panel offers the weekday and the date as two independent switches, and a
+    /// single function that emits both joined by a comma can answer neither of
+    /// them on its own. The joined form is still what the popup wants, so it
+    /// stays — as a composition of this and
+    /// [`format_day_of_week`](Self::format_day_of_week), not as a third place
+    /// that knows how a date is spelled.
+    pub fn format_calendar_date(&self, utc_timestamp: u64, tz: &Tz) -> String {
+        let (year, month, day, _, _, _) = timestamp_to_date(local_secs(utc_timestamp, tz));
+        format!("{} {day}, {year}", month_name(month))
+    }
+
+    /// Format a date string: "DayOfWeek, Month DD, YYYY".
+    pub fn format_date(&self, utc_timestamp: u64, tz: &Tz) -> String {
+        format!(
+            "{}, {}",
+            self.format_day_of_week(utc_timestamp, tz),
+            self.format_calendar_date(utc_timestamp, tz)
+        )
+    }
+
+    /// The single-line taskbar reading, as the Date & Time panel has set it up.
+    ///
+    /// The time is always present — a clock with every switch off is still a
+    /// clock — and the weekday and date are prepended when asked for, in the
+    /// order a person reads them: `"Thu Aug 21 16:30"`.
+    ///
+    /// # Why the short names here and the long ones in `format_date`
+    ///
+    /// The taskbar has about a hundred pixels for this, and the popup has a
+    /// whole panel. Writing "Thursday, August 21, 2026" into the corner of the
+    /// screen would either overrun the display edge or be clipped, and the year
+    /// is the field nobody consults at a glance — so the taskbar drops it and
+    /// abbreviates the two names. Both spellings come from the same
+    /// `guitk::date` tables, so this is a second *presentation* of one calendar
+    /// rather than a second calendar; see design-decisions §492.
+    pub fn format_taskbar(&self, utc_timestamp: u64, tz: &Tz) -> String {
+        let (year, month, day, _, _, _) = timestamp_to_date(local_secs(utc_timestamp, tz));
+        let mut out = String::new();
+        if self.show_day_of_week {
+            let dow = day_of_week(year, month, day);
+            out.push_str(Weekday::from_index(i32::try_from(dow).unwrap_or(0)).short_name());
+            out.push(' ');
+        }
+        if self.show_date {
+            out.push_str(month_name_short(month));
+            out.push(' ');
+            out.push_str(&day.to_string());
+            out.push(' ');
+        }
+        out.push_str(&self.format_time(utc_timestamp, tz));
+        out
+    }
+
+    /// How much horizontal room to reserve for this clock at `font_size`.
+    ///
+    /// Measured over the **widest value each field can take**, never over the
+    /// current instant. A reserve that followed the current reading would change
+    /// width as the minute rolled over — `1` and `8` are not the same width in a
+    /// proportional face, nor are `Fri` and `Wed` — and every tray item laid out
+    /// to the left of the clock would twitch once a minute. The widest reading
+    /// is a fixed string for a given set of switches, so the layout is stable.
+    pub fn reading_width(&self, font_size: f32) -> f32 {
+        text::width(&self.widest_reading(font_size), font_size)
+    }
+
+    /// The widest reading [`format_taskbar`](Self::format_taskbar) can produce.
+    ///
+    /// Assembled from the widest weekday abbreviation, the widest month
+    /// abbreviation and the widest digit rather than from a guess, because
+    /// which of those is widest is a property of the font face and changes when
+    /// the face does.
+    fn widest_reading(&self, font_size: f32) -> String {
+        let widest = |cands: &[&'static str]| -> &'static str {
+            cands.iter().copied().fold("", |best, c| {
+                if text::width(c, font_size) > text::width(best, font_size) {
+                    c
+                } else {
+                    best
+                }
+            })
+        };
+        let digit = widest(&["0", "1", "2", "3", "4", "5", "6", "7", "8", "9"]);
+        // Two of the widest digit is at least as wide as any field the clock
+        // prints: days of the month, hours, minutes and seconds are all one or
+        // two digits.
+        let dd = format!("{digit}{digit}");
+
+        let mut out = String::new();
+        if self.show_day_of_week {
+            let days: [&'static str; 7] = core::array::from_fn(|i| {
+                Weekday::from_index(i32::try_from(i).unwrap_or(0)).short_name()
+            });
+            out.push_str(widest(&days));
+            out.push(' ');
+        }
+        if self.show_date {
+            let months: [&'static str; 12] = core::array::from_fn(|i| {
+                month_name_short(u32::try_from(i).unwrap_or(0).saturating_add(1))
+            });
+            out.push_str(widest(&months));
+            out.push(' ');
+            out.push_str(&dd);
+            out.push(' ');
+        }
+        out.push_str(&dd);
+        out.push(':');
+        out.push_str(&dd);
+        if self.show_seconds {
+            out.push(':');
+            out.push_str(&dd);
+        }
+        if !self.use_24h {
+            out.push(' ');
+            out.push_str(widest(&["AM", "PM"]));
+        }
+        out
+    }
+
+    /// Render the clock as a stacked band: the time, the long date under it,
+    /// and one row per extra timezone.
+    ///
+    /// Returns render commands positioned at `(x, y)`, laid out at `scale`
+    /// (the display scaling — the module's constants are logical pixels; see
+    /// `guitk::scaling`). `utc_now` is the current UTC timestamp and `local`
+    /// is the machine's zone — the same [`Tz`] the libc's `localtime` and the
+    /// shell's `printf '%(…)T'` use, so the band cannot disagree with `date`.
+    ///
+    /// This is **not** the taskbar reading: the taskbar has one line and draws
+    /// [`format_taskbar`](Self::format_taskbar) into it. This band is the head
+    /// of the calendar popup, which is the only surface with room for the
+    /// extra zones — see design-decisions §493.
+    pub fn render(
+        &self,
+        x: f32,
+        y: f32,
+        scale: f32,
+        utc_now: u64,
+        local: &Tz,
+    ) -> Vec<RenderCommand> {
         let mut cmds = Vec::new();
 
         // Main time.
@@ -875,7 +1128,7 @@ impl ClockDisplay {
             y,
             text: time_str,
             color: theme::TEXT,
-            font_size: 13.0,
+            font_size: CLOCK_TIME_FONT * scale,
             font_weight: FontWeightHint::Regular,
             max_width: None,
             overflow: TextOverflow::Clip,
@@ -885,17 +1138,17 @@ impl ClockDisplay {
         let date_str = self.format_date(utc_now, local);
         cmds.push(RenderCommand::Text {
             x,
-            y: y + 16.0,
+            y: y + CLOCK_DATE_OFFSET * scale,
             text: date_str,
             color: theme::SUBTEXT,
-            font_size: 11.0,
+            font_size: CLOCK_DATE_FONT * scale,
             font_weight: FontWeightHint::Regular,
             max_width: None,
             overflow: TextOverflow::Clip,
         });
 
         // Extra timezones.
-        let mut tz_y = y + 34.0;
+        let mut tz_y = y + CLOCK_ZONES_OFFSET * scale;
         for tz in &self.extra_timezones {
             let tz_time = self.format_time(utc_now, &tz.tz);
             let label = format!("{}: {}", tz.label, tz_time);
@@ -904,15 +1157,32 @@ impl ClockDisplay {
                 y: tz_y,
                 text: label,
                 color: theme::SUBTEXT,
-                font_size: 10.0,
+                font_size: CLOCK_ZONE_FONT * scale,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
                 overflow: TextOverflow::Clip,
             });
-            tz_y += 14.0;
+            tz_y += CLOCK_ZONE_ROW * scale;
         }
 
         cmds
+    }
+
+    /// How tall [`render`](Self::render) draws, so a host can reserve the room.
+    ///
+    /// Depends on how many extra zones there are and on nothing else — in
+    /// particular not on the instant, which is why the calendar popup can hold
+    /// this on its own state and still read the current second at draw time.
+    #[must_use]
+    pub fn render_height(&self, scale: f32) -> f32 {
+        let rows = self.extra_timezones.len();
+        let base = if rows == 0 {
+            // Time, then date, then the date line's own height.
+            CLOCK_DATE_OFFSET + CLOCK_ZONE_ROW
+        } else {
+            CLOCK_ZONES_OFFSET + rows as f32 * CLOCK_ZONE_ROW
+        };
+        base * scale
     }
 }
 
@@ -948,6 +1218,381 @@ pub struct GridCell {
     pub month: u32,
 }
 
+/// The clock band drawn across the head of the popup.
+///
+/// Held on the view rather than passed to `render`, because the band's *height*
+/// moves every row below it — the arrows, the day cells, the "Today" button.
+/// A caller that supplied the clock only when drawing would have a popup whose
+/// cells were clicked one band away from where they appear, which is precisely
+/// the class of bug [`MonthLayout`] exists to make impossible.
+///
+/// The instant is deliberately **not** here: `render` takes it, so the band
+/// reads the current second on every frame rather than the second the popup
+/// happened to open on. The band's height does not depend on it.
+#[derive(Clone, Debug)]
+pub struct ClockHeader {
+    /// The clock to read with — the same one the taskbar draws, so the two
+    /// readings cannot disagree about the hour.
+    pub clock: ClockDisplay,
+    /// The zone to read in.
+    pub zone: Tz,
+}
+
+/// What is under a point on the calendar popup.
+///
+/// Separated from acting on it for the same reason the shell's own `Hit` is:
+/// "where is the pointer" becomes something a test can assert directly, and
+/// the press path cannot drift from what was drawn.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CalendarHit {
+    /// The `<` control — the previous month, or the previous year in the year
+    /// overview.
+    PrevPage,
+    /// The `>` control.
+    NextPage,
+    /// The month-and-year (or year) title, which switches between the month
+    /// grid and the year overview.
+    Title,
+    /// The "Today" button.
+    Today,
+    /// A day cell, by index into [`CalendarView::generate_grid`].
+    Day(usize),
+    /// A mini month of the year overview, 1-12.
+    Month(u32),
+    /// The popup, but none of its controls. A host uses this to know the click
+    /// was *on* the popup and so must not dismiss it.
+    Panel,
+}
+
+// ============================================================================
+// Popup geometry
+// ============================================================================
+
+/// Where every part of the month popup sits, at a given origin and scaling.
+///
+/// This exists because the popup is now clicked as well as drawn. Geometry
+/// written twice — once to paint an arrow, once to decide whether a click hit
+/// it — yields a control that is live somewhere other than where it appears
+/// the moment either copy is edited, and nothing about the surviving copy looks
+/// wrong. Every rectangle here is read by `render_month_view` *and* by
+/// [`CalendarView::hit_test`], so the two cannot disagree.
+///
+/// `scale` is the display scaling the host draws its chrome at. This module's
+/// constants are logical pixels (see `guitk::scaling`), and the popup has to
+/// live in the same coordinate space as the taskbar it rises from: laid out at
+/// 100% beside a taskbar drawn at 200% it would be half-size and anchored to
+/// the wrong pixel.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct MonthLayout {
+    /// The popup card.
+    pub frame: Rect,
+    /// Display scaling. Every constant in this module is multiplied by it.
+    scale: f32,
+    /// Top of the clock band, and its height — zero when there is no band.
+    clock_y: f32,
+    clock_h: f32,
+    /// Left edge of the seven-column day grid, past the week-number gutter.
+    grid_x: f32,
+    /// Top of the arrows-and-title row.
+    nav_y: f32,
+    /// Top of the S M T W T F S row.
+    dow_y: f32,
+    /// Top of the first row of day cells.
+    grid_y: f32,
+    /// Width of the week-number gutter, or zero when the column is off.
+    gutter: f32,
+    /// Whether the "Today" button is drawn. It is not while the view is
+    /// already on today's month, where it would do nothing.
+    today_shown: bool,
+}
+
+impl MonthLayout {
+    /// Lay the month popup out with its top-left corner at `(x, y)`.
+    #[must_use]
+    pub fn new(view: &CalendarView, x: f32, y: f32, scale: f32) -> Self {
+        let px = |v: f32| v * scale;
+        let gutter = if view.config.show_week_numbers {
+            px(WEEK_NUM_WIDTH)
+        } else {
+            0.0
+        };
+        let clock_h = view
+            .header
+            .as_ref()
+            .map_or(0.0, |h| h.clock.render_height(scale));
+        let clock_y = y + px(PADDING);
+        let nav_y = clock_y + clock_h;
+        let dow_y = nav_y + px(NAV_HEIGHT);
+        let grid_y = dow_y + px(DOW_HEADER_HEIGHT);
+        let height = px(PADDING) * 2.0
+            + clock_h
+            + px(NAV_HEIGHT)
+            + px(DOW_HEADER_HEIGHT)
+            + GRID_ROWS as f32 * px(CELL_SIZE);
+        Self {
+            frame: Rect::new(x, y, px(POPUP_WIDTH) + gutter, height),
+            scale,
+            clock_y,
+            clock_h,
+            grid_x: x + px(PADDING) + gutter,
+            nav_y,
+            dow_y,
+            grid_y,
+            gutter,
+            today_shown: !view.is_viewing_today_month(),
+        }
+    }
+
+    /// A logical length in drawn pixels.
+    fn px(&self, logical: f32) -> f32 {
+        logical * self.scale
+    }
+
+    /// Width of the seven-column day grid.
+    #[must_use]
+    pub fn grid_width(&self) -> f32 {
+        GRID_COLS as f32 * self.px(CELL_SIZE)
+    }
+
+    /// Where the clock band is drawn, and whether there is one.
+    #[must_use]
+    pub fn clock_band(&self) -> Option<Rect> {
+        if self.clock_h <= 0.0 {
+            return None;
+        }
+        Some(Rect::new(
+            self.frame.x + self.px(PADDING),
+            self.clock_y,
+            (self.frame.w - self.px(PADDING) * 2.0).max(0.0),
+            self.clock_h,
+        ))
+    }
+
+    /// The `<` control.
+    #[must_use]
+    pub fn prev_arrow(&self) -> Rect {
+        Rect::new(
+            self.grid_x,
+            self.nav_y,
+            self.px(NAV_ARROW_WIDTH),
+            self.px(NAV_ARROW_HEIGHT),
+        )
+    }
+
+    /// The `>` control.
+    #[must_use]
+    pub fn next_arrow(&self) -> Rect {
+        let w = self.px(NAV_ARROW_WIDTH);
+        Rect::new(
+            self.grid_x + self.grid_width() - w,
+            self.nav_y,
+            w,
+            self.px(NAV_ARROW_HEIGHT),
+        )
+    }
+
+    /// The month-and-year title, filling the space between the two arrows.
+    #[must_use]
+    pub fn title(&self) -> Rect {
+        let arrow = self.px(NAV_ARROW_WIDTH);
+        Rect::new(
+            self.grid_x + arrow,
+            self.nav_y,
+            (self.grid_width() - arrow * 2.0).max(0.0),
+            self.px(NAV_ARROW_HEIGHT),
+        )
+    }
+
+    /// The "Today" button, or `None` while the view is already on this month.
+    #[must_use]
+    pub fn today_button(&self) -> Option<Rect> {
+        if !self.today_shown {
+            return None;
+        }
+        let pad = self.px(TODAY_BUTTON_PADDING);
+        let w =
+            text::measure(TODAY_LABEL, self.px(TODAY_FONT), FontWeightHint::Regular) + pad * 2.0;
+        let centre = self.grid_x + self.grid_width() / 2.0;
+        Some(Rect::new(
+            centre - w / 2.0,
+            self.nav_y + self.px(NAV_ARROW_HEIGHT),
+            w,
+            (self.px(NAV_HEIGHT) - self.px(NAV_ARROW_HEIGHT)).max(0.0),
+        ))
+    }
+
+    /// The day-of-week heading above column `col`.
+    #[must_use]
+    pub fn dow_header(&self, col: usize) -> Rect {
+        let cell = self.px(CELL_SIZE);
+        Rect::new(
+            self.grid_x + col as f32 * cell,
+            self.dow_y,
+            cell,
+            self.px(DOW_HEADER_HEIGHT),
+        )
+    }
+
+    /// The week-number gutter cell beside grid row `row`.
+    #[must_use]
+    pub fn week_number(&self, row: usize) -> Rect {
+        let cell = self.px(CELL_SIZE);
+        Rect::new(
+            self.frame.x + self.px(PADDING),
+            self.grid_y + row as f32 * cell,
+            self.gutter,
+            cell,
+        )
+    }
+
+    /// The cell at `index` into the 42-cell grid.
+    #[must_use]
+    pub fn cell(&self, index: usize) -> Rect {
+        let size = self.px(CELL_SIZE);
+        let col = index % GRID_COLS;
+        let row = index / GRID_COLS;
+        Rect::new(
+            self.grid_x + col as f32 * size,
+            self.grid_y + row as f32 * size,
+            size,
+            size,
+        )
+    }
+
+    /// Which grid cell a point falls in, if any.
+    ///
+    /// A scan over [`cell`](Self::cell) rather than arithmetic that inverts it:
+    /// dividing the offset by the cell size would be a *second* answer to where
+    /// the cells are, and forty-two `contains` calls on a click is not a cost
+    /// worth trading correctness for.
+    #[must_use]
+    pub fn cell_at(&self, px: f32, py: f32) -> Option<usize> {
+        (0..GRID_CELLS).find(|&i| self.cell(i).contains(px, py))
+    }
+
+    /// The event card that hangs below the popup for a selected date.
+    #[must_use]
+    pub fn detail(&self, event_count: usize) -> Rect {
+        let visible = event_count.min(MAX_VISIBLE_EVENTS);
+        let height = self.px(EVENT_HEADER_HEIGHT)
+            + visible as f32 * self.px(EVENT_ROW_HEIGHT)
+            + self.px(PADDING);
+        Rect::new(
+            self.frame.x,
+            self.frame.y + self.frame.h + self.px(DETAIL_GAP),
+            self.frame.w,
+            height,
+        )
+    }
+}
+
+/// Where every part of the year overview sits.
+///
+/// The month view's counterpart, and here for the same reason: the year's
+/// arrows and its twelve mini months are all clickable, and their rectangles
+/// must be the ones that were drawn.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct YearLayout {
+    /// The popup card.
+    pub frame: Rect,
+    scale: f32,
+    /// Top of the first row of mini months.
+    grid_y: f32,
+    /// Size of one mini month.
+    mini_w: f32,
+    mini_h: f32,
+}
+
+impl YearLayout {
+    /// Lay the year overview out with its top-left corner at `(x, y)`.
+    #[must_use]
+    pub fn new(x: f32, y: f32, scale: f32) -> Self {
+        let px = |v: f32| v * scale;
+        let mini_w = GRID_COLS as f32 * px(MINI_CELL) + px(MINI_MONTH_PADDING);
+        let mini_h =
+            GRID_ROWS as f32 * px(MINI_CELL) + px(MINI_MONTH_LABEL_HEIGHT) + px(MINI_MONTH_PADDING);
+        let width = YEAR_COLS as f32 * mini_w
+            + px(PADDING) * 2.0
+            + (YEAR_COLS - 1) as f32 * px(MINI_MONTH_GAP);
+        let height = px(NAV_HEIGHT)
+            + YEAR_ROWS as f32 * mini_h
+            + px(PADDING) * 2.0
+            + (YEAR_ROWS - 1) as f32 * px(MINI_MONTH_GAP);
+        Self {
+            frame: Rect::new(x, y, width, height),
+            scale,
+            grid_y: y + px(PADDING) + px(NAV_HEIGHT),
+            mini_w,
+            mini_h,
+        }
+    }
+
+    fn px(&self, logical: f32) -> f32 {
+        logical * self.scale
+    }
+
+    /// Top of the arrows-and-title row.
+    fn nav_y(&self) -> f32 {
+        self.frame.y + self.px(PADDING)
+    }
+
+    /// The `<` control — the previous year.
+    #[must_use]
+    pub fn prev_arrow(&self) -> Rect {
+        Rect::new(
+            self.frame.x + self.px(PADDING),
+            self.nav_y(),
+            self.px(NAV_ARROW_WIDTH),
+            self.px(NAV_ARROW_HEIGHT),
+        )
+    }
+
+    /// The `>` control — the next year.
+    #[must_use]
+    pub fn next_arrow(&self) -> Rect {
+        let w = self.px(NAV_ARROW_WIDTH);
+        Rect::new(
+            self.frame.x + self.frame.w - self.px(PADDING) - w,
+            self.nav_y(),
+            w,
+            self.px(NAV_ARROW_HEIGHT),
+        )
+    }
+
+    /// The year title, which returns to the month grid.
+    #[must_use]
+    pub fn title(&self) -> Rect {
+        let edge = self.px(PADDING) + self.px(NAV_ARROW_WIDTH);
+        Rect::new(
+            self.frame.x + edge,
+            self.nav_y(),
+            (self.frame.w - edge * 2.0).max(0.0),
+            self.px(NAV_ARROW_HEIGHT),
+        )
+    }
+
+    /// The box of the `index`-th mini month, `index` counting from January.
+    #[must_use]
+    pub fn month(&self, index: usize) -> Rect {
+        let col = index % YEAR_COLS;
+        let row = index / YEAR_COLS;
+        Rect::new(
+            self.frame.x + self.px(PADDING) + col as f32 * (self.mini_w + self.px(MINI_MONTH_GAP)),
+            self.grid_y + row as f32 * (self.mini_h + self.px(MINI_MONTH_GAP)),
+            self.mini_w,
+            self.mini_h,
+        )
+    }
+
+    /// Which month (1-12) a point falls on, if any.
+    #[must_use]
+    pub fn month_at(&self, px: f32, py: f32) -> Option<u32> {
+        (0..12usize)
+            .find(|&i| self.month(i).contains(px, py))
+            .map(|i| u32::try_from(i).unwrap_or(0).saturating_add(1))
+    }
+}
+
 /// The calendar popup widget.
 pub struct CalendarView {
     /// Configuration.
@@ -964,6 +1609,11 @@ pub struct CalendarView {
     pub mode: CalendarViewMode,
     /// Selected date (if any) for event detail popup.
     pub selected_date: Option<(i32, u32, u32)>,
+    /// The clock band across the head of the popup, if the host wants one.
+    ///
+    /// `None` is a bare month grid. See [`ClockHeader`] for why it lives here
+    /// rather than being passed to `render`.
+    pub header: Option<ClockHeader>,
 }
 
 impl CalendarView {
@@ -976,6 +1626,7 @@ impl CalendarView {
             visible: false,
             mode: CalendarViewMode::Month,
             selected_date: None,
+            header: None,
         }
     }
 
@@ -994,13 +1645,19 @@ impl CalendarView {
     }
 
     /// Show or hide the popup.
+    ///
+    /// Opening rewinds it: month view, today's month, nothing selected. A popup
+    /// that reopened where it was last left would show September to someone who
+    /// closed it there in August and has no idea it moved — and would hang the
+    /// event card of a date they have long since stopped looking at underneath
+    /// it. This is the same reasoning as the start menu's scroll rewind.
     pub fn set_visible(&mut self, visible: bool) {
         self.visible = visible;
         if visible {
-            // Reset to month view showing today's month.
             self.mode = CalendarViewMode::Month;
             self.view_year = self.today.0;
             self.view_month = self.today.1;
+            self.selected_date = None;
         }
     }
 
@@ -1048,6 +1705,201 @@ impl CalendarView {
     /// Navigate to next year (year view).
     pub fn next_year(&mut self) {
         self.set_view_to(self.view_anchor().add_years(1));
+    }
+
+    /// Whether the view is already showing the month today falls in.
+    ///
+    /// Read by the layout (to decide whether the "Today" button exists at all)
+    /// and by the renderer (to decide whether to draw it). One answer, so the
+    /// button cannot be clickable while invisible or the reverse.
+    #[must_use]
+    pub fn is_viewing_today_month(&self) -> bool {
+        self.view_year == self.today.0 && self.view_month == self.today.1
+    }
+
+    /// Set today from a UTC instant and a **zone**.
+    ///
+    /// Prefer this to [`set_today_from_timestamp`](Self::set_today_from_timestamp),
+    /// which takes a fixed offset and so cannot be right across a daylight-saving
+    /// transition: a zone that observes DST has two offsets and a rule saying
+    /// which is in force at a given instant. This applies the same `local_secs`
+    /// the taskbar clock does, so the popup cannot open on a different day than
+    /// the reading that opened it.
+    pub fn set_today_from_zone(&mut self, utc_now: u64, tz: &Tz) {
+        let (y, m, d, _, _, _) = timestamp_to_date(local_secs(utc_now, tz));
+        self.set_today(y, m, d);
+    }
+
+    // ========================================================================
+    // Hit testing
+    // ========================================================================
+
+    /// The popup's outline, for a host deciding where to put it.
+    #[must_use]
+    pub fn popup_rect(&self, x: f32, y: f32, scale: f32) -> Rect {
+        match self.mode {
+            CalendarViewMode::Month => MonthLayout::new(self, x, y, scale).frame,
+            CalendarViewMode::Year => YearLayout::new(x, y, scale).frame,
+        }
+    }
+
+    /// What is under a point, given where the popup was drawn.
+    ///
+    /// `None` means the point is not on the popup at all — which is how a host
+    /// tells that a click landed outside and should dismiss it. Note that this
+    /// is *not* the same as [`CalendarHit::Panel`], which is a click that hit
+    /// the popup but none of its controls, and must **not** dismiss it.
+    #[must_use]
+    pub fn hit_test(
+        &self,
+        x: f32,
+        y: f32,
+        scale: f32,
+        px: f32,
+        py: f32,
+        store: &EventStore,
+    ) -> Option<CalendarHit> {
+        if !self.visible {
+            return None;
+        }
+        match self.mode {
+            CalendarViewMode::Month => {
+                self.hit_test_month(&MonthLayout::new(self, x, y, scale), px, py, store)
+            }
+            CalendarViewMode::Year => Self::hit_test_year(&YearLayout::new(x, y, scale), px, py),
+        }
+    }
+
+    fn hit_test_month(
+        &self,
+        layout: &MonthLayout,
+        px: f32,
+        py: f32,
+        store: &EventStore,
+    ) -> Option<CalendarHit> {
+        // The event card is tested first because it is drawn last and hangs
+        // *below* the frame: a point inside it is not inside `frame`, and
+        // falling through to `None` would dismiss the popup on a click aimed at
+        // the very list the click before it opened.
+        if let Some(card) = self.detail_rect(layout, store)
+            && card.contains(px, py)
+        {
+            return Some(CalendarHit::Panel);
+        }
+        if !layout.frame.contains(px, py) {
+            return None;
+        }
+        // The arrows sit inside the title's row and so are tested before it.
+        if layout.prev_arrow().contains(px, py) {
+            return Some(CalendarHit::PrevPage);
+        }
+        if layout.next_arrow().contains(px, py) {
+            return Some(CalendarHit::NextPage);
+        }
+        if layout.title().contains(px, py) {
+            return Some(CalendarHit::Title);
+        }
+        if layout.today_button().is_some_and(|r| r.contains(px, py)) {
+            return Some(CalendarHit::Today);
+        }
+        if let Some(index) = layout.cell_at(px, py) {
+            return Some(CalendarHit::Day(index));
+        }
+        Some(CalendarHit::Panel)
+    }
+
+    fn hit_test_year(layout: &YearLayout, px: f32, py: f32) -> Option<CalendarHit> {
+        if !layout.frame.contains(px, py) {
+            return None;
+        }
+        if layout.prev_arrow().contains(px, py) {
+            return Some(CalendarHit::PrevPage);
+        }
+        if layout.next_arrow().contains(px, py) {
+            return Some(CalendarHit::NextPage);
+        }
+        if layout.title().contains(px, py) {
+            return Some(CalendarHit::Title);
+        }
+        if let Some(month) = layout.month_at(px, py) {
+            return Some(CalendarHit::Month(month));
+        }
+        Some(CalendarHit::Panel)
+    }
+
+    /// Where the event card is, if one is showing.
+    fn detail_rect(&self, layout: &MonthLayout, store: &EventStore) -> Option<Rect> {
+        let (year, month, day) = self.selected_date?;
+        let count = store.events_for_date(year, month, day).len();
+        if count == 0 {
+            return None;
+        }
+        Some(layout.detail(count))
+    }
+
+    /// Act on a hit. Returns whether anything about the view changed.
+    pub fn apply(&mut self, hit: CalendarHit) -> bool {
+        match hit {
+            CalendarHit::PrevPage => {
+                match self.mode {
+                    CalendarViewMode::Month => self.prev_month(),
+                    CalendarViewMode::Year => self.prev_year(),
+                }
+                true
+            }
+            CalendarHit::NextPage => {
+                match self.mode {
+                    CalendarViewMode::Month => self.next_month(),
+                    CalendarViewMode::Year => self.next_year(),
+                }
+                true
+            }
+            CalendarHit::Title => {
+                match self.mode {
+                    CalendarViewMode::Month => self.show_year_view(),
+                    CalendarViewMode::Year => self.show_month_view(),
+                }
+                true
+            }
+            CalendarHit::Today => {
+                self.go_to_today();
+                true
+            }
+            CalendarHit::Day(index) => self.select_grid_cell(index),
+            CalendarHit::Month(month) => {
+                self.view_month = month;
+                self.show_month_view();
+                true
+            }
+            CalendarHit::Panel => false,
+        }
+    }
+
+    /// Select — or deselect — the day in grid cell `index`.
+    ///
+    /// A cell from a neighbouring month carries the view onto that month as
+    /// well. Selecting the trailing "1" of an August grid and staying in August
+    /// would leave the highlight on a cell whose date the header contradicts,
+    /// and the event card below it listing a September day under an August
+    /// title.
+    ///
+    /// Clicking the selected day again clears it, which is the only way to
+    /// dismiss the event card without closing the whole popup.
+    fn select_grid_cell(&mut self, index: usize) -> bool {
+        let Some(cell) = self.generate_grid().get(index).copied() else {
+            return false;
+        };
+        let date = (cell.year, cell.month, cell.day);
+        if self.selected_date == Some(date) {
+            self.selected_date = None;
+            return true;
+        }
+        self.selected_date = Some(date);
+        if !cell.current_month {
+            self.view_year = cell.year;
+            self.view_month = cell.month;
+        }
+        true
     }
 
     // ========================================================================
@@ -1118,172 +1970,187 @@ impl CalendarView {
 
     /// Render the complete calendar popup at position `(x, y)`.
     ///
-    /// `store` is used to show event dots on dates that have events.
-    pub fn render(&self, x: f32, y: f32, store: &EventStore) -> Vec<RenderCommand> {
+    /// `scale` is the host's display scaling — see [`MonthLayout`] for why the
+    /// popup has to be laid out in the same coordinate space as the chrome it
+    /// rises from. `utc_now` feeds the clock band at the head of the popup (and
+    /// is unused when there is no band). `store` supplies the event dots and
+    /// the card that hangs below a selected date.
+    ///
+    /// Every rectangle drawn here comes from [`MonthLayout`] or [`YearLayout`],
+    /// which is also what [`hit_test`](Self::hit_test) reads — so nothing can be
+    /// clickable somewhere other than where it is painted.
+    pub fn render(
+        &self,
+        x: f32,
+        y: f32,
+        scale: f32,
+        utc_now: u64,
+        store: &EventStore,
+    ) -> Vec<RenderCommand> {
         if !self.visible {
             return Vec::new();
         }
 
         match self.mode {
-            CalendarViewMode::Month => self.render_month_view(x, y, store),
-            CalendarViewMode::Year => self.render_year_view(x, y),
+            CalendarViewMode::Month => self.render_month_view(x, y, scale, utc_now, store),
+            CalendarViewMode::Year => self.render_year_view(x, y, scale),
         }
     }
 
-    fn render_month_view(&self, x: f32, y: f32, store: &EventStore) -> Vec<RenderCommand> {
+    fn render_month_view(
+        &self,
+        x: f32,
+        y: f32,
+        scale: f32,
+        utc_now: u64,
+        store: &EventStore,
+    ) -> Vec<RenderCommand> {
+        let layout = MonthLayout::new(self, x, y, scale);
+        let frame = layout.frame;
+        let radii = CornerRadii::all(layout.px(CARD_RADIUS));
         let mut cmds = Vec::new();
-        let wn_extra = if self.config.show_week_numbers {
-            WEEK_NUM_WIDTH
-        } else {
-            0.0
-        };
-        let total_width = POPUP_WIDTH + wn_extra;
-        let grid_rows = 6;
-        let total_height =
-            PADDING * 2.0 + NAV_HEIGHT + DOW_HEADER_HEIGHT + (grid_rows as f32 * CELL_SIZE);
 
         // Popup background with shadow.
         cmds.push(RenderCommand::BoxShadow {
-            x,
-            y,
-            width: total_width,
-            height: total_height,
+            x: frame.x,
+            y: frame.y,
+            width: frame.w,
+            height: frame.h,
             offset_x: 0.0,
-            offset_y: 4.0,
-            blur: 16.0,
+            offset_y: layout.px(4.0),
+            blur: layout.px(16.0),
             spread: 0.0,
             color: Color::rgba(0, 0, 0, 100),
-            corner_radii: CornerRadii::all(CARD_RADIUS),
+            corner_radii: radii,
         });
         cmds.push(RenderCommand::FillRect {
-            x,
-            y,
-            width: total_width,
-            height: total_height,
+            x: frame.x,
+            y: frame.y,
+            width: frame.w,
+            height: frame.h,
             color: theme::BASE,
-            corner_radii: CornerRadii::all(CARD_RADIUS),
+            corner_radii: radii,
         });
         cmds.push(RenderCommand::StrokeRect {
-            x,
-            y,
-            width: total_width,
-            height: total_height,
+            x: frame.x,
+            y: frame.y,
+            width: frame.w,
+            height: frame.h,
             color: theme::SURFACE1,
             line_width: 1.0,
-            corner_radii: CornerRadii::all(CARD_RADIUS),
+            corner_radii: radii,
         });
 
-        let content_x = x + PADDING;
-        let mut cy = y + PADDING;
+        // The clock band, drawn by the very `ClockDisplay` the taskbar reads
+        // with — one clock, two presentations, so the popup cannot claim a
+        // different hour than the reading that opened it.
+        if let (Some(header), Some(band)) = (self.header.as_ref(), layout.clock_band()) {
+            cmds.extend(
+                header
+                    .clock
+                    .render(band.x, band.y, scale, utc_now, &header.zone),
+            );
+        }
 
-        // Navigation header.
-        self.render_nav_header(&mut cmds, content_x + wn_extra, cy);
-        cy += NAV_HEIGHT;
+        self.render_nav_header(&mut cmds, &layout);
+        self.render_dow_headers(&mut cmds, &layout);
 
-        // Day-of-week headers.
-        self.render_dow_headers(&mut cmds, content_x + wn_extra, cy);
-        cy += DOW_HEADER_HEIGHT;
-
-        // Grid.
-        // The grid is 42 cells meaning six weeks of seven. `chunks` states
-        // that once, where `row * 7` and `row * 7 + col` stated it at each of
-        // the two places that indexed back in — and each of those then had to
-        // re-check the result it had just computed against `get`.
+        // The grid is 42 cells meaning six weeks of seven. `chunks` states that
+        // once, where `row * 7` and `row * 7 + col` stated it at each of the two
+        // places that indexed back in.
         let grid = self.generate_grid();
-        for (row, week) in grid.chunks(7).enumerate() {
-            // Week number column.
+        for (row, week) in grid.chunks(GRID_COLS).enumerate() {
             if self.config.show_week_numbers {
-                let wn = Self::week_number_for(week);
+                let gutter = layout.week_number(row);
                 cmds.push(RenderCommand::Text {
-                    x: content_x,
-                    y: cy + row as f32 * CELL_SIZE + 12.0,
-                    text: format!("{wn}"),
+                    x: gutter.x,
+                    y: gutter.y + layout.px(12.0),
+                    text: format!("{}", Self::week_number_for(week)),
                     color: theme::SURFACE2,
-                    font_size: 10.0,
+                    font_size: layout.px(WEEK_NUM_FONT),
                     font_weight: FontWeightHint::Regular,
-                    max_width: Some(WEEK_NUM_WIDTH),
+                    max_width: Some(gutter.w),
                     overflow: TextOverflow::Ellipsis,
                 });
             }
-
-            for (col, cell) in week.iter().enumerate() {
-                let cx = content_x + wn_extra + col as f32 * CELL_SIZE;
-                let cell_y = cy + row as f32 * CELL_SIZE;
-                self.render_day_cell(&mut cmds, cx, cell_y, cell, store);
-            }
+        }
+        for (index, cell) in grid.iter().enumerate() {
+            self.render_day_cell(&mut cmds, &layout, index, cell, store);
         }
 
-        // Event detail popup for selected date.
+        // Event card for the selected date.
         if let Some((sy, sm, sd)) = self.selected_date {
             let events = store.events_for_date(sy, sm, sd);
             if !events.is_empty() {
-                let detail_y = y + total_height + 4.0;
-                self.render_event_detail(&mut cmds, x, detail_y, total_width, sy, sm, sd, &events);
+                let card = layout.detail(events.len());
+                Self::render_event_detail(&mut cmds, &layout, card, sm, sd, &events);
             }
         }
 
         cmds
     }
 
-    fn render_nav_header(&self, cmds: &mut Vec<RenderCommand>, x: f32, y: f32) {
-        let label = format!("{} {}", month_name(self.view_month), self.view_year);
-        let grid_width = 7.0 * CELL_SIZE;
+    fn render_nav_header(&self, cmds: &mut Vec<RenderCommand>, layout: &MonthLayout) {
+        let arrow_size = layout.px(NAV_ARROW_FONT);
+        // Each glyph is centred in its own hit box, so what is clickable is
+        // what looks clickable. Drawing at the box's left edge — which is what
+        // this did before the boxes existed — put a 10px glyph at one end of a
+        // 24px target and left the other end looking like empty header.
+        for (rect, glyph) in [(layout.prev_arrow(), "<"), (layout.next_arrow(), ">")] {
+            cmds.push(RenderCommand::Text {
+                x: text::center_x(
+                    glyph,
+                    rect.x + rect.w / 2.0,
+                    arrow_size,
+                    FontWeightHint::Bold,
+                ),
+                y: rect.y + layout.px(10.0),
+                text: glyph.to_string(),
+                color: theme::SUBTEXT,
+                font_size: arrow_size,
+                font_weight: FontWeightHint::Bold,
+                max_width: None,
+                overflow: TextOverflow::Clip,
+            });
+        }
 
-        // Left arrow.
-        cmds.push(RenderCommand::Text {
-            x,
-            y: y + 10.0,
-            text: "<".to_string(),
-            color: theme::SUBTEXT,
-            font_size: 18.0,
-            font_weight: FontWeightHint::Bold,
-            max_width: None,
-            overflow: TextOverflow::Clip,
-        });
-
-        // Right arrow.
-        cmds.push(RenderCommand::Text {
-            x: x + grid_width - 16.0,
-            y: y + 10.0,
-            text: ">".to_string(),
-            color: theme::SUBTEXT,
-            font_size: 18.0,
-            font_weight: FontWeightHint::Bold,
-            max_width: None,
-            overflow: TextOverflow::Clip,
-        });
-
-        // Centered month/year label. Month names are localised, so an
+        // Centred month/year label. Month names are localised, so an
         // eight-pixels-per-byte guess put "Februar" and "Fevereiro" visibly
         // off-centre and pushed the longest ones under the > arrow.
-        let label_x = text::center_x(&label, x + grid_width / 2.0, 15.0, FontWeightHint::Bold);
+        let title = layout.title();
+        let title_size = layout.px(NAV_TITLE_FONT);
+        let label = format!("{} {}", month_name(self.view_month), self.view_year);
         cmds.push(RenderCommand::Text {
-            x: label_x,
-            y: y + 10.0,
+            x: text::center_x(
+                &label,
+                title.x + title.w / 2.0,
+                title_size,
+                FontWeightHint::Bold,
+            ),
+            y: title.y + layout.px(10.0),
             text: label,
             color: theme::TEXT,
-            font_size: 15.0,
+            font_size: title_size,
             font_weight: FontWeightHint::Bold,
-            max_width: Some(grid_width - 40.0),
+            max_width: Some(title.w),
             overflow: TextOverflow::Ellipsis,
         });
 
-        // "Today" button below the label.
-        let is_viewing_today = self.view_year == self.today.0 && self.view_month == self.today.1;
-        if !is_viewing_today {
-            let today_label = "Today";
-            let tx = text::center_x(
-                today_label,
-                x + grid_width / 2.0,
-                11.0,
-                FontWeightHint::Regular,
-            );
+        // "Today" button below the label — absent while the view is already on
+        // this month, which is the layout's decision, not a second one here.
+        if let Some(button) = layout.today_button() {
+            let size = layout.px(TODAY_FONT);
             cmds.push(RenderCommand::Text {
-                x: tx,
-                y: y + 30.0,
-                text: today_label.to_string(),
+                x: text::center_x(
+                    TODAY_LABEL,
+                    button.x + button.w / 2.0,
+                    size,
+                    FontWeightHint::Regular,
+                ),
+                y: button.y + layout.px(2.0),
+                text: TODAY_LABEL.to_string(),
                 color: theme::BLUE,
-                font_size: 11.0,
+                font_size: size,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
                 overflow: TextOverflow::Clip,
@@ -1291,18 +2158,19 @@ impl CalendarView {
         }
     }
 
-    fn render_dow_headers(&self, cmds: &mut Vec<RenderCommand>, x: f32, y: f32) {
+    fn render_dow_headers(&self, cmds: &mut Vec<RenderCommand>, layout: &MonthLayout) {
         let headers = dow_headers(self.config.first_day_of_week);
-        for (i, hdr) in headers.iter().enumerate() {
-            let hx = x + i as f32 * CELL_SIZE + (CELL_SIZE - 16.0) / 2.0;
+        let size = layout.px(DOW_HEADER_FONT);
+        for (col, hdr) in headers.iter().enumerate() {
+            let rect = layout.dow_header(col);
             cmds.push(RenderCommand::Text {
-                x: hx,
-                y: y + 6.0,
-                text: hdr.to_string(),
+                x: text::center_x(hdr, rect.x + rect.w / 2.0, size, FontWeightHint::Bold),
+                y: rect.y + layout.px(6.0),
+                text: (*hdr).to_string(),
                 color: theme::SUBTEXT,
-                font_size: 11.0,
+                font_size: size,
                 font_weight: FontWeightHint::Bold,
-                max_width: Some(CELL_SIZE),
+                max_width: Some(rect.w),
                 overflow: TextOverflow::Ellipsis,
             });
         }
@@ -1311,170 +2179,158 @@ impl CalendarView {
     fn render_day_cell(
         &self,
         cmds: &mut Vec<RenderCommand>,
-        x: f32,
-        y: f32,
+        layout: &MonthLayout,
+        index: usize,
         cell: &GridCell,
         store: &EventStore,
     ) {
+        let rect = layout.cell(index);
         let is_today =
             cell.year == self.today.0 && cell.month == self.today.1 && cell.day == self.today.2;
         let is_selected = self.selected_date == Some((cell.year, cell.month, cell.day));
 
-        // Today highlight circle.
-        if is_today {
-            let circle_x = x + (CELL_SIZE - TODAY_RADIUS * 2.0) / 2.0;
-            let circle_y = y + (CELL_SIZE - TODAY_RADIUS * 2.0) / 2.0 - 2.0;
-            cmds.push(RenderCommand::FillRect {
-                x: circle_x,
-                y: circle_y,
-                width: TODAY_RADIUS * 2.0,
-                height: TODAY_RADIUS * 2.0,
-                color: theme::BLUE,
-                corner_radii: CornerRadii::all(TODAY_RADIUS),
-            });
+        // Today's highlight, or the selection's.
+        let disc = if is_today {
+            Some(theme::BLUE)
         } else if is_selected {
-            let circle_x = x + (CELL_SIZE - TODAY_RADIUS * 2.0) / 2.0;
-            let circle_y = y + (CELL_SIZE - TODAY_RADIUS * 2.0) / 2.0 - 2.0;
+            Some(theme::SURFACE1)
+        } else {
+            None
+        };
+        if let Some(color) = disc {
+            let radius = layout.px(TODAY_RADIUS);
             cmds.push(RenderCommand::FillRect {
-                x: circle_x,
-                y: circle_y,
-                width: TODAY_RADIUS * 2.0,
-                height: TODAY_RADIUS * 2.0,
-                color: theme::SURFACE1,
-                corner_radii: CornerRadii::all(TODAY_RADIUS),
+                x: rect.x + (rect.w - radius * 2.0) / 2.0,
+                y: rect.y + (rect.h - radius * 2.0) / 2.0 - layout.px(2.0),
+                width: radius * 2.0,
+                height: radius * 2.0,
+                color,
+                corner_radii: CornerRadii::all(radius),
             });
         }
 
-        // Day number.
+        // Day number, centred by measurement. The old `if day >= 10 { 4.0 }`
+        // nudge was a guess at the width of one extra digit in a proportional
+        // face, so "11" and "28" were centred differently from each other.
         let text_color = if is_today {
             theme::BASE
-        } else if !cell.current_month {
-            theme::SURFACE2
-        } else {
+        } else if cell.current_month {
             theme::TEXT
+        } else {
+            theme::SURFACE2
         };
-
+        let weight = if is_today {
+            FontWeightHint::Bold
+        } else {
+            FontWeightHint::Regular
+        };
         let day_str = format!("{}", cell.day);
-        // Center the number in the cell.
-        let char_offset = if cell.day >= 10 { 4.0 } else { 0.0 };
-        let tx = x + (CELL_SIZE - 8.0) / 2.0 - char_offset;
+        let size = layout.px(DAY_FONT);
         cmds.push(RenderCommand::Text {
-            x: tx,
-            y: y + (CELL_SIZE - 12.0) / 2.0 - 2.0,
+            x: text::center_x(&day_str, rect.x + rect.w / 2.0, size, weight),
+            y: rect.y + (rect.h - size) / 2.0 - layout.px(2.0),
             text: day_str,
             color: text_color,
-            font_size: 13.0,
-            font_weight: if is_today {
-                FontWeightHint::Bold
-            } else {
-                FontWeightHint::Regular
-            },
-            max_width: Some(CELL_SIZE),
+            font_size: size,
+            font_weight: weight,
+            max_width: Some(rect.w),
             overflow: TextOverflow::Ellipsis,
         });
 
         // Event dot indicator.
-        let has_events = !store
+        if !store
             .events_for_date(cell.year, cell.month, cell.day)
-            .is_empty();
-        if has_events {
-            let dot_x = x + (CELL_SIZE - DOT_RADIUS * 2.0) / 2.0;
-            let dot_y = y + CELL_SIZE - DOT_RADIUS * 2.0 - 4.0;
-            let dot_color = if is_today {
-                theme::BASE
-            } else {
-                theme::LAVENDER
-            };
+            .is_empty()
+        {
+            let dot = layout.px(DOT_RADIUS);
             cmds.push(RenderCommand::FillRect {
-                x: dot_x,
-                y: dot_y,
-                width: DOT_RADIUS * 2.0,
-                height: DOT_RADIUS * 2.0,
-                color: dot_color,
-                corner_radii: CornerRadii::all(DOT_RADIUS),
+                x: rect.x + (rect.w - dot * 2.0) / 2.0,
+                y: rect.y + rect.h - dot * 2.0 - layout.px(4.0),
+                width: dot * 2.0,
+                height: dot * 2.0,
+                color: if is_today {
+                    theme::BASE
+                } else {
+                    theme::LAVENDER
+                },
+                corner_radii: CornerRadii::all(dot),
             });
         }
     }
 
     fn render_event_detail(
-        &self,
         cmds: &mut Vec<RenderCommand>,
-        x: f32,
-        y: f32,
-        width: f32,
-        _year: i32,
+        layout: &MonthLayout,
+        card: Rect,
         month: u32,
         day: u32,
         events: &[CalendarEvent],
     ) {
+        let pad = layout.px(PADDING);
+        let row_h = layout.px(EVENT_ROW_HEIGHT);
+        let header_h = layout.px(EVENT_HEADER_HEIGHT);
         let visible_count = events.len().min(MAX_VISIBLE_EVENTS);
-        let header_h = 28.0;
-        let detail_height = header_h + visible_count as f32 * EVENT_ROW_HEIGHT + PADDING;
 
-        // Background.
         cmds.push(RenderCommand::FillRect {
-            x,
-            y,
-            width,
-            height: detail_height,
+            x: card.x,
+            y: card.y,
+            width: card.w,
+            height: card.h,
             color: theme::SURFACE0,
-            corner_radii: CornerRadii::all(CARD_RADIUS),
+            corner_radii: CornerRadii::all(layout.px(CARD_RADIUS)),
         });
 
         // Header: "Month DD".
-        let header = format!("{} {day}", month_name_short(month));
         cmds.push(RenderCommand::Text {
-            x: x + PADDING,
-            y: y + 6.0,
-            text: header,
+            x: card.x + pad,
+            y: card.y + layout.px(6.0),
+            text: format!("{} {day}", month_name_short(month)),
             color: theme::TEXT,
-            font_size: 13.0,
+            font_size: layout.px(EVENT_HEADER_FONT),
             font_weight: FontWeightHint::Bold,
-            max_width: Some(width - PADDING * 2.0),
+            max_width: Some((card.w - pad * 2.0).max(0.0)),
             overflow: TextOverflow::Ellipsis,
         });
 
-        // Event rows.
         for (i, event) in events.iter().take(MAX_VISIBLE_EVENTS).enumerate() {
-            let ey = y + header_h + i as f32 * EVENT_ROW_HEIGHT;
+            let ey = card.y + header_h + i as f32 * row_h;
 
-            // Color bar.
+            // Colour bar.
             cmds.push(RenderCommand::FillRect {
-                x: x + PADDING,
-                y: ey + 4.0,
-                width: 3.0,
-                height: EVENT_ROW_HEIGHT - 8.0,
+                x: card.x + pad,
+                y: ey + layout.px(4.0),
+                width: layout.px(3.0),
+                height: (row_h - layout.px(8.0)).max(0.0),
                 color: event.color,
-                corner_radii: CornerRadii::all(1.5),
+                corner_radii: CornerRadii::all(layout.px(1.5)),
             });
 
             // Time.
             let (_, _, _, h, m, _) = timestamp_to_date(event.start_timestamp);
-            let time_str = if event.all_day {
-                "All day".to_string()
-            } else {
-                format!("{h:02}:{m:02}")
-            };
             cmds.push(RenderCommand::Text {
-                x: x + PADDING + 10.0,
-                y: ey + 6.0,
-                text: time_str,
+                x: card.x + pad + layout.px(10.0),
+                y: ey + layout.px(6.0),
+                text: if event.all_day {
+                    "All day".to_string()
+                } else {
+                    format!("{h:02}:{m:02}")
+                },
                 color: theme::SUBTEXT,
-                font_size: 10.0,
+                font_size: layout.px(EVENT_TIME_FONT),
                 font_weight: FontWeightHint::Regular,
-                max_width: Some(50.0),
+                max_width: Some(layout.px(50.0)),
                 overflow: TextOverflow::Ellipsis,
             });
 
             // Title.
             cmds.push(RenderCommand::Text {
-                x: x + PADDING + 65.0,
-                y: ey + 6.0,
+                x: card.x + pad + layout.px(65.0),
+                y: ey + layout.px(6.0),
                 text: event.title.clone(),
                 color: theme::TEXT,
-                font_size: 12.0,
+                font_size: layout.px(EVENT_TITLE_FONT),
                 font_weight: FontWeightHint::Regular,
-                max_width: Some(width - PADDING * 2.0 - 75.0),
+                max_width: Some((card.w - pad * 2.0 - layout.px(75.0)).max(0.0)),
                 overflow: TextOverflow::Ellipsis,
             });
         }
@@ -1482,13 +2338,12 @@ impl CalendarView {
         // "N more..." if truncated.
         if events.len() > MAX_VISIBLE_EVENTS {
             let more = events.len().saturating_sub(MAX_VISIBLE_EVENTS);
-            let my = y + header_h + visible_count as f32 * EVENT_ROW_HEIGHT;
             cmds.push(RenderCommand::Text {
-                x: x + PADDING + 10.0,
-                y: my,
+                x: card.x + pad + layout.px(10.0),
+                y: card.y + header_h + visible_count as f32 * row_h,
                 text: format!("{more} more..."),
                 color: theme::SUBTEXT,
-                font_size: 11.0,
+                font_size: layout.px(TODAY_FONT),
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
                 overflow: TextOverflow::Clip,
@@ -1500,102 +2355,99 @@ impl CalendarView {
     // Rendering — year view
     // ========================================================================
 
-    fn render_year_view(&self, x: f32, y: f32) -> Vec<RenderCommand> {
+    fn render_year_view(&self, x: f32, y: f32, scale: f32) -> Vec<RenderCommand> {
+        let layout = YearLayout::new(x, y, scale);
+        let frame = layout.frame;
         let mut cmds = Vec::new();
-
-        // 4 columns x 3 rows of mini months.
-        let mini_month_w = 7.0 * MINI_CELL + 8.0; // 7 cells + padding
-        let mini_month_h = 6.0 * MINI_CELL + MINI_MONTH_LABEL_HEIGHT + 8.0;
-        let total_width = 4.0 * mini_month_w + PADDING * 2.0 + 3.0 * 8.0; // 3 gaps
-        let total_height = NAV_HEIGHT + 3.0 * mini_month_h + PADDING * 2.0 + 2.0 * 8.0;
 
         // Background.
         cmds.push(RenderCommand::BoxShadow {
-            x,
-            y,
-            width: total_width,
-            height: total_height,
+            x: frame.x,
+            y: frame.y,
+            width: frame.w,
+            height: frame.h,
             offset_x: 0.0,
-            offset_y: 4.0,
-            blur: 16.0,
+            offset_y: layout.px(4.0),
+            blur: layout.px(16.0),
             spread: 0.0,
             color: Color::rgba(0, 0, 0, 100),
-            corner_radii: CornerRadii::all(CARD_RADIUS),
+            corner_radii: CornerRadii::all(layout.px(CARD_RADIUS)),
         });
         cmds.push(RenderCommand::FillRect {
-            x,
-            y,
-            width: total_width,
-            height: total_height,
+            x: frame.x,
+            y: frame.y,
+            width: frame.w,
+            height: frame.h,
             color: theme::BASE,
-            corner_radii: CornerRadii::all(CARD_RADIUS),
+            corner_radii: CornerRadii::all(layout.px(CARD_RADIUS)),
         });
 
-        let mut cy = y + PADDING;
+        // Year navigation header. Same shape as the month view's: each glyph
+        // centred in the box that is actually clickable, so the two views do
+        // not disagree about where an arrow is.
+        let arrow_size = layout.px(NAV_ARROW_FONT);
+        for (rect, glyph) in [(layout.prev_arrow(), "<"), (layout.next_arrow(), ">")] {
+            cmds.push(RenderCommand::Text {
+                x: text::center_x(
+                    glyph,
+                    rect.x + rect.w / 2.0,
+                    arrow_size,
+                    FontWeightHint::Bold,
+                ),
+                y: rect.y + layout.px(10.0),
+                text: glyph.to_string(),
+                color: theme::SUBTEXT,
+                font_size: arrow_size,
+                font_weight: FontWeightHint::Bold,
+                max_width: None,
+                overflow: TextOverflow::Clip,
+            });
+        }
 
-        // Year navigation header.
+        let title = layout.title();
+        let title_size = layout.px(YEAR_TITLE_FONT);
         let year_label = format!("{}", self.view_year);
-        let center_x = text::center_x(
-            &year_label,
-            x + total_width / 2.0,
-            16.0,
-            FontWeightHint::Bold,
-        );
-
         cmds.push(RenderCommand::Text {
-            x: x + PADDING,
-            y: cy + 10.0,
-            text: "<".to_string(),
-            color: theme::SUBTEXT,
-            font_size: 18.0,
-            font_weight: FontWeightHint::Bold,
-            max_width: None,
-            overflow: TextOverflow::Clip,
-        });
-        cmds.push(RenderCommand::Text {
-            x: x + total_width - PADDING - 16.0,
-            y: cy + 10.0,
-            text: ">".to_string(),
-            color: theme::SUBTEXT,
-            font_size: 18.0,
-            font_weight: FontWeightHint::Bold,
-            max_width: None,
-            overflow: TextOverflow::Clip,
-        });
-        cmds.push(RenderCommand::Text {
-            x: center_x,
-            y: cy + 10.0,
+            x: text::center_x(
+                &year_label,
+                title.x + title.w / 2.0,
+                title_size,
+                FontWeightHint::Bold,
+            ),
+            y: title.y + layout.px(10.0),
             text: year_label,
             color: theme::TEXT,
-            font_size: 16.0,
+            font_size: title_size,
             font_weight: FontWeightHint::Bold,
-            max_width: None,
-            overflow: TextOverflow::Clip,
+            max_width: Some(title.w),
+            overflow: TextOverflow::Ellipsis,
         });
-        cy += NAV_HEIGHT;
 
         // Render 12 mini months, four to a row. Iterating the months and
         // deriving the cell keeps "there are twelve of them" the fact being
         // stated, rather than a 3x4 loop that happens to produce 1..=12.
         for (cell, month) in (1..=12u32).enumerate() {
-            let col = cell % 4;
-            let row = cell / 4;
-            let mx = x + PADDING + col as f32 * (mini_month_w + 8.0);
-            let my = cy + row as f32 * (mini_month_h + 8.0);
-            self.render_mini_month(&mut cmds, mx, my, self.view_year, month);
+            let box_ = layout.month(cell);
+            self.render_mini_month(&mut cmds, &layout, box_, month);
         }
 
         cmds
     }
 
+    /// Draw one mini month inside the box `YearLayout::month` assigned it.
+    ///
+    /// Takes the box rather than deriving it, so the month a click lands on
+    /// (`YearLayout::month_at`) is by construction the month drawn there.
     fn render_mini_month(
         &self,
         cmds: &mut Vec<RenderCommand>,
-        x: f32,
-        y: f32,
-        year: i32,
+        layout: &YearLayout,
+        box_: Rect,
         month: u32,
     ) {
+        let year = self.view_year;
+        let (x, y) = (box_.x, box_.y);
+        let cell = layout.px(MINI_CELL);
         let is_current = year == self.today.0 && month == self.today.1;
         let label_color = if is_current { theme::BLUE } else { theme::TEXT };
 
@@ -1605,13 +2457,13 @@ impl CalendarView {
             y,
             text: month_name_short(month).to_string(),
             color: label_color,
-            font_size: 11.0,
+            font_size: layout.px(MINI_LABEL_FONT),
             font_weight: FontWeightHint::Bold,
-            max_width: Some(7.0 * MINI_CELL),
+            max_width: Some(GRID_COLS as f32 * cell),
             overflow: TextOverflow::Ellipsis,
         });
 
-        let grid_y = y + MINI_MONTH_LABEL_HEIGHT;
+        let grid_y = y + layout.px(MINI_MONTH_LABEL_HEIGHT);
 
         // The same `month_grid` the full month view is built from, rather
         // than the second implementation that used to live here: a
@@ -1630,10 +2482,10 @@ impl CalendarView {
                 // months; a mini month shows only its own days.
                 continue;
             }
-            let col = pos % 7;
-            let row = pos / 7;
-            let cx = x + col as f32 * MINI_CELL;
-            let cell_y = grid_y + row as f32 * MINI_CELL;
+            let col = pos % GRID_COLS;
+            let row = pos / GRID_COLS;
+            let cx = x + col as f32 * cell;
+            let cell_y = grid_y + row as f32 * cell;
 
             let is_today = year == self.today.0 && month == self.today.1 && d == self.today.2;
 
@@ -1641,10 +2493,10 @@ impl CalendarView {
                 cmds.push(RenderCommand::FillRect {
                     x: cx,
                     y: cell_y,
-                    width: MINI_CELL,
-                    height: MINI_CELL,
+                    width: cell,
+                    height: cell,
                     color: theme::BLUE,
-                    corner_radii: CornerRadii::all(MINI_CELL / 2.0),
+                    corner_radii: CornerRadii::all(cell / 2.0),
                 });
             }
 
@@ -1653,14 +2505,20 @@ impl CalendarView {
             } else {
                 theme::SUBTEXT
             };
+            let size = layout.px(MINI_DAY_FONT);
             cmds.push(RenderCommand::Text {
-                x: cx + 1.0,
-                y: cell_y + 1.0,
+                x: text::center_x(
+                    &format!("{d}"),
+                    cx + cell / 2.0,
+                    size,
+                    FontWeightHint::Regular,
+                ),
+                y: cell_y + layout.px(1.0),
                 text: format!("{d}"),
                 color: text_color,
-                font_size: 8.0,
+                font_size: size,
                 font_weight: FontWeightHint::Regular,
-                max_width: Some(MINI_CELL),
+                max_width: Some(cell),
                 overflow: TextOverflow::Ellipsis,
             });
         }
@@ -1675,10 +2533,11 @@ impl CalendarView {
         clock: &ClockDisplay,
         x: f32,
         y: f32,
+        scale: f32,
         utc_now: u64,
         local: &Tz,
     ) -> Vec<RenderCommand> {
-        clock.render(x, y, utc_now, local)
+        clock.render(x, y, scale, utc_now, local)
     }
 }
 
@@ -1700,6 +2559,13 @@ mod tests {
     )]
 
     use super::*;
+
+    /// A fixed instant for render tests: 2023-11-14 22:13:20 UTC.
+    ///
+    /// Rendering takes the current time as a parameter precisely so tests can
+    /// pin it; a render test that read the wall clock would produce different
+    /// command counts on the day the clock band gained or lost a digit.
+    const NOW: u64 = 1_700_000_000;
 
     // --- header centring ---
 
@@ -1725,36 +2591,40 @@ mod tests {
 
     #[test]
     fn days_in_month_non_leap() {
-        assert_eq!(days_in_month(2023, 1), 31);
-        assert_eq!(days_in_month(2023, 2), 28);
-        assert_eq!(days_in_month(2023, 3), 31);
-        assert_eq!(days_in_month(2023, 4), 30);
-        assert_eq!(days_in_month(2023, 5), 31);
-        assert_eq!(days_in_month(2023, 6), 30);
-        assert_eq!(days_in_month(2023, 7), 31);
-        assert_eq!(days_in_month(2023, 8), 31);
-        assert_eq!(days_in_month(2023, 9), 30);
-        assert_eq!(days_in_month(2023, 10), 31);
-        assert_eq!(days_in_month(2023, 11), 30);
-        assert_eq!(days_in_month(2023, 12), 31);
+        assert_eq!(date::days_in_month(2023, 1), 31);
+        assert_eq!(date::days_in_month(2023, 2), 28);
+        assert_eq!(date::days_in_month(2023, 3), 31);
+        assert_eq!(date::days_in_month(2023, 4), 30);
+        assert_eq!(date::days_in_month(2023, 5), 31);
+        assert_eq!(date::days_in_month(2023, 6), 30);
+        assert_eq!(date::days_in_month(2023, 7), 31);
+        assert_eq!(date::days_in_month(2023, 8), 31);
+        assert_eq!(date::days_in_month(2023, 9), 30);
+        assert_eq!(date::days_in_month(2023, 10), 31);
+        assert_eq!(date::days_in_month(2023, 11), 30);
+        assert_eq!(date::days_in_month(2023, 12), 31);
     }
 
     #[test]
     fn days_in_month_leap_february() {
-        assert_eq!(days_in_month(2024, 2), 29);
-        assert_eq!(days_in_month(2000, 2), 29);
-        assert_eq!(days_in_month(1900, 2), 28);
+        assert_eq!(date::days_in_month(2024, 2), 29);
+        assert_eq!(date::days_in_month(2000, 2), 29);
+        assert_eq!(date::days_in_month(1900, 2), 28);
     }
 
     #[test]
     fn an_impossible_month_is_clamped_rather_than_being_zero_days_long() {
         // This used to answer 0, which is not a month length any caller could
-        // use: the recurrence walk stepped `while day > days_in_month(..)`,
+        // use: the recurrence walk stepped `while day > date::days_in_month(..)`,
         // and a zero there is a loop that never advances. Clamping means every
         // month number names a real month.
-        assert_eq!(days_in_month(2024, 0), 31, "month 0 reads as January");
-        assert_eq!(days_in_month(2024, 13), 31, "month 13 reads as December");
-        assert_eq!(days_in_month(2024, u32::MAX), 31);
+        assert_eq!(date::days_in_month(2024, 0), 31, "month 0 reads as January");
+        assert_eq!(
+            date::days_in_month(2024, 13),
+            31,
+            "month 13 reads as December"
+        );
+        assert_eq!(date::days_in_month(2024, u32::MAX), 31);
     }
 
     #[test]
@@ -1970,7 +2840,7 @@ mod tests {
                     );
                     assert_eq!(
                         full.len() as u32,
-                        days_in_month(year, month),
+                        date::days_in_month(year, month),
                         "{year}-{month:02} lost a day"
                     );
                 }
@@ -2024,6 +2894,7 @@ mod tests {
             use_24h: false,
             show_seconds: false,
             extra_timezones: Vec::new(),
+            ..ClockDisplay::new()
         };
         for (hour, h12, ampm) in expected {
             let ts = hour * SECS_PER_HOUR;
@@ -2302,7 +3173,7 @@ mod tests {
                 end_timestamp: start + 1800, // 30 min
                 all_day: false,
                 repeat: Some(Recurrence::Daily),
-                color: theme::GREEN,
+                color: theme::BLUE,
                 description: String::new(),
             },
         );
@@ -2328,7 +3199,7 @@ mod tests {
                 end_timestamp: start + 3600,
                 all_day: false,
                 repeat: Some(Recurrence::Weekly),
-                color: theme::PEACH,
+                color: theme::LAVENDER,
                 description: String::new(),
             },
         );
@@ -2354,7 +3225,7 @@ mod tests {
                 end_timestamp: start + 7200,
                 all_day: false,
                 repeat: Some(Recurrence::Monthly),
-                color: theme::YELLOW,
+                color: theme::SURFACE2,
                 description: String::new(),
             },
         );
@@ -2380,7 +3251,7 @@ mod tests {
                 end_timestamp: start + 3600,
                 all_day: false,
                 repeat: Some(Recurrence::Monthly),
-                color: theme::GREEN,
+                color: theme::BLUE,
                 description: String::new(),
             },
         );
@@ -2534,6 +3405,7 @@ mod tests {
             use_24h: true,
             show_seconds: false,
             extra_timezones: Vec::new(),
+            ..ClockDisplay::new()
         };
         // Epoch = midnight UTC.
         assert_eq!(clock.format_time(0, &Tz::UTC), "00:00");
@@ -2548,6 +3420,7 @@ mod tests {
             use_24h: true,
             show_seconds: true,
             extra_timezones: Vec::new(),
+            ..ClockDisplay::new()
         };
         let ts = 13 * 3600 + 45 * 60 + 30;
         assert_eq!(clock.format_time(ts, &Tz::UTC), "13:45:30");
@@ -2559,6 +3432,7 @@ mod tests {
             use_24h: false,
             show_seconds: false,
             extra_timezones: Vec::new(),
+            ..ClockDisplay::new()
         };
         // Midnight.
         assert_eq!(clock.format_time(0, &Tz::UTC), "12:00 AM");
@@ -2576,6 +3450,7 @@ mod tests {
             use_24h: true,
             show_seconds: false,
             extra_timezones: Vec::new(),
+            ..ClockDisplay::new()
         };
         // India: UTC+5:30, and no DST rule — POSIX writes an *east* offset
         // with a minus sign.  At UTC midnight, local time is 05:30.
@@ -2626,6 +3501,108 @@ mod tests {
         let ts = 1704067200;
         let date_str = clock.format_date(ts, &Tz::UTC);
         assert_eq!(date_str, "Monday, January 1, 2024");
+    }
+
+    /// The long form is the two halves joined, not a third spelling of a date.
+    #[test]
+    fn the_long_date_is_its_two_halves_and_nothing_else() {
+        let clock = ClockDisplay::new();
+        for ts in [0_u64, 1_704_067_200, 1_787_070_645, 4_000_000_000] {
+            for zone in [Tz::UTC, tz("EST5EDT,M3.2.0,M11.1.0"), tz("JST-9")] {
+                assert_eq!(
+                    clock.format_date(ts, &zone),
+                    format!(
+                        "{}, {}",
+                        clock.format_day_of_week(ts, &zone),
+                        clock.format_calendar_date(ts, &zone)
+                    )
+                );
+            }
+        }
+    }
+
+    /// The two switches the Date & Time panel drew and nothing read.
+    #[test]
+    fn the_taskbar_reading_follows_the_switches() {
+        let mut clock = ClockDisplay::new();
+        // 2026-08-18 16:30:45 UTC — a Tuesday.
+        let ts = 1_787_070_645;
+
+        assert_eq!(clock.format_taskbar(ts, &Tz::UTC), "16:30");
+        clock.show_day_of_week = true;
+        assert_eq!(clock.format_taskbar(ts, &Tz::UTC), "Tue 16:30");
+        clock.show_date = true;
+        assert_eq!(clock.format_taskbar(ts, &Tz::UTC), "Tue Aug 18 16:30");
+        clock.show_day_of_week = false;
+        assert_eq!(clock.format_taskbar(ts, &Tz::UTC), "Aug 18 16:30");
+        clock.show_seconds = true;
+        assert_eq!(clock.format_taskbar(ts, &Tz::UTC), "Aug 18 16:30:45");
+        clock.use_24h = false;
+        assert_eq!(clock.format_taskbar(ts, &Tz::UTC), "Aug 18 4:30:45 PM");
+    }
+
+    /// The taskbar's date is taken from the same shifted instant as its time.
+    #[test]
+    fn the_taskbar_reading_crosses_midnight_with_the_zone() {
+        let mut clock = ClockDisplay::new();
+        clock.show_day_of_week = true;
+        clock.show_date = true;
+        let ts = 1_787_070_645; // 2026-08-18 16:30:45 UTC, a Tuesday.
+        assert_eq!(clock.format_taskbar(ts, &Tz::UTC), "Tue Aug 18 16:30");
+        assert_eq!(clock.format_taskbar(ts, &tz("JST-9")), "Wed Aug 19 01:30");
+        assert_eq!(
+            clock.format_taskbar(ts, &tz("HST10")),
+            "Tue Aug 18 06:30",
+            "UTC-10 stays on the same day"
+        );
+    }
+
+    /// The reserved width has to be an upper bound on every reading, or the
+    /// clock is clipped at the display edge for part of the year — and nothing
+    /// about a clipped clock says which end was cut.
+    #[test]
+    fn the_reserved_width_covers_every_reading_the_switches_allow() {
+        const SIZE: f32 = 13.0;
+        let mut clock = ClockDisplay::new();
+        for (dow, date, secs, h24) in [
+            (false, false, false, true),
+            (true, true, false, true),
+            (true, true, true, true),
+            (true, true, true, false),
+            (false, true, false, false),
+        ] {
+            clock.show_day_of_week = dow;
+            clock.show_date = date;
+            clock.show_seconds = secs;
+            clock.use_24h = h24;
+            let reserved = clock.reading_width(SIZE);
+            // Three years sampled every 25 hours: every weekday, every month,
+            // every day of the month, and every hour.
+            for step in 0..1100_u64 {
+                let ts = 1_787_070_645 + step * 25 * 3600;
+                let reading = clock.format_taskbar(ts, &Tz::UTC);
+                assert!(
+                    text::width(&reading, SIZE) <= reserved,
+                    "{reading:?} exceeds the reserved {reserved}"
+                );
+            }
+        }
+    }
+
+    /// The reserve must also not be wildly generous — a slot much wider than
+    /// the reading is dead space taken from the window buttons.
+    #[test]
+    fn the_reserved_width_is_close_to_what_a_reading_actually_needs() {
+        const SIZE: f32 = 13.0;
+        let mut clock = ClockDisplay::new();
+        clock.show_day_of_week = true;
+        clock.show_date = true;
+        let reserved = clock.reading_width(SIZE);
+        let real = text::width("Mon Sep 28 22:38", SIZE);
+        assert!(
+            reserved <= real * 1.25,
+            "reserved {reserved} against a real reading of {real}"
+        );
     }
 
     #[test]
@@ -2770,7 +3747,7 @@ description: Just a test";
     fn render_hidden_returns_empty() {
         let cal = CalendarView::new(CalendarConfig::default());
         let store = EventStore::new();
-        let cmds = cal.render(0.0, 0.0, &store);
+        let cmds = cal.render(0.0, 0.0, 1.0, NOW, &store);
         assert!(cmds.is_empty());
     }
 
@@ -2781,7 +3758,7 @@ description: Just a test";
         cal.set_visible(true);
 
         let store = EventStore::new();
-        let cmds = cal.render(100.0, 100.0, &store);
+        let cmds = cal.render(100.0, 100.0, 1.0, NOW, &store);
         // Should have popup bg, border, nav header, dow headers, and 42 day cells minimum.
         assert!(
             cmds.len() > 50,
@@ -2798,7 +3775,7 @@ description: Just a test";
         cal.mode = CalendarViewMode::Year;
 
         let store = EventStore::new();
-        let cmds = cal.render(0.0, 0.0, &store);
+        let cmds = cal.render(0.0, 0.0, 1.0, NOW, &store);
         assert!(!cmds.is_empty());
     }
 
@@ -2813,7 +3790,7 @@ description: Just a test";
         cal.set_visible(true);
 
         let store = EventStore::new();
-        let cmds = cal.render(0.0, 0.0, &store);
+        let cmds = cal.render(0.0, 0.0, 1.0, NOW, &store);
         // Should have extra text commands for week numbers.
         let text_cmds: Vec<_> = cmds
             .iter()
@@ -2837,7 +3814,7 @@ description: Just a test";
         let start = date_to_timestamp(2026, 5, 18, 10, 0, 0).expect("valid");
         add(&mut store, make_event("Test Event", start, start + 3600));
 
-        let cmds = cal.render(0.0, 0.0, &store);
+        let cmds = cal.render(0.0, 0.0, 1.0, NOW, &store);
         // Should contain at least one small dot-sized FillRect.
         let has_dot = cmds.iter().any(|c| match c {
             RenderCommand::FillRect { width, height, .. } => {
@@ -2867,12 +3844,12 @@ description: Just a test";
                 end_timestamp: start + 3600,
                 all_day: false,
                 repeat: None,
-                color: theme::PEACH,
+                color: theme::LAVENDER,
                 description: String::new(),
             },
         );
 
-        let cmds = cal.render(0.0, 0.0, &store);
+        let cmds = cal.render(0.0, 0.0, 1.0, NOW, &store);
         // Should contain a text command with the event title.
         let has_event_text = cmds.iter().any(|c| match c {
             RenderCommand::Text { text, .. } => text == "Visible Event",
@@ -2884,7 +3861,7 @@ description: Just a test";
     #[test]
     fn clock_render_produces_commands() {
         let clock = ClockDisplay::new();
-        let cmds = clock.render(0.0, 0.0, 1_700_000_000, &Tz::UTC);
+        let cmds = clock.render(0.0, 0.0, 1.0, NOW, &Tz::UTC);
         // At minimum: time text + date text.
         assert!(cmds.len() >= 2);
     }
@@ -2895,9 +3872,435 @@ description: Just a test";
         assert!(clock.add_timezone("Tokyo", "JST-9"));
         assert!(clock.add_timezone("London", "GMT0BST,M3.5.0/1,M10.5.0"));
 
-        let cmds = clock.render(0.0, 0.0, 1_700_000_000, &Tz::UTC);
+        let cmds = clock.render(0.0, 0.0, 1.0, NOW, &Tz::UTC);
         // time + date + 2 timezone lines.
         assert!(cmds.len() >= 4);
+    }
+
+    /// The band's reserved height must cover every row it actually draws.
+    ///
+    /// The height is what pushes the whole month grid down, so a band that
+    /// under-reserves does not merely clip itself — it draws its last zone on
+    /// top of the "<" arrow, and the arrow stays clickable underneath.
+    #[test]
+    fn the_clock_band_reserves_the_height_it_draws_in() {
+        let mut clock = ClockDisplay::new();
+        for zones in [
+            &[][..],
+            &[("Tokyo", "JST-9")],
+            &[("Tokyo", "JST-9"), ("London", "GMT0BST,M3.5.0/1,M10.5.0")],
+            &[
+                ("Tokyo", "JST-9"),
+                ("London", "GMT0BST,M3.5.0/1,M10.5.0"),
+                ("Denver", "MST7MDT,M3.2.0,M11.1.0"),
+            ],
+        ] {
+            clock.extra_timezones.clear();
+            for (label, tz) in zones {
+                assert!(clock.add_timezone(label, tz));
+            }
+            for scale in [1.0_f32, 1.5, 2.0] {
+                let top = 40.0_f32;
+                let height = clock.render_height(scale);
+                for cmd in clock.render(0.0, top, scale, NOW, &Tz::UTC) {
+                    let RenderCommand::Text { y, font_size, .. } = cmd else {
+                        continue;
+                    };
+                    assert!(
+                        y + font_size <= top + height,
+                        "{} zone(s) at {scale}x draw down to {} but reserve only {height}",
+                        zones.len(),
+                        y + font_size - top
+                    );
+                }
+            }
+        }
+    }
+
+    // ========================================================================
+    // Layout and hit testing
+    //
+    // The point of `MonthLayout`/`YearLayout` is that the renderer and the
+    // hit test read the *same* rectangles, so these tests are mostly about
+    // that agreement rather than about any particular coordinate.
+    // ========================================================================
+
+    /// A month view sitting at the origin, showing May 2026 with today in it.
+    fn open_month() -> CalendarView {
+        let mut cal = CalendarView::new(CalendarConfig::default());
+        cal.set_today(2026, 5, 18);
+        cal.set_visible(true);
+        cal
+    }
+
+    fn centre(r: Rect) -> (f32, f32) {
+        (r.x + r.w / 2.0, r.y + r.h / 2.0)
+    }
+
+    /// The selection disc is drawn on the cell the click that made it hits.
+    ///
+    /// This is the whole reason the layout exists. It closes the loop through
+    /// the real render output: select a day, find the disc the renderer drew,
+    /// click its centre, and insist the hit test names a cell holding exactly
+    /// the date that was selected. When the two derived their geometry
+    /// separately, this is the test that would have caught them drifting.
+    #[test]
+    fn the_selection_disc_is_drawn_on_the_cell_that_is_clicked() {
+        let mut cal = open_month();
+        let store = EventStore::new();
+        cal.selected_date = Some((2026, 5, 7));
+
+        let disc_size = TODAY_RADIUS * 2.0;
+        let disc = cal
+            .render(0.0, 0.0, 1.0, NOW, &store)
+            .into_iter()
+            .find_map(|c| match c {
+                RenderCommand::FillRect {
+                    x,
+                    y,
+                    width,
+                    height,
+                    color,
+                    ..
+                } if color == theme::SURFACE1
+                    && (width - disc_size).abs() < 0.01
+                    && (height - disc_size).abs() < 0.01 =>
+                {
+                    Some(Rect::new(x, y, width, height))
+                }
+                _ => None,
+            })
+            .expect("a selected day draws a disc");
+
+        let (cx, cy) = centre(disc);
+        let Some(CalendarHit::Day(index)) = cal.hit_test(0.0, 0.0, 1.0, cx, cy, &store) else {
+            panic!("the centre of the selection disc is not on a day cell");
+        };
+        let cell = cal.generate_grid()[index];
+        assert_eq!((cell.year, cell.month, cell.day), (2026, 5, 7));
+    }
+
+    /// Each nav control answers at its own centre, and no two overlap there.
+    #[test]
+    fn every_nav_control_answers_at_its_own_centre() {
+        // Off today's month, so the "Today" button exists.
+        let mut cal = open_month();
+        cal.view_month = 9;
+        let store = EventStore::new();
+        let layout = MonthLayout::new(&cal, 0.0, 0.0, 1.0);
+
+        for (rect, want) in [
+            (layout.prev_arrow(), CalendarHit::PrevPage),
+            (layout.next_arrow(), CalendarHit::NextPage),
+            (layout.title(), CalendarHit::Title),
+            (
+                layout.today_button().expect("off-month shows Today"),
+                CalendarHit::Today,
+            ),
+        ] {
+            let (px, py) = centre(rect);
+            assert_eq!(
+                cal.hit_test(0.0, 0.0, 1.0, px, py, &store),
+                Some(want),
+                "{want:?} is not clickable at the centre of its own box"
+            );
+        }
+    }
+
+    /// Every one of the 42 cells is hit at its own centre, and at its index.
+    #[test]
+    fn every_grid_cell_answers_at_its_own_index() {
+        let cal = open_month();
+        let store = EventStore::new();
+        let layout = MonthLayout::new(&cal, 17.0, 23.0, 1.0);
+        for index in 0..GRID_CELLS {
+            let (px, py) = centre(layout.cell(index));
+            assert_eq!(
+                cal.hit_test(17.0, 23.0, 1.0, px, py, &store),
+                Some(CalendarHit::Day(index)),
+                "cell {index} is not clickable where it is drawn"
+            );
+        }
+    }
+
+    /// Outside is `None` (dismiss); inside-but-inert is `Panel` (do not).
+    ///
+    /// Collapsing the two would make the popup close on a click in its own
+    /// margin, which is the single most irritating way for a popup to behave.
+    #[test]
+    fn dead_space_inside_the_popup_is_not_a_dismissal() {
+        let cal = open_month();
+        let store = EventStore::new();
+        let layout = MonthLayout::new(&cal, 0.0, 0.0, 1.0);
+        let frame = layout.frame;
+
+        // The strip between the frame's left edge and the padded grid.
+        assert_eq!(
+            cal.hit_test(0.0, 0.0, 1.0, frame.x + 1.0, layout.grid_y + 1.0, &store),
+            Some(CalendarHit::Panel)
+        );
+        // A pixel past the right edge is off the popup entirely.
+        assert_eq!(
+            cal.hit_test(0.0, 0.0, 1.0, frame.x + frame.w, frame.y + 1.0, &store),
+            None
+        );
+        assert_eq!(cal.hit_test(0.0, 0.0, 1.0, -1.0, -1.0, &store), None);
+    }
+
+    /// The event card hangs below the frame and still belongs to the popup.
+    ///
+    /// It is drawn outside `frame`, so a naive "is it in the frame?" test
+    /// dismisses the popup when the user clicks the very list they just opened.
+    #[test]
+    fn the_event_card_hangs_below_the_frame_and_still_counts_as_the_popup() {
+        let mut cal = open_month();
+        let mut store = EventStore::new();
+        let start = date_to_timestamp(2026, 5, 18, 10, 0, 0).expect("valid");
+        add(&mut store, make_event("Standup", start, start + 3600));
+        cal.selected_date = Some((2026, 5, 18));
+
+        let layout = MonthLayout::new(&cal, 0.0, 0.0, 1.0);
+        let card = cal
+            .detail_rect(&layout, &store)
+            .expect("a selected day with events shows a card");
+        assert!(
+            card.y >= layout.frame.y + layout.frame.h,
+            "the card overlaps the grid it describes"
+        );
+
+        let (px, py) = centre(card);
+        assert_eq!(
+            cal.hit_test(0.0, 0.0, 1.0, px, py, &store),
+            Some(CalendarHit::Panel)
+        );
+
+        // With nothing selected there is no card, and that same point is off
+        // the popup — so the host dismisses rather than swallowing the click.
+        cal.selected_date = None;
+        assert_eq!(cal.hit_test(0.0, 0.0, 1.0, px, py, &store), None);
+    }
+
+    /// The popup is measured in the shell's pixels, not its own.
+    ///
+    /// `guitk::scaling` has widget code work in logical pixels, but this popup
+    /// is anchored to taskbar chrome the shell has *already* scaled. Laid out
+    /// at 100% beside a 200% taskbar it would be half-size and hung off the
+    /// wrong pixel, so the scale is threaded in explicitly.
+    #[test]
+    fn the_popup_is_measured_in_the_shells_pixels() {
+        let cal = open_month();
+        let store = EventStore::new();
+        let one = cal.popup_rect(0.0, 0.0, 1.0);
+        let two = cal.popup_rect(0.0, 0.0, 2.0);
+        assert!((two.w - one.w * 2.0).abs() < 0.01, "{two:?} vs {one:?}");
+        assert!((two.h - one.h * 2.0).abs() < 0.01, "{two:?} vs {one:?}");
+
+        // And a point that hits a cell at 1x hits the same cell at 2x when it
+        // is doubled with the layout.
+        for index in [0_usize, 15, 41] {
+            let (px, py) = centre(MonthLayout::new(&cal, 0.0, 0.0, 1.0).cell(index));
+            assert_eq!(
+                cal.hit_test(0.0, 0.0, 2.0, px * 2.0, py * 2.0, &store),
+                Some(CalendarHit::Day(index))
+            );
+        }
+    }
+
+    /// The clock band pushes everything below it down by exactly its height.
+    #[test]
+    fn the_clock_band_moves_the_grid_down_by_its_own_height() {
+        let mut cal = open_month();
+        let bare = MonthLayout::new(&cal, 0.0, 0.0, 1.0);
+
+        let mut clock = ClockDisplay::new();
+        assert!(clock.add_timezone("Tokyo", "JST-9"));
+        let band_h = clock.render_height(1.0);
+        cal.header = Some(ClockHeader {
+            clock,
+            zone: Tz::UTC,
+        });
+        let with = MonthLayout::new(&cal, 0.0, 0.0, 1.0);
+
+        assert!((with.frame.h - bare.frame.h - band_h).abs() < 0.01);
+        assert!((with.cell(0).y - bare.cell(0).y - band_h).abs() < 0.01);
+        assert_eq!(with.clock_band().map(|b| b.h), Some(band_h));
+        assert_eq!(bare.clock_band(), None);
+    }
+
+    /// Clicking the selected day again clears it.
+    ///
+    /// It is the only way to dismiss the event card without closing the popup.
+    #[test]
+    fn clicking_the_selected_day_again_clears_the_selection() {
+        let mut cal = open_month();
+        let index = cal
+            .generate_grid()
+            .iter()
+            .position(|c| (c.year, c.month, c.day) == (2026, 5, 18))
+            .expect("today is in its own month grid");
+
+        assert!(cal.apply(CalendarHit::Day(index)));
+        assert_eq!(cal.selected_date, Some((2026, 5, 18)));
+        assert!(cal.apply(CalendarHit::Day(index)));
+        assert_eq!(cal.selected_date, None);
+    }
+
+    /// A spill-over cell carries the view onto the month it belongs to.
+    ///
+    /// Otherwise the highlight sits on a cell whose date the header above it
+    /// contradicts, and the card below lists a June day under a May title.
+    #[test]
+    fn a_spill_over_cell_carries_the_view_onto_its_month() {
+        let mut cal = open_month();
+        let grid = cal.generate_grid();
+        let index = grid
+            .iter()
+            .rposition(|c| !c.current_month)
+            .expect("a 42-cell grid always spills past its month");
+        let cell = grid[index];
+
+        assert!(cal.apply(CalendarHit::Day(index)));
+        assert_eq!(cal.selected_date, Some((cell.year, cell.month, cell.day)));
+        assert_eq!((cal.view_year, cal.view_month), (cell.year, cell.month));
+    }
+
+    /// The "Today" button is neither drawn nor clickable on today's month.
+    #[test]
+    fn the_today_button_is_absent_while_the_view_is_already_on_today() {
+        let cal = open_month();
+        let store = EventStore::new();
+        let layout = MonthLayout::new(&cal, 0.0, 0.0, 1.0);
+        assert_eq!(layout.today_button(), None);
+        assert!(
+            !cal.render(0.0, 0.0, 1.0, NOW, &store)
+                .iter()
+                .any(|c| matches!(c, RenderCommand::Text { text, .. } if text == TODAY_LABEL))
+        );
+
+        // Move off it and the button appears in both.
+        let mut off = open_month();
+        off.next_month();
+        let layout = MonthLayout::new(&off, 0.0, 0.0, 1.0);
+        let button = layout.today_button().expect("off-month shows Today");
+        let (px, py) = centre(button);
+        assert_eq!(
+            off.hit_test(0.0, 0.0, 1.0, px, py, &store),
+            Some(CalendarHit::Today)
+        );
+        assert!(
+            off.render(0.0, 0.0, 1.0, NOW, &store)
+                .iter()
+                .any(|c| matches!(c, RenderCommand::Text { text, .. } if text == TODAY_LABEL))
+        );
+    }
+
+    /// A hidden calendar is not clickable, however the host places it.
+    #[test]
+    fn a_hidden_calendar_is_not_clickable() {
+        let mut cal = open_month();
+        cal.set_visible(false);
+        let store = EventStore::new();
+        let layout = MonthLayout::new(&cal, 0.0, 0.0, 1.0);
+        let (px, py) = centre(layout.cell(0));
+        assert_eq!(cal.hit_test(0.0, 0.0, 1.0, px, py, &store), None);
+    }
+
+    /// Reopening rewinds to this month with nothing selected.
+    ///
+    /// A popup that reopens three months from where it was left is a popup
+    /// whose state the user cannot see while it is shut.
+    #[test]
+    fn reopening_rewinds_to_todays_month() {
+        let mut cal = open_month();
+        cal.next_month();
+        cal.show_year_view();
+        cal.selected_date = Some((2026, 8, 3));
+        cal.set_visible(false);
+        cal.set_visible(true);
+
+        assert_eq!((cal.view_year, cal.view_month), (2026, 5));
+        assert_eq!(cal.mode, CalendarViewMode::Month);
+        assert_eq!(cal.selected_date, None);
+    }
+
+    /// Every mini month answers at the box it was drawn in.
+    #[test]
+    fn every_mini_month_answers_at_its_own_box() {
+        let mut cal = open_month();
+        cal.show_year_view();
+        let store = EventStore::new();
+        let layout = YearLayout::new(0.0, 0.0, 1.0);
+        for index in 0..12_usize {
+            let (px, py) = centre(layout.month(index));
+            let month = u32::try_from(index).expect("12 fits") + 1;
+            assert_eq!(
+                cal.hit_test(0.0, 0.0, 1.0, px, py, &store),
+                Some(CalendarHit::Month(month)),
+                "mini month {month} is not clickable where it is drawn"
+            );
+        }
+    }
+
+    /// Picking a month from the overview returns to that month's grid.
+    #[test]
+    fn picking_a_mini_month_opens_it() {
+        let mut cal = open_month();
+        cal.show_year_view();
+        cal.next_year();
+        assert!(cal.apply(CalendarHit::Month(11)));
+        assert_eq!(cal.mode, CalendarViewMode::Month);
+        assert_eq!((cal.view_year, cal.view_month), (2027, 11));
+    }
+
+    /// The arrows page months in the grid and years in the overview.
+    #[test]
+    fn the_arrows_page_by_whatever_the_view_shows() {
+        let mut cal = open_month();
+        assert!(cal.apply(CalendarHit::NextPage));
+        assert_eq!((cal.view_year, cal.view_month), (2026, 6));
+
+        assert!(cal.apply(CalendarHit::Title));
+        assert_eq!(cal.mode, CalendarViewMode::Year);
+        assert!(cal.apply(CalendarHit::NextPage));
+        assert_eq!(cal.view_year, 2027);
+        assert_eq!(cal.view_month, 6, "paging years must not move the month");
+
+        assert!(cal.apply(CalendarHit::Title));
+        assert_eq!(cal.mode, CalendarViewMode::Month);
+    }
+
+    /// A click on inert popup space changes nothing.
+    #[test]
+    fn a_click_on_the_panel_changes_nothing() {
+        let mut cal = open_month();
+        let before = (cal.view_year, cal.view_month, cal.mode, cal.selected_date);
+        assert!(!cal.apply(CalendarHit::Panel));
+        assert_eq!(
+            (cal.view_year, cal.view_month, cal.mode, cal.selected_date),
+            before
+        );
+    }
+
+    /// Today comes from a zone's rules, not a fixed offset.
+    ///
+    /// A shell that opened the popup with a stored `-5h` for New York would
+    /// show yesterday's date for the last few hours of every summer evening.
+    #[test]
+    fn today_is_read_through_the_zones_rules() {
+        // 2026-07-04 01:30 UTC. New York is on EDT (-4), so it is still the
+        // evening of the 3rd there; a fixed -5 would agree by luck here, so
+        // pick an instant where the two rules disagree: 2026-01-01 04:30 UTC
+        // is 23:30 on 2025-12-31 in EST (-5) but 00:30 on the 1st in EDT.
+        let ny = Tz::parse(b"EST5EDT,M3.2.0,M11.1.0").expect("valid POSIX TZ");
+        let mut cal = CalendarView::new(CalendarConfig::default());
+
+        let summer = date_to_timestamp(2026, 7, 4, 1, 30, 0).expect("valid");
+        cal.set_today_from_zone(summer, &ny);
+        assert_eq!(cal.today, (2026, 7, 3), "EDT is -4, not -5");
+
+        let winter = date_to_timestamp(2026, 1, 1, 4, 30, 0).expect("valid");
+        cal.set_today_from_zone(winter, &ny);
+        assert_eq!(cal.today, (2025, 12, 31), "EST is -5");
     }
 
     // ========================================================================

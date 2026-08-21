@@ -9,5 +9,5 @@
 version 2
 input  build.py sha256 07de930e5833b8733fb147e3050554d06a96d5e2b071ce5d548de3d66e3547b9
 input  main.c sha256 fcdc165fc7abb0c5fe224320668ef43b15485c3aa8e14eacc3d0e1eaf0cb4a3c
-input  toolchain/sysroot/lib/libc.a sha256 6ec332f954b24058ea980191072f75714c3cd9f530130d2fd1893a02a23d2ce9
-output ctest-fortify.elf sha256 b09f1bd314cfbdb5d643273f6e12e7b06a92edf864dbb0b6b256c021b19b025e size 1414432
+input  toolchain/sysroot/lib/libc.a sha256 5452152d19a00555a4ba99de5f3f6168fa5df3c8214aa89d87b9fa9fa5a68dbd
+output ctest-fortify.elf sha256 80588d2e057abe7ec5e3de4ace0afdfe2d217d0df1cf38f97b868e4eadf1ffce size 1416472

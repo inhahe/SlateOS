@@ -135,6 +135,52 @@ impl Builder {
     }
 }
 
+/// Accumulate the IPv4 upper-layer pseudo-header (src, dst, protocol,
+/// upper-layer length) into a running checksum sum, per RFC 793 §3.1 and
+/// RFC 768. Use with [`crate::checksum::internet_continue`] to checksum
+/// TCP/UDP over IPv4.
+///
+/// This is the v4 counterpart of [`crate::ipv6::pseudo_header_sum`], which has
+/// been public and shared by `tcp`, `udp` and `icmpv6` since it was written.
+/// The v4 side predates it and was instead written out twice — privately in
+/// `tcp.rs` and again in `udp.rs`, identical apart from the protocol byte each
+/// hardcoded. Lane A found the same duplication in the kernel's own net stack,
+/// at seven copies rather than two, and asked for this function so the kernel
+/// can delete its copies and depend on this crate instead
+/// (`requests/a-c-netproto-checksum-already-owns-what-the-kernel-just-reunified.md`).
+///
+/// # Argument order
+///
+/// `(upper_len, protocol)` and not `(protocol, upper_len)`, for two reasons.
+/// It matches [`crate::ipv6::pseudo_header_sum`], so the two do not differ in
+/// a way a reader has to remember; and because `u16` does not coerce to `u8`,
+/// a call site that swaps them does not compile. With both as integers in the
+/// other order, `pseudo_header_sum(src, dst, 6, 20)` and
+/// `pseudo_header_sum(src, dst, 20, 6)` would both build — one meaning "TCP,
+/// 20 bytes" and the other "protocol 20, 6 bytes" — and the only symptom would
+/// be a checksum that never verifies.
+///
+/// # What this does not bind
+///
+/// The sum is unchanged by exchanging `src` and `dst`. Both addresses occupy
+/// whole aligned 16-bit words, and the Internet checksum is a commutative sum
+/// over those words, so a swap merely reorders four addends. The direction of
+/// a flow is distinguished by the port numbers, which live in the checksummed
+/// header itself. This is a property of RFC 1071, not a shortcut taken here —
+/// [`crate::ipv6::pseudo_header_sum`] has it too — but it is easy to assume
+/// away, so it is pinned by
+/// `ipv4::tests::the_checksum_cannot_see_a_source_destination_swap`.
+#[must_use]
+pub fn pseudo_header_sum(src: &Ipv4Addr, dst: &Ipv4Addr, upper_len: u16, protocol: u8) -> u32 {
+    let mut ph = [0u8; 12];
+    ph[0..4].copy_from_slice(src);
+    ph[4..8].copy_from_slice(dst);
+    // ph[8] is the mandatory zero byte.
+    ph[9] = protocol;
+    ph[10..12].copy_from_slice(&upper_len.to_be_bytes());
+    checksum::accumulate(0, &ph)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -232,5 +278,106 @@ mod tests {
         let p = Packet::parse(&hdr).unwrap();
         assert!(p.is_fragment());
         assert!(!p.dont_fragment());
+    }
+
+    /// The pseudo-header is the twelve bytes RFC 793 §3.1 draws, in that order.
+    ///
+    /// Asserted against a hand-built buffer rather than against another call
+    /// to the same function, because the point of the shared version is that
+    /// the *layout* is stated once — and a layout that agrees with itself is
+    /// no evidence at all. A checksum computed over a wrong-but-consistent
+    /// pseudo-header verifies perfectly between two Slate machines and is
+    /// rejected by everything else on the network, which is the worst
+    /// available failure: it looks like an interop problem in the peer.
+    #[test]
+    fn the_pseudo_header_is_the_twelve_bytes_rfc_793_draws() {
+        let expected: [u8; 12] = [
+            10, 0, 2, 15, // source address
+            10, 0, 2, 2, // destination address
+            0,    // mandatory zero
+            PROTO_TCP, // protocol
+            0x01, 0x2c, // upper-layer length, 300, big-endian
+        ];
+        assert_eq!(
+            pseudo_header_sum(&A, &B, 300, PROTO_TCP),
+            checksum::accumulate(0, &expected)
+        );
+    }
+
+    /// A third address, distinct from both [`A`] and [`B`], for the tests that
+    /// need "a different host" rather than "the other end".
+    const C: Ipv4Addr = [192, 168, 1, 1];
+
+    /// Changing any one input changes the sum.
+    ///
+    /// The pseudo-header exists to bind a segment to the addresses and
+    /// protocol it was sent under; a sum that ignored one of its inputs would
+    /// still verify against itself and would accept a segment redirected from
+    /// another connection.
+    #[test]
+    fn every_input_reaches_the_sum() {
+        let base = checksum::fold(pseudo_header_sum(&A, &B, 300, PROTO_TCP));
+        assert_ne!(base, checksum::fold(pseudo_header_sum(&C, &B, 300, PROTO_TCP)));
+        assert_ne!(base, checksum::fold(pseudo_header_sum(&A, &C, 300, PROTO_TCP)));
+        assert_ne!(base, checksum::fold(pseudo_header_sum(&A, &B, 301, PROTO_TCP)));
+        assert_ne!(base, checksum::fold(pseudo_header_sum(&A, &B, 300, PROTO_UDP)));
+    }
+
+    /// Swapping source and destination leaves the sum unchanged, and that is a
+    /// property of the Internet checksum rather than a defect here.
+    ///
+    /// The sum is over 16-bit words, and both addresses occupy whole aligned
+    /// pairs of them, so exchanging the two exchanges four addends in a
+    /// commutative sum. Nothing a pseudo-header can do would fix that; the
+    /// direction of a flow is distinguished by the port numbers, which are
+    /// inside the checksummed header and *are* asymmetric.
+    ///
+    /// Asserted rather than merely written down because the natural way to
+    /// test "the addresses reach the sum" is to swap them, that test passes on
+    /// every *other* field, and it would look like a bug in this function
+    /// rather than a fact about the algorithm. It cost one debugging cycle
+    /// here; pinning it means it costs nobody else one.
+    #[test]
+    fn the_checksum_cannot_see_a_source_destination_swap() {
+        assert_eq!(
+            pseudo_header_sum(&A, &B, 300, PROTO_TCP),
+            pseudo_header_sum(&B, &A, 300, PROTO_TCP)
+        );
+    }
+
+    /// TCP and UDP agree with the shared function they now both call.
+    ///
+    /// This is the regression that would fire if either module grew its own
+    /// copy back. `tcp::pseudo_header_sum` and `udp::pseudo_header_sum` are
+    /// private, so they are reached here through the parse/build round trip
+    /// each performs: a segment built with one layout and parsed with another
+    /// fails its checksum.
+    #[test]
+    fn tcp_and_udp_checksums_still_verify_over_ipv4() {
+        let payload = [1u8, 2, 3, 4, 5, 6, 7];
+        let seg = crate::tcp::Builder {
+            src_port: 1234,
+            dst_port: 80,
+            seq: 42,
+            ack: 0,
+            flags: crate::tcp::FLAG_SYN,
+            window: 8192,
+        };
+        let mut buf = [0u8; 64];
+        let n = seg
+            .write(&mut buf, &A, &B, &payload)
+            .expect("fits in 64 bytes");
+        assert!(crate::tcp::Segment::parse(&buf[..n], &A, &B).is_some());
+        // A segment presented as coming from a *different host* must not
+        // verify: that is the pseudo-header doing its job. Note this is a
+        // third address and not the pair swapped -- see
+        // `the_checksum_cannot_see_a_source_destination_swap`.
+        assert!(crate::tcp::Segment::parse(&buf[..n], &C, &B).is_none());
+
+        let mut ubuf = [0u8; 64];
+        let un = crate::udp::write(&mut ubuf, &A, &B, 5353, 53, &payload)
+            .expect("fits in 64 bytes");
+        assert!(crate::udp::Datagram::parse(&ubuf[..un], &A, &B).is_some());
+        assert!(crate::udp::Datagram::parse(&ubuf[..un], &C, &B).is_none());
     }
 }

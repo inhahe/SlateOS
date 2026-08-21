@@ -28,8 +28,6 @@ const COL_BLUE: Color = Color::from_hex(0x89B4FA);
 const COL_LAVENDER: Color = Color::from_hex(0xB4BEFE);
 const COL_OVERLAY0: Color = Color::from_hex(0x6C7086);
 const COL_MANTLE: Color = Color::from_hex(0x181825);
-const COL_GREEN: Color = Color::from_hex(0xA6E3A1);
-const COL_PEACH: Color = Color::from_hex(0xFAB387);
 
 // ============================================================================
 // License list metrics
@@ -1317,8 +1315,6 @@ mod tests {
             COL_LAVENDER,
             COL_OVERLAY0,
             COL_MANTLE,
-            COL_GREEN,
-            COL_PEACH,
         ];
         for c in &colors {
             assert_eq!(c.a, 255, "Theme color should be opaque: {:?}", c);

@@ -4019,6 +4019,337 @@ pub unsafe extern "C" fn gethostbyaddr(
 }
 
 // ---------------------------------------------------------------------------
+// gethostbyname_r / gethostbyaddr_r — reentrant resolver lookups
+// ---------------------------------------------------------------------------
+//
+// These exist because the non-`_r` forms hand back a pointer into per-thread
+// storage that the *next* call overwrites.  A caller that wants two results
+// alive at once — or that wants to hold one across a call it does not control
+// — has no way to do it with `gethostbyname` alone.
+//
+// The six-argument shape below is the glibc/musl one, which is what CPython's
+// configure detected for this target (`HAVE_GETHOSTBYNAME_R_6_ARG`); the
+// three- and five-argument variants are Solaris and HP-UX history.
+//
+// Return-value convention, copied from musl deliberately rather than invented:
+// **0 on success, a positive errno on failure**, with the resolver's own
+// reason delivered separately through `*h_errnop`.  In particular "no such
+// host" is `ENOENT` *and* `*result == NULL`, not a bare 0 — a caller looping
+// over names needs to tell "not found" from "found, and here it is".
+
+/// Translate a resolver error (`h_errno` space) into the errno this family
+/// returns.
+///
+/// The mapping is musl's: the two spaces answer different questions, and
+/// collapsing them — returning 0 for a failed lookup, say — is what makes
+/// callers silently treat a miss as a hit.
+fn hostent_r_errno_for(h_err: i32) -> i32 {
+    match h_err {
+        HOST_NOT_FOUND | NO_DATA => errno::ENOENT,
+        TRY_AGAIN => errno::EAGAIN,
+        // NO_RECOVERY and anything unrecognised: the query itself failed.
+        _ => errno::EBADMSG,
+    }
+}
+
+/// Pack a resolver answer into a caller-provided buffer and point `ret` at it.
+///
+/// Returns 0, or `ERANGE` if `buflen` cannot hold the whole pointer web.
+///
+/// Layout, in one block so every pointer stays valid exactly as long as `buf`:
+/// `[pad][aliases: 1 ptr][addr_list: 2 ptrs][addr: 4 bytes][name: len+1]`.
+/// The pointer arrays come first and are preceded by however much padding it
+/// takes to 8-align them — POSIX only promises `buf` is a `char *`, so
+/// assuming it is already aligned would be a misaligned store on a caller that
+/// passed `&big_buf[1]`.
+///
+/// # Safety
+///
+/// `ret` and `result` must be valid for writes, `buf` valid for `buflen`
+/// bytes, and `name` readable for `name_len` bytes.
+unsafe fn fill_hostent_r(
+    ret: *mut Hostent,
+    buf: *mut u8,
+    buflen: usize,
+    name: *const u8,
+    name_len: usize,
+    addr: [u8; 4],
+    result: *mut *const Hostent,
+) -> i32 {
+    const PTR: usize = core::mem::size_of::<*const u8>();
+    /// Offset of the alias array from the first aligned byte.
+    const ALIASES_REL: usize = 0;
+    /// …of the address array: one pointer past the alias array.
+    const ADDR_LIST_REL: usize = PTR;
+    /// …of the four address bytes: two more pointers past that.
+    const ADDR_REL: usize = PTR * 3;
+    /// …of the name: four address bytes past that.
+    const NAME_REL: usize = PTR * 3 + 4;
+
+    // Padding needed to align `buf` to a pointer boundary.  `wrapping_sub` is
+    // exact here, not a fudge: `misalign` is a remainder mod `PTR`, so it is
+    // strictly less than `PTR` whenever it is non-zero.
+    let misalign = (buf as usize) % PTR;
+    let pad = if misalign == 0 {
+        0
+    } else {
+        PTR.wrapping_sub(misalign)
+    };
+
+    // `checked_add` rather than `+`: `name_len` comes from `strlen` on caller
+    // memory, and a corrupt string could in principle make this overflow, at
+    // which point a wrapped `need` would pass the `buflen` check and we would
+    // write outside the buffer.
+    let Some(name_off) = pad.checked_add(NAME_REL) else {
+        return errno::ERANGE;
+    };
+    let Some(need) = name_off
+        .checked_add(name_len)
+        .and_then(|n| n.checked_add(1))
+    else {
+        return errno::ERANGE;
+    };
+    if buflen < need {
+        return errno::ERANGE;
+    }
+
+    // Every one of these is smaller than `name_off`, which has already been
+    // shown not to overflow, so `wrapping_add` cannot wrap and is not hiding
+    // anything.
+    let aliases_off = pad.wrapping_add(ALIASES_REL);
+    let addr_list_off = pad.wrapping_add(ADDR_LIST_REL);
+    let addr_off = pad.wrapping_add(ADDR_REL);
+
+    // SAFETY: every offset below is < `need <= buflen`, so all writes land
+    // inside the caller's buffer.  `aliases_off` and `addr_list_off` are
+    // 8-aligned by construction of `pad`.  `name` is readable for `name_len`
+    // bytes by contract, and cannot overlap `buf`: it is either caller memory
+    // for a *different* object or one of our own stack buffers.
+    unsafe {
+        #[allow(clippy::cast_ptr_alignment)]
+        let aliases = buf.add(aliases_off).cast::<*const u8>();
+        aliases.write(core::ptr::null());
+
+        let addr_buf = buf.add(addr_off);
+        core::ptr::copy_nonoverlapping(addr.as_ptr(), addr_buf, addr.len());
+
+        #[allow(clippy::cast_ptr_alignment)]
+        let addr_list = buf.add(addr_list_off).cast::<*const u8>();
+        addr_list.write(addr_buf.cast_const());
+        addr_list.add(1).write(core::ptr::null());
+
+        let name_buf = buf.add(name_off);
+        core::ptr::copy_nonoverlapping(name, name_buf, name_len);
+        name_buf.add(name_len).write(0);
+
+        (*ret).h_name = name_buf.cast_const();
+        (*ret).h_aliases = aliases.cast_const();
+        (*ret).h_addrtype = AF_INET;
+        (*ret).h_length = 4;
+        (*ret).h_addr_list = addr_list.cast_const();
+        *result = ret;
+    }
+    0
+}
+
+/// Resolve a hostname to an IPv4 address, into caller-provided storage.
+///
+/// Returns 0 and sets `*result = ret` on success.  On failure returns a
+/// positive errno (`ENOENT` not found, `EAGAIN` try again, `EBADMSG`
+/// unrecoverable, `ERANGE` buffer too small), leaves `*result` NULL, and
+/// writes the resolver's reason to `*h_errnop`.
+///
+/// The calling thread's `h_errno` is updated as well.  Strictly the `_r` form
+/// owes nothing to that variable — the point of `h_errnop` is to avoid it —
+/// but real callers (CPython's `socketmodule` among them) read `h_errno` after
+/// these calls, and leaving it stale would hand them the *previous* lookup's
+/// reason.  Writing both costs one store and cannot mislead anyone: the
+/// per-thread copy is only ever read by this thread.
+///
+/// # Safety
+///
+/// `name` must be null-terminated, `ret`/`result` valid for writes, `buf`
+/// valid for `buflen` bytes, and `h_errnop`, if non-NULL, valid for writes.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub unsafe extern "C" fn gethostbyname_r(
+    name: *const u8,
+    ret: *mut Hostent,
+    buf: *mut u8,
+    buflen: usize,
+    result: *mut *const Hostent,
+    h_errnop: *mut i32,
+) -> i32 {
+    if result.is_null() || ret.is_null() || buf.is_null() {
+        return errno::EFAULT;
+    }
+    // SAFETY: `result` is non-null and valid for writes (checked above).
+    unsafe {
+        *result = core::ptr::null();
+    }
+
+    let fail = |h_err: i32| -> i32 {
+        set_h_errno(h_err);
+        if !h_errnop.is_null() {
+            // SAFETY: the caller guarantees a non-NULL `h_errnop` is writable.
+            unsafe {
+                *h_errnop = h_err;
+            }
+        }
+        hostent_r_errno_for(h_err)
+    };
+
+    if name.is_null() {
+        return fail(HOST_NOT_FOUND);
+    }
+    // SAFETY: the caller guarantees `name` is null-terminated.
+    let name_len = unsafe { crate::string::strlen(name) };
+    if name_len == 0 || name_len > 253 {
+        // Not a name any resolver could answer for; do not spend a syscall.
+        return fail(HOST_NOT_FOUND);
+    }
+
+    let mut resolved = [0u8; 4];
+    let rc = syscall3(
+        SYS_DNS_RESOLVE,
+        name as u64,
+        name_len as u64,
+        resolved.as_mut_ptr() as u64,
+    );
+    if rc < 0 {
+        return fail(resolver_error_for(rc));
+    }
+
+    // SAFETY: `ret`/`result`/`buf` were null-checked above and are valid for
+    // the sizes the caller declared; `name` is readable for `name_len` bytes,
+    // which is where `strlen` found its terminator.
+    let fill = unsafe { fill_hostent_r(ret, buf, buflen, name, name_len, resolved, result) };
+    if fill != 0 {
+        // ERANGE is not a resolver verdict — the lookup succeeded.  glibc
+        // reports NETDB_INTERNAL here; we have no such constant, and
+        // NO_RECOVERY would wrongly tell the caller not to retry.  Leaving
+        // h_errno at its previous value would be worse still, so say
+        // "internal, look at errno" the only way this API can: zero.
+        set_h_errno(0);
+        if !h_errnop.is_null() {
+            // SAFETY: as in `fail`.
+            unsafe {
+                *h_errnop = 0;
+            }
+        }
+        return fill;
+    }
+
+    set_h_errno(0);
+    if !h_errnop.is_null() {
+        // SAFETY: as in `fail`.
+        unsafe {
+            *h_errnop = 0;
+        }
+    }
+    0
+}
+
+/// Reverse-resolve an IPv4 address, into caller-provided storage.
+///
+/// Same conventions as [`gethostbyname_r`].  `len` must be 4 and `addr_type`
+/// `AF_INET`; anything else is `EBADMSG`/`NO_RECOVERY` rather than a silent
+/// wrong answer, because an IPv6 address squeezed through this API would
+/// otherwise be reverse-resolved as if its first four bytes were an IPv4
+/// address.
+///
+/// # Safety
+///
+/// `addr` must be readable for `len` bytes, `ret`/`result` valid for writes,
+/// `buf` valid for `buflen` bytes, and `h_errnop`, if non-NULL, writable.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub unsafe extern "C" fn gethostbyaddr_r(
+    addr: *const u8,
+    len: i32,
+    addr_type: i32,
+    ret: *mut Hostent,
+    buf: *mut u8,
+    buflen: usize,
+    result: *mut *const Hostent,
+    h_errnop: *mut i32,
+) -> i32 {
+    if result.is_null() || ret.is_null() || buf.is_null() {
+        return errno::EFAULT;
+    }
+    // SAFETY: `result` is non-null and valid for writes (checked above).
+    unsafe {
+        *result = core::ptr::null();
+    }
+
+    let fail = |h_err: i32| -> i32 {
+        set_h_errno(h_err);
+        if !h_errnop.is_null() {
+            // SAFETY: the caller guarantees a non-NULL `h_errnop` is writable.
+            unsafe {
+                *h_errnop = h_err;
+            }
+        }
+        hostent_r_errno_for(h_err)
+    };
+
+    if addr.is_null() || addr_type != AF_INET || len != 4 {
+        return fail(NO_RECOVERY);
+    }
+
+    let mut ip_bytes = [0u8; 4];
+    // SAFETY: `addr` is non-null and `len == 4` bytes readable by contract.
+    unsafe {
+        core::ptr::copy_nonoverlapping(addr, ip_bytes.as_mut_ptr(), 4);
+    }
+    let ip_u32 = u32::from_ne_bytes(ip_bytes);
+
+    let mut name_buf = [0u8; 256];
+    let rc = syscall3(
+        SYS_DNS_REVERSE_RESOLVE,
+        u64::from(ip_u32),
+        name_buf.as_mut_ptr() as u64,
+        name_buf.len() as u64,
+    );
+    if rc < 0 {
+        return fail(resolver_error_for(rc));
+    }
+    // Clamp the kernel's reported length rather than trusting it.
+    let name_len = core::cmp::min(rc as usize, name_buf.len());
+
+    // SAFETY: as in `gethostbyname_r`; `name_buf` is a local array readable
+    // for `name_len <= name_buf.len()` bytes.
+    let fill = unsafe {
+        fill_hostent_r(
+            ret,
+            buf,
+            buflen,
+            name_buf.as_ptr(),
+            name_len,
+            ip_bytes,
+            result,
+        )
+    };
+    if fill != 0 {
+        set_h_errno(0);
+        if !h_errnop.is_null() {
+            // SAFETY: as in `fail`.
+            unsafe {
+                *h_errnop = 0;
+            }
+        }
+        return fill;
+    }
+
+    set_h_errno(0);
+    if !h_errnop.is_null() {
+        // SAFETY: as in `fail`.
+        unsafe {
+            *h_errnop = 0;
+        }
+    }
+    0
+}
+
+// ---------------------------------------------------------------------------
 // h_errno / herror / hstrerror — legacy DNS error reporting
 // ---------------------------------------------------------------------------
 
@@ -7887,6 +8218,264 @@ mod tests {
         assert_eq!(resolver_error_for(i64::MIN), NO_RECOVERY);
         assert_eq!(resolver_error_for(-(i64::from(i32::MAX) + 1)), NO_RECOVERY);
         assert_eq!(resolver_error_for(0), NO_RECOVERY);
+    }
+
+    // -----------------------------------------------------------------------
+    // gethostbyname_r / gethostbyaddr_r
+    //
+    // The success path needs SYS_DNS_RESOLVE, which does not exist on the host,
+    // so these exercise the two halves that are pure: the errno mapping and the
+    // buffer packing.  The packing is where a reentrant resolver actually goes
+    // wrong — an under-sized or misaligned write here is a heap corruption in
+    // the caller, not a failed lookup.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn hostent_r_errno_keeps_not_found_distinct_from_broken() {
+        assert_eq!(hostent_r_errno_for(HOST_NOT_FOUND), errno::ENOENT);
+        assert_eq!(hostent_r_errno_for(NO_DATA), errno::ENOENT);
+        assert_eq!(hostent_r_errno_for(TRY_AGAIN), errno::EAGAIN);
+        assert_eq!(hostent_r_errno_for(NO_RECOVERY), errno::EBADMSG);
+        // An unrecognised resolver code must not read as success.
+        assert_ne!(hostent_r_errno_for(4242), 0);
+    }
+
+    /// Pack one answer and check every pointer in the returned web.
+    fn pack(buf: &mut [u8], name: &[u8]) -> (Hostent, *const Hostent, i32) {
+        let mut ret: Hostent = unsafe { core::mem::zeroed() };
+        let mut result: *const Hostent = core::ptr::null();
+        let rc = unsafe {
+            fill_hostent_r(
+                &mut ret,
+                buf.as_mut_ptr(),
+                buf.len(),
+                name.as_ptr(),
+                name.len(),
+                [10, 0, 0, 7],
+                &mut result,
+            )
+        };
+        (ret, result, rc)
+    }
+
+    #[test]
+    fn fill_hostent_r_builds_a_complete_pointer_web() {
+        let mut buf = [0xAAu8; 256];
+        let (ret, result, rc) = pack(&mut buf, b"host.example");
+        assert_eq!(rc, 0);
+        assert!(!result.is_null());
+        assert_eq!(ret.h_addrtype, AF_INET);
+        assert_eq!(ret.h_length, 4);
+
+        let name = unsafe { core::ffi::CStr::from_ptr(ret.h_name.cast()) };
+        assert_eq!(name.to_bytes(), b"host.example");
+
+        // h_aliases must be a valid, empty, NULL-terminated array — not NULL.
+        // Callers iterate it without checking the array pointer itself.
+        assert!(!ret.h_aliases.is_null());
+        assert!(unsafe { *ret.h_aliases }.is_null());
+
+        // h_addr_list: one address, then the terminator.
+        assert!(!ret.h_addr_list.is_null());
+        let a0 = unsafe { *ret.h_addr_list };
+        assert!(!a0.is_null());
+        let octets = unsafe { core::slice::from_raw_parts(a0, 4) };
+        assert_eq!(octets, &[10, 0, 0, 7]);
+        assert!(unsafe { *ret.h_addr_list.add(1) }.is_null());
+
+        // Everything must live inside the caller's buffer.
+        let lo = buf.as_ptr() as usize;
+        let hi = lo + buf.len();
+        for p in [
+            ret.h_name as usize,
+            ret.h_aliases as usize,
+            ret.h_addr_list as usize,
+            a0 as usize,
+        ] {
+            assert!(p >= lo && p < hi, "pointer {p:#x} escaped the buffer");
+        }
+    }
+
+    #[test]
+    fn fill_hostent_r_pointer_arrays_are_aligned_even_on_an_odd_buffer() {
+        // POSIX only promises `buf` is a char*.  Hand it a deliberately
+        // misaligned start and check the pointer arrays still land on an
+        // 8-byte boundary; an unaligned store here is UB on the C side.
+        let mut backing = [0u8; 256];
+        let (ret, result, rc) = pack(&mut backing[1..], b"a.b");
+        assert_eq!(rc, 0);
+        assert!(!result.is_null());
+        assert_eq!((ret.h_aliases as usize) % 8, 0);
+        assert_eq!((ret.h_addr_list as usize) % 8, 0);
+    }
+
+    #[test]
+    fn fill_hostent_r_reports_erange_rather_than_overflowing() {
+        // 1 alias ptr + 2 addr ptrs + 4 addr bytes + "abc\0" = 32 bytes with a
+        // perfectly aligned buffer.  31 must fail, and fail without writing.
+        let mut small = [0u8; 8];
+        let (_, result, rc) = pack(&mut small, b"abc");
+        assert_eq!(rc, errno::ERANGE);
+        assert!(result.is_null());
+
+        let mut zero: [u8; 0] = [];
+        let (_, result, rc) = pack(&mut zero, b"");
+        assert_eq!(rc, errno::ERANGE);
+        assert!(result.is_null());
+    }
+
+    #[test]
+    fn gethostbyname_r_null_outputs_are_efault_not_a_crash() {
+        let mut ret: Hostent = unsafe { core::mem::zeroed() };
+        let mut buf = [0u8; 128];
+        let mut result: *const Hostent = core::ptr::null();
+        let mut herr: i32 = 0;
+        let name = b"example.com\0".as_ptr();
+
+        assert_eq!(
+            unsafe {
+                gethostbyname_r(
+                    name,
+                    &mut ret,
+                    buf.as_mut_ptr(),
+                    buf.len(),
+                    core::ptr::null_mut(),
+                    &mut herr,
+                )
+            },
+            errno::EFAULT
+        );
+        assert_eq!(
+            unsafe {
+                gethostbyname_r(
+                    name,
+                    core::ptr::null_mut(),
+                    buf.as_mut_ptr(),
+                    buf.len(),
+                    &mut result,
+                    &mut herr,
+                )
+            },
+            errno::EFAULT
+        );
+        assert_eq!(
+            unsafe {
+                gethostbyname_r(
+                    name,
+                    &mut ret,
+                    core::ptr::null_mut(),
+                    buf.len(),
+                    &mut result,
+                    &mut herr,
+                )
+            },
+            errno::EFAULT
+        );
+    }
+
+    #[test]
+    fn gethostbyname_r_rejects_impossible_names_without_a_syscall() {
+        let mut ret: Hostent = unsafe { core::mem::zeroed() };
+        let mut buf = [0u8; 512];
+        let mut result: *const Hostent = core::ptr::null();
+        let mut herr: i32 = -1;
+
+        for name in [core::ptr::null(), b"\0".as_ptr()] {
+            herr = -1;
+            let rc = unsafe {
+                gethostbyname_r(
+                    name,
+                    &mut ret,
+                    buf.as_mut_ptr(),
+                    buf.len(),
+                    &mut result,
+                    &mut herr,
+                )
+            };
+            assert_eq!(rc, errno::ENOENT);
+            assert!(result.is_null());
+            assert_eq!(herr, HOST_NOT_FOUND);
+            // The out-parameter and the per-thread copy must agree.
+            assert_eq!(get_h_errno(), HOST_NOT_FOUND);
+        }
+
+        // 255 bytes of label: longer than any DNS name.
+        let mut long = [b'a'; 256];
+        long[255] = 0;
+        let rc = unsafe {
+            gethostbyname_r(
+                long.as_ptr(),
+                &mut ret,
+                buf.as_mut_ptr(),
+                buf.len(),
+                &mut result,
+                &mut herr,
+            )
+        };
+        assert_eq!(rc, errno::ENOENT);
+        assert!(result.is_null());
+
+        // A NULL h_errnop is allowed and must not be dereferenced.
+        let rc = unsafe {
+            gethostbyname_r(
+                b"\0".as_ptr(),
+                &mut ret,
+                buf.as_mut_ptr(),
+                buf.len(),
+                &mut result,
+                core::ptr::null_mut(),
+            )
+        };
+        assert_eq!(rc, errno::ENOENT);
+    }
+
+    #[test]
+    fn gethostbyaddr_r_rejects_bad_arguments() {
+        let addr = [127u8, 0, 0, 1];
+        let mut ret: Hostent = unsafe { core::mem::zeroed() };
+        let mut buf = [0u8; 512];
+        let mut result: *const Hostent = core::ptr::null();
+        let mut herr: i32 = 0;
+
+        for (p, len, af) in [
+            (core::ptr::null(), 4, AF_INET),
+            (addr.as_ptr(), 16, AF_INET6),
+            (addr.as_ptr(), 3, AF_INET),
+        ] {
+            let rc = unsafe {
+                gethostbyaddr_r(
+                    p,
+                    len,
+                    af,
+                    &mut ret,
+                    buf.as_mut_ptr(),
+                    buf.len(),
+                    &mut result,
+                    &mut herr,
+                )
+            };
+            // A malformed request is not "host not found" — retrying it with
+            // the same arguments will fail identically.
+            assert_eq!(rc, errno::EBADMSG);
+            assert_eq!(herr, NO_RECOVERY);
+            assert!(result.is_null());
+        }
+
+        assert_eq!(
+            unsafe {
+                gethostbyaddr_r(
+                    addr.as_ptr(),
+                    4,
+                    AF_INET,
+                    &mut ret,
+                    buf.as_mut_ptr(),
+                    buf.len(),
+                    core::ptr::null_mut(),
+                    &mut herr,
+                )
+            },
+            errno::EFAULT
+        );
     }
 
     #[test]

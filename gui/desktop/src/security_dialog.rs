@@ -91,8 +91,6 @@ mod theme {
     pub const RED: Color = Color::from_hex(0xF38BA8);
     pub const GREEN: Color = Color::from_hex(0xA6E3A1);
     pub const YELLOW: Color = Color::from_hex(0xF9E2AF);
-    pub const PEACH: Color = Color::from_hex(0xFAB387);
-    pub const MAUVE: Color = Color::from_hex(0xCBA6F7);
     pub const SHADOW: Color = Color::rgba(0, 0, 0, 160);
     pub const DIMMER: Color = Color::rgba(0, 0, 0, 120);
     pub const SHIELD_BG: Color = Color::from_hex(0x313244);
@@ -406,6 +404,42 @@ struct RememberedDecision {
     recorded_at_ms: u64,
 }
 
+/// How long a remembered **allow** stays good, in monotonic milliseconds.
+///
+/// Eight hours: about one working session, so a user who grants a program
+/// access to the microphone in the morning is asked again the next day rather
+/// than never again. The number is a policy, not a constraint — it trades
+/// "asked too often" against "granted longer than intended" — and it is bounded
+/// rather than infinite because the alternative has no way back: a permission
+/// granted once with no expiry and no revocation UI is granted for the life of
+/// the session no matter what the user later thinks of it.
+const REMEMBERED_ALLOW_LIFETIME_MS: u64 = 8 * 60 * 60 * 1000;
+
+impl RememberedDecision {
+    /// Whether this decision may still answer a request at `now_ms`.
+    ///
+    /// **Denials never expire; grants do.** The asymmetry is the point. A
+    /// remembered "no" cannot become dangerous with age — the worst it does is
+    /// keep refusing something the user already refused, and the user can
+    /// always start the program again to be asked afresh. A remembered "yes"
+    /// gets more dangerous the older it is: the program it was granted to may
+    /// have been updated, or the user may have forgotten it has the right at
+    /// all. So the risk-free direction is remembered indefinitely and the risky
+    /// one is not.
+    ///
+    /// A clock that went backwards (`now_ms` before the recorded stamp) reads
+    /// as *not yet expired* rather than as an enormous age, via
+    /// `saturating_sub`. That is the safe direction for a monotonic clock that
+    /// should never go backwards anyway: the failure it produces is one extra
+    /// prompt's worth of trust, not a silent grant.
+    const fn is_live(&self, now_ms: u64) -> bool {
+        if !self.allowed {
+            return true;
+        }
+        now_ms.saturating_sub(self.recorded_at_ms) < REMEMBERED_ALLOW_LIFETIME_MS
+    }
+}
+
 impl SecurityDialog {
     /// Create a new security dialog, initially hidden.
     pub fn new() -> Self {
@@ -460,10 +494,17 @@ impl SecurityDialog {
         }
     }
 
-    /// Check if there is a remembered decision matching this request.
+    /// Check if there is a live remembered decision matching this request.
+    ///
+    /// A decision that has aged past [`REMEMBERED_ALLOW_LIFETIME_MS`] is not
+    /// returned, so the user is asked again rather than silently granted
+    /// something they agreed to long ago. See [`RememberedDecision::is_live`]
+    /// for why only *allow* decisions expire.
     fn find_remembered_decision(&self, request: &CapRequestInfo) -> Option<&RememberedDecision> {
+        let now = self.current_time_ms;
         self.remembered_decisions.iter().find(|d| {
-            d.process_name == request.process_name
+            d.is_live(now)
+                && d.process_name == request.process_name
                 && d.resource_type == request.resource_type
                 && (d.rights.0 & request.rights.0) == request.rights.0
         })
@@ -1357,6 +1398,12 @@ impl SecurityDialog {
     }
 }
 
+impl Default for SecurityDialog {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 // ============================================================================
 // Utility
 // ============================================================================
@@ -1897,6 +1944,89 @@ mod tests {
         }
 
         assert!(dialog.remembered_decisions.len() <= 100);
+    }
+
+    /// Grant `app` access once, with "remember" ticked, at `recorded_at_ms`.
+    fn dialog_with_remembered_allow(recorded_at_ms: u64) -> SecurityDialog {
+        let mut dialog = SecurityDialog::new();
+        dialog.set_current_time(recorded_at_ms);
+        // `remember` is set *after* `push_request`: the hidden→visible
+        // transition clears the checkbox so each dialog session starts fresh.
+        // See `test_remember_decision_auto_approves`.
+        dialog.push_request(sample_request(1));
+        dialog.remember = true;
+        dialog.allow_current();
+        dialog.drain_events();
+        assert_eq!(dialog.remembered_decisions.len(), 1, "it was remembered");
+        dialog
+    }
+
+    /// Ask again and report whether the answer came from memory — i.e. whether
+    /// the dialog stayed shut and decided by itself.
+    fn asked_again_answers_silently(dialog: &mut SecurityDialog, at_ms: u64) -> bool {
+        dialog.set_current_time(at_ms);
+        dialog.push_request(sample_request(2));
+        let answered = !dialog.drain_events().is_empty();
+        dialog.deny_current();
+        dialog.drain_events();
+        answered
+    }
+
+    #[test]
+    fn a_remembered_grant_still_answers_within_its_lifetime() {
+        let mut dialog = dialog_with_remembered_allow(0);
+        assert!(
+            asked_again_answers_silently(&mut dialog, REMEMBERED_ALLOW_LIFETIME_MS - 1),
+            "remembering has to actually save the user a prompt, or it is not a \
+             feature"
+        );
+    }
+
+    #[test]
+    fn a_remembered_grant_stops_answering_once_it_is_old() {
+        // The defect this guards: `recorded_at_ms` was written and never read,
+        // so a permission granted once was granted for the whole session with
+        // no way for the user to be asked again.
+        let mut dialog = dialog_with_remembered_allow(0);
+        assert!(
+            !asked_again_answers_silently(&mut dialog, REMEMBERED_ALLOW_LIFETIME_MS),
+            "an expired grant must put the question back to the user"
+        );
+    }
+
+    #[test]
+    fn a_remembered_refusal_does_not_expire() {
+        // Denials are the risk-free direction: the worst an old "no" does is
+        // keep refusing what the user already refused.
+        let mut dialog = SecurityDialog::new();
+        dialog.set_current_time(0);
+        // See `dialog_with_remembered_allow` for why this ordering matters.
+        dialog.push_request(sample_request(1));
+        dialog.remember = true;
+        dialog.deny_current();
+        dialog.drain_events();
+
+        assert!(
+            asked_again_answers_silently(&mut dialog, REMEMBERED_ALLOW_LIFETIME_MS * 100),
+            "a remembered denial should still be remembered a long time later"
+        );
+    }
+
+    #[test]
+    fn a_clock_that_went_backwards_does_not_extend_a_grant_forever() {
+        // `saturating_sub` makes a backwards clock read as "not yet expired"
+        // rather than as an age of nearly u64::MAX, which would have expired
+        // everything at once. The cost is at most one prompt's worth of trust;
+        // the alternative silently re-asks for every remembered decision.
+        //
+        // The grant is recorded a long way into the run and then asked for at
+        // time zero, so `now_ms` is genuinely *before* the stamp — a plain
+        // subtraction here would underflow rather than merely read as young.
+        let mut dialog = dialog_with_remembered_allow(REMEMBERED_ALLOW_LIFETIME_MS * 10);
+        assert!(
+            asked_again_answers_silently(&mut dialog, 0),
+            "a clock that ran backwards must not expire anything"
+        );
     }
 
     #[test]

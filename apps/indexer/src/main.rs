@@ -1809,21 +1809,28 @@ fn current_timestamp() -> u64 {
         .unwrap_or(0)
 }
 
+/// How long ago the index was last rebuilt.
+///
+/// Relative rather than absolute, deliberately, and this is the one place in
+/// the tree where that is the right shape: the reader's question is not "on
+/// what date did this happen" but "is this index stale", and a date makes
+/// them do the subtraction themselves. Everywhere else that renders an
+/// instant — a file's mtime, a backup run, a restore point — renders it
+/// absolutely, through `guitk::datetime`, which this headless program does
+/// not reach and does not need to.
+///
+/// `"never"` stays here: an index that has not been built has no age, which
+/// is different from an age of zero.
+///
+/// The ladder this replaces stopped at days, so an index left alone for two
+/// years read `730 days ago`. `textfmt::duration::relative` carries the same
+/// scale past that — weeks, months, years — and is the same rendering the
+/// rest of the tree uses for an elapsed span.
 fn format_timestamp(ts: u64) -> String {
     if ts == 0 {
         return "never".to_string();
     }
-    // Simple timestamp format: seconds since epoch (full datetime requires OS time APIs).
-    let age_secs = current_timestamp().saturating_sub(ts);
-    if age_secs < 60 {
-        format!("{} seconds ago", age_secs)
-    } else if age_secs < 3600 {
-        format!("{} minutes ago", age_secs / 60)
-    } else if age_secs < 86400 {
-        format!("{} hours ago", age_secs / 3600)
-    } else {
-        format!("{} days ago", age_secs / 86400)
-    }
+    textfmt::duration::relative(current_timestamp().saturating_sub(ts))
 }
 
 fn format_size(bytes: u64) -> String {

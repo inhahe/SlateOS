@@ -36,7 +36,6 @@ use guitk::color::Color;
 use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 #[allow(unused_imports)]
 use guitk::style::CornerRadii;
-use guitk::date;
 use guitk::scroll_window;
 use guitk::text;
 
@@ -971,8 +970,12 @@ pub fn calculate_next_run(frequency: &ScheduleFrequency, now: u64) -> u64 {
     }
 }
 
-/// Decomposed time fields from a unix timestamp.
-/// Uses a simple algorithm (no timezone support -- assumes UTC).
+/// The calendar fields a cron expression matches against.
+///
+/// Not a `DateTime` directly because a cron expression matches on `u8` fields
+/// and on a weekday numbered from Sunday; this is the adapter between the two
+/// shapes, and it exists so `CronExpr::matches` keeps a signature that says
+/// what it compares.
 struct DecomposedTime {
     minute: u8,
     hour: u8,
@@ -981,55 +984,41 @@ struct DecomposedTime {
     weekday: u8,
 }
 
-/// Decompose a unix epoch timestamp into calendar fields (UTC).
+/// Decompose a unix epoch timestamp into the fields cron matches on.
+///
+/// This program used to decompose an instant twice by two different routes —
+/// here for cron matching, and again in `format_timestamp` for display — each
+/// with its own `secs % 86400` and its own transcription of Howard Hinnant's
+/// `civil_from_days`. The display half now renders through `guitk::datetime`;
+/// this half reads the same type's accessors, so there is one calendar in this
+/// file and not two. The old code also derived the weekday from
+/// `(days + 4) % 7`, a correct-but-separate fact about 1970-01-01 being a
+/// Thursday that `Date::weekday` already knows.
+///
+/// UTC, and that is a live bug, not a decision: a user who schedules a task
+/// for 03:00 means 03:00 where they are. It stays UTC because there is no
+/// per-process zone to read yet (known-issues
+/// `TD-NO-SYSTEM-DEFAULT-ZONE-WITHOUT-TZ`), and because cron-under-DST has
+/// genuine semantics to settle first — see known-issues
+/// `TD-CRON-MATCHES-UTC-FIELDS`. Written as an explicit `Tz::utc()` so the
+/// grep that finds the zoneless callers finds this one too.
 fn decompose_timestamp(ts: u64) -> DecomposedTime {
-    let secs = ts;
-    let minute = ((secs % 3600) / 60) as u8;
-    let hour = ((secs % 86400) / 3600) as u8;
-
-    // Days since epoch (1970-01-01, which was a Thursday = weekday 4).
-    let days = secs / 86400;
-    let weekday = ((days + 4) % 7) as u8; // 0 = Sunday
-
-    // Compute year, month, day from days since epoch.
-    let (year, month, day) = days_to_ymd(days);
-    let _ = year; // We only need month and day for cron matching.
-
+    let dt = guitk::datetime::DateTime::at(
+        i64::try_from(ts).unwrap_or(i64::MAX),
+        &guitk::tzrules::Tz::utc(),
+    );
+    let d = dt.date();
     DecomposedTime {
-        minute,
-        hour,
-        day: day as u8,
-        month: month as u8,
-        weekday,
+        // Every field below is in a range that fits `u8` by construction —
+        // minutes and hours from a seconds-of-day count, month and day from a
+        // calendar date, weekday from `0..=6` — so the fallbacks are
+        // unreachable rather than chosen.
+        minute: u8::try_from(dt.minute()).unwrap_or(0),
+        hour: u8::try_from(dt.hour()).unwrap_or(0),
+        day: u8::try_from(d.day()).unwrap_or(1),
+        month: u8::try_from(d.month()).unwrap_or(1),
+        weekday: u8::try_from(d.weekday().index()).unwrap_or(0),
     }
-}
-
-/// Convert days since the Unix epoch to (year, month, day), both 1-based.
-///
-/// Was a local transcription of Howard Hinnant's `civil_from_days` — one of
-/// four in `apps/`, spelled over three different integer types, of which the
-/// file manager's had been quietly wrong for every date before 2000-03-01.
-/// This one was right, which is the point: four spellings of one algorithm is
-/// four things to check, and a reader has no way to tell the right ones from
-/// the wrong one without redoing the derivation. `guitk::date` reaches the
-/// same algorithm through `tzrules`, which is what the libc's `localtime` and
-/// the taskbar clock render dates through.
-///
-/// A task's next-run time is arithmetic on a user-entered schedule, so
-/// `days_since_epoch` is not bounded by anything checked here. Saturating at
-/// `i32::MAX` days lands in the year 5 881 580, which is where a nonsense
-/// schedule belongs in a list sorted by next run.
-fn days_to_ymd(days_since_epoch: u64) -> (u64, u64, u64) {
-    let (year, month, day) =
-        date::Date::from_days_since_epoch(i32::try_from(days_since_epoch).unwrap_or(i32::MAX))
-            .ymd();
-    // The year cannot be negative: `days_since_epoch` is unsigned and the
-    // epoch is 1970.
-    (
-        u64::try_from(year).unwrap_or(0),
-        u64::from(month),
-        u64::from(day),
-    )
 }
 
 // ============================================================================
@@ -2558,6 +2547,26 @@ impl Default for SchedulerUI {
 // ============================================================================
 
 /// Format a unix timestamp into a human-readable UTC date/time string.
+///
+/// The two sentinels stay here rather than moving into the shared formatter:
+/// `"Never"` means a task that has not run yet and `"--"` a next-run time
+/// that does not exist, and neither is a rendering of an instant.
+///
+/// What replaced the rest is the point. This function decomposed the instant
+/// **twice** — once through `decompose_timestamp` for the time of day and
+/// again through a local `days_to_ymd(ts / 86400)` for the date — so the two
+/// halves of one string were derived by two different routes, and nothing made
+/// them agree. That is the shape a timezone would have broken first: applying
+/// an offset to one half and not the other yields a clock reading from one day
+/// stamped with another day's date. `guitk::datetime` decomposes once, and
+/// [`decompose_timestamp`] now reads the same type, so the file holds one
+/// calendar rather than two.
+///
+/// UTC, explicitly: there is no per-process zone plumbing yet (known-issues
+/// `TD-NO-SYSTEM-DEFAULT-ZONE-WITHOUT-TZ`), and a scheduler that shows the
+/// wrong hour is a scheduler nobody can set. The matching half of that problem
+/// — that a task scheduled for 03:00 *fires* at 03:00 UTC — is known-issues
+/// `TD-CRON-MATCHES-UTC-FIELDS`.
 fn format_timestamp(ts: u64) -> String {
     if ts == 0 {
         return String::from("Never");
@@ -2565,12 +2574,9 @@ fn format_timestamp(ts: u64) -> String {
     if ts == u64::MAX {
         return String::from("--");
     }
-
-    let dt = decompose_timestamp(ts);
-    let (year, month, day) = days_to_ymd(ts / 86400);
-    format!(
-        "{year:04}-{month:02}-{day:02} {:02}:{:02}",
-        dt.hour, dt.minute
+    guitk::datetime::stamp(
+        i64::try_from(ts).unwrap_or(i64::MAX),
+        &guitk::tzrules::Tz::utc(),
     )
 }
 
@@ -3271,28 +3277,56 @@ mod tests {
         }
     }
 
-    // -- decompose_timestamp / days_to_ymd tests ----------------------------
+    // -- decompose_timestamp tests ------------------------------------------
 
     #[test]
     fn test_decompose_epoch_zero() {
         let dt = decompose_timestamp(0);
         assert_eq!(dt.minute, 0);
         assert_eq!(dt.hour, 0);
+        assert_eq!(dt.day, 1);
+        assert_eq!(dt.month, 1);
         // 1970-01-01 is Thursday = weekday 4.
         assert_eq!(dt.weekday, 4);
     }
 
+    /// The two dates the deleted `days_to_ymd` tests pinned, asserted through
+    /// the only caller that ever wanted them.
+    ///
+    /// The epoch and the century boundary are exactly where a hand-rolled
+    /// calendar goes wrong — 2000 is a leap year by the 400-rule that the
+    /// 100-rule would otherwise deny — so a cron expression reading
+    /// `0 0 29 2 *` depends on this being right.
     #[test]
-    fn test_days_to_ymd_epoch() {
-        let (y, m, d) = days_to_ymd(0);
-        assert_eq!((y, m, d), (1970, 1, 1));
+    fn the_century_boundary_decomposes_the_way_a_calendar_says() {
+        // 2000-01-01 is day 10957 since the epoch, and it was a Saturday.
+        let dt = decompose_timestamp(10957 * 86_400);
+        assert_eq!((dt.month, dt.day), (1, 1));
+        assert_eq!(dt.weekday, 6);
+        // 2000-02-29 exists; 1900-02-29 would not have.
+        let leap = decompose_timestamp((10957 + 59) * 86_400);
+        assert_eq!((leap.month, leap.day), (2, 29));
     }
 
+    /// Every field a cron expression compares is in the range cron expects.
+    ///
+    /// The decomposition narrows five `u32`s to `u8`, and each narrowing has a
+    /// fallback that is meant to be unreachable. This walks a year of days at
+    /// an awkward offset from midnight and checks the fallbacks never fire —
+    /// a `day` of 1 arriving from a failed conversion rather than from the
+    /// calendar would silently fire every monthly task on the wrong date.
     #[test]
-    fn test_days_to_ymd_known_date() {
-        // 2000-01-01 is day 10957 since epoch.
-        let (y, m, d) = days_to_ymd(10957);
-        assert_eq!((y, m, d), (2000, 1, 1));
+    fn no_field_ever_falls_back_out_of_cron_range() {
+        // 2024 is a leap year, so this covers a 29 February.
+        let start: u64 = 1_704_067_200; // 2024-01-01 00:00:00 UTC
+        for day in 0..366u64 {
+            let dt = decompose_timestamp(start + day * 86_400 + 13 * 3600 + 47 * 60);
+            assert_eq!(dt.hour, 13, "day {day}");
+            assert_eq!(dt.minute, 47, "day {day}");
+            assert!((1..=12).contains(&dt.month), "day {day}: month {}", dt.month);
+            assert!((1..=31).contains(&dt.day), "day {day}: day {}", dt.day);
+            assert!(dt.weekday <= 6, "day {day}: weekday {}", dt.weekday);
+        }
     }
 
     // -- SchedulerUI tests --------------------------------------------------
@@ -3497,10 +3531,18 @@ mod tests {
     }
 
     #[test]
+    /// Asserted by value, not by prefix.
+    ///
+    /// `starts_with("2023-")` is satisfied by every one of the 365 days of
+    /// that year, so it could not have noticed a calendar that was a
+    /// fortnight out — which is precisely what `apps/undelete`'s copy of this
+    /// same arithmetic was.
     fn test_format_timestamp_known() {
-        // 1700000000 = 2023-11-14 22:13 UTC
-        let s = format_timestamp(1_700_000_000);
-        assert!(s.starts_with("2023-"));
+        // 2023-11-14 22:13:20 UTC.
+        assert_eq!(format_timestamp(1_700_000_000), "2023-11-14 22:13");
+        // The date and the time of day used to be decomposed by two separate
+        // routes; this asserts they name one instant.
+        assert_eq!(format_timestamp(1_787_070_645), "2026-08-18 16:30");
     }
 
     #[test]

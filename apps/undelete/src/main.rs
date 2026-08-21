@@ -3568,20 +3568,29 @@ pub fn format_size(bytes: u64) -> String {
 }
 
 /// Format a unix timestamp as a human-readable date string.
+///
+/// `"Unknown"` stays here rather than moving into the shared formatter: an
+/// inode with a zero deletion time is one whose time this program could not
+/// recover, which is a different fact from "deleted at the epoch".
+///
+/// Everything below that line used to be a home-made calendar, and it was
+/// **wrong** — not roughly, but by a fortnight. It derived the year as
+/// `days / 365` and the month as `remaining / 30`, so it lost the leap days
+/// and the five extra days a year that months actually have; a file deleted
+/// on 2026-08-18 was listed as deleted 2026-09-04, and the error grows by
+/// about five days for every year that passes. The deletion date is the
+/// column a user reads to tell two recoverable copies of the same file
+/// apart, so it was the worst field in the program to be wrong in.
+///
+/// UTC, explicitly, because this program has no zone to read: there is no
+/// per-process zone plumbing yet (known-issues `TD-NO-SYSTEM-DEFAULT-ZONE-WITHOUT-TZ`).
+/// Saying so with `Tz::utc()` leaves a mark that can be found and fixed when
+/// there is; `secs % 86400` left none.
 pub fn format_timestamp(ts: u64) -> String {
     if ts == 0 {
         return String::from("Unknown");
     }
-    // Simple epoch-to-date conversion (no timezone, approximation).
-    let days = ts / 86400;
-    let years_approx = days / 365;
-    let year = 1970_u64.saturating_add(years_approx);
-    let remaining_days = days.saturating_sub(years_approx.saturating_mul(365));
-    let month = (remaining_days / 30).saturating_add(1).min(12);
-    let day = (remaining_days % 30).saturating_add(1).min(31);
-    let hour = (ts % 86400) / 3600;
-    let minute = (ts % 3600) / 60;
-    format!("{year}-{month:02}-{day:02} {hour:02}:{minute:02}")
+    guitk::datetime::stamp(i64::try_from(ts).unwrap_or(i64::MAX), &guitk::tzrules::Tz::utc())
 }
 
 /// Format bytes as a hex preview string.
@@ -4578,11 +4587,19 @@ mod tests {
         assert_eq!(format_timestamp(0), "Unknown");
     }
 
+    /// The date the old home-made calendar got wrong, now asserted by value.
+    ///
+    /// The test this replaces checked that the string was non-empty and was
+    /// not `"Unknown"` — and passed for years while the function reported
+    /// 2023-12-01 for an instant in the middle of November. A test that never
+    /// looks at the value cannot notice a calendar that is a fortnight out;
+    /// that gap is where the bug lived.
     #[test]
     fn test_format_timestamp_nonzero() {
-        let result = format_timestamp(1_700_000_000);
-        assert!(!result.is_empty());
-        assert_ne!(result, "Unknown");
+        // 2023-11-14 22:13:20 UTC.
+        assert_eq!(format_timestamp(1_700_000_000), "2023-11-14 22:13");
+        // 2026-08-18 16:30:45 UTC — the old code said 2026-09-04.
+        assert_eq!(format_timestamp(1_787_070_645), "2026-08-18 16:30");
     }
 
     #[test]

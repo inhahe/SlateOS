@@ -7,7 +7,7 @@
 //! the header + payload.
 
 use crate::checksum;
-use crate::ipv4::PROTO_UDP;
+use crate::ipv4::{self, PROTO_UDP};
 use crate::ipv6::{self, Ipv6Addr};
 use crate::Ipv4Addr;
 
@@ -27,15 +27,14 @@ pub struct Datagram<'a> {
 
 /// Accumulate the IPv4 UDP pseudo-header (src IP, dst IP, protocol, UDP length)
 /// into a running checksum sum.
+///
+/// Was a local copy of the pseudo-header layout, byte-identical to `tcp.rs`'s
+/// apart from the protocol constant. It now names
+/// [`ipv4::pseudo_header_sum`], mirroring how [`pseudo_header_sum_v6`] has
+/// always named [`ipv6::pseudo_header_sum`].
 #[must_use]
 fn pseudo_header_sum(src: &Ipv4Addr, dst: &Ipv4Addr, udp_len: u16) -> u32 {
-    let mut ph = [0u8; 12];
-    ph[0..4].copy_from_slice(src);
-    ph[4..8].copy_from_slice(dst);
-    ph[8] = 0; // zero
-    ph[9] = PROTO_UDP;
-    ph[10..12].copy_from_slice(&udp_len.to_be_bytes());
-    checksum::accumulate(0, &ph)
+    ipv4::pseudo_header_sum(src, dst, udp_len, PROTO_UDP)
 }
 
 /// Accumulate the IPv6 UDP pseudo-header (RFC 8200 §8.1: 16-byte src/dst,

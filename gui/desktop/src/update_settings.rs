@@ -366,6 +366,12 @@ impl UpdateSettings {
     }
 }
 
+impl Default for UpdateSettings {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 // ============================================================================
 // UI rendering
 // ============================================================================
@@ -887,6 +893,12 @@ impl UpdateSettingsUI {
             color: TEXT,
             corner_radii: CornerRadii::all(8.0),
         });
+    }
+}
+
+impl Default for UpdateSettingsUI {
+    fn default() -> Self {
+        Self::new()
     }
 }
 

@@ -164,6 +164,66 @@ impl CursorShape {
 // Window creation parameters
 // ============================================================================
 
+/// Which band of the stacking order a window belongs to.
+///
+/// A desktop needs three kinds of surface that no amount of raising and
+/// lowering can express with one flat stack: a wallpaper that is always behind
+/// everything, ordinary application windows, and shell chrome — a taskbar, a
+/// start menu, a popup — that is always in front. Without this, clicking an
+/// application window raises it over the taskbar, because to the compositor
+/// the taskbar *is* an application window.
+///
+/// The bands are totally ordered and a window never leaves the one it was
+/// created in. Raising, focusing and stacking all happen strictly *within* a
+/// band, so an ordinary window cannot climb above the shell and a wallpaper
+/// cannot climb above anything. That is the whole guarantee — inside a band
+/// the rules are exactly what they were before this type existed.
+///
+/// Deliberately three and not an integer depth: an open-ended depth invites
+/// each surface to pick a number, and the numbers then encode a policy that
+/// nobody wrote down and every new surface has to guess at. Three named roles
+/// are what the shell actually distinguishes.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum Layer {
+    /// Behind every ordinary window: the wallpaper, the desktop icon surface.
+    Background,
+    /// Ordinary application windows. The default, and where a client that has
+    /// never heard of this type lands.
+    #[default]
+    Normal,
+    /// In front of every ordinary window: taskbar, start menu, popups, OSD.
+    Overlay,
+}
+
+impl Layer {
+    /// The wire byte for this layer.
+    #[must_use]
+    pub const fn as_byte(self) -> u8 {
+        match self {
+            Self::Background => 0,
+            Self::Normal => 1,
+            Self::Overlay => 2,
+        }
+    }
+
+    /// The layer a wire byte names, or `None` if it names none of them.
+    ///
+    /// Returning `None` rather than defaulting to [`Layer::Normal`] is
+    /// deliberate: a byte we do not recognise means the peer is speaking a
+    /// protocol we do not, and silently placing its taskbar in with the
+    /// application windows would be a wrong desktop rather than a refused
+    /// connection.
+    #[must_use]
+    pub const fn from_byte(b: u8) -> Option<Self> {
+        match b {
+            0 => Some(Self::Background),
+            1 => Some(Self::Normal),
+            2 => Some(Self::Overlay),
+            _ => None,
+        }
+    }
+}
+
 /// What a client asks for when it creates a window.
 ///
 /// Every field is a *request*: the compositor answers with the id it assigned
@@ -196,6 +256,13 @@ pub struct WindowSpec {
     pub min_size: Option<(u32, u32)>,
     /// Largest client area the window wants to be shown at.
     pub max_size: Option<(u32, u32)>,
+    /// Which band of the stacking order the window belongs to.
+    ///
+    /// Unlike the rest of this struct this one is not merely advisory: the
+    /// compositor either honours it or refuses the window, because a shell
+    /// panel silently demoted to [`Layer::Normal`] would be worse than no
+    /// panel — it would disappear behind the first window the user opened.
+    pub layer: Layer,
 }
 
 impl WindowSpec {
@@ -213,6 +280,7 @@ impl WindowSpec {
             transparent: false,
             min_size: None,
             max_size: None,
+            layer: Layer::Normal,
         }
     }
 }
@@ -298,6 +366,24 @@ pub enum RequestBody {
     SetOpacity { window: u64, opacity: f32 },
     /// Ask about the display. Answered with [`ResponseBody::DisplayInfo`].
     GetDisplayInfo,
+    /// Start or stop receiving the desktop's window list.
+    ///
+    /// A shell — a taskbar, a window switcher, an accessibility tool — needs to
+    /// know about windows it did not open, which nothing else in this protocol
+    /// will tell it. While subscribed, the compositor sends a
+    /// [`WLST`](crate::window_list) frame whenever the list it would send
+    /// differs from the one this client last received; see that module for why
+    /// it is a push rather than a query.
+    ///
+    /// Answered with [`ResponseBody::Ok`], and the first list follows
+    /// separately rather than riding in the reply: a `WLST` frame is what
+    /// arrives on every *later* change, so making the first one arrive by a
+    /// different route would give a shell two code paths to the same state.
+    ///
+    /// Subscribing twice is not an error and does not double the traffic. It
+    /// does re-send the list, which is the useful reading of a repeated
+    /// subscribe — "I may have lost track, tell me again".
+    SubscribeWindowList { subscribe: bool },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -316,6 +402,7 @@ enum RequestTag {
     GetDisplayInfo = 0x0B,
     SetFullscreen = 0x0C,
     SetOpacity = 0x0D,
+    SubscribeWindowList = 0x0E,
 }
 
 impl RequestTag {
@@ -334,6 +421,7 @@ impl RequestTag {
             0x0B => Self::GetDisplayInfo,
             0x0C => Self::SetFullscreen,
             0x0D => Self::SetOpacity,
+            0x0E => Self::SubscribeWindowList,
             _ => return None,
         })
     }
@@ -487,6 +575,7 @@ fn encode_request_body(out: &mut Vec<u8>, body: &RequestBody) {
             out.push(u8::from(spec.transparent));
             write_optional_size(out, spec.min_size);
             write_optional_size(out, spec.max_size);
+            out.push(spec.layer.as_byte());
         }
         RequestBody::DestroyWindow { window } => {
             out.push(RequestTag::DestroyWindow as u8);
@@ -546,6 +635,10 @@ fn encode_request_body(out: &mut Vec<u8>, body: &RequestBody) {
             write_f32(out, *opacity);
         }
         RequestBody::GetDisplayInfo => out.push(RequestTag::GetDisplayInfo as u8),
+        RequestBody::SubscribeWindowList { subscribe } => {
+            out.push(RequestTag::SubscribeWindowList as u8);
+            out.push(u8::from(*subscribe));
+        }
     }
 }
 
@@ -685,6 +778,8 @@ fn decode_request_body(r: &mut Reader<'_>) -> Result<RequestBody, DecodeError> {
             let transparent = read_bool(r)?;
             let min_size = read_optional_size(r)?;
             let max_size = read_optional_size(r)?;
+            let layer_byte = r.read_u8()?;
+            let layer = Layer::from_byte(layer_byte).ok_or(DecodeError::BadTag(layer_byte))?;
             RequestBody::CreateWindow(WindowSpec {
                 title,
                 width,
@@ -695,6 +790,7 @@ fn decode_request_body(r: &mut Reader<'_>) -> Result<RequestBody, DecodeError> {
                 transparent,
                 min_size,
                 max_size,
+                layer,
             })
         }
         RequestTag::DestroyWindow => RequestBody::DestroyWindow {
@@ -762,6 +858,9 @@ fn decode_request_body(r: &mut Reader<'_>) -> Result<RequestBody, DecodeError> {
             }
         }
         RequestTag::GetDisplayInfo => RequestBody::GetDisplayInfo,
+        RequestTag::SubscribeWindowList => RequestBody::SubscribeWindowList {
+            subscribe: read_bool(r)?,
+        },
     })
 }
 
@@ -819,6 +918,7 @@ mod tests {
             transparent: true,
             min_size: Some((320, 240)),
             max_size: Some((3840, 2160)),
+            layer: Layer::Overlay,
         }
     }
 
@@ -906,6 +1006,10 @@ mod tests {
                     opacity: 0.25,
                 },
             ),
+            // Both polarities: a codec that wrote a constant byte for the flag
+            // would round-trip one of these and not the other.
+            Request::new(14, RequestBody::SubscribeWindowList { subscribe: true }),
+            Request::new(15, RequestBody::SubscribeWindowList { subscribe: false }),
         ];
         assert_eq!(round_trip_requests(&reqs), reqs);
     }

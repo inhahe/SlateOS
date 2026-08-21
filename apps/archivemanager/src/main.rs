@@ -17,7 +17,6 @@
 //! Uses the guitk library for UI rendering.
 
 use guitk::color::Color;
-use guitk::date;
 use guitk::ratio;
 use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::style::CornerRadii;
@@ -321,22 +320,30 @@ impl ArchiveEntry {
     }
 
     /// Format a Unix timestamp as a date string.
+    ///
+    /// `"-"` for zero stays here rather than moving into the shared
+    /// formatter: an archive entry with no stored mtime is one whose time is
+    /// unknown, which is a different fact from "written at the epoch".
+    ///
+    /// The rest was the same `secs % 86400` decomposition the file explorer,
+    /// the RSS reader, the task scheduler and the undelete tool each wrote
+    /// for themselves — the same shape, five times, and only four of them
+    /// right. It renders a file's modification time, which is the very object
+    /// the explorer's Date column renders, so it must not be a separate
+    /// answer.
+    ///
+    /// UTC, explicitly, because this program has no zone to read: there is no
+    /// per-process zone plumbing yet (known-issues
+    /// `TD-NO-SYSTEM-DEFAULT-ZONE-WITHOUT-TZ`). Saying so with `Tz::utc()`
+    /// leaves a mark that can be found and fixed when there is one.
     pub fn format_date(timestamp: u64) -> String {
-        // Simplified: just show raw seconds-since-epoch for now.
-        // A real implementation would use a date formatting library.
         if timestamp == 0 {
             return String::from("-");
         }
-        // Rough conversion: seconds since 1970-01-01 to YYYY-MM-DD HH:MM
-        let secs = timestamp;
-        let days = secs / 86400;
-        let time_of_day = secs % 86400;
-        let hours = time_of_day / 3600;
-        let minutes = (time_of_day % 3600) / 60;
-
-        // Approximate year/month/day from days since epoch.
-        let (year, month, day) = days_to_ymd(days);
-        format!("{year:04}-{month:02}-{day:02} {hours:02}:{minutes:02}")
+        guitk::datetime::stamp(
+            i64::try_from(timestamp).unwrap_or(i64::MAX),
+            &guitk::tzrules::Tz::utc(),
+        )
     }
 
     /// Parent directory path, or empty string for root-level entries.
@@ -349,30 +356,14 @@ impl ArchiveEntry {
     }
 }
 
-/// Convert days since the Unix epoch to (year, month, day).
-///
-/// Was a local transcription of Howard Hinnant's `civil_from_days` — one of
-/// four in `apps/`, of which the file manager's had been quietly wrong for
-/// every date before 2000-03-01. This one was right, which is the point: four
-/// spellings of one algorithm is four things to check, and a reader has no way
-/// to tell the right ones from the wrong one without redoing the derivation.
-/// `guitk::date` reaches the same algorithm through `tzrules`, which is what
-/// the libc's `localtime` and the taskbar clock render dates through.
-///
-/// An archive states its own timestamps, so `days` is bounded by nothing this
-/// program controls; the old `wrapping_add(719468)` would have turned a
-/// hostile one into a date in the past. Saturating at `i32::MAX` days lands in
-/// the year 5 881 580 instead, which sorts where a nonsense date belongs.
-fn days_to_ymd(days: u64) -> (u64, u64, u64) {
-    let (year, month, day) =
-        date::Date::from_days_since_epoch(i32::try_from(days).unwrap_or(i32::MAX)).ymd();
-    // The year cannot be negative: `days` is unsigned and the epoch is 1970.
-    (
-        u64::try_from(year).unwrap_or(0),
-        u64::from(month),
-        u64::from(day),
-    )
-}
+// `days_to_ymd` lived here. It was a correct local transcription of Howard
+// Hinnant's `civil_from_days`, kept alive only by `format_date` calling it and
+// by two tests calling it directly. `format_date` now renders through
+// `guitk::datetime`, which reaches the same algorithm through `tzrules` — the
+// one the libc's `localtime` and the taskbar clock also use — so the last
+// non-test caller is gone and the function with it. A private calendar with no
+// production caller is not a spare; it is a second answer waiting to be picked
+// up by the next person who needs a date here.
 
 // ============================================================================
 // Column definitions for the file list
@@ -2697,12 +2688,17 @@ mod tests {
         assert_eq!(ArchiveEntry::format_date(0), "-");
     }
 
+    /// Asserted by value, not by punctuation.
+    ///
+    /// The assertions this replaces were `contains('-')` and `contains(':')`,
+    /// which "2026-13-40 25:99" also satisfies. A test that only checks the
+    /// separators cannot notice a wrong calendar, and a wrong calendar is
+    /// what four sibling programs' copies of this arithmetic turned out to
+    /// hold.
     #[test]
     fn test_entry_format_date_nonzero() {
-        let d = ArchiveEntry::format_date(1716000000);
-        // Should produce a date string with year, month, day.
-        assert!(d.contains('-'));
-        assert!(d.contains(':'));
+        // 2024-05-18 02:40:00 UTC.
+        assert_eq!(ArchiveEntry::format_date(1_716_000_000), "2024-05-18 02:40");
     }
 
     #[test]
@@ -3706,21 +3702,22 @@ mod tests {
         assert!(!a.tree.children.is_empty());
     }
 
-    // --- days_to_ymd tests ---
+    // --- calendar boundaries, asserted through the surface that renders them ---
 
+    /// The two facts the deleted `days_to_ymd` tests pinned — the epoch, and
+    /// that day 19723 is 2024-01-01 — restated through `format_date`, the only
+    /// thing in this program that ever wanted a date.
+    ///
+    /// They are worth keeping because they are the boundaries a hand-rolled
+    /// calendar gets wrong: the epoch itself, and a year far enough out that a
+    /// leap-year rule has had chances to drift.
     #[test]
-    fn test_days_to_ymd_epoch() {
-        let (y, m, d) = days_to_ymd(0);
-        assert_eq!(y, 1970);
-        assert_eq!(m, 1);
-        assert_eq!(d, 1);
-    }
-
-    #[test]
-    fn test_days_to_ymd_known_date() {
-        // 2024-01-01 is day 19723 from epoch.
-        let (y, _m, _d) = days_to_ymd(19723);
-        assert_eq!(y, 2024);
+    fn the_epoch_and_a_distant_year_render_as_themselves() {
+        // One second past the epoch, because zero is the "no stored mtime"
+        // sentinel and never reaches the calendar at all.
+        assert_eq!(ArchiveEntry::format_date(1), "1970-01-01 00:00");
+        // Day 19723 * 86400.
+        assert_eq!(ArchiveEntry::format_date(1_704_067_200), "2024-01-01 00:00");
     }
 
     // --- ViewMode test ---

@@ -9,6 +9,7 @@ use guitk::idseq::IdSeq;
 use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::style::CornerRadii;
 use guitk::text;
+use guitk::tzrules::Tz;
 
 // ============================================================================
 // Catppuccin Mocha palette
@@ -26,7 +27,6 @@ const BLUE: Color = Color::from_hex(0x89B4FA);
 const GREEN: Color = Color::from_hex(0xA6E3A1);
 const RED: Color = Color::from_hex(0xF38BA8);
 const YELLOW: Color = Color::from_hex(0xF9E2AF);
-const PEACH: Color = Color::from_hex(0xFAB387);
 const LAVENDER: Color = Color::from_hex(0xB4BEFE);
 const OVERLAY0: Color = Color::from_hex(0x6C7086);
 
@@ -372,13 +372,23 @@ impl BackupHistoryEntry {
         guitk::duration::coarse(self.duration_secs)
     }
 
-    /// Format the timestamp as a simple date string.
-    pub fn date_display(&self) -> String {
-        let days = self.timestamp / 86400;
-        let time_of_day = self.timestamp % 86400;
-        let hours = time_of_day / 3600;
-        let minutes = (time_of_day % 3600) / 60;
-        format!("Day {days} {hours:02}:{minutes:02}")
+    /// When the backup ran, as `2026-08-18 16:30`.
+    ///
+    /// This used to render `Day 20683 16:30` — the number of days since
+    /// 1 January 1970, shown to the user because turning it into a date was
+    /// work nobody had done. Meanwhile the backup *application* listed the
+    /// same runs as `2026-08-18 16:30:45`, so the two surfaces that show a
+    /// user their backup history disagreed about what a backup's date is.
+    ///
+    /// The zone is a parameter and is not defaulted, even though the only
+    /// caller today can only supply UTC. This module lives in the desktop
+    /// crate, which *does* have a real configured zone
+    /// ([`crate::datetime_settings`]) — it is only that this panel is not yet
+    /// wired to the shell. Making the zone an argument means that when it is
+    /// wired, the compiler asks for the zone rather than the panel silently
+    /// keeping a UTC clock nobody remembers choosing.
+    pub fn date_display(&self, tz: &Tz) -> String {
+        guitk::datetime::stamp(i64::try_from(self.timestamp).unwrap_or(i64::MAX), tz)
     }
 }
 
@@ -661,7 +671,11 @@ impl BackupSettingsUI {
     }
 
     /// Render the settings panel.
-    pub fn render(&self, x: f32, y: f32, width: f32, height: f32) -> Vec<RenderCommand> {
+    ///
+    /// `tz` is the zone the History tab dates its runs in — see
+    /// [`BackupHistoryEntry::date_display`] for why it is asked for here
+    /// rather than assumed.
+    pub fn render(&self, x: f32, y: f32, width: f32, height: f32, tz: &Tz) -> Vec<RenderCommand> {
         let mut cmds = Vec::new();
 
         // Panel background
@@ -744,7 +758,7 @@ impl BackupSettingsUI {
             BackupSettingsTab::Schedule => self.render_schedule(&mut cmds, cx, cy, cw),
             BackupSettingsTab::Sources => self.render_sources(&mut cmds, cx, cy, cw),
             BackupSettingsTab::Exclusions => self.render_exclusions(&mut cmds, cx, cy, cw),
-            BackupSettingsTab::History => self.render_history(&mut cmds, cx, cy, cw),
+            BackupSettingsTab::History => self.render_history(&mut cmds, cx, cy, cw, tz),
         }
 
         cmds
@@ -1460,7 +1474,7 @@ impl BackupSettingsUI {
     }
 
     /// Render history tab.
-    fn render_history(&self, cmds: &mut Vec<RenderCommand>, x: f32, y: f32, width: f32) {
+    fn render_history(&self, cmds: &mut Vec<RenderCommand>, x: f32, y: f32, width: f32, tz: &Tz) {
         let mut row_y = y;
 
         cmds.push(RenderCommand::Text {
@@ -1524,7 +1538,7 @@ impl BackupSettingsUI {
                     y: row_y + 22.0,
                     text: format!(
                         "{} — {} files — {} — {}",
-                        entry.date_display(),
+                        entry.date_display(tz),
                         entry.files_count,
                         entry.size_display(),
                         entry.duration_display()
@@ -1552,6 +1566,12 @@ impl BackupSettingsUI {
                 row_y += 62.0;
             }
         }
+    }
+}
+
+impl Default for BackupSettingsUI {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -1650,7 +1670,61 @@ mod tests {
         };
         assert_eq!(entry.size_display(), "4.7 GiB");
         assert_eq!(entry.duration_display(), "1h 1m");
-        assert!(entry.date_display().contains("01:01"));
+        // Asserted by value, not by `contains`. The assertion this replaces
+        // was `date_display().contains("01:01")`, which was satisfied by
+        // "Day 1 01:01" — so it proved the *time* and never looked at the
+        // part that was a day counter rather than a date.
+        assert_eq!(entry.date_display(&Tz::utc()), "1970-01-02 01:01");
+    }
+
+    /// The panel and the backup application date the same run alike.
+    ///
+    /// They are two surfaces onto one object — a backup run and when it
+    /// happened — and they disagreed: the application said `2026-08-18
+    /// 16:30:45` while this panel said `Day 20683 16:30`. Both now render
+    /// through `guitk::datetime`, so the only remaining difference is whether
+    /// seconds are shown, which is a deliberate choice per surface.
+    #[test]
+    fn the_history_panel_dates_a_run_the_way_the_backup_application_does() {
+        let entry = BackupHistoryEntry {
+            id: 1,
+            // 2026-08-18 16:30:45 UTC.
+            timestamp: 1_787_070_645,
+            backup_type: BackupType::Full,
+            status: BackupStatus::Success,
+            files_count: 1,
+            total_bytes: 1,
+            duration_secs: 1,
+            error_message: None,
+            target_path: "/backup".to_string(),
+        };
+        let utc = Tz::utc();
+        assert_eq!(entry.date_display(&utc), "2026-08-18 16:30");
+        assert_eq!(
+            guitk::datetime::stamp_secs(1_787_070_645, &utc),
+            "2026-08-18 16:30:45"
+        );
+    }
+
+    /// The zone reaches the dates, which is the whole reason it is a
+    /// parameter rather than an assumption.
+    #[test]
+    fn the_zone_reaches_the_history_dates() {
+        let entry = BackupHistoryEntry {
+            id: 1,
+            // 2026-08-18 02:00:00 UTC — the previous evening in New York.
+            timestamp: 1_787_018_400,
+            backup_type: BackupType::Full,
+            status: BackupStatus::Success,
+            files_count: 1,
+            total_bytes: 1,
+            duration_secs: 1,
+            error_message: None,
+            target_path: "/backup".to_string(),
+        };
+        let ny = Tz::parse(b"EST5EDT,M3.2.0,M11.1.0").expect("a valid POSIX TZ string");
+        assert_eq!(entry.date_display(&Tz::utc()), "2026-08-18 02:00");
+        assert_eq!(entry.date_display(&ny), "2026-08-17 22:00");
     }
 
     #[test]
@@ -1872,7 +1946,7 @@ mod tests {
     #[test]
     fn test_ui_render_produces_commands() {
         let ui = BackupSettingsUI::new();
-        let cmds = ui.render(0.0, 0.0, 600.0, 800.0);
+        let cmds = ui.render(0.0, 0.0, 600.0, 800.0, &Tz::utc());
         assert!(!cmds.is_empty());
     }
 

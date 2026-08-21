@@ -23937,9 +23937,28 @@ column in a game board or a table), not a string index.
 
 ## B-WORKSPACE-TEST-IS-RED-SLATEOS-COREUTILS-SHADOW-THE-HOSTS (lane B's tree; filed by lane C, 2026-08-16)
 
-**Status: OPEN.** Filed for lane B as
-`requests/c-b-workspace-test-red-slateos-coreutils-shadow-host.md`. Logged here
-because it blocks *every* lane's pre-merge gate, not just lane C's.
+**Status: ✅ FIXED 2026-08-16 by lane B** (`378c71b37`, `051ee45e7`) —
+`userspace/oils/src/hostpath.rs` strikes cargo's two injected directories out
+of `$PATH`, so the scaffolding tools resolve to the host's. The full
+write-up, including the coreutils gaps this uncovered and where they were
+fixed, is
+`B-THE-OILS-TESTS-RESOLVED-grep/sed/cat-FROM-THE-CARGO-BUILD-DIRECTORY`
+further down this file.
+
+**This heading said `Status: OPEN` until 2026-08-21**, five days after the fix
+landed. The stale status is worth a line of its own because this entry's own
+"Correction, same day" note below argues that a wrong statement in a shared
+file is worse than no statement — and then the entry became one. It is the
+predictable failure of recording a fix in a *new* entry and leaving the
+original untouched: three lanes read this file, the bug is described here, and
+nothing here pointed at the resolution. When you fix something that has an
+existing entry, amend that entry; a second entry elsewhere is a cross-reference,
+not a substitute.
+
+Kept below as filed, because the diagnosis is the useful part and it was right.
+
+**Originally filed as** `requests/c-b-workspace-test-red-slateos-coreutils-shadow-host.md`.
+Logged here because it blocked *every* lane's pre-merge gate, not just lane C's.
 
 **What.** `cargo test --workspace --target x86_64-pc-windows-gnu` is
 reproducibly red: `-p oils --lib` reports `1488 passed; 8 failed`. Run on its
@@ -47899,6 +47918,1012 @@ restated more than three times was worth generalising; three rounds now say yes,
 and the discriminator that makes such an audit tractable is question 2 above —
 **start from objects displayed on more than one surface**, not from functions
 that look alike.
+
+---
+
+## Thirteen programs each decided for themselves what a date is, and one of them was wrong by a fortnight (lane C)
+
+**Found:** 2026-08-21 · **Status:** FIXED · **Lane:** C
+**Commits:** `60eec1ba2`, `12cc4ce18`, and the migration commits that follow
+**Design decision:** §491
+
+Round 4 of the `apps/**` / `gui/**` sweep. Round 3 swept *durations* (a length
+of time) and deliberately left *instants* (a point in time) alone. This is that
+problem, and it turned out to hold the two worst individual bugs the sweep has
+found.
+
+### The same object, eight surfaces
+
+A file's modification time, a backup run, a restore point — all one kind of
+thing, "when did this happen". For the instant 2026-08-18 16:30:45 UTC:
+
+| Program | Rendered |
+|---|---|
+| `apps/explorer` | `2026-08-18 16:30` |
+| `apps/archivemanager` | `2026-08-18 16:30` |
+| `apps/taskscheduler` | `2026-08-18 16:30` |
+| `apps/rssreader` | `2026-08-18 16:30` |
+| `apps/backup` | `2026-08-18 16:30:45` |
+| `apps/undelete` | **`2026-09-04 16:30`** |
+| `apps/systemrestore` | **`D20683`** |
+| `gui/desktop/backup_settings` | **`Day 20683 16:30`** |
+
+### The individual bugs
+
+| Where | Bug | Effect |
+|---|---|---|
+| `apps/undelete:3571` | year computed as `days / 365`, month as `remaining / 30` | **14 days wrong in 2026, growing ~5 days/year.** A file deleted 18 Aug listed as deleted 4 Sep. The deletion date is the column a user reads to tell two recoverable copies apart. |
+| `apps/systemrestore:4249` | rendered `D{days_since_epoch}` | A restore point — the most consequence-laden thing in the system to pick by date — labelled `D20683`. |
+| `gui/desktop/backup_settings:376` | rendered `Day {days} HH:MM` | The settings page and the backup application showed a user their backup history and disagreed about what a backup's date is. |
+| `gui/desktop/main.rs` taskbar clock | `secs % 86_400`, no zone | **Five hours wrong out of the box** (shipped default zone `America/New_York`). `show_seconds`, `show_day_of_week` and `show_date` are each documented as applying "in the taskbar clock" and reached nothing. `calendar::ClockDisplay` — a complete, tested taskbar clock — had **no callers in the tree** (same defect as §469's two snap implementations). |
+| `gui/desktop/datetime_settings.rs` | timezone picker had 20 entries, none named UTC | The zone the shell falls back to when the configured one is unresolvable was one the user could not deliberately select. |
+| `apps/taskscheduler:2561` | decomposed the instant **twice** — `decompose_timestamp` for the time, `days_to_ymd(ts / 86400)` for the date | Two halves of one string derived by two routes with nothing making them agree. The shape a timezone would have broken first. |
+| `apps/screenrecorder:709` | held the timestamp as `(u16, u8, u8, u8, u8, u8)` | Month 13 at hour 25 was representable, and the formatter printed whatever it was given. |
+| `apps/indexer:1812` | relative-time ladder stopped at days | An index untouched for two years read `730 days ago`. |
+| all thirteen | no timezone applied | Every one was UTC, and none of them recorded that as a decision. |
+
+### Why the tests did not catch it
+
+Every one had a passing test. See §491's table — the assertions were
+`!is_empty()`, `contains('-')`, `starts_with("2023-")`, and in two cases an
+exactly-correct assertion that the day counter was a day counter. **They were
+not weak tests; they were right about the wrong thing.** All six now assert a
+rendered value, and `guitk::datetime` carries a regression test that runs the
+old `days / 365` arithmetic beside the new for three instants and asserts they
+differ.
+
+### The fix
+
+`guitk::datetime` (`DateTime` + nine renderings), with the zone a **required
+argument that is never defaulted**, so a program with no zone to offer writes
+`Tz::utc()` — which `rg` can find, and which `secs % 86_400` could not be
+distinguished from. `tzrules` is re-exported through `guitk` so a caller can
+name the type without its crate growing a dependency.
+
+### Still open
+
+- **`apps/backup` keeps its own `days_to_ymd`.** It is a headless CLI archiver
+  that deliberately does not link `guitk`, and the right home for the inverse of
+  `days_from_civil` is `tzrules`, which has no public one. Tracked by
+  `requests/c-b-year-of-day-computes-the-month-and-day-and-throws-them-away.md`;
+  the function's doc comment says "when that lands, delete this function".
+- **No per-process zone plumbing exists** (`TD-NO-SYSTEM-DEFAULT-ZONE-WITHOUT-TZ`),
+  so every migrated application still renders UTC — but now says so. The list of
+  surfaces still to fix is `rg 'Tz::utc' apps/ gui/`.
+- **`show_date` and `show_day_of_week` still do not reach the taskbar.**
+  `ClockDisplay::format_date` emits weekday and date together with no way to ask
+  for one, so honouring the two flags independently needs an API change. The
+  zone and `show_seconds` do reach it now.
+
+### Related
+
+Round 4 followed round 3's closing advice — *start from objects displayed on
+more than one surface, not from functions that look alike* — and that is
+precisely what surfaced the undelete bug: it was found by asking "who else
+renders a file's mtime", not by noticing that its code looked odd. Its code did
+not look odd. It looked like the other four.
+
+---
+
+### TD-CRON-MATCHES-UTC-FIELDS. A task scheduled for 03:00 runs at 03:00 UTC, wherever the user is (lane C, 2026-08-21)
+
+**In short:** The task scheduler lets you say "run this every day at 3 a.m."
+It then runs it at 3 a.m. *UTC* — which in New York is 11 p.m. the previous
+evening, and in Berlin is 4 or 5 a.m. depending on the season. Nothing in the
+program tells the user this. It is not a rounding error; it is the schedule
+being off by whole hours, and by a different number of hours in summer than in
+winter.
+
+**Where:** `apps/taskscheduler/src/main.rs`, `decompose_timestamp` — it builds
+a `guitk::datetime::DateTime` with an explicit `Tz::utc()` and hands the
+resulting minute/hour/day/month/weekday to `CronExpr::matches`.
+
+**Why it is still UTC.** Two reasons, and only the first is about plumbing:
+
+1. There is no per-process zone to read
+   (`TD-NO-SYSTEM-DEFAULT-ZONE-WITHOUT-TZ`). Every lane-C program that renders
+   an instant is in the same position and says so with an explicit
+   `Tz::utc()`.
+2. Cron under a zone that observes DST has real semantics to settle, and they
+   are not obvious. A daily 02:30 task on the spring-forward day has no 02:30
+   to run at; on the fall-back day it has two. Every implementation picks a
+   rule and they do not agree — Vixie cron runs the skipped job once at the
+   moment the clock jumps and runs a repeated job only once; systemd timers
+   with `Persistent=` behave differently again. Picking one silently, in the
+   commit that merely stops the file having two calendars in it, would be
+   inventing user-visible policy in a cleanup.
+
+**The proper fix,** in order:
+
+1. `calculate_next_run` takes a `&Tz` (four production call sites, seven test
+   ones), and the scheduler holds the zone rather than assuming one.
+2. Settle the DST rule and write it down. Recommended default: match Vixie —
+   a wall-clock time skipped by a forward jump fires once at the jump, and a
+   wall-clock time repeated by a backward jump fires once. That is what a user
+   who has used cron before will expect. This is the part that wants an
+   operator decision, and it should be promoted to `open-questions.md` at the
+   point where step 1 is otherwise ready, not before.
+3. Interval schedules (`Hourly`, `EveryNMinutes`) must *not* be zone-adjusted:
+   "every 15 minutes" is a span, not a wall-clock time, and stays elapsed-time
+   arithmetic. Only the `Cron` and `Daily`/`Weekly`/`Monthly` arms are
+   wall-clock.
+
+**If never fixed:** schedules keep firing at the wrong hour for every user not
+in UTC, and shift by an hour twice a year for users who observe DST. It does
+not get worse with time, and it is not a data-loss risk — but it makes the
+`Daily` frequency effectively useless for its most common purpose (an
+overnight job).
+
+**Related:** `design-decisions.md` §491 (the zone is an argument that is never
+defaulted), `TD-NO-SYSTEM-DEFAULT-ZONE-WITHOUT-TZ`.
+
+---
+
+### TD-C-DEAD-CODE-IS-ALLOWED-WHOLESALE. 120 lane-C files switch off the warning that finds orphaned code, and one of them was hiding a dead calendar (lane C, 2026-08-21)
+
+**In short:** Rust warns you when a function exists that nothing calls. 120
+files in lane C's tree begin with a line that turns that warning off for the
+whole file. So when the round-4 migration made several private helpers
+unreachable, the compiler said nothing about most of them. The one crate that
+*had not* switched the warning off reported its orphan immediately, which is
+how the pattern was noticed at all.
+
+**Where:** `#![allow(dead_code)]` at the top of 120 files under `apps/`,
+`gui/`, `net*/` and `pkg/` (148 files carry an `allow(dead_code)` in some
+form). Enumerate with:
+
+```
+grep -rn '^#!\[allow(dead_code' apps/ gui/ net/ pkg/ --include=*.rs
+```
+
+**How it bit.** Round 4 moved nine programs' timestamp rendering onto
+`guitk::datetime`. That orphaned three private calendars:
+
+| Crate | Orphaned | Did the compiler say so? |
+|---|---|---|
+| `apps/archivemanager` | `days_to_ymd` | **Yes** — no file-level allow. Deleted the same minute. |
+| `apps/rssreader` | `days_to_ymd` | No — `#![allow(dead_code)]` at line 24. Found by hand. |
+| `apps/taskscheduler` | `days_to_ymd` | No — its last caller was inside the same file, so it was still live until `decompose_timestamp` was rewritten. |
+
+A dead private calendar is not merely clutter. It is a second answer sitting
+in the file, correct-looking and untested against anything, waiting to be
+picked up by the next person who needs a date here — which is the exact
+failure round 4 exists to undo.
+
+**Why the allows are there.** Almost all of them are original-authorship
+convenience: an app was written with a full set of helpers before the UI that
+calls them existed, and the allow silenced the noise. That reason expires once
+the app is written; the line does not.
+
+**The proper fix:** delete the file-level allow from each crate and either use
+or delete what falls out. This is per-crate work with no shared blast radius —
+each file can be done independently and gated on that crate's own tests — so
+it is a good background task rather than one large change. Where a helper is
+genuinely a deliberate public-shaped API that nothing yet calls, narrow the
+allow to that item with a comment naming the caller it is waiting for, rather
+than leaving it file-wide.
+
+**If never fixed:** the tree keeps accumulating unreferenced code that no
+tooling reports, and every future consolidation like round 4 has to find its
+own orphans by hand.
+
+**Progress 2026-08-21 — `gui/desktop` cleared, and the prediction above was an
+understatement.** Making the shell a library removed all **54** module-level
+`#[allow(dead_code)]` in `gui/desktop`. The crate had been reporting zero
+warnings for its entire life; it immediately reported **119**.
+
+The entry above argued that a file-wide allow hides orphaned code. What the
+119 actually contained is worse than orphans:
+
+- **115 were dead palette constants** — and pulling on them exposed
+  `TD-C-FORTY-NINE-SHELL-MODULES-CARRY-THEIR-OWN-COPY-OF-THE-PALETTE`: 549
+  surviving constants, 33 distinct values, an entire settings page that the
+  desktop ignores. The unused-constant warning was the *only* signal that
+  duplication existed, and it had been suppressed 54 times.
+- **Three were live defects, not dead code:**
+  - `RememberedDecision::recorded_at_ms` was written and never read — a
+    security prompt answered "allow, remember this" was remembered for the
+    whole session with no expiry and no revocation UI. Fixed here (grants
+    expire after 8h, denials never; see `design-decisions.md` §496).
+  - `BannerStyle::description` had no caller — the notification settings page
+    offered a choice of banner styles and never showed what any of them did.
+    Fixed by rendering it as a hint line.
+  - `calendar::days_in_month` was a private identity wrapper over
+    `date::days_in_month`, justified by a doc comment claiming the toolkit
+    took `(month, year)`. `gui/toolkit/src/date.rs:402` takes `(year, month)`.
+    The wrapper was a second answer defended by a false statement about the
+    first. Deleted; 20 call sites requalified.
+
+**The lesson for the remaining ~66 files:** treat the warning burst as a
+*defect report*, not a cleanup list. The instinct on seeing 119 unused items
+is to delete all 119; three of these would have been deleted along with the
+bug they were evidence of. Read each one for *why* nothing calls it before
+deciding that nothing should.
+
+---
+
+### TD-C-ROUND-4-CRATES-CARRY-316-PRE-EXISTING-CLIPPY-WARNINGS (lane C, 2026-08-21)
+
+**In short:** `CLAUDE.md` says a crate must be clippy-clean. Six of the
+applications touched in round 4 are not, and were not before round 4 either —
+between them they emit 316 warnings, none of which the migration introduced.
+Recording the count so that the next person to open one of these files knows
+the mess predates them and roughly how big it is.
+
+**Where and how many** (`cargo clippy --target x86_64-pc-windows-gnu`, all
+targets, 2026-08-21):
+
+| Crate | Warnings |
+|---|---|
+| `apps/systemrestore` | 129 |
+| `apps/archivemanager` | 77 |
+| `apps/taskscheduler` | 56 |
+| `apps/explorer` | 34 |
+| `apps/rssreader` | 11 |
+| `apps/screenrecorder` | 9 |
+
+Overwhelmingly `clippy::arithmetic_side_effects` and
+`clippy::indexing_slicing` — the two defensive lints `CLAUDE.md` asks for by
+name. Both are the same shape of finding: a subtraction or an index that is
+fine for the values the program actually produces, and that nothing stops from
+receiving a value it is not fine for.
+
+**Verified not introduced by round 4:** the warning sites in the two files the
+migration edited most (`apps/explorer/src/columns.rs` at 462, 463, 1201, 1423,
+1455, 1475; `apps/screenrecorder/src/main.rs` at 161, 167, 172, 3780, 3814,
+4070, 4121, 4122, 4139) are all far from the edit sites (columns.rs ~1506,
+screenrecorder ~709–790), and the migrated crates build and test with zero
+warnings.
+
+**The proper fix:** one crate at a time, replacing bare arithmetic with
+`checked_*`/`saturating_*` and bare indexing with `.get()`, and suppressing
+individually only where the invariant is real and can be written down. Not
+folded into round 4 because it is a different kind of work — round 4 removes
+duplicate answers, this removes unproven assumptions — and mixing them would
+make both diffs unreviewable.
+
+**If never fixed:** the lints stay noisy enough that a genuinely new warning
+in one of these crates is invisible, which is the failure mode that matters
+more than any individual warning.
+
+---
+
+## `B-GUIREMOTE-READ-OVERSHOOTS-MAX-READ-PER-CALL` — `Socket::read` can return up to `CHUNK - 1` bytes past its documented cap — 2026-08-21 (lane B, found; lane C owns the fix)
+
+**In short:** the remote-display socket promises that one `read` call takes at
+most 256 KiB before returning, and its own test asserts it. The loop that
+implements the promise checks the budget *before* each chunk and then reads a
+whole chunk regardless, so it can finish up to 8 KiB over. Seen once, in a full
+workspace run; the failure message is enough to prove the mechanism.
+
+**Where:** `gui/remote/src/socket.rs:265` (`impl Transport for Socket::read`),
+asserted at `:725`
+(`socket::tests::one_read_is_bounded_so_a_fast_peer_cannot_starve_dispatch`).
+**Lane C's tree** — filed as
+`requests/b-c-guiremote-read-can-overshoot-its-own-cap-by-one-chunk.md`.
+
+**Observed:** `cargo test --workspace --target x86_64-pc-windows-gnu` on
+`lane-b` `3ad4bfa35`, one failure out of the whole workspace:
+
+```
+panicked at gui\remote\src\socket.rs:725:13: one read returned 265312 bytes
+```
+
+**Why it is not a flake.** `MAX_READ_PER_CALL = 256 * 1024 = 262_144`;
+`CHUNK = 8 * 1024`. `265_312 − 8_192 = 257_120`, which is below the cap (so the
+loop was entitled to iterate) and is *not* on the `CHUNK` grid (so an earlier
+read had come back short). The guard `while … total < MAX_READ_PER_CALL` is
+tested before a body that adds up to `CHUNK`, so the postcondition is
+`total < MAX + CHUNK`. The assertion says `total <= MAX`. Both are consistent;
+they are not the same statement.
+
+**Why it needs load.** The overshoot requires one short read first.
+`MAX_READ_PER_CALL` is exactly `32 * CHUNK`, so when every `recv` returns a
+full chunk — an idle machine, writer keeping the buffer full — `total` lands on
+the cap exactly and stops. Only a descheduled writer knocks it off the grid.
+
+**Not reproducible on demand: 0 failures in 128 attempts** — 40 runs of the
+single test against a concurrent `cargo build --workspace`; 48 full-suite runs
+of the `guiremote` test binary at 8-way process concurrency; 80 concurrent runs
+of the one test. A full workspace run is a harsher scheduler than anything
+constructible on purpose. Not chased further, because the arithmetic does not
+need a second sighting.
+
+**Proper fix** (three lines, lane C's to make): clamp the scratch slice to the
+remaining budget.
+
+```rust
+let want = MAX_READ_PER_CALL.saturating_sub(total).min(CHUNK);
+match self.stream.read(chunk.get_mut(..want).unwrap_or(&mut [])) {
+```
+
+Nothing is lost — the remainder stays in the kernel buffer, which is what the
+`MAX_READ_PER_CALL` doc comment already says happens to everything past the
+cap, and `Socket::wait` sees it immediately.
+
+**The alternative, recorded so it is not re-proposed silently:** relax the
+assertion to `n <= MAX_READ_PER_CALL + CHUNK`. Defensible — an 8 KiB overshoot
+on a 256 KiB budget starves nobody and the constant's purpose survives — but it
+writes an accidental bound into the test as if it were intentional, and the doc
+comment ("how much one `read` will take before returning") would then need to
+say "approximately".
+
+**Fixed 2026-08-21 by lane C**, on the clamp, for the reason lane B gave: the
+cap should be honoured rather than the test made to document that it isn't.
+
+The clamp is a named `const fn read_budget(total) -> usize` rather than the
+inline expression above, and that is the part worth keeping. **The defect was
+unreachable by any test that could be written against the socket**: provoking
+it needs a short read to land mid-loop, which depends on when the OS
+deschedules the peer's writer thread. Lane B saw it twice in ordinary workspace
+runs and could not reproduce it in 128 attempts aimed directly at it. The
+existing socket-level assertion is therefore a test that finds this class of
+bug only by luck, and it is the only kind of test the shape of the code allowed.
+
+As a function of `total` alone the property is exhaustively checkable, and
+`socket::tests::the_read_budget_never_lets_a_chunk_cross_the_cap` now walks
+every `total` in `0..=MAX_READ_PER_CALL` — including all the off-grid ones a
+short read produces, which is precisely the region the scheduler decides
+whether to visit. Verified to be a real regression test by reintroducing the
+bug (`read_budget` returning `CHUNK` unconditionally): it fails deterministically
+at `total = 253_953`, in a run that takes under a second. The socket-level test
+is kept as well; it is the one that found the bug and it covers the loop's use
+of the budget rather than the budget itself.
+
+**The reusable point.** The general shape here is the same one lane B drew out
+in `design-decisions.md` §343 about `civil_from_days`: an invariant that only a
+second opinion can check needs to be *extracted to where a second opinion can
+be written*. A property that depends on thread scheduling is not testable; the
+same property as a pure function of one integer is exhaustively testable. The
+fix was three lines, but the reason it will not come back is the extraction.
+
+---
+
+## TD-C-CLOCKDISPLAY-RENDER-HAS-NO-CALLER
+
+**In short:** `ClockDisplay` has a second way to put a clock on screen —
+`ClockDisplay::render`, plus the one-line wrapper `CalendarView::render_tray_clock`
+that forwards to it — and nothing calls either one outside a test. The taskbar
+draws its own reading instead. That is one function too many for one job, and
+it is the shape of defect that produced the UTC clock bug in the first place:
+the surface the user sees and the code that looks like it draws that surface
+were different code.
+
+**Where:** `gui/desktop/src/calendar.rs`. `ClockDisplay::render` and
+`CalendarView::render_tray_clock` (which is `clock.render(x, y, utc_now, local)`
+and nothing else). The only reference to either is one test asserting `render`
+emits some commands.
+
+**Why it was not just deleted with the taskbar-clock work (2026-08-21):**
+unlike the three orphaned calendars deleted in `21eb44781`, this one is not a
+duplicate *answer* — it is a different *layout*. It stacks the time, the long
+date and up to three extra-timezone rows vertically, which is an expanded tray
+popup, not the single line the taskbar draws. Deleting it would throw away the
+only rendering the `extra_timezones` list has, and `add_timezone` is a public,
+tested API the Date & Time panel's "additional clocks" feature is meant to feed.
+Wiring the taskbar onto it instead would make the taskbar clock two lines tall
+plus a row per extra zone, which is a visible layout decision, not a cleanup.
+
+**The proper fix:** decide what surface the additional clocks appear on. Two
+candidates, and they are not the same feature:
+
+| Option | What changes |
+|---|---|
+| Extra zones live in the calendar popup | `render` becomes the popup's clock header; the taskbar stays one line. `render_tray_clock` is deleted — its name is then simply wrong. |
+| Extra zones live in the tray, stacked | The taskbar grows to fit; `DesktopShell` renders through `ClockDisplay::render` and the private drawing in `render_taskbar` goes. |
+
+Either way the tree ends with **one** function that turns a `ClockDisplay` into
+pixels. Until then, `reading_width`/`format_taskbar` (the shell's path) and
+`render` (the orphan) both know how a clock is laid out.
+
+**If never fixed:** the orphan is silent — `calendar.rs` is inside a crate whose
+`main.rs` carries no blanket `#![allow(dead_code)]`, but `render` is `pub` on a
+`pub struct`, so `dead_code` does not fire on it either. It will sit there until
+somebody needing a tray clock finds it and gets a two-line one.
+
+**Fixed 2026-08-21**, on the first of the two options — extra zones live in the
+calendar popup, the taskbar stays one line. Recorded as `design-decisions.md`
+§493, because the alternative was defensible and the choice is user-visible.
+
+The deciding argument was not aesthetic. The tray is already sized for the
+*widest reading its own switches allow* (`clock_width`, held to the drawn text
+by `the_clocks_target_covers_the_reading_that_is_drawn`), and four more zones
+stacked there would push the taskbar's window buttons off the right of the bar
+on a small display. The popup has the room; the bar does not.
+
+What landed:
+
+- `ClockDisplay::render` is now the popup's clock band, reached through
+  `CalendarView::header: Option<ClockHeader>`. It has a real caller.
+- `render_tray_clock` was **not** deleted, contrary to what the table above
+  predicted. It survives as the one-line forwarder it always was, because the
+  popup's band and the tray's reading are now genuinely the same function with
+  the same signature — which is the property the entry was asking for. Its name
+  is the only thing that was wrong, and it now describes what it does.
+- `DesktopShell::popup_clock` builds the band from `datetime.additional_clocks`
+  on **every open**, not once at construction, so a zone added in the Date &
+  Time panel while the popup was shut is in the band when it reopens
+  (`reopening_the_calendar_rewinds_it`).
+- An `additional_clocks` entry whose `tz_id` is not in `available_timezones` is
+  **dropped**, not shown at UTC under its own label. A row reading "Mars
+  22:13" that is really the viewer's own UTC is worse than an absent row.
+  Pinned by `the_extra_clocks_reach_the_calendars_header`.
+
+This also closed the larger half of the defect: `AdditionalClock::visible` had
+been a switch whose only observable effect was printing "Hidden" beside its own
+row in the panel that set it. It now hides a clock.
+
+## TD-C-THE-SHELL-CAN-DRAW-ITSELF-AND-NOBODY-CAN-ASK-IT-TO
+
+**In short:** `DesktopShell` has five public methods that turn the desktop into
+draw commands — the taskbar, the window decorations, the Alt-Tab switcher, the
+start menu and now the calendar popup. Nothing outside the crate calls any of
+them, and nothing outside the crate *can*: `gui/desktop/Cargo.toml` declares no
+`[lib]` target, so `desktop` is a binary and `DesktopShell` is not importable at
+all. Every one of those methods is reached only from the crate's own `main()`
+demo and its own tests.
+
+**Where:** `gui/desktop/src/main.rs` — `render_taskbar` (:2303),
+`render_window_decorations` (:2402), `render_alt_tab` (:2493),
+`render_start_menu` (:2564), `render_calendar` (:2948).
+`gui/desktop/Cargo.toml` — no `[lib]`.
+
+**Why this is logged and not fixed (2026-08-21):** it is the render half of
+`TD-SHELL-HAS-NOWHERE-TO-SEND-A-LAUNCH`, and it has the same single cause —
+the shell has no compositor/IPC event loop yet. That entry covers the outbound
+half (a `ShellAction::Launch` nobody carries out); this one covers the inbound
+half (a `RenderTree` nobody paints). Fixing either one properly means building
+the loop, which is a task, not a cleanup, and adding a `[lib]` target on its own
+would produce an importable type with still no importer.
+
+**Why it is worth having written down anyway.** This is the exact defect the
+round-4 sweep exists to find — "the tree holds one correct answer that callers
+cannot reach, and grows wrong copies of it" — and it is currently invisible,
+because none of the five methods trips `dead_code`: they are `pub` on a `pub`
+type, which suppresses the lint even though the crate is a binary and the
+`pub` therefore reaches nobody. `apps/systray/src/main.rs` already has its own
+`render_calendar_popup` and its own `render_power_menu`, which is the copy-
+growing half of the pattern starting.
+
+**Proper fix:** the same event loop `TD-SHELL-HAS-NOWHERE-TO-SEND-A-LAUNCH`
+waits on. When it lands it composes the five trees in z-order — decorations,
+taskbar, then whichever popups are open — and submits the result to the
+compositor. At that point `desktop` gains a `[lib]` so the loop can live in a
+separate binary and the tests can exercise the composition, and the popup
+render methods stop being the only surfaces in the shell whose output has
+never been on a screen.
+
+**If never fixed:** the shell remains a very well-tested model of a desktop
+that cannot be displayed. Nothing rots — the tests hold the geometry and the
+hit testing to each other — but every surface added to it inherits the same
+condition, and the systray's parallel implementations keep diverging from the
+shell's with nothing to notice that they have.
+
+**Progress 2026-08-21 — one of the two stated blockers was already stale, and
+the other now has its first piece.** The entry above says the shell "has no
+compositor/IPC event loop yet" and treats that as one obstacle. It is two, and
+they were in different states:
+
+- *A transport to run a loop over.* *Already existed when this was written.*
+  `gui/compositor/src/server.rs` listens, accepts and paces; `oswindow` really
+  connects, blocks and submits; `apps/editor` is a working client end to end
+  over the real protocol. The claim was inherited from an earlier entry and not
+  rechecked. Recorded here rather than quietly corrected, because it is the same
+  failure `design-decisions.md` §305 exists for: a "blocked on X" note that
+  outlives X.
+- *A way for a shell surface to be a shell surface.* Genuinely missing, and the
+  real blocker. The compositor had one flat `z_stack` and every raise went to
+  the top of it, so a taskbar would have gone behind the first application
+  window the user clicked. **Fixed today:** `Layer::{Background, Normal,
+  Overlay}` on `WindowSpec`, a band each window is created in and cannot leave,
+  with raising confined to the band. `design-decisions.md` §494; 7 tests, all
+  verified to fail when the flat push is reintroduced.
+
+**Still open**, and still the reason this entry is not closed: the shell has no
+way to *learn about other windows*. `CompositorRequest` has no window-list query
+and no notification, so a taskbar could now stay in front of the windows it is
+supposed to list while having no idea what they are. That protocol surface plus
+the loop itself are what remain.
+
+**Progress 2026-08-21 (2) — the window-list protocol above now exists, so the
+loop is the only thing left.** `guiremote::window_list` adds a `WLST` frame
+carrying id, pid, band, title and the visible/minimized/maximized/focused flags
+for every window on the desktop; `RequestBody::SubscribeWindowList` turns the
+stream on; the compositor pushes a fresh snapshot whenever the encoded list
+differs from the bytes it last sent that link; `oswindow` exposes it as
+`watch_desktop` / `desktop_windows` / `desktop_revision`. `design-decisions.md`
+§495; 26 tests across the three crates, each verified to fail when the
+corresponding bug is reintroduced. A taskbar can now be told what to list.
+
+**What remains is exactly one thing: the loop itself.** `desktop` gains a
+`[lib]`, a binary opens three `Layer`-banded windows (wallpaper, taskbar,
+popups) through `oswindow`, calls `watch_desktop(true)`, and on each
+`desktop_revision` change re-renders the five trees and submits them. Both
+named blockers are gone; nothing is waiting on another lane.
+
+**Progress 2026-08-21 (3) — `desktop` is a library.** The `[lib]` above now
+exists: `src/main.rs` became `src/lib.rs`, the crate declares both a `[lib]`
+and a `[[bin]]`, and the scripted demo that used to *be* the crate is now a
+135-line binary beside it. `DesktopShell` is reachable by name from outside for
+the first time. Removing the 54 module-level `#[allow(dead_code)]` this
+required surfaced 119 concealed warnings and, in them, three live defects and
+one very large one — see `TD-C-DEAD-CODE-IS-ALLOWED-WHOLESALE` (progress note)
+and `TD-C-FORTY-NINE-SHELL-MODULES-CARRY-THEIR-OWN-COPY-OF-THE-PALETTE`.
+
+**The one design question the loop still has to answer**, noted here so it is
+not discovered halfway through: `DesktopShell.windows` is a
+`BTreeMap<WindowId, ManagedWindow>` the shell maintains itself, with ids it
+mints itself in `take_window_id` — while `WindowId`'s own doc says the id is
+"assigned by compositor". That is two answers to one question, which is the
+shape this whole sweep exists to remove. The loop must not paper over it by
+keeping both and mapping between them. The shell's map has to become a
+*projection* of `desktop_windows()`, retaining only state that is genuinely the
+shell's own (virtual-desktop assignment being the real one). Doing that first
+is what stops the loop from being written against a model that disagrees with
+the compositor.
+
+## TD-C-ANY-CLIENT-CAN-READ-EVERY-WINDOW-TITLE
+
+**In short:** Any program connected to the compositor can ask to be sent the
+list of every window on the desktop — including each window's title. Titles are
+usually filenames, URLs or email subject lines, so a program with no business
+knowing what you have open can watch all of it, live. Nothing stops it, because
+the compositor currently has no way to tell a trusted shell apart from an
+ordinary application.
+
+**Where:** `gui/compositor/src/wire.rs` — `ClientLink::answer_requests`
+intercepts `RequestBody::SubscribeWindowList` and calls
+`set_window_list_subscription` unconditionally. `gui/remote/src/control.rs` —
+the request itself. `gui/compositor/src/lib.rs` — `Compositor::window_list`,
+which returns the whole desktop by design (see below).
+
+**Reproduce:** any `oswindow` client, including `apps/editor`, can call
+`EventLoop::watch_desktop(true)` and then read `desktop_windows()`. There is no
+check of any kind between the request arriving and the subscription being
+granted.
+
+**Why it shipped this way (2026-08-21):** the shell cannot draw a taskbar
+without it, and the honest gate does not exist yet. A capability is the right
+mechanism — the shell is handed one at launch, an application is not — and
+kernel channel IPC does not yet deliver capabilities to the compositor. Any
+check written today would test a value the *client* supplies, which is not a
+gate but the appearance of one, and worse than none because it would look
+solved. Full reasoning in `design-decisions.md` §495.
+
+**Note that the unfiltered list is not the bug.** The compositor deliberately
+sends every window in every band including minimized ones, because filtering is
+the subscriber's decision — a taskbar and an Alt-Tab switcher want different
+subsets, and a compositor that picked one would leave the other unable to
+recover what was dropped. Narrowing what is sent is not the fix; deciding *who*
+may ask is.
+
+**Proper fix:** one capability check at the single place the subscription is
+granted — the `SubscribeWindowList` arm in `answer_requests` — refusing with
+`ResponseBody::Error` when the link holds no window-list capability. The
+compositor learns the caller's capabilities from the kernel at connection
+accept, not from the connection's own claims. One site, because the
+subscription is granted in exactly one place; that was part of why the
+interception lives in `answer_requests` rather than being spread through the
+compositor.
+
+**Trigger to fix:** when kernel channel IPC carries capabilities across an
+accepted connection. Lane A owns that; no request has been filed yet because
+the feature is not near enough to specify an interface against.
+
+**If never fixed:** every window title on the desktop is readable by every
+program the user runs, silently and continuously. The desktop works; the
+privacy property a user would assume it has is simply absent.
+
+## TD-C-FORTY-NINE-SHELL-MODULES-CARRY-THEIR-OWN-COPY-OF-THE-PALETTE
+
+**In short:** The desktop has a settings page where the user picks light or
+dark mode, an accent colour, and how transparent panels should be. Almost
+nothing obeys it. 49 of the shell's modules — every settings page, every
+dialog, the taskbar, the launcher, the login screen, the on-screen displays —
+each declare their own private list of colour constants and paint with those.
+The user can set the desktop to Light and watch the whole of it stay dark
+except the five surfaces `DesktopShell` renders itself. The setting is real,
+it is saved to disk, it is read back correctly, and then it is ignored.
+
+**Where:** `gui/desktop/src/*.rs` — 549 `const NAME: Color = …` declarations
+spread over 49 modules. They collapse to **33 distinct values**: `TEXT` is
+declared 31 times, `BLUE` 29, `BASE` 28, `SUBTEXT0` 28, `SURFACE0` and
+`SURFACE1` 27 each. `Color::from_hex(0x89B4FA)` is written out 47 separate
+times. The canonical answer lives in `gui/appearance/src/lib.rs`
+(`ThemeMode::is_light`, `AccentColor::color`/`color_light`,
+`TransparencyLevel::panel_alpha`, `AppearanceSettings::effective_accent`).
+
+**Reproduce:** set `theme.mode: light` in the appearance config and start the
+shell. `DesktopShell`'s own five render methods respond. Open any settings
+page, the launcher, or a dialog: unchanged, still Catppuccin Mocha. Same for
+a non-default accent — `effective_accent()` reaches nothing that draws.
+
+**Why it shipped:** every one of these 49 modules was behind
+`#[allow(dead_code)]` for the life of the crate (see
+`TD-C-DEAD-CODE-IS-ALLOWED-WHOLESALE`). The single symptom rustc could have
+shown — an unused constant — was suppressed 54 times over, so the duplication
+grew module by module with nothing to object. Removing those allows is what
+surfaced it: 119 warnings appeared at once in a crate that had been reporting
+zero.
+
+**This is the sweep's recurring shape, at its largest scale so far:** the tree
+held one correct answer that callers could not reach, so it grew wrong copies
+of it — 549 of them. The copies are not *wrong* today, because they agree with
+what the dark theme happens to be. They are wrong the moment the user changes
+anything.
+
+**Proper fix, in two parts — the second is the easy one:**
+
+1. **`gui/appearance` cannot currently answer the question.** It resolves
+   *accents* for both schemes (`color` / `color_light`) but the base, surface,
+   overlay and text colours exist only as the hardcoded dark values. Nothing in
+   the tree knows what a window background is in light mode. So the fix starts
+   by adding a resolved palette — a struct carrying the ~33 roles the shell
+   actually uses, built from a `ThemeMode` + `AccentColor` +
+   `TransparencyLevel` (Catppuccin Latte for light, Mocha for dark, which is
+   what the existing constants already are). Until that type exists there is
+   nothing to thread.
+2. Then thread `&Palette` through the render functions of the 49 modules and
+   delete the 549 constants. Mechanical, large, and safe: a module that no
+   longer declares a colour cannot disagree about one.
+
+Do **not** do part 2 without part 1 — threading a struct whose light variant
+does not exist yet just relocates the hardcoding into the struct's
+constructor.
+
+**Trigger:** this is not blocked on anything. It is sequenced after the shell
+event loop (`TD-C-THE-SHELL-CAN-DRAW-ITSELF-AND-NOBODY-CAN-ASK-IT-TO`) only
+because a shell that cannot be driven cannot demonstrate a theme change
+either — with the loop in place, changing the mode and watching the desktop
+repaint is the test that proves this fixed. It also subsumes
+`TD-FOUR-APPEARANCE-SETTINGS-THE-SHELL-STILL-IGNORES`, which is the same
+defect observed from the settings end.
+
+**If never fixed:** the appearance settings page stays decorative. A user who
+picks Light gets a desktop that is light in five places and dark in every
+other, which reads as a broken theme rather than an unimplemented one — worse
+than having no setting at all.
+---
+
+### B-THE-NATIVE-LIBC-AND-THE-LINUX-ABI-DISAGREE-ABOUT-WHAT-EXISTS, AND LIBC'S DOC COMMENTS EXPLAIN IT WITH A REASON THAT STOPPED BEING TRUE — 2026-08-21 — OPEN
+
+**In short.** SlateOS has two syscall ABIs. A binary loaded as a Linux
+executable gets `kernel/src/syscall/linux.rs`; a binary linked against our own
+`toolchain/sysroot/lib/libc.a` — CPython, bash, make, every `ctest-*` fixture —
+gets the native table. Over time lane A implemented a number of operations on
+the *Linux* side that the native side has no syscall number for, so our libc
+still answers `ENOSYS`. That part is defensible. What is not defensible is that
+several of those libc functions carry a doc comment giving the *reason* as "the
+kernel does not do this" — and the kernel does.
+
+**The concrete one that prompted the audit.** `posix/src/process.rs`
+`process_vm_readv` reads:
+
+> returns `-1` with `errno = ENOSYS`: cross-process memory access isn't part of
+> the microkernel's IPC model (programs use channel handles to transfer pages
+> explicitly rather than peeking at another task's address space).
+
+`kernel/src/syscall/linux.rs:26529` implements it, in both directions, with a
+same-address-space fast path and a cross-address-space path gated on a
+`Process` capability carrying the `DEBUG` right (design-decisions §24), using
+`copy_from_user_as` / `copy_to_user_as` against the target's PML4. The claim in
+the comment is not a simplification; it is the opposite of what the kernel now
+does, and anyone reading libc to find out whether SlateOS can do cross-process
+introspection gets the wrong answer.
+
+**How this was measured, so it can be re-run — and the two wrong ways I tried
+first.** Start by parsing `linux.rs` for `nr::X => sys_x(args)` arms. That is
+"a handler exists", which is *not* the same as "it works", and treating it as
+such is the trap this entry is about. Cross that against libc functions with an
+unconditional `set_errno(ENOSYS)` terminal outside `#[cfg(test)]`.
+
+Classifying each handler is where it goes wrong:
+
+- **Wrong test 1: "does the handler body contain `ENOSYS`?"** This calls
+  `sys_mknod_common` a real implementation, because it validates its arguments
+  carefully and then returns `linux_err(errno::EPERM)` — no `ENOSYS` anywhere.
+  A handler that never says `ENOSYS` can still refuse every call it gets. I
+  used this test while *writing this very entry* and it produced a list that
+  overstated the gap by a third.
+- **Wrong test 2: "can the handler return `SyscallResult::ok`?"** — right
+  question, but only if you follow delegation properly. My first
+  delegation-follower handled one level and only when the wrapper's body was a
+  bare tail call, so `sys_signalfd` (which has statements before delegating to
+  `signalfd_common`) and `sys_process_vm_readv` (delegating to
+  `process_vm_impl`) both looked like they never succeed. They do:
+  `signalfd_common` has two `SyscallResult::ok` sites, `process_vm_impl` seven.
+
+**The right test** is "can this handler, following delegation to its real
+implementation, ever return `SyscallResult::ok`?" — verified per call rather
+than trusted to a regex. The result, for the libc `ENOSYS` terminals checked:
+
+| Class | Calls |
+|---|---|
+| **Kernel really implements it; native libc has no number to reach it** | `signalfd`, `signalfd4`, `process_vm_readv`, `process_vm_writev`, `pidfd_open`, `kcmp`, `arch_prctl` |
+| **Kernel denies it too — the two differ only in *which* errno** | `mknod`, `mknodat`, `setns`, `mount`, `umount2`, `ptrace`, `chroot`, `swapon`, `swapoff`, `reboot`, `init_module` (all `EPERM`); `mq_notify` (`EBADF`) |
+| **Partial: libc's `ENOSYS` is a narrow arm, or the kernel succeeds only in the no-op case** | `unshare(0)`, `iopl(0)`, `ioperm`, `quotactl`, `syslog`, `madvise`, `tee` |
+| **Both sides `ENOSYS` — libc is honest** | `clone3`, `getdents`, `seccomp`, `bpf`, `userfaultfd`, `perf_event_open`, `io_uring_setup`, `fanotify_init`, `socket(SOCK_RAW)` |
+
+Only the first row is a missing feature. The second row is a *divergence*: both
+ABIs refuse the operation, but a program probing for support distinguishes
+`ENOSYS` from `EPERM`, so it still matters — it is just a much smaller problem,
+and one that argues for fixing the errno rather than adding a syscall number.
+
+**Why it bites.** The same program gets different behaviour depending on which
+ABI it was linked for, on calls neither side documents as ABI-dependent. Ports
+are exactly the programs that probe for features at runtime. And nothing tests
+the correspondence: `cargo test -p posix` tests libc against libc's own
+expectations, the kernel self-tests exercise the Linux arms directly, and no
+test compares the two answers for the same call.
+
+**Proper fix, in the order it should be done.**
+
+1. **Stop the doc comments from lying** — the cheap half, and the half that
+   costs nothing to get wrong later. Each libc `ENOSYS` terminal for a row-one
+   operation should say *"the native syscall table has no number for this; the
+   kernel implements it on the Linux ABI at `linux.rs:<line>`"*, not *"the
+   kernel does not do this"*. Done for `process_vm_readv`/`writev` and
+   `signalfd`, `pidfd_open`, `kcmp` and `arch_prctl` in the commit that filed
+   this entry — **step 1 is done**, that being all seven of row one. Row two
+   needs no doc change: libc saying "we don't do this" is true there, and only
+   the errno differs.
+2. **Decide, per row-one operation, whether the native ABI should reach it at
+   all.** This is a real design question and not obviously "yes for
+   everything". `signalfd`, `pidfd_open` and `process_vm_readv` are the easy
+   yes: each already takes a handle or is gated on a capability, so a native
+   number would not widen anyone's authority. `kcmp` is the awkward one — it
+   compares two *arbitrary* pids' resources by number, which is ambient
+   authority by construction, and is also the least-needed of the set.
+   `arch_prctl` is neither — it is per-thread CPU state (`FS`/`GS` base), and
+   the question there is whether the native ABI wants a general escape hatch or
+   a specific TLS call. Whatever is decided, the answer belongs in
+   `design-decisions.md`, because right now the split is an accident of what
+   lane A happened to need.
+3. **Then add native syscall numbers for whatever survives step 2**, which is a
+   lane A change and needs a request. Separately — and much cheaper — row two's
+   errno divergence can be closed from either side without a new syscall
+   number, by having libc return the kernel's `EPERM` instead of `ENOSYS` for
+   operations we deliberately refuse. That is a behaviour change to libc, so it
+   wants step 2's decision first rather than being done opportunistically.
+
+**Trigger.** Step 1 is done. Step 2 is worth raising with the operator only if
+a port actually needs one of these; none does today (CPython, bash and make
+link clean without them), which is why this is filed rather than escalated.
+Note that the audit turned up a reason to answer step 2 with "no" for at least
+one member of row one — see the `kcmp` entry immediately below.
+
+**If never fixed:** the libc keeps telling readers the kernel cannot do things
+it can. That is the same defect class as
+`B-WORKSPACE-TEST-IS-RED-SLATEOS-COREUTILS-SHADOW-THE-HOSTS` sitting at
+`Status: OPEN` for five days after it was fixed — a wrong statement in a file
+that other lanes consult is worse than no statement, because it is acted on.
+
+---
+
+### A-KCMP-COMPARES-ANY-TWO-PROCESSES-WITH-NO-AUTHORITY-CHECK — 2026-08-21 — OPEN (lane A tree; request filed)
+
+**In short.** A "syscall" is a request a program makes of the kernel. One of
+them, `kcmp`, asks the kernel to compare two *other* programs — "are these two
+things part of the same running program?", "does program 41 have file number 7
+open?". Linux only answers if the asker would be allowed to debug both targets.
+Ours answers anybody, about anybody. Nothing in SlateOS can reach it today, for
+an accidental reason (the syscall table our own programs use has no number for
+it), so this is a latent hole rather than a live one.
+
+**Where.** `kernel/src/syscall/linux.rs`, `sys_kcmp`, 33398–33546 — lane A's
+tree, so lane B has not touched it. Filed as
+`requests/b-a-kcmp-compares-any-two-processes-with-no-authority-check.md`.
+
+**The gap.** The handler's own header comment (33402–33410) writes Linux's gate
+order down correctly, including `ptrace_may_access(both tasks) -> -EPERM` as
+step 2. Step 2 is in the comment and not in the code: grepping the entire
+function body for `EPERM`, `capabilit`, `Rights` or `may_access` matches only
+that comment line. There is no path on which any caller is refused.
+
+This is inconsistent with lane A's own established policy rather than with some
+external standard, which is what makes it look like an oversight. Eleven lines
+away in the same file, `sys_process_vm_readv` (26529) gates cross-process access
+on a `Process` capability carrying `Rights::DEBUG` and states the principle
+outright — *"never by ambient PID authority"* (26702). `kcmp` is the same shape
+of introspection and got no gate.
+
+**What actually leaks, having checked rather than assumed.**
+
+- *Thread membership.* `KCMP_VM`/`FILES`/`FS`/`SIGHAND`/`IO`/`SYSVSEM` all
+  collapse to one `same_proc` predicate — identical owning `ProcessId` — so the
+  call reports whether any two TIDs on the system are threads of one process.
+  Narrower than Linux (we have no separable `files_struct` to share) but still
+  another user's private thread layout.
+- *Cross-process fd probing — the sharper one.* `KCMP_FILE` calls
+  `pcb::linux_fd_lookup(proc_pid, fd)` against **the target's** fd table and
+  answers `EBADF` when a descriptor is absent (33507–33527). Walking `idx1` and
+  watching `EBADF` flip enumerates exactly which fds another process holds open;
+  when both resolve, the returned ordering leaks `handle_kind_ord(kind)`, i.e.
+  whether the target's fd 7 is a socket or a file.
+
+**What does *not* leak, recorded so nobody re-derives it.** `kcmp` is usually
+also a KASLR concern, because Linux's comparator orders raw kernel pointers and
+must launder them through a per-boot cookie (`kptr_obfuscate()`). Ours does not:
+it orders `handle_kind_ord(kind)` and `raw_handle` — a handle-table index — and
+TIDs in the cross-process case. No kernel address is exposed and the cookie has
+no analogue to add. This is an authority bug only.
+
+**Why it is not urgent.** The native syscall table has no number for `kcmp`, so
+no binary linked against our libc can call it at all, and `posix/src/process.rs`
+`kcmp` is an argument validator that terminates in `ENOSYS`. But "unreachable
+because the other ABI happens not to expose it" is not a security property, and
+it interacts directly with the open question in
+`B-THE-NATIVE-LIBC-AND-THE-LINUX-ABI-DISAGREE-ABOUT-WHAT-EXISTS` step 2 — one of
+the calls being considered for a native number is this one. It should not get a
+number before it gets a gate.
+
+**Proper fix (lane A's call; the request argues for the first).** Either
+require a `Process` capability with `DEBUG` over each target, refusing with
+`EPERM` between the `ESRCH` liveness gate and the `type` range gate so the errno
+discriminator still matches Linux — noting the predicate is a conjunction over
+both targets, so a single undifferentiated `EPERM` is needed or the gate becomes
+its own oracle — or, more cheaply, refuse unless both targets resolve to the
+caller's own process, which closes both leaks, keeps the only form real programs
+use (`kcmp(getpid(), getpid(), …)`) working, and can be widened later. Either
+way the existing `kernel_ctx` escape must be preserved or the boot self-test
+goes red.
+
+**If never fixed:** a latent cross-process fd-enumeration oracle sits behind a
+syscall number we have not assigned, guarded by nothing but the fact that we
+forgot to assign it — and the comment above it tells every future reader that it
+is gated when it is not.
+
+---
+
+### B-PERSONALITY-TESTS-WERE-RACING-AND-AN-RAII-GUARD-MADE-THEM-LOOK-ISOLATED — 2026-08-21 — FIXED
+
+**In short.** Two tests in the POSIX library failed at random — passing one run,
+failing the next, with no code change in between. Cause: several tests all read
+and write one shared setting, and `cargo test` runs tests side by side, so they
+overwrote each other's setup. What made it take a while to see is that the tests
+already had something that *looked* like protection and wasn't.
+
+**Symptom.** `cargo test -p posix --target x86_64-pc-windows-gnu` intermittently:
+
+```
+---- unistd::tests::test_personality_query stdout ----
+assertion `left == right` failed: Should return PER_LINUX (0)
+  left: 5505024
+ right: 0
+```
+
+Also `unistd::tests::test_personality_set`. The immediately preceding run of the
+identical tree passed 20418/20418, which is what identified it as a race rather
+than a regression — the intervening edits were doc comments only.
+
+**Root cause.** `posix/src/unistd.rs::PERSONALITY_STATE` is one process-global
+`AtomicU32`. `cargo test` runs the binary's tests on parallel threads *within one
+process*, so every test touching it shares it. `unistd::tests::test_personality_query`
+asserted it read `0` without ever setting it, and
+`sys_personality::tests::test_phase78_combined_flags_round_trip` sets
+`PER_LINUX | ADDR_NO_RANDOMIZE | MMAP_PAGE_ZERO | READ_IMPLIES_EXEC`
+= `0x54_0000` = **5505024** — the exact observed value. Not a near miss; the
+failing assertion printed the other test's constant.
+
+**Why it hid — the part worth keeping.** `sys_personality`'s tests were not
+naive about shared state. They had a `reset_personality()` helper *and* an RAII
+`PersonalityGuard` that snapshot the value on construction and restored it on
+drop, with a doc comment saying it existed "so tests don't bleed state into each
+other". Both are useless here, and worse than useless because they look
+sufficient:
+
+- **Save/restore is not mutual exclusion.** It defends against *sequential*
+  bleed — test A leaving a value behind for test B. It does nothing about a
+  concurrent writer, which is the failure mode cargo actually produces.
+- **The restore is itself a write**, so a guard dropping at the end of test A
+  can clobber test B's setup mid-assertion. The mechanism intended to prevent
+  interference was also a source of it.
+
+The lesson generalises past this file: an isolation mechanism that does not
+*exclude* is decoration, and its presence suppresses the question "are these
+tests actually isolated?" for everyone who reads them afterwards.
+
+**Fix.** `posix/src/unistd.rs` now exposes `PERSONALITY_TEST_LOCK` /
+`lock_personality_for_test()` — same shape as the existing
+`environ::ENV_TEST_LOCK`, which solved this identical problem for `ENV_STORE`
+after the `wordexp::tests::tilde_*` flakes. `sys_personality`'s
+`reset_personality()` now *returns the guard* (taking the lock, then resetting)
+rather than returning the previous `i32`, so a caller that forgets to bind it
+has nothing plausible to do with the result; `PersonalityGuard` is deleted, with
+a comment where it stood saying why it must not come back. The two `unistd`
+tests take the lock and establish the value they assert on instead of assuming
+it.
+
+**Generalisation not yet done.** This is the second global in this crate to need
+a test lock retrofitted after producing flakes (`ENV_STORE` was the first). The
+crate has other process-global mutable statics — an audit for "global mutable
+static, written by more than one test, no lock" would likely find more, and is
+worth doing before the next intermittent failure rather than after. Logged here
+rather than done now because it is a separate piece of work with its own risk of
+churn across many test modules.
+
+---
+
+## TD-C-THE-DESKTOP-AND-THE-COMPOSITOR-BOTH-DRAW-WINDOW-TITLE-BARS
+
+**In short:** Two different parts of the system each know how to draw a
+window's title bar, borders and close/maximise/minimise buttons, and they
+disagree about what one looks like. The compositor's version is the one that
+actually runs. The desktop shell's version has never drawn a pixel, because
+until today the shell could not be called by anything. Wiring the shell to the
+compositor — the next task — would put the second one on screen *on top of*
+the first, which is how this was found.
+
+**Where:**
+
+| | Compositor | Desktop shell |
+|---|---|---|
+| Entry point | `Compositor::render_title_bar` (`gui/compositor/src/lib.rs`), called from `render_window` | `DesktopShell::render_window_decorations` (`gui/desktop/src/lib.rs:2367`, 92 lines) |
+| Geometry | `Window::title_bar_layout` → `TitleBarLayout` | `DesktopShell::window_chrome` → `WindowChrome` |
+| Button size | `TITLE_BUTTON_SIZE = 20` | `WINDOW_BUTTON_SIZE = 16.0` |
+| Title bar height | `TITLE_BAR_HEIGHT = 30` | `TITLE_BAR_HEIGHT = 30.0` |
+| Display scaling | none | every dimension via `self.scale(…)` |
+| Rounded corners | none | `corner_radii()`, from the user's `WindowCorners` setting |
+| Drop shadow | none | yes |
+| Colours | `self.theme.title_bar_focused` / `close_button` / … | its own constants |
+| Is it on screen? | **yes** | no — no caller but the demo |
+
+**This is the sweep's recurring shape once more**, and the third instance
+found in two days: the tree held one correct answer that callers could not
+reach, so it grew a wrong copy. Here the copy is not merely unused — it has
+*drifted*, and the drift is invisible precisely because only one of the two
+ever runs. Nothing compares 16 against 20.
+
+**Which one is right: the compositor.** This is not a close call and is not an
+open question. `gui/compositor/src/lib.rs`'s own module doc states the policy —
+"Window decorations drawn server-side (consistent look, secure close button)" —
+and the security half of that is the real argument: the close button must be
+drawn and hit-tested by something the client cannot lie to. The compositor also
+already owns everything decoration *does* as opposed to looks like: drag-to-move
+(`title_bar_rect().contains`), resize edges, button hit testing, damage
+tracking, and fullscreen's decoration suppression. Moving those to the shell
+would mean moving input routing to the shell, which contradicts the
+architecture. The shell's copy is the one to delete.
+
+**But deleting it plainly would lose three real features**, which is the actual
+work in this entry:
+
+1. **Display scaling.** The shell scales every decoration dimension by the
+   user's scale factor; the compositor hardcodes pixels. On a HiDPI display the
+   compositor's title bar is 30 physical pixels — a sliver. The scale factor
+   lives in `AppearanceSettings` and has to reach the compositor.
+2. **Corner radius.** The user's `WindowCorners` setting (`Square`/`Rounded`/…)
+   is honoured only by the shell's version.
+3. **Shadows.**
+
+So the sequence is: teach the compositor the two settings it is missing, port
+the shadow, *then* delete `render_window_decorations` and `window_chrome` and
+the geometry fields on `ManagedWindow` that exist only to feed them. Not the
+other order — deleting first ships a visible regression on every HiDPI display.
+
+**Why this blocks the event loop** (`TD-C-THE-SHELL-CAN-DRAW-ITSELF-AND-NOBODY-CAN-ASK-IT-TO`):
+that entry says the loop should "re-render the five trees and submit them". Four
+of the five are genuine shell surfaces — taskbar, Alt-Tab, start menu, calendar.
+The fifth is `render_window_decorations`, and submitting it would double-draw
+every title bar in the desktop, at the wrong size. The loop must render four,
+not five, and this entry is why.
+
+**It also explains a hole in the window-list protocol that is not a hole.**
+`WindowInfo` (`gui/remote/src/window_list.rs`) carries no geometry — no x, y,
+width or height. That looks like an oversight the moment you try to decorate a
+window from a shell, and it is not one: a shell that does not decorate does not
+need window geometry, and a taskbar, Alt-Tab list, start menu and calendar
+between them need none of it. Do not add geometry to `WindowInfo` to make the
+shell's decorator work. That is the copy, not the original.
+
+**Trigger:** do this before the shell event loop, or at minimum render only the
+four shell surfaces in that loop and leave this entry open. Nothing is blocked
+on another lane — `gui/compositor` and `gui/desktop` are both lane C's.
+
+**If never fixed:** the shell keeps a 92-line renderer that cannot be correct
+because nothing exercises it, and the first person to wire the loop up
+naively gets doubled title bars and reasonably concludes the compositor is
+broken.
 
 ---
 

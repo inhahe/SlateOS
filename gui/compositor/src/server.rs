@@ -118,6 +118,12 @@ pub struct ServerStats {
     /// value is a symptom, not housekeeping — see
     /// [`Compositor::discard_unrouted_input`].
     pub unrouted_events: u64,
+    /// Window-list frames pushed to a subscribed shell.
+    ///
+    /// Should track how often the desktop's window set actually changed, not
+    /// the tick rate. A value climbing with `frames` means something is
+    /// perturbing the list every tick, which is a bug worth being able to see.
+    pub window_lists_sent: u64,
     /// Frames composited.
     pub frames: u64,
     /// Windows destroyed because the client that owned them went away.
@@ -300,7 +306,8 @@ impl Server {
         }
     }
 
-    /// Give every client its input, then write everything queued for it.
+    /// Give every client its input and any window-list change, then write
+    /// everything queued for it.
     fn route_and_flush(&mut self, compositor: &mut Compositor) {
         for client in &mut self.clients {
             let routed = compositor.route_input(&mut client.link);
@@ -308,6 +315,11 @@ impl Server {
                 .stats
                 .routed_events
                 .saturating_add(u64::try_from(routed).unwrap_or(u64::MAX));
+            // After input, so that a window list and the focus events that
+            // caused it reach a shell in the order they happened.
+            if compositor.route_window_list(&mut client.link) {
+                self.stats.window_lists_sent = self.stats.window_lists_sent.saturating_add(1);
+            }
         }
         // Whatever no live link claimed. Counted rather than left to accumulate:
         // an unbounded queue of events for windows nobody owns would eventually

@@ -665,6 +665,7 @@ dependencies = [
  "safeio",
  "sha2",
  "textfmt",
+ "tzrules",
 ]
 
 [[package]]
@@ -5675,6 +5676,7 @@ name = "logind"
 version = "0.1.0"
 dependencies = [
  "authlib",
+ "libservicebus",
  "posix",
 ]
 

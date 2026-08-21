@@ -3,6 +3,25 @@ name = "desktop"
 version = "0.1.0"
 edition = "2024"
 description = "SlateOS desktop shell — window manager, taskbar, system tray"
+
+# A library first, and a binary only incidentally. The shell's surfaces —
+# taskbar, decorations, Alt-Tab, start menu, calendar — all produce a
+# `RenderTree` for something else to paint, and while this crate was a bare
+# binary there was nothing outside it that *could*: `DesktopShell` was not
+# importable at any price, so five public render methods had exactly one caller
+# each, the crate's own demo. See known-issues.md
+# TD-C-THE-SHELL-CAN-DRAW-ITSELF-AND-NOBODY-CAN-ASK-IT-TO.
+[lib]
+name = "desktop"
+path = "src/lib.rs"
+
+# The scripted demonstration. Kept because a library whose only caller is its
+# own test suite is one refactor away from drifting from what a real session
+# does; this is a second caller that goes through the public API.
+[[bin]]
+name = "desktop"
+path = "src/main.rs"
+
 [dependencies]
 guitk = { path = "../toolkit" }
 

@@ -210,26 +210,16 @@ impl Date {
 
     /// The `(year, month, day)` this date names, with `month` and `day`
     /// 1-based.
+    /// This is the exact inverse of [`tzrules::days_from_civil`], which
+    /// [`Date::from_ymd`] builds with, so the two directions cannot disagree.
+    /// It used to walk the months subtracting `days_in_month` from a
+    /// `year_of_day` result — which was the same projection computed twice,
+    /// since `year_of_day` derives the year by computing the month and day and
+    /// discarding them. See `requests/b-c-tzrules-now-exports-civil-from-days.md`.
     #[must_use]
     pub fn ymd(self) -> (i32, u32, u32) {
-        let days = i64::from(self.days);
-        let year = tzrules::year_of_day(days);
-        // Days elapsed since 1 January of that year. `year_of_day` returns the
-        // year *containing* `days`, so this is 0..=365 and the walk below
-        // always finds its month.
-        let mut day_of_year = days.saturating_sub(tzrules::days_from_civil(year, 1, 1));
-        let year = i32::try_from(year).unwrap_or(i32::MAX);
-        for month in 1..=12u32 {
-            let month_len = i64::from(days_in_month(year, month));
-            if day_of_year < month_len {
-                let day = u32::try_from(day_of_year).unwrap_or(0).saturating_add(1);
-                return (year, month, day);
-            }
-            day_of_year = day_of_year.saturating_sub(month_len);
-        }
-        // Unreachable for the reason above; 31 December is the honest answer
-        // for "the last day of the year we already know this is in".
-        (year, 12, 31)
+        let (year, month, day) = tzrules::civil_from_days(i64::from(self.days));
+        (i32::try_from(year).unwrap_or(i32::MAX), month, day)
     }
 
     /// The Gregorian year.

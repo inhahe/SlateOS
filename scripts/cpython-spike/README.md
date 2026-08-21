@@ -1,31 +1,68 @@
 # CPython spike — how much libc does a real interpreter need?
 
-**Answer: CPython 3.12.3 references 363 external symbols, and SlateOS's `libc.a`
-now provides all 363. It links.** The spike originally measured thirteen
-missing; every one turned out to be a small, well-understood function — no
-missing subsystem, no architectural surprise — and all thirteen were
-implemented in commit `5531f816c`. Re-running the spike after that commit gives
-`MISSING_BY_SET_DIFFERENCE=0`, `MISSING_AT_LINK=0`, and a 26 MB statically
-linked `python-slateos` ELF.
+**Answer: CPython 3.12.3 references 478 external symbols, and SlateOS's `libc.a`
+provides all 478. It links, and — with its standard library packed as one
+`python312.zip` — it starts, imports, and does real work.**
 
-This is the third and largest program pointed at our libc, after GNU bash 5.2
-(design-decisions.md §305, shipped, 3 symbols missing at the time) and pkgconf
-2.3.0 (shipped, zero missing). It exists because `roadmap.md`'s "Enough of POSIX
-libc for: gcc, coreutils, bash, Python (CPython)" had been open for months with
-no measurement behind it — and "we should port CPython eventually" is not a
-measurement.
+This is the fourth and by a wide margin the largest program pointed at our libc,
+after GNU bash 5.2 (design-decisions.md §305, 3 symbols missing at the time),
+pkgconf 2.3.0 (zero missing) and GNU make 4.4.1 (§339). It exists because
+`roadmap.md`'s "Enough of POSIX libc for: gcc, coreutils, bash, Python
+(CPython)" had been open for months with no measurement behind it — and "we
+should port CPython eventually" is not a measurement.
+
+The spike ran in two stages, and the second stage is where most of the value
+turned out to be:
+
+1. **Linking** (`run.sh` + `slatelink.sh`). Originally measured thirteen missing
+   symbols; all thirteen landed in `5531f816c`. That gave a binary.
+2. **Running** (`stdlib.sh`). A linked interpreter with no standard library
+   cannot get past `init_fs_encoding` — it dies looking for the `encodings`
+   package, which is not frozen into the binary. Closing that gap exposed two
+   *cross-build configuration* defects that had made the stage-1 measurement an
+   undercount, and cost six more libc functions. See "The two defects" below.
 
 ## Running it
 
 ```bash
 scripts/cpython-spike/run.sh        # fetch, configure, build libpython3.12.a
 scripts/cpython-spike/slatelink.sh  # link it against SlateOS's own libc.a
+scripts/cpython-spike/stdlib.sh     # pack the stdlib, and prove it runs
 ```
 
-Both derive every path from `scripts/lib/worktree.sh`, so they work in any of
-the four checkouts and cannot link one lane's objects against another lane's
+All three derive every path from `scripts/lib/worktree.sh`, so they work in any
+of the four checkouts and cannot link one lane's objects against another lane's
 libc. Scratch lives in `/tmp/cpython-spike-$SLATE_LANE`; delete it to redo
 `configure`.
+
+Two more scripts answer a narrower question — *how much of the 20 MB archive
+does a run actually read?* — and are documented under "How much of the archive a
+run actually reads" below:
+
+```bash
+PYTHONHOME=<prefix> <prefix>/bin/python3 scripts/cpython-spike/pymeasure.py
+PYTHONHOME=<prefix> <prefix>/bin/python3 scripts/cpython-spike/pyworkload.py
+```
+
+`pymeasure.py` measures what `Py_Initialize` alone reads; `pyworkload.py` adds
+the imports the proposed Path-Z rung performs. Both default to whichever `.zip`
+is on the running interpreter's `sys.path`, so neither can quietly describe a
+different file from the one that produced its module list. They must be run
+against a real `<prefix>/bin/python3` + `<prefix>/lib/python312.zip` layout: an
+interpreter run out of its build tree keeps `sys.prefix = /usr/local` whatever
+`PYTHONHOME` says, and then measures a stdlib *directory* instead of an archive.
+
+Artifacts land on the gitignored shelf in `build/spike/`, and
+`scripts/create-ext4-rootfs.sh` stages both of them:
+
+| Artifact | Size | Staged as |
+|---|---:|---|
+| `python-slateos.elf` | 11,210,656 | `/bin/python3` |
+| `python312.zip` | 20,498,464 | `/usr/local/lib/python312.zip` |
+
+They are staged under **one** condition, never separately: an interpreter
+without its stdlib is 11 MB on the image that produces a process dying before
+`main()`, with an error that reads like a broken libc.
 
 ### Prerequisites
 
@@ -45,45 +82,94 @@ libc. Scratch lives in `/tmp/cpython-spike-$SLATE_LANE`; delete it to redo
 
 | Flag | Why |
 |---|---|
-| `--disable-shared` | SlateOS has no dynamic loader on this path; the target is a static `ET_EXEC`, same as bash and pkgconf. |
+| `MODULE_BUILDTYPE=static` | **The single most consequential setting here.** See below. |
+| `PKG_CONFIG_LIBDIR=/nonexistent-slateos-cross` | Likewise. See below. |
+| `--disable-shared` | SlateOS has no dynamic loader on this path; the target is a static `ET_EXEC`, same as bash and pkgconf. Note this governs *libpython only* — it does **not** imply static stdlib modules. |
 | `--without-ensurepip`, `--disable-test-modules` | Megabytes of *Python* source. Cannot affect which libc symbols the interpreter core references. |
 | `ac_cv_file__dev_ptmx=no`, `ac_cv_file__dev_ptc=no` | `configure` cannot stat files on the target and hard-errors if left to guess. |
 | `ac_cv_buggy_getaddrinfo=no` | `configure` detects the well-known broken-`getaddrinfo` bug by **running** a test program. A cross build cannot, so it assumes the bug is present and errors out. Asserting "not buggy" is the correct cross answer and what distro cross-recipes do. The alternative `configure` suggests, `--disable-ipv6`, would silently compile a *different* interpreter with a smaller socket surface — the opposite of what a spike measuring libc surface wants. If our `getaddrinfo` is genuinely buggy that is a `posix/src` bug to fix, not a reason to build less of CPython. |
 
-Optional modules `zlib`, `binascii` and `_ctypes` fail to build for want of
-zlib and libffi. That is expected and irrelevant: neither is libc, and neither
-is linked into `Programs/python.o` or `libpython3.12.a`.
+## The two defects — why stage 1 measured the wrong interpreter
+
+Both were silent. Both produced a build that linked, exited 0, and was wrong.
+
+### 1. `MODULE_BUILDTYPE` defaults to `shared`, and `--disable-shared` does not change it
+
+CPython 3.12's `configure` contains `MODULE_BUILDTYPE=${MODULE_BUILDTYPE:-shared}`
+and only overrides it for wasm hosts. `--disable-shared` governs *libpython*;
+the stdlib's C extensions are a separate axis. Left at the default, every one
+of them — `_struct`, `_json`, `math`, `binascii`, `select`, `_socket`, … — is
+built as a `.so` in `lib-dynload`, which on a system with no dynamic loader is
+a file that can never be opened.
+
+The symptom was not a build failure. The interpreter linked and started, and
+then `import struct` raised `ModuleNotFoundError: No module named '_struct'`.
+`sys.builtin_module_names` held **31** entries — the frozen bootstrap set and
+nothing else.
+
+With `MODULE_BUILDTYPE=static` it holds **83**, `libpython3.12.a` goes from
+46,400,194 to 61,462,452 bytes, and the stdlib stops being decorative.
+`stdlib.sh` prints that count on every run, first thing, because it is the
+number most likely to regress silently.
+
+### 2. `pkg-config` answers for the build machine
+
+`configure` locates zlib, OpenSSL, libffi, sqlite3, liblzma, bzip2, ncurses,
+readline and libuuid through `pkg-config`, which in a cross build cheerfully
+describes the *host's* library set. So CPython compiled `zlib`, `binascii` and
+`_ctypes` against Ubuntu's headers and then failed to link them — and the
+previous version of this README recorded that as "expected and irrelevant".
+
+It was neither. `MAKE_EXIT` was **2**, i.e. the build was failing, and the
+failure was being read as normal. Setting `PKG_CONFIG_LIBDIR` to a directory
+that does not exist makes every probe answer "no", which is *the truth for our
+sysroot*. `MAKE_EXIT` is now 0 with zero error lines.
+
+The general lesson, which is not specific to CPython: **in a cross build, a
+probe that consults the host is not a failed probe, it is a wrong answer.**
+
+### Three archives that live outside `libpython`
+
+Once modules went static, `_decimal`, `pyexpat`, `_elementtree` and the SHA-2
+implementation stopped carrying their own copies in `lib-dynload` and started
+needing the vendored archives CPython's own Makefile appends via `MODLIBS`:
+
+```
+Modules/_decimal/libmpdec/libmpdec.a
+Modules/expat/libexpat.a
+Modules/_hacl/libHacl_Hash_SHA2.a
+```
+
+A hand-written link naming only `libpython3.12.a` gets `undefined symbol:
+PyExpat_XML_SetEntityDeclHandler` and friends. `slatelink.sh` globs them rather
+than typing them out, so a CPython that renames one fails loudly at the link
+instead of silently dropping a module.
 
 ## The measurement, and the trap in it
 
 `slatelink.sh` computes the answer **twice, by unrelated means**, and the two
 agree exactly:
 
-| | before `5531f816c` | after |
-|---|---|---|
-| `REFERENCED_RAW` | 2225 | 2225 |
-| `CPYTHON_SELF_DEFINES` | 2486 | 2486 |
-| **`REFERENCED_EXTERNAL`** | **363** | **363** |
-| `SYSROOT_DEFINES` | 3011 | 3027 |
-| **`MISSING_BY_SET_DIFFERENCE`** | **13** | **0** |
-| **`MISSING_AT_LINK`** (ld.lld's own report) | **13**, identical list | **0** |
-| `SLATE_LINK_EXIT` | 1 (`NO_SLATE_BINARY`) | 0 |
+| | stage 1 (shared modules) | stage 2 (static modules) |
+|---|---:|---:|
+| `REFERENCED_RAW` | 2225 | 2756 |
+| `CPYTHON_SELF_DEFINES` | 2486 | 3041 |
+| **`REFERENCED_EXTERNAL`** | **363** | **478** |
+| `SYSROOT_DEFINES` | 3027 | 3060 |
+| **`MISSING_BY_SET_DIFFERENCE`** | **0** | **0** |
+| **`MISSING_AT_LINK`** (ld.lld's own report) | **0** | **0** |
+| `SLATE_LINK_EXIT` | 0 | 0 |
 
-`SYSROOT_DEFINES` moved by 16, not 13, and the extra three are accounted for
-exactly: the four `posix_spawnattr_set*` were implemented together with their
-`posix_spawnattr_get*` counterparts (a setter shipped without its getter is
-half an API, and the storage backing both is the same struct field), which is
-17 new exports minus `syscall`, which already existed under that name. Nothing
-unexplained moved.
-
-The two independent methods agreed exactly both before and after, which is the
-point of computing the answer twice.
+The jump from 363 to 478 is the 52 extra C extension modules arriving, not a
+regression: those 115 symbols were always going to be needed by an interpreter
+that can `import struct`. Stage 1's 363 was an honest measurement of the wrong
+binary.
 
 **The trap, recorded because the first run of this script fell into it.**
 `nm --undefined-only` on a *static archive* reports every member's undefined
 symbols — and a static library is overwhelmingly self-referential. `obmalloc.o`
 calls `PyErr_NoMemory`, which is undefined *in obmalloc.o* and defined in
-`errors.o` two members later. So the raw 2225 is "external references made by
+`errors.o` two members later. So the raw 2756 is "external references made by
 any member", not "symbols the archive cannot satisfy". Differencing it straight
 against `libc.a` produced **1875 "missing" symbols** — a figure that is 99%
 CPython's own API (`PyAST_Check`, `PyArg_ParseTuple`, `PyBytes_Type`, …) and
@@ -94,10 +180,54 @@ what its name claims.
 The two methods are worth keeping side by side because they bound the answer
 from opposite directions: the linker only reports symbols on paths it actually
 pulled in (a lower bound on what a *fuller* CPython would need), while the set
-difference covers every member (an upper bound). Here they coincide, which is
-itself the strongest evidence that 13 is right.
+difference covers every member (an upper bound). Here they coincide.
 
-## The thirteen — all closed in `5531f816c`
+## How much of the archive a run actually reads
+
+`requests/b-a-cpython-path-z-self-test.md` originally worried, in prose, that
+CPython "opens a 20 MB zip and reads its central directory". `pymeasure.py` and
+`pyworkload.py` replace that with a count of bytes, taken under the musl control
+interpreter against the identical archive:
+
+| | bytes | note |
+|---|---:|---|
+| Central directory | 66,083 | read once, 1,034 entries, at the *end* of the file |
+| `Py_Initialize` members | 20,372 | 3 members, all `encodings` — the part that must work before `main()` |
+| The Path-Z rung's imports | 409,311 | 19 more members: `json`, `base64`, `struct` and their closure (`re`, `enum`, `collections`, `functools`, …) |
+| **Total** | **495,766** | **2.42% of the 20,498,464-byte archive** |
+
+Under half a megabyte across ~22 members, plus one 66 KB read near EOF. If the
+rung ever hangs, bulk throughput is not the suspect: a seek, a short read near
+the end of the file, or an `mmap` of a large file that is mostly never touched
+are. That is a much narrower thing to look at than "it reads 20 MB".
+
+**Two traps, both of which I fell into first.**
+
+1. **Snapshot `sys.modules` before the measuring script imports anything of its
+   own.** The first version did `import zipfile` at the top and *then* reported
+   the startup set, counting zipfile's dependency closure — pathlib, urllib,
+   ipaddress, shutil, threading — as startup work, inflating the answer ~2x.
+   `sys` is the only safe thing to touch above the snapshot: it is a builtin and
+   is already imported before any user code runs.
+
+2. **`__file__` is not the authority on "came from the zip".**
+   `importlib._bootstrap` and `importlib._bootstrap_external` are frozen into
+   the interpreter — they have to be, they *are* the import system — yet CPython
+   still points their `__file__` at where the source would have lived, inside
+   the archive. Believing it credits them with **117,451 bytes of reads that
+   never happen**, on the two modules guaranteed never to be read that way. The
+   loader is the authority: a member is read from the archive only when its
+   `__spec__.loader` is zipimport's. `pymeasure.py` prints that overcount
+   underneath the real figure, so the error is visible rather than asserted.
+
+The check that the filter is right is that the two scripts arrive at the startup
+figure independently and agree: 3 members, 20,372 bytes.
+
+## The nineteen symbols CPython cost us
+
+Thirteen from stage 1 (`5531f816c`), six more from stage 2.
+
+### Stage 1 — the interpreter core
 
 | Symbol | Group | Where CPython uses it | Landed in |
 |---|---|---|---|
@@ -115,32 +245,127 @@ itself the strongest evidence that 13 is right.
 | `posix_spawnattr_setschedparam` | posix_spawn | `os.posix_spawn` | `posix/src/spawn.rs` |
 | `__sched_cpucount` | sched | `os.sched_getaffinity` (musl's out-of-line helper behind the `CPU_COUNT` macro) | `posix/src/sched.rs` |
 
-Five groups, thirteen functions, and not one of them required a new kernel
-subsystem — SlateOS already had threads, signals, pty groundwork and
-`posix_spawn` itself. Two carry documented degradations rather than lies, both
-written up in `todo.txt`: `pthread_kill` on a *peer* thread currently delivers
+Two carry documented degradations rather than lies, both written up in
+`todo.txt`: `pthread_kill` on a *peer* thread currently delivers
 process-directed (the kernel has no task-id-targeted signal syscall yet), and
 `pthread_getcpuclockid` returns POSIX's `ENOENT` for a peer. `syscall()` is a
 translation table over the dozen numbers CPython actually issues, not a trap
 door — the libc-bypass numbers (`read`, `write`, `execve`, …) deliberately
 return `ENOSYS`.
 
-**This is the headline result.** The interpreter that "wants threads, dynamic
-loading, locales and a far wider syscall surface" than bash or pkgconf turned
-out to be 13 functions away from linking — about the same order as bash's 3,
-not the order of magnitude more that the roadmap's phrasing implied — and those
-13 are now written, tested and shipped.
+### Stage 2 — the static stdlib modules
 
-## What this spike is *not*
+| Symbol | Group | Where CPython uses it | Landed in |
+|---|---|---|---|
+| `getspnam` | shadow | `spwd.getspnam` | `posix/src/shadow.rs` (new) |
+| `getspent` | shadow | `spwd.getspall` | `posix/src/shadow.rs` |
+| `setspent` | shadow | `spwd.getspall` | `posix/src/shadow.rs` |
+| `endspent` | shadow | `spwd.getspall` | `posix/src/shadow.rs` |
+| `gethostbyname_r` | resolver | `socket.gethostbyname_ex` | `posix/src/socket.rs` |
+| `gethostbyaddr_r` | resolver | `socket.gethostbyaddr` | `posix/src/socket.rs` |
 
-`slatelink.sh` now exits 0 and emits `python-slateos`: 26,038,688 bytes,
-*ELF 64-bit LSB executable, x86-64, statically linked, with debug_info, not
-stripped*, followed by the marker `SLATE_CPYTHON_BUILT`.
+`shadow.rs` is the other half of a marker `pwd.rs` had already planted: our
+single `root` entry reports `pw_passwd = "x"`, which is the Unix convention for
+"the hash is in the shadow database". Until now there was no shadow database
+for it to point at. The entry it returns has `sp_pwdp = "!"` — a string `crypt`
+cannot produce, so the database can never grant access, chosen over an empty
+hash (which authenticates anybody) and over "no such user" (which would
+contradict `getpwnam`).
 
-**That is a linked interpreter, not a running one.** Linking proves the symbol
-surface is complete; it proves nothing about behaviour. A working `python3` on
-SlateOS additionally needs the stdlib staged in the rootfs, a functioning
-`importlib` bootstrap, and the filesystem and tty semantics those assume — the
-very semantics behind the two degradations listed above. The deliverable here
-is the measurement and the now-closed list, plus a binary to run once there is
-a rootfs to run it in.
+## Why the standard library is one file
+
+`<prefix>/lib/python312.zip` is the **first** entry of CPython's default
+`sys.path`, and `zipimport` is frozen into the binary. This is not a trick
+bolted on afterwards — it is the layout CPython already looks for before
+anything else. The alternative is 569 files and ~12 MB of small reads our ext4
+driver walks at every boot to deliver exactly the same modules.
+
+Three decisions inside `stdlib.sh` that are measured rather than assumed:
+
+- **`ZIP_STORED`, not `ZIP_DEFLATED`.** `zlib` has no target build, so
+  `zipimport` cannot inflate a compressed member: the deflated variant of this
+  archive fails at startup with `No module named 'zlib'` raised from inside
+  `<frozen zipimport>`. Deflate would take the same content from 10.3 MB to
+  2.6 MB — revisit if zlib is ever ported. `create-ext4-rootfs.sh` asserts
+  zero deflated members at stage time, because a build host whose `zipfile`
+  defaults changed would reintroduce this invisibly.
+- **`--invalidation-mode unchecked-hash`.** A normal `.pyc` records the
+  source's mtime and size and the loader re-validates against them; inside a
+  zip that check is answered from the zip's directory entry, which is a
+  different clock from the one that compiled the file. One skewed timestamp and
+  every module silently falls back to re-parsing source on every import.
+  `unchecked-hash` removes the question rather than trying to answer it, which
+  is right for a stdlib shipped as one immutable file.
+- **Both `.py` and `.pyc` go in.** `zipimport` tries `.pyc` first, so imports
+  never parse source; the `.py` rides along so that tracebacks and
+  `inspect.getsource` show real lines. On a system where a Python traceback may
+  be the only debugging tool that works, that is worth its megabytes — and it
+  is verified, not asserted: `stdlib.sh` provokes a `json` error and checks the
+  traceback contains a source line.
+
+`compileall -d /usr/local/lib/python312.zip` rewrites the path baked into each
+code object. Without it every traceback on SlateOS would name
+`/tmp/cpython-spike-<lane>/zipsrc/json/…`, a build-machine scratch directory
+that does not exist on the target and never will.
+
+Dropped from the tree, with reasons: `test/` (~30 MB, and `--disable-test-modules`
+already removed its C half), `idlelib/` + `tkinter/` + `turtledemo/` (need Tcl/Tk),
+`lib2to3/` (removed upstream in 3.13), `ensurepip/` (we build `--without-ensurepip`),
+`venv/` (needs a package installer to be useful).
+
+Deliberately **kept** even though their C extension is absent: `ssl`, `sqlite3`,
+`bz2`, `lzma`. `import ssl` then fails with `No module named '_ssl'`, which
+names the actual missing piece. Deleting the pure-Python half instead would
+report `No module named 'ssl'` and send whoever hits it looking for the wrong
+thing.
+
+## What `stdlib.sh` proves, and where
+
+The verification runs against the musl-linked control interpreter that `make`
+builds from the *identical objects* with the identical `MODLIBS`. `run.sh`
+proves CPython compiles; `slatelink.sh` proves it links against our `libc.a`;
+this closes the remaining gap on the host, so that the only thing left untested
+is SlateOS itself.
+
+It runs from an isolated `$ISO` directory, **not** from the build tree: CPython's
+`getpath` finds a *build tree* by the landmark `Lib/os.py` next to the
+executable, so a probe run from the build directory answers a question nobody is
+asking. That exact mistake produced a false pass the first time it was measured.
+
+```
+BUILTIN_MODULES= 83
+ZIP_SOURCES=517 ZIP_BYTECODE=517
+ZIP_BYTES=20498464
+SLATE_PYTHON_OK 3.12.3
+json   {'a': [1, 2, 3]}          re     ['slate', 'os']
+b64    c2xhdGVvcw==             struct (7, 42)
+ctr    [('i', 4), ('s', 4)]     sha256 8dc798e3a54a1d25
+math   5.0                      dec    0.1428571428571428571428571429
+date   2026-08-21               uni    LATIN SMALL LETTER E
+xml    1                        path   /usr/local/lib/python312.zip
+rand   17
+SLATE_PYTHON_STDLIB_OK
+File "/usr/local/lib/python312.zip/json/decoder.py", line 353, in raw_decode
+HAS_SOURCE_LINE True
+FILE_BACKED_AT_STARTUP_NOSITE= 8
+```
+
+That last line is the minimum SlateOS must serve to get an interpreter running:
+under `-S`, exactly eight file-backed modules are imported before the prompt —
+`_frozen_importlib_external`, `abc`, `codecs`, `encodings`,
+`encodings.aliases`, `encodings.utf_8`, `io`, `zipimport`. All eight come out
+of the zip.
+
+(`-E` is *not* used for these probes and would be counterproductive: it discards
+`PYTHONHOME`, which is the only thing telling the interpreter where the zip is.)
+
+## What this spike is still *not*
+
+`python-slateos.elf` has never executed on SlateOS. Everything above was
+measured on the host, either by the linker or by a control interpreter built
+from the same objects. The remaining unknowns are ours, not CPython's: whether
+our ext4 driver, `mmap`, tty and `getrandom` behave the way `zipimport` and
+`init_fs_encoding` assume.
+
+Closing that needs a Path-Z self-test in `kernel/src/proc/spawn.rs`, which is
+lane A's tree — filed as `requests/b-a-cpython-path-z-self-test.md`.

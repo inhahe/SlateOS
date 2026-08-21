@@ -27777,6 +27777,151 @@ several small ways at once. Minutes are zero-padded in clock readings (`1:05`
 similar estimates no longer show a seconds field. The music player, benchmark,
 camera and screen-capture readouts change most, because they were the ones that
 could not count past their largest unit.
+
+---
+
+## §491 — An instant is rendered where the zone is known, and the zone is an argument that is never defaulted
+
+**Date:** 2026-08-21
+**Decided by:** Claude (autonomous)
+
+**In short:** All over Slate, programs show you *when* something happened — when
+a file was last written, when a backup ran, when a restore point was taken.
+Thirteen of them each worked out for themselves how to turn a number of seconds
+into a date, and none of them applied a timezone, so all thirteen quietly showed
+UTC. One of them, the file-recovery tool, was also plain **wrong**: it listed a
+file deleted on 18 August as deleted on 4 September, and the error grows by
+about five days every year. Two others didn't show a date at all — the system
+restore tool labelled restore points `D20683` and the backup settings page
+listed runs as `Day 20683 16:30`, both of which are the number of days since
+1970. The decision here is that there is now one module (`guitk::datetime`) that
+does the conversion, and that **the timezone is a required argument to it** —
+a program with no zone to offer has to write `Tz::utc()` and say why, which
+leaves something a search can find later.
+
+### The zone is the part that matters
+
+The taskbar clock had the same defect and it is the clearest illustration. Its
+whole body was:
+
+```rust
+let secs = SystemTime::now()…as_secs();
+let h = (secs % 86_400) / 3600;
+let m = (secs % 3600) / 60;
+format!("{h:02}:{m:02}")
+```
+
+That is UTC. The shipped default zone is `America/New_York`, so out of the box
+the corner of the screen was five hours wrong — and `show_seconds`,
+`show_day_of_week` and `show_date`, whose doc comments each say they apply *"in
+the taskbar clock"*, reached nothing at all. Meanwhile `calendar::ClockDisplay`
+— a complete taskbar clock, with zone handling, a seconds switch, a 12/24-hour
+switch and its own passing tests — had **no callers anywhere in the tree**.
+
+That is §469's defect exactly (`snap.rs` was dead while the shell computed its
+own snapping), and it is the sweep's recurring shape: *the tree held one correct
+answer that callers could not reach, and grew wrong copies of it.*
+
+The reason `secs % 86_400` spread is that it is **UTC by accident and
+indistinguishable from arithmetic that meant it**. No reviewer reading those
+four lines can tell whether the author considered zones and chose UTC, or never
+thought about it. Thirteen programs shipped a UTC clock and not one of them
+recorded the decision, because the code has no place to record it.
+
+Hence the rule: `Tz` is a parameter, on every function, with no default and no
+`_utc` convenience shortcut on the free functions. A caller with nothing to
+offer writes `Tz::utc()` at the call site. That is one token longer and it is
+greppable, which is the entire point — `rg 'Tz::utc'` now lists every surface in
+the tree that still shows the wrong hour, and the list shrinks as zone plumbing
+arrives.
+
+**Cost, stated plainly:** every call site is longer, and a caller that genuinely
+wants UTC has to say so twice (once in code, once in a comment). Fifteen call
+sites paid that cost. The alternative — a `stamp(secs)` that means UTC —
+would have made the migration a one-line change per site and would have
+reproduced the exact condition that caused the bug.
+
+### Why a new module rather than `guitk::date`
+
+`date::Date` says, in its own module docs, that it is a *civil* date and that
+converting an instant to one "is the caller's business, because only the caller
+knows which zone the user meant". That boundary is right about **which zone**
+and wrong to leave **the conversion** with the caller too, which is how thirteen
+callers came to own a calendar each. `datetime` is where the caller's business
+gets done once, with the zone still explicitly the caller's to supply.
+
+`DateTime` is a `Date` plus a seconds-into-the-day count, not six integers. The
+screen recorder held `(u16, u8, u8, u8, u8, u8)` and nothing stopped it holding
+month 13 at hour 25; the new type has no such state. It decomposes with
+`div_euclid`, so an instant before 1970 lands on the day that *contains* it
+rather than an hour before the epoch — the failure truncating division gives.
+
+### What the shapes are, and what is deliberately not one of them
+
+`stamp` (`2026-08-18 16:30`) is the default because five of the thirteen had
+already converged on it, and because it sorts lexicographically in the order it
+sorts chronologically — so a table column that sorts by rendered text is in
+chronological order without a special case. Then `stamp_secs`, `iso_date`,
+`clock`, `clock_secs`, `clock12`, `clock12_secs`, `long_date`, `medium_date`.
+
+The module deliberately does **not** decide between 12- and 24-hour, and does
+not decide whether seconds show. Those are *settings*, and a setting belongs
+with whatever owns it — the taskbar's `ClockDisplay`, the alarm clock's format
+enum. A shared formatter that owned them would have to be handed the settings,
+which is a wider coupling than handing it a zone.
+
+### Relative time is a different question, and stays rare
+
+The indexer renders "how long ago was this index built", and that stays
+relative (`textfmt::duration::relative`) rather than becoming a date. The
+reader's question there is *is this stale*, not *on what date*, and a date makes
+them do the subtraction. That is the only surface in the tree where it is the
+right shape; everything else that renders an instant renders it absolutely. The
+distinction is worth stating because "show a relative time, it's friendlier" is
+a plausible-sounding rule that would have hidden the undelete bug completely —
+`14 days ago` is wrong by a fortnight in a way nobody can see.
+
+### Alternatives rejected
+
+1. **Put it in `textfmt`, so headless programs reach it too.** `textfmt` is
+   zero-dependency by construction and a timestamp formatter needs `tzrules`.
+   The two headless offenders (`apps/backup`, `apps/indexer`) are handled
+   separately: the indexer needed a *duration*, which `textfmt` already has, and
+   `apps/backup` keeps its own calendar with a comment saying so and a request
+   open with lane B for `tzrules::civil_from_days`. Breaking `textfmt`'s
+   zero-dependency property to serve one caller is the wrong trade.
+2. **Make the zone optional, defaulting to UTC.** Rejected above: it recreates
+   the condition that produced the bug.
+3. **Thread a zone through to every app now.** There is no per-process zone
+   plumbing yet (known-issues `TD-NO-SYSTEM-DEFAULT-ZONE-WITHOUT-TZ`), and
+   inventing one as part of a formatting sweep would be a much larger change
+   made for the wrong reason. `Tz::utc()` at the call sites is the honest
+   interim, and it is honest *because* it is visible.
+4. **Leave the differences as house style.** Three of the thirteen were not
+   style. One was fourteen days wrong; two showed a day counter where a date
+   belongs.
+
+### Where the tests were
+
+Every one of the thirteen had a passing test. They passed because of what they
+did not ask:
+
+| Program | The assertion | What it could not notice |
+|---|---|---|
+| undelete | `!result.is_empty()`, `result != "Unknown"` | any date at all |
+| archive manager | `contains('-')`, `contains(':')` | `2026-13-40 25:99` |
+| task scheduler | `starts_with("2023-")` | any of that year's 365 days |
+| RSS reader | `starts_with("2024-01-01")` | the time of day, derived separately |
+| system restore | `== "D0"`, `== "D1"`, `== "D100"` | *correct* — it proved the day counter was a day counter |
+| backup settings | `contains("01:01")` | satisfied by `"Day 1 01:01"` |
+
+The last two are the instructive ones. They were not weak tests; they were
+*right about the wrong thing*. This is §486 again from another angle — a test
+that asserts what the code does, rather than what the user needs, is a test that
+locks the defect in. All six now assert a rendered value.
+
+---
+
 ## §340 — `libc.a`'s shape is now asserted by a script, and seventeen functions were split into one-function modules to satisfy it
 
 **Date:** 2026-08-20
@@ -28066,6 +28211,716 @@ about. Today it is unreachable from anything but the short-lived `loginctl`
 personality, which operates on an in-memory `Daemon` it built itself and throws
 away; `todo.txt` records that the caller check must land in the same change as
 the transport rather than after it.
+
+---
+
+## §342 — logind's bus interface authorises every method, and refuses outright when the kernel cannot say who is calling
+
+**Date:** 2026-08-20
+**Decided by:** Claude (autonomous)
+
+**In short:** logind can now be reached by other programs — it registers a name
+on the service registry and answers requests, which is what §341 promised and
+did not deliver. Every request is checked against *who sent it*. But the kernel
+currently cannot tell a service who connected to it, so logind does not know,
+so it says no to everything. That is on purpose: the alternative is a session
+manager that unlocks screens for anyone who asks nicely. The desktop's unlock
+path is finished on both ends and stays unusable until the kernel can identify
+a caller (requested from lane A).
+
+### What was decided
+
+Three things, and the second is the one with a real trade-off.
+
+**1. The transport is the service bus, not a Unix socket.** `libservicebus`
+already wraps the kernel's service registry, channels and completion ports, and
+`design.txt` is explicit that channel IPC is the primary IPC and that file
+descriptors are not. A socket would have been the familiar answer and the wrong
+one for this system.
+
+**2. An unidentified caller is refused, not defaulted.** This is the decision.
+`Connection::peer_credentials()` returns `Option<Credentials>`, and `None`
+means *the kernel could not tell us who this is*. Every method in
+`logind/src/bus.rs` treats `None` as untrusted and answers
+`system.logind.Error.UnknownCaller`.
+
+Since the kernel cannot answer *any* peer query today, that means the whole
+interface refuses every call. The alternative — treat an unidentified caller as
+the session's owner, on the grounds that in practice it usually is — would make
+the daemon immediately useful and would make `ForceUnlockSession` a
+password-free screen unlock available to any process that can open a channel.
+That is the exact hole §341 was written to close, reopened one layer down.
+
+The cost is real and worth naming: lane C's `apps/lockscreen` has both ends of
+its unlock path built and still cannot unlock a screen. Shipping something that
+works by trusting its input would have hidden that, which is the point — a
+security property that is only enforced once someone remembers to enforce it is
+not a property. Filed as
+`requests/b-a-a-service-cannot-find-out-who-is-calling-it.md`; landing it is a
+one-line change on this side because every caller is already written against
+the fail-closed contract.
+
+**3. Someone else's session is reported as absent, not as forbidden.** A
+non-root caller asking about a session it does not own gets `NoSuchSession` —
+the same answer an imaginary session gets. `AccessDenied` would have been more
+informative and would also have confirmed that the session exists, which is a
+fact about another user. The one exception is `ForceUnlockSession`, which
+checks root *before* looking the session up, so that its error code cannot be
+used to enumerate session ids either.
+
+### Where the argument encoding went
+
+`Message` carries an opaque payload, which is right for a transport — a
+compositor's pixel buffer and a session manager's arguments have nothing in
+common. But that leaves *argument lists* unspecified, and an unspecified thing
+every service needs is a thing every service invents separately. That is
+§329 (three disagreeing password hashers) and §330 (five disagreeing YAML
+parsers) in advance. So the length-prefixed field codec lives in
+`libservicebus::fields`, once, with the hostile-input tests attached to it
+rather than to its first caller.
+
+Fields are bytes, not `String`: a password is whatever the user typed, and a
+codec that insisted on UTF-8 would refuse a legitimate password rather than
+fail to match it — a far more confusing bug than the one it prevents.
+
+### What was not decided here
+
+Whether the credentials should come back from `SYS_SERVICE_ACCEPT` directly
+rather than from a separate call, and whether the same record should back a
+`SO_PEERCRED` on unix-domain sockets. Both are lane A's to answer; the request
+asks the questions and commits to following whichever way they go.
+
+---
+
+## §343 — `tzrules` exports both directions of the civil-date bijection, because exporting one of them cost six transcriptions and one wrong date
+
+**2026-08-20** · **Decided by:** Claude (autonomous)
+(lane C proposed the change and lane B agreed; lane C also offered an
+alternative, which was declined — see below)
+
+**In short:** the timezone crate could turn a calendar date into a day number
+but not the other way round, even though the code to do it was already sitting
+inside another function and being thrown away. Six different parts of the tree
+had each written the missing half for themselves, and one of them **guessed**
+— the file manager showed a made-up date for every file last written before
+March 2000. The fix is one `pub fn`, and the interesting part is why it took a
+bug to notice.
+
+### The situation
+
+`tzrules::days_from_civil(year, month, day) -> i64` was public. Its inverse
+was not — but `year_of_day(days) -> i64` ran the whole inverse (Hinnant's
+`civil_from_days`) and returned only the year, discarding the month and the
+day it had just computed two lines earlier.
+
+Lane C found six independent re-derivations of the missing direction while
+migrating GUI apps onto a shared `guitk::date`
+(`requests/c-b-year-of-day-computes-the-month-and-day-and-throws-them-away.md`):
+`gui/toolkit`, `apps/archivemanager`, `apps/taskscheduler`, `apps/rssreader`,
+`apps/explorer` and `apps/backup`. Five were right. `apps/explorer` estimated
+the year as `1970 + days / 365` and the month as `day_of_year / 30 + 1`,
+clamped to at most month 12 and day 28.
+
+The clamp is the part worth remembering. A file written on 1985-07-04 was
+listed as 1985-07-09; 1999-06-15 as 1999-06-23; and 2000-02-29 — a real leap
+day — as 2000-03-07. **Every value it produced was in range**, so no
+assertion, no clamp and no type could have caught it. Only comparing it
+against a second implementation could, and there was no second implementation
+to compare against, because the correct one was private.
+
+Two days later, before this decision was written up, lane C's wider sweep
+(`f638fd156`, `gui/toolkit/src/datetime.rs`) put the count at **thirteen**
+surfaces and turned up two more of the same kind. The undelete tool computed
+the year as `days / 365` and the month as `remaining / 30`, drifting about
+five days per year and already a fortnight wrong by 2026 — on the one column a
+user reads to tell two copies of a deleted file apart. System restore labelled
+its restore points `D20683`, which is not a wrong date so much as no date at
+all. Same shape, different app, found a different way, and neither found by
+the other's investigation.
+
+That is the argument for this change better than it was originally stated. It
+kept happening not because anyone was careless, but because the correct
+implementation was unreachable and an incorrect one was four lines away.
+
+### The decision
+
+Make `civil_from_days` public and define `year_of_day` in terms of it:
+
+```rust
+pub fn civil_from_days(days: i64) -> (i64, u32, u32);
+pub fn year_of_day(days: i64) -> i64 { civil_from_days(days).0 }
+```
+
+### The alternative that was declined
+
+Lane C offered to do it the other way instead: carve `guitk::date::Date` out
+into its own dependency-free crate — as `randrange` was already carved out of
+the toolkit so the credential service would not have to link fonts — and have
+both `guitk` and `apps/backup` depend on that.
+
+That works, and it solves the immediate problem (`apps/backup` is a headless
+command-line archiver and must not link a GUI toolkit to print a date). It was
+declined because it does not touch the cause. `tzrules` would still export one
+direction of a bijection, and the seventh caller who needs the other direction
+— in a crate that depends on neither `tzrules`' new crate nor `guitk` — writes
+the seventh transcription. The asymmetry *is* the defect: six copies of a
+function whose forward direction was already public is not six people being
+careless, it is one missing `pub`.
+
+The counter-argument, which is real: a timezone crate is an odd home for a
+general calendar conversion, and putting it there means every consumer of
+`tzrules` links it. It is fourteen lines of branch-free integer arithmetic in
+a `no_std`, dependency-free crate that already contains `is_leap`,
+`days_in_month` and `days_from_civil`, so the cohesion objection is weaker
+than it looks — the calendar helpers were already there, and `civil_from_days`
+was already there too, just unnamed.
+
+### Why the test is a round trip and not a table
+
+`days_from_civil(civil_from_days(x)) == x`, day by day, over 1900–2100.
+
+A table of expected `(year, month, day)` values would have been written by the
+same person who wrote the function, and would encode the same
+misunderstanding — which is exactly how `apps/explorer` passed whatever review
+it got. The round trip is a second opinion that costs nothing, because the
+other direction already existed and was already trusted. Three further tests
+cover the dates from lane C's bug report by name, the far-out-of-era range
+that `days_from_civil`'s doc comment promises but nothing tested (year 1, year
+−400, century leap and non-leap years), and the invariant that `year_of_day`
+never disagrees with `civil_from_days` — that last one is redundant today and
+exists so that re-inlining the year projection has to get the March-based
+January/February shift right a second time, under test.
+
+### Consequence for the fixtures
+
+`tzrules` is linked into `libc.a`, so this change makes the nine
+`services/ctest-*` ELF fixtures stale by the `scripts/stamp-ancestry.py`
+definition, and they are rebuilt in the same change.
+
+---
+
+## §492 — The taskbar clock abbreviates the date the calendar popup spells out
+
+**Date:** 2026-08-21
+**Decided by:** Claude (autonomous)
+
+**In short:** The Date & Time settings page has two switches, "show day of
+week" and "show date", both on by default, both documented as applying "in the
+taskbar clock". Neither reached the taskbar — you could toggle them all day and
+the corner of the screen never changed. Making them work meant deciding what
+the corner of the screen should actually say, because a date has two spellings
+in this tree already: the popup's `Thursday, August 21, 2026` and nothing else.
+The decision is that the taskbar uses a short form — `Tue Aug 18 16:30` — with
+no year, while the calendar popup keeps the long one.
+
+**The tradeoff.** The long form is the one the tree already had, so reusing it
+verbatim would have been the smaller change and would have guaranteed the two
+surfaces agreed letter for letter. Against that:
+
+- **It does not fit.** The tray had 80 logical pixels for the reading.
+  `Thursday, August 21, 2026 16:30` is roughly 190 at the body font size. The
+  tray is now measured rather than fixed (`DesktopShell::tray_width`), so it
+  *could* have grown to 190 — but that is a fifth of a 1024-wide display spent
+  on a clock, taken from the window buttons.
+- **The year is the field nobody reads at a glance.** A taskbar clock answers
+  "what time is it" and, secondarily, "what day is it". It does not answer
+  "what year is it"; anyone who needs that opens the calendar.
+- **Every other desktop abbreviates here.** GNOME's top bar, macOS's menu bar
+  and the Windows taskbar all use short weekday and short month (or a numeric
+  date). A user arriving from any of them expects three letters.
+
+**What this is not.** It is not a second calendar. Both spellings come from the
+same `guitk::date` tables — `Weekday::name`/`Weekday::short_name` and
+`date::month_name`/`date::month_short_name` — reached through the same
+`ClockDisplay`, from the same zone-shifted instant. The long form is now
+*defined as* the composition of `format_day_of_week` and
+`format_calendar_date`, so it cannot drift from the short one by more than the
+abbreviation itself. That is the distinction §491 turns on: one calendar, two
+presentations, is fine; two calendars is the defect.
+
+**Why the reserved width is measured over the widest reading and not the
+current one.** `ClockDisplay::reading_width` assembles the widest weekday
+abbreviation, the widest month abbreviation and the widest digit — measured in
+the actual face, because which of those is widest is a property of the font —
+and returns the width of *that*. The obvious alternative, measuring the reading
+being drawn, makes the slot change width whenever a digit changes, which
+shuffles every tray item to its left once a minute. Sizing the slot to a
+constant string and drawing into its left edge costs a few pixels of slack and
+buys a still layout.
+
+**Reversible in one `format!`.** If the operator wants the year, or a numeric
+`2026-08-18`, it is the body of `ClockDisplay::format_taskbar` and the matching
+arm of `widest_reading`. The tray resizes itself around whatever it returns.
+
+---
+
+## §344 — CPython's stdlib ships as one STORED zip, and the two configure defects that made the first measurement meaningless
+
+**2026-08-21** · **Decided by:** Claude (autonomous)
+
+**In short:** we had a Python interpreter that linked against our own C library
+and could not run a single line of Python. Two settings in CPython's build
+system were quietly describing the *build machine* instead of SlateOS, so the
+thing we had measured and called a success was a stripped-down interpreter with
+no working standard library. Fixing them turned 31 usable modules into 83 and
+cost six new C-library functions. The library itself is now one 20 MB file
+rather than 569 small ones, which is the layout CPython was already looking for.
+
+### What was wrong, and why it looked right
+
+Both defects produced a build that **exited 0**. Neither announced itself.
+
+**1. `MODULE_BUILDTYPE` defaults to `shared`.** CPython 3.12's `configure`
+contains `MODULE_BUILDTYPE=${MODULE_BUILDTYPE:-shared}` and only overrides it
+for wasm hosts. We were passing `--disable-shared`, which reads like it settles
+the question, and does not: it governs *libpython*, while the stdlib's C
+extensions are a separate axis. So `_struct`, `_json`, `math`, `_socket`,
+`select` and forty-odd others were built as `.so` files in `lib-dynload` — on a
+system with no dynamic loader, files that can never be opened.
+
+The failure surfaced only when something tried to *use* the interpreter:
+`import struct` gives `ModuleNotFoundError: No module named '_struct'`.
+`sys.builtin_module_names` held **31** entries, the frozen bootstrap set and
+nothing else. With `MODULE_BUILDTYPE=static` it holds **83**.
+
+**2. `pkg-config` answers for the host.** `configure` finds zlib, OpenSSL,
+libffi, sqlite3, liblzma, bzip2, ncurses, readline and libuuid through
+`pkg-config`, which in a cross build cheerfully describes Ubuntu's library set.
+CPython therefore compiled `zlib`, `binascii` and `_ctypes` against host
+headers and then failed to link them — and the spike's README recorded this as
+"expected and irrelevant". It was neither: `MAKE_EXIT` was **2**, the build was
+failing, and the failure had been read as normal for weeks.
+`PKG_CONFIG_LIBDIR=/nonexistent-slateos-cross` makes every probe answer "no",
+which is *the truth for our sysroot*. `MAKE_EXIT` is now 0 with zero error
+lines.
+
+The general rule, which is not specific to CPython and is worth carrying to the
+next port: **in a cross build, a probe that consults the host is not a failed
+probe, it is a wrong answer.** A cross build should be configured so that every
+"do we have X?" question is answered by the sysroot or answered "no".
+
+### What it cost, and what it bought
+
+`REFERENCED_EXTERNAL` — the count of libc symbols CPython genuinely needs
+somebody else to provide — went from **363 to 478**. That is not a regression;
+those 115 symbols were always going to be needed by an interpreter that can
+`import struct`. The 363 was an honest measurement of the wrong binary.
+
+Six of the 478 were missing and are now written (`posix/src/shadow.rs`,
+`posix/src/socket.rs`): `getspnam`, `getspent`, `setspent`, `endspent`,
+`gethostbyname_r`, `gethostbyaddr_r`. `MISSING_AT_LINK` is back to 0.
+
+### The standard library as one file
+
+**Decision: pack `Lib/` into a single `ZIP_STORED` `python312.zip`, containing
+both `.py` and `.pyc`, compiled with `unchecked-hash` invalidation and with the
+target path baked into the code objects.**
+
+*Why a zip at all.* `<prefix>/lib/python312.zip` is the **first** entry of
+CPython's default `sys.path` and `zipimport` is frozen into the binary. This is
+not an optimisation bolted on afterwards; it is the layout CPython already
+looks for before anything else. The alternative is 569 files and ~12 MB of
+small reads our ext4 driver walks at every boot to deliver exactly the same
+modules.
+
+*Why STORED rather than deflated.* `zlib` has no target build, so `zipimport`
+cannot inflate a compressed member. This is measured, not reasoned: the
+deflated variant of this archive fails at startup with `No module named 'zlib'`
+raised from inside `<frozen zipimport>`. The cost is real — deflate takes the
+same content from 10.3 MB to 2.6 MB — and the trade is revisitable the day zlib
+is ported. Until then `create-ext4-rootfs.sh` asserts zero deflated members at
+stage time, because a build host whose `zipfile` defaults changed would
+reintroduce this invisibly.
+
+*Why `unchecked-hash`.* A normal `.pyc` records the source's mtime and size and
+the loader re-validates against them. Inside a zip that check is answered from
+the zip's own directory entry, which is a different clock from the one that
+compiled the file — one skewed timestamp and every module silently falls back
+to re-parsing source on every single import. `unchecked-hash` removes the
+question instead of trying to answer it, which is the right call for a stdlib
+shipped as one immutable file. If it is ever edited in place, that is a rebuild
+of the artifact, not a cache-invalidation event.
+
+*Why both `.py` and `.pyc`, at the cost of roughly half the 20 MB.*
+`zipimport` tries `.pyc` first, so imports never parse source; the `.py` rides
+along purely so tracebacks and `inspect.getsource` show real lines. On a system
+where a Python traceback may be the only debugging tool that works, that is
+worth its megabytes — and it is verified rather than asserted: `stdlib.sh`
+provokes a `json` error and checks the formatted traceback contains a source
+line, from a file that does not exist on disk.
+
+*Alternative considered and rejected: strip the pure-Python halves of modules
+whose C extension is absent* (`ssl`, `sqlite3`, `bz2`, `lzma`). Keeping them
+means `import ssl` fails with `No module named '_ssl'`, which names the actual
+missing piece. Deleting them would report `No module named 'ssl'` and send
+whoever hits it looking for the wrong thing. A misleading error is more
+expensive than a megabyte.
+
+### `sp_pwdp = "!"`
+
+`pwd.rs` had long reported `pw_passwd = "x"` for root — the Unix convention for
+"the hash lives in the shadow database" — with no shadow database for it to
+point at. `shadow.rs` supplies one, and the entry it returns has `sp_pwdp` set
+to `"!"`.
+
+Three candidates, and the reasoning is a security argument rather than a
+preference:
+
+| Value | Consequence |
+|---|---|
+| `""` (empty) | An empty hash **authenticates anybody**. Not a candidate. |
+| absent (`getspnam` returns NULL) | Contradicts `getpwnam`, which does report root. Any caller that consults both learns the database disagrees with itself. |
+| `"!"` | Cannot be produced by `crypt`, so no supplied password can ever match it. The database exists, agrees with `pwd`, and can never grant access. |
+
+### The interpreter ships stripped of DWARF but not of symbols
+
+`--strip-debug`, not `strip`: 35.7 MB becomes 11.2 MB. Nothing on SlateOS can
+read DWARF (there is no debugger, and the ELF loader maps `PT_LOAD` only, so
+`.debug_*` is 24.5 MB the ext4 driver stores and never reads). The extra 1.1 MB
+that `--strip-debug` keeps is `.symtab`, which is the only thing that could
+turn a fault address from the kernel into a function name — and a *name* is
+what survives having no source tree on the target, whereas a *line* is not.
+The unstripped binary stays in the build tree beside the objects its debug info
+refers to, which is the only place it means anything.
+
+Verified rather than assumed: every `PT_LOAD` segment (offset, vaddr, filesz,
+memsz, flags) and the entry point are byte-identical before and after, and
+`.eh_frame`/`.eh_frame_hdr` survive.
+
+### Status
+
+The interpreter has still never executed on SlateOS. Everything above was
+measured on the host — by the linker, or by the musl-linked control interpreter
+`make` builds from the identical objects. The remaining unknowns are ours, not
+CPython's: whether our ext4 driver, `mmap`, tty and `getrandom` behave the way
+`zipimport` and `init_fs_encoding` assume. That needs a Path-Z self-test in
+`kernel/src/proc/spawn.rs`, which is lane A's tree — filed as
+`requests/b-a-cpython-path-z-self-test.md`.
+
+---
+
+## §493 — The extra clocks surface in the calendar popup, not stacked in the tray
+
+**Date:** 2026-08-21
+**Decided by:** Claude (autonomous)
+
+**In short:** The Date & Time settings page lets you add up to four extra
+clocks for other cities — "London", "Tokyo" — each with a name and an on/off
+switch. Nothing anywhere drew one. The switch's only effect was to print the
+word "Hidden" beside its own row, in the very panel that set it. Making them
+appear meant choosing *where*, and there were two real places: stacked under
+the clock in the corner of the taskbar, or in a band across the top of the
+calendar popup that the clock opens. The decision is the popup.
+
+**The tradeoff.** Stacking them in the tray is the more discoverable option and
+it is the one the orphaned code was already shaped for — `ClockDisplay::render`
+draws the time, the long date and a row per extra zone vertically, which is a
+tray popout's layout, not a single taskbar line. Choosing the tray would have
+been the smaller edit. Against that:
+
+- **The taskbar has no room and the popup has plenty.** The tray is sized to
+  the *widest reading its own switches allow*, not the current one — that is
+  what `clock_width` computes and what
+  `the_clocks_target_covers_the_reading_that_is_drawn` holds it to. Four extra
+  zones would multiply that height by five and widen it to the longest city
+  name. On a 1024-wide display that takes the space the taskbar's window
+  buttons live in, so adding a clock for Tokyo would silently cost you the
+  ability to click between windows.
+- **A taskbar clock answers one question.** "What time is it here." A user who
+  wants to know what time it is in Tokyo is already asking a second question,
+  and asking a second question is what opening the calendar *is*. Putting the
+  answer one click away costs that user a click and costs everyone else
+  nothing; putting it in the tray costs everyone else bar space permanently.
+- **Every other desktop puts it behind the click.** Windows 10/11's calendar
+  flyout, macOS's date-and-time menu and GNOME's clock drop-down all show
+  additional time zones in the panel the clock opens, never in the bar itself.
+
+**The cost of the choice, stated plainly.** The extra clocks are now invisible
+until you click the clock. A user who adds "Tokyo" in the settings panel and
+then looks at the taskbar sees no change and may conclude the switch still does
+nothing — which is exactly the complaint this decision was meant to end. The
+mitigation is that the popup is one click from the thing they were looking at,
+and that the settings panel lists each added clock with its own live reading —
+so the switch visibly does *something* at the point of use, even before you go
+looking for the band. If the operator would rather have it in the bar, see
+"reversible" below.
+
+**What it made possible, which the tray option would not have.** The popup's
+band is `ClockDisplay::render` — the same function, with the same signature,
+that `CalendarView::render_tray_clock` forwards to for the one-line taskbar
+reading. So the tree ends with **one** function that turns a `ClockDisplay`
+into pixels, which is what `TD-C-CLOCKDISPLAY-RENDER-HAS-NO-CALLER` was
+actually asking for. The tray option would have reached the same place, but by
+deleting the shell's own drawing path instead, and that path is the one with
+the measured-width invariant on it.
+
+**Two smaller calls inside this one:**
+
+- **The band is rebuilt on every open, not cached.** `DesktopShell::popup_clock`
+  runs in `toggle_calendar`, so a zone added while the popup was shut is in the
+  band the next time it opens. A cached band would be a second copy of the
+  settings, and a settings panel whose changes do not take effect until restart
+  is the failure this whole entry is about.
+- **An unresolvable zone is dropped, not shown at UTC.** If an
+  `AdditionalClock`'s `tz_id` is not in `available_timezones`, the row is
+  omitted. The alternative — fall back to UTC and keep the label — draws a row
+  reading "Mars 22:13" that is really the viewer's own UTC time under someone
+  else's name. A missing row is a visible bug; a wrong row is an invisible one.
+
+**Reversible.** The band's *content* is `DesktopShell::popup_clock`, and its
+*position* is the single `header` field on `CalendarView`. Moving the extra
+zones to the tray means calling `ClockDisplay::render` from `render_taskbar`
+instead and letting `tray_width` measure the taller block — the layout already
+computes its own height (`ClockDisplay::render_height`), so nothing needs new
+geometry. The switches, the labels and the zone lookup are unaffected either
+way.
+
+## §494 — Stacking is three named bands, not a depth number, and a raise never leaves its band
+
+**Date:** 2026-08-21
+**Decided by:** Claude (autonomous)
+
+**In short:** A desktop has three kinds of surface: a wallpaper that belongs
+behind everything, ordinary application windows, and the shell's own furniture
+— taskbar, start menu, popups — that belongs in front of everything. Until now
+the compositor had one flat pile and every window that was clicked went to the
+very top of it, so a taskbar would have been an ordinary window that disappeared
+behind the first application the user clicked on. The fix is to give each window
+a *band* it is created in and can never leave; clicking still raises a window,
+but only as far as the top of its own band.
+
+**The alternative, and why not:** the obvious cheaper design is an integer depth
+on each window — wallpaper 0, applications 100, taskbar 1000 — sorted at
+composite time. It is less code and needs no new type. It was rejected on two
+counts.
+
+The first is that a depth number does not survive a raise. Raising means "put
+this in front of its peers", which with numbers means picking a new number
+larger than theirs, and there is no such number that is also smaller than the
+next band's. Every scheme that fixes this — renumbering the band on each raise,
+reserving gaps, using floats — is re-deriving a sorted list, badly, in a
+representation that cannot express the constraint the list exists to enforce.
+
+The second is that an open-ended depth encodes policy nobody wrote down. Each
+new surface picks a number, and the numbers only mean something relative to
+numbers chosen elsewhere in the tree; the next person adding an on-screen
+display has to read every other surface's constant to find out what to type.
+Three named roles say the same thing in a form the compiler checks, and there
+are exactly three because three is what a desktop actually distinguishes.
+
+**The representation, and the invariant it rests on:** `z_stack` stays one flat
+`Vec<WindowId>`, kept partitioned by band in ascending order. It is not three
+stacks, because roughly ten places already walk `z_stack` — the occlusion cull,
+input hit-testing, damage, scene capture, direct-scanout eligibility — and every
+one of them is correct as written against a single bottom-to-top list. Three
+stacks would make each of those chain three iterators in the right order, which
+is ten new chances to get the order wrong for one saved invariant.
+
+The invariant is instead concentrated in one place: `stack_insertion_index`
+*counts* the windows in bands at or below a given one, which is the correct
+insertion point exactly while the stack is sorted, and `raise_within_layer` is
+the only thing that ever inserts. `the_stack_stays_partitioned_by_band_under_
+arbitrary_raises` re-checks the sortedness after every raise of every window
+over three rounds, because a counting function silently returns a plausible
+wrong answer the moment its precondition lapses.
+
+**A consequence worth naming: focus is confined but not banded.** Clicking an
+application still focuses it even though it cannot rise above the taskbar — the
+band restricts stacking only. The one place the band does reach focus is
+*automatic* refocus when a window closes: that now picks the topmost remaining
+window at or below the closed window's band, because the old "topmost remaining
+window" would have meant closing an application hands the keyboard to the
+taskbar, which is in front of everything by construction and is never what the
+user was about to type into.
+
+**Compatibility:** `Layer::Normal` is the `Default` and what `WindowSpec::new`
+sets, so every existing caller is unchanged — with all windows in one band the
+insertion index is always the length of the stack, which is the `push` the code
+did before. The 194 pre-existing compositor tests passed untouched, which is the
+evidence for that claim rather than an argument for it. On the wire the layer is
+one trailing byte on `CreateWindow`, and an unrecognised value is a decode error
+rather than a default: a peer whose taskbar we silently filed under
+"application" would give the user a broken desktop instead of a refused
+connection.
+
+**Reversible:** yes. Deleting the field returns the flat stack; nothing outside
+`raise_within_layer`, `stack_insertion_index` and the `CreateWindow` codec knows
+the concept exists.
+
+## §495 — A shell learns the desktop by subscribing to a pushed snapshot, and the compositor decides it is stale by comparing bytes rather than counting changes
+
+**Date:** 2026-08-21
+**Decided by:** Claude (autonomous)
+
+**In short:** A taskbar has to show a button per open window, but until now a
+client could only see the windows it opened itself — so the shell could draw a
+taskbar with nothing in it and no way to find out what was missing. This adds a
+way for a program to say "tell me about everyone's windows", after which the
+compositor sends the whole list whenever it changes. Two things had to be
+chosen: *when* the compositor decides the list changed, and *what* stops any
+program from using this to read every window title on the desktop. The first is
+decided here; the second is not solved and is written down as a known issue.
+
+### What was added
+
+A new frame kind, `WLST`, carrying one entry per window: id, owning process,
+band (`Layer`), title, and four state flags (visible, minimized, maximized,
+focused). A new request, `SubscribeWindowList { subscribe: bool }`, turns the
+stream on and off. The client stores the latest list and a revision counter; a
+shell redraws when the counter moves.
+
+Three properties, each deliberate:
+
+- **Push, not poll.** A taskbar that polled would either lag by up to a frame
+  or ask every frame for an answer that almost never changes.
+- **Snapshot, not delta.** A shell that missed one delta would be wrong
+  forever, with nothing in the protocol to tell it so. A snapshot is
+  self-correcting: the next one is the whole truth regardless of what came
+  before. At desktop scale — tens of windows, one subscribed shell — the cost
+  of re-sending is a few hundred bytes.
+- **Unfiltered.** The compositor sends *every* window: invisible ones,
+  minimized ones, every band. Filtering is the shell's decision and different
+  jobs need different subsets — a taskbar wants minimized windows and not
+  overlays; an Alt-Tab switcher wants neither. A compositor that pre-filtered
+  would have to pick one, be wrong for the other, and leave the loser with no
+  way to recover what was dropped.
+
+### The decision: comparing bytes vs. counting changes
+
+The obvious design is an epoch counter on the compositor, bumped wherever the
+window set is touched, with each link remembering the epoch it last sent. It is
+cheap and it is what most compositors do.
+
+It was rejected because of *where the bug lives*. The bump sites are
+`create_window_from_spec`, `destroy_window`, `set_title`, `focus_window`,
+`minimize_window`, `restore_window`, `maximize_window`, `set_layer` — eight
+today and more later. A future edit that changes a title without bumping does
+not fail: it silently leaves a taskbar showing a stale name until something
+unrelated moves the counter. That is a bug with no test that could plausibly
+catch it, in a place nobody would think to look. It is the same trap §494
+named in the stacking order: *counting* a property is correct only while its
+precondition holds, and a lapsed precondition returns a plausible wrong answer
+rather than an error.
+
+What ships instead: `route_window_list` encodes the list every tick and
+compares the bytes to the exact bytes it last sent that link. Identical means
+nothing goes out. **There is no site to forget** — staleness is derived from
+the thing that would actually be wrong, so a new window-mutating method is
+covered the moment it exists, without its author knowing this protocol is
+there.
+
+*Cost:* one encode per subscribed client per frame — a few hundred bytes of
+formatting for tens of windows, against a frame budget of milliseconds. If
+that ever matters, the fix is to encode once and compare per link, not to go
+back to counting.
+
+*Byte comparison, not a hash:* a hash collision means a *missed* update, i.e.
+a permanently stuck taskbar, which is far worse than the bytes it saves. The
+compared buffer is the message that would be sent anyway.
+
+### What is deliberately not solved: any client may enumerate every title
+
+A window title is often a filename, a URL, or a subject line. Subscribing is
+open to any client, so this is a real information leak, recorded in
+`known-issues.md` as `TD-C-ANY-CLIENT-CAN-READ-EVERY-WINDOW-TITLE`. Real
+Wayland gates the equivalent behind a privileged protocol that only a
+compositor-trusted shell can bind.
+
+The alternatives were: (a) ship it ungated and record the debt, (b) gate it on
+something available today, or (c) not ship it, leaving the shell unable to
+draw a taskbar. (b) is the right answer and cannot be written yet — the honest
+gate is a capability, and kernel channel IPC does not yet carry capabilities to
+the compositor, so anything written today would be a check against a value the
+client itself supplies, which is not a gate but the appearance of one. (c)
+blocks the shell on a kernel feature. So (a), with the debt named and the
+proper fix stated: one capability check in `answer_requests`, at the one place
+the subscription is granted.
+
+**Reversible:** yes, and cheaply. The subscription is link state in
+`ClientLink`, the query is one method on `Compositor`, and the frame kind is
+additive — a peer that does not know `WLST` never subscribes and never
+receives one.
+
+## §496 — A remembered "allow" expires after eight hours; a remembered "deny" never does
+
+**Date:** 2026-08-21
+**Decided by:** Claude (autonomous)
+
+**In short:** When the desktop asks "may this program use your microphone?",
+there is a *Remember this* checkbox. Ticking it and clicking Allow used to mean
+"never ask me again for the rest of this session" — the timestamp the dialog
+recorded alongside the decision was written and never looked at. Now a
+remembered *yes* stops answering after eight hours and the user is asked again,
+while a remembered *no* keeps answering forever. The two directions are treated
+differently on purpose.
+
+**Where:** `gui/desktop/src/security_dialog.rs` — `RememberedDecision::is_live`
+and `REMEMBERED_ALLOW_LIFETIME_MS`.
+
+### Why the asymmetry
+
+An old refusal cannot become dangerous. The worst a stale "no" does is keep
+refusing something the user already refused, and the user has an obvious way
+out: start the program again and answer differently. Expiring denials buys
+nothing and costs a re-prompt for a question already settled.
+
+An old grant gets *more* dangerous with age, along two axes the user cannot
+see. The program may have been updated since — the binary that has the
+microphone right is not the binary that was granted it. And the user simply
+forgets: a permission given in the morning is invisible by evening, because
+there is no revocation UI in which to notice it. Nothing else in the shell can
+take a right away, which is what makes the expiry load-bearing rather than
+merely tidy: it is currently the *only* path by which a granted capability is
+ever given back.
+
+So the risk-free direction is remembered indefinitely and the risky one is not.
+This matches how a user reasons about the checkbox — "remember" plainly means
+"don't pester me", not "grant permanently" — and it fails in the direction of
+asking too often rather than granting too long.
+
+### Why eight hours specifically
+
+It is a policy, not a constraint, and it is chosen to be about one working
+session: a permission granted in the morning is asked for again the next day.
+The tradeoff is "asked too often" against "granted longer than intended", and
+the honest position is that any value in the 4–24h range would be defensible.
+What is *not* defensible is infinity, which is what the code did before, because
+infinity has no way back — with no revocation UI, a permission granted once was
+granted for the life of the session no matter what the user later thought of it.
+
+If a revocation UI is ever built (a "programs you have allowed" list with a
+Forget button), this constant becomes much less important and could reasonably
+be lengthened. Until then it is the whole mechanism.
+
+### Alternatives considered
+
+- **Expire both directions equally.** Symmetric and simpler to explain, and
+  rejected because the symmetry is fake: the two decisions have opposite risk
+  profiles under aging. It costs the user re-prompts for questions they have
+  already answered no to, in exchange for no safety at all.
+- **Expire neither** (the previous behaviour). Rejected: see above — a grant
+  with no expiry and no revocation is unconditional.
+- **Expire on program restart rather than on a clock.** Arguably the better
+  rule, and not available: the dialog is keyed on process name and rights, and
+  has no notion of a program's identity across restarts. Worth revisiting when
+  the shell can be told that a pid exited.
+
+### The clock going backwards
+
+`is_live` uses `saturating_sub`, so a `now_ms` earlier than the recorded stamp
+reads as *not yet expired* rather than as an age of nearly `u64::MAX`. The
+alternative underflows — which in release would wrap to an enormous age and
+silently expire every remembered decision at once, and in debug panics inside a
+security dialog. The chosen direction costs at most one prompt's worth of
+trust; the other costs the whole feature at the moment the clock hiccups. This
+is a monotonic clock that should never go backwards anyway, so the branch exists
+to make the failure boring rather than because it is expected.
+
+Both halves of the asymmetry and the backwards-clock branch are covered by
+tests proved real by reintroduction: making `is_live` always return true fails
+the grant-expiry test, dropping the denial exemption fails the refusal test, and
+replacing `saturating_sub` with `-` panics the backwards-clock test with
+`attempt to subtract with overflow`.
 
 ---
 

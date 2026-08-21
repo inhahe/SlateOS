@@ -256,6 +256,37 @@ impl Socket {
     }
 }
 
+/// How many bytes the next chunk read may take, given how many this call has
+/// taken already.
+///
+/// Clamping here rather than checking after the read is what makes
+/// [`MAX_READ_PER_CALL`] an actual cap. The loop's guard is tested *before* its
+/// body, so a body that always reads a whole `CHUNK` has the postcondition
+/// `total < MAX_READ_PER_CALL + CHUNK` instead — it lands on the cap exactly
+/// only while every read is full-length. That holds on an idle machine, where
+/// `total` walks the `CHUNK` grid and `MAX_READ_PER_CALL` is exactly `32 *
+/// CHUNK`, and stops holding the moment the peer's writer is descheduled
+/// mid-stream: one short read takes `total` off the grid and the final
+/// iteration straddles the boundary.
+///
+/// Nothing is lost by the shorter read. The remainder stays in the kernel
+/// buffer, which is what `MAX_READ_PER_CALL`'s own doc comment promises
+/// happens to everything past the cap, and [`Socket::wait`] reports it as
+/// readable immediately.
+///
+/// **This is a free function because the bug was invisible to every test that
+/// could be written against the socket.** Provoking it needs a short read to
+/// land mid-loop, which depends on when the OS deschedules the writer thread;
+/// lane B hit it in ordinary workspace runs and then failed to reproduce it in
+/// 128 deliberate attempts. As a function of `total` alone the property is
+/// exhaustively checkable, and
+/// `the_read_budget_never_lets_a_chunk_cross_the_cap` checks it. See
+/// `requests/b-c-guiremote-read-can-overshoot-its-own-cap-by-one-chunk.md`.
+const fn read_budget(total: usize) -> usize {
+    let remaining = MAX_READ_PER_CALL.saturating_sub(total);
+    if remaining < CHUNK { remaining } else { CHUNK }
+}
+
 impl Transport for Socket {
     type Error = io::Error;
 
@@ -263,7 +294,8 @@ impl Transport for Socket {
         let mut total = 0usize;
         let mut chunk = [0u8; CHUNK];
         while self.open && total < MAX_READ_PER_CALL {
-            match self.stream.read(&mut chunk) {
+            let want = read_budget(total);
+            match self.stream.read(chunk.get_mut(..want).unwrap_or(&mut [])) {
                 Ok(0) => {
                     // End of stream. Not an error — see `is_hangup`.
                     self.open = false;
@@ -732,6 +764,41 @@ mod tests {
         drop(writer.join().expect("writer thread"));
         assert_eq!(got.len(), total, "byte count differs");
         assert_eq!(got, payload, "bytes differ");
+    }
+
+    /// The cap holds from *every* starting total, not just the ones a run of
+    /// full-length reads can reach.
+    ///
+    /// `one_read_is_bounded_so_a_fast_peer_cannot_starve_dispatch` above is the
+    /// test that found the bug, and it found it twice in a loaded workspace run
+    /// and never once in 128 attempts aimed at it — because reaching an
+    /// off-grid `total` needs the OS to deschedule the writer at the right
+    /// moment. This one reaches every off-grid total on purpose.
+    #[test]
+    fn the_read_budget_never_lets_a_chunk_cross_the_cap() {
+        for total in 0..=MAX_READ_PER_CALL {
+            let want = read_budget(total);
+            assert!(want <= CHUNK, "budget at {total} exceeds one chunk");
+            assert!(
+                total.saturating_add(want) <= MAX_READ_PER_CALL,
+                "budget at {total} overshoots the cap"
+            );
+        }
+
+        // On the grid, the budget is a whole chunk and the walk ends exactly on
+        // the cap — the case that used to make the unclamped loop look correct.
+        assert_eq!(read_budget(0), CHUNK);
+        assert_eq!(read_budget(MAX_READ_PER_CALL - CHUNK), CHUNK);
+
+        // Off the grid. 5,024 bytes of remaining budget is the state lane B's
+        // failure trace showed; the unclamped loop read a whole 8,192 there and
+        // returned 265,312 against a 262,144 cap.
+        assert_eq!(read_budget(MAX_READ_PER_CALL - 5_024), 5_024);
+
+        // Past the cap the loop's own guard has already stopped it, but the
+        // budget must still be a refusal rather than a wrap.
+        assert_eq!(read_budget(MAX_READ_PER_CALL), 0);
+        assert_eq!(read_budget(usize::MAX), 0);
     }
 
     #[test]

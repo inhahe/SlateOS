@@ -66,6 +66,24 @@ cd "Python-$VER"
 
 export CC="$SLATE_CC" AR="$SLATE_AR" RANLIB="$SLATE_RANLIB"
 
+# Blind pkg-config. This is not tidiness, it is the difference between a usable
+# interpreter and a toy.
+#
+# CPython 3.12 finds zlib, OpenSSL, libffi, sqlite3, liblzma, bzip2, ncurses,
+# readline and libuuid through `pkg-config`, which in a cross build answers for
+# the *build* machine. configure therefore marked zlib/binascii/_ctypes as
+# buildable, and the compiler then failed on `#include <zlib.h>` because zig's
+# musl sysroot has no such header -- the three failures this spike used to
+# report as "expected". They were never expected; they were configure believing
+# the host's library set was the target's.
+#
+# Pointing PKG_CONFIG_LIBDIR at a directory that does not exist makes every
+# probe answer "no", which is the truth: SlateOS's sysroot carries none of these
+# yet. The modules with a bundled fallback (_decimal -> libmpdec,
+# pyexpat/_elementtree -> expat) are unaffected; the rest turn off cleanly
+# instead of turning on and then failing to compile.
+export PKG_CONFIG_LIBDIR=/nonexistent-slateos-cross PKG_CONFIG_PATH=
+
 # --disable-shared: SlateOS has no dynamic loader on this path, so the target is
 #   a static ET_EXEC, same as bash and pkgconf.
 # --without-ensurepip / --disable-test-modules: pip and the test suite are
@@ -83,7 +101,23 @@ export CC="$SLATE_CC" AR="$SLATE_AR" RANLIB="$SLATE_RANLIB"
 #   smaller socket surface -- which is the opposite of what a spike measuring
 #   our libc surface wants. If our getaddrinfo turns out to be genuinely buggy
 #   that is a posix/src bug to fix, not a reason to build less of CPython.
+#
+# MODULE_BUILDTYPE=static: build every stdlib C extension *into* libpython
+#   rather than as a .so in lib-dynload. configure defaults this to "shared" on
+#   every host except wasm, and --disable-shared does not change it -- it only
+#   governs libpython itself. Left at the default, the interpreter links and
+#   starts, and then `import struct` fails: measured on the musl control build,
+#   sys.builtin_module_names held only the 31 bootstrap modules, and math,
+#   _struct, _json, _random, select, _datetime, _socket, array, binascii,
+#   _heapq, _bisect, _pickle and unicodedata were all absent. base64, json,
+#   random, hashlib and datetime are all unusable in that state.
+#
+#   A shared lib-dynload is not an option to fix that with: the SlateOS target
+#   is a static ET_EXEC with no dynamic loader (see --disable-shared above), so
+#   an extension that is not inside the binary can never be reached. static is
+#   the only build type that produces a working interpreter here.
 if [ ! -f config.status ]; then
+    MODULE_BUILDTYPE=static \
     ./configure \
         --host=x86_64-linux-musl \
         --build=x86_64-pc-linux-gnu \

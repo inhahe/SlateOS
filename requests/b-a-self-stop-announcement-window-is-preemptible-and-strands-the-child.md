@@ -193,10 +193,12 @@ cd "D:/visual studio projects/os-lane-b" && bash scripts/boot-test.sh
 ```
 
 It is a race, so expect it to need repeats — I saw it once in two boots of the
-same tree. **Update, boot 3 of that same tree: `ctest-jobctl` passed.** Same
-commit, same image, same host, nothing changed in between. So the observed rate
-here is one in three rather than one in two, and — more usefully — a *passing*
-boot is not evidence the window is closed. Whatever fix you land wants to be
+same tree. **Update: boots 3 and 4 both passed `ctest-jobctl`** — boot 3 on the
+identical tree, boot 4 after merging `origin/main` into `lane-b`, both showing
+each `[sched] Suspended task N` immediately followed by its `[signal] Process M
+stopped by signal 20`. So the observed rate here is one in four rather than one
+in two, and — more usefully — a *passing* boot is not evidence the window is
+closed. Whatever fix you land wants to be
 argued from the sequencing rather than confirmed by a green run. If you want a
 fixture that widens the odds enough for a green run to mean something, say so
 and I will build the self-stop-in-a-loop version offered below.

@@ -36,15 +36,31 @@
 //!
 //! # Scope, and what is refused rather than guessed
 //!
-//! This driver reads a **single-device, little-endian, unencrypted** pool. Each
-//! of the following is detected and reported by name, never misread:
+//! This driver reads **one device** of a **little-endian, unencrypted** pool.
+//! The governing question for any layout is whether that one device is a
+//! complete copy of the pool's address space:
+//!
+//! - A single-disk pool's disk is, trivially.
+//! - **A mirror leg is**, and is therefore supported: every leg holds
+//!   byte-identical content at identical offsets, which is what lets ZFS
+//!   itself service a read from whichever leg is idle. A DVA names the
+//!   top-level vdev and an offset within it, so it lands in the same place on
+//!   the device in hand as on any other leg.
+//! - A raidz leg is not — it holds interleaved data and parity columns, so the
+//!   bytes at a DVA's offset are a stripe fragment and reconstruction needs
+//!   every column.
+//! - A `replacing` or `spare` leg may not be: one child is mid-resilver, and a
+//!   single label does not say which child the device in hand is.
+//!
+//! Each of the following is detected and reported by name, never misread:
 //!
 //! | Not supported | Where it is caught |
 //! |---|---|
 //! | a hot spare or L2ARC cache device — a real pool member holding no pool data | `label::parse_config` |
 //! | a destroyed pool (`zpool import -D` territory) | `label::parse_config` |
 //! | an SPA version above 5000 | `label::parse_config` |
-//! | mirror / raidz (more than one vdev child) | `label::parse_config` |
+//! | raidz / draid — parity interleaved across devices | `label::parse_config` |
+//! | `replacing` / `spare` — mirror-shaped, but a child is mid-resilver | `label::parse_config` |
 //! | a separate intent-log (SLOG) device | `label::parse_config` |
 //! | any top-level vdev but the first, e.g. a stripe's second disk | `label::parse_config` |
 //! | big-endian pool | `label::parse_uberblock`, `dmu::Reader::read_block` |

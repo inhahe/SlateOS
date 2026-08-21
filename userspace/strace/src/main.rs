@@ -176,247 +176,253 @@ fn build_syscall_table() -> HashMap<u32, SyscallInfo> {
     // Helper to reduce repetition.
     macro_rules! sc {
         ($nr:expr, $name:expr, $fmt:expr) => {
-            t.insert($nr, SyscallInfo { name: $name, arg_format: $fmt });
+            t.insert(
+                $nr,
+                SyscallInfo {
+                    name: $name,
+                    arg_format: $fmt,
+                },
+            );
         };
     }
 
     // -- Core (0-199) --
-    sc!(0,   "yield",                 ArgFormat::None);
-    sc!(1,   "exit",                  ArgFormat::Int);
-    sc!(2,   "task_id",               ArgFormat::None);
-    sc!(10,  "clock_monotonic",       ArgFormat::None);
-    sc!(11,  "sleep",                 ArgFormat::Int);
-    sc!(12,  "timer_create",          ArgFormat::IntInt);
-    sc!(13,  "timer_cancel",          ArgFormat::Handle);
-    sc!(20,  "mmap",                  ArgFormat::PtrSize);
-    sc!(21,  "munmap",                ArgFormat::PtrSize);
-    sc!(30,  "irq_register",          ArgFormat::Int);
-    sc!(31,  "irq_wait",              ArgFormat::Int);
-    sc!(32,  "irq_release",           ArgFormat::Int);
-    sc!(40,  "port_read",             ArgFormat::IntInt);
-    sc!(41,  "port_write",            ArgFormat::Generic);
-    sc!(42,  "dma_alloc",             ArgFormat::IntInt);
-    sc!(43,  "dma_free",              ArgFormat::Handle);
-    sc!(44,  "dma_domain_create",     ArgFormat::None);
-    sc!(45,  "dma_domain_destroy",    ArgFormat::Handle);
-    sc!(46,  "dma_map",               ArgFormat::Generic);
-    sc!(47,  "dma_unmap",             ArgFormat::Generic);
-    sc!(48,  "dma_attach",            ArgFormat::Generic);
-    sc!(49,  "dma_detach",            ArgFormat::Generic);
-    sc!(50,  "sched_set_timeslice",   ArgFormat::IntInt);
-    sc!(51,  "sched_get_timeslice",   ArgFormat::Int);
-    sc!(52,  "sched_reconfigure",     ArgFormat::IntInt);
-    sc!(53,  "sched_set_profile",     ArgFormat::Int);
-    sc!(54,  "sched_get_profile",     ArgFormat::None);
-    sc!(60,  "sysctl_get",            ArgFormat::Int);
-    sc!(61,  "sysctl_set",            ArgFormat::IntInt);
-    sc!(70,  "mm_set_profile",        ArgFormat::Int);
-    sc!(71,  "mm_get_profile",        ArgFormat::None);
-    sc!(80,  "system_set_profile",    ArgFormat::Int);
-    sc!(99,  "debug_print",           ArgFormat::PtrLen);
-    sc!(100, "console_write",         ArgFormat::PtrLen);
-    sc!(101, "console_read_char",     ArgFormat::Handle);
-    sc!(102, "log_read",              ArgFormat::Generic);
+    sc!(0, "yield", ArgFormat::None);
+    sc!(1, "exit", ArgFormat::Int);
+    sc!(2, "task_id", ArgFormat::None);
+    sc!(10, "clock_monotonic", ArgFormat::None);
+    sc!(11, "sleep", ArgFormat::Int);
+    sc!(12, "timer_create", ArgFormat::IntInt);
+    sc!(13, "timer_cancel", ArgFormat::Handle);
+    sc!(20, "mmap", ArgFormat::PtrSize);
+    sc!(21, "munmap", ArgFormat::PtrSize);
+    sc!(30, "irq_register", ArgFormat::Int);
+    sc!(31, "irq_wait", ArgFormat::Int);
+    sc!(32, "irq_release", ArgFormat::Int);
+    sc!(40, "port_read", ArgFormat::IntInt);
+    sc!(41, "port_write", ArgFormat::Generic);
+    sc!(42, "dma_alloc", ArgFormat::IntInt);
+    sc!(43, "dma_free", ArgFormat::Handle);
+    sc!(44, "dma_domain_create", ArgFormat::None);
+    sc!(45, "dma_domain_destroy", ArgFormat::Handle);
+    sc!(46, "dma_map", ArgFormat::Generic);
+    sc!(47, "dma_unmap", ArgFormat::Generic);
+    sc!(48, "dma_attach", ArgFormat::Generic);
+    sc!(49, "dma_detach", ArgFormat::Generic);
+    sc!(50, "sched_set_timeslice", ArgFormat::IntInt);
+    sc!(51, "sched_get_timeslice", ArgFormat::Int);
+    sc!(52, "sched_reconfigure", ArgFormat::IntInt);
+    sc!(53, "sched_set_profile", ArgFormat::Int);
+    sc!(54, "sched_get_profile", ArgFormat::None);
+    sc!(60, "sysctl_get", ArgFormat::Int);
+    sc!(61, "sysctl_set", ArgFormat::IntInt);
+    sc!(70, "mm_set_profile", ArgFormat::Int);
+    sc!(71, "mm_get_profile", ArgFormat::None);
+    sc!(80, "system_set_profile", ArgFormat::Int);
+    sc!(99, "debug_print", ArgFormat::PtrLen);
+    sc!(100, "console_write", ArgFormat::PtrLen);
+    sc!(101, "console_read_char", ArgFormat::Handle);
+    sc!(102, "log_read", ArgFormat::Generic);
     sc!(103, "console_try_read_char", ArgFormat::Handle);
 
     // -- IPC (200-399) --
-    sc!(200, "channel_create",        ArgFormat::Int);
-    sc!(201, "channel_send",          ArgFormat::FdPtrLen);
-    sc!(202, "channel_recv",          ArgFormat::FdPtrLen);
-    sc!(203, "channel_try_recv",      ArgFormat::FdPtrLen);
-    sc!(204, "channel_close",         ArgFormat::Handle);
-    sc!(205, "channel_recv_timeout",  ArgFormat::Generic);
-    sc!(206, "channel_send_caps",     ArgFormat::Generic);
-    sc!(207, "channel_recv_caps",     ArgFormat::Generic);
-    sc!(208, "channel_send_timeout",  ArgFormat::Generic);
+    sc!(200, "channel_create", ArgFormat::Int);
+    sc!(201, "channel_send", ArgFormat::FdPtrLen);
+    sc!(202, "channel_recv", ArgFormat::FdPtrLen);
+    sc!(203, "channel_try_recv", ArgFormat::FdPtrLen);
+    sc!(204, "channel_close", ArgFormat::Handle);
+    sc!(205, "channel_recv_timeout", ArgFormat::Generic);
+    sc!(206, "channel_send_caps", ArgFormat::Generic);
+    sc!(207, "channel_recv_caps", ArgFormat::Generic);
+    sc!(208, "channel_send_timeout", ArgFormat::Generic);
     sc!(209, "channel_send_blocking", ArgFormat::FdPtrLen);
-    sc!(210, "futex_wait",            ArgFormat::PtrSize);
-    sc!(211, "futex_wake",            ArgFormat::PtrSize);
-    sc!(212, "futex_lock_pi",         ArgFormat::Handle);
-    sc!(213, "futex_unlock_pi",       ArgFormat::Handle);
-    sc!(214, "futex_wait_timeout",    ArgFormat::Generic);
-    sc!(220, "pipe_create",           ArgFormat::None);
-    sc!(221, "pipe_write",            ArgFormat::FdPtrLen);
-    sc!(222, "pipe_read",             ArgFormat::FdPtrLen);
-    sc!(223, "pipe_try_write",        ArgFormat::FdPtrLen);
-    sc!(224, "pipe_try_read",         ArgFormat::FdPtrLen);
-    sc!(225, "pipe_close",            ArgFormat::Handle);
-    sc!(226, "pipe_read_timeout",     ArgFormat::Generic);
-    sc!(227, "pipe_write_timeout",    ArgFormat::Generic);
-    sc!(228, "pipe_poll",             ArgFormat::Handle);
-    sc!(229, "pipe_readable_bytes",   ArgFormat::Handle);
-    sc!(230, "shm_create",            ArgFormat::Int);
-    sc!(231, "shm_size",              ArgFormat::Handle);
-    sc!(232, "shm_close",             ArgFormat::Handle);
-    sc!(240, "eventfd_create",        ArgFormat::Int);
-    sc!(241, "eventfd_write",         ArgFormat::IntInt);
-    sc!(242, "eventfd_read",          ArgFormat::Handle);
-    sc!(243, "eventfd_try_read",      ArgFormat::Handle);
-    sc!(244, "eventfd_close",         ArgFormat::Handle);
-    sc!(245, "eventfd_read_timeout",  ArgFormat::IntInt);
+    sc!(210, "futex_wait", ArgFormat::PtrSize);
+    sc!(211, "futex_wake", ArgFormat::PtrSize);
+    sc!(212, "futex_lock_pi", ArgFormat::Handle);
+    sc!(213, "futex_unlock_pi", ArgFormat::Handle);
+    sc!(214, "futex_wait_timeout", ArgFormat::Generic);
+    sc!(220, "pipe_create", ArgFormat::None);
+    sc!(221, "pipe_write", ArgFormat::FdPtrLen);
+    sc!(222, "pipe_read", ArgFormat::FdPtrLen);
+    sc!(223, "pipe_try_write", ArgFormat::FdPtrLen);
+    sc!(224, "pipe_try_read", ArgFormat::FdPtrLen);
+    sc!(225, "pipe_close", ArgFormat::Handle);
+    sc!(226, "pipe_read_timeout", ArgFormat::Generic);
+    sc!(227, "pipe_write_timeout", ArgFormat::Generic);
+    sc!(228, "pipe_poll", ArgFormat::Handle);
+    sc!(229, "pipe_readable_bytes", ArgFormat::Handle);
+    sc!(230, "shm_create", ArgFormat::Int);
+    sc!(231, "shm_size", ArgFormat::Handle);
+    sc!(232, "shm_close", ArgFormat::Handle);
+    sc!(240, "eventfd_create", ArgFormat::Int);
+    sc!(241, "eventfd_write", ArgFormat::IntInt);
+    sc!(242, "eventfd_read", ArgFormat::Handle);
+    sc!(243, "eventfd_try_read", ArgFormat::Handle);
+    sc!(244, "eventfd_close", ArgFormat::Handle);
+    sc!(245, "eventfd_read_timeout", ArgFormat::IntInt);
     sc!(246, "eventfd_write_timeout", ArgFormat::Generic);
-    sc!(250, "cp_create",             ArgFormat::None);
-    sc!(251, "cp_register",           ArgFormat::Generic);
-    sc!(252, "cp_unregister",         ArgFormat::Generic);
-    sc!(253, "cp_wait",               ArgFormat::FdPtrLen);
-    sc!(254, "cp_try_wait",           ArgFormat::FdPtrLen);
-    sc!(255, "cp_close",              ArgFormat::Handle);
-    sc!(256, "cp_notify",             ArgFormat::Generic);
-    sc!(260, "io_ring_setup",         ArgFormat::IntInt);
-    sc!(261, "io_ring_enter",         ArgFormat::IntInt);
-    sc!(262, "io_ring_destroy",       ArgFormat::Handle);
-    sc!(270, "sem_create",            ArgFormat::IntInt);
-    sc!(271, "sem_signal",            ArgFormat::IntInt);
-    sc!(272, "sem_wait",              ArgFormat::Handle);
-    sc!(273, "sem_try_wait",          ArgFormat::Handle);
-    sc!(274, "sem_close",             ArgFormat::Handle);
-    sc!(275, "sem_wait_timeout",      ArgFormat::IntInt);
-    sc!(280, "service_register",      ArgFormat::PtrLen);
-    sc!(281, "service_connect",       ArgFormat::PtrLen);
-    sc!(282, "service_accept",        ArgFormat::Handle);
-    sc!(283, "service_try_accept",    ArgFormat::Handle);
+    sc!(250, "cp_create", ArgFormat::None);
+    sc!(251, "cp_register", ArgFormat::Generic);
+    sc!(252, "cp_unregister", ArgFormat::Generic);
+    sc!(253, "cp_wait", ArgFormat::FdPtrLen);
+    sc!(254, "cp_try_wait", ArgFormat::FdPtrLen);
+    sc!(255, "cp_close", ArgFormat::Handle);
+    sc!(256, "cp_notify", ArgFormat::Generic);
+    sc!(260, "io_ring_setup", ArgFormat::IntInt);
+    sc!(261, "io_ring_enter", ArgFormat::IntInt);
+    sc!(262, "io_ring_destroy", ArgFormat::Handle);
+    sc!(270, "sem_create", ArgFormat::IntInt);
+    sc!(271, "sem_signal", ArgFormat::IntInt);
+    sc!(272, "sem_wait", ArgFormat::Handle);
+    sc!(273, "sem_try_wait", ArgFormat::Handle);
+    sc!(274, "sem_close", ArgFormat::Handle);
+    sc!(275, "sem_wait_timeout", ArgFormat::IntInt);
+    sc!(280, "service_register", ArgFormat::PtrLen);
+    sc!(281, "service_connect", ArgFormat::PtrLen);
+    sc!(282, "service_accept", ArgFormat::Handle);
+    sc!(283, "service_try_accept", ArgFormat::Handle);
     sc!(284, "service_accept_timeout", ArgFormat::IntInt);
-    sc!(285, "service_unregister",    ArgFormat::Handle);
-    sc!(290, "ns_create",             ArgFormat::Int);
-    sc!(291, "ns_bind",               ArgFormat::Generic);
-    sc!(292, "ns_unbind",             ArgFormat::Generic);
-    sc!(293, "ns_hide",               ArgFormat::Generic);
-    sc!(294, "ns_attach",             ArgFormat::IntInt);
-    sc!(295, "ns_query",              ArgFormat::Int);
+    sc!(285, "service_unregister", ArgFormat::Handle);
+    sc!(290, "ns_create", ArgFormat::Int);
+    sc!(291, "ns_bind", ArgFormat::Generic);
+    sc!(292, "ns_unbind", ArgFormat::Generic);
+    sc!(293, "ns_hide", ArgFormat::Generic);
+    sc!(294, "ns_attach", ArgFormat::IntInt);
+    sc!(295, "ns_query", ArgFormat::Int);
 
     // -- Security (400-499) --
-    sc!(400, "cap_query",             ArgFormat::None);
-    sc!(401, "cap_request",           ArgFormat::Generic);
-    sc!(402, "cap_request_status",    ArgFormat::Int);
-    sc!(403, "cap_request_cancel",    ArgFormat::Int);
+    sc!(400, "cap_query", ArgFormat::None);
+    sc!(401, "cap_request", ArgFormat::Generic);
+    sc!(402, "cap_request_status", ArgFormat::Int);
+    sc!(403, "cap_request_cancel", ArgFormat::Int);
 
     // -- Process (500-599) --
-    sc!(500, "process_spawn",         ArgFormat::Path);
-    sc!(501, "process_wait",          ArgFormat::Int);
-    sc!(502, "process_id",            ArgFormat::None);
-    sc!(503, "process_exec",          ArgFormat::Generic);
+    sc!(500, "process_spawn", ArgFormat::Path);
+    sc!(501, "process_wait", ArgFormat::Int);
+    sc!(502, "process_id", ArgFormat::None);
+    sc!(503, "process_exec", ArgFormat::Generic);
     sc!(504, "set_exception_handler", ArgFormat::Handle);
-    sc!(505, "exception_return",      ArgFormat::Handle);
-    sc!(506, "process_kill",          ArgFormat::IntInt);
-    sc!(507, "process_try_wait",      ArgFormat::Int);
-    sc!(508, "notify_ready",          ArgFormat::None);
-    sc!(509, "process_is_ready",      ArgFormat::Int);
-    sc!(510, "thread_create",         ArgFormat::Generic);
-    sc!(511, "thread_exit",           ArgFormat::Int);
-    sc!(512, "thread_join",           ArgFormat::Int);
-    sc!(513, "thread_suspend",        ArgFormat::Int);
-    sc!(514, "thread_resume",         ArgFormat::Int);
-    sc!(515, "thread_set_priority",   ArgFormat::IntInt);
-    sc!(516, "process_crash_info",    ArgFormat::IntInt);
-    sc!(520, "trace_enable",          ArgFormat::IntInt);
-    sc!(521, "trace_read",            ArgFormat::FdPtrLen);
+    sc!(505, "exception_return", ArgFormat::Handle);
+    sc!(506, "process_kill", ArgFormat::IntInt);
+    sc!(507, "process_try_wait", ArgFormat::Int);
+    sc!(508, "notify_ready", ArgFormat::None);
+    sc!(509, "process_is_ready", ArgFormat::Int);
+    sc!(510, "thread_create", ArgFormat::Generic);
+    sc!(511, "thread_exit", ArgFormat::Int);
+    sc!(512, "thread_join", ArgFormat::Int);
+    sc!(513, "thread_suspend", ArgFormat::Int);
+    sc!(514, "thread_resume", ArgFormat::Int);
+    sc!(515, "thread_set_priority", ArgFormat::IntInt);
+    sc!(516, "process_crash_info", ArgFormat::IntInt);
+    sc!(520, "trace_enable", ArgFormat::IntInt);
+    sc!(521, "trace_read", ArgFormat::FdPtrLen);
 
     // -- Filesystem (600-799) --
-    sc!(600, "fs_read_file",          ArgFormat::Path);
-    sc!(601, "fs_write_file",         ArgFormat::Path);
-    sc!(602, "fs_delete",             ArgFormat::Path);
-    sc!(603, "fs_list_dir",           ArgFormat::Path);
-    sc!(604, "fs_mkdir",              ArgFormat::Path);
-    sc!(605, "fs_rmdir",              ArgFormat::Path);
-    sc!(606, "fs_stat",               ArgFormat::Path);
-    sc!(607, "fs_link",               ArgFormat::Generic);
-    sc!(608, "fs_statvfs",            ArgFormat::Path);
-    sc!(609, "fs_flock",              ArgFormat::IntInt);
-    sc!(610, "fs_open",               ArgFormat::Path);
-    sc!(611, "fs_close",              ArgFormat::Handle);
-    sc!(612, "fs_read",               ArgFormat::FdPtrLen);
-    sc!(613, "fs_write",              ArgFormat::FdPtrLen);
-    sc!(614, "fs_seek",               ArgFormat::IntInt);
-    sc!(615, "fs_truncate",           ArgFormat::IntInt);
-    sc!(616, "fs_rename",             ArgFormat::Generic);
-    sc!(617, "fs_fstat",              ArgFormat::Handle);
-    sc!(618, "fs_trash",              ArgFormat::Path);
-    sc!(619, "fs_trash_list",         ArgFormat::FdPtrLen);
-    sc!(620, "fs_trash_restore",      ArgFormat::Path);
-    sc!(621, "fs_trash_empty",        ArgFormat::None);
-    sc!(622, "fs_watch_create",       ArgFormat::Path);
-    sc!(623, "fs_watch_read",         ArgFormat::FdPtrLen);
-    sc!(624, "fs_watch_close",        ArgFormat::Handle);
-    sc!(625, "fs_journal_cursor",     ArgFormat::Generic);
-    sc!(626, "fs_journal_read",       ArgFormat::Generic);
-    sc!(627, "fs_journal_flush",      ArgFormat::Handle);
-    sc!(628, "fs_metadata",           ArgFormat::Path);
-    sc!(629, "fs_set_attr",           ArgFormat::Generic);
-    sc!(630, "fs_set_owner",          ArgFormat::Generic);
-    sc!(631, "fs_set_perms",          ArgFormat::Generic);
-    sc!(632, "fs_set_times",          ArgFormat::Generic);
-    sc!(633, "fs_get_xattr",          ArgFormat::Generic);
-    sc!(634, "fs_set_xattr",          ArgFormat::Generic);
-    sc!(635, "fs_remove_xattr",       ArgFormat::Generic);
-    sc!(636, "fs_list_xattrs",        ArgFormat::Generic);
-    sc!(637, "fs_symlink",            ArgFormat::Generic);
-    sc!(640, "fs_funlock",            ArgFormat::Handle);
-    sc!(641, "fs_sync",               ArgFormat::Handle);
-    sc!(642, "fs_copy",               ArgFormat::Generic);
-    sc!(643, "fs_append",             ArgFormat::FdPtrLen);
-    sc!(644, "fs_ftruncate",          ArgFormat::IntInt);
-    sc!(645, "fs_dup",                ArgFormat::Handle);
-    sc!(646, "fs_handle_path",        ArgFormat::FdPtrLen);
-    sc!(647, "fs_readdir_at",         ArgFormat::Generic);
-    sc!(648, "fs_tmpfile",            ArgFormat::Path);
-    sc!(649, "fs_fallocate",          ArgFormat::Generic);
-    sc!(650, "fs_seek_data",          ArgFormat::IntInt);
-    sc!(651, "fs_seek_hole",          ArgFormat::IntInt);
+    sc!(600, "fs_read_file", ArgFormat::Path);
+    sc!(601, "fs_write_file", ArgFormat::Path);
+    sc!(602, "fs_delete", ArgFormat::Path);
+    sc!(603, "fs_list_dir", ArgFormat::Path);
+    sc!(604, "fs_mkdir", ArgFormat::Path);
+    sc!(605, "fs_rmdir", ArgFormat::Path);
+    sc!(606, "fs_stat", ArgFormat::Path);
+    sc!(607, "fs_link", ArgFormat::Generic);
+    sc!(608, "fs_statvfs", ArgFormat::Path);
+    sc!(609, "fs_flock", ArgFormat::IntInt);
+    sc!(610, "fs_open", ArgFormat::Path);
+    sc!(611, "fs_close", ArgFormat::Handle);
+    sc!(612, "fs_read", ArgFormat::FdPtrLen);
+    sc!(613, "fs_write", ArgFormat::FdPtrLen);
+    sc!(614, "fs_seek", ArgFormat::IntInt);
+    sc!(615, "fs_truncate", ArgFormat::IntInt);
+    sc!(616, "fs_rename", ArgFormat::Generic);
+    sc!(617, "fs_fstat", ArgFormat::Handle);
+    sc!(618, "fs_trash", ArgFormat::Path);
+    sc!(619, "fs_trash_list", ArgFormat::FdPtrLen);
+    sc!(620, "fs_trash_restore", ArgFormat::Path);
+    sc!(621, "fs_trash_empty", ArgFormat::None);
+    sc!(622, "fs_watch_create", ArgFormat::Path);
+    sc!(623, "fs_watch_read", ArgFormat::FdPtrLen);
+    sc!(624, "fs_watch_close", ArgFormat::Handle);
+    sc!(625, "fs_journal_cursor", ArgFormat::Generic);
+    sc!(626, "fs_journal_read", ArgFormat::Generic);
+    sc!(627, "fs_journal_flush", ArgFormat::Handle);
+    sc!(628, "fs_metadata", ArgFormat::Path);
+    sc!(629, "fs_set_attr", ArgFormat::Generic);
+    sc!(630, "fs_set_owner", ArgFormat::Generic);
+    sc!(631, "fs_set_perms", ArgFormat::Generic);
+    sc!(632, "fs_set_times", ArgFormat::Generic);
+    sc!(633, "fs_get_xattr", ArgFormat::Generic);
+    sc!(634, "fs_set_xattr", ArgFormat::Generic);
+    sc!(635, "fs_remove_xattr", ArgFormat::Generic);
+    sc!(636, "fs_list_xattrs", ArgFormat::Generic);
+    sc!(637, "fs_symlink", ArgFormat::Generic);
+    sc!(640, "fs_funlock", ArgFormat::Handle);
+    sc!(641, "fs_sync", ArgFormat::Handle);
+    sc!(642, "fs_copy", ArgFormat::Generic);
+    sc!(643, "fs_append", ArgFormat::FdPtrLen);
+    sc!(644, "fs_ftruncate", ArgFormat::IntInt);
+    sc!(645, "fs_dup", ArgFormat::Handle);
+    sc!(646, "fs_handle_path", ArgFormat::FdPtrLen);
+    sc!(647, "fs_readdir_at", ArgFormat::Generic);
+    sc!(648, "fs_tmpfile", ArgFormat::Path);
+    sc!(649, "fs_fallocate", ArgFormat::Generic);
+    sc!(650, "fs_seek_data", ArgFormat::IntInt);
+    sc!(651, "fs_seek_hole", ArgFormat::IntInt);
 
     // -- Networking (800-899) --
-    sc!(800, "tcp_connect",           ArgFormat::Generic);
-    sc!(801, "tcp_send",              ArgFormat::FdPtrLen);
-    sc!(802, "tcp_recv",              ArgFormat::FdPtrLen);
-    sc!(803, "tcp_close",             ArgFormat::Handle);
-    sc!(804, "tcp_bind",              ArgFormat::Generic);
-    sc!(805, "tcp_accept",            ArgFormat::Handle);
-    sc!(806, "tcp_close_listener",    ArgFormat::Handle);
-    sc!(807, "tcp_abort",             ArgFormat::Handle);
-    sc!(808, "tcp_peer_addr",         ArgFormat::Handle);
-    sc!(810, "udp_bind",              ArgFormat::Generic);
-    sc!(811, "udp_send",              ArgFormat::Generic);
-    sc!(812, "udp_recv",              ArgFormat::FdPtrLen);
-    sc!(813, "udp_close",             ArgFormat::Handle);
-    sc!(814, "udp_mcast_join",        ArgFormat::Generic);
-    sc!(815, "udp_mcast_leave",       ArgFormat::Generic);
-    sc!(816, "udp_connect",           ArgFormat::Generic);
-    sc!(817, "udp_local_port",        ArgFormat::Handle);
-    sc!(820, "dns_resolve",           ArgFormat::PtrLen);
-    sc!(821, "dns_reverse_resolve",   ArgFormat::Generic);
-    sc!(825, "net_stat",              ArgFormat::Generic);
-    sc!(830, "icmp_ping",             ArgFormat::Generic);
-    sc!(831, "icmp_ping_wait",        ArgFormat::Generic);
-    sc!(840, "tcp_list",              ArgFormat::FdPtrLen);
-    sc!(841, "tcp_listener_list",     ArgFormat::FdPtrLen);
-    sc!(842, "net_if_info",           ArgFormat::FdPtrLen);
-    sc!(843, "arp_table",             ArgFormat::FdPtrLen);
-    sc!(844, "dns_cache_stats",       ArgFormat::Generic);
-    sc!(845, "tcp_poll_status",       ArgFormat::Handle);
-    sc!(846, "tcp_listener_ready",    ArgFormat::Handle);
-    sc!(847, "udp_rx_ready",          ArgFormat::Handle);
-    sc!(848, "udp_rx_front_bytes",    ArgFormat::Handle);
-    sc!(849, "tcp_info",              ArgFormat::Handle);
-    sc!(850, "tcp_set_nodelay",       ArgFormat::IntInt);
-    sc!(851, "tcp_set_keepalive",     ArgFormat::IntInt);
+    sc!(800, "tcp_connect", ArgFormat::Generic);
+    sc!(801, "tcp_send", ArgFormat::FdPtrLen);
+    sc!(802, "tcp_recv", ArgFormat::FdPtrLen);
+    sc!(803, "tcp_close", ArgFormat::Handle);
+    sc!(804, "tcp_bind", ArgFormat::Generic);
+    sc!(805, "tcp_accept", ArgFormat::Handle);
+    sc!(806, "tcp_close_listener", ArgFormat::Handle);
+    sc!(807, "tcp_abort", ArgFormat::Handle);
+    sc!(808, "tcp_peer_addr", ArgFormat::Handle);
+    sc!(810, "udp_bind", ArgFormat::Generic);
+    sc!(811, "udp_send", ArgFormat::Generic);
+    sc!(812, "udp_recv", ArgFormat::FdPtrLen);
+    sc!(813, "udp_close", ArgFormat::Handle);
+    sc!(814, "udp_mcast_join", ArgFormat::Generic);
+    sc!(815, "udp_mcast_leave", ArgFormat::Generic);
+    sc!(816, "udp_connect", ArgFormat::Generic);
+    sc!(817, "udp_local_port", ArgFormat::Handle);
+    sc!(820, "dns_resolve", ArgFormat::PtrLen);
+    sc!(821, "dns_reverse_resolve", ArgFormat::Generic);
+    sc!(825, "net_stat", ArgFormat::Generic);
+    sc!(830, "icmp_ping", ArgFormat::Generic);
+    sc!(831, "icmp_ping_wait", ArgFormat::Generic);
+    sc!(840, "tcp_list", ArgFormat::FdPtrLen);
+    sc!(841, "tcp_listener_list", ArgFormat::FdPtrLen);
+    sc!(842, "net_if_info", ArgFormat::FdPtrLen);
+    sc!(843, "arp_table", ArgFormat::FdPtrLen);
+    sc!(844, "dns_cache_stats", ArgFormat::Generic);
+    sc!(845, "tcp_poll_status", ArgFormat::Handle);
+    sc!(846, "tcp_listener_ready", ArgFormat::Handle);
+    sc!(847, "udp_rx_ready", ArgFormat::Handle);
+    sc!(848, "udp_rx_front_bytes", ArgFormat::Handle);
+    sc!(849, "tcp_info", ArgFormat::Handle);
+    sc!(850, "tcp_set_nodelay", ArgFormat::IntInt);
+    sc!(851, "tcp_set_keepalive", ArgFormat::IntInt);
     sc!(852, "tcp_set_keepalive_params", ArgFormat::Generic);
-    sc!(853, "tcp_last_error",        ArgFormat::Handle);
-    sc!(854, "tcp_local_port",        ArgFormat::Handle);
-    sc!(855, "tcp_shutdown",          ArgFormat::IntInt);
+    sc!(853, "tcp_last_error", ArgFormat::Handle);
+    sc!(854, "tcp_local_port", ArgFormat::Handle);
+    sc!(855, "tcp_shutdown", ArgFormat::IntInt);
 
     // -- DRM/Display (1000+) --
-    sc!(1000, "drm_open",             ArgFormat::None);
-    sc!(1001, "drm_close",            ArgFormat::Handle);
-    sc!(1002, "drm_display_size",     ArgFormat::Handle);
-    sc!(1010, "drm_gem_create",       ArgFormat::IntInt);
-    sc!(1011, "drm_gem_destroy",      ArgFormat::Handle);
-    sc!(1012, "drm_gem_mmap",         ArgFormat::Handle);
-    sc!(1020, "drm_fb_create",        ArgFormat::Generic);
-    sc!(1021, "drm_fb_destroy",       ArgFormat::Handle);
-    sc!(1030, "drm_page_flip",        ArgFormat::IntInt);
-    sc!(1031, "drm_flush_region",     ArgFormat::Generic);
+    sc!(1000, "drm_open", ArgFormat::None);
+    sc!(1001, "drm_close", ArgFormat::Handle);
+    sc!(1002, "drm_display_size", ArgFormat::Handle);
+    sc!(1010, "drm_gem_create", ArgFormat::IntInt);
+    sc!(1011, "drm_gem_destroy", ArgFormat::Handle);
+    sc!(1012, "drm_gem_mmap", ArgFormat::Handle);
+    sc!(1020, "drm_fb_create", ArgFormat::Generic);
+    sc!(1021, "drm_fb_destroy", ArgFormat::Handle);
+    sc!(1030, "drm_page_flip", ArgFormat::IntInt);
+    sc!(1031, "drm_flush_region", ArgFormat::Generic);
     sc!(1040, "drm_connector_status", ArgFormat::Handle);
-    sc!(1041, "drm_mode_get",         ArgFormat::Handle);
-    sc!(1042, "drm_crtc_info",        ArgFormat::Handle);
+    sc!(1041, "drm_mode_get", ArgFormat::Handle);
+    sc!(1042, "drm_crtc_info", ArgFormat::Handle);
 
     t
 }
@@ -582,7 +588,9 @@ fn format_trace_line(
         // exit() never returns.
         line.push_str(" = ?");
     } else if entry.result < 0 {
-        line.push_str(&format!(" = -1 (err {})", -entry.result));
+        // `unsigned_abs`, not `-x`: the result is kernel-supplied, and
+        // negating i64::MIN is the one input that would overflow.
+        line.push_str(&format!(" = -1 (err {})", entry.result.unsigned_abs()));
     } else {
         line.push_str(&format!(" = {}", entry.result));
     }
@@ -675,9 +683,7 @@ fn format_trace_json(
     table: &HashMap<u32, SyscallInfo>,
     config: &Config,
 ) -> String {
-    let name = table
-        .get(&entry.syscall_nr)
-        .map_or("unknown", |i| i.name);
+    let name = table.get(&entry.syscall_nr).map_or("unknown", |i| i.name);
 
     // Escape the name for JSON (syscall names are ASCII, so this is safe).
     let escaped_name = name.replace('\\', "\\\\").replace('"', "\\\"");
@@ -717,11 +723,13 @@ fn print_summary(
     let mut entries: Vec<(u32, &SyscallStats)> = stats.iter().map(|(k, v)| (*k, v)).collect();
     entries.sort_by_key(|e| std::cmp::Reverse(e.1.total_time_ns));
 
-    let _ = writeln!(output,
+    let _ = writeln!(
+        output,
         "{:>6} {:>11} {:>11} {:>9} {:>9} {:>-16}",
         "% time", "seconds", "usecs/call", "calls", "errors", "syscall"
     );
-    let _ = writeln!(output,
+    let _ = writeln!(
+        output,
         "{:->6} {:->11} {:->11} {:->9} {:->9} {:->16}",
         "", "", "", "", "", ""
     );
@@ -734,11 +742,11 @@ fn print_summary(
             0.0
         };
         let secs = stat.total_time_ns as f64 / 1_000_000_000.0;
-        let usecs_per_call = if stat.calls > 0 {
-            stat.total_time_ns / (stat.calls * 1_000)
-        } else {
-            0
-        };
+        let usecs_per_call = stat
+            .calls
+            .checked_mul(1_000)
+            .and_then(|ns_per_us| stat.total_time_ns.checked_div(ns_per_us))
+            .unwrap_or(0);
 
         let errors_str = if stat.errors > 0 {
             format!("{}", stat.errors)
@@ -746,19 +754,22 @@ fn print_summary(
             String::new()
         };
 
-        let _ = writeln!(output,
+        let _ = writeln!(
+            output,
             "{pct:>5.2}% {secs:>11.6} {usecs_per_call:>11} {:>9} {:>9} {name:<16}",
             stat.calls, errors_str
         );
     }
 
-    let _ = writeln!(output,
+    let _ = writeln!(
+        output,
         "{:->6} {:->11} {:->11} {:->9} {:->9} {:->16}",
         "", "", "", "", "", ""
     );
 
     let total_secs = total_time as f64 / 1_000_000_000.0;
-    let _ = writeln!(output,
+    let _ = writeln!(
+        output,
         "100.00% {total_secs:>11.6} {:>11} {total_calls:>9} {total_errors:>9} total",
         ""
     );
@@ -781,24 +792,31 @@ fn trace_enable(pid: u32, enable: bool) -> bool {
 
 /// Read trace entries from the kernel.
 ///
-/// Returns the number of entries read, or 0 on failure.
-fn trace_read(pid: u32, buf: &mut [TraceEntry]) -> usize {
-    if buf.is_empty() {
-        return 0;
+/// Returns the prefix of `buf` the kernel actually filled — empty on failure.
+///
+/// Handing back the slice rather than a count is deliberate: the kernel's
+/// number is turned into a range in exactly one place, here, where a byte
+/// count that does not fit the buffer we handed over is treated as "read
+/// nothing" instead of travelling into a caller's `buf[..count]` and
+/// panicking there.
+fn trace_read(pid: u32, buf: &mut [TraceEntry]) -> &[TraceEntry] {
+    let Some(buf_len) = buf.len().checked_mul(TRACE_ENTRY_SIZE) else {
+        return &[];
+    };
+    if buf_len == 0 {
+        return &[];
     }
     let buf_ptr = buf.as_mut_ptr() as u64;
-    let buf_len = (buf.len() * TRACE_ENTRY_SIZE) as u64;
     // SAFETY: We pass a valid mutable buffer pointer and its byte length.
     // The kernel writes TraceEntry structs into the buffer and returns the
     // number of bytes written.  The buffer is properly aligned (TraceEntry
     // has natural alignment from #[repr(C)]).
-    let bytes_read = unsafe {
-        syscall3(SYS_TRACE_READ, u64::from(pid), buf_ptr, buf_len)
-    };
+    let bytes_read = unsafe { syscall3(SYS_TRACE_READ, u64::from(pid), buf_ptr, buf_len as u64) };
     if bytes_read < 0 {
-        return 0;
+        return &[];
     }
-    (bytes_read as usize) / TRACE_ENTRY_SIZE
+    let count = (bytes_read as usize) / TRACE_ENTRY_SIZE;
+    buf.get(..count).unwrap_or(&[])
 }
 
 // ============================================================================
@@ -812,22 +830,19 @@ fn try_proc_trace(pid: u32) -> Option<Vec<TraceEntry>> {
     let path = format!("/proc/{pid}/syscall_trace");
     let data = fs::read(&path).ok()?;
 
-    if data.len() < TRACE_ENTRY_SIZE {
-        return Some(Vec::new());
-    }
+    // `chunks_exact` does the arithmetic that the hand-rolled
+    // `for i in 0..count { data[i * SIZE .. i * SIZE + SIZE] }` used to do,
+    // and does it without a multiplication that could wrap: a trailing
+    // partial record is dropped by construction rather than by a length
+    // check somebody has to remember to keep in step with the stride.
+    let mut entries = Vec::new();
 
-    let entry_count = data.len() / TRACE_ENTRY_SIZE;
-    let mut entries = Vec::with_capacity(entry_count);
-
-    for i in 0..entry_count {
-        let offset = i * TRACE_ENTRY_SIZE;
-        let slice = data.get(offset..offset + TRACE_ENTRY_SIZE)?;
+    for slice in data.chunks_exact(TRACE_ENTRY_SIZE) {
         // SAFETY: TraceEntry is #[repr(C)] with all-numeric fields, no
         // padding requirements beyond natural alignment.  We copy from a
         // byte slice into a properly typed value.
-        let entry: TraceEntry = unsafe {
-            core::ptr::read_unaligned(slice.as_ptr().cast::<TraceEntry>())
-        };
+        let entry: TraceEntry =
+            unsafe { core::ptr::read_unaligned(slice.as_ptr().cast::<TraceEntry>()) };
         if entry.timestamp_ns != 0 {
             entries.push(entry);
         }
@@ -932,9 +947,7 @@ fn run_trace(config: &Config) {
 
         match try_proc_trace(target_pid) {
             Some(entries) => {
-                display_entries(
-                    &entries, &table, config, &mut stats, &mut *output,
-                );
+                display_entries(&entries, &table, config, &mut stats, &mut *output);
                 if config.summary_only || config.summary_with_trace {
                     let _ = writeln!(output);
                     print_summary(&stats, &table, &mut *output);
@@ -963,10 +976,18 @@ fn run_trace(config: &Config) {
     let mut process_alive = true;
 
     while process_alive {
-        let count = trace_read(target_pid, &mut buf);
+        let read = trace_read(target_pid, &mut buf);
 
-        if count > 0 {
-            let entries: Vec<TraceEntry> = buf[..count]
+        if read.is_empty() {
+            // No events available.  Check if the process is still alive.
+            let stat_path = format!("/proc/{target_pid}/stat");
+            if fs::metadata(&stat_path).is_err() {
+                process_alive = false;
+            } else {
+                std::thread::sleep(poll_interval);
+            }
+        } else {
+            let entries: Vec<TraceEntry> = read
                 .iter()
                 .filter(|e| {
                     config.filter_syscalls.is_empty()
@@ -975,9 +996,7 @@ fn run_trace(config: &Config) {
                 .copied()
                 .collect();
 
-            display_entries(
-                &entries, &table, config, &mut stats, &mut *output,
-            );
+            display_entries(&entries, &table, config, &mut stats, &mut *output);
             total_events = total_events.saturating_add(entries.len() as u64);
 
             // Check if the process exited (saw an exit syscall).
@@ -987,14 +1006,6 @@ fn run_trace(config: &Config) {
                     process_alive = false;
                     break;
                 }
-            }
-        } else {
-            // No events available.  Check if the process is still alive.
-            let stat_path = format!("/proc/{target_pid}/stat");
-            if fs::metadata(&stat_path).is_err() {
-                process_alive = false;
-            } else {
-                std::thread::sleep(poll_interval);
             }
         }
     }
@@ -1044,9 +1055,7 @@ fn display_entries(
                 let json = format_trace_json(entry, table, config);
                 let _ = writeln!(output, "{json}");
             } else {
-                let line = format_trace_line(
-                    entry, table, config, first_ts, &mut prev_ts,
-                );
+                let line = format_trace_line(entry, table, config, first_ts, &mut prev_ts);
                 let _ = writeln!(output, "{line}");
             }
         }
@@ -1065,10 +1074,7 @@ fn spawn_and_trace(command: &[String]) -> Option<u32> {
     let program = command.first()?;
     let args = command.get(1..)?;
 
-    let child = process::Command::new(program)
-        .args(args)
-        .spawn()
-        .ok()?;
+    let child = process::Command::new(program).args(args).spawn().ok()?;
 
     Some(child.id())
 }
@@ -1133,96 +1139,57 @@ fn parse_args() -> Config {
     // Pre-build the syscall table for filter parsing.
     let table = build_syscall_table();
 
-    let mut i = 1;
-    let mut saw_double_dash = false;
+    // Walked with an iterator rather than an index: an option's value comes
+    // from `it.next()`, which cannot read past the end and cannot be paired
+    // with a stride the arm forgot to bump.  The old loop advanced `i` by 1
+    // or 2 in twenty separate statements, each of which had to agree with
+    // how many arguments its arm had consumed.
+    /// The value of a value-taking option: diagnose and exit if it is last.
+    fn value(it: &mut impl Iterator<Item = String>, flag: &str, what: &str) -> String {
+        it.next().unwrap_or_else(|| {
+            eprintln!("strace: {flag} requires {what}");
+            process::exit(1);
+        })
+    }
 
-    while i < args.len() {
-        if saw_double_dash {
-            // Everything after `--` is the command to trace.
-            config.command.push(args[i].clone());
-            i += 1;
-            continue;
-        }
+    let mut it = args.into_iter();
+    it.next(); // argv[0]
 
-        let arg = args[i].as_str();
-        match arg {
+    while let Some(arg) = it.next() {
+        match arg.as_str() {
             "--" => {
-                saw_double_dash = true;
-                i += 1;
+                // Everything after `--` is the command to trace.
+                config.command.extend(it.by_ref());
+                break;
             }
             "-p" => {
-                if i + 1 >= args.len() {
-                    eprintln!("strace: -p requires a PID value");
-                    process::exit(1);
-                }
-                match args[i + 1].parse::<u32>() {
+                let pid_str = value(&mut it, "-p", "a PID value");
+                match pid_str.parse::<u32>() {
                     Ok(pid) => config.attach_pid = Some(pid),
                     Err(_) => {
-                        eprintln!("strace: invalid PID: {}", args[i + 1]);
+                        eprintln!("strace: invalid PID: {pid_str}");
                         process::exit(1);
                     }
                 }
-                i += 2;
             }
-            "-o" => {
-                if i + 1 >= args.len() {
-                    eprintln!("strace: -o requires a filename");
-                    process::exit(1);
-                }
-                config.output_file = Some(args[i + 1].clone());
-                i += 2;
-            }
-            "-c" | "--summary-only" => {
-                config.summary_only = true;
-                i += 1;
-            }
-            "-C" => {
-                config.summary_with_trace = true;
-                i += 1;
-            }
+            "-o" => config.output_file = Some(value(&mut it, "-o", "a filename")),
+            "-c" | "--summary-only" => config.summary_only = true,
+            "-C" => config.summary_with_trace = true,
             "-e" => {
-                if i + 1 >= args.len() {
-                    eprintln!("strace: -e requires a filter expression");
-                    process::exit(1);
-                }
-                let filter = parse_filter(&args[i + 1], &table);
+                let expr = value(&mut it, "-e", "a filter expression");
+                let filter = parse_filter(&expr, &table);
                 if filter.is_empty() {
-                    eprintln!(
-                        "strace: warning: filter '{}' matched no syscalls",
-                        args[i + 1]
-                    );
+                    eprintln!("strace: warning: filter '{expr}' matched no syscalls");
                 }
                 config.filter_syscalls.extend(filter);
-                i += 2;
             }
-            "-T" | "--syscall-times" => {
-                config.show_duration = true;
-                i += 1;
-            }
-            "-t" => {
-                config.show_timestamp = true;
-                i += 1;
-            }
-            "-tt" => {
-                config.show_timestamp_us = true;
-                i += 1;
-            }
-            "-r" | "--relative-timestamps" => {
-                config.relative_timestamps = true;
-                i += 1;
-            }
-            "-f" | "--follow-forks" => {
-                config.follow_forks = true;
-                i += 1;
-            }
-            "-v" | "--verbose" => {
-                config.verbose = true;
-                i += 1;
-            }
-            "--json" => {
-                config.json_output = true;
-                i += 1;
-            }
+            "-T" | "--syscall-times" => config.show_duration = true,
+            "-t" => config.show_timestamp = true,
+            "-tt" => config.show_timestamp_us = true,
+            "-r" | "--relative-timestamps" => config.relative_timestamps = true,
+            "-f" | "--follow-forks" => config.follow_forks = true,
+            "-v" | "--verbose" => config.verbose = true,
+            "--json" => config.json_output = true,
             "--help" | "-h" | "help" => {
                 print_usage();
                 process::exit(0);
@@ -1236,7 +1203,8 @@ fn parse_args() -> Config {
                     process::exit(1);
                 }
                 // Treat this and everything after as the command.
-                config.command.extend(args[i..].iter().cloned());
+                config.command.push(other.to_string());
+                config.command.extend(it.by_ref());
                 break;
             }
         }
@@ -1265,7 +1233,17 @@ fn main() {
     run_trace(&config);
 }
 
+// Panicking on bad data is what a test is *for*: a test that carefully
+// propagates an error instead of unwrapping just reports "ok" less loudly.
+// The defensive lints stay on for the production code above.
 #[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects
+)]
 mod tests {
     use super::*;
 
@@ -1456,28 +1434,48 @@ mod tests {
     #[test]
     fn format_args_into_int_shows_only_arg1() {
         let mut out = String::new();
-        format_args_into(&mut out, &entry_with(1, 42, 99, 0, 0), ArgFormat::Int, false);
+        format_args_into(
+            &mut out,
+            &entry_with(1, 42, 99, 0, 0),
+            ArgFormat::Int,
+            false,
+        );
         assert_eq!(out, "42");
     }
 
     #[test]
     fn format_args_into_intint_shows_two_args() {
         let mut out = String::new();
-        format_args_into(&mut out, &entry_with(0, 7, 8, 0, 0), ArgFormat::IntInt, false);
+        format_args_into(
+            &mut out,
+            &entry_with(0, 7, 8, 0, 0),
+            ArgFormat::IntInt,
+            false,
+        );
         assert_eq!(out, "7, 8");
     }
 
     #[test]
     fn format_args_into_ptrlen_verbose_shows_hex_and_dec() {
         let mut out = String::new();
-        format_args_into(&mut out, &entry_with(0, 0x1000, 16, 0, 0), ArgFormat::PtrLen, true);
+        format_args_into(
+            &mut out,
+            &entry_with(0, 0x1000, 16, 0, 0),
+            ArgFormat::PtrLen,
+            true,
+        );
         assert_eq!(out, "0x1000, 16");
     }
 
     #[test]
     fn format_args_into_ptrlen_brief_uses_format_ptr() {
         let mut out = String::new();
-        format_args_into(&mut out, &entry_with(0, 0, 16, 0, 0), ArgFormat::PtrLen, false);
+        format_args_into(
+            &mut out,
+            &entry_with(0, 0, 16, 0, 0),
+            ArgFormat::PtrLen,
+            false,
+        );
         // NULL pointer goes through format_ptr_as_string.
         assert_eq!(out, "NULL");
     }
@@ -1485,7 +1483,12 @@ mod tests {
     #[test]
     fn format_args_into_fdptrlen_shows_fd_then_buffer() {
         let mut out = String::new();
-        format_args_into(&mut out, &entry_with(0, 3, 0x1000, 256, 0), ArgFormat::FdPtrLen, true);
+        format_args_into(
+            &mut out,
+            &entry_with(0, 3, 0x1000, 256, 0),
+            ArgFormat::FdPtrLen,
+            true,
+        );
         assert_eq!(out, "3, 0x1000, 256");
     }
 
@@ -1493,19 +1496,39 @@ mod tests {
     fn format_args_into_generic_collapses_zero_args() {
         // Generic format trims trailing zero args.
         let mut out = String::new();
-        format_args_into(&mut out, &entry_with(0, 0xABCD, 0, 0, 0), ArgFormat::Generic, false);
+        format_args_into(
+            &mut out,
+            &entry_with(0, 0xABCD, 0, 0, 0),
+            ArgFormat::Generic,
+            false,
+        );
         assert_eq!(out, "0xabcd");
 
         let mut out2 = String::new();
-        format_args_into(&mut out2, &entry_with(0, 1, 2, 0, 0), ArgFormat::Generic, false);
+        format_args_into(
+            &mut out2,
+            &entry_with(0, 1, 2, 0, 0),
+            ArgFormat::Generic,
+            false,
+        );
         assert_eq!(out2, "0x1, 0x2");
 
         let mut out3 = String::new();
-        format_args_into(&mut out3, &entry_with(0, 1, 2, 3, 0), ArgFormat::Generic, false);
+        format_args_into(
+            &mut out3,
+            &entry_with(0, 1, 2, 3, 0),
+            ArgFormat::Generic,
+            false,
+        );
         assert_eq!(out3, "0x1, 0x2, 0x3");
 
         let mut out4 = String::new();
-        format_args_into(&mut out4, &entry_with(0, 0, 0, 0, 0), ArgFormat::Generic, false);
+        format_args_into(
+            &mut out4,
+            &entry_with(0, 0, 0, 0, 0),
+            ArgFormat::Generic,
+            false,
+        );
         assert!(out4.is_empty());
     }
 

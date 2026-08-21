@@ -340,6 +340,10 @@ pub mod ctype;
 pub(crate) mod decfloat;
 pub mod dirent;
 pub mod dlfcn;
+// Ed25519 lives here, next to `crypt` and `sha2`, because this crate is
+// already where lane B's cryptographic primitives are written once and shared:
+// `sshd`, `ssh` and `ftpd` each had their own fake of it. See the module doc.
+pub mod ed25519;
 pub mod endian;
 pub mod environ;
 pub mod epoll;

@@ -1339,86 +1339,90 @@ pub unsafe extern "C" fn setstate(statebuf: *mut u8) -> *mut u8 {
 // Temporary files
 // ---------------------------------------------------------------------------
 
-/// Create a unique temporary file.
-///
-/// The `template` string must end with exactly six 'X' characters
-/// (e.g., `"/tmp/fileXXXXXX"`).  These are replaced with unique
-/// characters and the file is created atomically.
-///
-/// Returns an open file descriptor on success, or -1 on error.
-///
-/// # Safety
-///
-/// `template` must be a writable null-terminated string with at least
-/// 6 trailing 'X' characters.
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub unsafe extern "C" fn mkstemp(template: *mut u8) -> i32 {
-    if template.is_null() {
-        crate::errno::set_errno(crate::errno::EINVAL);
-        return -1;
-    }
-
-    let len = unsafe { crate::string::strlen(template) };
-    if len < 6 {
-        crate::errno::set_errno(crate::errno::EINVAL);
-        return -1;
-    }
-
-    // Verify the last 6 characters are 'X'.
-    let suffix_start = len.wrapping_sub(6);
-    let mut i: usize = 0;
-    while i < 6 {
-        if unsafe { *template.add(suffix_start.wrapping_add(i)) } != b'X' {
+/// Own archive member — gnulib replaces `mkstemp`. See string.rs's module header.
+mod gnu_mkstemp {
+    /// Create a unique temporary file.
+    ///
+    /// The `template` string must end with exactly six 'X' characters
+    /// (e.g., `"/tmp/fileXXXXXX"`).  These are replaced with unique
+    /// characters and the file is created atomically.
+    ///
+    /// Returns an open file descriptor on success, or -1 on error.
+    ///
+    /// # Safety
+    ///
+    /// `template` must be a writable null-terminated string with at least
+    /// 6 trailing 'X' characters.
+    #[cfg_attr(target_os = "none", unsafe(no_mangle))]
+    pub unsafe extern "C" fn mkstemp(template: *mut u8) -> i32 {
+        if template.is_null() {
             crate::errno::set_errno(crate::errno::EINVAL);
             return -1;
         }
-        i = i.wrapping_add(1);
-    }
 
-    // Try up to 100 unique names.
-    let mut attempt: u32 = 0;
-    while attempt < 100 {
-        // Generate random bytes for the suffix.  Use getrandom (backed
-        // by RDRAND) for unpredictability — predictable temp file names
-        // are a security vulnerability (symlink attacks).
-        let mut rand_bytes = [0u8; 6];
-        crate::unistd::getrandom(rand_bytes.as_mut_ptr(), 6, 0);
-
-        // Fill the 6 X's with alphanumeric characters from random bytes.
-        let mut j: usize = 0;
-        while j < 6 {
-            let rb = rand_bytes.get(j).copied().unwrap_or(0);
-            let idx = rb % 36;
-            let ch = if idx < 10 {
-                b'0'.wrapping_add(idx)
-            } else {
-                b'a'.wrapping_add(idx.wrapping_sub(10))
-            };
-            // SAFETY: suffix_start + j < len, template is writable.
-            unsafe {
-                *template.add(suffix_start.wrapping_add(j)) = ch;
-            }
-            j = j.wrapping_add(1);
-        }
-
-        // Try to create the file exclusively.
-        let flags = crate::fcntl::O_RDWR | crate::fcntl::O_CREAT | crate::fcntl::O_EXCL;
-        let fd = crate::file::open(template, flags, 0o600);
-        if fd >= 0 {
-            return fd;
-        }
-
-        // If EEXIST, try again.  Any other error, bail.
-        if crate::errno::get_errno() != crate::errno::EEXIST {
+        let len = unsafe { crate::string::strlen(template) };
+        if len < 6 {
+            crate::errno::set_errno(crate::errno::EINVAL);
             return -1;
         }
 
-        attempt = attempt.wrapping_add(1);
-    }
+        // Verify the last 6 characters are 'X'.
+        let suffix_start = len.wrapping_sub(6);
+        let mut i: usize = 0;
+        while i < 6 {
+            if unsafe { *template.add(suffix_start.wrapping_add(i)) } != b'X' {
+                crate::errno::set_errno(crate::errno::EINVAL);
+                return -1;
+            }
+            i = i.wrapping_add(1);
+        }
 
-    crate::errno::set_errno(crate::errno::EEXIST);
-    -1
+        // Try up to 100 unique names.
+        let mut attempt: u32 = 0;
+        while attempt < 100 {
+            // Generate random bytes for the suffix.  Use getrandom (backed
+            // by RDRAND) for unpredictability — predictable temp file names
+            // are a security vulnerability (symlink attacks).
+            let mut rand_bytes = [0u8; 6];
+            crate::unistd::getrandom(rand_bytes.as_mut_ptr(), 6, 0);
+
+            // Fill the 6 X's with alphanumeric characters from random bytes.
+            let mut j: usize = 0;
+            while j < 6 {
+                let rb = rand_bytes.get(j).copied().unwrap_or(0);
+                let idx = rb % 36;
+                let ch = if idx < 10 {
+                    b'0'.wrapping_add(idx)
+                } else {
+                    b'a'.wrapping_add(idx.wrapping_sub(10))
+                };
+                // SAFETY: suffix_start + j < len, template is writable.
+                unsafe {
+                    *template.add(suffix_start.wrapping_add(j)) = ch;
+                }
+                j = j.wrapping_add(1);
+            }
+
+            // Try to create the file exclusively.
+            let flags = crate::fcntl::O_RDWR | crate::fcntl::O_CREAT | crate::fcntl::O_EXCL;
+            let fd = crate::file::open(template, flags, 0o600);
+            if fd >= 0 {
+                return fd;
+            }
+
+            // If EEXIST, try again.  Any other error, bail.
+            if crate::errno::get_errno() != crate::errno::EEXIST {
+                return -1;
+            }
+
+            attempt = attempt.wrapping_add(1);
+        }
+
+        crate::errno::set_errno(crate::errno::EEXIST);
+        -1
+    }
 }
+pub use gnu_mkstemp::mkstemp;
 
 /// Generate a unique temporary filename (DEPRECATED — use `mkstemp`).
 ///
@@ -1509,260 +1513,278 @@ pub extern "C" fn tmpfile() -> *mut u8 {
 // mkostemp — mkstemp with flags
 // ---------------------------------------------------------------------------
 
-/// Create a unique temporary file with additional open flags.
-///
-/// Like `mkstemp` but `flags` can include `O_CLOEXEC`, `O_APPEND`,
-/// etc.  Currently, the flags are accepted but not enforced (our open
-/// implementation doesn't support `O_CLOEXEC`).
-///
-/// # Safety
-///
-/// `template` must be a writable null-terminated string with at least
-/// 6 trailing 'X' characters.
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub unsafe extern "C" fn mkostemp(template: *mut u8, flags: i32) -> i32 {
-    if template.is_null() {
-        crate::errno::set_errno(crate::errno::EINVAL);
-        return -1;
-    }
-
-    let len = unsafe { crate::string::strlen(template) };
-    if len < 6 {
-        crate::errno::set_errno(crate::errno::EINVAL);
-        return -1;
-    }
-
-    // Verify the last 6 characters are 'X'.
-    let suffix_start = len.wrapping_sub(6);
-    let mut i: usize = 0;
-    while i < 6 {
-        if unsafe { *template.add(suffix_start.wrapping_add(i)) } != b'X' {
+/// Own archive member — gnulib replaces `mkostemp`. See string.rs's module header.
+mod gnu_mkostemp {
+    /// Create a unique temporary file with additional open flags.
+    ///
+    /// Like `mkstemp` but `flags` can include `O_CLOEXEC`, `O_APPEND`,
+    /// etc.  Currently, the flags are accepted but not enforced (our open
+    /// implementation doesn't support `O_CLOEXEC`).
+    ///
+    /// # Safety
+    ///
+    /// `template` must be a writable null-terminated string with at least
+    /// 6 trailing 'X' characters.
+    #[cfg_attr(target_os = "none", unsafe(no_mangle))]
+    pub unsafe extern "C" fn mkostemp(template: *mut u8, flags: i32) -> i32 {
+        if template.is_null() {
             crate::errno::set_errno(crate::errno::EINVAL);
             return -1;
         }
-        i = i.wrapping_add(1);
-    }
 
-    // Try up to 100 unique names.
-    let mut attempt: u32 = 0;
-    while attempt < 100 {
-        // Use getrandom for unpredictable suffix (same rationale as mkstemp).
-        let mut rand_bytes = [0u8; 6];
-        crate::unistd::getrandom(rand_bytes.as_mut_ptr(), 6, 0);
-
-        let mut j: usize = 0;
-        while j < 6 {
-            let rb = rand_bytes.get(j).copied().unwrap_or(0);
-            let idx = rb % 36;
-            let ch = if idx < 10 {
-                b'0'.wrapping_add(idx)
-            } else {
-                b'a'.wrapping_add(idx.wrapping_sub(10))
-            };
-            unsafe {
-                *template.add(suffix_start.wrapping_add(j)) = ch;
-            }
-            j = j.wrapping_add(1);
-        }
-
-        // OR the caller's flags (e.g., O_CLOEXEC, O_APPEND) with the
-        // mandatory O_RDWR | O_CREAT | O_EXCL flags.
-        let open_flags =
-            crate::fcntl::O_RDWR | crate::fcntl::O_CREAT | crate::fcntl::O_EXCL | flags;
-        let fd = crate::file::open(template, open_flags, 0o600);
-        if fd >= 0 {
-            return fd;
-        }
-
-        if crate::errno::get_errno() != crate::errno::EEXIST {
+        let len = unsafe { crate::string::strlen(template) };
+        if len < 6 {
+            crate::errno::set_errno(crate::errno::EINVAL);
             return -1;
         }
 
-        attempt = attempt.wrapping_add(1);
-    }
+        // Verify the last 6 characters are 'X'.
+        let suffix_start = len.wrapping_sub(6);
+        let mut i: usize = 0;
+        while i < 6 {
+            if unsafe { *template.add(suffix_start.wrapping_add(i)) } != b'X' {
+                crate::errno::set_errno(crate::errno::EINVAL);
+                return -1;
+            }
+            i = i.wrapping_add(1);
+        }
 
-    crate::errno::set_errno(crate::errno::EEXIST);
-    -1
+        // Try up to 100 unique names.
+        let mut attempt: u32 = 0;
+        while attempt < 100 {
+            // Use getrandom for unpredictable suffix (same rationale as mkstemp).
+            let mut rand_bytes = [0u8; 6];
+            crate::unistd::getrandom(rand_bytes.as_mut_ptr(), 6, 0);
+
+            let mut j: usize = 0;
+            while j < 6 {
+                let rb = rand_bytes.get(j).copied().unwrap_or(0);
+                let idx = rb % 36;
+                let ch = if idx < 10 {
+                    b'0'.wrapping_add(idx)
+                } else {
+                    b'a'.wrapping_add(idx.wrapping_sub(10))
+                };
+                unsafe {
+                    *template.add(suffix_start.wrapping_add(j)) = ch;
+                }
+                j = j.wrapping_add(1);
+            }
+
+            // OR the caller's flags (e.g., O_CLOEXEC, O_APPEND) with the
+            // mandatory O_RDWR | O_CREAT | O_EXCL flags.
+            let open_flags =
+                crate::fcntl::O_RDWR | crate::fcntl::O_CREAT | crate::fcntl::O_EXCL | flags;
+            let fd = crate::file::open(template, open_flags, 0o600);
+            if fd >= 0 {
+                return fd;
+            }
+
+            if crate::errno::get_errno() != crate::errno::EEXIST {
+                return -1;
+            }
+
+            attempt = attempt.wrapping_add(1);
+        }
+
+        crate::errno::set_errno(crate::errno::EEXIST);
+        -1
+    }
 }
+pub use gnu_mkostemp::mkostemp;
 
 // ---------------------------------------------------------------------------
 // mkstemps — create a temporary file with a suffix
 // ---------------------------------------------------------------------------
 
-/// Create a unique temporary file with a user-specified suffix.
-///
-/// Like `mkstemp`, but the last `suffixlen` characters of `template`
-/// are preserved as a suffix (e.g., `"/tmp/fileXXXXXX.txt"` with
-/// `suffixlen=4`).  The 6 'X' characters before the suffix are replaced
-/// with unique characters.
-///
-/// Returns an open fd on success, -1 on error.
-///
-/// # Safety
-///
-/// `template` must be a writable null-terminated string.
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub unsafe extern "C" fn mkstemps(template: *mut u8, suffixlen: i32) -> i32 {
-    unsafe { mkostemps(template, suffixlen, 0) }
+/// Own archive member — gnulib replaces `mkstemps`. See string.rs's module header.
+mod gnu_mkstemps {
+    use super::*;
+
+    /// Create a unique temporary file with a user-specified suffix.
+    ///
+    /// Like `mkstemp`, but the last `suffixlen` characters of `template`
+    /// are preserved as a suffix (e.g., `"/tmp/fileXXXXXX.txt"` with
+    /// `suffixlen=4`).  The 6 'X' characters before the suffix are replaced
+    /// with unique characters.
+    ///
+    /// Returns an open fd on success, -1 on error.
+    ///
+    /// # Safety
+    ///
+    /// `template` must be a writable null-terminated string.
+    #[cfg_attr(target_os = "none", unsafe(no_mangle))]
+    pub unsafe extern "C" fn mkstemps(template: *mut u8, suffixlen: i32) -> i32 {
+        unsafe { mkostemps(template, suffixlen, 0) }
+    }
 }
+pub use gnu_mkstemps::mkstemps;
 
 // ---------------------------------------------------------------------------
 // mkostemps — create a temporary file with suffix + flags
 // ---------------------------------------------------------------------------
 
-/// Create a unique temporary file with a suffix and open flags.
-///
-/// Combines `mkstemps` (suffix support) with `mkostemp` (additional
-/// open flags like `O_CLOEXEC`).
-///
-/// Returns an open fd on success, -1 on error.
-///
-/// # Safety
-///
-/// `template` must be a writable null-terminated string.
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub unsafe extern "C" fn mkostemps(template: *mut u8, suffixlen: i32, flags: i32) -> i32 {
-    if template.is_null() || suffixlen < 0 {
-        crate::errno::set_errno(crate::errno::EINVAL);
-        return -1;
-    }
-
-    let slen = suffixlen as usize;
-    let len = unsafe { crate::string::strlen(template) };
-    // Need at least 6 'X' before the suffix.
-    if len < 6_usize.wrapping_add(slen) {
-        crate::errno::set_errno(crate::errno::EINVAL);
-        return -1;
-    }
-
-    // Check that the 6 chars before the suffix are 'X'.
-    let x_start = len.wrapping_sub(slen).wrapping_sub(6);
-    let mut i: usize = 0;
-    while i < 6 {
-        if unsafe { *template.add(x_start.wrapping_add(i)) } != b'X' {
+/// Own archive member — gnulib replaces `mkostemps`. See string.rs's module header.
+mod gnu_mkostemps {
+    /// Create a unique temporary file with a suffix and open flags.
+    ///
+    /// Combines `mkstemps` (suffix support) with `mkostemp` (additional
+    /// open flags like `O_CLOEXEC`).
+    ///
+    /// Returns an open fd on success, -1 on error.
+    ///
+    /// # Safety
+    ///
+    /// `template` must be a writable null-terminated string.
+    #[cfg_attr(target_os = "none", unsafe(no_mangle))]
+    pub unsafe extern "C" fn mkostemps(template: *mut u8, suffixlen: i32, flags: i32) -> i32 {
+        if template.is_null() || suffixlen < 0 {
             crate::errno::set_errno(crate::errno::EINVAL);
             return -1;
         }
-        i = i.wrapping_add(1);
-    }
 
-    // Try up to 100 unique names.
-    let mut attempt: u32 = 0;
-    while attempt < 100 {
-        let mut rand_bytes = [0u8; 6];
-        crate::unistd::getrandom(rand_bytes.as_mut_ptr(), 6, 0);
-
-        let mut j: usize = 0;
-        while j < 6 {
-            // `j < 6 == rand_bytes.len()`, so the index is in bounds.
-            #[allow(clippy::indexing_slicing)]
-            let ch = rand_bytes[j] % 36;
-            let c = if ch < 10 {
-                b'0'.wrapping_add(ch)
-            } else {
-                b'a'.wrapping_add(ch.wrapping_sub(10))
-            };
-            unsafe {
-                *template.add(x_start.wrapping_add(j)) = c;
-            }
-            j = j.wrapping_add(1);
-        }
-
-        let base_flags = crate::fcntl::O_RDWR | crate::fcntl::O_CREAT | crate::fcntl::O_EXCL;
-        let fd = crate::file::open(template, base_flags | flags, 0o600);
-        if fd >= 0 {
-            return fd;
-        }
-
-        if crate::errno::get_errno() != crate::errno::EEXIST {
+        let slen = suffixlen as usize;
+        let len = unsafe { crate::string::strlen(template) };
+        // Need at least 6 'X' before the suffix.
+        if len < 6_usize.wrapping_add(slen) {
+            crate::errno::set_errno(crate::errno::EINVAL);
             return -1;
         }
 
-        attempt = attempt.wrapping_add(1);
-    }
+        // Check that the 6 chars before the suffix are 'X'.
+        let x_start = len.wrapping_sub(slen).wrapping_sub(6);
+        let mut i: usize = 0;
+        while i < 6 {
+            if unsafe { *template.add(x_start.wrapping_add(i)) } != b'X' {
+                crate::errno::set_errno(crate::errno::EINVAL);
+                return -1;
+            }
+            i = i.wrapping_add(1);
+        }
 
-    crate::errno::set_errno(crate::errno::EEXIST);
-    -1
+        // Try up to 100 unique names.
+        let mut attempt: u32 = 0;
+        while attempt < 100 {
+            let mut rand_bytes = [0u8; 6];
+            crate::unistd::getrandom(rand_bytes.as_mut_ptr(), 6, 0);
+
+            let mut j: usize = 0;
+            while j < 6 {
+                // `j < 6 == rand_bytes.len()`, so the index is in bounds.
+                #[allow(clippy::indexing_slicing)]
+                let ch = rand_bytes[j] % 36;
+                let c = if ch < 10 {
+                    b'0'.wrapping_add(ch)
+                } else {
+                    b'a'.wrapping_add(ch.wrapping_sub(10))
+                };
+                unsafe {
+                    *template.add(x_start.wrapping_add(j)) = c;
+                }
+                j = j.wrapping_add(1);
+            }
+
+            let base_flags = crate::fcntl::O_RDWR | crate::fcntl::O_CREAT | crate::fcntl::O_EXCL;
+            let fd = crate::file::open(template, base_flags | flags, 0o600);
+            if fd >= 0 {
+                return fd;
+            }
+
+            if crate::errno::get_errno() != crate::errno::EEXIST {
+                return -1;
+            }
+
+            attempt = attempt.wrapping_add(1);
+        }
+
+        crate::errno::set_errno(crate::errno::EEXIST);
+        -1
+    }
 }
+pub use gnu_mkostemps::mkostemps;
 
 // ---------------------------------------------------------------------------
 // mkdtemp — create a unique temporary directory
 // ---------------------------------------------------------------------------
 
-/// Create a unique temporary directory.
-///
-/// Modifies `template` in-place (replacing the trailing 6 'X' chars
-/// with a unique suffix) and creates the directory with mode 0700.
-/// Returns `template` on success, or null on error.
-///
-/// # Safety
-///
-/// `template` must be a writable null-terminated string with at least
-/// 6 trailing 'X' characters.
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub unsafe extern "C" fn mkdtemp(template: *mut u8) -> *mut u8 {
-    if template.is_null() {
-        crate::errno::set_errno(crate::errno::EINVAL);
-        return core::ptr::null_mut();
-    }
-
-    let len = unsafe { crate::string::strlen(template) };
-    if len < 6 {
-        crate::errno::set_errno(crate::errno::EINVAL);
-        return core::ptr::null_mut();
-    }
-
-    // Verify the last 6 characters are 'X'.
-    let suffix_start = len.wrapping_sub(6);
-    let mut i: usize = 0;
-    while i < 6 {
-        if unsafe { *template.add(suffix_start.wrapping_add(i)) } != b'X' {
+/// Own archive member — gnulib replaces `mkdtemp`. See string.rs's module header.
+mod gnu_mkdtemp {
+    /// Create a unique temporary directory.
+    ///
+    /// Modifies `template` in-place (replacing the trailing 6 'X' chars
+    /// with a unique suffix) and creates the directory with mode 0700.
+    /// Returns `template` on success, or null on error.
+    ///
+    /// # Safety
+    ///
+    /// `template` must be a writable null-terminated string with at least
+    /// 6 trailing 'X' characters.
+    #[cfg_attr(target_os = "none", unsafe(no_mangle))]
+    pub unsafe extern "C" fn mkdtemp(template: *mut u8) -> *mut u8 {
+        if template.is_null() {
             crate::errno::set_errno(crate::errno::EINVAL);
             return core::ptr::null_mut();
         }
-        i = i.wrapping_add(1);
-    }
 
-    // Try up to 100 unique names.
-    let mut attempt: u32 = 0;
-    while attempt < 100 {
-        // Generate a cryptographically random suffix via RDRAND-backed getrandom.
-        let mut rand_bytes = [0u8; 6];
-        crate::unistd::getrandom(rand_bytes.as_mut_ptr(), 6, 0);
-
-        let mut j: usize = 0;
-        while j < 6 {
-            let rb = rand_bytes.get(j).copied().unwrap_or(0);
-            let idx = rb % 36;
-            let ch = if idx < 10 {
-                b'0'.wrapping_add(idx)
-            } else {
-                b'a'.wrapping_add(idx.wrapping_sub(10))
-            };
-            // SAFETY: suffix_start + j < len, template is writable.
-            unsafe {
-                *template.add(suffix_start.wrapping_add(j)) = ch;
-            }
-            j = j.wrapping_add(1);
-        }
-
-        // Try to create the directory.
-        let ret = crate::file::mkdir(template, 0o700);
-        if ret == 0 {
-            return template;
-        }
-
-        // If EEXIST, try again.
-        if crate::errno::get_errno() != crate::errno::EEXIST {
+        let len = unsafe { crate::string::strlen(template) };
+        if len < 6 {
+            crate::errno::set_errno(crate::errno::EINVAL);
             return core::ptr::null_mut();
         }
 
-        attempt = attempt.wrapping_add(1);
-    }
+        // Verify the last 6 characters are 'X'.
+        let suffix_start = len.wrapping_sub(6);
+        let mut i: usize = 0;
+        while i < 6 {
+            if unsafe { *template.add(suffix_start.wrapping_add(i)) } != b'X' {
+                crate::errno::set_errno(crate::errno::EINVAL);
+                return core::ptr::null_mut();
+            }
+            i = i.wrapping_add(1);
+        }
 
-    crate::errno::set_errno(crate::errno::EEXIST);
-    core::ptr::null_mut()
+        // Try up to 100 unique names.
+        let mut attempt: u32 = 0;
+        while attempt < 100 {
+            // Generate a cryptographically random suffix via RDRAND-backed getrandom.
+            let mut rand_bytes = [0u8; 6];
+            crate::unistd::getrandom(rand_bytes.as_mut_ptr(), 6, 0);
+
+            let mut j: usize = 0;
+            while j < 6 {
+                let rb = rand_bytes.get(j).copied().unwrap_or(0);
+                let idx = rb % 36;
+                let ch = if idx < 10 {
+                    b'0'.wrapping_add(idx)
+                } else {
+                    b'a'.wrapping_add(idx.wrapping_sub(10))
+                };
+                // SAFETY: suffix_start + j < len, template is writable.
+                unsafe {
+                    *template.add(suffix_start.wrapping_add(j)) = ch;
+                }
+                j = j.wrapping_add(1);
+            }
+
+            // Try to create the directory.
+            let ret = crate::file::mkdir(template, 0o700);
+            if ret == 0 {
+                return template;
+            }
+
+            // If EEXIST, try again.
+            if crate::errno::get_errno() != crate::errno::EEXIST {
+                return core::ptr::null_mut();
+            }
+
+            attempt = attempt.wrapping_add(1);
+        }
+
+        crate::errno::set_errno(crate::errno::EEXIST);
+        core::ptr::null_mut()
+    }
 }
+pub use gnu_mkdtemp::mkdtemp;
 
 // ---------------------------------------------------------------------------
 // system — execute a shell command
@@ -2059,133 +2081,137 @@ pub extern "C" fn jrand48(xsubi: *mut u16) -> i64 {
 // getsubopt — parse suboption strings
 // ---------------------------------------------------------------------------
 
-/// Parse comma-separated suboptions.
-///
-/// Scans `*optionp` for the next suboption from the null-terminated
-/// `tokens` array.  On match, `*valuep` points to the value after `=`
-/// (or null if no `=`), `*optionp` is advanced past the suboption,
-/// and the matching token index is returned.  Returns -1 if no match.
-///
-/// # Safety
-///
-/// `optionp` must point to a valid `*mut u8` pointing into a
-/// modifiable string.  `tokens` must be a null-terminated array of
-/// null-terminated C strings.  `valuep` must be a valid pointer.
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub unsafe extern "C" fn getsubopt(
-    optionp: *mut *mut u8,
-    tokens: *const *const u8,
-    valuep: *mut *mut u8,
-) -> i32 {
-    if optionp.is_null() || tokens.is_null() || valuep.is_null() {
-        return -1;
-    }
-
-    let opt = unsafe { *optionp };
-    if opt.is_null() || unsafe { *opt } == 0 {
-        return -1;
-    }
-
-    // Find the end of this suboption (comma or null).
-    let mut end: usize = 0;
-    while unsafe { *opt.add(end) } != 0 && unsafe { *opt.add(end) } != b',' {
-        end = end.wrapping_add(1);
-    }
-
-    // Find '=' within this suboption to separate key from value.
-    let mut eq_pos: Option<usize> = None;
-    let mut j: usize = 0;
-    while j < end {
-        if unsafe { *opt.add(j) } == b'=' {
-            eq_pos = Some(j);
-            break;
-        }
-        j = j.wrapping_add(1);
-    }
-
-    let key_len = eq_pos.unwrap_or(end);
-
-    // Try to match against each token.
-    let mut idx: i32 = 0;
-    loop {
-        let token = unsafe { *tokens.add(idx as usize) };
-        if token.is_null() {
-            break;
+/// Own archive member — gnulib replaces `getsubopt`. See string.rs's module header.
+mod gnu_getsubopt {
+    /// Parse comma-separated suboptions.
+    ///
+    /// Scans `*optionp` for the next suboption from the null-terminated
+    /// `tokens` array.  On match, `*valuep` points to the value after `=`
+    /// (or null if no `=`), `*optionp` is advanced past the suboption,
+    /// and the matching token index is returned.  Returns -1 if no match.
+    ///
+    /// # Safety
+    ///
+    /// `optionp` must point to a valid `*mut u8` pointing into a
+    /// modifiable string.  `tokens` must be a null-terminated array of
+    /// null-terminated C strings.  `valuep` must be a valid pointer.
+    #[cfg_attr(target_os = "none", unsafe(no_mangle))]
+    pub unsafe extern "C" fn getsubopt(
+        optionp: *mut *mut u8,
+        tokens: *const *const u8,
+        valuep: *mut *mut u8,
+    ) -> i32 {
+        if optionp.is_null() || tokens.is_null() || valuep.is_null() {
+            return -1;
         }
 
-        // Compare key_len bytes of opt against this token.
-        let tok_len = unsafe { crate::string::strlen(token) };
-        if tok_len == key_len {
-            let mut matched = true;
-            let mut k: usize = 0;
-            while k < key_len {
-                if unsafe { *opt.add(k) } != unsafe { *token.add(k) } {
-                    matched = false;
-                    break;
-                }
-                k = k.wrapping_add(1);
+        let opt = unsafe { *optionp };
+        if opt.is_null() || unsafe { *opt } == 0 {
+            return -1;
+        }
+
+        // Find the end of this suboption (comma or null).
+        let mut end: usize = 0;
+        while unsafe { *opt.add(end) } != 0 && unsafe { *opt.add(end) } != b',' {
+            end = end.wrapping_add(1);
+        }
+
+        // Find '=' within this suboption to separate key from value.
+        let mut eq_pos: Option<usize> = None;
+        let mut j: usize = 0;
+        while j < end {
+            if unsafe { *opt.add(j) } == b'=' {
+                eq_pos = Some(j);
+                break;
+            }
+            j = j.wrapping_add(1);
+        }
+
+        let key_len = eq_pos.unwrap_or(end);
+
+        // Try to match against each token.
+        let mut idx: i32 = 0;
+        loop {
+            let token = unsafe { *tokens.add(idx as usize) };
+            if token.is_null() {
+                break;
             }
 
-            if matched {
-                // Set valuep to the value after '=' (or null).
-                if let Some(ep) = eq_pos {
-                    unsafe {
-                        *valuep = opt.add(ep.wrapping_add(1));
+            // Compare key_len bytes of opt against this token.
+            let tok_len = unsafe { crate::string::strlen(token) };
+            if tok_len == key_len {
+                let mut matched = true;
+                let mut k: usize = 0;
+                while k < key_len {
+                    if unsafe { *opt.add(k) } != unsafe { *token.add(k) } {
+                        matched = false;
+                        break;
                     }
-                } else {
-                    unsafe {
-                        *valuep = core::ptr::null_mut();
-                    }
+                    k = k.wrapping_add(1);
                 }
 
-                // Advance optionp past this suboption.
-                if unsafe { *opt.add(end) } == b',' {
-                    unsafe {
-                        *optionp = opt.add(end.wrapping_add(1));
+                if matched {
+                    // Set valuep to the value after '=' (or null).
+                    if let Some(ep) = eq_pos {
+                        unsafe {
+                            *valuep = opt.add(ep.wrapping_add(1));
+                        }
+                    } else {
+                        unsafe {
+                            *valuep = core::ptr::null_mut();
+                        }
                     }
-                } else {
-                    unsafe {
-                        *optionp = opt.add(end);
+
+                    // Advance optionp past this suboption.
+                    if unsafe { *opt.add(end) } == b',' {
+                        unsafe {
+                            *optionp = opt.add(end.wrapping_add(1));
+                        }
+                    } else {
+                        unsafe {
+                            *optionp = opt.add(end);
+                        }
                     }
-                }
 
-                // Null-terminate the key portion (write '\0' at '=' or end).
-                unsafe {
-                    *opt.add(key_len) = 0;
-                }
+                    // Null-terminate the key portion (write '\0' at '=' or end).
+                    unsafe {
+                        *opt.add(key_len) = 0;
+                    }
 
-                return idx;
+                    return idx;
+                }
+            }
+
+            idx = idx.wrapping_add(1);
+        }
+
+        // No match — still advance past this suboption.
+        if let Some(ep) = eq_pos {
+            unsafe {
+                *valuep = opt.add(ep.wrapping_add(1));
+            }
+        } else {
+            unsafe {
+                *valuep = core::ptr::null_mut();
             }
         }
+        if unsafe { *opt.add(end) } == b',' {
+            unsafe {
+                *optionp = opt.add(end.wrapping_add(1));
+            }
+        } else {
+            unsafe {
+                *optionp = opt.add(end);
+            }
+        }
+        unsafe {
+            *opt.add(key_len) = 0;
+        }
 
-        idx = idx.wrapping_add(1);
+        -1
     }
-
-    // No match — still advance past this suboption.
-    if let Some(ep) = eq_pos {
-        unsafe {
-            *valuep = opt.add(ep.wrapping_add(1));
-        }
-    } else {
-        unsafe {
-            *valuep = core::ptr::null_mut();
-        }
-    }
-    if unsafe { *opt.add(end) } == b',' {
-        unsafe {
-            *optionp = opt.add(end.wrapping_add(1));
-        }
-    } else {
-        unsafe {
-            *optionp = opt.add(end);
-        }
-    }
-    unsafe {
-        *opt.add(key_len) = 0;
-    }
-
-    -1
 }
+pub use gnu_getsubopt::getsubopt;
 
 // ---------------------------------------------------------------------------
 // a64l / l64a — base-64 encoding (POSIX XSI)

@@ -22215,6 +22215,161 @@ read.
 
 ---
 
+## §337 — A coreutils diagnostic is prefixed with the utility's own name, not with `argv[0]`
+
+**Date:** 2026-08-19
+**Decided by:** Claude (autonomous)
+
+**In short:** When one of our coreutils fails, the error line opens with a name.
+GNU opens it with the *exact text you typed to run the program* — so the same
+failure reads `/usr/bin/test: …` if you typed a full path and `./[: …` if you
+typed a relative one. We open it with a fixed short name instead (`test: …`,
+`split: …`). This records that crate-wide choice, and the single place it
+bends: `test` is also spelled `[`, and there the spelling is not decoration —
+it changes what the program accepts — so the two report themselves under
+different names.
+
+### What GNU does, measured
+
+Not inferred from the source: run against GNU coreutils 9.4 on the dev
+machine, `/usr/bin/test x )` says `/usr/bin/test: missing argument after ')'`
+and `./[ x )` says `./[: missing argument after ')'`. The prefix is `argv[0]`
+reproduced verbatim, directory components and all. (gnulib's
+`set_program_name` keeps the unstripped string in `program_name`, which is what
+`error()` prints; the stripped basename lives in a *different* variable that
+coreutils' diagnostics do not use.)
+
+### The rule here
+
+Every binary in `userspace/coreutils` prefixes its diagnostics with its own
+short name, a constant compiled into it. Nothing reads `argv[0]` to build a
+message.
+
+The case *for* echoing `argv[0]`, which is real and is why GNU does it: when
+several copies of a utility exist — one in `/usr/bin`, one in `~/bin`, one in
+the build tree — the prefix tells you which one actually ran. That is a
+genuinely useful debugging signal and we are giving it up.
+
+Three things buy it back, and together they outweigh it:
+
+- **The prefix becomes a stable string.** It is the same whether the utility
+  was invoked by absolute path from a script, by bare name through `PATH`, or
+  by our own test harness out of `target/debug`. A diagnostic that changes
+  text depending on how it was reached is a diagnostic that cannot be matched
+  on, and matching on it is exactly what scripts do.
+- **It cannot leak a build path.** `argv[0]` under `cargo test` is an absolute
+  path into the target directory; echoing it would put the developer's
+  directory layout into user-visible output, and into any golden file that
+  captures it.
+- **It is uniform across ~60 utilities.** The crate is a set of small
+  binaries with no multi-call dispatcher, so `argv[0]` carries no information
+  the binary does not already know about itself — with exactly one exception.
+
+The cost we are accepting, stated plainly: a script that greps stderr for
+`/usr/bin/test:` will not match our output. A script that greps for `test:`
+will match both. The latter is the far more common shape, and the former is
+already fragile against GNU itself — it breaks the moment the utility is
+invoked by bare name.
+
+### The exception: `test` and `[` are two names for one program
+
+POSIX gives the same program two spellings with different grammars — `[ … ]`
+requires the closing bracket that `test …` must not have. So the invoked
+spelling is semantic, and a `[` that reported itself as `test` would be
+actively misleading: the user would be told about an expression they did not
+write, in a syntax that would have been wrong for them.
+
+`test.rs` therefore chooses between two *fixed* names based on which spelling
+ran, and its `--version` under `[` prints `[ (SlateOS coreutils) 9.4` —
+mirroring GNU, where `[ --version` prints `[ (GNU coreutils) 9.4`, again the
+invoked name.
+
+What it deliberately does *not* do is echo `argv[0]` for this one utility.
+That would be the smaller change and it is the wrong one: `argv[0]` can be a
+path, a symlink under a third name, or anything a caller of `execve` cares to
+put there, and the program has no rule for turning those into a grammar
+choice. The information that is actually semantic is one bit — bracket or not
+— and the program already knows it from its own entry point. Reproducing an
+arbitrary string to encode one bit invites the string to be wrong.
+
+### Consequence for the differential harnesses
+
+`scripts/test-diff.sh` compares our stderr against real GNU stderr, so it must
+strip the prefix from both sides or every single error case would "differ."
+It does — but it strips *the expected prefix specifically*, and rewrites a line
+that had no prefix at all to `<unprefixed>…`. That detail is the point: a naive
+"delete everything before the first colon" would make a dropped prefix, or a
+prefix naming the wrong utility, compare equal to a correct one, and the
+harness would go quiet about a real regression. The normalisation is allowed to
+hide this decision and nothing else.
+
+---
+
+## §338 — `human` is checked against a *committed measurement* of GNU, not a live diff
+
+**Date:** 2026-08-19
+**Decided by:** Claude (autonomous)
+
+**In short:** every other coreutils utility we've ported is tested by running
+ours and GNU's side by side and diffing. `human` — the code that turns a byte
+count into `1.0M` or `999 kB` — cannot be tested that way, because there is no
+`human` command to run. The only way to make GNU print a given number is to own
+a file that big, or to copy that many bytes. So the numbers were measured once,
+and the answers are checked into the repo as a table.
+
+**The problem.** `human` is a library module ported from gnulib's
+`lib/human.c`. The existing harness (`scripts/test-diff.sh`) is built around
+executing two binaries; there is no binary here. The obvious alternative — have
+the test shell out to GNU on the fly — founders on how GNU is reached: nothing
+accepts "render this number for me". Every caller renders a number it *already
+has*, from a file it can see or bytes it has moved.
+
+**What was chosen.** A committed fixture,
+`userspace/coreutils/tests/data/human-gnu.txt` (~30k rows), produced by
+`scripts/gen-human-fixture.sh` and consumed by `tests/human_gnu.rs`.
+
+**Alternatives, and why not:**
+
+| Option | Why not |
+|---|---|
+| Live diff, like every other utility | No binary to diff against. |
+| Shell out to GNU from the test | Would require GNU coreutils installed to run *our* suite, several GB of scratch, and minutes of runtime. A unit test that stands up 3749 files is not a unit test. |
+| More hand-written expectations | This is what existed, and it is what missed the bug below. |
+
+**The cost, stated plainly:** the fixture can go stale against a newer GNU and
+nothing detects that automatically — it is re-measured only when someone runs
+the generator. That is a real downside, accepted because the alternative is a
+test most checkouts cannot run at all. The fixture header records the GNU
+version that produced it (8.32) so a disagreement can at least be attributed.
+
+**Why a sweep rather than a few more hand cases.** gnulib makes two rounding
+decisions twelve lines apart, `human.c:301` and `human.c:327`, written almost
+identically — one compares against 2, the other against 0. The port had the
+first transcribed over the second. Every hand-written rule test passed anyway:
+the rules were all still obeyed, just with the SI carry 450 bytes early.
+Measured on GNU, `999499` is `999 kB` and `999500` is `1.0 MB`; the bug moved
+that boundary to `999050`. No hand-picked case was ever going to land in that
+gap, because choosing the case requires already knowing where the boundary is —
+which is the thing under test. A sweep whose expectations come from GNU rather
+than from the author's understanding of GNU is the only construction that
+catches this class of error.
+
+**Three instruments, because one cannot cover it.** `ls -l` (ceiling,
+autoscale, both bases); `du -a --apparent-size -B N` (ceiling with a block-size
+divisor — a branch `ls` never reaches, because `ls` always passes from=to=1);
+and `dd` (round-to-nearest, which as far as this sweep could establish no other
+coreutils caller uses — `ls -h`, `du -h` and `df -h` all round *up*, so that a
+file never renders smaller than it is).
+
+**Two limits worth knowing.** The ls/du sweeps stand up sparse files, which is
+free — but NTFS refuses lengths past ~16 TB, so the sweep stops at 5e12 and
+reaches exponent 4 (`T`) in both bases; exponents `P E Z Y R Q` are unreachable
+by measurement and rest on unit tests against the letter table alone. And `dd`
+must actually move every byte it reports, so that sweep is capped at 20 MB —
+enough to reach exponent 2 and both sides of the 999500 boundary.
+
+---
+
 ## §462 — A generator that cannot reach the kernel CSPRNG refuses to generate
 
 **Date:** 2026-08-18
@@ -24079,6 +24234,115 @@ a different feature, not a relaxation of this gate. `replacing`/`spare` would
 need the label's own vdev GUID matched against the child list to identify which
 child is in hand, plus a resilver-completion check on it; that is tractable and
 deliberately not done here.
+
+## §248 — ZFS gang blocks are read, and the header is trusted because of *where* it sits, not because a parent vouched for it
+
+**Date:** 2026-08-20
+**Decided by:** Claude (autonomous)
+
+**In short.** When a ZFS pool gets full enough that there is no longer one
+unbroken run of free space big enough for the file block being written, ZFS
+writes the block in pieces and leaves behind a little index — a *gang header* —
+listing where the pieces went. SlateOS's ZFS reader used to refuse any block
+stored that way, which is exactly backwards: a pool only starts doing this when
+it is nearly full, and a nearly-full pool is the one whose owner most urgently
+wants to copy their files off it. It now reassembles them. The part worth
+recording is how the index itself is proved genuine, because it cannot be proved
+the ordinary way, and the two obvious guesses at how it *is* proved are both
+wrong in ways a synthetic test would happily agree with.
+
+**Decision.** `dmu::Reader::read_block` follows a DVA whose gang bit is set into
+`read_gang`, which verifies the header, walks its block pointers in order, reads
+each piece (recursively, since a piece may itself be a gang block), and
+concatenates them. The tree is capped at `MAX_GANG_DEPTH = 6`. A tree whose
+pieces do not add up to exactly the parent's `psize` — short *or* long — is
+rejected as `InvalidArgument`.
+
+**Why the header is checksummed against its own address.** Every other block in
+ZFS is verified against a hash stored in the pointer that names it. A gang header
+cannot be: the pointer that would hold its hash is the same pointer whose target
+the header describes, so ZFS would have to know the header's hash before it had
+finished deciding the header's contents. The way out is that the header carries
+its own hash, in a 40-byte `zio_eck_t` trailer, and what is fed into that hash in
+place of the checksum field is the header's *address* — vdev, offset, and the
+transaction group it was written in. Forging a header therefore means placing it
+at precisely the address the parent already names, in the transaction the parent
+already records, which is not a forgery so much as a rewrite of the parent.
+
+**Why DVA 0's address specifically.** A pointer may name up to three copies of
+the same header (`copies=2` and metadata get more than one). The address hashed
+into the trailer is always **copy 0's**, whichever copy is actually being read.
+That is not an oversight in OpenZFS — it is what makes the copies byte-identical
+to each other, so any of them satisfies the parent and a resilver can substitute
+one for another without rewriting anything. A reader that verifies against "the
+address I read from" works on a single-copy pool and fails on a healthy
+multi-copy one, which is the worst possible failure ordering: it passes the easy
+test and breaks on the configuration that was chosen for extra safety. Two
+matching details: the offset used is the raw DVA offset, *not* the
+label/boot-reserve-adjusted one (the 4 MiB reserve is a property of the device,
+not of the block's identity), and the transaction group is the *physical* birth
+word falling back to the logical one when it is zero — zero there means "same as
+logical", the common case, not "transaction zero".
+
+**Why the parent's checksum is deliberately not checked.** The parent pointer of
+a gang block carries a `blk_cksum` field, and it does *not* describe the
+assembled bytes — OpenZFS's `zio_checksum_error` substitutes the gang-header
+verifier whenever the pointer's gang bit is set, so nothing ever hashes the
+concatenation. Coverage is nonetheless complete, by a different route: each piece
+is verified against its own pointer, each of those pointers lives inside the
+header, the header is verified by its trailer, and the trailer is anchored to the
+address the parent names. The chain is unbroken; it just runs through addresses
+rather than through one end-to-end hash. This is stated here because a reader
+that "helpfully" also checked the parent's field would reject every real gang
+block, and the code would look more careful while being strictly wrong. The test
+suite pins it the only way that works: `make_gang_blkptr` writes
+`0xDEAD_BEEF_DEAD_BEEF` into that field, so every happy-path check fails the
+moment anyone starts consulting it.
+
+**Why the header's size is resolved by trying and falling back.** A gang header
+used to be 512 bytes on every pool. The `dynamic_gang_header` feature made it one
+minimum allocation on its vdev instead — 4096 on a typical `ashift=12` pool. This
+driver does not parse `features_for_read`, and does not need to: it does what
+OpenZFS itself does, trying the larger size that the DVA's own `asize` admits and
+falling back to 512 when that does not verify. The self-checksum is what decides,
+so a wrong guess cannot be mistaken for a right one — it fails the trailer magic
+or it fails the hash. The alternative, parsing the feature flags, would add a
+dependency on a list that grows with every OpenZFS release in order to answer a
+question the data already answers.
+
+**Why there is a depth cap.** A header whose child pointer addresses the header
+itself verifies at every level — it is a genuine header at a genuine address —
+and contributes no bytes, so the length check that catches every other malformed
+tree never fires. Nothing but a cap terminates it, and the thing it exhausts is
+the kernel stack. Six levels is far past anything real: even the three-pointer
+old-style header spans 729 pieces at that depth, which for a 16 MiB block means
+pieces of 22 KiB. A pool fragmented worse than that is failing allocations, not
+writing deeper trees.
+
+**How it was verified.** Thirteen new checks in the ZFS self-test, run under QEMU
+(`[zfs] Self-test passed (144 checks)`, up from 131). They cover reassembly in
+header order, a zero physical birth falling back to the logical txg, a 4096-byte
+dynamic header, an old 512-byte header inside a 4096-byte allocation, a nested
+tree, a ditto copy hashed against copy 0's address, and seven rejections: wrong
+address, wrong txg, short tree, long tree, self-referential cycle, corrupt
+header, missing trailer magic. The on-disk facts were re-derived from freshly
+fetched OpenZFS `zio.c`/`zio.h`/`zio_checksum.c` rather than from memory, because
+a synthetic test encodes whatever assumption its author made and therefore cannot
+catch a wrong one — self-consistent and wrong is the outcome to fear here.
+
+**Where it lives.** `kernel/src/fs/zfs/dmu.rs`: `read_raw`, `read_copy`,
+`read_gang`, `read_gang_header`, and the free function `gang_verifier`. Tests in
+`kernel/src/fs/zfs/tests.rs` under the `gang` group. Scope statement in
+`kernel/src/fs/zfs/mod.rs`.
+
+**How to reverse.** Make `read_copy` return `NotSupported` when `dva.gang` is
+set; nothing else depends on the gang path.
+
+**What would change this.** If a pool is ever found whose gang header is neither
+512 nor its vdev's minimum allocation, the two-try resolution becomes a real
+feature-flag parse. And if gang *writes* are ever wanted, none of this transfers
+— the allocator side is the hard half, and reading is deliberately the only half
+built.
 
 ## §463 — Two shared RNG crates merge into the dependency-free one
 
@@ -26511,6 +26775,171 @@ the two items are now always written as a single test —
 `the_painted_grid_is_square_evenly_spaced_and_fits_the_window` in nonogram,
 `the_painted_dots_are_a_square_even_lattice_centred_in_the_window` in dots — so
 that it is not possible to do one without the other.
+
+---
+
+## §339 — `libc.a` is built at `codegen-units=4096`, because an archive's object granularity is a libc ABI feature
+
+**Date:** 2026-08-20
+**Decided by:** Claude (autonomous)
+
+**In short:** we tried to build the real GNU `make` against our C library and
+link it. It compiled perfectly and asked for nothing we don't have — but the
+link still failed, with eleven "this name is defined twice" errors. The cause
+was not in `make` and not in any function we wrote: it was in how our library
+file is *packaged*. Rust had glued unrelated functions together into a small
+number of chunks, and a real C library must keep them separable so that a
+program which brings its own `getopt` can decline ours. One compiler flag —
+`-C codegen-units=4096` — restores that separability, and the eleven errors
+became zero. The alternative was to accept slightly better-optimised code and
+a C library that no GNU program can link against.
+
+**Terms used below.** An *archive* (`libc.a`) is a container holding many
+*object files*; the linker pulls out an object only if that object defines a
+symbol that is still missing, and never pulls out the rest. A *codegen unit*
+(CGU) is the chunk rustc hands to LLVM; one CGU becomes one object file in the
+archive. *gnulib* is a library of portability replacements that essentially
+every GNU program copies into its own source tree.
+
+### What happened
+
+`scripts/make-spike/run.sh` cross-compiles GNU make 4.4.1 unmodified and links
+it `-nostdlib` against `toolchain/sysroot/lib/libc.a`. The first run:
+
+```
+CONFIGURE_EXIT=0
+MAKE_EXIT=0
+OBJ_COUNT=30
+SLATE_LINK_EXIT=1
+MISSING_COUNT=0
+```
+
+Zero missing symbols and a failed link. The failures were all of the other
+kind — eleven duplicate definitions, in four families:
+
+```
+fnmatch
+glob globfree
+getopt getopt_long getopt_long_only optarg opterr optind optopt
+error
+```
+
+Every one of those is a name **gnulib supplies a replacement for**. That is not
+a coincidence and it is not specific to make: coreutils, grep, sed, tar,
+findutils, diffutils, gawk, gcc and binutils all vendor gnulib and therefore all
+define those same names themselves. A real libc defines them too, and this is
+normally harmless, because in glibc each function is its own object file — the
+program already defined `getopt`, so glibc's `getopt.o` is simply never
+extracted.
+
+Ours could not do that. Measuring the shipped archive with `nm --defined-only
+-g -A` (419 members, 384 rcgu objects, 2680 C-ABI symbols) showed why:
+
+| symbol | shared its object file with |
+|---|---|
+| `fnmatch` | `stdout`, `fopen`, `fwrite`, `fileno`, `isalpha`, `tolower` |
+| `glob`, `globfree` | `printf`, `snprintf`, `vfprintf`, `uname`, `err`, `warn` |
+| the `getopt` family | `sem_wait`, `sched_getaffinity`, `__fprintf_chk` |
+| the `error` family | `getenv`, `environ`, `setenv`, `regcomp`, `statfs` |
+
+So the collision was **unavoidable**, not unlucky. Each of the four names shared
+a member with something no C program can do without, so that member was always
+going to be extracted, and its `getopt` was always going to collide with the
+program's own. No link order, no object subsetting, no `--start-group` and no
+amount of care on the *caller's* side can avoid extracting an object you need
+for `printf`.
+
+### The decision
+
+Add `-C codegen-units=4096` to `$sysrootFlags` in `toolchain/build-sysroot.ps1`.
+Rebuilt that way the archive has 577 members and the four families are isolated:
+
+```
+cgu.034 -> fnmatch
+cgu.038 -> glob globfree
+cgu.050 -> getopt getopt_long getopt_long_only optarg opterr optind optopt
+cgu.065 -> error error_at_line error_message_count error_one_per_line
+           error_print_progname verror verror_at_line
+```
+
+Relinking make against it dropped the duplicate count from 11 to 0 and left
+exactly one undefined symbol, `bsd_signal` — which is how that genuine gap was
+found at all (fixed in `posix/src/signal.rs`, together with `sysv_signal`).
+
+The number 4096 is not a target; it is "no ceiling". rustc's partitioner starts
+from one CGU per module and *merges* until it is under the limit, so a limit
+above the module count means no merging happens and the layout falls out at
+roughly one object per module. That is glibc's one-object-per-`.c` layout,
+reached by a different route.
+
+### The alternatives, and why they lose
+
+**Leave it, and patch each port.** Every gnulib-using package can be built with
+`--disable-year2038`-style configure overrides or by deleting `lib/getopt.o`
+from its own object list before linking. This works and it is what a first
+instinct reaches for — it is also a per-package workaround for a defect in our
+libc, repeated for every C program we ever port, each time discovered by a
+confusing link error rather than by a rule. Rejected: the bug is ours.
+
+**Split the offending modules into their own crates.** Genuinely fixes the four
+known cases and nothing else. The next port brings its own gnulib module list
+and the problem recurs with different names. It also fragments `posix` for a
+reason that has nothing to do with the code's structure.
+
+**`--allow-multiple-definition` in every port's link.** Silences the error by
+letting the linker pick whichever definition it saw first, which means the
+program's `getopt` and our `getopt` become a coin flip decided by link order.
+That is a correctness hazard dressed as a build fix; a program that vendors
+gnulib's `getopt` usually does so because it depends on a behaviour difference.
+Rejected outright.
+
+**Set `codegen-units = 1` and rely on `--whole-archive`-free linking.** Goes the
+wrong way: one CGU means one object means *every* symbol collides.
+
+### What it costs — and what it unexpectedly saved
+
+Higher `codegen-units` means less cross-function optimisation *within* an
+object, because LLVM only sees one module at a time. In principle that is a
+real cost; in practice `#[inline]` functions and generic instantiations are
+still duplicated into every CGU that uses them, and a C library's hot paths
+(`memcpy`, `strlen`, `printf`'s inner loop) are self-contained. Compile time
+goes up slightly at link and down at codegen (more parallelism). We are not
+measuring a code-quality regression here because there is no benchmark of
+libc.a's generated code to regress against — that is a gap worth noting, but it
+does not change the decision: a libc that cannot be linked against is not made
+better by being optimised.
+
+What was *not* anticipated is that the same change makes linked binaries
+**smaller**, for the identical reason it fixes the duplicates. Archive
+extraction is all-or-nothing per member, so a coarse member drags in every
+function it contains whether the program calls it or not. Relinking pkgconf
+2.3.0 — which was already linking cleanly and needed no fix at all — against
+the rebuilt archive:
+
+| | before (`cgu=16`) | after (`cgu=4096`) |
+|---|---|---|
+| `pkgconf-slateos.elf` | 2,926,720 bytes | 2,551,080 bytes |
+
+375,640 bytes, 12.8%, from a program whose source did not change by one
+character. The dead weight was `glob`, `regcomp`, `statfs` and their neighbours
+riding into the image on the coattails of `printf` and `getenv`. Every
+statically linked program on the system gets some version of that back, which
+comfortably outweighs whatever inlining was lost — and it is a second,
+independent sign that the coarse archive was wrong rather than merely
+inconvenient.
+
+### Why the change landed in `toolchain/`, which is not Lane B's
+
+`toolchain/build-sysroot.ps1` is not inside any lane's ownership globs. It was
+edited directly rather than filed as a `requests/` item because the line it
+changes builds Lane B's own `posix` crate into Lane B's own sysroot, and the
+edit is confined to that crate's `RUSTFLAGS` — the kernel and the bare-metal
+services are built from `.cargo/config.toml`'s `[target.x86_64-unknown-none]`
+rustflags, which this script deliberately replaces wholesale and does not
+touch. If that ceases to be true — if the script grows a step that builds
+something outside `posix`/`stubs` — the flag should move to a per-crate
+mechanism rather than the shared one.
+
 
 ## §488 — The compositor's rendering seam is cut at the primitive, not at the pixel and not at the scene
 

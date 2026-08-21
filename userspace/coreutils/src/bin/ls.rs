@@ -6,6 +6,7 @@
 //!   -h  human-readable sizes (K, M, G) in long format
 //!   -1  one entry per line (default when output is not a terminal)
 
+use coreutils::human::{human_readable, Opts};
 use coreutils::quote::quoteaf_os;
 use std::env;
 use std::fs;
@@ -185,20 +186,24 @@ fn show_entry_long(out: &mut impl Write, name: &str, path: &Path, opts: &Options
     let _ = writeln!(out, "{file_type}rw-r--r--  {size_str} {name}");
 }
 
+/// Render a size for `ls -lh`, right-aligned in the six-column field this
+/// listing uses.
+///
+/// The rendering itself is [`human_readable`] with the option set GNU's `ls`
+/// passes for `-h` — autoscale, ceiling, IEC suffixes. The hand-rolled chain
+/// this replaces was the third copy of the same idea in this crate (see `df`
+/// and `du`) and carried the same defects: it rounded to nearest rather than
+/// up, it stopped at `G`, and it never dropped the decimal at ten — so a 10 KiB
+/// file listed as `10.0K` where GNU, measured, says `10K`.
+///
+/// The six-column padding is kept as-is and is deliberately *not* GNU's
+/// behaviour: real `ls` sizes the column to the widest entry in the listing.
+/// That is a layout question about `ls`, not a rendering question about
+/// `human`, so it is left alone here rather than half-changed.
 fn human_size(bytes: u64) -> String {
-    const KIB: u64 = 1024;
-    const MIB: u64 = 1024 * 1024;
-    const GIB: u64 = 1024 * 1024 * 1024;
-
-    if bytes >= GIB {
-        format!("{:>5.1}G", bytes as f64 / GIB as f64)
-    } else if bytes >= MIB {
-        format!("{:>5.1}M", bytes as f64 / MIB as f64)
-    } else if bytes >= KIB {
-        format!("{:>5.1}K", bytes as f64 / KIB as f64)
-    } else {
-        format!("{bytes:>6}")
-    }
+    let rendered =
+        human_readable(bytes, Opts::AUTOSCALE | Opts::CEILING | Opts::SI | Opts::BASE_1024, 1, 1);
+    format!("{rendered:>6}")
 }
 
 #[cfg(test)]
@@ -335,7 +340,15 @@ mod tests {
     fn human_kib() {
         assert_eq!(human_size(1024), "  1.0K");
         assert_eq!(human_size(1536), "  1.5K");
-        assert_eq!(human_size(10 * 1024), " 10.0K");
+    }
+
+    /// Measured: GNU `ls -h` renders 10240 as `10K`, not `10.0K`. The decimal
+    /// is dropped once the mantissa reaches ten, which is a rule about the
+    /// *mantissa* and not about any byte-count threshold — this assertion used
+    /// to demand `10.0K` and was describing the old implementation.
+    #[test]
+    fn the_decimal_disappears_at_ten() {
+        assert_eq!(human_size(10 * 1024), "   10K");
     }
 
     #[test]
@@ -347,7 +360,10 @@ mod tests {
     #[test]
     fn human_gib() {
         assert_eq!(human_size(1024 * 1024 * 1024), "  1.0G");
-        assert_eq!(human_size(2_500_000_000), "  2.3G");
+        // Measured: `2.4G`. 2_500_000_000 is 2.3283 GiB, and `ls -h` rounds
+        // *up*, so the tenth is 4 rather than the 3 that round-to-nearest --
+        // and this assertion -- used to produce.
+        assert_eq!(human_size(2_500_000_000), "  2.4G");
     }
 
     #[test]
@@ -355,10 +371,21 @@ mod tests {
         assert_eq!(human_size(1023), "  1023");
     }
 
+    /// One byte under a mebibyte is `1.0M`, **not** anything ending in `K`.
+    ///
+    /// This is the rounding carry, and it is the rule a `{:.1}` format string
+    /// can least express: 1048575 / 1024 is 1023.999 K, ceiling takes that to
+    /// 1024.0 K, and 1024.0 K is not a rendering — it has to carry into the
+    /// next prefix and become 1.0 M. The old hand-rolled chain picked its
+    /// prefix *first*, from a threshold comparison, and then formatted, so it
+    /// emitted `1024.0K`, which no `ls` on earth prints.
+    ///
+    /// The assertion this replaces was `assert!(s.ends_with('K'))`, whose
+    /// premise — "just under a mebibyte is still the K range" — is precisely
+    /// the misconception. A test that only checks the suffix cannot see this;
+    /// the value is measured from GNU and compared whole.
     #[test]
-    fn human_boundary_just_under_mib() {
-        // 1024 * 1024 - 1 → still K range.
-        let s = human_size(1024 * 1024 - 1);
-        assert!(s.ends_with('K'));
+    fn rounding_up_carries_into_the_next_prefix() {
+        assert_eq!(human_size(1024 * 1024 - 1), "  1.0M");
     }
 }

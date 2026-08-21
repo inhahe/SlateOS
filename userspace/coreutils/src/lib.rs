@@ -95,6 +95,31 @@
 //!   `cmd /c` — silently changes the quoting rules the script was written
 //!   against rather than failing.
 //!
+//! The tenth is the shared-interface argument applied to *output* rather than
+//! input — the same number, printed the same way by everything that prints it:
+//!
+//! - [`human`] — `1.5G`, `1.5 GB`, `1.4 GiB`. gnulib has one
+//!   `human_readable` and every size-printing utility calls it; we had three
+//!   hand-rolled `human_size` functions (`df`, `du`, `ls`) that agreed with
+//!   each other and with GNU on nothing but the letters. All three now call
+//!   this module and the copies are gone. The rules that a `{:.1}` format
+//!   string cannot express are the ones that matter: the decimal disappears at
+//!   ten rather than at a byte count, rounding is done on the exact ratio and
+//!   can carry up into the next prefix, and the value is a *ratio* of two
+//!   block sizes — which is what lets one function serve both `df`'s
+//!   512-byte-blocks-as-kibibytes and `dd`'s bytes-per-nanosecond.
+//!
+//!   Those are not abstract concerns. Measured against GNU, the three copies
+//!   were between them wrong in four independent ways — a spurious `B` on
+//!   unscaled counts, round-to-nearest where GNU rounds up, a decimal that
+//!   never disappeared at ten, and no prefix above `G`, so a 5 TB file listed
+//!   as `4768.4G`. `ls` additionally printed `1024.0K` for one byte under a
+//!   mebibyte, because it chose the prefix before rounding and so could not
+//!   carry. Each of those had a unit test asserting the wrong answer.
+//!   `tests/human_gnu.rs` checks this module against ~36k renderings measured
+//!   from GNU itself; see `design-decisions.md` §338 for why that fixture is
+//!   committed rather than diffed live.
+//!
 //! The regex engine, which is the other thing they must not disagree about,
 //! lives in `userspace/ere` rather than here — the shell needs it too, and it
 //! cannot depend on the coreutils. See `design-decisions.md` §322.
@@ -105,6 +130,7 @@ pub mod errmsg;
 pub mod extfloat;
 pub mod filekind;
 pub mod getopt;
+pub mod human;
 pub mod quote;
 pub mod shell;
 pub mod tabstops;

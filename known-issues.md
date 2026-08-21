@@ -43475,6 +43475,129 @@ that choice cannot masquerade as a behavioural difference. On the first run it
 did exactly that — 37 "failures", all of them the prefix and none of them the
 message.
 
+## B-BOOT-TEST-FREE-SPACE-FLOOR-IS-BLIND-TO-THE-TEMP-VOLUME (lane B, 2026-08-19) — filed to lane A
+
+**In short:** the boot test refuses to run when the *project* disk is nearly
+full, which is the right idea, but it only ever looks at that one disk. The Rust
+compiler also writes scratch files to the Windows temp folder, which on this
+machine is on a different disk. When that other disk filled up, the boot test
+announced "Free space OK: 47 GiB" and then died with `rustc-LLVM ERROR: out of
+memory` — a message about RAM, for a problem that was entirely about disk.
+
+**Where:** `scripts/boot-test.sh:898` (`measure_free_gb`), which measures
+`df -Pk "$PROJECT_ROOT"` and nothing else. Lane A owns the boot test; filed as
+`requests/b-a-free-space-floor-does-not-check-the-compiler-s-temp-volume.md`.
+
+**How it presented.** Two builds, one cause, two diagnostics that share no
+words:
+
+```
+Free space OK: 47 GiB on the build volume        <- D:, genuinely fine
+rustc-LLVM ERROR: out of memory                  <- C:, at zero bytes free
+Allocation failed
+[run-timeout] child exited: FAIL (exit 101), 227s elapsed
+```
+
+```
+warning: failed to save last-use data ... database or disk is full
+rustc-LLVM ERROR: IO failure on output stream: No space left on device
+error: failed to write `C:/Users/.../Temp/slate-cu/.../root-output`
+  Caused by: There is not enough space on the disk. (os error 112)
+```
+
+The second is self-explanatory; the first is actively misleading, and it is the
+one the boot test produces. An hour can go into looking at parallelism and RAM
+before anyone thinks to run `df` on a volume the run never mentioned.
+
+**Why it is the guard's problem rather than just bad luck.** The floor exists
+(Q47) so that a build cannot fill the tree and take the editor and git down with
+it. That reasoning applies unchanged to the volume holding `$TMP`: if it fills,
+the build dies too, and takes rather more with it. The guard's ok/refuse/unknown
+trichotomy is right and its comment is careful to call 20 GiB a floor rather
+than an estimate — this is a volume it did not have in view, not a design error.
+
+**Proper fix** (detail and rationale in the request): resolve `$TMPDIR`/`$TMP`/
+`$TEMP`/`/tmp`, check it against the floor too when it is on a different
+filesystem from `$PROJECT_ROOT`, say which volume failed, and use a smaller
+floor for scratch than the 20 GiB sized for four full worktree rebuilds.
+Deliberately *not* part of the ask: letting `--reclaim-space` delete anything on
+that volume — here it is the operator's system drive.
+
+**Workaround until then:** when a build reports an LLVM OOM, run `df -h` across
+all volumes before believing it.
+
+**Two incidental findings, recorded because they cost time to establish:**
+
+- MSYS `truncate(1)` creates genuinely sparse files on NTFS — a 5 TB file costs
+  zero bytes — but Python's `file.truncate()` on Windows does **not**; it
+  reserves, and will fill the volume. This is how the disk got full in the first
+  place. `scripts/gen-human-fixture.sh` depends on the sparse behaviour and
+  guards it: it stands up one 5 TB probe, re-reads free space, and refuses to
+  run if the probe cost more than a GiB.
+- NTFS rejects `truncate` past roughly 16 TB with `Invalid argument`, which caps
+  how far a sparse-file-based sweep can reach.
+
+## B-`df`-`du`-AND-`ls`-EACH-HAND-ROLLED-THE-SAME-BROKEN-SIZE-FORMATTER (lane B, 2026-08-19) — ✅ **FIXED 2026-08-19**
+
+**In short:** the three utilities that print human-readable sizes — `df -h`,
+`du -h`, `ls -lh` — each had their own private copy of "turn bytes into
+`1.5G`", written as a chain of `{:.1}` format strings. All three were wrong,
+in the same four ways, and every one of them had unit tests that asserted the
+wrong answers. The most visible symptom: on a machine with terabyte disks,
+`df -h` reported `1860.7G` where every other `df` in the world says `1.9T`.
+
+**Where:** `human_size` in `src/bin/df.rs`, `src/bin/du.rs` and `src/bin/ls.rs`.
+All three are now one-line calls to `coreutils::human::human_readable`; the
+copies are gone.
+
+**The four divergences**, measured against GNU coreutils 8.32 rather than
+reasoned about:
+
+| bytes | GNU | old `du`/`df` | what was wrong |
+|---|---|---|---|
+| 5 | `5` | `5B` | a bare count takes no suffix |
+| 1025 | `1.1K` | `1.0K` | GNU rounds **up**; `{:.1}` rounds to nearest |
+| 16777216 | `16M` | `16.0M` | the decimal drops once the mantissa hits ten |
+| 5×10¹² | `4.6T` | `4768.4G` | the chain stopped at `G` |
+
+**And a fifth, in `ls` only:** `human_size(1048576 - 1)` returned `1024.0K`.
+One byte under a mebibyte is `1.0M` — 1023.999 K rounded up is 1024.0 K, which
+is not a rendering and has to carry into the next prefix. The hand-rolled code
+picked its prefix *first*, from a threshold comparison, then formatted, so it
+had no way to carry. `1024.0K` is a string no `ls` has ever printed.
+
+**Why it survived this long: the tests agreed with the code.** Every one of
+these had coverage, and the coverage asserted the bug:
+
+```rust
+assert_eq!(human_size(0), "0B");        // GNU: 0
+assert_eq!(human_size(1023), "1023B");  // GNU: 1023
+assert_eq!(human_size(10 * 1024), " 10.0K");  // GNU: 10K
+assert_eq!(human_size(2_500_000_000), "  2.3G");  // GNU: 2.4G
+assert!(s.ends_with('K'));  // for 1 MiB - 1, where GNU says 1.0M
+```
+
+These were written by reading the implementation and writing down what it did.
+That is the failure mode, and it is not fixed by writing *more* tests of the
+same kind — the last one is instructive, because asserting only the suffix
+looks like defensive testing while in fact checking the one thing that was
+still right.
+
+**Fix as landed.** All three now call `human_readable` with the option set GNU
+passes for `-h` (`AUTOSCALE | CEILING | SI | BASE_1024`), which was itself
+confirmed rather than assumed: `df --block-size=1` and `df -h` read together on
+the same filesystems give 553.9 GiB → `554G` and 299.8 GiB → `300G` (so the
+rounding is upward) and 1.818 TiB → `1.9T` (so the base is 1024). Every
+replaced assertion was re-measured against GNU on a file of exactly that
+length. `ls` keeps its six-column right-alignment, which is *not* GNU's
+behaviour — real `ls` sizes the column to the widest entry — because that is a
+layout question about `ls` rather than a rendering question about `human`, and
+half-changing it would have been worse than leaving it.
+
+**What makes the fix trustworthy** is `userspace/coreutils/tests/human_gnu.rs`:
+36121 renderings measured from GNU across three instruments, all matching. See
+`design-decisions.md` §338 for the fixture's construction and its limits.
+
 ## TD-A-FULL-PAGE-FILE-MAKES-RUSTC-REPORT-A-SOURCE-ERROR (lane C, 2026-08-20)
 
 **Not a code defect. Read this before debugging a build failure that says a
@@ -46064,3 +46187,153 @@ in a dead spot, and one that the renderer paints each of the `2·n·(n−1)` lin
 exactly once. Mutation sweep 27/28, then 28/28 once the threshold was pinned by
 something other than itself. rustfmt drift 173 → 0 (committed separately),
 binary clippy 95 → 78, test-module warnings 7 → 0.
+
+## FIXED-B-LIBC-ARCHIVE-GRANULARITY-MADE-GNULIB-PORTS-UNLINKABLE (lane B, 2026-08-20)
+
+**Status: fixed** in `toolchain/build-sysroot.ps1` on 2026-08-20 by adding
+`-C codegen-units=4096` to `$sysrootFlags`. Recorded here because the *symptom*
+is so far from the *cause* that anyone who hits a variant of it will otherwise
+spend the same hour re-deriving it.
+
+**Symptom.** A C program links against `toolchain/sysroot/lib/libc.a` and fails
+with duplicate-symbol errors for `getopt`, `glob`, `fnmatch` or `error` (and
+their families: `optind`, `globfree`, `verror`, …) while reporting **zero**
+undefined symbols. Reproduce with `scripts/make-spike/run.sh` against a sysroot
+built before the fix: `SLATE_LINK_EXIT=1` with `MISSING_COUNT=0` and 11
+duplicates.
+
+**Cause.** `libc.a` was built with rustc's default `codegen-units = 16`, which
+merges unrelated modules into 16 object files. The four names above are exactly
+the ones gnulib supplies replacements for — so every GNU package that vendors
+gnulib (coreutils, grep, sed, tar, findutils, diffutils, gawk, gcc, binutils,
+make) defines them itself — and each of them shared an archive member with a
+symbol no C program can avoid (`fnmatch` with `fopen`, `glob` with `printf`,
+`getopt` with `sem_wait`, `error` with `getenv`). The linker therefore always
+extracted the member, and the collision could not be avoided from the caller's
+side by link order, object subsetting or `--start-group`.
+
+**Fix.** `-C codegen-units=4096` makes rustc's partitioner stop merging and emit
+roughly one object per module, which is glibc's one-object-per-`.c` layout. The
+rebuilt archive isolates all four families (`cgu.034` = `fnmatch`, `cgu.038` =
+`glob globfree`, `cgu.050` = the getopt family, `cgu.065` = the error family)
+and make's duplicate count went 11 → 0. Full rationale, alternatives considered
+and the cost in `design-decisions.md` §339.
+
+**If it comes back.** The failure mode is silent: nothing tests the archive's
+*shape*, only its contents. A regression would be reintroduced by anyone who
+adds a `[profile.release]` to the workspace root with an explicit
+`codegen-units`, or who reorders `$sysrootFlags` such that a later `-C
+codegen-units` wins. The cheap guard is to run `scripts/make-spike/run.sh` after
+any change to how the sysroot is built; the proper guard is a test that asserts
+`nm --defined-only -g -A libc.a` places `getopt` in a member defining no more
+than the getopt family, and that has not been written — see the tech-debt entry
+below.
+
+## TD-B-NOTHING-TESTS-THE-SHAPE-OF-LIBC-A (lane B, 2026-08-20)
+
+**What.** We now depend on `libc.a` having one-symbol-family-per-archive-member
+granularity (see the FIXED entry above), and nothing checks it. Every existing
+libc test links a fixture and calls a function; none of them would notice if the
+archive collapsed back to 16 objects, because a fixture that defines no `getopt`
+of its own links fine either way. The defect only shows up when a *third-party*
+program brings its own copy — i.e. at the moment we are trying to port
+something, which is the worst time to discover it.
+
+**Where.** `toolchain/build-sysroot.ps1` (`$sysrootFlags`) produces the archive;
+there is no test crate that inspects it.
+
+**Proper fix.** A test that runs `nm --defined-only -g` over each member of the
+built `libc.a` and asserts that the member defining `getopt` defines nothing
+outside the getopt family, and likewise for `glob`, `fnmatch` and `error`. Better
+still, invert it: assert that *no* member defines both a gnulib-replaceable name
+and a name from a short list of unavoidable ones (`printf`, `malloc`, `fopen`,
+`getenv`, `memcpy`). That generalises to the next gnulib module we have not
+thought of. It needs `nm` and a built sysroot, so it belongs with the other
+sysroot-level checks rather than in `cargo test -p posix`.
+
+**Why not done now.** The spike that found the bug is not itself a test — it
+downloads and builds GNU make, which is far too heavy for the normal suite, and
+it lives in `scripts/make-spike/` for that reason. Writing the lightweight
+archive-shape assertion is a separate, smaller piece of work.
+
+## TD-B-CARGO-TEST-WORKSPACE-NO-LONGER-FINISHES (lane B, 2026-08-20)
+
+**What.** `cargo test --workspace` can no longer reach the *first test* inside a
+bounded timeout on a cold cache. Measured 2026-08-20 from a clean-ish target
+dir: 2,428 crates compiled in 50 minutes, **zero `test result` lines produced**,
+and `scripts/run-timeout.py`'s 3000 s limit killed the run mid-compile. The
+suite did not fail — it never started. `userspace/` alone now holds 2,751 crate
+directories, nearly all of them near-identical single-binary `*-cli` crates.
+
+**Why it matters more than it looks.** The project's testing rule is that the
+full workspace suite gates a merge to `main`. A suite that cannot finish is a
+gate that is quietly always skipped, and the failure mode is indistinguishable
+from success at a glance: the log ends in `Compiling …` with no failures in it.
+This session hit exactly that — a 50-minute run was left in flight for most of
+an hour under the impression it was validating a change, when it could never
+have reached the tests, and the change actually being validated (`posix`) took
+**3 seconds** once run on its own (20,398 tests, 0 failed).
+
+**Where.** Root `Cargo.toml` `members` (`userspace/*`); the timeout lives in
+whatever `scripts/run-timeout.py` invocation the agent chooses, so there is no
+single place that is "wrong" — which is part of the problem.
+
+**Proper fix — options, none yet chosen.**
+1. **Split the workspace.** Move the `*-cli` crates into their own workspace so
+   the core (`posix`, `kernel`, `fs`, `net`, `init`, `services`, coreutils) can
+   be tested in minutes, and run the CLI workspace on its own cadence. Biggest
+   win, biggest churn, and it cuts across all three lanes' trees, so it needs
+   coordination rather than a unilateral edit.
+2. **`cargo test --workspace --exclude`-list the `*-cli` crates** for the
+   routine gate and run the full thing only before a `main` merge. Cheap, but
+   the exclusion list has to be maintained and will silently rot.
+3. **Test only the crates a change touches** (`-p <crate>`), with the full run
+   reserved for release points. This is what actually happened here and it
+   worked well, but it is currently an ad-hoc judgement call rather than a
+   documented rule, so it is applied inconsistently.
+
+**Interim rule being followed.** Use `-p <crate> --target x86_64-pc-windows-gnu`
+for the change under test, and do not treat a timed-out `--workspace` run as
+evidence of anything. If a `--workspace` run is started, give it a timeout that
+accounts for a >50-minute compile, and check that the log actually contains
+`test result` lines before believing it.
+
+**Not filed as a request to another lane** because it is not yet clear which of
+the three options is right, and picking one is a workspace-layout decision with
+consequences for every lane. Promote to `open-questions.md` if the routine
+per-crate workaround starts letting real regressions through.
+
+## `[A]` A cold kernel build no longer fits the boot test's 900 s default
+
+**Status:** OPEN (2026-08-20)
+
+**What happens.** `python scripts/run-timeout.py 900 ./scripts/boot-test.sh` —
+the budget most of this project's history used — now times out *during the
+build*, before QEMU is ever launched, whenever the rustc fingerprint cache is
+cold. It was hit on 2026-08-20 while gating the ZFS gang-block work: the run
+died at 900 s with the log's last line still `Compiling kernel v0.1.0`. The
+re-run with `--poll 60 2700` finished the same work in 1349 s, of which 677 s
+(11m17s) was the build alone.
+
+**Why the cache is cold more often than it looks.** Nothing dramatic is needed
+to invalidate it. A `cargo clippy` run immediately before the boot test does
+it, because clippy and rustc write different fingerprints into the same target
+directory and each evicts the other. So the ordinary "lint, then boot-test"
+sequence is exactly the sequence that guarantees a cold build.
+
+**Two things that made it worse than a plain timeout.** The run was piped
+through `| tail -60`, which buffered the child's entire output, so the log file
+sat at 0 bytes for the full 900 s and the job looked wedged rather than busy.
+And the pipeline's exit status is `tail`'s, so the harness reported **0** while
+`run-timeout.py` had in fact returned 124. Both are avoidable: never pipe
+`run-timeout.py`, and read its log incrementally instead.
+
+**Proper fix.** Either raise `run-timeout.py`'s recommended boot-test budget in
+`CLAUDE.md`/`scripts` to ~2700 s, or split the build out of `boot-test.sh` so
+the timeout covers only the QEMU phase and a slow build cannot be mistaken for
+a hang. The second is better — the two phases fail for unrelated reasons and
+deserve unrelated budgets — but the first is what any run should do today.
+
+**Workaround until then.** `python scripts/run-timeout.py --poll 60 2700
+./scripts/boot-test.sh`, backgrounded via the Bash tool's `run_in_background`,
+with no pipe on the command.

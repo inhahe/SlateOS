@@ -50,7 +50,7 @@ use crate::fs::path::Path;
 use crate::fs::vfs::{EntryType, FileSystem};
 use crate::serial_println;
 
-use super::dmu::parse_dnode;
+use super::dmu::{Reader, parse_dnode};
 use super::label::{
     POOL_STATE_ACTIVE, POOL_STATE_DESTROYED, POOL_STATE_EXPORTED, POOL_STATE_L2CACHE,
     POOL_STATE_SPARE, SPA_VERSION_FEATURES, front_label_offset, parse_uberblock,
@@ -67,7 +67,7 @@ use super::raw::{
     OBJSET_PHYS_SIZE, SPA_MINBLOCKSHIFT, UBERBLOCK_MAGIC, UBERBLOCK_MAGIC_SWAPPED,
     VDEV_LABEL_NVLIST_OFFSET, VDEV_LABEL_SIZE, VDEV_LABEL_START_SIZE, VDEV_LABEL_UBERBLOCK_OFFSET,
     VDEV_LABEL_UBERBLOCK_SIZE, ZIO_CHECKSUM_FLETCHER_4, ZIO_CHECKSUM_SHA256, ZIO_COMPRESS_OFF,
-    ZIO_COMPRESS_ZSTD, bf64_get, bf64_get_sb,
+    ZIO_COMPRESS_ZSTD, bf64_get, bf64_get_sb, parse_blkptr,
 };
 use super::sa::{SA_MAGIC, SaAttr, SaMap, SaRegistry, decimal_key, parse_header};
 use super::zap::{
@@ -2716,6 +2716,380 @@ fn test_pool_damage(c: &mut Checks) -> KernelResult<()> {
 }
 
 // ---------------------------------------------------------------------------
+// Gang blocks
+// ---------------------------------------------------------------------------
+//
+// A gang block is what ZFS writes when it wanted one contiguous run and the
+// pool could not give it one: the DVA's gang bit is set, the offset leads to a
+// small header of block pointers, and the pieces those name concatenate into
+// the block. Everything here is built by hand from the on-disk layout rather
+// than by inverting the reader, for the same reason the rest of this file is:
+// a builder that shares the reader's idea of the format cannot disagree with
+// it, and disagreement is the only thing a test can detect.
+//
+// Three properties are not guessable from the layout and are each pinned by a
+// named check below, because getting any of them wrong yields a driver that
+// works on the pools you tested and silently misreads the ones you did not:
+//
+//  * the header is checksummed against its own **address**, not against the
+//    parent's `blk_cksum`;
+//  * that address is always **DVA 0's**, even when copy 1 is the one being
+//    read, which is what makes ditto copies of a header interchangeable;
+//  * the txg in it is the *physical* birth, which is stored as zero whenever
+//    it equals the logical one — so zero means "use the logical txg", not
+//    "txg zero".
+
+/// Reserve `len` bytes of the image's allocatable area.
+fn gang_alloc(img: &mut PoolImage, len: usize) -> u64 {
+    let off = img.next;
+    img.next = img.next.saturating_add(u64::try_from(len).unwrap_or(0));
+    off
+}
+
+/// Write a `hdr_len`-byte gang header at DVA offset `place`, holding
+/// `children`, self-checksummed as though it lived at DVA offset `identity`
+/// in transaction group `txg`.
+///
+/// `place` and `identity` are the same for every header a real pool writes.
+/// They are separate parameters only so that the ditto-copy check below can
+/// exist: it needs a header that is valid *at DVA 0's address* while actually
+/// being read from DVA 1's, which is precisely the case a driver that
+/// verifies against "the DVA I am reading" gets wrong.
+fn write_gang_header(
+    img: &mut PoolImage,
+    place: u64,
+    identity: u64,
+    children: &[Vec<u8>],
+    hdr_len: usize,
+    txg: u64,
+) {
+    let mut gbh = vec![0u8; hdr_len];
+    for (i, bp) in children.iter().enumerate() {
+        put_bytes(&mut gbh, i.saturating_mul(BLKPTR_LEN), bp);
+    }
+
+    // The self-checksum: hash the header with its own address sitting where
+    // the checksum will go, then overwrite that field with the hash. This is
+    // `zio_checksum_compute`'s embedded path, written out longhand.
+    let eck = hdr_len.saturating_sub(ZEC_LEN);
+    put_u64(&mut gbh, eck, ZEC_MAGIC);
+    let verifier: [u64; 4] = [0, identity, txg, 0];
+    for (i, w) in verifier.iter().enumerate() {
+        put_u64(
+            &mut gbh,
+            eck.saturating_add(8).saturating_add(i.saturating_mul(8)),
+            *w,
+        );
+    }
+    let cksum = sha256_cksum(&gbh);
+    for (i, w) in cksum.iter().enumerate() {
+        put_u64(
+            &mut gbh,
+            eck.saturating_add(8).saturating_add(i.saturating_mul(8)),
+            *w,
+        );
+    }
+
+    put_bytes(&mut img.bytes, PoolImage::abs(place), &gbh);
+}
+
+/// A block pointer with the gang bit set on each of `dvas` — `(offset,
+/// allocated size)` pairs — standing in for `total` bytes of data.
+///
+/// `phys_birth` and `birth` are set separately so the check that the verifier
+/// falls back from a zero physical birth to the logical one can be written.
+///
+/// The checksum field is filled with nonsense **on purpose**: ZFS does not
+/// verify a gang leader's `blk_cksum` against the assembled bytes — each piece
+/// is covered by its own pointer's checksum and the header by its own trailer
+/// — so a driver that checked it here would reject every real gang block. The
+/// nonsense is what makes the happy-path checks below prove that.
+fn make_gang_blkptr(dvas: &[(u64, u64)], total: usize, phys_birth: u64, birth: u64) -> Vec<u8> {
+    let mut bp = vec![0u8; BLKPTR_LEN];
+    for (i, &(off, asize)) in dvas.iter().enumerate() {
+        let at = i.saturating_mul(16);
+        put_u64(&mut bp, at, asize >> SPA_MINBLOCKSHIFT);
+        put_u64(
+            &mut bp,
+            at.saturating_add(8),
+            (off >> SPA_MINBLOCKSHIFT) | (1u64 << 63),
+        );
+    }
+    let sectors = u64::try_from(total).unwrap_or(0) >> SPA_MINBLOCKSHIFT;
+    let sz = sectors.saturating_sub(1);
+    let props = sz
+        | (sz << 16)
+        | (u64::from(ZIO_COMPRESS_OFF) << 32)
+        | (u64::from(ZIO_CHECKSUM_FLETCHER_4) << 40)
+        | (u64::from(DMU_OT_PLAIN_FILE_CONTENTS) << 48)
+        | (1u64 << 63);
+    put_u64(&mut bp, 48, props);
+    put_u64(&mut bp, 72, phys_birth);
+    put_u64(&mut bp, 80, birth);
+    put_u64(&mut bp, 88, 1);
+    put_u64(&mut bp, 96, 0xDEAD_BEEF_DEAD_BEEF);
+    bp
+}
+
+/// `n` sectors of `fill`.
+fn gang_piece(fill: u8, sectors: usize) -> Vec<u8> {
+    vec![fill; sectors.saturating_mul(512)]
+}
+
+/// The gang transaction group. Different from [`IMG_TXG`] so that a driver
+/// which reached for the wrong birth field would not accidentally agree.
+const GANG_TXG: u64 = 1234;
+
+/// A dynamic gang header's size on an `ashift=12` pool: one minimum
+/// allocation, which is 4096 bytes, holding 31 pointers rather than three.
+const GANG_BIG: usize = 4096;
+
+#[expect(
+    clippy::too_many_lines,
+    reason = "one image shared by every case; splitting it would mean rebuilding \
+              a 4 MiB image per check or threading a dozen offsets through helpers"
+)]
+fn test_gang(c: &mut Checks) -> KernelResult<()> {
+    let mut img = PoolImage::new();
+    let alg = ZIO_CHECKSUM_FLETCHER_4;
+    let ot = DMU_OT_PLAIN_FILE_CONTENTS;
+
+    // --- The pieces every case draws on ----------------------------------
+    let (a, b, d) = (
+        gang_piece(0x11, 1),
+        gang_piece(0x22, 2),
+        gang_piece(0x33, 1),
+    );
+    let a_bp = img.put(&a, ot, 0, alg);
+    let b_bp = img.put(&b, ot, 0, alg);
+    let d_bp = img.put(&d, ot, 0, alg);
+    let abd: Vec<u8> = [a.as_slice(), b.as_slice(), d.as_slice()].concat();
+
+    let read = |img: &PoolImage, bp: &[u8]| -> KernelResult<Vec<u8>> {
+        let src = MemorySource::new(img.bytes.clone());
+        let parsed = parse_blkptr(bp, 0)?;
+        Reader::new(&src).read_block(&parsed)
+    };
+
+    // --- The ordinary case: three pieces, an old-style 512-byte header ----
+    let h1 = gang_alloc(&mut img, 512);
+    write_gang_header(
+        &mut img,
+        h1,
+        h1,
+        &[a_bp.clone(), b_bp.clone(), d_bp.clone()],
+        512,
+        GANG_TXG,
+    );
+    let bp1 = make_gang_blkptr(&[(h1, 512)], abd.len(), GANG_TXG, GANG_TXG);
+    match read(&img, &bp1) {
+        Ok(got) => c.check_bytes(&got, &abd, "a gang block reassembles in header order"),
+        Err(e) => {
+            c.failed = c.failed.saturating_add(1);
+            serial_println!("[zfs] SELF-TEST FAILED: gang read: {:?}", e);
+        }
+    }
+
+    // A zero physical birth means "same as the logical birth", which is how
+    // every ordinary write stores it. A driver that fed the raw field to the
+    // verifier would hash against txg 0 and reject this.
+    let h2 = gang_alloc(&mut img, 512);
+    write_gang_header(&mut img, h2, h2, &[a_bp.clone(), d_bp.clone()], 512, GANG_TXG);
+    let ad: Vec<u8> = [a.as_slice(), d.as_slice()].concat();
+    let bp2 = make_gang_blkptr(&[(h2, 512)], ad.len(), 0, GANG_TXG);
+    match read(&img, &bp2) {
+        Ok(got) => c.check_bytes(
+            &got,
+            &ad,
+            "a zero physical birth falls back to the logical one",
+        ),
+        Err(e) => {
+            c.failed = c.failed.saturating_add(1);
+            serial_println!("[zfs] SELF-TEST FAILED: gang phys_birth: {:?}", e);
+        }
+    }
+
+    // --- A dynamic gang header: 4096 bytes, 31 slots ---------------------
+    let h3 = gang_alloc(&mut img, GANG_BIG);
+    write_gang_header(
+        &mut img,
+        h3,
+        h3,
+        &[a_bp.clone(), b_bp.clone(), d_bp.clone()],
+        GANG_BIG,
+        GANG_TXG,
+    );
+    let bp3 = make_gang_blkptr(&[(h3, GANG_BIG as u64)], abd.len(), GANG_TXG, GANG_TXG);
+    match read(&img, &bp3) {
+        Ok(got) => c.check_bytes(&got, &abd, "a dynamic gang header reassembles too"),
+        Err(e) => {
+            c.failed = c.failed.saturating_add(1);
+            serial_println!("[zfs] SELF-TEST FAILED: dynamic gang header: {:?}", e);
+        }
+    }
+
+    // The same allocation size holding an *old* 512-byte header, which is what
+    // an `ashift=12` pool without the feature looks like: 4096 bytes reserved,
+    // 512 of them meaningful. Reading it as 4096 finds no trailer magic at
+    // 4056, so the reader must retry at 512 rather than call the block bad.
+    let h4 = gang_alloc(&mut img, GANG_BIG);
+    write_gang_header(&mut img, h4, h4, &[a_bp.clone(), d_bp.clone()], 512, GANG_TXG);
+    let bp4 = make_gang_blkptr(&[(h4, GANG_BIG as u64)], ad.len(), GANG_TXG, GANG_TXG);
+    match read(&img, &bp4) {
+        Ok(got) => c.check_bytes(
+            &got,
+            &ad,
+            "an old header in a large allocation falls back to 512",
+        ),
+        Err(e) => {
+            c.failed = c.failed.saturating_add(1);
+            serial_println!("[zfs] SELF-TEST FAILED: gang size fallback: {:?}", e);
+        }
+    }
+
+    // --- A gang piece that is itself a gang block ------------------------
+    let h5 = gang_alloc(&mut img, 512);
+    write_gang_header(&mut img, h5, h5, &[a_bp.clone(), b_bp.clone()], 512, GANG_TXG);
+    let ab_len = a.len().saturating_add(b.len());
+    let inner_bp = make_gang_blkptr(&[(h5, 512)], ab_len, GANG_TXG, GANG_TXG);
+    let h6 = gang_alloc(&mut img, 512);
+    write_gang_header(&mut img, h6, h6, &[inner_bp, d_bp.clone()], 512, GANG_TXG);
+    let bp6 = make_gang_blkptr(&[(h6, 512)], abd.len(), GANG_TXG, GANG_TXG);
+    match read(&img, &bp6) {
+        Ok(got) => c.check_bytes(&got, &abd, "a gang tree nests"),
+        Err(e) => {
+            c.failed = c.failed.saturating_add(1);
+            serial_println!("[zfs] SELF-TEST FAILED: nested gang: {:?}", e);
+        }
+    }
+
+    // --- Ditto copies: the verifier is DVA 0's address, always -----------
+    //
+    // Copy 0 is garbage, so the read falls through to copy 1 — which sits at a
+    // different offset but is checksummed against copy 0's. That is what ZFS
+    // does (`BP_IDENTITY`), and it is the only reason two copies of a header
+    // can be byte-identical. A driver that verified against the offset it was
+    // reading would fail here and report a healthy pool as corrupt.
+    let h7_bad = gang_alloc(&mut img, 512);
+    let h7_good = gang_alloc(&mut img, 512);
+    put_bytes(
+        &mut img.bytes,
+        PoolImage::abs(h7_bad),
+        &vec![0x5A; 512],
+    );
+    write_gang_header(
+        &mut img,
+        h7_good,
+        h7_bad,
+        &[a_bp.clone(), d_bp.clone()],
+        512,
+        GANG_TXG,
+    );
+    let bp7 = make_gang_blkptr(&[(h7_bad, 512), (h7_good, 512)], ad.len(), GANG_TXG, GANG_TXG);
+    match read(&img, &bp7) {
+        Ok(got) => c.check_bytes(
+            &got,
+            &ad,
+            "a gang header's verifier is DVA 0's address on every copy",
+        ),
+        Err(e) => {
+            c.failed = c.failed.saturating_add(1);
+            serial_println!("[zfs] SELF-TEST FAILED: gang ditto copy: {:?}", e);
+        }
+    }
+
+    // The same header read through a pointer that names the *wrong* offset:
+    // the bytes are intact and the trailer magic is there, but the address it
+    // was hashed against is not the one it is being read from. This is the
+    // check that says the address is genuinely part of the checksum.
+    let bp7_misaddressed =
+        make_gang_blkptr(&[(h7_good, 512)], ad.len(), GANG_TXG, GANG_TXG);
+    c.check_err(
+        read(&img, &bp7_misaddressed).map(|_| ()),
+        KernelError::IoError,
+        "a gang header at the wrong address does not verify",
+    );
+
+    // ...and read at the right address but claiming the wrong txg.
+    let bp7_mistxg = make_gang_blkptr(
+        &[(h7_bad, 512), (h7_good, 512)],
+        ad.len(),
+        GANG_TXG.saturating_add(1),
+        GANG_TXG.saturating_add(1),
+    );
+    c.check_err(
+        read(&img, &bp7_mistxg).map(|_| ()),
+        KernelError::IoError,
+        "a gang header from the wrong txg does not verify",
+    );
+
+    // --- Trees that do not add up ----------------------------------------
+    //
+    // Both directions are `InvalidArgument`, not `IoError`: the bytes read and
+    // verified fine, and it is the header and the pointer that disagree.
+    let bp_short = make_gang_blkptr(&[(h2, 512)], ad.len().saturating_add(512), 0, GANG_TXG);
+    c.check_err(
+        read(&img, &bp_short).map(|_| ()),
+        KernelError::InvalidArgument,
+        "a gang tree short of the block it stands for is refused",
+    );
+    let bp_long = make_gang_blkptr(&[(h1, 512)], a.len(), GANG_TXG, GANG_TXG);
+    c.check_err(
+        read(&img, &bp_long).map(|_| ()),
+        KernelError::InvalidArgument,
+        "a gang tree longer than the block it stands for is refused",
+    );
+
+    // --- A cycle ---------------------------------------------------------
+    //
+    // A header whose only child is a gang pointer back to itself verifies at
+    // every level — it really is the header it claims to be — and appends no
+    // bytes, so nothing but the depth cap ever stops the recursion. Without
+    // the cap this check overflows the kernel stack instead of failing.
+    let h8 = gang_alloc(&mut img, 512);
+    let self_bp = make_gang_blkptr(&[(h8, 512)], a.len(), GANG_TXG, GANG_TXG);
+    write_gang_header(
+        &mut img,
+        h8,
+        h8,
+        core::slice::from_ref(&self_bp),
+        512,
+        GANG_TXG,
+    );
+    c.check_err(
+        read(&img, &self_bp).map(|_| ()),
+        KernelError::NotSupported,
+        "a self-referential gang header is stopped by the depth cap",
+    );
+
+    // --- Damage ----------------------------------------------------------
+    let mut damaged = PoolImage {
+        bytes: img.bytes.clone(),
+        next: img.next,
+    };
+    // One flipped bit inside the header's pointer array: magic intact, hash
+    // wrong.
+    if let Some(byte) = damaged.bytes.get_mut(PoolImage::abs(h1).saturating_add(9)) {
+        *byte ^= 0x01;
+    }
+    c.check_err(
+        read(&damaged, &bp1).map(|_| ()),
+        KernelError::IoError,
+        "a corrupt gang header fails its self-checksum",
+    );
+    // The magic itself destroyed: not a gang header at all, so the complaint
+    // is about the shape rather than about the contents.
+    put_u64(&mut damaged.bytes, PoolImage::abs(h1).saturating_add(472), 0);
+    c.check_err(
+        read(&damaged, &bp1).map(|_| ()),
+        KernelError::InvalidArgument,
+        "a gang header without its trailer magic is refused",
+    );
+
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
 
 /// Run the ZFS self-tests.
 ///
@@ -2732,7 +3106,7 @@ pub fn self_test() -> KernelResult<()> {
 
     // Named so a hard error says *which* group stopped; without the name the
     // serial log shows an error with no indication of where it came from.
-    let groups: [(&str, TestGroup); 11] = [
+    let groups: [(&str, TestGroup); 12] = [
         ("primitives", test_primitives),
         ("zio", test_zio),
         ("nvlist", test_nvlist),
@@ -2742,6 +3116,10 @@ pub fn self_test() -> KernelResult<()> {
         ("zap hash", test_zap_hash),
         ("zap leaf", test_zap_leaf),
         ("sa", test_sa),
+        // Builds an image and reads through `Reader`, so it wants the format
+        // groups above to have passed first — but it is not a mount, so it
+        // stays ahead of the two pool groups.
+        ("gang", test_gang),
         // Last, and in this order: the two pool groups exercise everything
         // above through the real mount path, so a failure here after the
         // others passed localises the fault to the chain between structures

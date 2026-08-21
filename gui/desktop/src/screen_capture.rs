@@ -354,17 +354,14 @@ impl RecordingStats {
         }
     }
 
-    /// Elapsed time as HH:MM:SS string.
+    /// Elapsed recording time, `mm:ss` widening to `hh:mm:ss` past an hour.
+    ///
+    /// Shares [`guitk::duration::clock`] with [`RecordingEntry::duration_display`]
+    /// because the two render the *same integer*: `ScreenRecorder::stop` writes
+    /// `duration_ms: self.stats.elapsed_ms`. They used to be two functions and
+    /// disagreed past an hour — see that method's note.
     pub fn elapsed_display(&self) -> String {
-        let total_secs = self.elapsed_ms / 1000;
-        let hours = total_secs / 3600;
-        let mins = (total_secs % 3600) / 60;
-        let secs = total_secs % 60;
-        if hours > 0 {
-            format!("{:02}:{:02}:{:02}", hours, mins, secs)
-        } else {
-            format!("{:02}:{:02}", mins, secs)
-        }
+        guitk::duration::clock(self.elapsed_ms / 1000)
     }
 
     /// Average fps achieved.
@@ -423,11 +420,18 @@ pub struct RecordingEntry {
 }
 
 impl RecordingEntry {
+    /// The finished recording's length, in the same shape the overlay showed
+    /// while it was being made.
+    ///
+    /// `duration_ms` is not merely *like* `RecordingStats::elapsed_ms` — it is
+    /// assigned from it, unmodified, in `ScreenRecorder::stop`. This method
+    /// nevertheless used to compute `mins = total_secs / 60` with no hour
+    /// branch, so a recording of one hour and one minute read `01:01:01` in the
+    /// overlay and `61:01` here, a moment later, for one integer. Both had
+    /// tests, at 3 661 000 ms and 125 000 ms respectively, so neither ever
+    /// evaluated the other's input.
     pub fn duration_display(&self) -> String {
-        let total_secs = self.duration_ms / 1000;
-        let mins = total_secs / 60;
-        let secs = total_secs % 60;
-        format!("{}:{:02}", mins, secs)
+        guitk::duration::clock(self.duration_ms / 1000)
     }
 
     pub fn size_display(&self) -> String {
@@ -1065,7 +1069,38 @@ mod tests {
             frame_rate: FrameRate::Fps30,
             format: OutputFormat::Mp4,
         };
-        assert_eq!(entry.duration_display(), "2:05");
+        // "02:05", not "2:05": the field is zero-padded because the overlay
+        // that showed this same recording being made pads it, and the list is
+        // read moments after the overlay disappears.
+        assert_eq!(entry.duration_display(), "02:05");
+    }
+
+    /// `ScreenRecorder::stop` writes `duration_ms: self.stats.elapsed_ms`, so
+    /// these two methods render one integer. They used to be two independent
+    /// formatters and disagreed past an hour — the overlay read `01:01:01`
+    /// and the list `61:01` — because each was tested only at a value that
+    /// hid the disagreement (3 661 000 ms here, 125 000 ms there).
+    #[test]
+    fn test_overlay_and_list_agree_for_the_same_recording() {
+        for elapsed_ms in [0_u64, 125_000, 3_600_000, 3_661_000, 90_061_000] {
+            let mut stats = RecordingStats::new();
+            stats.elapsed_ms = elapsed_ms;
+            let entry = RecordingEntry {
+                id: 1,
+                filename: "test.mp4".to_string(),
+                timestamp: 0,
+                duration_ms: elapsed_ms,
+                file_size: 1024,
+                region: CaptureRegion::new(0, 0, 800, 600),
+                frame_rate: FrameRate::Fps30,
+                format: OutputFormat::Mp4,
+            };
+            assert_eq!(
+                stats.elapsed_display(),
+                entry.duration_display(),
+                "{elapsed_ms} ms rendered two ways"
+            );
+        }
     }
 
     // --- ScreenRecorder ---

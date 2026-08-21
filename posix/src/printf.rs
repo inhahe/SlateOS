@@ -3655,35 +3655,35 @@ mod tests {
     #[test]
     fn fixed_ties_round_to_even() {
         // The three divergences recorded in the tech-debt entry.
-        assert_eq!(fmt_f(b"%.1f ", 8.25), "8.2");
-        assert_eq!(fmt_f(b"%.0f ", 2.5), "2");
+        assert_eq!(fmt_f(b"%.1f\0", 8.25), "8.2");
+        assert_eq!(fmt_f(b"%.0f\0", 2.5), "2");
         // Same tie, other parity: 8.75 rounds *up* to reach the even digit.
-        assert_eq!(fmt_f(b"%.1f ", 8.75), "8.8");
-        assert_eq!(fmt_f(b"%.0f ", 3.5), "4");
+        assert_eq!(fmt_f(b"%.1f\0", 8.75), "8.8");
+        assert_eq!(fmt_f(b"%.0f\0", 3.5), "4");
         // 0.5 -> 0 is the case where ties-away and ties-even differ on the
         // integer part rather than a fraction digit.
-        assert_eq!(fmt_f(b"%.0f ", 0.5), "0");
-        assert_eq!(fmt_f(b"%.0f ", 1.5), "2");
+        assert_eq!(fmt_f(b"%.0f\0", 0.5), "0");
+        assert_eq!(fmt_f(b"%.0f\0", 1.5), "2");
     }
 
     #[test]
     fn fixed_ties_to_even_carries_through_nines() {
         // 9.5 is a tie whose even neighbour is 10 — the carry must still run.
-        assert_eq!(fmt_f(b"%.0f ", 9.5), "10");
+        assert_eq!(fmt_f(b"%.0f\0", 9.5), "10");
         // 0.125 at two places: "0.12" (2 is even), not "0.13".
-        assert_eq!(fmt_f(b"%.2f ", 0.125), "0.12");
-        assert_eq!(fmt_f(b"%.2f ", 0.375), "0.38");
+        assert_eq!(fmt_f(b"%.2f\0", 0.125), "0.12");
+        assert_eq!(fmt_f(b"%.2f\0", 0.375), "0.38");
     }
 
     #[test]
     fn fixed_non_ties_are_unaffected() {
         // Nothing here is halfway, so the ordinary remainder test decides and
         // the answers must be unchanged by the tie machinery.
-        assert_eq!(fmt_f(b"%.0f ", 3.7), "4");
-        assert_eq!(fmt_f(b"%.0f ", 3.2), "3");
-        assert_eq!(fmt_f(b"%.1f ", 8.26), "8.3");
-        assert_eq!(fmt_f(b"%.1f ", 8.24), "8.2");
-        assert_eq!(fmt_f(b"%.2f ", 1.005), "1.00"); // 1.005 is really 1.00499...
+        assert_eq!(fmt_f(b"%.0f\0", 3.7), "4");
+        assert_eq!(fmt_f(b"%.0f\0", 3.2), "3");
+        assert_eq!(fmt_f(b"%.1f\0", 8.26), "8.3");
+        assert_eq!(fmt_f(b"%.1f\0", 8.24), "8.2");
+        assert_eq!(fmt_f(b"%.2f\0", 1.005), "1.00"); // 1.005 is really 1.00499...
     }
 
     #[test]
@@ -3691,11 +3691,11 @@ mod tests {
         // The tie is judged on the original value at `precision - exponent`
         // places, not on the derived mantissa: 1234.5 at %.3e keeps four
         // significant digits, so the tie is at the units place and 1234 wins.
-        assert_eq!(fmt_f(b"%.3e ", 1234.5), "1.234e+03");
-        assert_eq!(fmt_f(b"%.3e ", 1235.5), "1.236e+03");
-        assert_eq!(fmt_f(b"%.0e ", 2.5), "2e+00");
-        assert_eq!(fmt_f(b"%.0e ", 3.5), "4e+00");
-        assert_eq!(fmt_f(b"%.1e ", 0.125), "1.2e-01");
+        assert_eq!(fmt_f(b"%.3e\0", 1234.5), "1.234e+03");
+        assert_eq!(fmt_f(b"%.3e\0", 1235.5), "1.236e+03");
+        assert_eq!(fmt_f(b"%.0e\0", 2.5), "2e+00");
+        assert_eq!(fmt_f(b"%.0e\0", 3.5), "4e+00");
+        assert_eq!(fmt_f(b"%.1e\0", 0.125), "1.2e-01");
     }
 
     #[test]
@@ -3704,31 +3704,31 @@ mod tests {
         // negative for values above the precision.  1250 is exactly halfway
         // between 1200 and 1300, so `%.1e` — two significant digits — is a
         // genuine tie and the even neighbour, 1.2, wins.
-        assert_eq!(fmt_f(b"%.1e ", 1250.0), "1.2e+03");
-        assert_eq!(fmt_f(b"%.1e ", 1350.0), "1.4e+03");
+        assert_eq!(fmt_f(b"%.1e\0", 1250.0), "1.2e+03");
+        assert_eq!(fmt_f(b"%.1e\0", 1350.0), "1.4e+03");
         // At three significant digits 1250 needs no rounding at all.
-        assert_eq!(fmt_f(b"%.2e ", 1250.0), "1.25e+03");
+        assert_eq!(fmt_f(b"%.2e\0", 1250.0), "1.25e+03");
         // 1250 is *not* halfway between 1000 and 2000, so `%.0e` is an
         // ordinary round-down rather than a tie.
-        assert_eq!(fmt_f(b"%.0e ", 1250.0), "1e+03");
+        assert_eq!(fmt_f(b"%.0e\0", 1250.0), "1e+03");
         // 0.1 is not exactly representable, so it is never an exact tie: the
         // true value is just above 0.1 and rounds up regardless of parity.
-        assert_eq!(fmt_f(b"%.1f ", 0.1), "0.1");
+        assert_eq!(fmt_f(b"%.1f\0", 0.1), "0.1");
     }
 
     #[test]
     fn huge_magnitudes_print_every_digit() {
         // The old cast-based integer part saturated at 2^64-1, so everything
         // from here up printed the same 20 digits of garbage.
-        assert_eq!(fmt_f(b"%.2f ", 1e20), "100000000000000000000.00");
-        assert_eq!(fmt_f(b"%.2f ", 1e25), "10000000000000000905969664.00");
+        assert_eq!(fmt_f(b"%.2f\0", 1e20), "100000000000000000000.00");
+        assert_eq!(fmt_f(b"%.2f\0", 1e25), "10000000000000000905969664.00");
         // 2^64 exactly: the first value the old code could not represent.
         assert_eq!(
-            fmt_f(b"%.0f ", 18_446_744_073_709_551_616.0),
+            fmt_f(b"%.0f\0", 18_446_744_073_709_551_616.0),
             "18446744073709551616"
         );
         // %.0f of DBL_MAX is 309 digits; check the ends and the length.
-        let s = fmt_f(b"%.0f ", f64::MAX);
+        let s = fmt_f(b"%.0f\0", f64::MAX);
         assert_eq!(s.len(), 309);
         assert!(s.starts_with("179769313486231570814527423731704356798070567525844996598917"));
         assert!(s.ends_with("858368"));
@@ -3739,22 +3739,22 @@ mod tests {
         // %g picks its style from X, the exponent %e would produce.  The
         // boundaries are exact powers of ten, which is where the old
         // `floor(log10(v))` was least trustworthy.
-        assert_eq!(fmt_f(b"%g ", 100_000.0), "100000");
-        assert_eq!(fmt_f(b"%g ", 1_000_000.0), "1e+06");
-        assert_eq!(fmt_f(b"%g ", 0.0001), "0.0001");
-        assert_eq!(fmt_f(b"%g ", 0.00001), "1e-05");
+        assert_eq!(fmt_f(b"%g\0", 100_000.0), "100000");
+        assert_eq!(fmt_f(b"%g\0", 1_000_000.0), "1e+06");
+        assert_eq!(fmt_f(b"%g\0", 0.0001), "0.0001");
+        assert_eq!(fmt_f(b"%g\0", 0.00001), "1e-05");
         // X is the exponent *after* rounding to P significant digits, so a
         // value that carries across a power of ten switches style with it.
-        assert_eq!(fmt_f(b"%.2g ", 99.9), "1e+02");
-        assert_eq!(fmt_f(b"%.3g ", 99.9), "99.9");
+        assert_eq!(fmt_f(b"%.2g\0", 99.9), "1e+02");
+        assert_eq!(fmt_f(b"%.3g\0", 99.9), "99.9");
         // C99 7.21.6.1p8: a precision of zero is taken as 1.
-        assert_eq!(fmt_f(b"%.0g ", 0.5), "0.5");
-        assert_eq!(fmt_f(b"%.1g ", 0.5), "0.5");
-        assert_eq!(fmt_f(b"%.0g ", 1234.0), "1e+03");
+        assert_eq!(fmt_f(b"%.0g\0", 0.5), "0.5");
+        assert_eq!(fmt_f(b"%.1g\0", 0.5), "0.5");
+        assert_eq!(fmt_f(b"%.0g\0", 1234.0), "1e+03");
         // Trailing zeros go, but not the significant ones.
-        assert_eq!(fmt_f(b"%g ", 0.5), "0.5");
-        assert_eq!(fmt_f(b"%g ", 1.0), "1");
-        assert_eq!(fmt_f(b"%g ", 0.0), "0");
+        assert_eq!(fmt_f(b"%g\0", 0.5), "0.5");
+        assert_eq!(fmt_f(b"%g\0", 1.0), "1");
+        assert_eq!(fmt_f(b"%g\0", 0.0), "0");
     }
 
     #[test]
@@ -3780,12 +3780,12 @@ mod tests {
             if v.is_finite() {
                 for &p in &[0usize, 1, 6, 17, 25] {
                     assert_eq!(
-                        fmt_f(format!("%.{p}f ").as_bytes(), v),
+                        fmt_f(format!("%.{p}f\0").as_bytes(), v),
                         format!("{v:.p$}"),
                         "%.{p}f of {v:e}"
                     );
                     assert_eq!(
-                        fmt_f(format!("%.{p}e ").as_bytes(), v),
+                        fmt_f(format!("%.{p}e\0").as_bytes(), v),
                         rust_e(v, p),
                         "%.{p}e of {v:e}"
                     );
@@ -3800,13 +3800,13 @@ mod tests {
         // Every f64 has a finite exact decimal expansion, and printf must show
         // it rather than the drift of a multiply-by-ten loop.  These are the
         // real digits of the doubles nearest the written literals.
-        assert_eq!(fmt_f(b"%.30f ", 0.1), "0.100000000000000005551115123126");
-        assert_eq!(fmt_f(b"%.20f ", 1e-20), "0.00000000000000000001");
-        assert_eq!(fmt_f(b"%.25f ", 1.0 / 3.0), "0.3333333333333333148296163");
+        assert_eq!(fmt_f(b"%.30f\0", 0.1), "0.100000000000000005551115123126");
+        assert_eq!(fmt_f(b"%.20f\0", 1e-20), "0.00000000000000000001");
+        assert_eq!(fmt_f(b"%.25f\0", 1.0 / 3.0), "0.3333333333333333148296163");
         // Past the end of the expansion the digits are genuinely zero, and a
         // precision larger than any buffer still prints them all.
-        assert_eq!(fmt_f(b"%.60f ", 0.5), format!("0.5{}", "0".repeat(59)));
-        assert_eq!(fmt_f(b"%.400f ", 0.25).len(), 402);
+        assert_eq!(fmt_f(b"%.60f\0", 0.5), format!("0.5{}", "0".repeat(59)));
+        assert_eq!(fmt_f(b"%.400f\0", 0.25).len(), 402);
     }
 
     // -----------------------------------------------------------------------

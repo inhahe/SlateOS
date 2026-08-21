@@ -4,10 +4,15 @@
 # do this: a fresh checkout gives every file the same mtime.
 # Text inputs are hashed with CRLF folded to LF (version 2); binary ones
 # byte-for-byte. See `sha256_text` for why.
+# Version 3 adds `builder` lines: the out-of-tree compiler and linker,
+# which decide the ELF's bytes but live in no commit. See `builder_record`.
 # Regenerate with: scripts/ctest-fixtures.py build
 #   (run it with `python` on Windows, `python3` under WSL/Linux)
-version 2
+version 3
 input  build.py sha256 a5cd875605b6fcfa268dc3b82800b161f77a41b6a5921ad38b2d07df37f338f9
 input  main.c sha256 525cb278bd8916c6c7a02a0e37b151d8da7a96e0d446982ca976c29905e2691c
-input  toolchain/sysroot/lib/libc.a sha256 5e252d0d790a2194853cbf874faefa41feb57e436bdb277243279dadf340bb01
-output ctest-scanf.elf sha256 5940cdcfdd96d6a28c9ec50fe383e92fc06c45e2f881f0e3f2ba9ffa6402c675 size 1420248
+input  toolchain/sysroot/lib/libc.a sha256 76693f94d275e815eae9b33cb3af5d61daba43ce8fe12bbe98821d9873a87668
+builder compiler.toolchain sha256 2c60cd9c2c6948acc1894219ef9dfffdbf169cf33d6e5b12d8e026269319a8e2
+builder rust-lld version LLD 22.1.2 (https://github.com/rust-lang/llvm-project.git 1cb4e3833c1919c2e6fb579a23ac0e2b22587b7e) (compatible with GNU linkers)
+builder zig version 0.16.0
+output ctest-scanf.elf sha256 fac49b3836446ced146c2e2cbb3b6c6134f24fd3940c1a062879fd392e0f6adc size 1424496

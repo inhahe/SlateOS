@@ -4,10 +4,15 @@
 # do this: a fresh checkout gives every file the same mtime.
 # Text inputs are hashed with CRLF folded to LF (version 2); binary ones
 # byte-for-byte. See `sha256_text` for why.
+# Version 3 adds `builder` lines: the out-of-tree compiler and linker,
+# which decide the ELF's bytes but live in no commit. See `builder_record`.
 # Regenerate with: scripts/ctest-fixtures.py build
 #   (run it with `python` on Windows, `python3` under WSL/Linux)
-version 2
+version 3
 input  build.py sha256 3c373aabde056a2e26e40802b32e37af8649200d86f93e8f92a487470d9cfe1a
 input  main.c sha256 402188f2f6421ef31666c9e99f2ffd5def2ad0955174decc7a1a080f0734d222
-input  toolchain/sysroot/lib/libc.a sha256 5e252d0d790a2194853cbf874faefa41feb57e436bdb277243279dadf340bb01
-output ctest-longdouble.elf sha256 5f38dd48a387a0ec810a0cfa5c5fffe901289fe848504960cb97409033c8d989 size 1431776
+input  toolchain/sysroot/lib/libc.a sha256 76693f94d275e815eae9b33cb3af5d61daba43ce8fe12bbe98821d9873a87668
+builder compiler.toolchain sha256 2c60cd9c2c6948acc1894219ef9dfffdbf169cf33d6e5b12d8e026269319a8e2
+builder rust-lld version LLD 22.1.2 (https://github.com/rust-lang/llvm-project.git 1cb4e3833c1919c2e6fb579a23ac0e2b22587b7e) (compatible with GNU linkers)
+builder zig version 0.16.0
+output ctest-longdouble.elf sha256 b9b5d32d39024e4347103431977c172091ba97ba7c70ea70af7561caa8d5f2f3 size 1441072

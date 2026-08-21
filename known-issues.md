@@ -48841,3 +48841,86 @@ static, written by more than one test, no lock" would likely find more, and is
 worth doing before the next intermittent failure rather than after. Logged here
 rather than done now because it is a separate piece of work with its own risk of
 churn across many test modules.
+
+---
+
+## TD-C-THE-DESKTOP-AND-THE-COMPOSITOR-BOTH-DRAW-WINDOW-TITLE-BARS
+
+**In short:** Two different parts of the system each know how to draw a
+window's title bar, borders and close/maximise/minimise buttons, and they
+disagree about what one looks like. The compositor's version is the one that
+actually runs. The desktop shell's version has never drawn a pixel, because
+until today the shell could not be called by anything. Wiring the shell to the
+compositor — the next task — would put the second one on screen *on top of*
+the first, which is how this was found.
+
+**Where:**
+
+| | Compositor | Desktop shell |
+|---|---|---|
+| Entry point | `Compositor::render_title_bar` (`gui/compositor/src/lib.rs`), called from `render_window` | `DesktopShell::render_window_decorations` (`gui/desktop/src/lib.rs:2367`, 92 lines) |
+| Geometry | `Window::title_bar_layout` → `TitleBarLayout` | `DesktopShell::window_chrome` → `WindowChrome` |
+| Button size | `TITLE_BUTTON_SIZE = 20` | `WINDOW_BUTTON_SIZE = 16.0` |
+| Title bar height | `TITLE_BAR_HEIGHT = 30` | `TITLE_BAR_HEIGHT = 30.0` |
+| Display scaling | none | every dimension via `self.scale(…)` |
+| Rounded corners | none | `corner_radii()`, from the user's `WindowCorners` setting |
+| Drop shadow | none | yes |
+| Colours | `self.theme.title_bar_focused` / `close_button` / … | its own constants |
+| Is it on screen? | **yes** | no — no caller but the demo |
+
+**This is the sweep's recurring shape once more**, and the third instance
+found in two days: the tree held one correct answer that callers could not
+reach, so it grew a wrong copy. Here the copy is not merely unused — it has
+*drifted*, and the drift is invisible precisely because only one of the two
+ever runs. Nothing compares 16 against 20.
+
+**Which one is right: the compositor.** This is not a close call and is not an
+open question. `gui/compositor/src/lib.rs`'s own module doc states the policy —
+"Window decorations drawn server-side (consistent look, secure close button)" —
+and the security half of that is the real argument: the close button must be
+drawn and hit-tested by something the client cannot lie to. The compositor also
+already owns everything decoration *does* as opposed to looks like: drag-to-move
+(`title_bar_rect().contains`), resize edges, button hit testing, damage
+tracking, and fullscreen's decoration suppression. Moving those to the shell
+would mean moving input routing to the shell, which contradicts the
+architecture. The shell's copy is the one to delete.
+
+**But deleting it plainly would lose three real features**, which is the actual
+work in this entry:
+
+1. **Display scaling.** The shell scales every decoration dimension by the
+   user's scale factor; the compositor hardcodes pixels. On a HiDPI display the
+   compositor's title bar is 30 physical pixels — a sliver. The scale factor
+   lives in `AppearanceSettings` and has to reach the compositor.
+2. **Corner radius.** The user's `WindowCorners` setting (`Square`/`Rounded`/…)
+   is honoured only by the shell's version.
+3. **Shadows.**
+
+So the sequence is: teach the compositor the two settings it is missing, port
+the shadow, *then* delete `render_window_decorations` and `window_chrome` and
+the geometry fields on `ManagedWindow` that exist only to feed them. Not the
+other order — deleting first ships a visible regression on every HiDPI display.
+
+**Why this blocks the event loop** (`TD-C-THE-SHELL-CAN-DRAW-ITSELF-AND-NOBODY-CAN-ASK-IT-TO`):
+that entry says the loop should "re-render the five trees and submit them". Four
+of the five are genuine shell surfaces — taskbar, Alt-Tab, start menu, calendar.
+The fifth is `render_window_decorations`, and submitting it would double-draw
+every title bar in the desktop, at the wrong size. The loop must render four,
+not five, and this entry is why.
+
+**It also explains a hole in the window-list protocol that is not a hole.**
+`WindowInfo` (`gui/remote/src/window_list.rs`) carries no geometry — no x, y,
+width or height. That looks like an oversight the moment you try to decorate a
+window from a shell, and it is not one: a shell that does not decorate does not
+need window geometry, and a taskbar, Alt-Tab list, start menu and calendar
+between them need none of it. Do not add geometry to `WindowInfo` to make the
+shell's decorator work. That is the copy, not the original.
+
+**Trigger:** do this before the shell event loop, or at minimum render only the
+four shell surfaces in that loop and leave this entry open. Nothing is blocked
+on another lane — `gui/compositor` and `gui/desktop` are both lane C's.
+
+**If never fixed:** the shell keeps a 92-line renderer that cannot be correct
+because nothing exercises it, and the first person to wire the loop up
+naively gets doubled title bars and reasonably concludes the compositor is
+broken.

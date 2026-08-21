@@ -243,6 +243,54 @@ provision_rootfs() {
     return 1
 }
 
+# Build `toolchain/sysroot/lib/libc.a`, which nine committed ctest fixtures
+# link against and which no other provisioning step produces.
+#
+# `toolchain/sysroot/` is gitignored, so a fresh worktree has none, and the
+# failure that produces is two steps removed from its cause: the fixture gate
+# reports `missing input toolchain/sysroot/lib/libc.a`, naming the file but not
+# `toolchain/build-sysroot.ps1`, the script that makes it.  Lane C hit exactly
+# that (requests/c-a-the-staleness-detector-has-no-caller.md, ask 2) and lost
+# the afternoon to it; the build itself takes ~30 seconds.  The cost was never
+# the build, it was not knowing the build existed.
+#
+# Building it *always* rather than only when absent is deliberate, and is the
+# other half of the same request.  `os` and `os-lane-a` passed the fixture gate
+# for days on an 18-hour-old and a 3-day-old `libc.a` — artifacts older than the
+# `posix/` commits they were supposed to reflect.  Re-running here means every
+# provisioned worktree's artifact is at least as new as its checkout, which
+# removes a whole class of "green here, stale there" divergence between lanes.
+# Cargo makes the no-op case cheap.
+provision_sysroot() {
+    # PowerShell, because build-sysroot.ps1 carries the RUSTFLAGS that give the
+    # sysroot the x86_64-slateos ABI (code-model=large, relocation-model=static).
+    # Those cannot be reproduced by calling cargo directly from here without
+    # duplicating them, and a second copy of that flag set is exactly the
+    # divergence the stamp exists to detect.
+    local ps
+    for ps in powershell.exe pwsh.exe powershell pwsh; do
+        if command -v "$ps" >/dev/null 2>&1; then
+            echo "==> building sysroot (toolchain/build-sysroot.ps1)"
+            if ( cd "$ROOT" && "$ps" -NoProfile -ExecutionPolicy Bypass \
+                     -File "toolchain/build-sysroot.ps1" ); then
+                return 0
+            fi
+            echo "    error: build-sysroot.ps1 failed" >&2
+            return 1
+        fi
+    done
+
+    # No PowerShell: report rather than fail silently. A worktree without a
+    # sysroot can still build and boot the kernel; it is the ctest fixtures
+    # that cannot be rebuilt, so this is a partial provision, not a dead one.
+    echo "    no PowerShell interpreter found; cannot build the sysroot." >&2
+    echo "    toolchain/sysroot/lib/libc.a is what the nine ctest fixtures" >&2
+    echo "    link against.  Without it 'ctest-fixtures.py build' cannot run," >&2
+    echo "    though the kernel still builds and boots.  Run by hand with:" >&2
+    echo "      powershell -File toolchain/build-sysroot.ps1" >&2
+    return 1
+}
+
 check_only=0
 
 # Which classes of prerequisite `--check` reports on.  All three by default.
@@ -389,6 +437,7 @@ failed=()
 if [ $# -eq 0 ]; then
     provision_limine || failed+=("limine")
     provision_rootfs || failed+=("rootfs.ext4")
+    provision_sysroot || failed+=("sysroot")
 fi
 
 for name in "${requested[@]}"; do

@@ -46919,6 +46919,66 @@ Two corollaries for the harness itself:
   reported with its dispersion**, since the pair's whole value is the ratio and
   a stall on one side forges it.
 
+**Postscript 4, 2026-08-21, one hour later: postscript 3 was itself wrong, and
+the second boot proves it. The gap does not exist.**
+
+Postscript 3 concluded "residual ~1.34 with identical inner loops, hypothesis is
+code placement" from a single `--bench` boot. A second boot on the merged tree,
+same kernel source, says:
+
+| | v4 | v6 | ratio |
+|---|---|---|---|
+| boot 1 `e98846a78` | 11510 cyc | **7458 cyc** | 1.54 |
+| boot 2 `40a379b55` | **7228 cyc** | **7458 cyc** | **0.97** |
+
+**v6 measured 7458 cycles in both boots, to the cycle.** v4 fell from 11510 to
+7228. So v4 is now marginally *faster* than v6 — which is the physically correct
+ordering, because v4 sums a 12-byte pseudo-header where v6 sums 40, and 230
+cycles is a fair price for 14 extra words plus a call. The original §251
+prediction — that unifying the checksum would close the gap — **was correct**.
+There is no residual, no placement effect, and nothing for `straddle-check.py`
+to find here. Postscript 3's "1.07 → 1.34 → 1.54" was a table of how badly each
+boot's v4 window happened to be disturbed.
+
+What makes this worth keeping rather than quietly deleting is that postscript 3
+identified the mechanism correctly and *still* drew the wrong conclusion from
+it. It said, accurately, that the guest TSC tracks host wall-clock under TCG and
+that v4's window was contaminated. Then it treated 1.34 as "the honest one"
+because it was the least contaminated reading available — instead of concluding
+that no reading was trustworthy and taking another boot. **Picking the best of a
+set of known-bad measurements is not the same as having a good one**, and the
+cost of finding out was one boot: 151 seconds.
+
+The refined mechanism, now that there are two boots to compare:
+
+- **Contamination moves between benchmarks from boot to boot.** Boot 1 hit v4
+  (mean 7.8× min) and spared v6 (1.17×). Boot 2 hit v6 (mean 81091 against min
+  7458, max 1.37e8) and spared v4. It is not a property of either benchmark.
+- **Min-of-N filters a partially-disturbed window and cannot filter a wholly
+  disturbed one.** Boot 2's v6 split reads `1st=9886 2nd=7458 (32% UNSTABLE)` —
+  the stall covered the first half, the second half was clean, and the minimum
+  correctly picked up the clean value, landing on the same 7458 as boot 1. Boot
+  1's v4 split reads `1st=11510 2nd=12010 (4%)` — both halves inflated, no clean
+  draw anywhere in the window, so the minimum had nothing good to find, and the
+  split check saw two consistent halves and passed it.
+- Therefore **the split check's silence means "no *change* mid-window", not "no
+  contamination"**, and a low split percentage on a window whose mean is many
+  times its min is the specific combination to distrust. Boot 1's v4 was exactly
+  that: 4% split, 7.8× mean/min.
+
+This strengthens rather than weakens postscript 3's harness proposal, and
+sharpens it: **flag any window whose mean exceeds its min by a large factor, and
+flag it hardest when the split check is clean**, since that pairing is invisible
+to every check the suite currently runs. Both bad windows here would have been
+caught (7.8× and 10.9×) against v6-in-boot-1's honest 1.17×.
+
+Standing correction to how this file gets written: two of the three conclusions
+in this §251 thread were drawn from one boot each, and both were wrong. The
+below-floor check was designed against the 428-cycle observation precisely
+because one sample is not a measurement — and postscript 3 then drew a
+conclusion from one sample anyway. **A performance claim in this file needs two
+boots, and if the two disagree the answer is a third, not an average.**
+
 **Two general lessons, both of which cost a full measure-and-conclude cycle
 here:**
 

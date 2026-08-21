@@ -615,6 +615,132 @@ impl Extend<RenderCommand> for RenderTree {
     }
 }
 
+/// How far down the lowest thing `cmds` draws reaches, or `None` if it draws
+/// nothing.
+///
+/// This is the number a free-form scrollable panel needs and has no other way
+/// to get. A list of uniform rows can compute its own height — count times row
+/// height, which is what [`scroll_window`] does — but a panel that stacks
+/// headings, property rows, separators and a conditional badge knows its height
+/// only after it has laid them out. Without this, such a panel has no upper
+/// bound to clamp its scroll offset against, and the offset climbs forever
+/// while the view stands still.
+///
+/// # Measure by rendering, not by a second pass
+///
+/// The obvious alternative is a `measure_*` function beside each `render_*` one
+/// that adds up the same section heights. That is the renderer/hit-test
+/// divergence in another costume: two derivations of one layout, agreeing until
+/// someone edits one of them, and the disagreement shows up as a panel that
+/// scrolls slightly too far or stops slightly too soon — a symptom nobody
+/// reports precisely enough to find. Rendering into a throwaway `Vec` and
+/// measuring *that* cannot diverge, because it is not a second derivation: it
+/// is the first one's output. A panel is a few dozen commands, so it costs
+/// nothing worth naming.
+///
+/// # What counts
+///
+/// - `PushTranslate`/`PopTranslate` shift the measurement, as they shift the
+///   drawing. Unbalanced pops are ignored rather than treated as an error.
+/// - **`PushClip` does not.** A clip is not ink, and clipping the measurement
+///   would return the height of the clip rectangle every time — precisely the
+///   useless answer, since the reason for measuring is to reach the content the
+///   clip is hiding.
+/// - A `Text` command's bottom is its `y` plus the line height of its font, `y`
+///   being the top edge (the backend derives the baseline from it by adding the
+///   ascent). `PushFont` is tracked, since the mono and UI faces differ in line
+///   height.
+/// - A `Line`'s stroke is centred on it, so half its width hangs below.
+/// - A `BoxShadow` extends past its box by its offset, blur and spread. It is
+///   ink like anything else: a shadow cut off by the panel edge looks wrong.
+/// - Non-finite results are dropped, so one bad command cannot make the whole
+///   panel infinitely tall.
+///
+/// ```
+/// use guitk::color::Color;
+/// use guitk::render::{RenderCommand, content_bottom};
+/// use guitk::style::CornerRadii;
+///
+/// assert_eq!(content_bottom(&[]), None, "nothing drawn, nothing to measure");
+///
+/// let cmds = vec![RenderCommand::FillRect {
+///     x: 0.0,
+///     y: 10.0,
+///     width: 5.0,
+///     height: 30.0,
+///     color: Color::WHITE,
+///     corner_radii: CornerRadii::ZERO,
+/// }];
+/// assert_eq!(content_bottom(&cmds), Some(40.0));
+/// ```
+///
+/// [`scroll_window`]: crate::scroll_window
+#[must_use]
+pub fn content_bottom(cmds: &[RenderCommand]) -> Option<f32> {
+    let mut translate: f32 = 0.0;
+    let mut translates: Vec<f32> = Vec::new();
+    let mut fonts: Vec<FontFamily> = Vec::new();
+    let mut lowest: Option<f32> = None;
+
+    let mut sink = |bottom: f32| {
+        if bottom.is_finite() {
+            lowest = Some(lowest.map_or(bottom, |low: f32| low.max(bottom)));
+        }
+    };
+
+    for cmd in cmds {
+        match cmd {
+            RenderCommand::PushTranslate { dy, .. } => {
+                translates.push(translate);
+                translate += dy;
+            }
+            RenderCommand::PopTranslate => {
+                // An unbalanced pop is a caller bug, but not one this function
+                // should turn into a wrong measurement or a panic; fall back to
+                // the untranslated origin.
+                translate = translates.pop().unwrap_or(0.0);
+            }
+            RenderCommand::PushFont { family } => fonts.push(*family),
+            RenderCommand::PopFont => {
+                fonts.pop();
+            }
+            RenderCommand::FillRect { y, height, .. }
+            | RenderCommand::StrokeRect { y, height, .. }
+            | RenderCommand::Image { y, height, .. } => sink(translate + y + height),
+            RenderCommand::Text {
+                y,
+                font_size,
+                font_weight,
+                ..
+            }
+            | RenderCommand::RichText {
+                y,
+                font_size,
+                font_weight,
+                ..
+            } => {
+                let family = fonts.last().copied().unwrap_or_default();
+                let line = crate::text::line_height_in(*font_size, *font_weight, family);
+                sink(translate + y + line);
+            }
+            RenderCommand::Line { y1, y2, width, .. } => {
+                sink(translate + y1.max(*y2) + width / 2.0);
+            }
+            RenderCommand::BoxShadow {
+                y,
+                height,
+                offset_y,
+                blur,
+                spread,
+                ..
+            } => sink(translate + y + height + offset_y + blur + spread),
+            RenderCommand::PushClip { .. } | RenderCommand::PopClip => {}
+        }
+    }
+
+    lowest
+}
+
 #[cfg(test)]
 #[allow(
     clippy::unwrap_used,
@@ -902,5 +1028,188 @@ mod tests {
         assert_eq!(text, "plain");
         assert!(s.is_empty());
         assert!((0..5).all(|b| TextSpan::color_at(s, b).is_none()));
+    }
+
+    // -- content_bottom ------------------------------------------------------
+
+    fn rect(y: f32, height: f32) -> RenderCommand {
+        RenderCommand::FillRect {
+            x: 0.0,
+            y,
+            width: 10.0,
+            height,
+            color: RED,
+            corner_radii: CornerRadii::ZERO,
+        }
+    }
+
+    fn label(y: f32, size: f32) -> RenderCommand {
+        RenderCommand::Text {
+            x: 0.0,
+            y,
+            text: "x".to_string(),
+            color: RED,
+            font_size: size,
+            font_weight: FontWeightHint::Regular,
+            max_width: None,
+            overflow: TextOverflow::Clip,
+        }
+    }
+
+    /// Nothing drawn is not zero height — a caller that wants to treat it as
+    /// zero can say so, but one that wants to distinguish "empty panel" from
+    /// "panel whose content ends at the origin" must be able to.
+    #[test]
+    fn content_bottom_of_nothing_is_none() {
+        assert_eq!(content_bottom(&[]), None);
+        assert_eq!(
+            content_bottom(&[RenderCommand::PushClip {
+                x: 0.0,
+                y: 0.0,
+                width: 100.0,
+                height: 100.0,
+            }]),
+            None,
+            "a clip is not ink"
+        );
+    }
+
+    /// The lowest edge wins regardless of the order the commands were emitted
+    /// in — a renderer is free to draw a footer before a body.
+    #[test]
+    fn content_bottom_takes_the_lowest_edge_in_any_order() {
+        assert_eq!(
+            content_bottom(&[rect(0.0, 30.0), rect(5.0, 10.0)]),
+            Some(30.0)
+        );
+        assert_eq!(
+            content_bottom(&[rect(5.0, 10.0), rect(0.0, 30.0)]),
+            Some(30.0)
+        );
+    }
+
+    /// The whole point of the function: a panel taller than its clip must
+    /// measure as its content, not as its window. Clipping the measurement
+    /// would return the clip height every time and leave the scroll offset
+    /// with no real bound.
+    #[test]
+    fn content_bottom_ignores_the_clip_that_hides_the_overflow() {
+        let cmds = vec![
+            RenderCommand::PushClip {
+                x: 0.0,
+                y: 0.0,
+                width: 100.0,
+                height: 50.0,
+            },
+            rect(0.0, 400.0),
+            RenderCommand::PopClip,
+        ];
+        assert_eq!(content_bottom(&cmds), Some(400.0));
+    }
+
+    /// A translate moves what is drawn, so it must move what is measured.
+    #[test]
+    fn content_bottom_follows_translates_in_and_out() {
+        let cmds = vec![
+            rect(0.0, 10.0),
+            RenderCommand::PushTranslate { dx: 0.0, dy: 100.0 },
+            rect(0.0, 10.0),
+            RenderCommand::PushTranslate { dx: 0.0, dy: 100.0 },
+            rect(0.0, 10.0),
+            RenderCommand::PopTranslate,
+            RenderCommand::PopTranslate,
+            rect(0.0, 10.0),
+        ];
+        assert_eq!(content_bottom(&cmds), Some(210.0), "translates nest");
+    }
+
+    /// An unbalanced `PopTranslate` is a caller bug. It must not panic, and it
+    /// must not silently keep applying an offset that the caller believes it
+    /// has removed.
+    #[test]
+    fn content_bottom_survives_an_unbalanced_pop() {
+        let cmds = vec![
+            RenderCommand::PopTranslate,
+            RenderCommand::PopFont,
+            rect(0.0, 10.0),
+        ];
+        assert_eq!(content_bottom(&cmds), Some(10.0));
+    }
+
+    /// Text is measured by its line height, not by its font size: the two
+    /// differ by the face's line gap, and a panel measured by font size stops
+    /// scrolling a few pixels short of its last line.
+    #[test]
+    fn content_bottom_of_text_is_a_whole_line_below_its_top() {
+        let size = 12.0;
+        let expected = crate::text::line_height(size, FontWeightHint::Regular);
+        assert_eq!(content_bottom(&[label(40.0, size)]), Some(40.0 + expected));
+        assert!(
+            expected >= size,
+            "a line is at least as tall as the glyphs on it; got {expected} for size {size}"
+        );
+    }
+
+    /// A bigger font makes a taller line, so a panel ending in a heading
+    /// measures taller than one ending in a body row at the same `y`.
+    #[test]
+    fn content_bottom_of_text_grows_with_the_font() {
+        let small = content_bottom(&[label(0.0, 10.0)]).expect("drew something");
+        let large = content_bottom(&[label(0.0, 30.0)]).expect("drew something");
+        assert!(large > small, "{large} should exceed {small}");
+    }
+
+    /// A stroke is centred on the line, so half of it hangs below. A separator
+    /// drawn at the very bottom of a panel is otherwise measured as ending
+    /// exactly on its own centre line.
+    #[test]
+    fn content_bottom_of_a_line_includes_half_its_stroke() {
+        let cmds = vec![RenderCommand::Line {
+            x1: 0.0,
+            y1: 100.0,
+            x2: 50.0,
+            y2: 80.0,
+            color: RED,
+            width: 4.0,
+        }];
+        assert_eq!(
+            content_bottom(&cmds),
+            Some(102.0),
+            "lowest end plus half of 4"
+        );
+    }
+
+    /// A shadow is ink: one cut off by the panel edge looks wrong, so the
+    /// measurement has to reach past the box it belongs to.
+    #[test]
+    fn content_bottom_of_a_shadow_reaches_past_its_box() {
+        let cmds = vec![RenderCommand::BoxShadow {
+            x: 0.0,
+            y: 0.0,
+            width: 10.0,
+            height: 10.0,
+            offset_x: 0.0,
+            offset_y: 2.0,
+            blur: 4.0,
+            spread: 1.0,
+            color: RED,
+            corner_radii: CornerRadii::ZERO,
+        }];
+        assert_eq!(content_bottom(&cmds), Some(17.0));
+    }
+
+    /// One bad command must not make the panel infinitely tall — an infinite
+    /// bound is a scroll offset that can run away without limit, which is the
+    /// bug this function exists to prevent.
+    #[test]
+    fn content_bottom_drops_nonfinite_commands() {
+        for bad in [f32::INFINITY, f32::NAN, f32::NEG_INFINITY] {
+            let cmds = vec![rect(bad, 10.0), rect(0.0, 25.0)];
+            assert_eq!(
+                content_bottom(&cmds),
+                Some(25.0),
+                "{bad} must not displace the real measurement"
+            );
+        }
     }
 }

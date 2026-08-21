@@ -44,6 +44,7 @@ use guitk::rng::SeededRng;
 use guitk::rng::{RandomSource, SecretSource, SystemRandom};
 use guitk::style::CornerRadii;
 use guitk::text;
+use guitk::wheel;
 use pwkdf::{KdfError, KdfParams, PasswordVerifier};
 
 // =============================================================================
@@ -71,6 +72,21 @@ const SIDEBAR_WIDTH: f32 = 220.0;
 const ENTRY_LIST_WIDTH: f32 = 320.0;
 const TOOLBAR_HEIGHT: f32 = 48.0;
 const ROW_HEIGHT: f32 = 52.0;
+/// Height of the entry list's own header strip -- the "N entries" line, which
+/// stays put while the rows below it scroll.
+///
+/// It was written as a bare `32.0` in `render_entry_list` and again in
+/// `handle_list_click`, which is two chances to disagree about where row zero
+/// starts; the scroll bound needs it as well, which would have made three.
+const LIST_HEADER_HEIGHT: f32 = 32.0;
+/// The vertical step the detail panel's fields are laid out on, used as the
+/// "row" a wheel notch is measured in there. The panel has no rows of its own
+/// -- it is a column of labelled fields at varying spacings -- so this is the
+/// nearest honest answer to "how far is one line".
+const DETAIL_LINE_HEIGHT: f32 = 24.0;
+/// Window size before the first `Event::Resize` arrives.
+const DEFAULT_WINDOW_WIDTH: f32 = 1280.0;
+const DEFAULT_WINDOW_HEIGHT: f32 = 800.0;
 const ICON_SIZE: f32 = 20.0;
 const DEFAULT_FONT_SIZE: f32 = 14.0;
 const HEADING_FONT_SIZE: f32 = 18.0;
@@ -909,7 +925,6 @@ impl CredRandom {
             Err(_) => Self::Unavailable,
         }
     }
-
 }
 
 /// The both-sides-of-the-draw rule lives in [`SecretSource::secret`]. This
@@ -2466,6 +2481,23 @@ struct AppState {
     list_scroll: f32,
     /// Scroll offset for the detail panel.
     detail_scroll: f32,
+    /// Window size, kept current by `Event::Resize`.
+    ///
+    /// It used to be passed to `build_render_tree` and to exist nowhere else,
+    /// which is why the two offsets above had no upper bound: at the moment
+    /// the wheel turned there was no size in scope to compute one from, so
+    /// both were clamped with `.max(0.0)` and nothing else and either pane
+    /// could be scrolled into blank space indefinitely.
+    width: f32,
+    height: f32,
+    /// Height of the detail panel's content as the renderer last laid it out.
+    ///
+    /// The panel's length depends on which fields the selected entry has, so
+    /// unlike the entry list it cannot be derived without doing the layout.
+    /// Measuring it during the render is what keeps the bound and the drawing
+    /// in agreement; a second derivation here would drift the first time a
+    /// field is added to one and not the other.
+    detail_content_height: f32,
     /// Settings: auto-lock minutes.
     settings_auto_lock: u32,
 }
@@ -2501,6 +2533,9 @@ impl AppState {
             unlock_failed: false,
             list_scroll: 0.0,
             detail_scroll: 0.0,
+            width: DEFAULT_WINDOW_WIDTH,
+            height: DEFAULT_WINDOW_HEIGHT,
+            detail_content_height: 0.0,
             settings_auto_lock: DEFAULT_AUTO_LOCK_MINUTES,
         };
         state.refresh_filter();
@@ -2512,6 +2547,86 @@ impl AppState {
     #[cfg(test)]
     fn for_test() -> Self {
         Self::new(Vault::for_test("My Vault", TEST_MASTER_PASSWORD))
+    }
+
+    /// Height of the area below the toolbar, which both panes are drawn into.
+    fn pane_height(&self) -> f32 {
+        (self.height - TOOLBAR_HEIGHT).max(0.0)
+    }
+
+    /// The y of the entry list's first row -- the header strip's bottom edge.
+    ///
+    /// `TOOLBAR_HEIGHT + LIST_HEADER_HEIGHT` was written once in the renderer
+    /// and once in `handle_list_click`, which is the arrangement that let the
+    /// two disagree about which pixels are rows in the first place.
+    const fn rows_top() -> f32 {
+        TOOLBAR_HEIGHT + LIST_HEADER_HEIGHT
+    }
+
+    /// The height of the entry list's scrolling row area.
+    ///
+    /// The header strip does *not* scroll, so it is not part of this. It used
+    /// to be inside the renderer's clip, which meant a scrolled row was
+    /// painted over the "N entries" caption rather than stopping under it.
+    fn rows_height(&self) -> f32 {
+        (self.height - Self::rows_top()).max(0.0)
+    }
+
+    /// The index into `filtered_ids` under `my`, or `None` if the pointer is
+    /// not over a row.
+    ///
+    /// The bound the click path never had. Without it, a click in the 32px
+    /// header strip produced a *negative* offset, and a negative `f32` cast to
+    /// `usize` saturates to zero in Rust rather than wrapping -- so clicking
+    /// the caption selected, decrypted and displayed the first entry in the
+    /// vault. Scrolled, it selected some other entry instead, because the
+    /// scroll offset was added before the cast could saturate.
+    fn row_at(&self, my: f32) -> Option<usize> {
+        let offset = my - Self::rows_top();
+        if !offset.is_finite() || offset < 0.0 || offset >= self.rows_height() {
+            return None;
+        }
+        let from_top = offset + self.list_scroll;
+        if !from_top.is_finite() || from_top < 0.0 {
+            return None;
+        }
+        #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
+        let idx = (from_top / ROW_HEIGHT) as usize;
+        if idx < self.filtered_ids.len() {
+            Some(idx)
+        } else {
+            None
+        }
+    }
+
+    /// How far the entry list may be scrolled before its last row sits on the
+    /// bottom edge of the pane.
+    ///
+    /// Derived rather than measured because the list's content really is
+    /// uniform -- one `ROW_HEIGHT` per filtered entry, which is exactly what
+    /// `render_entry_list` draws into `rows_height`.
+    fn max_list_scroll(&self) -> f32 {
+        let content = self.filtered_ids.len() as f32 * ROW_HEIGHT;
+        (content - self.rows_height()).max(0.0)
+    }
+
+    /// How far the detail panel may be scrolled, from the height the renderer
+    /// last measured for it.
+    ///
+    /// Zero until something has been rendered, and zero for the generator,
+    /// settings and audit views, none of which scroll.
+    fn max_detail_scroll(&self) -> f32 {
+        (self.detail_content_height - self.pane_height()).max(0.0)
+    }
+
+    /// Pull both offsets back inside their bounds.
+    ///
+    /// Needed after anything that can shorten the content under a pane that is
+    /// already scrolled: a resize, a filter that drops entries, or moving to an
+    /// entry with fewer fields than the one before it.
+    fn clamp_scroll(&mut self) {
+        self.list_scroll = self.list_scroll.clamp(0.0, self.max_list_scroll());
+        self.detail_scroll = self.detail_scroll.clamp(0.0, self.max_detail_scroll());
     }
 
     /// Rebuild the filtered entry list from current sidebar + search + sort.
@@ -3090,13 +3205,21 @@ fn render_entry_list(rt: &mut RenderTree, state: &AppState, height: f32) {
         None,
     );
 
-    let mut y = y_start + 32.0;
+    // Clip to the row area, not to the whole pane. Read from the same two
+    // helpers the hit test uses, so the clip below *is* the region a click is
+    // accepted in rather than a second opinion about it. The old clip started
+    // at the toolbar, which included the non-scrolling header strip -- so a
+    // scrolled row was painted straight over the "N entries" caption instead
+    // of disappearing under it.
+    let rows_y = AppState::rows_top();
+    let rows_h = state.rows_height();
+    let mut y = rows_y;
 
     rt.push(RenderCommand::PushClip {
         x: x_start,
-        y: y_start,
+        y: rows_y,
         width: ENTRY_LIST_WIDTH,
-        height: h,
+        height: rows_h,
     });
 
     let effective_y = y - state.list_scroll;
@@ -3105,7 +3228,7 @@ fn render_entry_list(rt: &mut RenderTree, state: &AppState, height: f32) {
         let row_y = effective_y + i as f32 * ROW_HEIGHT;
 
         // Skip rows outside visible area
-        if row_y + ROW_HEIGHT < y_start || row_y > y_start + h {
+        if row_y + ROW_HEIGHT < rows_y || row_y > rows_y + rows_h {
             continue;
         }
 
@@ -3238,7 +3361,13 @@ fn render_entry_list(rt: &mut RenderTree, state: &AppState, height: f32) {
 // Render: entry detail panel
 // =============================================================================
 
-fn render_entry_detail(rt: &mut RenderTree, state: &AppState, width: f32, height: f32) {
+/// Draw the detail panel, and return the height of the content it laid out.
+///
+/// The return value is the whole reason the panel can be scrolled to an end:
+/// its length depends on which fields the entry carries, so the bound cannot
+/// be computed without walking the same layout. Returning the walked height
+/// means the bound and the drawing are one derivation rather than two.
+fn render_entry_detail(rt: &mut RenderTree, state: &AppState, width: f32, height: f32) -> f32 {
     let x_start = SIDEBAR_WIDTH + ENTRY_LIST_WIDTH;
     let y_start = TOOLBAR_HEIGHT;
     let panel_width = width - x_start;
@@ -3271,7 +3400,8 @@ fn render_entry_detail(rt: &mut RenderTree, state: &AppState, width: f32, height
                 FontWeightHint::Light,
                 None,
             );
-            return;
+            // Nothing selected: no content, so nothing to scroll.
+            return 0.0;
         }
     };
 
@@ -3848,10 +3978,13 @@ fn render_entry_detail(rt: &mut RenderTree, state: &AppState, width: f32, height
         );
     }
 
-    // Suppress unused y warning
-    let _ = y;
-
     rt.push(RenderCommand::PopClip);
+
+    // `y` is the baseline of the last thing drawn, in screen coordinates with
+    // the scroll already subtracted; adding it back gives the unscrolled
+    // bottom of the content, and a trailing `pad` keeps the final line off the
+    // panel edge at full scroll. This used to be discarded with `let _ = y`.
+    y + state.detail_scroll - y_start + pad
 }
 
 /// Render a single labeled field row with optional copy button.
@@ -4727,8 +4860,17 @@ fn render_lock_screen(rt: &mut RenderTree, state: &AppState, width: f32, height:
 // Build complete render tree
 // =============================================================================
 
-fn build_render_tree(state: &AppState, width: f32, height: f32) -> RenderTree {
+/// Draw the whole window, and record what the detail panel measured.
+///
+/// Takes the state by `&mut` so the measurement has somewhere to go: the
+/// detail panel's height is only known once it has been laid out, and the
+/// wheel handler needs it to know where the panel ends. The window size comes
+/// from the state rather than from parameters, so that there is one answer to
+/// how big the window is instead of two that can disagree -- the parameters
+/// were the reason nothing but the renderer knew the size.
+fn build_render_tree(state: &mut AppState) -> RenderTree {
     let mut rt = RenderTree::new();
+    let (width, height) = (state.width, state.height);
 
     if !state.vault.is_unlocked() {
         render_lock_screen(&mut rt, state, width, height);
@@ -4747,13 +4889,27 @@ fn build_render_tree(state: &AppState, width: f32, height: f32) -> RenderTree {
     // Entry list
     render_entry_list(&mut rt, state, height);
 
-    // Detail panel (depends on view)
-    match state.detail_view {
+    // Detail panel (depends on view). Only the entry detail scrolls; the other
+    // three are fixed-height panels, so they measure as zero content and their
+    // bound comes out zero.
+    let detail_content = match state.detail_view {
         DetailView::EntryDetail => render_entry_detail(&mut rt, state, width, height),
-        DetailView::PasswordGenerator => render_generator_panel(&mut rt, state, width, height),
-        DetailView::Settings => render_settings_panel(&mut rt, state, width, height),
-        DetailView::AuditReport => render_audit_panel(&mut rt, state, width, height),
-    }
+        DetailView::PasswordGenerator => {
+            render_generator_panel(&mut rt, state, width, height);
+            0.0
+        }
+        DetailView::Settings => {
+            render_settings_panel(&mut rt, state, width, height);
+            0.0
+        }
+        DetailView::AuditReport => {
+            render_audit_panel(&mut rt, state, width, height);
+            0.0
+        }
+    };
+    state.detail_content_height = detail_content;
+    // A shorter entry than the last one can leave the offset past the end.
+    state.clamp_scroll();
 
     rt
 }
@@ -4772,6 +4928,15 @@ fn handle_event(state: &mut AppState, event: &Event) {
         }
         Event::Mouse(mouse_event) => {
             handle_mouse(state, mouse_event);
+        }
+        Event::Resize { width, height } => {
+            // Until this arm existed the size lived only in the renderer's
+            // parameters, so the scroll bounds had nothing to be computed
+            // from. Growing the window can leave a pane scrolled past its own
+            // end, hence the re-clamp.
+            state.width = *width as f32;
+            state.height = *height as f32;
+            state.clamp_scroll();
         }
         _ => {}
     }
@@ -4919,10 +5084,22 @@ fn handle_mouse(state: &mut AppState, mouse: &MouseEvent) {
     }
 
     if let MouseEventKind::Scroll { dy, .. } = mouse.kind {
+        // `wheel::pixels` and not an `Accumulator`: both offsets are already
+        // continuous, so a trackpad's fifth of a notch can be shown as a fifth
+        // of a row straight away rather than banked until it rounds. The
+        // `20.0` per notch it replaces was one of a dozen private guesses in
+        // this tree at what a notch is worth -- these rows are 52 px, so it
+        // was not half of one.
+        //
+        // Both are now clamped at the far end as well as at zero. They were
+        // clamped with `.max(0.0)` alone, which let either pane be wound off
+        // the end of its content into blank space and kept going.
         if mouse.x >= SIDEBAR_WIDTH && mouse.x < SIDEBAR_WIDTH + ENTRY_LIST_WIDTH {
-            state.list_scroll = (state.list_scroll - dy * 20.0).max(0.0);
+            state.list_scroll = (state.list_scroll + wheel::pixels(dy, ROW_HEIGHT))
+                .clamp(0.0, state.max_list_scroll());
         } else if mouse.x >= SIDEBAR_WIDTH + ENTRY_LIST_WIDTH {
-            state.detail_scroll = (state.detail_scroll - dy * 20.0).max(0.0);
+            state.detail_scroll = (state.detail_scroll + wheel::pixels(dy, DETAIL_LINE_HEIGHT))
+                .clamp(0.0, state.max_detail_scroll());
         }
     }
 
@@ -5003,13 +5180,17 @@ fn handle_sidebar_click(state: &mut AppState, my: f32) {
 }
 
 fn handle_list_click(state: &mut AppState, my: f32) {
-    let y_start = TOOLBAR_HEIGHT + 32.0;
-    let row_idx = ((my - y_start + state.list_scroll) / ROW_HEIGHT) as usize;
+    let Some(row_idx) = state.row_at(my) else {
+        return;
+    };
 
     if let Some(&entry_id) = state.filtered_ids.get(row_idx) {
         state.selected_entry_id = Some(entry_id);
         state.detail_view = DetailView::EntryDetail;
         state.show_password = false;
+        // A new entry's fields start at the top, not wherever the last one had
+        // been scrolled to.
+        state.detail_scroll = 0.0;
     }
 }
 
@@ -6330,12 +6511,371 @@ mod tests {
         assert!(!state.audit_issues.is_empty());
     }
 
+    // == Wheel scrolling ======================================================
+
+    /// An unlocked vault holding `n` logins, with the list rebuilt.
+    fn unlocked_with_entries(n: usize) -> AppState {
+        let mut state = AppState::for_test();
+        state.vault.unlock(TEST_MASTER_PASSWORD, state.now);
+        for i in 0..n {
+            state.vault.add_entry(
+                EntryData::Login(LoginData::new(
+                    &format!("site{i}"),
+                    &format!("user{i}"),
+                    "Correct-Horse-Battery-9!",
+                )),
+                state.now,
+            );
+        }
+        state.refresh_filter();
+        state
+    }
+
+    /// A point inside the entry list column.
+    const LIST_X: f32 = SIDEBAR_WIDTH + 10.0;
+    /// A point inside the detail panel.
+    const DETAIL_X: f32 = SIDEBAR_WIDTH + ENTRY_LIST_WIDTH + 10.0;
+
+    fn wheel_at(state: &mut AppState, x: f32, dy: f32) {
+        handle_event(
+            state,
+            &Event::Mouse(MouseEvent {
+                x,
+                y: TOOLBAR_HEIGHT + 100.0,
+                kind: MouseEventKind::Scroll { dx: 0.0, dy },
+            }),
+        );
+    }
+
+    #[test]
+    fn one_wheel_notch_crosses_three_rows_of_the_entry_list() {
+        // Not the flat `20.0` px this handler used to add, which on a 52 px
+        // row was under half of one -- three detents did not clear two rows.
+        let mut state = unlocked_with_entries(60);
+        wheel_at(&mut state, LIST_X, -1.0);
+        assert_eq!(state.list_scroll, 3.0 * ROW_HEIGHT);
+        wheel_at(&mut state, LIST_X, 1.0);
+        assert_eq!(state.list_scroll, 0.0);
+    }
+
+    #[test]
+    fn a_fraction_of_a_notch_moves_now_rather_than_being_banked() {
+        // The offset is in pixels, so there is nothing an accumulator could
+        // buy: it would only sit on movement the list can already show.
+        let mut state = unlocked_with_entries(60);
+        wheel_at(&mut state, LIST_X, -0.1);
+        assert_eq!(state.list_scroll, 0.3 * ROW_HEIGHT);
+    }
+
+    #[test]
+    fn the_entry_list_stops_with_its_last_row_on_the_bottom_edge() {
+        // The bug this pins: the bound was `.max(0.0)` and nothing else, so
+        // the list wound off the end of its content into blank space and kept
+        // going for as long as the wheel was turned.
+        let mut state = unlocked_with_entries(60);
+        for _ in 0..200 {
+            wheel_at(&mut state, LIST_X, -1.0);
+        }
+        let content = 60.0 * ROW_HEIGHT;
+        assert_eq!(state.list_scroll, content - state.rows_height());
+        assert!(state.list_scroll > 0.0, "the fixture must be scrollable");
+        // The last row's bottom edge lands on the pane's bottom edge, which is
+        // what "scrolled to the end" is supposed to mean.
+        let last_row_bottom = AppState::rows_top() + content - state.list_scroll;
+        assert_eq!(last_row_bottom, AppState::rows_top() + state.rows_height());
+    }
+
+    #[test]
+    fn a_list_shorter_than_the_pane_does_not_scroll_at_all() {
+        let mut state = unlocked_with_entries(2);
+        wheel_at(&mut state, LIST_X, -10.0);
+        assert_eq!(state.list_scroll, 0.0);
+    }
+
+    #[test]
+    fn a_nonfinite_delta_does_not_freeze_either_pane() {
+        // An infinity added to an offset clamps to the far end and never comes
+        // back; `wheel::pixels` turns one into no movement at all.
+        let mut state = unlocked_with_entries(60);
+        wheel_at(&mut state, LIST_X, f32::NAN);
+        wheel_at(&mut state, DETAIL_X, f32::INFINITY);
+        assert_eq!(state.list_scroll, 0.0);
+        assert_eq!(state.detail_scroll, 0.0);
+        wheel_at(&mut state, LIST_X, -1.0);
+        assert_eq!(state.list_scroll, 3.0 * ROW_HEIGHT);
+    }
+
+    #[test]
+    fn the_detail_panel_cannot_be_scrolled_before_it_has_been_measured() {
+        // Its length depends on the entry's fields, so until a render has
+        // walked the layout there is no bound and the honest answer is zero.
+        let mut state = unlocked_with_entries(60);
+        state.selected_entry_id = state.filtered_ids.first().copied();
+        wheel_at(&mut state, DETAIL_X, -5.0);
+        assert_eq!(state.detail_scroll, 0.0);
+    }
+
+    #[test]
+    fn a_detail_panel_taller_than_its_pane_scrolls_to_the_measured_end() {
+        let mut state = unlocked_with_entries(60);
+        state.selected_entry_id = state.filtered_ids.first().copied();
+        // A short window, so the login panel is certainly longer than it.
+        handle_event(
+            &mut state,
+            &Event::Resize {
+                width: 1280,
+                height: 200,
+            },
+        );
+        let _ = build_render_tree(&mut state);
+        let max = state.max_detail_scroll();
+        assert!(max > 0.0, "the panel must overflow a 200 px window");
+        for _ in 0..200 {
+            wheel_at(&mut state, DETAIL_X, -1.0);
+        }
+        assert_eq!(state.detail_scroll, max);
+        for _ in 0..200 {
+            wheel_at(&mut state, DETAIL_X, 1.0);
+        }
+        assert_eq!(state.detail_scroll, 0.0);
+    }
+
+    #[test]
+    fn the_generator_settings_and_audit_panels_do_not_scroll() {
+        // They are fixed-height panels; measuring them as zero content is what
+        // keeps the wheel from winding them off the screen.
+        for view in [
+            DetailView::PasswordGenerator,
+            DetailView::Settings,
+            DetailView::AuditReport,
+        ] {
+            let mut state = unlocked_with_entries(60);
+            state.detail_view = view;
+            let _ = build_render_tree(&mut state);
+            wheel_at(&mut state, DETAIL_X, -5.0);
+            assert_eq!(state.detail_scroll, 0.0, "{view:?} should not scroll");
+        }
+    }
+
+    #[test]
+    fn shrinking_the_window_pulls_a_scrolled_list_back_inside_it() {
+        // Before `Event::Resize` was handled the state did not know the window
+        // had changed at all, so an offset taken at one size stayed valid at
+        // every other.
+        let mut state = unlocked_with_entries(60);
+        for _ in 0..200 {
+            wheel_at(&mut state, LIST_X, -1.0);
+        }
+        let tall = state.list_scroll;
+        handle_event(
+            &mut state,
+            &Event::Resize {
+                width: 1280,
+                height: 2000,
+            },
+        );
+        assert!(
+            state.list_scroll < tall,
+            "a taller window shows more, so the offset must come back"
+        );
+        assert_eq!(state.list_scroll, state.max_list_scroll());
+    }
+
+    #[test]
+    fn selecting_a_different_entry_starts_its_panel_at_the_top() {
+        let mut state = unlocked_with_entries(60);
+        state.selected_entry_id = state.filtered_ids.first().copied();
+        handle_event(
+            &mut state,
+            &Event::Resize {
+                width: 1280,
+                height: 200,
+            },
+        );
+        let _ = build_render_tree(&mut state);
+        wheel_at(&mut state, DETAIL_X, -1.0);
+        assert!(state.detail_scroll > 0.0);
+        handle_list_click(&mut state, TOOLBAR_HEIGHT + LIST_HEADER_HEIGHT + 1.0);
+        assert_eq!(state.detail_scroll, 0.0);
+    }
+
+    #[test]
+    fn the_hit_test_and_the_renderer_agree_on_where_row_zero_starts() {
+        // Both used a bare `32.0`; naming it is what stops them drifting.
+        let mut state = unlocked_with_entries(60);
+        let first = state.filtered_ids.first().copied();
+        handle_list_click(&mut state, TOOLBAR_HEIGHT + LIST_HEADER_HEIGHT + 1.0);
+        assert_eq!(state.selected_entry_id, first);
+        // One row further down, after scrolling by exactly one row, is row 1.
+        state.list_scroll = ROW_HEIGHT;
+        handle_list_click(&mut state, TOOLBAR_HEIGHT + LIST_HEADER_HEIGHT + 1.0);
+        assert_eq!(state.selected_entry_id, state.filtered_ids.get(1).copied());
+    }
+
+    // == The entry list's edges ================================================
+
+    /// The rectangle the renderer actually clipped the entry rows to.
+    ///
+    /// Read out of the emitted commands rather than recomputed from the
+    /// constants. Recomputing is what makes a layout test worthless: it
+    /// re-derives the renderer's arithmetic and then checks the hit test
+    /// against *that*, so the two can drift together and the test still
+    /// passes. This asks the renderer what it drew.
+    fn rows_clip(state: &mut AppState) -> (f32, f32) {
+        build_render_tree(state)
+            .commands
+            .iter()
+            .find_map(|cmd| match cmd {
+                RenderCommand::PushClip {
+                    x,
+                    y,
+                    width,
+                    height,
+                    ..
+                } if *x == SIDEBAR_WIDTH && *width == ENTRY_LIST_WIDTH => Some((*y, *height)),
+                _ => None,
+            })
+            .expect("the entry rows are drawn under a clip")
+    }
+
+    /// A left click in the entry-list column at `my`, through the same
+    /// `handle_event` a real pointer would arrive by.
+    fn click_list(state: &mut AppState, my: f32) {
+        state.selected_entry_id = None;
+        handle_event(
+            state,
+            &Event::Mouse(MouseEvent {
+                x: LIST_X,
+                y: my,
+                kind: MouseEventKind::Press(MouseButton::Left),
+            }),
+        );
+    }
+
+    #[test]
+    // Exact equality is the assertion, not an approximation of it: the
+    // renderer passes these two helpers' return values straight into the
+    // clip, so anything short of bit-for-bit identity means a third copy of
+    // the arithmetic has appeared -- which is the bug being pinned.
+    #[allow(clippy::float_cmp)]
+    fn the_lists_clip_is_the_region_the_hit_test_accepts() {
+        let mut state = unlocked_with_entries(60);
+        let (clip_y, clip_h) = rows_clip(&mut state);
+        assert_eq!(clip_y, AppState::rows_top());
+        assert_eq!(clip_h, state.rows_height());
+
+        click_list(&mut state, clip_y);
+        assert!(
+            state.selected_entry_id.is_some(),
+            "the clip's top edge is dead"
+        );
+        click_list(&mut state, clip_y + clip_h - 0.5);
+        assert!(
+            state.selected_entry_id.is_some(),
+            "the clip's bottom edge is dead"
+        );
+        click_list(&mut state, clip_y + clip_h);
+        assert_eq!(
+            state.selected_entry_id, None,
+            "the hit test runs past the clip the rows are painted in"
+        );
+    }
+
+    #[test]
+    fn the_entry_count_caption_does_not_open_the_first_credential() {
+        // The bug: `handle_list_click` had no guard, so a click in the 32px
+        // header strip produced a negative offset -- and a negative `f32` cast
+        // to `usize` saturates to zero rather than wrapping. Clicking the
+        // caption therefore selected, decrypted and displayed entry zero.
+        let mut state = unlocked_with_entries(60);
+        for my in [
+            TOOLBAR_HEIGHT,
+            TOOLBAR_HEIGHT + LIST_HEADER_HEIGHT / 2.0,
+            AppState::rows_top() - 0.5,
+        ] {
+            click_list(&mut state, my);
+            assert_eq!(
+                state.selected_entry_id, None,
+                "the caption selected at {my}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_scrolled_caption_click_does_not_open_some_other_credential() {
+        // Worse than selecting entry zero: with the list scrolled, the offset
+        // was added *before* the cast could saturate, so a caption click
+        // resolved to a real -- and arbitrary -- entry.
+        let mut state = unlocked_with_entries(60);
+        state.list_scroll = 10.0 * ROW_HEIGHT;
+        click_list(&mut state, TOOLBAR_HEIGHT + LIST_HEADER_HEIGHT / 2.0);
+        assert_eq!(state.selected_entry_id, None);
+    }
+
+    #[test]
+    fn every_row_edge_selects_the_row_the_renderer_drew_there() {
+        let mut state = unlocked_with_entries(60);
+        let (clip_y, clip_h) = rows_clip(&mut state);
+        let mut slot = 0usize;
+        loop {
+            let top = clip_y + slot as f32 * ROW_HEIGHT;
+            if top >= clip_y + clip_h {
+                break;
+            }
+            let bottom = (top + ROW_HEIGHT - 0.5).min(clip_y + clip_h - 0.5);
+            for probe in [top, bottom] {
+                click_list(&mut state, probe);
+                assert_eq!(
+                    state.selected_entry_id,
+                    state.filtered_ids.get(slot).copied(),
+                    "slot {slot} at y={probe}"
+                );
+            }
+            slot += 1;
+        }
+        assert!(slot > 1, "the pane must fit more than one row");
+    }
+
+    #[test]
+    fn empty_space_below_a_short_list_selects_nothing() {
+        // Inside the row area but past the end of the list -- a different
+        // rejection from the caption one.
+        let mut state = unlocked_with_entries(2);
+        let (clip_y, clip_h) = rows_clip(&mut state);
+        let below_last = clip_y + 2.0 * ROW_HEIGHT + 1.0;
+        assert!(below_last < clip_y + clip_h, "the pane must fit >2 rows");
+        click_list(&mut state, below_last);
+        assert_eq!(state.selected_entry_id, None);
+    }
+
+    #[test]
+    // `max(0.0)` returns a literal zero, so the comparison is exact.
+    #[allow(clippy::float_cmp)]
+    fn a_window_shorter_than_its_own_chrome_has_no_rows() {
+        let mut state = unlocked_with_entries(60);
+        state.height = 10.0;
+        assert_eq!(state.rows_height(), 0.0);
+        click_list(&mut state, 5.0);
+        assert_eq!(state.selected_entry_id, None);
+    }
+
+    #[test]
+    fn a_nonfinite_coordinate_selects_nothing() {
+        let mut state = unlocked_with_entries(60);
+        for y in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+            click_list(&mut state, y);
+            assert_eq!(state.selected_entry_id, None, "selected on {y}");
+        }
+    }
+
     // == Render tests ==========================================================
 
     #[test]
     fn test_render_lock_screen() {
-        let state = AppState::for_test();
-        let rt = build_render_tree(&state, 1024.0, 768.0);
+        let mut state = AppState::for_test();
+        state.width = 1024.0;
+        state.height = 768.0;
+        let rt = build_render_tree(&mut state);
         assert!(!rt.commands.is_empty());
         // Lock screen should have FillRect for background
         let has_fill = rt
@@ -6355,7 +6895,7 @@ mod tests {
         );
         state.refresh_filter();
         state.selected_entry_id = state.filtered_ids.first().copied();
-        let rt = build_render_tree(&state, 1280.0, 800.0);
+        let rt = build_render_tree(&mut state);
         assert!(rt.commands.len() > 30);
     }
 
@@ -6365,7 +6905,7 @@ mod tests {
         state.vault.unlock(TEST_MASTER_PASSWORD, state.now);
         state.detail_view = DetailView::PasswordGenerator;
         state.generated_password = "test-password-123".to_string();
-        let rt = build_render_tree(&state, 1280.0, 800.0);
+        let rt = build_render_tree(&mut state);
         assert!(rt.commands.len() > 20);
     }
 
@@ -6374,7 +6914,7 @@ mod tests {
         let mut state = AppState::for_test();
         state.vault.unlock(TEST_MASTER_PASSWORD, state.now);
         state.detail_view = DetailView::Settings;
-        let rt = build_render_tree(&state, 1280.0, 800.0);
+        let rt = build_render_tree(&mut state);
         assert!(rt.commands.len() > 20);
     }
 
@@ -6383,7 +6923,7 @@ mod tests {
         let mut state = AppState::for_test();
         state.vault.unlock(TEST_MASTER_PASSWORD, state.now);
         state.detail_view = DetailView::AuditReport;
-        let rt = build_render_tree(&state, 1280.0, 800.0);
+        let rt = build_render_tree(&mut state);
         assert!(!rt.commands.is_empty());
     }
 
@@ -6396,7 +6936,7 @@ mod tests {
             .add_entry(EntryData::Login(LoginData::new("s", "u", "123")), state.now);
         state.run_audit();
         state.detail_view = DetailView::AuditReport;
-        let rt = build_render_tree(&state, 1280.0, 800.0);
+        let rt = build_render_tree(&mut state);
         assert!(rt.commands.len() > 20);
     }
 
@@ -6417,7 +6957,7 @@ mod tests {
             let id = state.vault.add_entry(data, state.now);
             state.selected_entry_id = Some(id);
             state.detail_view = DetailView::EntryDetail;
-            let rt = build_render_tree(&state, 1280.0, 800.0);
+            let rt = build_render_tree(&mut state);
             assert!(rt.commands.len() > 20, "Render failed for entry type");
         }
     }
@@ -6427,7 +6967,7 @@ mod tests {
         let mut state = AppState::for_test();
         state.vault.unlock(TEST_MASTER_PASSWORD, state.now);
         state.selected_entry_id = None;
-        let rt = build_render_tree(&state, 1280.0, 800.0);
+        let rt = build_render_tree(&mut state);
         assert!(!rt.commands.is_empty());
     }
 

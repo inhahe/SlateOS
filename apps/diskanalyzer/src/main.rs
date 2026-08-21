@@ -25,6 +25,7 @@
 use guitk::color::Color;
 #[allow(unused_imports)]
 use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
+use guitk::scroll_window;
 #[allow(unused_imports)]
 use guitk::style::CornerRadii;
 use guitk::table::{Column, Fit, Table};
@@ -992,8 +993,14 @@ pub struct DiskAnalyzerUI {
     pub scanning: bool,
     /// Text in the path input field.
     pub path_input: String,
-    /// Scroll offset for list view.
-    pub scroll_offset: f32,
+    /// Index of the first list-view row to draw.
+    ///
+    /// A row index rather than a pixel offset: the list draws whole rows only
+    /// (see [`guitk::scroll_window`]), so a pixel offset would only be able to
+    /// express positions the renderer then rounds away. Written by
+    /// [`DiskAnalyzerUI::scroll_list_by`]; a value past the end is not an
+    /// error, and shows the last full page.
+    pub scroll_offset: usize,
     /// List rows (cached after sort/flatten).
     pub list_rows: Vec<ListRow>,
 }
@@ -1024,7 +1031,7 @@ impl DiskAnalyzerUI {
             progress: ScanProgress::new(),
             scanning: false,
             path_input: "/".to_string(),
-            scroll_offset: 0.0,
+            scroll_offset: 0,
             list_rows: Vec::new(),
         }
     }
@@ -1032,6 +1039,22 @@ impl DiskAnalyzerUI {
     /// Set the view mode.
     pub fn set_view_mode(&mut self, mode: ViewMode) {
         self.view_mode = mode;
+    }
+
+    /// Scrolls the list view by `delta` rows: positive is towards the end.
+    ///
+    /// The host calls this from a wheel event or a Page key. Deliberately not
+    /// clamped to the list length here — the length that matters is the one at
+    /// the next *render*, and the renderer clamps against it. Clamping here
+    /// instead would mean a scroll issued while a scan is still adding rows got
+    /// pinned to a list that has since grown.
+    pub fn scroll_list_by(&mut self, delta: isize) {
+        self.scroll_offset = scroll_window::shift(self.scroll_offset, delta);
+    }
+
+    /// Scrolls the list view back to the first row.
+    pub fn scroll_list_to_top(&mut self) {
+        self.scroll_offset = 0;
     }
 
     /// Start a scan with the given pre-built tree (for testing / offline use).
@@ -1381,16 +1404,30 @@ impl DiskAnalyzerUI {
         let table = list_table();
         table.header(&mut tree.commands, content_y + 8.0, COLOR_TEXT, FONT_SIZE);
 
-        // Rows
+        // Rows. `scroll_window` decides which of them are on screen: it
+        // truncates to whole rows (so nothing is drawn across the status bar)
+        // and pulls a stale offset back to the last full page, which is what
+        // makes a listing that shrank -- a directory collapsed, a filter
+        // applied -- show its tail rather than going blank.
         let row_area_y = content_y + TABLE_HEADER_HEIGHT;
-        let max_visible = ((content_h - TABLE_HEADER_HEIGHT) / ROW_HEIGHT) as usize;
+        let window = scroll_window::visible(
+            self.list_rows.len(),
+            ROW_HEIGHT,
+            content_h - TABLE_HEADER_HEIGHT,
+            self.scroll_offset,
+        );
 
-        for (i, row) in self.list_rows.iter().enumerate() {
-            if i >= max_visible {
-                break;
-            }
-            let ry = row_area_y + i as f32 * ROW_HEIGHT;
-            // Alternating row background
+        for (drawn, row) in self
+            .list_rows
+            .get(window.start..window.end())
+            .unwrap_or_default()
+            .iter()
+            .enumerate()
+        {
+            let i = window.start.saturating_add(drawn);
+            let ry = row_area_y + drawn as f32 * ROW_HEIGHT;
+            // Alternating row background. Striped by absolute row index, not by
+            // position on screen, so the stripes do not invert as you scroll.
             if i % 2 == 0 {
                 tree.push(RenderCommand::FillRect {
                     x: 0.0,
@@ -1708,6 +1745,17 @@ fn main() {}
 
 #[cfg(test)]
 mod tests {
+    // A test module's job is to fail loudly the instant the code under test is
+    // wrong, so the defensive lints that forbid exactly that in production code
+    // are off here — as `CLAUDE.md` prescribes.
+    #![allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::indexing_slicing,
+        clippy::arithmetic_side_effects
+    )]
+
     use super::*;
 
     // -- helpers ---------------------------------------------------------------
@@ -2823,6 +2871,116 @@ mod tests {
             chevrons.iter().any(|t| t == "v"),
             "the expanded directory's chevron was lost: {chevrons:?}"
         );
+    }
+
+    /// A list-view UI with `n` rows named `row0`..`row{n-1}`, so the drawn
+    /// slice can be identified from the render commands alone.
+    fn ui_with_numbered_rows(n: usize) -> DiskAnalyzerUI {
+        let mut ui = DiskAnalyzerUI::new();
+        ui.view_mode = ViewMode::List;
+        ui.list_rows = (0..n)
+            .map(|i| list_row(&format!("row{i}"), 0, FileKind::RegularFile, false))
+            .collect();
+        ui
+    }
+
+    /// The `rowN` names actually drawn, in the order they were drawn.
+    fn drawn_row_names(ui: &DiskAnalyzerUI) -> Vec<String> {
+        list_view_texts(ui)
+            .into_iter()
+            .map(|(_, t, ..)| t)
+            .filter(|t| t.starts_with("row"))
+            .collect()
+    }
+
+    /// How many whole rows the list view has room for.
+    fn list_capacity() -> usize {
+        let content_h = WINDOW_HEIGHT - TOOLBAR_HEIGHT - BREADCRUMB_HEIGHT - STATUS_BAR_HEIGHT;
+        scroll_window::capacity(ROW_HEIGHT, content_h - TABLE_HEADER_HEIGHT)
+    }
+
+    #[test]
+    fn the_list_view_stops_at_the_last_row_that_fits() {
+        let page = list_capacity();
+        assert!(page > 0, "the window must fit at least one row");
+        let ui = ui_with_numbered_rows(page * 3);
+        let drawn = drawn_row_names(&ui);
+        assert_eq!(drawn.len(), page, "a long list must be cut to what fits");
+        // Nothing may be drawn over the status bar.
+        let content_y = TOOLBAR_HEIGHT + BREADCRUMB_HEIGHT;
+        let bottom = content_y + TABLE_HEADER_HEIGHT + (page as f32) * ROW_HEIGHT;
+        assert!(
+            bottom <= WINDOW_HEIGHT - STATUS_BAR_HEIGHT,
+            "{page} rows reach {bottom}, past the status bar"
+        );
+    }
+
+    #[test]
+    fn scrolling_the_list_reaches_the_rows_that_did_not_fit() {
+        // `scroll_offset` used to be an `f32` that nothing read and nothing
+        // wrote: the list was truncated from the top, so everything past the
+        // first screenful was unreachable no matter what the user did.
+        let page = list_capacity();
+        let mut ui = ui_with_numbered_rows(page * 2);
+        assert_eq!(
+            drawn_row_names(&ui).first().map(String::as_str),
+            Some("row0")
+        );
+
+        ui.scroll_list_by(3);
+        assert_eq!(
+            drawn_row_names(&ui).first().map(String::as_str),
+            Some("row3"),
+            "scrolling by three rows should start the list three rows down"
+        );
+
+        // The last row is reachable, which is the whole point.
+        ui.scroll_list_by(isize::try_from(page).unwrap());
+        let last = format!("row{}", page * 2 - 1);
+        assert_eq!(
+            drawn_row_names(&ui).last(),
+            Some(&last),
+            "the end of the list must be reachable by scrolling"
+        );
+
+        ui.scroll_list_to_top();
+        assert_eq!(
+            drawn_row_names(&ui).first().map(String::as_str),
+            Some("row0")
+        );
+    }
+
+    #[test]
+    fn a_list_that_shrinks_under_a_stale_offset_shows_its_last_page() {
+        let page = list_capacity();
+        let mut ui = ui_with_numbered_rows(page * 4);
+        ui.scroll_list_by(isize::try_from(page * 3).unwrap());
+        // A directory is collapsed and most of the rows go away, without
+        // anything resetting the scroll position.
+        ui.list_rows.truncate(page + 1);
+        let drawn = drawn_row_names(&ui);
+        assert_eq!(drawn.len(), page, "the pane must not go blank");
+        assert_eq!(
+            drawn.last(),
+            Some(&format!("row{page}")),
+            "a stale offset should pin to the last page, not past the end"
+        );
+    }
+
+    #[test]
+    fn scrolling_up_from_the_top_stays_at_the_top() {
+        let mut ui = ui_with_numbered_rows(50);
+        ui.scroll_list_by(-1);
+        ui.scroll_list_by(isize::MIN);
+        assert_eq!(ui.scroll_offset, 0, "the offset must not wrap round");
+        assert_eq!(
+            drawn_row_names(&ui).first().map(String::as_str),
+            Some("row0")
+        );
+        // ... and scrolling absurdly far down does not overflow either.
+        ui.scroll_list_by(isize::MAX);
+        ui.scroll_list_by(isize::MAX);
+        assert_eq!(drawn_row_names(&ui).len(), list_capacity());
     }
 
     #[test]

@@ -61,6 +61,29 @@ const COMPASS_CY: f32 = 340.0;
 const COMPASS_RADIUS: f32 = 240.0;
 const WINDOW_WIDTH: f32 = 900.0;
 const WINDOW_HEIGHT: f32 = 720.0;
+/// Height of the status bar at the foot of the window.
+const STATUS_BAR_HEIGHT: f32 = 32.0;
+
+// ── Waypoint list geometry ──────────────────────────────────────────
+//
+// One description of where the waypoint rows are, read by the renderer and
+// by the hit test. They were separate literals -- `36.0`/`828.0` in one and
+// `40.0`/`860.0` in the other, over a shared `100.0` and `36.0` that agreed
+// only by luck -- which is the state a list is in right before the two
+// copies drift apart.
+
+/// Left edge of a waypoint row, and its width: the rectangle the selection
+/// highlight is painted in, and therefore the one a click must land in.
+const WP_LIST_X: f32 = 36.0;
+const WP_LIST_WIDTH: f32 = 828.0;
+/// Y of the top of the first row.
+const WP_LIST_TOP: f32 = 100.0;
+/// Row pitch. The highlight is drawn `WP_ROW_GAP` shorter than this so the
+/// rows read as separate; the gap still belongs to the row above for
+/// hit-testing, so the pointer can never fall between two rows and select
+/// neither.
+const WP_ROW_HEIGHT: f32 = 36.0;
+const WP_ROW_GAP: f32 = 2.0;
 
 // ── Types ───────────────────────────────────────────────────────────
 
@@ -250,8 +273,6 @@ struct CompassApp {
     entry_name_buf: String,
     /// Status message shown at the bottom.
     status: String,
-    /// Scroll offset in waypoint list view.
-    wp_scroll: usize,
 }
 
 impl CompassApp {
@@ -269,8 +290,42 @@ impl CompassApp {
             entry_lon_buf: String::new(),
             entry_name_buf: String::new(),
             status: String::from("Digital Compass"),
-            wp_scroll: 0,
         }
+    }
+
+    /// Y of the top of waypoint row `i`.
+    ///
+    /// The single description of the list's vertical layout: the renderer
+    /// draws from it and [`Self::waypoint_at`] hit-tests against it.
+    fn wp_row_top(i: usize) -> f32 {
+        WP_LIST_TOP + i as f32 * WP_ROW_HEIGHT
+    }
+
+    /// How many rows fit between the top of the list and the status bar.
+    ///
+    /// Nothing clips against this, because `MAX_WAYPOINTS` rows always fit --
+    /// and a test pins that. It exists so that raising the cap fails loudly
+    /// instead of quietly drawing waypoints under the status bar and off the
+    /// bottom of a window, in a list that has no way to scroll.
+    fn wp_rows_that_fit() -> usize {
+        ((WINDOW_HEIGHT - STATUS_BAR_HEIGHT - WP_LIST_TOP) / WP_ROW_HEIGHT) as usize
+    }
+
+    /// The waypoint drawn at `(x, y)`, if any.
+    ///
+    /// The list is drawn contiguously from `WP_LIST_TOP`, so "row index within
+    /// the list" and "row actually painted" are the same test -- there is no
+    /// scroll offset to apply, and there used to be one: a `wp_scroll` that
+    /// this hit test added and the renderer ignored outright. It was always
+    /// zero, so it never bit; it was also the exact shape of the bug that
+    /// made the notification shade hit-test 76 px from where it painted, and
+    /// it would have started biting the moment anyone wired scrolling up.
+    fn waypoint_at(&self, x: f32, y: f32) -> Option<usize> {
+        if x < WP_LIST_X || x > WP_LIST_X + WP_LIST_WIDTH || y < WP_LIST_TOP {
+            return None;
+        }
+        let row = ((y - WP_LIST_TOP) / WP_ROW_HEIGHT) as usize;
+        (row < self.waypoints.len()).then_some(row)
     }
 
     /// True heading = magnetic heading + declination.
@@ -393,17 +448,12 @@ impl CompassApp {
         if let MouseEventKind::Press(MouseButton::Left) = event.kind {
             // Waypoint list click detection
             if self.view == View::Waypoints {
-                let list_y_start: f32 = 100.0;
-                let row_h: f32 = 36.0;
-                if event.x >= 40.0 && event.x <= 860.0 && event.y >= list_y_start {
-                    let row = ((event.y - list_y_start) / row_h) as usize + self.wp_scroll;
-                    if row < self.waypoints.len() {
-                        self.selected_waypoint = Some(row);
-                        self.status = format!(
-                            "Selected: {}",
-                            self.waypoints.get(row).map_or("?", |w| w.name.as_str())
-                        );
-                    }
+                if let Some(row) = self.waypoint_at(event.x, event.y) {
+                    self.selected_waypoint = Some(row);
+                    self.status = format!(
+                        "Selected: {}",
+                        self.waypoints.get(row).map_or("?", |w| w.name.as_str())
+                    );
                 }
             }
         }
@@ -1119,20 +1169,17 @@ impl CompassApp {
             return;
         }
 
-        let row_h: f32 = 36.0;
-        let start_y: f32 = 100.0;
-
         for (i, wp) in self.waypoints.iter().enumerate() {
-            let y = start_y + i as f32 * row_h;
+            let y = Self::wp_row_top(i);
             let is_selected = self.selected_waypoint == Some(i);
 
             // Row highlight
             if is_selected {
                 cmds.push(RenderCommand::FillRect {
-                    x: 36.0,
+                    x: WP_LIST_X,
                     y,
-                    width: 828.0,
-                    height: row_h - 2.0,
+                    width: WP_LIST_WIDTH,
+                    height: WP_ROW_HEIGHT - WP_ROW_GAP,
                     color: SURFACE0,
                     corner_radii: CornerRadii::all(4.0),
                 });
@@ -1173,7 +1220,7 @@ impl CompassApp {
         }
 
         // Help text at bottom
-        let help_y = start_y + self.waypoints.len() as f32 * row_h + 20.0;
+        let help_y = Self::wp_row_top(self.waypoints.len()) + 20.0;
         cmds.push(RenderCommand::Text {
             x: 40.0,
             y: help_y,
@@ -1375,7 +1422,7 @@ impl CompassApp {
     }
 
     fn render_status_bar(&self, cmds: &mut Vec<RenderCommand>) {
-        let bar_y = WINDOW_HEIGHT - 32.0;
+        let bar_y = WINDOW_HEIGHT - STATUS_BAR_HEIGHT;
         cmds.push(RenderCommand::FillRect {
             x: 0.0,
             y: bar_y,
@@ -2346,6 +2393,143 @@ mod tests {
     #[test]
     fn test_key_to_char_unknown() {
         assert_eq!(key_to_char(Key::Escape, false), None);
+    }
+
+    // ── Waypoint list layout ────────────────────────────────────────
+    //
+    // The list has no scrolling, and does not need any: `MAX_WAYPOINTS` rows
+    // always fit above the status bar. It nevertheless carried a `wp_scroll`
+    // that the hit test added to its row index and the renderer ignored
+    // outright -- the same shape as the notification shade that hit-tested
+    // 76 px from where it painted, sitting harmlessly at zero. The field is
+    // gone; these tests hold the ground it stood on.
+
+    fn app_with_waypoints(n: usize) -> CompassApp {
+        let mut app = default_app();
+        app.view = View::Waypoints;
+        for _ in 0..n {
+            app.add_waypoint_at_current_position();
+        }
+        app
+    }
+
+    fn click_at(app: &mut CompassApp, x: f32, y: f32) -> Option<usize> {
+        app.selected_waypoint = None;
+        app.handle_event(&Event::Mouse(MouseEvent {
+            x,
+            y,
+            kind: MouseEventKind::Press(MouseButton::Left),
+        }));
+        app.selected_waypoint
+    }
+
+    /// Where the renderer actually painted each row, read out of the render
+    /// commands rather than from `wp_row_top`.
+    ///
+    /// A test that asks the layout helper where a row is cannot catch the
+    /// renderer and the hit test disagreeing: both would be wrong together
+    /// and it would still pass. The drawn output is the only independent
+    /// evidence. Row `i` is made to paint by selecting it, since the
+    /// highlight is the only per-row rectangle.
+    fn painted_row_top(app: &mut CompassApp, i: usize) -> f32 {
+        app.selected_waypoint = Some(i);
+        let mut cmds = Vec::new();
+        app.render_waypoint_view(&mut cmds);
+        cmds.iter()
+            .find_map(|cmd| match cmd {
+                RenderCommand::FillRect { x, y, width, .. }
+                    if *x == WP_LIST_X && *width == WP_LIST_WIDTH =>
+                {
+                    Some(*y)
+                }
+                _ => None,
+            })
+            .expect("the selected row is painted")
+    }
+
+    /// Clicking a row selects the row that is painted there -- edges
+    /// included, which is what makes the hit test independent of the
+    /// renderer rather than merely consistent with it at the centres.
+    #[test]
+    fn clicking_a_row_selects_the_row_it_is_painted_in() {
+        let mut app = app_with_waypoints(5);
+        for i in 0..5 {
+            let top = painted_row_top(&mut app, i);
+            assert_eq!(click_at(&mut app, 100.0, top), Some(i), "row {i} top edge");
+            assert_eq!(
+                click_at(&mut app, 100.0, top + WP_ROW_HEIGHT / 2.0),
+                Some(i),
+                "row {i} middle",
+            );
+            assert_eq!(
+                click_at(&mut app, 100.0, top + WP_ROW_HEIGHT - 0.5),
+                Some(i),
+                "row {i} bottom edge",
+            );
+        }
+    }
+
+    /// The click region is the rectangle the highlight is painted in, at both
+    /// horizontal edges. The two used to be different literals -- 36..864
+    /// drawn, 40..860 clicked -- so a 4 px strip down each side of every row
+    /// looked selectable and was not.
+    #[test]
+    fn a_rows_click_region_is_as_wide_as_the_row_is_painted() {
+        let mut app = app_with_waypoints(3);
+        let mid = painted_row_top(&mut app, 1) + WP_ROW_HEIGHT / 2.0;
+        assert_eq!(click_at(&mut app, WP_LIST_X, mid), Some(1));
+        assert_eq!(click_at(&mut app, WP_LIST_X + WP_LIST_WIDTH, mid), Some(1));
+        assert_eq!(click_at(&mut app, WP_LIST_X - 1.0, mid), None);
+        assert_eq!(
+            click_at(&mut app, WP_LIST_X + WP_LIST_WIDTH + 1.0, mid),
+            None
+        );
+    }
+
+    /// Clicking past the end of the list selects nothing. Rows are drawn
+    /// contiguously from the top, so "past the last row" and "outside the
+    /// painted list" are the same place -- and the help text lives there.
+    #[test]
+    fn clicking_below_the_last_row_selects_nothing() {
+        let mut app = app_with_waypoints(3);
+        let below = CompassApp::wp_row_top(3) + 4.0;
+        assert_eq!(click_at(&mut app, 100.0, below), None);
+        assert_eq!(click_at(&mut app, 100.0, WINDOW_HEIGHT - 10.0), None);
+        assert_eq!(click_at(&mut app, 100.0, WP_LIST_TOP - 1.0), None);
+    }
+
+    /// The tripwire for the assumption that lets this list get away with
+    /// having no scrolling at all.
+    ///
+    /// If `MAX_WAYPOINTS` ever exceeds what fits, the extra waypoints would be
+    /// drawn under the status bar and off the bottom of the window, with no
+    /// wheel, no keyboard scroll and no way to reach them. Whoever raises the
+    /// cap should be made to add real scrolling -- so this fails instead of
+    /// letting them find out from a user.
+    #[test]
+    fn every_waypoint_the_app_will_hold_fits_on_screen() {
+        assert!(
+            MAX_WAYPOINTS <= CompassApp::wp_rows_that_fit(),
+            "{MAX_WAYPOINTS} waypoints no longer fit in the {} rows above the \
+             status bar -- the list needs real scrolling before the cap goes up",
+            CompassApp::wp_rows_that_fit(),
+        );
+        let last_bottom = CompassApp::wp_row_top(MAX_WAYPOINTS - 1) + WP_ROW_HEIGHT;
+        assert!(last_bottom <= WINDOW_HEIGHT - STATUS_BAR_HEIGHT);
+    }
+
+    /// A full list is clickable to its last row -- the concrete form of the
+    /// invariant above.
+    #[test]
+    fn the_last_of_a_full_list_is_still_clickable() {
+        let mut app = app_with_waypoints(MAX_WAYPOINTS);
+        assert_eq!(app.waypoints.len(), MAX_WAYPOINTS);
+        let last = MAX_WAYPOINTS - 1;
+        let top = painted_row_top(&mut app, last);
+        assert_eq!(
+            click_at(&mut app, 100.0, top + WP_ROW_HEIGHT / 2.0),
+            Some(last)
+        );
     }
 
     // ── Mouse event tests ───────────────────────────────────────────

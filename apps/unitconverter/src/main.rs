@@ -22,6 +22,7 @@ use guitk::event::{Event, EventResult, Key, KeyEvent, MouseButton, MouseEventKin
 use guitk::layout::FlexDirection;
 use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 use guitk::style::CornerRadii;
+use guitk::wheel;
 use guitk::widget::{Widget, WidgetTree};
 
 use std::collections::VecDeque;
@@ -518,6 +519,16 @@ const HISTORY_PANEL_WIDTH: f32 = 260.0;
 const WINDOW_WIDTH: f32 = 900.0;
 const WINDOW_HEIGHT: f32 = 640.0;
 
+/// Height of one history entry, and the top of the first one.
+///
+/// These were literals inside the renderer, which meant the scroll handler had
+/// no way to know how tall the list it was scrolling actually is — so it had no
+/// upper bound and the wheel walked the history off the top of the panel with
+/// no way back but scrolling all the way up again. Naming them lets
+/// [`UnitConverterApp::max_history_scroll`] be derived from what is drawn.
+const HISTORY_ITEM_HEIGHT: f32 = 52.0;
+const HISTORY_LIST_TOP: f32 = 50.0;
+
 /// Main application state.
 pub struct UnitConverterApp {
     /// Currently selected category.
@@ -609,6 +620,9 @@ impl UnitConverterApp {
         if self.history.len() > MAX_HISTORY {
             self.history.pop_back();
         }
+        // Dropping the oldest entry shortens the list, which can strand the
+        // offset past the new end and leave the panel showing blank space.
+        self.scroll_history_by(0.0);
     }
 
     /// Swap from and to units.
@@ -962,6 +976,25 @@ impl UnitConverterApp {
         false
     }
 
+    /// The furthest the history panel can scroll: zero when the list is
+    /// shorter than the panel it sits in.
+    ///
+    /// A scroll offset needs *both* ends clamped. Only the top was, so the
+    /// wheel scrolled the history into empty space indefinitely.
+    pub fn max_history_scroll(&self) -> f32 {
+        let content = self.history.len() as f32 * HISTORY_ITEM_HEIGHT;
+        let viewport = WINDOW_HEIGHT - HISTORY_LIST_TOP;
+        (content - viewport).max(0.0)
+    }
+
+    /// Move the history panel by `delta` pixels, staying inside the list.
+    fn scroll_history_by(&mut self, delta: f32) {
+        if !delta.is_finite() {
+            return;
+        }
+        self.history_scroll = (self.history_scroll + delta).clamp(0.0, self.max_history_scroll());
+    }
+
     /// Handle a full event (mouse, key, etc.). Returns EventResult.
     pub fn handle_event(&mut self, event: &Event) -> EventResult {
         match event {
@@ -983,7 +1016,14 @@ impl UnitConverterApp {
                 MouseEventKind::Scroll { dy, .. } => {
                     // Scroll history panel.
                     if mouse.x >= WINDOW_WIDTH - HISTORY_PANEL_WIDTH {
-                        self.history_scroll = (self.history_scroll - dy).max(0.0);
+                        // `dy` is in notches, not pixels. `self.history_scroll -
+                        // dy` moved the list by *one pixel* per detent — about a
+                        // fiftieth of an entry, so spinning the wheel looked
+                        // like nothing was happening at all. A notch is three
+                        // rows, and a row here is a history entry. No
+                        // accumulator: the offset is an `f32`, so it holds a
+                        // trackpad's fraction directly.
+                        self.scroll_history_by(wheel::pixels(*dy, HISTORY_ITEM_HEIGHT));
                         EventResult::Consumed
                     } else {
                         EventResult::Ignored
@@ -1801,8 +1841,8 @@ impl UnitConverterApp {
                 overflow: TextOverflow::Ellipsis,
             });
         } else {
-            let item_h: f32 = 52.0;
-            let start_y: f32 = 50.0;
+            let item_h = HISTORY_ITEM_HEIGHT;
+            let start_y = HISTORY_LIST_TOP;
             let scroll = self.history_scroll;
 
             // Clip to panel area.
@@ -1905,8 +1945,115 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
+    // The scrolling tests assert a float equals the exact literal the code
+    // under test was handed. That is the assertion meant: a tolerance would let
+    // a value that has drifted pass as one that has not. (The *conversion*
+    // tests below rightly use a tolerance — those results come out of
+    // arithmetic, not out of a constant.)
+    #![allow(clippy::float_cmp)]
+
     use super::*;
-    use guitk::event::Modifiers;
+    use guitk::event::{Modifiers, MouseEvent};
+
+    // ========================================================================
+    // History panel scrolling
+    // ========================================================================
+
+    /// An app whose history is long enough that the panel genuinely overflows.
+    fn app_with_history() -> UnitConverterApp {
+        let mut app = UnitConverterApp::new();
+        for i in 1..=MAX_HISTORY {
+            app.from_input = i.to_string();
+            app.do_convert();
+        }
+        assert!(
+            app.max_history_scroll() > 0.0,
+            "the fixture must actually overflow the panel"
+        );
+        app
+    }
+
+    /// Scroll `dy` notches with the pointer over the history panel.
+    fn wheel_over_history(app: &mut UnitConverterApp, dy: f32) -> EventResult {
+        app.handle_event(&Event::Mouse(MouseEvent {
+            x: WINDOW_WIDTH - 20.0,
+            y: 300.0,
+            kind: MouseEventKind::Scroll { dx: 0.0, dy },
+        }))
+    }
+
+    /// `dy` is in notches. This handler subtracted it from a pixel offset, so a
+    /// full detent of a real wheel moved the history by one pixel — a fiftieth
+    /// of an entry, indistinguishable from the list not moving at all.
+    #[test]
+    fn one_wheel_notch_moves_three_history_entries() {
+        let mut app = app_with_history();
+        // Negative `dy` is towards the user, which moves towards the end.
+        assert_eq!(wheel_over_history(&mut app, -1.0), EventResult::Consumed);
+        assert_eq!(app.history_scroll, 3.0 * HISTORY_ITEM_HEIGHT);
+        wheel_over_history(&mut app, 1.0);
+        assert_eq!(app.history_scroll, 0.0);
+    }
+
+    /// `.max(0.0)` clamps one end only, so the wheel walked the history off the
+    /// top of the panel indefinitely and left it blank with no way back but
+    /// scrolling all the way up again.
+    #[test]
+    fn the_wheel_stops_with_the_last_entry_on_screen() {
+        let mut app = app_with_history();
+        for _ in 0..100 {
+            wheel_over_history(&mut app, -1.0);
+        }
+        assert_eq!(app.history_scroll, app.max_history_scroll());
+        // The last entry's bottom sits exactly at the bottom of the window.
+        let last_bottom =
+            HISTORY_LIST_TOP + app.history.len() as f32 * HISTORY_ITEM_HEIGHT - app.history_scroll;
+        assert_eq!(last_bottom, WINDOW_HEIGHT);
+    }
+
+    /// A history shorter than the panel cannot scroll at all.
+    #[test]
+    fn a_short_history_does_not_scroll() {
+        let mut app = UnitConverterApp::new();
+        app.do_convert();
+        assert_eq!(app.max_history_scroll(), 0.0);
+        wheel_over_history(&mut app, -5.0);
+        assert_eq!(app.history_scroll, 0.0);
+    }
+
+    /// The offset is an `f32`, so a trackpad's fraction of a notch moves the
+    /// list now rather than being rounded away or banked for later.
+    #[test]
+    fn a_fraction_of_a_notch_moves_the_history_now() {
+        let mut app = app_with_history();
+        wheel_over_history(&mut app, -0.5);
+        assert_eq!(app.history_scroll, 1.5 * HISTORY_ITEM_HEIGHT);
+    }
+
+    /// The pointer must be over the panel for the panel to scroll.
+    #[test]
+    fn scrolling_the_main_area_leaves_the_history_alone() {
+        let mut app = app_with_history();
+        let result = app.handle_event(&Event::Mouse(MouseEvent {
+            x: SIDEBAR_WIDTH + 10.0,
+            y: 300.0,
+            kind: MouseEventKind::Scroll { dx: 0.0, dy: -1.0 },
+        }));
+        assert_eq!(result, EventResult::Ignored);
+        assert_eq!(app.history_scroll, 0.0);
+    }
+
+    /// Input events come from outside the process, and an infinity stored in
+    /// the offset would blank the panel for the rest of the run.
+    #[test]
+    fn a_nonfinite_delta_does_not_freeze_the_history() {
+        let mut app = app_with_history();
+        wheel_over_history(&mut app, f32::NAN);
+        wheel_over_history(&mut app, f32::INFINITY);
+        assert_eq!(app.history_scroll, 0.0);
+        wheel_over_history(&mut app, -1.0);
+        assert_eq!(app.history_scroll, 3.0 * HISTORY_ITEM_HEIGHT);
+    }
 
     // -- Conversion engine tests --
 

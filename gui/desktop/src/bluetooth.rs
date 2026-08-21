@@ -10,9 +10,9 @@
 //! - Auto-connect for known devices
 //! - System tray indicator
 
-use crate::scroll_window;
 use guitk::color::Color;
 use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
+use guitk::scroll_window;
 use guitk::style::CornerRadii;
 
 // ============================================================================
@@ -964,9 +964,7 @@ mod tests {
     fn drawn_device_names(cmds: &[RenderCommand]) -> Vec<String> {
         cmds.iter()
             .filter_map(|c| match c {
-                RenderCommand::Text { text, .. } if text.starts_with("dev") => {
-                    Some(text.clone())
-                }
+                RenderCommand::Text { text, .. } if text.starts_with("dev") => Some(text.clone()),
                 _ => None,
             })
             .collect()
@@ -980,7 +978,9 @@ mod tests {
                 RenderCommand::Line { y1, y2, .. } => Some(y1.max(*y2)),
                 _ => None,
             })
-            .fold(None, |acc: Option<f32>, v| Some(acc.map_or(v, |a| a.max(v))))
+            .fold(None, |acc: Option<f32>, v| {
+                Some(acc.map_or(v, |a| a.max(v)))
+            })
     }
 
     #[test]
@@ -1014,7 +1014,10 @@ mod tests {
         ui.scroll_offset = 0;
         let unscrolled = drawn_device_names(&ui.render(&mgr, 10.0, 20.0, 600.0, 500.0));
         assert!(!unscrolled.is_empty(), "a 500px panel should show devices");
-        assert_eq!(unscrolled[0], "dev0", "an unscrolled list starts at the top");
+        assert_eq!(
+            unscrolled[0], "dev0",
+            "an unscrolled list starts at the top"
+        );
 
         ui.scroll_offset = 1;
         let past_heading = drawn_device_names(&ui.render(&mgr, 10.0, 20.0, 600.0, 500.0));

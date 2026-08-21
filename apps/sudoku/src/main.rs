@@ -22,7 +22,7 @@
 use guitk::color::Color;
 use guitk::event::{Event, Key, KeyEvent, Modifiers, MouseButton, MouseEvent, MouseEventKind};
 use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
-use guitk::rng::{seed_from_system, RandomSource, SeededRng};
+use guitk::rng::{RandomSource, SeededRng, seed_from_system};
 use guitk::style::CornerRadii;
 
 // ── Catppuccin Mocha palette ────────────────────────────────────────
@@ -62,6 +62,17 @@ const CELL_FONT_SIZE: f32 = 24.0;
 const NOTE_FONT_SIZE: f32 = 10.0;
 const STATUS_FONT_SIZE: f32 = 14.0;
 const LABEL_FONT_SIZE: f32 = 13.0;
+
+/// Half a digit's drawn width and height at `CELL_FONT_SIZE`.
+///
+/// `RenderCommand::Text` is positioned by its top-left corner, so a digit is
+/// centred in its cell by starting it this far up and to the left of the cell's
+/// middle. The numbers are eyeballed rather than measured -- the renderer has no
+/// text-metrics call to ask -- which is exactly why they are named here instead
+/// of being two bare literals subtracted from an inline `CELL_SIZE / 2.0`.
+const DIGIT_HALF_WIDTH: f32 = 7.0;
+/// Half a digit's drawn height at `CELL_FONT_SIZE`. See `DIGIT_HALF_WIDTH`.
+const DIGIT_HALF_HEIGHT: f32 = 10.0;
 
 const MAX_HINTS: usize = 5;
 const MAX_UNDO: usize = 500;
@@ -486,11 +497,7 @@ fn count_solutions(grid: &mut [u8; TOTAL_CELLS], limit: usize) -> usize {
     count_solutions_inner(grid, limit, 0)
 }
 
-fn count_solutions_inner(
-    grid: &mut [u8; TOTAL_CELLS],
-    limit: usize,
-    found: usize,
-) -> usize {
+fn count_solutions_inner(grid: &mut [u8; TOTAL_CELLS], limit: usize, found: usize) -> usize {
     if found >= limit {
         return found;
     }
@@ -525,9 +532,7 @@ fn solve_shuffled(grid: &mut [u8; TOTAL_CELLS], rng: &mut SeededRng) -> bool {
     };
 
     let cands = candidates(grid, row, col);
-    let mut digits: Vec<u8> = (1..=9)
-        .filter(|&d| cands & (1 << (d - 1)) != 0)
-        .collect();
+    let mut digits: Vec<u8> = (1..=9).filter(|&d| cands & (1 << (d - 1)) != 0).collect();
     rng.shuffle(&mut digits);
 
     for digit in digits {
@@ -552,9 +557,9 @@ fn generate_full_grid(rng: &mut SeededRng) -> [u8; TOTAL_CELLS] {
     if !solved {
         // Fallback: fill with a known valid grid
         let fallback = [
-            5, 3, 4, 6, 7, 8, 9, 1, 2, 6, 7, 2, 1, 9, 5, 3, 4, 8, 1, 9, 8, 3, 4, 2, 5, 6, 7,
-            8, 5, 9, 7, 6, 1, 4, 2, 3, 4, 2, 6, 8, 5, 3, 7, 9, 1, 7, 1, 3, 9, 2, 4, 8, 5, 6,
-            9, 6, 1, 5, 3, 7, 2, 8, 4, 2, 8, 7, 4, 1, 9, 6, 3, 5, 3, 4, 5, 2, 8, 6, 1, 7, 9,
+            5, 3, 4, 6, 7, 8, 9, 1, 2, 6, 7, 2, 1, 9, 5, 3, 4, 8, 1, 9, 8, 3, 4, 2, 5, 6, 7, 8, 5,
+            9, 7, 6, 1, 4, 2, 3, 4, 2, 6, 8, 5, 3, 7, 9, 1, 7, 1, 3, 9, 2, 4, 8, 5, 6, 9, 6, 1, 5,
+            3, 7, 2, 8, 4, 2, 8, 7, 4, 1, 9, 6, 3, 5, 3, 4, 5, 2, 8, 6, 1, 7, 9,
         ];
         grid = fallback;
     }
@@ -739,22 +744,18 @@ impl SudokuApp {
 
         match key_event.key {
             // Navigation
-            Key::Up
-                if self.selected_row > 0 => {
-                    self.selected_row -= 1;
-                }
-            Key::Down
-                if self.selected_row < GRID_SIZE - 1 => {
-                    self.selected_row += 1;
-                }
-            Key::Left
-                if self.selected_col > 0 => {
-                    self.selected_col -= 1;
-                }
-            Key::Right
-                if self.selected_col < GRID_SIZE - 1 => {
-                    self.selected_col += 1;
-                }
+            Key::Up if self.selected_row > 0 => {
+                self.selected_row -= 1;
+            }
+            Key::Down if self.selected_row < GRID_SIZE - 1 => {
+                self.selected_row += 1;
+            }
+            Key::Left if self.selected_col > 0 => {
+                self.selected_col -= 1;
+            }
+            Key::Right if self.selected_col < GRID_SIZE - 1 => {
+                self.selected_col += 1;
+            }
 
             // Undo / Redo (before number input so Ctrl combos match first)
             Key::Z if key_event.modifiers.ctrl => self.undo(),
@@ -798,19 +799,7 @@ impl SudokuApp {
                 return;
             }
 
-            // Calculate which cell was clicked
-            let gx = mouse_event.x - PADDING;
-            let gy = mouse_event.y - PADDING - HEADER_HEIGHT;
-
-            if gx < 0.0 || gy < 0.0 {
-                return;
-            }
-
-            // Account for box gaps in the calculation
-            let col = pixel_to_grid_coord(gx);
-            let row = pixel_to_grid_coord(gy);
-
-            if let (Some(r), Some(c)) = (row, col) {
+            if let Some((r, c)) = cell_at(mouse_event.x, mouse_event.y) {
                 self.selected_row = r;
                 self.selected_col = c;
             }
@@ -1058,10 +1047,12 @@ impl SudokuApp {
 
         for r in 0..GRID_SIZE {
             for c in 0..GRID_SIZE {
-                if vals[idx(r, c)] != 0 && has_conflict(&vals, r, c, vals[idx(r, c)])
-                    && !result.contains(&(r, c)) {
-                        result.push((r, c));
-                    }
+                if vals[idx(r, c)] != 0
+                    && has_conflict(&vals, r, c, vals[idx(r, c)])
+                    && !result.contains(&(r, c))
+                {
+                    result.push((r, c));
+                }
             }
         }
 
@@ -1242,15 +1233,13 @@ impl SudokuApp {
     }
 
     fn render_grid(&self, cmds: &mut Vec<RenderCommand>) {
-        let origin_x = PADDING;
-        let origin_y = PADDING + HEADER_HEIGHT;
         let conflict_cells = self.all_conflict_cells();
 
         // Grid background
         let grid_size = grid_total_size();
         cmds.push(RenderCommand::FillRect {
-            x: origin_x - 2.0,
-            y: origin_y - 2.0,
+            x: GRID_ORIGIN_X - 2.0,
+            y: GRID_ORIGIN_Y - 2.0,
             width: grid_size + 4.0,
             height: grid_size + 4.0,
             color: CRUST,
@@ -1260,9 +1249,7 @@ impl SudokuApp {
         // Cells
         for r in 0..GRID_SIZE {
             for c in 0..GRID_SIZE {
-                let (cx, cy) = cell_pixel_pos(r, c);
-                let px = origin_x + cx;
-                let py = origin_y + cy;
+                let (px, py) = cell_origin(r, c);
 
                 let cell = &self.cells[idx(r, c)];
                 let is_selected = r == self.selected_row && c == self.selected_col;
@@ -1324,9 +1311,10 @@ impl SudokuApp {
                         FontWeightHint::Regular
                     };
 
+                    let (mx, my) = cell_center(r, c);
                     cmds.push(RenderCommand::Text {
-                        x: px + CELL_SIZE / 2.0 - 7.0,
-                        y: py + CELL_SIZE / 2.0 - 10.0,
+                        x: mx - DIGIT_HALF_WIDTH,
+                        y: my - DIGIT_HALF_HEIGHT,
                         text: cell.value.to_string(),
                         color: digit_color,
                         font_size: CELL_FONT_SIZE,
@@ -1346,16 +1334,14 @@ impl SudokuApp {
             for box_c in 0..BOX_SIZE {
                 let r = box_r * BOX_SIZE;
                 let c = box_c * BOX_SIZE;
-                let (bx, by) = cell_pixel_pos(r, c);
-                // Width spans 3 cells + 2 inner gaps
-                let box_w = CELL_SIZE * 3.0 + CELL_GAP * 2.0;
-                let box_h = CELL_SIZE * 3.0 + CELL_GAP * 2.0;
+                let (bx, by) = cell_origin(r, c);
+                let box_span = box_pixel_span();
 
                 cmds.push(RenderCommand::StrokeRect {
-                    x: origin_x + bx - 1.0,
-                    y: origin_y + by - 1.0,
-                    width: box_w + 2.0,
-                    height: box_h + 2.0,
+                    x: bx - 1.0,
+                    y: by - 1.0,
+                    width: box_span + 2.0,
+                    height: box_span + 2.0,
                     color: OVERLAY0,
                     line_width: 1.5,
                     corner_radii: CornerRadii::all(2.0),
@@ -1417,11 +1403,14 @@ impl SudokuApp {
 
         // Stats line
         let total = self.stats.total_completed();
-        let best = self
-            .stats
-            .best_time(self.difficulty)
-            .map_or_else(|| "--:--".to_string(), |t| format!("{:02}:{:02}", t / 60, t % 60));
-        let stats_text = format!("Completed: {total}  Best ({}):{best}", self.difficulty.label());
+        let best = self.stats.best_time(self.difficulty).map_or_else(
+            || "--:--".to_string(),
+            |t| format!("{:02}:{:02}", t / 60, t % 60),
+        );
+        let stats_text = format!(
+            "Completed: {total}  Best ({}):{best}",
+            self.difficulty.label()
+        );
         cmds.push(RenderCommand::Text {
             x: PADDING,
             y: footer_y + 24.0,
@@ -1435,74 +1424,89 @@ impl SudokuApp {
     }
 }
 
-// ── Pixel geometry helpers ──────────────────────────────────────────
+// ── Grid geometry ───────────────────────────────────
+//
+// Where a cell is painted and which cell a click lands in were worked out
+// independently, and the per-axis offset -- cells, plus the thin gaps between
+// cells inside a box, plus the thick gaps between boxes -- was written out
+// three times: in `cell_pixel_pos`, again in `cell_pixel_pos_clean`, and a
+// third time inside the loop in `pixel_to_grid_coord`. The renderer called the
+// first of those; every test called the second. Two functions meant to compute
+// the same thing, with the product using one and the tests measuring the other,
+// is worse than one function and no tests at all -- the suite reports on code
+// nobody runs, and stays green while the thing on screen moves. These are now
+// the one place the grid's arithmetic is written.
 
-/// Total pixel size of the 9x9 grid including gaps between cells and boxes.
+/// Screen coordinates of the grid's top-left corner.
+const GRID_ORIGIN_X: f32 = PADDING;
+/// Screen coordinates of the grid's top-left corner.
+const GRID_ORIGIN_Y: f32 = PADDING + HEADER_HEIGHT;
+
+/// Distance from the grid's near edge to the near edge of row/column `i`.
+///
+/// The two gap widths are what make this more than a multiplication: the eight
+/// boundaries between the nine lines are not alike. Two of them -- after the
+/// third line and after the sixth -- separate one 3x3 box from the next and get
+/// `BOX_GAP`; the other six sit inside a box and get `CELL_GAP`.
+fn axis_offset(i: usize) -> f32 {
+    let box_gaps_before = i / BOX_SIZE;
+    let cell_gaps_before = i - box_gaps_before;
+    i as f32 * CELL_SIZE + cell_gaps_before as f32 * CELL_GAP + box_gaps_before as f32 * BOX_GAP
+}
+
+/// Distance across the whole grid, in pixels.
+///
+/// Derived from `axis_offset` rather than restated as "nine cells, six thin
+/// gaps and two thick ones", so that a change to the spacing cannot leave the
+/// frame and the cells disagreeing about how big the grid is.
 fn grid_total_size() -> f32 {
-    // 9 cells + 6 inner cell gaps (within boxes) + 2 box gaps
-    CELL_SIZE * 9.0 + CELL_GAP * 6.0 + BOX_GAP * 2.0
+    axis_offset(GRID_SIZE - 1) + CELL_SIZE
 }
 
-/// Pixel position of the top-left corner of cell (row, col) relative to grid origin.
-fn cell_pixel_pos(row: usize, col: usize) -> (f32, f32) {
-    let x = col as f32 * CELL_SIZE
-        + (col / BOX_SIZE) as f32 * BOX_GAP
-        + inner_gaps_before(col) * CELL_GAP;
-    let y = row as f32 * CELL_SIZE
-        + (row / BOX_SIZE) as f32 * BOX_GAP
-        + inner_gaps_before(row) * CELL_GAP;
-    (x, y)
+/// Distance across one 3x3 box, in pixels.
+///
+/// The same for every box: the gaps *between* boxes fall outside them, so each
+/// box is three cells and the two thin gaps inside it, wherever it sits.
+fn box_pixel_span() -> f32 {
+    axis_offset(BOX_SIZE - 1) + CELL_SIZE
 }
 
-/// Number of inner (within-box) cell gaps before position `pos` in one axis.
-fn inner_gaps_before(pos: usize) -> f32 {
-    // Within each box of 3, there are gaps between cells 0-1 and 1-2.
-    // Box 0: positions 0,1,2 => 0 gaps before 0, 1 gap before 1, 2 before 2
-    // Box 1: positions 3,4,5 => 0 extra inner gaps at box boundary (that's a box gap)
-    // So inner gaps = pos - (pos / 3) = the index within all boxes minus box transitions
-    if pos == 0 {
-        return 0.0;
-    }
-    // Total gaps before this position = (pos - 1) gaps between consecutive cells.
-    // Of those, box boundaries (at 3 and 6) use BOX_GAP not CELL_GAP.
-    // Inner gaps = total gaps - box boundary gaps
-    let total_gaps = pos;
-    let box_boundary_gaps = pos / BOX_SIZE;
-    (total_gaps - box_boundary_gaps) as f32
+/// Screen coordinates of the top-left corner of a cell.
+fn cell_origin(row: usize, col: usize) -> (f32, f32) {
+    (
+        GRID_ORIGIN_X + axis_offset(col),
+        GRID_ORIGIN_Y + axis_offset(row),
+    )
 }
 
-/// Simplified cell_pixel_pos using the inner_gaps_before helper properly.
-fn cell_pixel_pos_clean(row: usize, col: usize) -> (f32, f32) {
-    let x = col as f32 * CELL_SIZE
-        + inner_gaps_before(col) * CELL_GAP
-        + (col / BOX_SIZE) as f32 * BOX_GAP;
-    let y = row as f32 * CELL_SIZE
-        + inner_gaps_before(row) * CELL_GAP
-        + (row / BOX_SIZE) as f32 * BOX_GAP;
-    (x, y)
+/// Screen coordinates of the middle of a cell.
+fn cell_center(row: usize, col: usize) -> (f32, f32) {
+    let (x, y) = cell_origin(row, col);
+    (x + CELL_SIZE / 2.0, y + CELL_SIZE / 2.0)
 }
 
-/// Convert a pixel coordinate (relative to grid origin) to a grid coordinate.
-/// Returns None if outside the grid.
-fn pixel_to_grid_coord(pixel: f32) -> Option<usize> {
-    if pixel < 0.0 {
-        return None;
-    }
-    // Try each position and check if the pixel falls within it
-    for i in 0..GRID_SIZE {
-        let pos = i as f32 * CELL_SIZE
-            + inner_gaps_before(i) * CELL_GAP
-            + (i / BOX_SIZE) as f32 * BOX_GAP;
-        if pixel >= pos && pixel < pos + CELL_SIZE {
-            return Some(i);
-        }
-    }
-    None
+/// The row or column an offset from the grid's near edge falls in, or `None`
+/// if it falls outside the grid or into one of the gaps between cells.
+///
+/// A gap is dead rather than rounded to the nearer neighbour, deliberately: the
+/// gaps are the painted lines between cells, and a click that lands on the line
+/// between two cells has not said which of the two was meant. Note there is no
+/// cast here at all, so there is no truncate-toward-zero edge to get wrong --
+/// a negative offset is smaller than every cell's near edge and matches none of
+/// them. See known-issues.md `C-GOMOKU-THE-CLICK-SLOP-ONLY-WORKED-ON-TWO-EDGES`
+/// for what that cast costs when it is there.
+fn axis_index(offset: f32) -> Option<usize> {
+    (0..GRID_SIZE).find(|&i| {
+        let near = axis_offset(i);
+        offset >= near && offset < near + CELL_SIZE
+    })
 }
 
-// Override cell_pixel_pos to use the clean version
-fn cell_pos(row: usize, col: usize) -> (f32, f32) {
-    cell_pixel_pos_clean(row, col)
+/// The cell a click at `(x, y)` lands on, or `None` if it misses the grid.
+fn cell_at(x: f32, y: f32) -> Option<(usize, usize)> {
+    let row = axis_index(y - GRID_ORIGIN_Y)?;
+    let col = axis_index(x - GRID_ORIGIN_X)?;
+    Some((row, col))
 }
 
 // ── Entry point ─────────────────────────────────────────────────────
@@ -1534,19 +1538,16 @@ mod tests {
 
     fn known_solution() -> [u8; TOTAL_CELLS] {
         [
-            5, 3, 4, 6, 7, 8, 9, 1, 2,
-            6, 7, 2, 1, 9, 5, 3, 4, 8,
-            1, 9, 8, 3, 4, 2, 5, 6, 7,
-            8, 5, 9, 7, 6, 1, 4, 2, 3,
-            4, 2, 6, 8, 5, 3, 7, 9, 1,
-            7, 1, 3, 9, 2, 4, 8, 5, 6,
-            9, 6, 1, 5, 3, 7, 2, 8, 4,
-            2, 8, 7, 4, 1, 9, 6, 3, 5,
-            3, 4, 5, 2, 8, 6, 1, 7, 9,
+            5, 3, 4, 6, 7, 8, 9, 1, 2, 6, 7, 2, 1, 9, 5, 3, 4, 8, 1, 9, 8, 3, 4, 2, 5, 6, 7, 8, 5,
+            9, 7, 6, 1, 4, 2, 3, 4, 2, 6, 8, 5, 3, 7, 9, 1, 7, 1, 3, 9, 2, 4, 8, 5, 6, 9, 6, 1, 5,
+            3, 7, 2, 8, 4, 2, 8, 7, 4, 1, 9, 6, 3, 5, 3, 4, 5, 2, 8, 6, 1, 7, 9,
         ]
     }
 
-    fn make_cells_from_values(values: &[u8; TOTAL_CELLS], givens: &[bool; TOTAL_CELLS]) -> [Cell; TOTAL_CELLS] {
+    fn make_cells_from_values(
+        values: &[u8; TOTAL_CELLS],
+        givens: &[bool; TOTAL_CELLS],
+    ) -> [Cell; TOTAL_CELLS] {
         core::array::from_fn(|i| {
             if givens[i] {
                 Cell::as_given(values[i])
@@ -1834,7 +1835,10 @@ mod tests {
     fn test_generate_full_grid_different_seeds() {
         let grid1 = generate_full_grid(&mut SeededRng::new(1));
         let grid2 = generate_full_grid(&mut SeededRng::new(2));
-        assert_ne!(grid1, grid2, "Different seeds should produce different grids");
+        assert_ne!(
+            grid1, grid2,
+            "Different seeds should produce different grids"
+        );
     }
 
     #[test]
@@ -2120,7 +2124,10 @@ mod tests {
             app.seed_counter, FALLBACK_SEED,
             "a fresh game did not ask the system for its seed"
         );
-        assert_ne!(app.seed_counter, 42, "a fresh puzzle still comes from a literal");
+        assert_ne!(
+            app.seed_counter, 42,
+            "a fresh puzzle still comes from a literal"
+        );
     }
 
     // ── SudokuApp construction ─────────────────────────────────────
@@ -2277,7 +2284,8 @@ mod tests {
         });
         app.handle_event(&event);
         assert_eq!(
-            app.cells[idx(r, c)].value, original_value,
+            app.cells[idx(r, c)].value,
+            original_value,
             "Given cell should not change"
         );
     }
@@ -2359,7 +2367,11 @@ mod tests {
         });
         app.handle_event(&event);
         assert!(app.cells[idx(r, c)].has_note(3));
-        assert_eq!(app.cells[idx(r, c)].value, 0, "Note mode should not set value");
+        assert_eq!(
+            app.cells[idx(r, c)].value,
+            0,
+            "Note mode should not set value"
+        );
     }
 
     #[test]
@@ -2393,7 +2405,10 @@ mod tests {
         // Switch to value mode and place a digit
         app.note_mode = false;
         app.input_digit(3);
-        assert!(!app.cells[idx(r, c)].has_any_note(), "Notes should be cleared when placing a value");
+        assert!(
+            !app.cells[idx(r, c)].has_any_note(),
+            "Notes should be cleared when placing a value"
+        );
         assert_eq!(app.cells[idx(r, c)].value, 3);
     }
 
@@ -2512,7 +2527,10 @@ mod tests {
         let expected = app.solution[idx(r, c)];
         app.use_hint();
         assert_eq!(app.cells[idx(r, c)].value, expected);
-        assert!(app.cells[idx(r, c)].given, "Hinted cell should become given");
+        assert!(
+            app.cells[idx(r, c)].given,
+            "Hinted cell should become given"
+        );
     }
 
     #[test]
@@ -2547,7 +2565,8 @@ mod tests {
             let val_before = app.cells[idx(r, c)].value;
             app.use_hint();
             assert_eq!(
-                app.cells[idx(r, c)].value, val_before,
+                app.cells[idx(r, c)].value,
+                val_before,
                 "No hint should be given when limit reached"
             );
         }
@@ -2562,7 +2581,10 @@ mod tests {
 
         let before = app.hints_remaining;
         app.use_hint();
-        assert_eq!(app.hints_remaining, before, "Hint on given should not consume a hint");
+        assert_eq!(
+            app.hints_remaining, before,
+            "Hint on given should not consume a hint"
+        );
     }
 
     #[test]
@@ -2579,7 +2601,10 @@ mod tests {
         app.undo();
         assert_eq!(app.cells[idx(r, c)].value, 0);
         assert!(!app.cells[idx(r, c)].given);
-        assert_eq!(app.hints_remaining, hints_before, "Undo should restore hint count");
+        assert_eq!(
+            app.hints_remaining, hints_before,
+            "Undo should restore hint count"
+        );
     }
 
     // ── Game completion ────────────────────────────────────────────
@@ -2624,7 +2649,10 @@ mod tests {
             text: None,
         });
         app.handle_event(&up);
-        assert_eq!(app.selected_row, old_row, "Navigation should be blocked after winning");
+        assert_eq!(
+            app.selected_row, old_row,
+            "Navigation should be blocked after winning"
+        );
     }
 
     // ── New game ───────────────────────────────────────────────────
@@ -2734,7 +2762,11 @@ mod tests {
             text: None,
         });
         app.handle_event(&event);
-        assert_eq!(app.cells[idx(r, c)].value, 0, "Input should be blocked when paused");
+        assert_eq!(
+            app.cells[idx(r, c)].value,
+            0,
+            "Input should be blocked when paused"
+        );
     }
 
     // ── Statistics ─────────────────────────────────────────────────
@@ -2755,7 +2787,11 @@ mod tests {
 
         stats.record_completion(Difficulty::Easy, 150);
         assert_eq!(stats.games_completed(Difficulty::Easy), 3);
-        assert_eq!(stats.best_time(Difficulty::Easy), Some(90), "Best time should not increase");
+        assert_eq!(
+            stats.best_time(Difficulty::Easy),
+            Some(90),
+            "Best time should not increase"
+        );
     }
 
     #[test]
@@ -2801,7 +2837,10 @@ mod tests {
         let app = SudokuApp::new();
         // A freshly generated puzzle should have no conflicts
         let conflicts = app.all_conflict_cells();
-        assert!(conflicts.is_empty(), "Fresh puzzle should have no conflicts");
+        assert!(
+            conflicts.is_empty(),
+            "Fresh puzzle should have no conflicts"
+        );
     }
 
     #[test]
@@ -2824,7 +2863,10 @@ mod tests {
         if conflict_digit != 0 {
             app.input_digit(conflict_digit);
             let conflicts = app.all_conflict_cells();
-            assert!(!conflicts.is_empty(), "Should detect conflict after placing duplicate");
+            assert!(
+                !conflicts.is_empty(),
+                "Should detect conflict after placing duplicate"
+            );
             assert!(conflicts.contains(&(r, c)));
         }
     }
@@ -2855,7 +2897,9 @@ mod tests {
     fn test_render_contains_title() {
         let app = SudokuApp::new();
         let cmds = app.render();
-        let has_title = cmds.iter().any(|cmd| matches!(cmd, RenderCommand::Text { text, .. } if text == "Sudoku"));
+        let has_title = cmds
+            .iter()
+            .any(|cmd| matches!(cmd, RenderCommand::Text { text, .. } if text == "Sudoku"));
         assert!(has_title, "Render should contain title text");
     }
 
@@ -2864,12 +2908,15 @@ mod tests {
         let app = SudokuApp::new();
         let cmds = app.render();
         // At least some given digits should be rendered
-        let digit_count = cmds.iter().filter(|cmd| {
-            matches!(cmd, RenderCommand::Text { text, font_size, .. }
+        let digit_count = cmds
+            .iter()
+            .filter(|cmd| {
+                matches!(cmd, RenderCommand::Text { text, font_size, .. }
                 if text.len() == 1
                     && text.chars().next().is_some_and(|ch| ch.is_ascii_digit() && ch != '0')
                     && (*font_size - CELL_FONT_SIZE).abs() < 0.1)
-        }).count();
+            })
+            .count();
         assert!(digit_count > 0, "Render should contain cell digits");
     }
 
@@ -2887,7 +2934,9 @@ mod tests {
             }
         }
         let cmds = app.render();
-        let has_completed = cmds.iter().any(|cmd| matches!(cmd, RenderCommand::Text { text, .. } if text.contains("Completed")));
+        let has_completed = cmds.iter().any(
+            |cmd| matches!(cmd, RenderCommand::Text { text, .. } if text.contains("Completed")),
+        );
         assert!(has_completed, "Won state should show 'Completed' text");
     }
 
@@ -2896,11 +2945,11 @@ mod tests {
     #[test]
     fn test_mouse_click_selects_cell() {
         let mut app = SudokuApp::new();
-        // Click on cell (0,0) position
-        let (cx, cy) = cell_pixel_pos_clean(0, 0);
+        // Click the middle of the top-left cell.
+        let (cx, cy) = cell_center(0, 0);
         let click = Event::Mouse(MouseEvent {
-            x: PADDING + cx + CELL_SIZE / 2.0,
-            y: PADDING + HEADER_HEIGHT + cy + CELL_SIZE / 2.0,
+            x: cx,
+            y: cy,
             kind: MouseEventKind::Press(MouseButton::Left),
         });
         app.handle_event(&click);
@@ -2910,43 +2959,416 @@ mod tests {
 
     // ── Pixel geometry ─────────────────────────────────────────────
 
+    // These tests are built from the board-geometry checklist in
+    // `design-decisions.md` §485, and every one of them measures the
+    // *painted* grid rather than asking `cell_origin` where it put things.
+    // The suite this replaced did the opposite: it round-tripped
+    // `pixel_to_grid_coord` against `cell_pixel_pos_clean` -- a function the
+    // renderer never called -- and restated `grid_total_size`'s own formula as
+    // its expected value. Both passed on a grid painted anywhere at all.
+
+    /// Top-left corners of the 81 painted cells, in render order.
+    ///
+    /// A cell is the only thing drawn exactly `CELL_SIZE` square, which is what
+    /// picks them out of the render list without consulting `cell_origin`.
+    fn painted_cells(cmds: &[RenderCommand]) -> Vec<(f32, f32)> {
+        cmds.iter()
+            .filter_map(|c| match c {
+                RenderCommand::FillRect {
+                    x,
+                    y,
+                    width,
+                    height,
+                    ..
+                } if (*width - CELL_SIZE).abs() < 0.01 && (*height - CELL_SIZE).abs() < 0.01 => {
+                    Some((*x, *y))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The painted cell that contains `(x, y)`, if any.
+    fn painted_cell_containing(cmds: &[RenderCommand], x: f32, y: f32) -> Option<(f32, f32)> {
+        painted_cells(cmds)
+            .into_iter()
+            .find(|&(cx, cy)| x >= cx && x < cx + CELL_SIZE && y >= cy && y < cy + CELL_SIZE)
+    }
+
+    /// The window the app asks for, as the background rectangle states it.
+    fn window_size(cmds: &[RenderCommand]) -> (f32, f32) {
+        match cmds.first() {
+            Some(RenderCommand::FillRect { width, height, .. }) => (*width, *height),
+            other => panic!("expected a background rect first, got {other:?}"),
+        }
+    }
+
+    // ── 1. The lattice, measured against the window ────────────
+
     #[test]
-    fn test_grid_total_size() {
+    fn the_painted_grid_is_nine_cells_across_and_fits_the_window() {
+        let app = SudokuApp::new();
+        let cmds = app.render();
+        let cells = painted_cells(&cmds);
+        assert_eq!(cells.len(), TOTAL_CELLS, "one painted rect per cell");
+
+        let mut xs: Vec<f32> = cells.iter().map(|c| c.0).collect();
+        let mut ys: Vec<f32> = cells.iter().map(|c| c.1).collect();
+        xs.sort_by(f32::total_cmp);
+        xs.dedup_by(|a, b| (*a - *b).abs() < 0.01);
+        ys.sort_by(f32::total_cmp);
+        ys.dedup_by(|a, b| (*a - *b).abs() < 0.01);
+        assert_eq!(xs.len(), GRID_SIZE, "nine distinct columns, got {xs:?}");
+        assert_eq!(ys.len(), GRID_SIZE, "nine distinct rows, got {ys:?}");
+
+        // Consecutive lines are one cell apart plus a gap, and the gap is the
+        // thick one exactly at the two box boundaries. Stated against the
+        // constants rather than against `axis_offset`, so a change to the
+        // spacing rule has to be made here too and cannot pass unnoticed.
+        for (i, pair) in xs.windows(2).enumerate() {
+            let expected = CELL_SIZE
+                + if (i + 1) % BOX_SIZE == 0 {
+                    BOX_GAP
+                } else {
+                    CELL_GAP
+                };
+            assert!(
+                (pair[1] - pair[0] - expected).abs() < 0.01,
+                "columns {i} and {} are {} apart, expected {expected}",
+                i + 1,
+                pair[1] - pair[0]
+            );
+        }
+
+        let (win_w, win_h) = window_size(&cmds);
+        let right = xs[GRID_SIZE - 1] + CELL_SIZE;
+        let bottom = ys[GRID_SIZE - 1] + CELL_SIZE;
+        assert!(
+            xs[0] > 0.0 && ys[0] > 0.0,
+            "the grid starts inside the window"
+        );
+        assert!(
+            right < win_w,
+            "the grid ends inside the window: {right} vs {win_w}"
+        );
+        assert!(
+            bottom < win_h,
+            "the grid ends above the footer: {bottom} vs {win_h}"
+        );
+        assert!(
+            ys[0] >= HEADER_HEIGHT,
+            "the grid starts below the header: {} vs {HEADER_HEIGHT}",
+            ys[0]
+        );
+    }
+
+    // ── 2. Every point of a cell, not just its middle ──────────
+
+    #[test]
+    fn every_point_in_a_painted_cell_resolves_to_that_cell() {
+        // A mapping shifted by less than half a cell still answers correctly
+        // dead centre, which is all the old round-trip test ever asked.
+        let app = SudokuApp::new();
+        let cmds = app.render();
+        let inset = 0.5;
+        let far = CELL_SIZE - 0.5;
+        for row in 0..GRID_SIZE {
+            for col in 0..GRID_SIZE {
+                let (ox, oy) = cell_origin(row, col);
+                for dx in [inset, CELL_SIZE / 2.0, far] {
+                    for dy in [inset, CELL_SIZE / 2.0, far] {
+                        assert_eq!(
+                            cell_at(ox + dx, oy + dy),
+                            Some((row, col)),
+                            "({dx}, {dy}) into cell ({row}, {col}) missed it"
+                        );
+                    }
+                }
+                // And that cell is the one actually painted there.
+                let (mx, my) = cell_center(row, col);
+                assert_eq!(
+                    painted_cell_containing(&cmds, mx, my),
+                    Some((ox, oy)),
+                    "cell ({row}, {col}) is not painted where cell_origin says"
+                );
+            }
+        }
+    }
+
+    // ── 3. All four edges, inward and outward ───────────────
+
+    #[test]
+    fn the_grid_edges_reject_clicks_alike_on_all_four_sides() {
+        // The grid occupies the half-open box [left, right) x [top, bottom),
+        // so the edges are not mirror images of one another and no offset
+        // makes them so -- state the interval instead of mirroring it.
+        // See design-decisions.md §485.
+        let (left, top) = cell_origin(0, 0);
+        let (last_x, last_y) = cell_origin(GRID_SIZE - 1, GRID_SIZE - 1);
+        let right = last_x + CELL_SIZE;
+        let bottom = last_y + CELL_SIZE;
+        let mid_y = cell_center(4, 4).1;
+        let mid_x = cell_center(4, 4).0;
+
+        for d in [0.25_f32, 1.0, 5.0, 40.0, 400.0] {
+            assert_eq!(cell_at(left - d, mid_y), None, "{d} left of the grid");
+            assert_eq!(cell_at(right + d, mid_y), None, "{d} right of the grid");
+            assert_eq!(cell_at(mid_x, top - d), None, "{d} above the grid");
+            assert_eq!(cell_at(mid_x, bottom + d), None, "{d} below the grid");
+        }
+        for d in [0.25_f32, 1.0, 5.0] {
+            assert_eq!(
+                cell_at(left + d, mid_y).map(|c| c.1),
+                Some(0),
+                "{d} inside the left edge"
+            );
+            assert_eq!(
+                cell_at(right - d, mid_y).map(|c| c.1),
+                Some(GRID_SIZE - 1),
+                "{d} inside the right edge"
+            );
+            assert_eq!(
+                cell_at(mid_x, top + d).map(|c| c.0),
+                Some(0),
+                "{d} inside the top edge"
+            );
+            assert_eq!(
+                cell_at(mid_x, bottom - d).map(|c| c.0),
+                Some(GRID_SIZE - 1),
+                "{d} inside the bottom edge"
+            );
+        }
+    }
+
+    // ── 4. A sweep well past the grid ────────────────────
+
+    #[test]
+    fn nothing_outside_the_painted_grid_lands_on_a_cell() {
+        // Wraps, clamps and saturating casts live well out here, not just
+        // one pixel past the edge.
+        let app = SudokuApp::new();
+        let cmds = app.render();
+        let far = GRID_ORIGIN_X + grid_total_size() + 300.0;
+        let mut step = -300.0_f32;
+        while step < far {
+            let mut other = -300.0_f32;
+            while other < far {
+                let inside = painted_cell_containing(&cmds, step, other).is_some();
+                assert_eq!(
+                    cell_at(step, other).is_some(),
+                    inside,
+                    "({step}, {other}) is {} a painted cell but cell_at disagrees",
+                    if inside { "inside" } else { "outside" }
+                );
+                other += 7.0;
+            }
+            step += 7.0;
+        }
+    }
+
+    // ── 5. Each element's place *within* its cell ────────────
+
+    #[test]
+    fn a_digit_is_painted_inside_the_cell_that_holds_it() {
+        // Measured against the painted cell that contains it, never against
+        // `cell_origin` -- an inverse proves membership, not placement.
+        let app = SudokuApp::new();
+        let cmds = app.render();
+        let mut checked = 0;
+        for row in 0..GRID_SIZE {
+            for col in 0..GRID_SIZE {
+                let value = app.cells[idx(row, col)].value;
+                if value == 0 {
+                    continue;
+                }
+                let (ox, oy) = cell_origin(row, col);
+                let digit = cmds.iter().find(|c| match c {
+                    RenderCommand::Text { x, y, text, .. } => {
+                        *text == value.to_string()
+                            && *x >= ox
+                            && *x < ox + CELL_SIZE
+                            && *y >= oy
+                            && *y < oy + CELL_SIZE
+                    }
+                    _ => false,
+                });
+                let Some(RenderCommand::Text { x, y, .. }) = digit else {
+                    panic!(
+                        "the {value} in cell ({row}, {col}) is not drawn inside the cell painted at ({ox}, {oy})"
+                    );
+                };
+                // Inside the cell is not enough: a digit pinned to the cell's
+                // top-left corner is inside it too. Being *centred* is the
+                // claim, so require the glyph's corner to sit in the middle
+                // half of the cell on both axes -- true of a centred digit of
+                // any plausible size, false of one flush against an edge.
+                let quarter = CELL_SIZE / 4.0;
+                assert!(
+                    *x >= ox + quarter && *x <= ox + CELL_SIZE - quarter,
+                    "the {value} in cell ({row}, {col}) is drawn at x={x}, not centred in the cell painted at x={ox}"
+                );
+                assert!(
+                    *y >= oy + quarter && *y <= oy + CELL_SIZE - quarter,
+                    "the {value} in cell ({row}, {col}) is drawn at y={y}, not centred in the cell painted at y={oy}"
+                );
+                checked += 1;
+            }
+        }
+        assert!(
+            checked > 20,
+            "a fresh puzzle should have some givens, found {checked}"
+        );
+    }
+
+    #[test]
+    fn the_selected_cell_is_outlined_where_that_cell_is_painted() {
+        let mut app = SudokuApp::new();
+        app.selected_row = 5;
+        app.selected_col = 7;
+        let cmds = app.render();
+        let (ox, oy) = cell_origin(5, 7);
+        let outline = cmds.iter().any(|c| match c {
+            RenderCommand::StrokeRect {
+                x,
+                y,
+                width,
+                height,
+                ..
+            } => {
+                (*width - CELL_SIZE).abs() < 0.01
+                    && (*height - CELL_SIZE).abs() < 0.01
+                    && (*x - ox).abs() < 0.01
+                    && (*y - oy).abs() < 0.01
+            }
+            _ => false,
+        });
+        assert!(outline, "no cell-sized outline at ({ox}, {oy})");
+    }
+
+    // ── 6. The frame agrees with the cells about the grid's size ─
+
+    #[test]
+    fn the_grid_background_sits_squarely_around_the_painted_cells() {
+        // A grid sized one cell wrong shifts nothing else, so the margins are
+        // its only symptom: all four must be positive and equal.
+        let app = SudokuApp::new();
+        let cmds = app.render();
+        let cells = painted_cells(&cmds);
+        let left = cells.iter().map(|c| c.0).fold(f32::MAX, f32::min);
+        let top = cells.iter().map(|c| c.1).fold(f32::MAX, f32::min);
+        let right = cells.iter().map(|c| c.0).fold(f32::MIN, f32::max) + CELL_SIZE;
+        let bottom = cells.iter().map(|c| c.1).fold(f32::MIN, f32::max) + CELL_SIZE;
+
         let size = grid_total_size();
-        // 9 * CELL_SIZE + 6 * CELL_GAP + 2 * BOX_GAP
-        let expected = 9.0 * CELL_SIZE + 6.0 * CELL_GAP + 2.0 * BOX_GAP;
-        assert!((size - expected).abs() < 0.01);
-    }
+        let bg = cmds
+            .iter()
+            .find_map(|c| match c {
+                RenderCommand::FillRect {
+                    x,
+                    y,
+                    width,
+                    height,
+                    ..
+                } if (*width - size - 4.0).abs() < 0.01 && (*height - size - 4.0).abs() < 0.01 => {
+                    Some((*x, *y, *width, *height))
+                }
+                _ => None,
+            })
+            .expect("a grid background sized from grid_total_size");
 
-    #[test]
-    fn test_pixel_to_grid_coord_first_cell() {
-        let coord = pixel_to_grid_coord(5.0);
-        assert_eq!(coord, Some(0));
-    }
-
-    #[test]
-    fn test_pixel_to_grid_coord_negative() {
-        assert_eq!(pixel_to_grid_coord(-1.0), None);
-    }
-
-    #[test]
-    fn test_pixel_to_grid_round_trip() {
-        for i in 0..GRID_SIZE {
-            let (px, _) = cell_pixel_pos_clean(0, i);
-            let mid = px + CELL_SIZE / 2.0;
-            let result = pixel_to_grid_coord(mid);
-            assert_eq!(result, Some(i), "Round trip failed for column {i}");
+        let margins = [
+            left - bg.0,
+            top - bg.1,
+            bg.0 + bg.2 - right,
+            bg.1 + bg.3 - bottom,
+        ];
+        for m in margins {
+            assert!(
+                m > 0.0,
+                "the background must enclose the cells, margins {margins:?}"
+            );
+            assert!(
+                (m - margins[0]).abs() < 0.01,
+                "all four margins should match, got {margins:?}"
+            );
         }
     }
 
     #[test]
-    fn test_inner_gaps_before() {
-        assert!((inner_gaps_before(0) - 0.0).abs() < 0.01);
-        assert!((inner_gaps_before(1) - 1.0).abs() < 0.01);
-        assert!((inner_gaps_before(2) - 2.0).abs() < 0.01);
-        // Position 3 is start of box 1: 3 total gaps - 1 box boundary = 2 inner gaps
-        assert!((inner_gaps_before(3) - 2.0).abs() < 0.01);
-        assert!((inner_gaps_before(4) - 3.0).abs() < 0.01);
+    fn each_box_outline_encloses_exactly_its_nine_cells() {
+        // The box borders are drawn from `box_pixel_span`, which used to be a
+        // fifth copy of the spacing sum written out as `3 cells + 2 gaps`.
+        let app = SudokuApp::new();
+        let cmds = app.render();
+        let span = box_pixel_span();
+        for box_r in 0..BOX_SIZE {
+            for box_c in 0..BOX_SIZE {
+                let (bx, by) = cell_origin(box_r * BOX_SIZE, box_c * BOX_SIZE);
+                let found = cmds.iter().any(|c| match c {
+                    RenderCommand::StrokeRect {
+                        x,
+                        y,
+                        width,
+                        height,
+                        ..
+                    } => {
+                        (*width - span - 2.0).abs() < 0.01
+                            && (*height - span - 2.0).abs() < 0.01
+                            && (*x - (bx - 1.0)).abs() < 0.01
+                            && (*y - (by - 1.0)).abs() < 0.01
+                    }
+                    _ => false,
+                });
+                assert!(
+                    found,
+                    "no outline around box ({box_r}, {box_c}) at ({bx}, {by})"
+                );
+
+                // The outline must reach the far corner of the box's last cell.
+                let (lx, ly) = cell_origin(
+                    box_r * BOX_SIZE + BOX_SIZE - 1,
+                    box_c * BOX_SIZE + BOX_SIZE - 1,
+                );
+                assert!(
+                    (bx + span - (lx + CELL_SIZE)).abs() < 0.01
+                        && (by + span - (ly + CELL_SIZE)).abs() < 0.01,
+                    "box ({box_r}, {box_c}) spans {span}, which does not reach its last cell"
+                );
+            }
+        }
+    }
+
+    // ── The gaps are dead on purpose ────────────────────
+
+    #[test]
+    fn a_click_on_the_line_between_two_cells_selects_neither() {
+        // Stated so that it is a decision rather than an accident: a click on
+        // the painted line between two cells has not said which was meant.
+        // If this is ever changed to round to the nearer cell, this test is
+        // the place that has to change with it.
+        let app = SudokuApp::new();
+        let cmds = app.render();
+        for i in 0..GRID_SIZE - 1 {
+            let (ox, _) = cell_origin(0, i);
+            let gap_middle = ox
+                + CELL_SIZE
+                + if (i + 1) % BOX_SIZE == 0 {
+                    BOX_GAP / 2.0
+                } else {
+                    CELL_GAP / 2.0
+                };
+            let y = cell_center(0, 0).1;
+            assert_eq!(
+                cell_at(gap_middle, y),
+                None,
+                "the gap after column {i} is not dead"
+            );
+            assert_eq!(
+                painted_cell_containing(&cmds, gap_middle, y),
+                None,
+                "the gap after column {i} has a cell painted over it"
+            );
+        }
     }
 
     // ── Key release is ignored ─────────────────────────────────────
@@ -2965,7 +3387,11 @@ mod tests {
             text: None,
         });
         app.handle_event(&release);
-        assert_eq!(app.cells[idx(r, c)].value, 0, "Key release should not place a digit");
+        assert_eq!(
+            app.cells[idx(r, c)].value,
+            0,
+            "Key release should not place a digit"
+        );
     }
 
     // ── values_array ───────────────────────────────────────────────

@@ -278,16 +278,18 @@ impl Board {
         match line.orientation {
             Orientation::Horizontal => {
                 if line.row < self.h_lines.len()
-                    && let Some(&drawn) = self.h_lines[line.row].get(line.col) {
-                        return drawn;
-                    }
+                    && let Some(&drawn) = self.h_lines[line.row].get(line.col)
+                {
+                    return drawn;
+                }
                 false
             }
             Orientation::Vertical => {
                 if line.row < self.v_lines.len()
-                    && let Some(&drawn) = self.v_lines[line.row].get(line.col) {
-                        return drawn;
-                    }
+                    && let Some(&drawn) = self.v_lines[line.row].get(line.col)
+                {
+                    return drawn;
+                }
                 false
             }
         }
@@ -824,105 +826,109 @@ impl DotsAndBoxes {
         }
     }
 
-    // ── Coordinate helpers ─────────────────────────────────────────
+    // ── Board geometry ─────────────────────────────────────────────
+    //
+    // There used to be two hit tests. `handle_mouse` called
+    // `hit_test_line_precise`, which measures the perpendicular distance to
+    // each line *segment*, so the whole 70px length of a line was clickable.
+    // `hit_test_line` measured the distance to each segment's *midpoint*
+    // instead, so only a 12px disc around the middle of a line answered at all
+    // and the two ends were dead. They were not two spellings of one rule --
+    // they were two different rules -- and the app ran one of them while three
+    // of the tests were pointed at the other. A test aimed at a function
+    // nothing calls is green about code that does not ship; see
+    // design-decisions.md §486. The midpoint version is gone.
+    //
+    // The endpoints of a line were also derived at six sites (twice in each
+    // hit test, twice in `render_lines`, twice in `render_cursor`), which is
+    // what let a hit test and the picture of the same line disagree in the
+    // first place. `line_endpoints` is now the one place that is written.
 
-    /// Pixel position of a dot at grid coordinates (row, col).
+    /// How far from a line a click may land and still count, in pixels.
+    ///
+    /// Measured perpendicular to the line, so the whole of a line is equally
+    /// clickable -- the alternative, distance to the line's midpoint, makes
+    /// the ends of every line dead and is what the deleted `hit_test_line`
+    /// did. At `DOT_SPACING` 70 and this threshold, the bands around two
+    /// parallel lines never touch, so "nearest line" is never a close call.
+    const CLICK_THRESHOLD: f32 = 10.0;
+
+    /// Centre of the dot at grid coordinates (row, col), in pixels.
+    ///
+    /// The first dot's *centre* used to sit at `PADDING`, which put its left
+    /// half inside the padding while the window still reserved a whole dot's
+    /// width past the last column -- so the board hung 12px up and to the
+    /// left of centre in its own window. Offsetting by `DOT_RADIUS` here
+    /// makes the painted board, discs included, sit exactly `PADDING` from
+    /// every edge; `board_pixel_span` measures the same discs, so the two
+    /// agree by construction.
     fn dot_pos(&self, row: usize, col: usize) -> (f32, f32) {
-        let x = PADDING + col as f32 * DOT_SPACING;
-        let y = PADDING + HEADER_HEIGHT + row as f32 * DOT_SPACING;
+        let x = PADDING + DOT_RADIUS + col as f32 * DOT_SPACING;
+        let y = PADDING + DOT_RADIUS + HEADER_HEIGHT + row as f32 * DOT_SPACING;
         (x, y)
+    }
+
+    /// The two dots a line runs between, in pixels.
+    ///
+    /// A horizontal line joins `(row, col)` to the dot on its right; a
+    /// vertical one joins it to the dot below. Both hit-testing and painting
+    /// read this, so a line cannot be drawn between one pair of dots and
+    /// clicked between another.
+    fn line_endpoints(&self, line: LineId) -> ((f32, f32), (f32, f32)) {
+        let start = self.dot_pos(line.row, line.col);
+        let end = match line.orientation {
+            Orientation::Horizontal => (self.dot_pos(line.row, line.col + 1).0, start.1),
+            Orientation::Vertical => (start.0, self.dot_pos(line.row + 1, line.col).1),
+        };
+        (start, end)
+    }
+
+    /// Every line on the board, drawn or not.
+    fn all_lines(&self) -> impl Iterator<Item = LineId> + use<> {
+        let gs = self.grid_size();
+        let bps = self.boxes_per_side();
+        let horizontals =
+            (0..gs).flat_map(move |row| (0..bps).map(move |col| LineId::horizontal(row, col)));
+        let verticals =
+            (0..bps).flat_map(move |row| (0..gs).map(move |col| LineId::vertical(row, col)));
+        horizontals.chain(verticals)
+    }
+
+    /// Distance from the far side of the outermost dots to the window edge.
+    ///
+    /// The dots are drawn as discs of `DOT_RADIUS` centred on the lattice, so
+    /// the picture reaches half a dot past the last dot's centre on every
+    /// side; the window has to hold that as well as the lattice itself.
+    fn board_pixel_span(&self) -> f32 {
+        let gs = self.grid_size();
+        let (near, _) = self.dot_pos(0, 0);
+        let (far, _) = self.dot_pos(0, gs - 1);
+        far - near + DOT_RADIUS * 2.0
     }
 
     /// Window width for current grid size.
     fn window_width(&self) -> f32 {
-        let gs = self.grid_size();
-        PADDING * 2.0 + (gs as f32 - 1.0) * DOT_SPACING + DOT_RADIUS * 2.0
+        PADDING * 2.0 + self.board_pixel_span()
     }
 
     /// Window height for current grid size.
     fn window_height(&self) -> f32 {
-        let gs = self.grid_size();
-        PADDING * 2.0 + HEADER_HEIGHT + FOOTER_HEIGHT + (gs as f32 - 1.0) * DOT_SPACING
-            + DOT_RADIUS * 2.0
+        PADDING * 2.0 + HEADER_HEIGHT + FOOTER_HEIGHT + self.board_pixel_span()
     }
 
-    /// Find which line (if any) the mouse position is nearest to.
+    /// The line a click at `(mx, my)` lands on, or `None` if it is not within
+    /// `CLICK_THRESHOLD` of any of them.
     fn hit_test_line(&self, mx: f32, my: f32) -> Option<LineId> {
-        let threshold = 12.0;
-        let bps = self.boxes_per_side();
-        let gs = self.grid_size();
-
         let mut best_line: Option<LineId> = None;
-        let mut best_dist = threshold;
-
-        // Check horizontal lines.
-        for row in 0..gs {
-            for col in 0..bps {
-                let (x1, y1) = self.dot_pos(row, col);
-                let (x2, _y2) = self.dot_pos(row, col + 1);
-                let mid_x = (x1 + x2) / 2.0;
-                let mid_y = y1;
-                let dist = ((mx - mid_x).powi(2) + (my - mid_y).powi(2)).sqrt();
-                if dist < best_dist {
-                    best_dist = dist;
-                    best_line = Some(LineId::horizontal(row, col));
-                }
+        let mut best_dist = Self::CLICK_THRESHOLD;
+        for line in self.all_lines() {
+            let ((x1, y1), (x2, y2)) = self.line_endpoints(line);
+            let dist = point_to_segment_distance(mx, my, x1, y1, x2, y2);
+            if dist < best_dist {
+                best_dist = dist;
+                best_line = Some(line);
             }
         }
-
-        // Check vertical lines.
-        for row in 0..bps {
-            for col in 0..gs {
-                let (x1, y1) = self.dot_pos(row, col);
-                let (_x2, y2) = self.dot_pos(row + 1, col);
-                let mid_x = x1;
-                let mid_y = (y1 + y2) / 2.0;
-                let dist = ((mx - mid_x).powi(2) + (my - mid_y).powi(2)).sqrt();
-                if dist < best_dist {
-                    best_dist = dist;
-                    best_line = Some(LineId::vertical(row, col));
-                }
-            }
-        }
-
-        best_line
-    }
-
-    /// Find which line the mouse is near using perpendicular distance to line segments.
-    fn hit_test_line_precise(&self, mx: f32, my: f32) -> Option<LineId> {
-        let threshold = 10.0;
-        let bps = self.boxes_per_side();
-        let gs = self.grid_size();
-
-        let mut best_line: Option<LineId> = None;
-        let mut best_dist = threshold;
-
-        // Check horizontal lines.
-        for row in 0..gs {
-            for col in 0..bps {
-                let (x1, y1) = self.dot_pos(row, col);
-                let (x2, _y2) = self.dot_pos(row, col + 1);
-                let dist = point_to_segment_distance(mx, my, x1, y1, x2, y1);
-                if dist < best_dist {
-                    best_dist = dist;
-                    best_line = Some(LineId::horizontal(row, col));
-                }
-            }
-        }
-
-        // Check vertical lines.
-        for row in 0..bps {
-            for col in 0..gs {
-                let (x1, y1) = self.dot_pos(row, col);
-                let (_x2, y2) = self.dot_pos(row + 1, col);
-                let dist = point_to_segment_distance(mx, my, x1, y1, x1, y2);
-                if dist < best_dist {
-                    best_dist = dist;
-                    best_line = Some(LineId::vertical(row, col));
-                }
-            }
-        }
-
         best_line
     }
 
@@ -930,10 +936,9 @@ impl DotsAndBoxes {
 
     fn handle_event(&mut self, event: &Event) {
         match event {
-            Event::Key(ke)
-                if ke.pressed => {
-                    self.handle_key(ke.key);
-                }
+            Event::Key(ke) if ke.pressed => {
+                self.handle_key(ke.key);
+            }
             Event::Mouse(me) => {
                 self.handle_mouse(me);
             }
@@ -966,29 +971,30 @@ impl DotsAndBoxes {
                 self.new_game_with_size(5);
             }
             Key::Left | Key::Right | Key::Up | Key::Down
-                if self.phase == GamePhase::Playing && !self.ai_pending => {
-                    self.move_cursor(key);
-                }
-            Key::Tab
-                if self.phase == GamePhase::Playing && !self.ai_pending => {
-                    self.toggle_cursor_orientation();
-                }
-            Key::Enter | Key::Space
-                if self.phase == GamePhase::Playing && !self.ai_pending => {
-                    let line = self.cursor.to_line_id();
-                    self.try_place_line(line);
-                }
+                if self.phase == GamePhase::Playing && !self.ai_pending =>
+            {
+                self.move_cursor(key);
+            }
+            Key::Tab if self.phase == GamePhase::Playing && !self.ai_pending => {
+                self.toggle_cursor_orientation();
+            }
+            Key::Enter | Key::Space if self.phase == GamePhase::Playing && !self.ai_pending => {
+                let line = self.cursor.to_line_id();
+                self.try_place_line(line);
+            }
             _ => {}
         }
     }
 
     fn handle_mouse(&mut self, me: &MouseEvent) {
         if let MouseEventKind::Press(MouseButton::Left) = me.kind
-            && self.phase == GamePhase::Playing && !self.ai_pending
-                && let Some(line) = self.hit_test_line_precise(me.x, me.y)
-                    && !self.board.is_line_drawn(line) {
-                        self.try_place_line(line);
-                    }
+            && self.phase == GamePhase::Playing
+            && !self.ai_pending
+            && let Some(line) = self.hit_test_line(me.x, me.y)
+            && !self.board.is_line_drawn(line)
+        {
+            self.try_place_line(line);
+        }
     }
 
     fn handle_tick(&mut self, elapsed_ms: u64) {
@@ -1068,7 +1074,12 @@ impl DotsAndBoxes {
         });
 
         // Mode label.
-        let mode_text = format!("{} | {}x{}", self.mode.label(), self.grid_size(), self.grid_size());
+        let mode_text = format!(
+            "{} | {}x{}",
+            self.mode.label(),
+            self.grid_size(),
+            self.grid_size()
+        );
         cmds.push(RenderCommand::Text {
             x: PADDING,
             y: 34.0,
@@ -1164,11 +1175,23 @@ impl DotsAndBoxes {
 
                     // Player initial in the box.
                     let label = match player {
-                        Player::One => if self.mode == GameMode::VsAi { "Y" } else { "1" },
-                        Player::Two => if self.mode == GameMode::VsAi { "A" } else { "2" },
+                        Player::One => {
+                            if self.mode == GameMode::VsAi {
+                                "Y"
+                            } else {
+                                "1"
+                            }
+                        }
+                        Player::Two => {
+                            if self.mode == GameMode::VsAi {
+                                "A"
+                            } else {
+                                "2"
+                            }
+                        }
                     };
-                    let cx = (x1 + x2) / 2.0 - 5.0;
-                    let cy = (y1 + y2) / 2.0 - 8.0;
+                    let cx = f32::midpoint(x1, x2) - 5.0;
+                    let cy = f32::midpoint(y1, y2) - 8.0;
                     cmds.push(RenderCommand::Text {
                         x: cx,
                         y: cy,
@@ -1185,59 +1208,22 @@ impl DotsAndBoxes {
     }
 
     fn render_lines(&self, cmds: &mut Vec<RenderCommand>) {
-        let bps = self.boxes_per_side();
-        let gs = self.grid_size();
-
-        // Horizontal lines.
-        for row in 0..gs {
-            for col in 0..bps {
-                let (x1, y1) = self.dot_pos(row, col);
-                let (x2, _y2) = self.dot_pos(row, col + 1);
-                let color = if self.board.h_lines[row][col] {
-                    LAVENDER
-                } else {
-                    SURFACE0
-                };
-                let w = if self.board.h_lines[row][col] {
-                    LINE_THICKNESS
-                } else {
-                    2.0
-                };
-                cmds.push(RenderCommand::Line {
-                    x1,
-                    y1,
-                    x2,
-                    y2: y1,
-                    color,
-                    width: w,
-                });
-            }
-        }
-
-        // Vertical lines.
-        for row in 0..bps {
-            for col in 0..gs {
-                let (x1, y1) = self.dot_pos(row, col);
-                let (_x2, y2) = self.dot_pos(row + 1, col);
-                let color = if self.board.v_lines[row][col] {
-                    LAVENDER
-                } else {
-                    SURFACE0
-                };
-                let w = if self.board.v_lines[row][col] {
-                    LINE_THICKNESS
-                } else {
-                    2.0
-                };
-                cmds.push(RenderCommand::Line {
-                    x1,
-                    y1,
-                    x2: x1,
-                    y2,
-                    color,
-                    width: w,
-                });
-            }
+        // One loop over `all_lines`, not one per orientation, and the ends of
+        // each line come from `line_endpoints` -- the same call the hit test
+        // makes -- so a line is painted exactly where clicking it works.
+        for line in self.all_lines() {
+            let ((x1, y1), (x2, y2)) = self.line_endpoints(line);
+            let drawn = self.board.is_line_drawn(line);
+            let color = if drawn { LAVENDER } else { SURFACE0 };
+            let w = if drawn { LINE_THICKNESS } else { 2.0 };
+            cmds.push(RenderCommand::Line {
+                x1,
+                y1,
+                x2,
+                y2,
+                color,
+                width: w,
+            });
         }
     }
 
@@ -1251,33 +1237,15 @@ impl DotsAndBoxes {
             return;
         }
 
-        let color = self.current_player.color();
-        match line.orientation {
-            Orientation::Horizontal => {
-                let (x1, y1) = self.dot_pos(line.row, line.col);
-                let (x2, _y2) = self.dot_pos(line.row, line.col + 1);
-                cmds.push(RenderCommand::Line {
-                    x1,
-                    y1,
-                    x2,
-                    y2: y1,
-                    color,
-                    width: LINE_HOVER_THICKNESS,
-                });
-            }
-            Orientation::Vertical => {
-                let (x1, y1) = self.dot_pos(line.row, line.col);
-                let (_x2, y2) = self.dot_pos(line.row + 1, line.col);
-                cmds.push(RenderCommand::Line {
-                    x1,
-                    y1,
-                    x2: x1,
-                    y2,
-                    color,
-                    width: LINE_HOVER_THICKNESS,
-                });
-            }
-        }
+        let ((x1, y1), (x2, y2)) = self.line_endpoints(line);
+        cmds.push(RenderCommand::Line {
+            x1,
+            y1,
+            x2,
+            y2,
+            color: self.current_player.color(),
+            width: LINE_HOVER_THICKNESS,
+        });
     }
 
     fn render_dots(&self, cmds: &mut Vec<RenderCommand>) {
@@ -1312,7 +1280,9 @@ impl DotsAndBoxes {
         cmds.push(RenderCommand::Text {
             x: PADDING,
             y: footer_y + 12.0,
-            text: String::from("Arrows: move | Tab: toggle H/V | Enter: draw | N: new | M: mode | 3/4/5: size"),
+            text: String::from(
+                "Arrows: move | Tab: toggle H/V | Enter: draw | N: new | M: mode | 3/4/5: size",
+            ),
             color: OVERLAY0,
             font_size: 12.0,
             font_weight: FontWeightHint::Regular,
@@ -2198,7 +2168,7 @@ mod tests {
         // Click near the midpoint of the top-left horizontal line.
         let (x1, y1) = app.dot_pos(0, 0);
         let (x2, _y2) = app.dot_pos(0, 1);
-        let mid_x = (x1 + x2) / 2.0;
+        let mid_x = f32::midpoint(x1, x2);
         app.handle_event(&make_click(mid_x, y1));
         assert!(app.board.is_line_drawn(LineId::horizontal(0, 0)));
     }
@@ -2208,7 +2178,7 @@ mod tests {
         let mut app = two_player_app();
         let (x1, y1) = app.dot_pos(0, 0);
         let (_x2, y2) = app.dot_pos(1, 0);
-        let mid_y = (y1 + y2) / 2.0;
+        let mid_y = f32::midpoint(y1, y2);
         app.handle_event(&make_click(x1, mid_y));
         assert!(app.board.is_line_drawn(LineId::vertical(0, 0)));
     }
@@ -2225,7 +2195,7 @@ mod tests {
         let mut app = two_player_app();
         let (x1, y1) = app.dot_pos(0, 0);
         let (x2, _) = app.dot_pos(0, 1);
-        let mid_x = (x1 + x2) / 2.0;
+        let mid_x = f32::midpoint(x1, x2);
         app.handle_event(&make_click(mid_x, y1));
         assert_eq!(app.board.drawn_line_count(), 1);
         // Click same line again.
@@ -2294,7 +2264,10 @@ mod tests {
                 // After drawing the chosen line, no adjacent box should have 3 sides
                 // (unless AI is forced to).
                 let current_sides = board.box_side_count(*br, *bc);
-                assert_ne!(current_sides, 2, "AI should avoid lines that give box 3 sides when possible");
+                assert_ne!(
+                    current_sides, 2,
+                    "AI should avoid lines that give box 3 sides when possible"
+                );
             }
         }
     }
@@ -2452,10 +2425,15 @@ mod tests {
 
     #[test]
     fn test_dot_pos_origin() {
+        // Stated as a property of the picture rather than as a copy of the
+        // arithmetic: the first dot's *disc* -- not its centre -- begins one
+        // PADDING in from the window's left edge and from under the header.
+        // Restating `PADDING + HEADER_HEIGHT` here would have passed happily
+        // while the board hung 12px off-centre, which is what it did.
         let app = test_app();
         let (x, y) = app.dot_pos(0, 0);
-        assert_eq!(x, PADDING);
-        assert_eq!(y, PADDING + HEADER_HEIGHT);
+        assert_eq!(x - DOT_RADIUS, PADDING);
+        assert_eq!(y - DOT_RADIUS, PADDING + HEADER_HEIGHT);
     }
 
     #[test]
@@ -2482,7 +2460,7 @@ mod tests {
         let app = test_app();
         let (x1, y1) = app.dot_pos(0, 0);
         let (x2, _) = app.dot_pos(0, 1);
-        let mid_x = (x1 + x2) / 2.0;
+        let mid_x = f32::midpoint(x1, x2);
         let result = app.hit_test_line(mid_x, y1);
         assert_eq!(result, Some(LineId::horizontal(0, 0)));
     }
@@ -2492,7 +2470,7 @@ mod tests {
         let app = test_app();
         let (x1, y1) = app.dot_pos(0, 0);
         let (_, y2) = app.dot_pos(1, 0);
-        let mid_y = (y1 + y2) / 2.0;
+        let mid_y = f32::midpoint(y1, y2);
         let result = app.hit_test_line(x1, mid_y);
         assert_eq!(result, Some(LineId::vertical(0, 0)));
     }
@@ -2504,30 +2482,472 @@ mod tests {
         assert!(result.is_none());
     }
 
-    #[test]
-    fn test_hit_test_precise_horizontal() {
-        let app = test_app();
-        let (x1, y1) = app.dot_pos(0, 0);
-        let (x2, _) = app.dot_pos(0, 1);
-        let mid_x = (x1 + x2) / 2.0;
-        let result = app.hit_test_line_precise(mid_x, y1);
-        assert_eq!(result, Some(LineId::horizontal(0, 0)));
+    // The three tests that used to follow here were `_precise` copies of the
+    // three above, aimed at the second hit test. With one hit test left they
+    // were the same three tests written twice, so they are gone; what they
+    // were really covering -- that a click anywhere along a line, not just at
+    // its middle, finds it -- is now covered properly by
+    // `every_point_along_a_line_is_clickable`.
+
+    // ── Board geometry (design-decisions.md §485 checklist) ────────
+
+    /// Distance between two points, for comparing painted geometry.
+    fn apart(a: (f32, f32), b: (f32, f32)) -> f32 {
+        ((a.0 - b.0).powi(2) + (a.1 - b.1).powi(2)).sqrt()
     }
 
-    #[test]
-    fn test_hit_test_precise_vertical() {
-        let app = test_app();
-        let (x1, y1) = app.dot_pos(0, 0);
-        let (_, y2) = app.dot_pos(1, 0);
-        let mid_y = (y1 + y2) / 2.0;
-        let result = app.hit_test_line_precise(x1, mid_y);
-        assert_eq!(result, Some(LineId::vertical(0, 0)));
+    fn same_point(a: (f32, f32), b: (f32, f32)) -> bool {
+        apart(a, b) < 0.01
     }
 
+    /// The centre of every dot the renderer paints.
+    ///
+    /// Dots are the only `FillRect` drawn `DOT_RADIUS * 2` square in
+    /// `TEXT_COLOR`; the completed-box fills are far larger and a different
+    /// colour.
+    fn painted_dots(app: &DotsAndBoxes) -> Vec<(f32, f32)> {
+        app.render(app.window_width(), app.window_height())
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::FillRect {
+                    x,
+                    y,
+                    width,
+                    height,
+                    color,
+                    ..
+                } if (*width - DOT_RADIUS * 2.0).abs() < 0.01
+                    && (*height - DOT_RADIUS * 2.0).abs() < 0.01
+                    && *color == TEXT_COLOR =>
+                {
+                    Some((x + DOT_RADIUS, y + DOT_RADIUS))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Every line segment the renderer paints for the board itself.
+    ///
+    /// The cursor is drawn as a line too, at `LINE_HOVER_THICKNESS`, and it
+    /// sits on top of a board line rather than being one; excluding it by
+    /// width keeps the two apart.
+    fn painted_board_lines(app: &DotsAndBoxes) -> Vec<((f32, f32), (f32, f32))> {
+        app.render(app.window_width(), app.window_height())
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Line {
+                    x1,
+                    y1,
+                    x2,
+                    y2,
+                    width,
+                    ..
+                } if (*width - LINE_HOVER_THICKNESS).abs() >= 0.01 => {
+                    Some(((*x1, *y1), (*x2, *y2)))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The cursor's hover line, if one is painted.
+    fn painted_cursor_line(app: &DotsAndBoxes) -> Option<((f32, f32), (f32, f32))> {
+        app.render(app.window_width(), app.window_height())
+            .iter()
+            .find_map(|c| match c {
+                RenderCommand::Line {
+                    x1,
+                    y1,
+                    x2,
+                    y2,
+                    width,
+                    ..
+                } if (*width - LINE_HOVER_THICKNESS).abs() < 0.01 => Some(((*x1, *y1), (*x2, *y2))),
+                _ => None,
+            })
+    }
+
+    /// §485 item 1 and 6: the lattice is square and evenly spaced, and the
+    /// frame around it is positive and even on all four sides.
+    ///
+    /// "Inside the window" on its own would pass with any amount of slack on
+    /// one side, which is how a board measured with a spacing it does not
+    /// have stays invisible.
     #[test]
-    fn test_hit_test_precise_far_away() {
+    fn the_painted_dots_are_a_square_even_lattice_centred_in_the_window() {
+        for gs in MIN_GRID_SIZE..=MAX_GRID_SIZE {
+            let app = DotsAndBoxes::with_config(gs, GameMode::TwoPlayer, 7);
+            let dots = painted_dots(&app);
+            assert_eq!(
+                dots.len(),
+                gs * gs,
+                "a {gs}x{gs} board should paint {} dots, painted {}",
+                gs * gs,
+                dots.len()
+            );
+
+            let mut xs: Vec<f32> = dots.iter().map(|d| d.0).collect();
+            let mut ys: Vec<f32> = dots.iter().map(|d| d.1).collect();
+            xs.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            ys.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            xs.dedup_by(|a, b| (*a - *b).abs() < 0.01);
+            ys.dedup_by(|a, b| (*a - *b).abs() < 0.01);
+            assert_eq!(xs.len(), gs, "expected {gs} distinct dot columns");
+            assert_eq!(ys.len(), gs, "expected {gs} distinct dot rows");
+
+            for i in 1..gs {
+                assert!(
+                    (xs[i] - xs[i - 1] - DOT_SPACING).abs() < 0.01,
+                    "columns {} and {i} are {} apart, not DOT_SPACING",
+                    i - 1,
+                    xs[i] - xs[i - 1]
+                );
+                assert!(
+                    (ys[i] - ys[i - 1] - DOT_SPACING).abs() < 0.01,
+                    "rows {} and {i} are {} apart, not DOT_SPACING",
+                    i - 1,
+                    ys[i] - ys[i - 1]
+                );
+            }
+            assert!(
+                ((xs[gs - 1] - xs[0]) - (ys[gs - 1] - ys[0])).abs() < 0.01,
+                "the lattice is {} wide and {} tall -- not square",
+                xs[gs - 1] - xs[0],
+                ys[gs - 1] - ys[0]
+            );
+
+            let (win_w, win_h) = (app.window_width(), app.window_height());
+            let left = xs[0] - DOT_RADIUS;
+            let right = win_w - (xs[gs - 1] + DOT_RADIUS);
+            assert!(left > 0.0, "the leftmost dot is off the left edge");
+            assert!(right > 0.0, "the rightmost dot is off the right edge");
+            assert!(
+                (left - right).abs() < 0.01,
+                "the board sits {left} from the left and {right} from the right"
+            );
+
+            let top = ys[0] - DOT_RADIUS - HEADER_HEIGHT;
+            let bottom = win_h - FOOTER_HEIGHT - (ys[gs - 1] + DOT_RADIUS);
+            assert!(top > 0.0, "the top row of dots is under the header");
+            assert!(bottom > 0.0, "the bottom row of dots is under the footer");
+            assert!(
+                (top - bottom).abs() < 0.01,
+                "the board sits {top} below the header and {bottom} above the footer"
+            );
+        }
+    }
+
+    /// §485 item 5: a line is painted between exactly the two dots it joins.
+    #[test]
+    fn every_line_is_painted_between_the_two_dots_it_joins() {
+        for gs in MIN_GRID_SIZE..=MAX_GRID_SIZE {
+            let app = DotsAndBoxes::with_config(gs, GameMode::TwoPlayer, 7);
+            let dots = painted_dots(&app);
+            for line in app.all_lines() {
+                let (a, b) = app.line_endpoints(line);
+                assert!(
+                    dots.iter().any(|d| same_point(*d, a)),
+                    "{line:?} starts at {a:?}, where no dot is painted"
+                );
+                assert!(
+                    dots.iter().any(|d| same_point(*d, b)),
+                    "{line:?} ends at {b:?}, where no dot is painted"
+                );
+                assert!(
+                    (apart(a, b) - DOT_SPACING).abs() < 0.01,
+                    "{line:?} spans {}, not one lattice step",
+                    apart(a, b)
+                );
+            }
+        }
+    }
+
+    /// §485 item 2: the whole length of a line is clickable, not just a disc
+    /// around its middle.
+    ///
+    /// This is the test the old midpoint hit test would have failed: it
+    /// answered only within 12px of a line's centre, leaving roughly the
+    /// outer two-thirds of every 70px line dead. The dots themselves are
+    /// excluded here because up to four lines meet at one, so a click exactly
+    /// on a dot has not said which line was meant -- see
+    /// `a_click_on_a_dot_still_lands_on_a_line_meeting_there`.
+    #[test]
+    fn every_point_along_a_line_is_clickable() {
+        for gs in MIN_GRID_SIZE..=MAX_GRID_SIZE {
+            let app = DotsAndBoxes::with_config(gs, GameMode::TwoPlayer, 7);
+            for line in app.all_lines() {
+                let ((x1, y1), (x2, y2)) = app.line_endpoints(line);
+                for step in 1..40 {
+                    let t = step as f32 / 40.0;
+                    let x = x1 + (x2 - x1) * t;
+                    let y = y1 + (y2 - y1) * t;
+                    assert_eq!(
+                        app.hit_test_line(x, y),
+                        Some(line),
+                        "a click at ({x}, {y}), {}% of the way along {line:?}, missed it",
+                        t * 100.0
+                    );
+                }
+            }
+        }
+    }
+
+    /// A dot is a 12px target where up to four lines meet. Whichever line the
+    /// tie is broken toward, it must be one of them -- a dot must not be a
+    /// dead spot in the middle of the board.
+    #[test]
+    fn a_click_on_a_dot_still_lands_on_a_line_meeting_there() {
         let app = test_app();
-        assert!(app.hit_test_line_precise(9999.0, 9999.0).is_none());
+        for (row, col) in
+            (0..app.grid_size()).flat_map(|r| (0..app.grid_size()).map(move |c| (r, c)))
+        {
+            let dot = app.dot_pos(row, col);
+            let hit = app
+                .hit_test_line(dot.0, dot.1)
+                .unwrap_or_else(|| panic!("the dot at ({row}, {col}) is a dead spot"));
+            let (a, b) = app.line_endpoints(hit);
+            assert!(
+                same_point(a, dot) || same_point(b, dot),
+                "clicking the dot at ({row}, {col}) selected {hit:?}, which does not touch it"
+            );
+        }
+    }
+
+    /// The clickable band around a line is wide enough to cover the line the
+    /// player can see, and narrow enough not to reach the next line over.
+    ///
+    /// Deliberately stated in `LINE_HOVER_THICKNESS` and `DOT_SPACING` rather
+    /// than in `CLICK_THRESHOLD`: every other slop test here measures against
+    /// the threshold constant, so all of them move when it does and none of
+    /// them can object to a bad value for it. A mutation that cut the
+    /// threshold to a tenth survived the whole sweep for exactly that reason
+    /// -- the tests restated the number instead of the requirement, which is
+    /// design-decisions.md §487 in miniature. These two bounds are the
+    /// requirement: below the first, clicks that visibly land on a line miss
+    /// it; above the second, the bands of two parallel lines overlap and
+    /// "nearest line" becomes a coin flip in the empty space between them.
+    #[test]
+    fn the_clickable_band_covers_the_painted_line_but_not_its_neighbour() {
+        let app = test_app();
+        let h = LineId::horizontal(1, 1);
+        let ((x1, y), (x2, _)) = app.line_endpoints(h);
+        let mid = f32::midpoint(x1, x2);
+
+        let visible = LINE_HOVER_THICKNESS / 2.0;
+        assert_eq!(
+            app.hit_test_line(mid, y - visible),
+            Some(h),
+            "a click on the top edge of the painted line misses it"
+        );
+        assert_eq!(
+            app.hit_test_line(mid, y + visible),
+            Some(h),
+            "a click on the bottom edge of the painted line misses it"
+        );
+
+        let halfway = DOT_SPACING / 2.0;
+        assert!(
+            app.hit_test_line(mid, y + halfway - 0.05).is_none(),
+            "a click in the dead centre between two parallel lines picked one of them"
+        );
+    }
+
+    /// §485 item 3: the slop is the same on both sides of a line.
+    ///
+    /// Measured on an interior line, where there is nothing else within
+    /// reach, so what is being measured is the threshold and not a
+    /// neighbour winning the tie.
+    #[test]
+    fn a_line_takes_the_same_slop_on_both_sides_of_it() {
+        let app = test_app();
+        let eps = 0.05;
+        let t = DotsAndBoxes::CLICK_THRESHOLD;
+
+        let h = LineId::horizontal(1, 1);
+        let ((hx1, hy), (hx2, _)) = app.line_endpoints(h);
+        let hmid = f32::midpoint(hx1, hx2);
+        assert_eq!(app.hit_test_line(hmid, hy - t + eps), Some(h), "above");
+        assert_eq!(app.hit_test_line(hmid, hy + t - eps), Some(h), "below");
+        assert_ne!(app.hit_test_line(hmid, hy - t - eps), Some(h), "too high");
+        assert_ne!(app.hit_test_line(hmid, hy + t + eps), Some(h), "too low");
+
+        let v = LineId::vertical(1, 1);
+        let ((vx, vy1), (_, vy2)) = app.line_endpoints(v);
+        let vmid = f32::midpoint(vy1, vy2);
+        assert_eq!(app.hit_test_line(vx - t + eps, vmid), Some(v), "left");
+        assert_eq!(app.hit_test_line(vx + t - eps, vmid), Some(v), "right");
+        assert_ne!(
+            app.hit_test_line(vx - t - eps, vmid),
+            Some(v),
+            "too far left"
+        );
+        assert_ne!(
+            app.hit_test_line(vx + t + eps, vmid),
+            Some(v),
+            "too far right"
+        );
+    }
+
+    /// §485 item 3 again, at the four outer edges: the outside of the board
+    /// is as forgiving as the inside, and equally so on all four sides.
+    #[test]
+    fn the_board_edges_take_the_same_slop_on_all_four_sides() {
+        let app = test_app();
+        let gs = app.grid_size();
+        let eps = 0.05;
+        let t = DotsAndBoxes::CLICK_THRESHOLD;
+        let (min_x, min_y) = app.dot_pos(0, 0);
+        let (max_x, max_y) = app.dot_pos(gs - 1, gs - 1);
+        let mid_x = f32::midpoint(min_x, max_x);
+        let mid_y = f32::midpoint(min_y, max_y);
+
+        // Just outside each edge, still on the outermost line.
+        assert!(
+            app.hit_test_line(mid_x, min_y - t + eps).is_some(),
+            "just above the top edge is dead"
+        );
+        assert!(
+            app.hit_test_line(mid_x, max_y + t - eps).is_some(),
+            "just below the bottom edge is dead"
+        );
+        assert!(
+            app.hit_test_line(min_x - t + eps, mid_y).is_some(),
+            "just left of the left edge is dead"
+        );
+        assert!(
+            app.hit_test_line(max_x + t - eps, mid_y).is_some(),
+            "just right of the right edge is dead"
+        );
+
+        // A hair further out, on none of them -- the same distance on each
+        // side, which is what makes the four edges reflections of each other.
+        assert!(
+            app.hit_test_line(mid_x, min_y - t - eps).is_none(),
+            "the top edge reaches further out than the others"
+        );
+        assert!(
+            app.hit_test_line(mid_x, max_y + t + eps).is_none(),
+            "the bottom edge reaches further out than the others"
+        );
+        assert!(
+            app.hit_test_line(min_x - t - eps, mid_y).is_none(),
+            "the left edge reaches further out than the others"
+        );
+        assert!(
+            app.hit_test_line(max_x + t + eps, mid_y).is_none(),
+            "the right edge reaches further out than the others"
+        );
+    }
+
+    /// §485 item 4: sweep well past the board on all four sides and find
+    /// nothing, so an off-board click can never place a line.
+    #[test]
+    fn nothing_far_outside_the_painted_board_lands_on_a_line() {
+        let app = test_app();
+        let gs = app.grid_size();
+        let far = DotsAndBoxes::CLICK_THRESHOLD + 1.0;
+        let (min_x, min_y) = app.dot_pos(0, 0);
+        let (max_x, max_y) = app.dot_pos(gs - 1, gs - 1);
+
+        for step in 0..120 {
+            // Sweep the full height of the window and past it, on both sides.
+            let y = step as f32 * 10.0 - 50.0;
+            assert!(
+                app.hit_test_line(min_x - far, y).is_none(),
+                "a click at ({}, {y}) -- left of the whole board -- hit a line",
+                min_x - far
+            );
+            assert!(
+                app.hit_test_line(max_x + far, y).is_none(),
+                "a click at ({}, {y}) -- right of the whole board -- hit a line",
+                max_x + far
+            );
+
+            let x = step as f32 * 10.0 - 50.0;
+            assert!(
+                app.hit_test_line(x, min_y - far).is_none(),
+                "a click at ({x}, {}) -- above the whole board -- hit a line",
+                min_y - far
+            );
+            assert!(
+                app.hit_test_line(x, max_y + far).is_none(),
+                "a click at ({x}, {}) -- below the whole board -- hit a line",
+                max_y + far
+            );
+        }
+    }
+
+    /// The picture and the hit test are the same geometry: every line the
+    /// renderer paints answers to a click at its own midpoint, with the same
+    /// endpoints it was painted with.
+    #[test]
+    fn every_painted_line_is_clickable_where_it_is_painted() {
+        for gs in MIN_GRID_SIZE..=MAX_GRID_SIZE {
+            let app = DotsAndBoxes::with_config(gs, GameMode::TwoPlayer, 7);
+            for (a, b) in painted_board_lines(&app) {
+                let mid = (f32::midpoint(a.0, b.0), f32::midpoint(a.1, b.1));
+                let hit = app
+                    .hit_test_line(mid.0, mid.1)
+                    .unwrap_or_else(|| panic!("the line painted {a:?}..{b:?} is not clickable"));
+                let (ha, hb) = app.line_endpoints(hit);
+                assert!(
+                    same_point(ha, a) && same_point(hb, b),
+                    "the line painted {a:?}..{b:?} answers as {hit:?}, painted {ha:?}..{hb:?}"
+                );
+            }
+        }
+    }
+
+    /// §485 item 7: the board carries exactly the lines the rules say it
+    /// does -- `gs * (gs - 1)` in each direction -- each painted once.
+    #[test]
+    fn the_renderer_paints_every_line_on_the_board_exactly_once() {
+        for gs in MIN_GRID_SIZE..=MAX_GRID_SIZE {
+            let app = DotsAndBoxes::with_config(gs, GameMode::TwoPlayer, 7);
+            let expected = 2 * gs * (gs - 1);
+            assert_eq!(
+                app.all_lines().count(),
+                expected,
+                "a {gs}x{gs} board has {expected} lines"
+            );
+
+            let painted = painted_board_lines(&app);
+            assert_eq!(
+                painted.len(),
+                expected,
+                "a {gs}x{gs} board painted {} lines, not {expected}",
+                painted.len()
+            );
+            for line in app.all_lines() {
+                let (a, b) = app.line_endpoints(line);
+                let hits = painted
+                    .iter()
+                    .filter(|(pa, pb)| same_point(*pa, a) && same_point(*pb, b))
+                    .count();
+                assert_eq!(hits, 1, "{line:?} was painted {hits} times, not once");
+            }
+        }
+    }
+
+    /// The cursor is drawn on the line it points at, not the one next door.
+    #[test]
+    fn the_cursor_is_drawn_on_the_line_it_points_at() {
+        let mut app = two_player_app();
+        for line in app.all_lines() {
+            app.cursor = Cursor {
+                orientation: line.orientation,
+                row: line.row,
+                col: line.col,
+            };
+            let (a, b) = app.line_endpoints(line);
+            let drawn = painted_cursor_line(&app)
+                .unwrap_or_else(|| panic!("no cursor is drawn while it points at {line:?}"));
+            assert!(
+                same_point(drawn.0, a) && same_point(drawn.1, b),
+                "the cursor on {line:?} ({a:?}..{b:?}) is drawn at {drawn:?}"
+            );
+        }
     }
 
     // ── Geometry helper ────────────────────────────────────────────
@@ -2617,7 +3037,10 @@ mod tests {
     #[cfg(not(unix))]
     fn a_fresh_game_is_seeded_by_the_system_and_not_by_a_literal() {
         let mut fresh = DotsAndBoxes::new();
-        assert_eq!(fresh.rng.next_u64(), SeededRng::new(FALLBACK_SEED).next_u64());
+        assert_eq!(
+            fresh.rng.next_u64(),
+            SeededRng::new(FALLBACK_SEED).next_u64()
+        );
         assert_ne!(
             DotsAndBoxes::new().rng.next_u64(),
             SeededRng::new(42).next_u64(),

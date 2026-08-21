@@ -23,6 +23,7 @@ use guitk::event::{Event, EventResult, Key, KeyEvent, Modifiers, MouseButton, Mo
 #[allow(unused_imports)]
 use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 #[allow(unused_imports)]
+use guitk::scroll_window;
 use guitk::style::CornerRadii;
 use guitk::text;
 
@@ -70,6 +71,11 @@ const GRAPH_BAR_WIDTH: f32 = 8.0;
 const GRAPH_BAR_GAP: f32 = 2.0;
 const TRAFFIC_GRAPH_HEIGHT: f32 = 100.0;
 const DNS_ROW_HEIGHT: f32 = 28.0;
+/// Vertical space the sidebar keeps for its "N more" line.
+///
+/// Reserved whether or not the line is drawn, so that how many interfaces fit
+/// does not depend on how many interfaces fit.
+const LIST_MORE_HEIGHT: f32 = 16.0;
 
 /// Font size of a toolbar button's label.
 const TOOLBAR_TEXT: f32 = 12.0;
@@ -479,8 +485,12 @@ pub struct NetManagerApp {
     pub edit_ip_config: IpConfig,
     /// Status bar message.
     pub status_message: String,
-    /// Whether the sidebar is scrolled (future: scroll offset).
-    pub sidebar_scroll: f32,
+    /// Index of the first interface drawn in the sidebar.
+    ///
+    /// A request rather than an index: an offset left over from a longer list
+    /// shows the last page instead of a blank sidebar, because
+    /// [`scroll_window::visible`] clamps the *result* and leaves this alone.
+    pub sidebar_scroll: usize,
 }
 
 impl NetManagerApp {
@@ -526,8 +536,22 @@ impl NetManagerApp {
             editing_ip: false,
             edit_ip_config,
             status_message,
-            sidebar_scroll: 0.0,
+            sidebar_scroll: 0,
         }
+    }
+
+    /// Scroll the sidebar's interface list by `delta` rows.
+    ///
+    /// Only the top is clamped here; how far down the list can go depends on
+    /// the sidebar's height, which the renderer knows and this does not. An
+    /// offset run past the end is a request for the last page, not an error.
+    pub fn scroll_sidebar_by(&mut self, delta: isize) {
+        self.sidebar_scroll = scroll_window::shift(self.sidebar_scroll, delta);
+    }
+
+    /// Scroll the sidebar back to the first interface.
+    pub fn scroll_sidebar_to_top(&mut self) {
+        self.sidebar_scroll = 0;
     }
 
     /// Get a reference to the currently selected interface, if any.
@@ -922,10 +946,30 @@ fn render_sidebar(tree: &mut RenderTree, app: &NetManagerApp) {
         width: 1.0,
     });
 
-    // Interface items
+    // Interface items.
+    //
+    // The list is bounded by the sidebar's own height, not by the window: the
+    // status bar is drawn across the bottom, and the old loop — which had no
+    // break of any kind — ran a long interface list straight through it and off
+    // the screen, with no way to scroll the tail back into view.
     let list_y = sy + 32.0;
-    for (i, iface) in app.interfaces.iter().enumerate() {
-        let item_y = list_y + i as f32 * SIDEBAR_ITEM_HEIGHT;
+    let window = scroll_window::visible(
+        app.interfaces.len(),
+        SIDEBAR_ITEM_HEIGHT,
+        sy + sh - list_y - LIST_MORE_HEIGHT,
+        app.sidebar_scroll,
+    );
+    for (drawn, iface) in app
+        .interfaces
+        .get(window.start..window.end())
+        .unwrap_or_default()
+        .iter()
+        .enumerate()
+    {
+        // The selection is an index into the whole list, so compare against the
+        // absolute position, not the position on screen.
+        let i = window.start.saturating_add(drawn);
+        let item_y = list_y + drawn as f32 * SIDEBAR_ITEM_HEIGHT;
         let is_selected = i == app.selected_interface;
 
         // Selection highlight
@@ -985,6 +1029,23 @@ fn render_sidebar(tree: &mut RenderTree, app: &NetManagerApp) {
             height: 8.0,
             color: iface.state.color(),
             corner_radii: CornerRadii::all(4.0),
+        });
+    }
+
+    // A list that is hiding interfaces says so. Without this the sidebar is
+    // indistinguishable from one showing everything there is, which is how a
+    // truncated list goes unnoticed.
+    let hidden = app.interfaces.len().saturating_sub(window.count);
+    if hidden > 0 {
+        tree.push(RenderCommand::Text {
+            x: sx + 12.0,
+            y: list_y + window.count as f32 * SIDEBAR_ITEM_HEIGHT,
+            text: format!("{hidden} more"),
+            color: OVERLAY0,
+            font_size: 11.0,
+            font_weight: FontWeightHint::Regular,
+            max_width: None,
+            overflow: TextOverflow::Clip,
         });
     }
 }
@@ -3328,6 +3389,235 @@ mod tests {
         assert!(
             (accented - ascii).abs() < ascii * 0.25,
             "{accented} should be close to {ascii}, not to the byte count"
+        );
+    }
+
+    // --- Sidebar scrolling ---
+
+    /// An app whose sidebar holds `n` interfaces, named so that a rendered row
+    /// can be recognised by the *shape* of its text rather than by where on
+    /// screen it landed. A pixel filter is what makes a helper quietly report
+    /// that nothing was drawn.
+    fn app_with_interfaces(n: usize) -> NetManagerApp {
+        let mut app = NetManagerApp::new();
+        let template = app.interfaces.first().cloned().expect("sample interfaces");
+        app.interfaces = (0..n)
+            .map(|i| {
+                let mut iface = template.clone();
+                iface.id = u32::try_from(i).unwrap_or(u32::MAX).saturating_add(1);
+                iface.name = format!("I{i:03}");
+                iface
+            })
+            .collect();
+        app.selected_interface = 0;
+        app
+    }
+
+    /// The interface names the sidebar actually drew, in the order it drew
+    /// them. Keyed on the `I000` shape given by `app_with_interfaces`, so a
+    /// change to the sidebar's indentation cannot turn this into an empty list.
+    fn drawn_interfaces(app: &NetManagerApp) -> Vec<String> {
+        let mut tree = RenderTree::new();
+        render_sidebar(&mut tree, app);
+        tree.commands
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, .. }
+                    if text.len() == 4
+                        && text.starts_with('I')
+                        && text.get(1..).is_some_and(|d| {
+                            d.chars().all(|ch| ch.is_ascii_digit())
+                        }) =>
+                {
+                    Some(text.clone())
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The whole point of the fix: the old loop had no break at all, so an
+    /// interface list longer than the sidebar drew through the status bar and
+    /// off the bottom of the window.
+    #[test]
+    fn no_sidebar_row_is_drawn_past_the_bottom_of_the_sidebar() {
+        let bottom = WINDOW_HEIGHT - STATUS_BAR_HEIGHT;
+        for n in [0_usize, 1, 8, 9, 10, 40, 200] {
+            for offset in [0_usize, 3, 50, 10_000] {
+                let mut app = app_with_interfaces(n);
+                app.sidebar_scroll = offset;
+                let mut tree = RenderTree::new();
+                render_sidebar(&mut tree, &app);
+                for cmd in &tree.commands {
+                    let (label, y) = match cmd {
+                        RenderCommand::Text { text, y, .. } => (text.clone(), *y),
+                        RenderCommand::FillRect { y, height, .. } => {
+                            ("rect".to_string(), y + height)
+                        }
+                        _ => continue,
+                    };
+                    // The sidebar's own background fills exactly `sh`, so it
+                    // ends on the boundary rather than inside it.
+                    assert!(
+                        y <= bottom + 0.01,
+                        "{label:?} drawn to y={y}, past the sidebar bottom \
+                         {bottom} (n={n}, offset={offset})"
+                    );
+                }
+            }
+        }
+    }
+
+    /// A sidebar that fits everything shows everything and says nothing about
+    /// hidden rows -- the case that must not regress when the window is added.
+    #[test]
+    fn a_sidebar_that_fits_its_interfaces_shows_all_of_them() {
+        let app = app_with_interfaces(4);
+        assert_eq!(drawn_interfaces(&app), ["I000", "I001", "I002", "I003"]);
+        let mut tree = RenderTree::new();
+        render_sidebar(&mut tree, &app);
+        assert!(
+            !tree.commands.iter().any(|c| matches!(
+                c,
+                RenderCommand::Text { text, .. } if text.ends_with(" more")
+            )),
+            "nothing is hidden, so nothing should claim to be"
+        );
+    }
+
+    /// Every interface is reachable by scrolling. A list that stops at the
+    /// sidebar's bottom edge and has no offset is a list whose tail cannot be
+    /// seen at all, which is the half of the bug that a clamp alone leaves in
+    /// place.
+    #[test]
+    fn every_interface_is_reachable_by_scrolling() {
+        let n = 60;
+        let mut seen: Vec<String> = Vec::new();
+        for offset in 0..n {
+            let mut app = app_with_interfaces(n);
+            app.sidebar_scroll = offset;
+            for name in drawn_interfaces(&app) {
+                if !seen.contains(&name) {
+                    seen.push(name);
+                }
+            }
+        }
+        assert_eq!(seen.len(), n, "only {} of {n} interfaces were ever drawn", seen.len());
+        for i in 0..n {
+            assert!(seen.contains(&format!("I{i:03}")), "I{i:03} unreachable");
+        }
+    }
+
+    /// Scrolling by one row moves the window by exactly one row -- the
+    /// property that fails when an offset field exists but is never read,
+    /// which is what `sidebar_scroll: f32` was for the life of this app.
+    #[test]
+    fn scrolling_the_sidebar_moves_it_by_exactly_one_interface() {
+        let mut app = app_with_interfaces(60);
+        let first = drawn_interfaces(&app);
+        assert!(first.len() >= 2, "test needs a sidebar that holds rows");
+        app.scroll_sidebar_by(1);
+        let second = drawn_interfaces(&app);
+        assert_eq!(second.first().map(String::as_str), Some("I001"));
+        assert_eq!(
+            second.len(),
+            first.len(),
+            "a full page stays full while scrolling"
+        );
+    }
+
+    /// An offset outliving the list it was taken against shows the last page,
+    /// not a blank sidebar.
+    #[test]
+    fn a_sidebar_under_a_stale_offset_shows_its_last_page() {
+        let mut app = app_with_interfaces(60);
+        app.sidebar_scroll = 55;
+        let page = drawn_interfaces(&app);
+        app.interfaces.truncate(6);
+        let after = drawn_interfaces(&app);
+        assert_eq!(
+            after,
+            ["I000", "I001", "I002", "I003", "I004", "I005"],
+            "a shrunken list should scroll up to meet the offset, not go blank"
+        );
+        assert!(!page.is_empty(), "the deep offset should still show a page");
+        assert_eq!(
+            page.last().map(String::as_str),
+            Some("I059"),
+            "the last page ends at the end of the list"
+        );
+    }
+
+    /// Scrolling up from the top stays at the top rather than wrapping to the
+    /// far end of the list, which is what an unsigned subtraction would do.
+    #[test]
+    fn scrolling_the_sidebar_up_from_the_top_stays_at_the_top() {
+        let mut app = app_with_interfaces(60);
+        app.scroll_sidebar_by(-1);
+        assert_eq!(app.sidebar_scroll, 0);
+        app.scroll_sidebar_by(isize::MIN);
+        assert_eq!(app.sidebar_scroll, 0);
+        assert_eq!(drawn_interfaces(&app).first().map(String::as_str), Some("I000"));
+        app.scroll_sidebar_by(4);
+        app.scroll_sidebar_to_top();
+        assert_eq!(app.sidebar_scroll, 0);
+    }
+
+    /// A sidebar hiding interfaces says how many, and the count is the truth.
+    #[test]
+    fn a_sidebar_that_is_hiding_interfaces_says_so() {
+        let app = app_with_interfaces(60);
+        let shown = drawn_interfaces(&app).len();
+        assert!(shown < 60, "60 interfaces should not fit a 680px window");
+        let mut tree = RenderTree::new();
+        render_sidebar(&mut tree, &app);
+        let note = tree
+            .commands
+            .iter()
+            .find_map(|c| match c {
+                RenderCommand::Text { text, .. } if text.ends_with(" more") => {
+                    Some(text.clone())
+                }
+                _ => None,
+            })
+            .expect("a truncated sidebar should say it is truncated");
+        assert_eq!(note, format!("{} more", 60 - shown));
+    }
+
+    /// The selection highlight follows the selected interface as the list
+    /// scrolls, rather than staying on whichever row is at that position on
+    /// screen. Comparing the loop counter to `selected_interface` after
+    /// windowing is exactly the mistake this rules out.
+    #[test]
+    fn the_selection_highlight_tracks_the_selected_interface_not_the_screen_row() {
+        let mut app = app_with_interfaces(60);
+        app.selected_interface = 20;
+        app.sidebar_scroll = 20;
+        let names = drawn_interfaces(&app);
+        assert_eq!(names.first().map(String::as_str), Some("I020"));
+
+        let mut tree = RenderTree::new();
+        render_sidebar(&mut tree, &app);
+        // The highlight is the only rounded full-width row rect in SURFACE0.
+        let highlights: Vec<f32> = tree
+            .commands
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::FillRect {
+                    y, width, color, ..
+                } if *color == SURFACE0
+                    && (*width - (SIDEBAR_WIDTH - 8.0)).abs() < 0.01 =>
+                {
+                    Some(*y)
+                }
+                _ => None,
+            })
+            .collect();
+        let list_y = TITLE_BAR_HEIGHT + TOOLBAR_HEIGHT + 32.0;
+        assert_eq!(
+            highlights,
+            vec![list_y],
+            "interface 20 is the first row on screen, so the highlight belongs there"
         );
     }
 }

@@ -15,9 +15,53 @@
 //! - Station search
 
 use guitk::color::Color;
-use guitk::rng::{seeded_from_system, RandomSource, SeededRng};
+use guitk::listview::ListViewport;
 use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
+use guitk::rng::{seeded_from_system, RandomSource, SeededRng};
+use guitk::scroll_window;
 use guitk::style::CornerRadii;
+
+// ── Layout ─────────────────────────────────────────────────────────────────
+//
+// Both scrolling lists in this window are drawn by one function and scrolled by
+// another, so every distance either of them needs is named here rather than
+// spelled out at each site. The genre list previously had its bottom edge
+// written out twice with two different values, and drew over the search hint
+// as a result.
+
+/// Width of the tab-and-genre sidebar.
+const SIDEBAR_WIDTH: f32 = 160.0;
+/// Height of the now-playing bar pinned to the bottom of the window.
+const PLAYER_BAR_HEIGHT: f32 = 80.0;
+/// Height of one screen tab in the sidebar (Browse / Favorites / Recent).
+const SIDEBAR_TAB_HEIGHT: f32 = 24.0;
+/// Height of one genre row, including the gap under it.
+const GENRE_ROW_HEIGHT: f32 = 20.0;
+/// Height of the "[/] Search" hint pinned to the bottom of the sidebar.
+const SEARCH_HINT_HEIGHT: f32 = 20.0;
+/// Vertical space a list keeps for its "N more" line.
+///
+/// Reserved whether or not the line is drawn, so that how many rows fit does
+/// not depend on how many rows fit.
+const LIST_MORE_HEIGHT: f32 = 16.0;
+
+/// Y of the sidebar's first genre row, measured from the sidebar's own top.
+///
+/// The title, the three screen tabs, the gap beneath them, the "Genres"
+/// heading and the always-present "All Genres" row, summed once. Named because
+/// the renderer walks down this distance a piece at a time while
+/// [`RadioApp::genre_rows`] needs it as a single number, and two spellings of
+/// one distance is one spelling too many; the renderer asserts they agree.
+const GENRE_ROWS_TOP: f32 = 32.0
+    + 3.0 * SIDEBAR_TAB_HEIGHT
+    + 8.0
+    + 16.0
+    + GENRE_ROW_HEIGHT;
+
+/// Height of one station row in the main list.
+const STATION_ROW_HEIGHT: f32 = 50.0;
+/// Y of the station list's first row, from the top of the list pane.
+const STATION_ROWS_TOP: f32 = 30.0;
 
 // ── Catppuccin Mocha palette ───────────────────────────────────────────────
 const BASE: Color = Color::from_hex(0x1E1E2E);
@@ -348,11 +392,27 @@ struct RadioApp {
 
     // Genre filter
     genre_filter: Option<Genre>,
-    genre_scroll: usize,
+    /// Which genres the sidebar is showing, and which of them is the filter.
+    ///
+    /// The two move together because `genre_filter` is cycled by Left/Right
+    /// without regard to what is on screen: a filter set without a matching
+    /// scroll leaves the highlighted genre off the bottom of the sidebar, with
+    /// no key that brings it back. `genre_scroll`, which this replaces, was
+    /// written by nothing and read by nothing at all.
+    ///
+    /// `None` means the "All Genres" row, which is drawn above the scrolled
+    /// region and so is visible at any offset.
+    genre_view: ListViewport,
 
-    // Station selection
-    selected_station: usize,
-    station_scroll: usize,
+    /// Which stations the list pane is showing, and which of them is picked.
+    ///
+    /// One field rather than a selection and a scroll offset, because the rule
+    /// binding them — the picked station is on screen — has to be restored on
+    /// every movement, and a rule spread across four key handlers is a rule
+    /// that holds in three of them. Here it held in none: `station_scroll` was
+    /// read by the renderer and written by nobody, so Down past the tenth
+    /// station moved a selection that stayed off screen for good.
+    station_view: ListViewport,
 
     // Playback
     play_state: PlayState,
@@ -405,15 +465,14 @@ impl RadioApp {
         for (i, bar) in spectrum_bars.iter_mut().enumerate() {
             *bar = ((i as u8).wrapping_mul(7).wrapping_add(30)) % 100;
         }
-        Self {
+        let mut app = Self {
             stations,
             favorites: Vec::new(),
             recent: Vec::new(),
             max_recent: 30,
             genre_filter: None,
-            genre_scroll: 0,
-            selected_station: 0,
-            station_scroll: 0,
+            genre_view: ListViewport::new(0),
+            station_view: ListViewport::new(0),
             play_state: PlayState::Stopped,
             current_station: None,
             volume: 75,
@@ -433,7 +492,84 @@ impl RadioApp {
             status_message: "Select a station and press Enter to play".into(),
             width: 900.0,
             height: 650.0,
-        }
+        };
+        // Not `..Default::default()` on the two viewports: their heights come
+        // from the window size, and a viewport whose height disagrees with the
+        // pane it is drawn into is the bug this type exists to prevent.
+        app.set_size(900.0, 650.0);
+        app.select_station(0);
+        app
+    }
+
+    /// Resizes the window, keeping both list viewports' heights in step.
+    ///
+    /// The single door through which `width`/`height` change. A viewport whose
+    /// row count is left over from a taller window would let the selection sit
+    /// below the last row actually drawn — the renderer would show one page and
+    /// the key handler would believe another.
+    fn set_size(&mut self, width: f32, height: f32) {
+        self.width = width;
+        self.height = height;
+        let stations = self.filtered_stations().len();
+        self.station_view.set_height(self.station_rows(), stations);
+        self.genre_view
+            .set_height(self.genre_rows(), Genre::ALL.len());
+    }
+
+    /// How many station rows the list pane can show at the current size.
+    ///
+    /// The renderer draws exactly this many, and the viewport uses it to decide
+    /// when a selection has fallen off the bottom, so it is derived once.
+    fn station_rows(&self) -> usize {
+        let pane_h = self.height - PLAYER_BAR_HEIGHT;
+        scroll_window::capacity(
+            STATION_ROW_HEIGHT,
+            pane_h - STATION_ROWS_TOP - LIST_MORE_HEIGHT,
+        )
+    }
+
+    /// How many genre rows fit in the sidebar at the current size.
+    ///
+    /// Stops above the search hint, not at the sidebar's bottom edge: the two
+    /// were confused before, so a short window drew the last genres straight
+    /// over the hint. The "N more" line's space is subtracted unconditionally
+    /// so the count does not depend on whether the line turns out to be needed.
+    fn genre_rows(&self) -> usize {
+        let sidebar_h = self.height - PLAYER_BAR_HEIGHT;
+        scroll_window::capacity(
+            GENRE_ROW_HEIGHT,
+            sidebar_h - GENRE_ROWS_TOP - SEARCH_HINT_HEIGHT - LIST_MORE_HEIGHT,
+        )
+    }
+
+    /// The picked station's position in the filtered list, or 0 when nothing is
+    /// picked — which happens only when the filtered list is empty, where every
+    /// caller's `get` returns `None` regardless.
+    fn selected_station(&self) -> usize {
+        self.station_view.selected().unwrap_or(0)
+    }
+
+    /// Picks the station at `index` in the filtered list and scrolls to it.
+    fn select_station(&mut self, index: usize) {
+        let len = self.filtered_stations().len();
+        self.station_view.select(Some(index), len);
+    }
+
+    /// Sets the genre filter and scrolls the sidebar so the choice is on screen.
+    ///
+    /// Both Left and Right funnel through here: they differ only in which genre
+    /// they pick, and everything after that — the reveal, the station list
+    /// jumping back to the top, the status line — is the same in both and was
+    /// duplicated in both.
+    fn set_genre_filter(&mut self, genre: Option<Genre>) {
+        self.genre_filter = genre;
+        let index = genre.and_then(|g| Genre::ALL.iter().position(|&x| x == g));
+        self.genre_view.select(index, Genre::ALL.len());
+        // The filter decides which stations exist, so a position into the old
+        // list would name a different station or none at all.
+        self.select_station(0);
+        let label = genre.map_or("All", Genre::label);
+        self.status_message = format!("Genre: {label}");
     }
 
     /// Get filtered station list for current view.
@@ -482,7 +618,7 @@ impl RadioApp {
         match self.play_state {
             PlayState::Stopped => {
                 let filtered = self.filtered_stations();
-                if let Some(&idx) = filtered.get(self.selected_station) {
+                if let Some(&idx) = filtered.get(self.selected_station()) {
                     self.play_station(idx);
                 }
             }
@@ -528,7 +664,7 @@ impl RadioApp {
 
     fn toggle_favorite(&mut self) {
         let filtered = self.filtered_stations();
-        if let Some(&idx) = filtered.get(self.selected_station) {
+        if let Some(&idx) = filtered.get(self.selected_station()) {
             if self.favorites.contains(&idx) {
                 self.favorites.retain(|&i| i != idx);
                 if let Some(s) = self.stations.get(idx) {
@@ -545,7 +681,7 @@ impl RadioApp {
 
     fn is_current_favorite(&self) -> bool {
         let filtered = self.filtered_stations();
-        filtered.get(self.selected_station)
+        filtered.get(self.selected_station())
             .map(|idx| self.favorites.contains(idx))
             .unwrap_or(false)
     }
@@ -718,65 +854,73 @@ impl RadioApp {
             "-" => self.volume_down(),
             "m" if !ctrl => self.toggle_mute(),
 
-            // Navigation
+            // Navigation. Every arm scrolls the list to keep the new selection
+            // on screen, which is the whole reason it goes through the viewport
+            // rather than assigning an index: moving a selection the list does
+            // not follow is how Down used to walk off the bottom of the pane.
+            //
+            // A page is now a windowful rather than a fixed five rows, so
+            // PageDown lands on the row after the last one visible instead of
+            // somewhere in the middle of the page it was already showing.
             "Up" => {
-                self.selected_station = self.selected_station.saturating_sub(1);
+                let len = self.filtered_stations().len();
+                self.station_view.select_prev(len);
             }
             "Down" => {
-                let filtered = self.filtered_stations();
-                let max = filtered.len().saturating_sub(1);
-                let next = self.selected_station.saturating_add(1);
-                if next <= max {
-                    self.selected_station = next;
-                }
+                let len = self.filtered_stations().len();
+                self.station_view.select_next(len);
             }
             "PageUp" | "Prior" => {
-                self.selected_station = self.selected_station.saturating_sub(5);
+                let len = self.filtered_stations().len();
+                self.station_view.page_up(len);
             }
             "PageDown" | "Next" => {
-                let filtered = self.filtered_stations();
-                let max = filtered.len().saturating_sub(1);
-                let next = self.selected_station.saturating_add(5).min(max);
-                self.selected_station = next;
+                let len = self.filtered_stations().len();
+                self.station_view.page_down(len);
             }
 
             // Genre filter
-            "Left"
-                if self.screen == Screen::Browse => {
-                    // Cycle genre filter backward
-                    self.genre_filter = match self.genre_filter {
-                        None => Some(Genre::World),
-                        Some(g) => {
-                            let idx = Genre::ALL.iter().position(|&x| x == g).unwrap_or(0);
-                            if idx == 0 { None } else { Genre::ALL.get(idx.saturating_sub(1)).copied() }
+            "Left" if self.screen == Screen::Browse => {
+                // Cycle genre filter backward, wrapping through "All".
+                let previous = match self.genre_filter {
+                    None => Some(Genre::World),
+                    Some(g) => {
+                        let idx = Genre::ALL.iter().position(|&x| x == g).unwrap_or(0);
+                        if idx == 0 {
+                            None
+                        } else {
+                            Genre::ALL.get(idx.saturating_sub(1)).copied()
                         }
-                    };
-                    self.selected_station = 0;
-                    let label = self.genre_filter.map(|g| g.label()).unwrap_or("All");
-                    self.status_message = format!("Genre: {label}");
-                }
-            "Right"
-                if self.screen == Screen::Browse => {
-                    self.genre_filter = match self.genre_filter {
-                        None => Some(Genre::Rock),
-                        Some(g) => {
-                            let idx = Genre::ALL.iter().position(|&x| x == g).unwrap_or(0);
-                            let next = idx.saturating_add(1);
-                            if next >= Genre::ALL.len() { None } else { Genre::ALL.get(next).copied() }
+                    }
+                };
+                self.set_genre_filter(previous);
+            }
+            "Right" if self.screen == Screen::Browse => {
+                let next = match self.genre_filter {
+                    None => Some(Genre::Rock),
+                    Some(g) => {
+                        let idx = Genre::ALL.iter().position(|&x| x == g).unwrap_or(0);
+                        let next = idx.saturating_add(1);
+                        if next >= Genre::ALL.len() {
+                            None
+                        } else {
+                            Genre::ALL.get(next).copied()
                         }
-                    };
-                    self.selected_station = 0;
-                    let label = self.genre_filter.map(|g| g.label()).unwrap_or("All");
-                    self.status_message = format!("Genre: {label}");
-                }
+                    }
+                };
+                self.set_genre_filter(next);
+            }
 
             // Favorite
             "f" if !ctrl => self.toggle_favorite(),
 
             // Screen switching
-            "1" => { self.screen = Screen::Browse; self.selected_station = 0; }
-            "2" => { self.screen = Screen::Favorites; self.selected_station = 0; }
-            "3" => { self.screen = Screen::Recent; self.selected_station = 0; }
+            // A screen switch replaces the list rather than editing it, so the
+            // old position names nothing; `select_station` scrolls back to the
+            // top as well as picking the first row.
+            "1" => { self.screen = Screen::Browse; self.select_station(0); }
+            "2" => { self.screen = Screen::Favorites; self.select_station(0); }
+            "3" => { self.screen = Screen::Recent; self.select_station(0); }
 
             // Search
             "/" => {
@@ -808,8 +952,8 @@ impl RadioApp {
 
         // Layout:
         // [Genre sidebar 160px] [Station list] [Now Playing bar 80px at bottom]
-        let sidebar_w: f32 = 160.0;
-        let player_h: f32 = 80.0;
+        let sidebar_w = SIDEBAR_WIDTH;
+        let player_h = PLAYER_BAR_HEIGHT;
         let main_x = sidebar_w;
         let main_w = self.width - sidebar_w;
         let main_h = self.height - player_h;
@@ -832,6 +976,13 @@ impl RadioApp {
     }
 
     fn render_sidebar(&self, cmds: &mut Vec<RenderCommand>, x: f32, y: f32, w: f32, h: f32) {
+        // `genre_rows` sizes the genre list from `self.height`; if the sidebar
+        // it is drawn into were some other height the list would stop in the
+        // wrong place, which is the class of bug this whole function was in.
+        debug_assert!(
+            ((self.height - PLAYER_BAR_HEIGHT) - h).abs() < 0.01,
+            "the sidebar must be the one `genre_rows` sized the genre list for"
+        );
         cmds.push(RenderCommand::FillRect {
             x, y, width: w, height: h,
             color: MANTLE, corner_radii: CornerRadii::ZERO,
@@ -869,7 +1020,7 @@ impl RadioApp {
                 max_width: Some(w - 24.0),
                 overflow: TextOverflow::Ellipsis,
             });
-            ty += 24.0;
+            ty += SIDEBAR_TAB_HEIGHT;
         }
 
         ty += 8.0;
@@ -901,39 +1052,69 @@ impl RadioApp {
                 max_width: Some(w - 28.0),
                 overflow: TextOverflow::Ellipsis,
             });
-            ty += 20.0;
+            ty += GENRE_ROW_HEIGHT;
 
-            for genre in &Genre::ALL {
-                if ty + 18.0 > y + h {
-                    break;
-                }
+            // The distance walked down to here, in pieces, is the one
+            // `genre_rows` needs as a single number. Assert rather than
+            // recompute, so a change to any piece above is caught here instead
+            // of quietly shifting where the list is allowed to stop.
+            debug_assert!(
+                (ty - (y + GENRE_ROWS_TOP)).abs() < 0.01,
+                "GENRE_ROWS_TOP must be the y the genre rows actually start at"
+            );
+
+            // Bounded by where the search hint begins, not by the sidebar's
+            // bottom edge: the old `ty + 18.0 > y + h` let the last genres draw
+            // straight over the hint at `y + h - SEARCH_HINT_HEIGHT`.
+            let window =
+                scroll_window::visible_count(Genre::ALL.len(), self.genre_rows(), self.genre_view.first_visible());
+            for (row, genre) in Genre::ALL
+                .get(window.start..window.end())
+                .unwrap_or_default()
+                .iter()
+                .enumerate()
+            {
+                let gy = ty + (row as f32) * GENRE_ROW_HEIGHT;
                 let active = self.genre_filter == Some(*genre);
                 if active {
                     cmds.push(RenderCommand::FillRect {
-                        x: x + 6.0, y: ty, width: w - 12.0, height: 18.0,
+                        x: x + 6.0, y: gy, width: w - 12.0, height: 18.0,
                         color: SURFACE0, corner_radii: CornerRadii::all(3.0),
                     });
                 }
                 // Genre color dot
                 cmds.push(RenderCommand::FillRect {
-                    x: x + 10.0, y: ty + 5.0, width: 8.0, height: 8.0,
+                    x: x + 10.0, y: gy + 5.0, width: 8.0, height: 8.0,
                     color: genre.color(), corner_radii: CornerRadii::all(4.0),
                 });
                 cmds.push(RenderCommand::Text {
-                    x: x + 22.0, y: ty + 3.0,
+                    x: x + 22.0, y: gy + 3.0,
                     text: genre.label().to_string(), font_size: 10.0,
                     color: if active { TEXT_COLOR } else { SUBTEXT0 },
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(w - 36.0),
                     overflow: TextOverflow::Ellipsis,
                 });
-                ty += 20.0;
+            }
+
+            let hidden = Genre::ALL.len().saturating_sub(window.count);
+            if hidden > 0 {
+                cmds.push(RenderCommand::Text {
+                    x: x + 22.0,
+                    y: ty + (window.count as f32) * GENRE_ROW_HEIGHT + 3.0,
+                    text: format!("{hidden} more"),
+                    font_size: 9.0,
+                    color: OVERLAY0,
+                    font_weight: FontWeightHint::Regular,
+                    max_width: Some(w - 36.0),
+                    overflow: TextOverflow::Ellipsis,
+                });
             }
         }
 
         // Search hint
         cmds.push(RenderCommand::Text {
-            x: x + 12.0, y: y + h - 20.0,
+            x: x + 12.0, y: y + h - SEARCH_HINT_HEIGHT,
             text: "[/] Search".into(), font_size: 9.0,
             color: OVERLAY0, font_weight: FontWeightHint::Regular,
             max_width: Some(w - 24.0),
@@ -967,9 +1148,16 @@ impl RadioApp {
             overflow: TextOverflow::Ellipsis,
         });
 
-        let start_y = y + 30.0;
-        let row_h: f32 = 50.0;
-        let visible = ((h - 40.0) / row_h) as usize;
+        let start_y = y + STATION_ROWS_TOP;
+        let row_h = STATION_ROW_HEIGHT;
+        // The viewport decides where the selection may go; this pane decides
+        // where rows land. If the two ever disagreed about how many rows fit,
+        // the selection could sit below the last row drawn — which is exactly
+        // the state the old code lived in permanently.
+        debug_assert!(
+            ((self.height - PLAYER_BAR_HEIGHT) - h).abs() < 0.01,
+            "the station pane must be the one `station_rows` sized the viewport for"
+        );
 
         if filtered.is_empty() {
             cmds.push(RenderCommand::Text {
@@ -982,15 +1170,27 @@ impl RadioApp {
             return;
         }
 
+        // `visible_range` re-derives the window against the length it is given,
+        // so a list that shrank since the last keypress — a favorite removed
+        // while the Favorites screen is up — shows its last page rather than
+        // blank space.
+        let window = self.station_view.visible_range(filtered.len());
+        let shown = window.len();
         // Enumerate *after* the skip so `row` is the position on screen and needs
         // no subtraction to become a y-coordinate; the absolute index the
         // selection is compared against is reconstructed by adding the scroll
         // back on. Enumerating first and subtracting is the same number by a
         // route that underflows if the two ever disagree.
-        for (row, &station_idx) in filtered.iter().skip(self.station_scroll).take(visible).enumerate() {
+        let first = window.start;
+        for (row, &station_idx) in filtered
+            .get(window)
+            .unwrap_or_default()
+            .iter()
+            .enumerate()
+        {
             if let Some(station) = self.stations.get(station_idx) {
                 let ry = start_y + (row as f32) * row_h;
-                let is_sel = self.station_scroll.saturating_add(row) == self.selected_station;
+                let is_sel = self.station_view.selected() == Some(first.saturating_add(row));
                 let is_playing = self.current_station == Some(station_idx)
                     && self.play_state == PlayState::Playing;
 
@@ -1053,6 +1253,24 @@ impl RadioApp {
                     overflow: TextOverflow::Ellipsis,
                 });
             }
+        }
+
+        // A list that is hiding rows has to say so, or a station that exists
+        // and is simply below the fold is indistinguishable from one that does
+        // not exist. The space for this line is subtracted from the row budget
+        // unconditionally, so drawing it can never push a row off the bottom.
+        let hidden = filtered.len().saturating_sub(shown);
+        if hidden > 0 {
+            cmds.push(RenderCommand::Text {
+                x: x + 18.0,
+                y: start_y + (shown as f32) * row_h,
+                text: format!("{hidden} more"),
+                font_size: 9.0,
+                color: OVERLAY0,
+                font_weight: FontWeightHint::Regular,
+                max_width: Some(w - 40.0),
+                overflow: TextOverflow::Ellipsis,
+            });
         }
     }
 
@@ -1552,9 +1770,9 @@ mod tests {
     fn test_key_navigation() {
         let mut app = RadioApp::new();
         app.handle_key("Down", false, false);
-        assert_eq!(app.selected_station, 1);
+        assert_eq!(app.selected_station(), 1);
         app.handle_key("Up", false, false);
-        assert_eq!(app.selected_station, 0);
+        assert_eq!(app.selected_station(), 0);
     }
 
     #[test]
@@ -1678,4 +1896,285 @@ mod tests {
             "a fresh app still animates from a literal"
         );
     }
+
+    // ── Scrolling lists ────────────────────────────────────────────────────
+    //
+    // Both lists in this window used to be drawn from state that nothing
+    // maintained: `station_scroll` was read by the renderer and written by
+    // nobody, so the selection walked off the bottom of the pane and stayed
+    // there, and `genre_scroll` was neither read nor written, so the genre
+    // list simply ran past its own bottom edge and over the search hint.
+    //
+    // These tests are phrased as questions about what is *drawn*, because
+    // that is the thing that was wrong. A test that only asked what the
+    // selection index was would have passed throughout.
+
+    /// Station names as they appear in the list pane, top to bottom.
+    ///
+    /// Keyed on the pane's own x and the row title's font size rather than a
+    /// y range: a filter on position is exactly the thing that silently
+    /// returns nothing when the geometry it assumes has moved.
+    fn drawn_stations(app: &RadioApp) -> Vec<String> {
+        app.render()
+            .into_iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { x, text, font_size, .. }
+                    if (x - (SIDEBAR_WIDTH + 18.0)).abs() < 0.01
+                        && (font_size - 13.0).abs() < 0.01 =>
+                {
+                    Some(text)
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Genre labels drawn in the sidebar, with the y each was drawn at.
+    fn drawn_genres(app: &RadioApp) -> Vec<(String, f32)> {
+        app.render()
+            .into_iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { x, y, text, font_size, .. }
+                    if (x - 22.0).abs() < 0.01 && (font_size - 10.0).abs() < 0.01 =>
+                {
+                    Some((text, y))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The "N more" line a list draws when it is hiding rows, if any.
+    fn more_line(app: &RadioApp, x: f32) -> Option<String> {
+        app.render().into_iter().find_map(|c| match c {
+            RenderCommand::Text { x: cx, text, font_size, .. }
+                if (cx - x).abs() < 0.01
+                    && (font_size - 9.0).abs() < 0.01
+                    && text.ends_with(" more") =>
+            {
+                Some(text)
+            }
+            _ => None,
+        })
+    }
+
+    #[test]
+    fn no_station_row_is_drawn_past_the_bottom_of_the_list_pane() {
+        for height in [200.0_f32, 300.0, 450.0, 650.0, 900.0] {
+            let mut app = RadioApp::new();
+            app.set_size(900.0, height);
+            let drawn = drawn_stations(&app);
+            let pane_h = height - PLAYER_BAR_HEIGHT;
+            let bottom = STATION_ROWS_TOP + (drawn.len() as f32) * STATION_ROW_HEIGHT;
+            assert!(
+                bottom <= pane_h,
+                "at {height}px, {} rows reach {bottom} in a {pane_h}px pane",
+                drawn.len()
+            );
+        }
+    }
+
+    /// The regression test for the scroll offset that nothing wrote. Before
+    /// the fix the list showed rows 0..10 no matter where the selection was.
+    #[test]
+    fn the_station_list_follows_the_selection_down() {
+        let mut app = RadioApp::new();
+        let total = app.filtered_stations().len();
+        assert!(total > app.station_rows(), "need a list longer than the pane");
+
+        for step in 0..total {
+            let selected = app.selected_station();
+            assert_eq!(selected, step, "Down should advance one row at a time");
+            let name = app
+                .filtered_stations()
+                .get(selected)
+                .and_then(|&i| app.stations.get(i))
+                .map(|s| s.name.clone())
+                .expect("selected station exists");
+            assert!(
+                drawn_stations(&app).contains(&name),
+                "station {step} ({name}) is selected but not drawn"
+            );
+            app.handle_key("Down", false, false);
+        }
+    }
+
+    #[test]
+    fn the_station_list_scrolls_back_up_with_the_selection() {
+        let mut app = RadioApp::new();
+        let total = app.filtered_stations().len();
+        for _ in 0..total {
+            app.handle_key("Down", false, false);
+        }
+        for _ in 0..total {
+            app.handle_key("Up", false, false);
+        }
+        assert_eq!(app.selected_station(), 0);
+        let first = app
+            .stations
+            .first()
+            .map(|s| s.name.clone())
+            .expect("stations exist");
+        assert_eq!(
+            drawn_stations(&app).first(),
+            Some(&first),
+            "scrolling back to the first station should put it back on top"
+        );
+    }
+
+    #[test]
+    fn paging_through_the_station_list_never_leaves_the_selection_off_screen() {
+        let mut app = RadioApp::new();
+        for key in ["PageDown", "PageDown", "PageDown", "PageUp", "PageDown", "PageUp"] {
+            app.handle_key(key, false, false);
+            let name = app
+                .filtered_stations()
+                .get(app.selected_station())
+                .and_then(|&i| app.stations.get(i))
+                .map(|s| s.name.clone())
+                .expect("selected station exists");
+            assert!(
+                drawn_stations(&app).contains(&name),
+                "after {key} the selection ({name}) is off screen"
+            );
+        }
+    }
+
+    #[test]
+    fn a_station_list_that_is_hiding_stations_says_so() {
+        let app = RadioApp::new();
+        let total = app.filtered_stations().len();
+        let shown = drawn_stations(&app).len();
+        assert!(shown < total, "the default window should not fit every station");
+        assert_eq!(
+            more_line(&app, SIDEBAR_WIDTH + 18.0),
+            Some(format!("{} more", total - shown)),
+            "a list with rows below the fold must say how many"
+        );
+    }
+
+    #[test]
+    fn a_station_list_that_fits_says_nothing() {
+        let mut app = RadioApp::new();
+        app.set_size(900.0, 2000.0);
+        assert_eq!(drawn_stations(&app).len(), app.filtered_stations().len());
+        assert_eq!(more_line(&app, SIDEBAR_WIDTH + 18.0), None);
+    }
+
+    #[test]
+    fn switching_screens_scrolls_the_station_list_back_to_the_top() {
+        let mut app = RadioApp::new();
+        for _ in 0..15 {
+            app.handle_key("Down", false, false);
+        }
+        assert!(app.station_view.first_visible() > 0, "should have scrolled");
+        app.handle_key("1", false, false);
+        assert_eq!(app.selected_station(), 0);
+        assert_eq!(
+            app.station_view.first_visible(),
+            0,
+            "a screen switch replaces the list, so the old position names nothing"
+        );
+    }
+
+    /// The genre list used to stop at the sidebar's bottom edge, which is
+    /// *below* the search hint pinned 20px above it.
+    #[test]
+    fn no_genre_row_is_drawn_over_the_search_hint() {
+        for height in [300.0_f32, 400.0, 500.0, 650.0, 900.0] {
+            let mut app = RadioApp::new();
+            app.set_size(900.0, height);
+            let hint_top = (height - PLAYER_BAR_HEIGHT) - SEARCH_HINT_HEIGHT;
+            for (label, y) in drawn_genres(&app) {
+                assert!(
+                    y + GENRE_ROW_HEIGHT <= hint_top,
+                    "at {height}px the genre {label} at y={y} reaches into the \
+                     search hint at {hint_top}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_genre_sidebar_follows_the_genre_filter() {
+        let mut app = RadioApp::new();
+        // Short enough that the genre list cannot show all of `Genre::ALL`.
+        app.set_size(900.0, 400.0);
+        assert!(app.genre_rows() < Genre::ALL.len(), "need an overflowing list");
+
+        for expected in Genre::ALL {
+            app.handle_key("Right", false, false);
+            assert_eq!(app.genre_filter, Some(expected));
+            let labels: Vec<String> = drawn_genres(&app).into_iter().map(|(l, _)| l).collect();
+            assert!(
+                labels.iter().any(|l| l == expected.label()),
+                "the filter is {} but the sidebar shows {labels:?}",
+                expected.label()
+            );
+        }
+    }
+
+    #[test]
+    fn cycling_genres_backwards_also_keeps_the_choice_on_screen() {
+        let mut app = RadioApp::new();
+        app.set_size(900.0, 400.0);
+        for _ in 0..Genre::ALL.len() {
+            app.handle_key("Left", false, false);
+            if let Some(genre) = app.genre_filter {
+                let labels: Vec<String> =
+                    drawn_genres(&app).into_iter().map(|(l, _)| l).collect();
+                assert!(
+                    labels.iter().any(|l| l == genre.label()),
+                    "the filter is {} but the sidebar shows {labels:?}",
+                    genre.label()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_genre_list_that_is_hiding_genres_says_so() {
+        let mut app = RadioApp::new();
+        app.set_size(900.0, 400.0);
+        let shown = drawn_genres(&app).len();
+        assert!(shown < Genre::ALL.len(), "the short window should hide genres");
+        assert_eq!(
+            more_line(&app, 22.0),
+            Some(format!("{} more", Genre::ALL.len() - shown)),
+            "a genre list with rows below the fold must say how many"
+        );
+    }
+
+    #[test]
+    fn a_genre_list_that_fits_shows_every_genre_and_says_nothing() {
+        let app = RadioApp::new();
+        let labels: Vec<String> = drawn_genres(&app).into_iter().map(|(l, _)| l).collect();
+        assert_eq!(
+            labels.len(),
+            Genre::ALL.len(),
+            "the default window is tall enough for all {} genres",
+            Genre::ALL.len()
+        );
+        assert_eq!(more_line(&app, 22.0), None);
+    }
+
+    /// The genre list is only drawn on the Browse screen, so its scroll
+    /// position must not make the *station* list's "N more" line ambiguous —
+    /// the two are told apart by x, and this pins that apart-ness down.
+    #[test]
+    fn the_two_more_lines_are_distinguishable() {
+        let mut app = RadioApp::new();
+        app.set_size(900.0, 400.0);
+        assert!(more_line(&app, 22.0).is_some(), "genres are hidden at 400px");
+        assert!(
+            more_line(&app, SIDEBAR_WIDTH + 18.0).is_some(),
+            "stations are hidden at 400px too"
+        );
+        assert_ne!(
+            more_line(&app, 22.0),
+            more_line(&app, SIDEBAR_WIDTH + 18.0),
+            "two lists hiding different numbers of rows must report differently"
+        );
+    }
+
 }

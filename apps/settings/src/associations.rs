@@ -1373,6 +1373,15 @@ impl AssociationsPageState {
 // ============================================================================
 
 #[cfg(test)]
+// Panicking on bad data is what a test is *for*: an `unwrap` that fires names
+// the broken invariant better than a silent `if let` that skips the assertion.
+#[allow(
+    clippy::indexing_slicing,
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::arithmetic_side_effects
+)]
 mod tests {
     use super::*;
 

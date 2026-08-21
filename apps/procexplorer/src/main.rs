@@ -17,8 +17,10 @@ use guitk::color::Color;
 use guitk::event::{Event, EventResult, Key, KeyEvent, Modifiers, MouseButton, MouseEventKind};
 use guitk::history::SampleHistory;
 use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
+use guitk::scroll_window;
 use guitk::table::{Column, Fit, Table};
 use guitk::text;
+use guitk::wheel;
 
 use std::collections::HashMap;
 
@@ -567,6 +569,14 @@ pub struct ProcessExplorerState {
     pub view_mode: ViewMode,
     /// Scroll offset (number of rows scrolled).
     pub scroll_offset: usize,
+    /// Carries the fraction of a row a precision device sends.
+    ///
+    /// `scroll_offset` is a whole row index and cannot hold a fraction, so
+    /// something has to. Without this the handler could only read the *sign*
+    /// of `dy` and moved three rows for any non-zero value: a trackpad's
+    /// stream of 0.2-notch events scrolled fifteen times too far, and there
+    /// was no way to move by a single row at all.
+    wheel: wheel::Accumulator,
 
     // -- Search / filter -----------------------------------------------------
     /// Filter text (search box content).
@@ -635,6 +645,7 @@ impl ProcessExplorerState {
             sort_direction: SortDirection::Descending,
             view_mode: ViewMode::List,
             scroll_offset: 0,
+            wheel: wheel::Accumulator::default(),
             filter_text: String::new(),
             filter_focused: false,
             context_menu: None,
@@ -1144,13 +1155,11 @@ impl ProcessExplorerState {
                     return EventResult::Consumed;
                 }
 
-                // Process row click
-                if self.active_tab == Tab::Processes && my >= content_y + HEADER_HEIGHT {
-                    let row_f = (my - content_y - HEADER_HEIGHT) / ROW_HEIGHT;
-                    let row_idx = row_f as usize + self.scroll_offset;
-                    if row_idx < self.visible_indices.len() {
-                        self.selected_index = Some(row_idx);
-                    }
+                // Process row click. `row_at` carries the bound the clip
+                // already implied: a click below the last drawn row -- or in
+                // the status bar under it -- selects nothing.
+                if let Some(row_idx) = self.row_at(my) {
+                    self.selected_index = Some(row_idx);
                     return EventResult::Consumed;
                 }
 
@@ -1159,21 +1168,19 @@ impl ProcessExplorerState {
 
             // Right click — context menu on process rows
             MouseEventKind::Press(MouseButton::Right) => {
-                let content_y = TOOLBAR_HEIGHT + TAB_BAR_HEIGHT;
-                if self.active_tab == Tab::Processes && my >= content_y + HEADER_HEIGHT {
-                    let row_f = (my - content_y - HEADER_HEIGHT) / ROW_HEIGHT;
-                    let row_idx = row_f as usize + self.scroll_offset;
-                    if row_idx < self.visible_indices.len() {
-                        self.selected_index = Some(row_idx);
-                        if let Some(&proc_idx) = self.visible_indices.get(row_idx) {
-                            let pid = self.processes.get(proc_idx).map(|p| p.pid).unwrap_or(0);
-                            self.context_menu = Some(ContextMenu {
-                                x: mx,
-                                y: my,
-                                target_pid: pid,
-                                hover_index: None,
-                            });
-                        }
+                // The one that matters: this menu's actions include Kill, and
+                // it was being opened over a process the pointer was nowhere
+                // near whenever the click landed in the status bar.
+                if let Some(row_idx) = self.row_at(my) {
+                    self.selected_index = Some(row_idx);
+                    if let Some(&proc_idx) = self.visible_indices.get(row_idx) {
+                        let pid = self.processes.get(proc_idx).map(|p| p.pid).unwrap_or(0);
+                        self.context_menu = Some(ContextMenu {
+                            x: mx,
+                            y: my,
+                            target_pid: pid,
+                            hover_index: None,
+                        });
                     }
                 }
                 EventResult::Consumed
@@ -1181,13 +1188,18 @@ impl ProcessExplorerState {
 
             // Scroll wheel — scroll the process list
             MouseEventKind::Scroll { dy, .. } => {
-                if *dy < 0.0 {
-                    self.scroll_offset = self.scroll_offset.saturating_add(3);
-                } else if *dy > 0.0 {
-                    self.scroll_offset = self.scroll_offset.saturating_sub(3);
-                }
-                // Clamp scroll offset.
-                let max_scroll = self.visible_indices.len().saturating_sub(1);
+                let rows = self.wheel.rows(*dy);
+                self.scroll_offset = scroll_window::shift(self.scroll_offset, rows);
+                // Stop with the last row at the *bottom*, not at the top. The
+                // bound used to be `len - 1`, which let a thousand-process list
+                // scroll until one row sat above forty blank ones. `len -
+                // capacity` is the policy `scroll_window::visible` already
+                // applies to what it draws, so the stored offset now agrees
+                // with what the renderer would have shown anyway.
+                let max_scroll = self
+                    .visible_indices
+                    .len()
+                    .saturating_sub(self.visible_row_count().max(1));
                 if self.scroll_offset > max_scroll {
                     self.scroll_offset = max_scroll;
                 }
@@ -1196,18 +1208,7 @@ impl ProcessExplorerState {
 
             // Mouse move — update hover state
             MouseEventKind::Move => {
-                let content_y = TOOLBAR_HEIGHT + TAB_BAR_HEIGHT;
-                if self.active_tab == Tab::Processes && my >= content_y + HEADER_HEIGHT {
-                    let row_f = (my - content_y - HEADER_HEIGHT) / ROW_HEIGHT;
-                    let row_idx = row_f as usize + self.scroll_offset;
-                    self.hovered_index = if row_idx < self.visible_indices.len() {
-                        Some(row_idx)
-                    } else {
-                        None
-                    };
-                } else {
-                    self.hovered_index = None;
-                }
+                self.hovered_index = self.row_at(my);
 
                 // Update context menu hover.
                 if let Some(ref mut menu) = self.context_menu {
@@ -1313,17 +1314,67 @@ impl ProcessExplorerState {
         }
     }
 
+    /// The y of the first process row -- the column header's bottom edge.
+    ///
+    /// This used to be spelled `content_y + HEADER_HEIGHT` in four places:
+    /// the three pointer paths and the renderer. Four copies of one number is
+    /// four chances for three of them to be updated.
+    const fn rows_top() -> f32 {
+        TOOLBAR_HEIGHT + TAB_BAR_HEIGHT + HEADER_HEIGHT
+    }
+
+    /// How tall the process-row area is, from `rows_top` to the status bar.
+    ///
+    /// The bottom edge existed in exactly one place -- the renderer's clip --
+    /// while the top edge existed in four. That asymmetry is the bug: the
+    /// clip stopped above the status bar and the hit tests did not, so a
+    /// click in the status bar was resolved to whatever row the arithmetic
+    /// extrapolated to below the last one drawn.
+    fn rows_height(&self) -> f32 {
+        (self.window_height as f32 - Self::rows_top() - STATUS_BAR_HEIGHT).max(0.0)
+    }
+
+    /// The process row under `my`, or `None` if the pointer is outside the
+    /// row area or past the end of the list.
+    ///
+    /// The single bound for all three pointer paths *and* the renderer's
+    /// clip. `my` is rejected above `rows_top`, at or below the status bar,
+    /// and beyond the last row -- and non-finite coordinates are rejected
+    /// outright rather than saturating through the `as usize` cast.
+    fn row_at(&self, my: f32) -> Option<usize> {
+        if self.active_tab != Tab::Processes {
+            return None;
+        }
+        let offset = my - Self::rows_top();
+        if !offset.is_finite() || offset < 0.0 || offset >= self.rows_height() {
+            return None;
+        }
+        #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
+        let slot = (offset / ROW_HEIGHT) as usize;
+        self.row_of_slot(slot)
+    }
+
+    /// The list index drawn in the `slot`-th visible row, or `None` past the
+    /// end of the list.
+    ///
+    /// The renderer and the hit test both need this mapping, and the last
+    /// place they could still disagree was here -- the renderer added the
+    /// offset with `+`, which panics on overflow in a debug build and wraps
+    /// in a release one, while the hit test used `checked_add`.
+    fn row_of_slot(&self, slot: usize) -> Option<usize> {
+        let row = self.scroll_offset.checked_add(slot)?;
+        if row < self.visible_indices.len() {
+            Some(row)
+        } else {
+            None
+        }
+    }
+
     /// Number of process rows visible in the current window.
     fn visible_row_count(&self) -> usize {
-        let content_h = self.window_height as f32
-            - TOOLBAR_HEIGHT
-            - TAB_BAR_HEIGHT
-            - STATUS_BAR_HEIGHT
-            - HEADER_HEIGHT;
-        if content_h <= 0.0 {
-            return 0;
-        }
-        (content_h / ROW_HEIGHT) as usize
+        #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
+        let rows = (self.rows_height() / ROW_HEIGHT) as usize;
+        rows
     }
 
     // ========================================================================
@@ -1497,8 +1548,9 @@ impl ProcessExplorerState {
     /// Render the Processes tab: column headers + process rows.
     fn render_process_tab(&self, tree: &mut RenderTree) {
         let w = self.window_width as f32;
+        // The column header's *top*; `rows_top()` below is its bottom, which
+        // is where the rows -- and the hit test -- begin.
         let content_y = TOOLBAR_HEIGHT + TAB_BAR_HEIGHT;
-        let content_h = self.window_height as f32 - content_y - STATUS_BAR_HEIGHT;
 
         // Column headers
         tree.fill_rect(0.0, content_y, w, HEADER_HEIGHT, COLOR_HEADER_BG);
@@ -1547,19 +1599,19 @@ impl ProcessExplorerState {
             col_x += cw;
         }
 
-        // Process rows
-        let rows_y = content_y + HEADER_HEIGHT;
-        let row_area_h = content_h - HEADER_HEIGHT;
-        let visible_rows = if row_area_h > 0.0 {
-            (row_area_h / ROW_HEIGHT) as usize
-        } else {
-            0
-        };
+        // Process rows. Read from the same two helpers the hit test uses, so
+        // the clip below *is* the region the pointer is accepted in rather
+        // than a second opinion about it.
+        let rows_y = Self::rows_top();
+        let row_area_h = self.rows_height();
+        let visible_rows = self.visible_row_count();
 
         tree.clip(0.0, rows_y, w, row_area_h);
 
         for vis_i in 0..visible_rows {
-            let row_idx = vis_i + self.scroll_offset;
+            let Some(row_idx) = self.row_of_slot(vis_i) else {
+                break;
+            };
             let proc_vec_idx = match self.visible_indices.get(row_idx) {
                 Some(&idx) => idx,
                 None => break,
@@ -2977,6 +3029,289 @@ mod tests {
 
     use super::*;
     use guitk::event::MouseEvent;
+
+    // --- The wheel ---
+
+    /// A list of `n` processes, already filtered so `visible_indices` is
+    /// populated, with the window at its default height.
+    fn app_with_processes(n: usize) -> ProcessExplorerState {
+        let mut app = ProcessExplorerState::new();
+        app.processes = (0..n)
+            .map(|i| {
+                make_demo_process(
+                    (i as u32).saturating_add(1),
+                    0,
+                    &format!("proc{i}"),
+                    ProcessStatus::Running,
+                    0.0,
+                    0,
+                    1,
+                    0,
+                    "user",
+                )
+            })
+            .collect();
+        app.rebuild_visible_list();
+        app
+    }
+
+    fn wheel(app: &mut ProcessExplorerState, dy: f32) {
+        app.handle_mouse(&MouseEvent {
+            x: 100.0,
+            y: 300.0,
+            kind: MouseEventKind::Scroll { dx: 0.0, dy },
+        });
+    }
+
+    /// One detent is three rows, in the direction the delta reports.
+    #[test]
+    fn one_wheel_notch_moves_three_rows() {
+        let mut app = app_with_processes(500);
+        wheel(&mut app, -1.0);
+        assert_eq!(app.scroll_offset, 3);
+        wheel(&mut app, 1.0);
+        assert_eq!(app.scroll_offset, 0);
+    }
+
+    /// A precision device sends fractions of a notch. Reading only the sign --
+    /// which is what this did -- moved three rows for each of them, so a
+    /// trackpad ran five times too fast and could not move a single row.
+    #[test]
+    fn a_trackpads_fractions_add_up_instead_of_scrolling_five_times_too_far() {
+        let mut app = app_with_processes(500);
+        for _ in 0..5 {
+            wheel(&mut app, -0.2);
+        }
+        assert_eq!(app.scroll_offset, 3);
+    }
+
+    /// The list stops with its last row at the *bottom* of the pane. The bound
+    /// used to be `len - 1`, which let a long list scroll until one row sat
+    /// above a screenful of nothing.
+    #[test]
+    fn scrolling_to_the_end_leaves_a_full_pane_of_rows() {
+        let mut app = app_with_processes(500);
+        let capacity = app.visible_row_count();
+        assert!(capacity > 1, "the default window must fit several rows");
+        for _ in 0..500 {
+            wheel(&mut app, -1.0);
+        }
+        assert_eq!(app.scroll_offset, 500usize.saturating_sub(capacity));
+    }
+
+    /// A list shorter than the pane cannot scroll at all -- `len - capacity`
+    /// must saturate rather than underflow.
+    #[test]
+    fn a_list_shorter_than_the_pane_does_not_scroll() {
+        let mut app = app_with_processes(3);
+        wheel(&mut app, -1.0);
+        assert_eq!(app.scroll_offset, 0);
+    }
+
+    // --- The row area's edges ---
+
+    fn press(app: &mut ProcessExplorerState, button: MouseButton, my: f32) {
+        app.selected_index = None;
+        app.context_menu = None;
+        app.handle_mouse(&MouseEvent {
+            x: 100.0,
+            y: my,
+            kind: MouseEventKind::Press(button),
+        });
+    }
+
+    fn hover(app: &mut ProcessExplorerState, my: f32) {
+        app.hovered_index = None;
+        app.handle_mouse(&MouseEvent {
+            x: 100.0,
+            y: my,
+            kind: MouseEventKind::Move,
+        });
+    }
+
+    /// The rectangle the renderer actually clipped the process rows to.
+    ///
+    /// Read out of the emitted commands rather than recomputed from the
+    /// constants. Recomputing is what makes a layout test worthless: it
+    /// re-derives the renderer's arithmetic and then checks the hit test
+    /// against *that*, so the two can drift together and the test still
+    /// passes. This asks the renderer what it drew.
+    fn rows_clip(app: &ProcessExplorerState) -> (f32, f32) {
+        app.render()
+            .commands
+            .iter()
+            .find_map(|cmd| match cmd {
+                RenderCommand::PushClip { x, y, height, .. } if *x == 0.0 => Some((*y, *height)),
+                _ => None,
+            })
+            .expect("the process rows are drawn under a clip")
+    }
+
+    #[test]
+    // Exact equality is the assertion, not an approximation of it: the
+    // renderer passes these two helpers' return values straight into the
+    // clip, so anything short of bit-for-bit identity means a third copy of
+    // the arithmetic has appeared -- which is the bug being pinned.
+    #[allow(clippy::float_cmp)]
+    fn the_lists_clip_is_the_region_the_hit_test_accepts() {
+        let mut app = app_with_processes(500);
+        let (clip_y, clip_h) = rows_clip(&app);
+        assert_eq!(clip_y, ProcessExplorerState::rows_top());
+        assert_eq!(clip_h, app.rows_height());
+
+        hover(&mut app, clip_y);
+        assert!(app.hovered_index.is_some(), "the clip's top edge is dead");
+        hover(&mut app, clip_y + clip_h - 0.5);
+        assert!(
+            app.hovered_index.is_some(),
+            "the clip's bottom edge is dead"
+        );
+        hover(&mut app, clip_y + clip_h);
+        assert_eq!(
+            app.hovered_index, None,
+            "the hit test runs past the clip the rows are painted in"
+        );
+    }
+
+    #[test]
+    fn the_status_bar_does_not_select_a_process() {
+        // The bug: the row hit test had no lower bound, so it ran under the
+        // opaque status bar and out to the bottom of the window.
+        let mut app = app_with_processes(500);
+        let in_status_bar = app.window_height as f32 - (STATUS_BAR_HEIGHT / 2.0);
+        press(&mut app, MouseButton::Left, in_status_bar);
+        assert_eq!(app.selected_index, None);
+    }
+
+    #[test]
+    fn the_status_bar_does_not_open_the_kill_menu() {
+        // The one that matters: this menu's actions include killing the
+        // process it was opened over, and it was being opened over a process
+        // the pointer was nowhere near.
+        let mut app = app_with_processes(500);
+        let in_status_bar = app.window_height as f32 - (STATUS_BAR_HEIGHT / 2.0);
+        press(&mut app, MouseButton::Right, in_status_bar);
+        assert!(app.context_menu.is_none());
+        assert_eq!(app.selected_index, None);
+    }
+
+    #[test]
+    fn hovering_the_status_bar_leaves_no_row_lit() {
+        let mut app = app_with_processes(500);
+        let in_status_bar = app.window_height as f32 - (STATUS_BAR_HEIGHT / 2.0);
+        hover(&mut app, in_status_bar);
+        assert_eq!(app.hovered_index, None);
+    }
+
+    #[test]
+    fn the_column_header_is_not_the_first_row() {
+        // Above the rows, not below them. `rows_top` is the header's *bottom*,
+        // so a click one pixel above it must sort, not select.
+        let mut app = app_with_processes(500);
+        press(
+            &mut app,
+            MouseButton::Left,
+            ProcessExplorerState::rows_top() - 1.0,
+        );
+        assert_eq!(app.selected_index, None);
+    }
+
+    #[test]
+    fn empty_space_below_a_short_list_selects_nothing() {
+        // Inside the row area but past the end of the list. A different
+        // rejection from the status-bar one: here the pointer is over a
+        // legitimate part of the pane that simply has no row in it.
+        let mut app = app_with_processes(3);
+        let (clip_y, clip_h) = rows_clip(&app);
+        let below_last = clip_y + 3.0 * ROW_HEIGHT + 1.0;
+        assert!(below_last < clip_y + clip_h, "the pane must fit >3 rows");
+        press(&mut app, MouseButton::Left, below_last);
+        assert_eq!(app.selected_index, None);
+        hover(&mut app, below_last);
+        assert_eq!(app.hovered_index, None);
+    }
+
+    #[test]
+    fn the_three_pointer_paths_agree_on_every_row_edge() {
+        // Left click, right click and hover each had their own copy of the
+        // arithmetic. Probe every row's top and bottom edge through all
+        // three and require the same answer.
+        let mut app = app_with_processes(500);
+        let (clip_y, clip_h) = rows_clip(&app);
+        let rows = app.visible_row_count();
+        for slot in 0..rows {
+            for probe in [
+                clip_y + slot as f32 * ROW_HEIGHT,
+                clip_y + (slot as f32 + 1.0) * ROW_HEIGHT - 0.5,
+            ] {
+                if probe >= clip_y + clip_h {
+                    continue;
+                }
+                press(&mut app, MouseButton::Left, probe);
+                let left = app.selected_index;
+                press(&mut app, MouseButton::Right, probe);
+                let right = app.selected_index;
+                hover(&mut app, probe);
+                let moved = app.hovered_index;
+                assert_eq!(left, Some(slot), "left click at {probe}");
+                assert_eq!(right, left, "right click disagrees at {probe}");
+                assert_eq!(moved, left, "hover disagrees at {probe}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_scrolled_list_selects_the_row_it_draws() {
+        // The offset must be added to the slot, not to a row index that
+        // already includes it.
+        let mut app = app_with_processes(500);
+        wheel(&mut app, -4.0); // 12 rows
+        assert_eq!(app.scroll_offset, 12);
+        press(
+            &mut app,
+            MouseButton::Left,
+            ProcessExplorerState::rows_top() + 0.5,
+        );
+        assert_eq!(app.selected_index, Some(12));
+    }
+
+    #[test]
+    // `max(0.0)` returns a literal zero, so the comparison is exact.
+    #[allow(clippy::float_cmp)]
+    fn a_window_shorter_than_its_own_chrome_has_no_rows() {
+        // `rows_height` clamps at zero rather than going negative, so every
+        // probe is rejected by the bound rather than by an accident of sign.
+        let mut app = app_with_processes(500);
+        app.window_height = 10;
+        assert_eq!(app.rows_height(), 0.0);
+        assert_eq!(app.visible_row_count(), 0);
+        press(&mut app, MouseButton::Left, 5.0);
+        assert_eq!(app.selected_index, None);
+    }
+
+    #[test]
+    fn a_nonfinite_coordinate_selects_nothing() {
+        let mut app = app_with_processes(500);
+        for y in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+            press(&mut app, MouseButton::Left, y);
+            assert_eq!(app.selected_index, None, "selected on {y}");
+            hover(&mut app, y);
+            assert_eq!(app.hovered_index, None, "hovered on {y}");
+        }
+    }
+
+    #[test]
+    fn another_tab_has_no_process_rows() {
+        // Every path is gated on the Processes tab; `row_at` carries that
+        // gate now instead of each caller repeating it.
+        let mut app = app_with_processes(500);
+        app.active_tab = Tab::System;
+        let mid = ProcessExplorerState::rows_top() + ROW_HEIGHT / 2.0;
+        press(&mut app, MouseButton::Left, mid);
+        assert_eq!(app.selected_index, None);
+        hover(&mut app, mid);
+        assert_eq!(app.hovered_index, None);
+    }
 
     // --- Table cells stay in their columns ---
 

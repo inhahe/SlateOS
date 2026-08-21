@@ -24,6 +24,7 @@ use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 use guitk::rng::{seeded_from_system, RandomSource, SeededRng};
 #[allow(unused_imports)]
 use guitk::style::CornerRadii;
+use guitk::wheel;
 
 use std::collections::VecDeque;
 use std::f32::consts::PI;
@@ -81,6 +82,16 @@ const HISTORY_Y: f32 = 420.0;
 const HISTORY_WIDTH: f32 = 300.0;
 const HISTORY_HEIGHT: f32 = 260.0;
 const HISTORY_ROW_HEIGHT: f32 = 26.0;
+/// Height of the history panel's title bar, above the list.
+const HISTORY_HEADER_HEIGHT: f32 = 30.0;
+/// Height of the opaque avg/best/worst strip at the foot of the history panel.
+///
+/// It is painted *over* the bottom of the list area, so it is part of the
+/// list's geometry whether the list likes it or not: a row underneath it is
+/// drawn nowhere, and so must not be reachable or scrollable-to either. Both
+/// were literals before, which is how the hit test came to accept clicks on a
+/// strip of panel where nothing is visible.
+const HISTORY_STATS_HEIGHT: f32 = 24.0;
 const BUTTON_WIDTH: f32 = 140.0;
 const BUTTON_HEIGHT: f32 = 36.0;
 const PHASE_INDICATOR_Y: f32 = 370.0;
@@ -968,6 +979,11 @@ impl SpeedTestUI {
 
         self.current_speed_mbps = result.download_mbps;
         self.history.push(result);
+        // The list just changed length -- and once it is at `MAX_HISTORY` a
+        // push also *drops* the oldest, so the content can shrink back under
+        // the offset. Re-clamping here is what stops a full history leaving
+        // the view parked past its own end.
+        self.clamp_history_scroll();
         self.phase = SpeedTestPhase::Complete;
     }
 
@@ -992,6 +1008,117 @@ impl SpeedTestUI {
         self.server_dropdown_open = false;
     }
 
+    // ========================================================================
+    // History list layout
+    //
+    // One description of where the history rows are, shared by the renderer,
+    // the hit test and the scroll bound. It used to be three descriptions --
+    // and they disagreed, in every way three copies of the same arithmetic
+    // can: see `history_rows` for the mirrored hover and
+    // `history_viewport_height` for the clickable strip that shows nothing.
+    // ========================================================================
+
+    /// Y of the first pixel of the list, below the panel's title.
+    const fn history_list_top() -> f32 {
+        HISTORY_Y + HISTORY_HEADER_HEIGHT
+    }
+
+    /// Height of the strip of the panel the list is actually *visible* in.
+    ///
+    /// Not simply `HISTORY_HEIGHT - HISTORY_HEADER_HEIGHT`: the stats strip is
+    /// opaque and covers the bottom of that area. The hit test used the
+    /// panel's full height, so the bottom 24 px selected a row that the stats
+    /// strip had painted over -- pointing at "avg 84.2 Mbps" highlighted a
+    /// result you could not see.
+    fn history_viewport_height(&self) -> f32 {
+        let stats = if self.history.is_empty() {
+            0.0
+        } else {
+            HISTORY_STATS_HEIGHT
+        };
+        HISTORY_HEIGHT - HISTORY_HEADER_HEIGHT - stats
+    }
+
+    /// Every history row in draw order, as `(screen y of its top, index into
+    /// the history)`.
+    ///
+    /// The scroll offset is already applied, so the renderer and the hit test
+    /// do not merely agree on the formula -- they read the same numbers.
+    ///
+    /// The index mapping is the point. The list is drawn newest-first, so draw
+    /// position `i` is history index `len - 1 - i`. That reversal lived only
+    /// in the renderer; the hit test stored the raw draw position in
+    /// `history_hover`, which the renderer then matched against a history
+    /// index. The list was therefore mirrored: hovering the newest result
+    /// highlighted the oldest, and the middle row was the only one that
+    /// highlighted itself.
+    fn history_rows(&self) -> Vec<(f32, usize)> {
+        let top = Self::history_list_top() - self.history_scroll;
+        // `.rev()` *is* the newest-first ordering, and `enumerate` then gives
+        // the draw position -- so the reversal is one call rather than an
+        // index subtraction that has to be trusted not to underflow.
+        (0..self.history.len())
+            .rev()
+            .enumerate()
+            .map(|(draw_pos, idx)| (top + draw_pos as f32 * HISTORY_ROW_HEIGHT, idx))
+            .collect()
+    }
+
+    /// How far the list can scroll before its last row sits on the bottom of
+    /// the viewport.
+    ///
+    /// `history_scroll` had no upper bound because nothing knew how tall the
+    /// list was -- the row height and the panel geometry were literals spread
+    /// across the renderer. Deriving it from the measured content is what lets
+    /// the wheel stop rather than walking the list off into empty space.
+    pub fn max_history_scroll(&self) -> f32 {
+        let content = self.history.len() as f32 * HISTORY_ROW_HEIGHT;
+        (content - self.history_viewport_height()).max(0.0)
+    }
+
+    /// Pull the offset back inside its bounds after the list or the panel
+    /// changed shape under it.
+    fn clamp_history_scroll(&mut self) {
+        self.history_scroll = self.history_scroll.clamp(0.0, self.max_history_scroll());
+    }
+
+    /// Scroll the history by `delta` pixels, clamped at both ends.
+    fn scroll_history_by(&mut self, delta: f32) {
+        if !delta.is_finite() {
+            return;
+        }
+        self.history_scroll += delta;
+        self.clamp_history_scroll();
+    }
+
+    /// Whether `(x, y)` is anywhere over the history panel.
+    ///
+    /// Used to decide whether the wheel belongs to the history, so spinning it
+    /// over the gauge does not scroll a list on the other side of the window.
+    fn over_history(x: f32, y: f32) -> bool {
+        (HISTORY_X..=HISTORY_X + HISTORY_WIDTH).contains(&x)
+            && (HISTORY_Y..=HISTORY_Y + HISTORY_HEIGHT).contains(&y)
+    }
+
+    /// The history index under `(x, y)`, if a row is drawn there.
+    ///
+    /// The single hit test: click and hover both go through it, so the two can
+    /// no longer disagree about what the pointer is on.
+    fn history_row_at(&self, x: f32, y: f32) -> Option<usize> {
+        if !(HISTORY_X..=HISTORY_X + HISTORY_WIDTH).contains(&x) {
+            return None;
+        }
+        let top = Self::history_list_top();
+        let bottom = top + self.history_viewport_height();
+        if y < top || y >= bottom {
+            return None;
+        }
+        self.history_rows()
+            .into_iter()
+            .find(|&(ry, _)| y >= ry && y < ry + HISTORY_ROW_HEIGHT)
+            .map(|(_, idx)| idx)
+    }
+
     /// Handle a UI event (keyboard or mouse).
     pub fn handle_event(&mut self, event: &Event) -> EventResult {
         match event {
@@ -1002,6 +1129,25 @@ impl SpeedTestUI {
                 match mouse_event.kind {
                     MouseEventKind::Press(MouseButton::Left) => self.handle_click(x, y),
                     MouseEventKind::Move => self.handle_mouse_move(x, y),
+                    // There was no wheel handler at all, and nothing else ever
+                    // wrote `history_scroll` -- so with `MAX_HISTORY` of 20
+                    // rows of 26 px in a 206 px viewport, twelve of the twenty
+                    // results were drawn nowhere and reachable by nothing.
+                    //
+                    // `dy` is a *notch count*, not a distance (see
+                    // `guitk::wheel`), and `pixels` rather than an
+                    // `Accumulator` because `history_scroll` is an `f32` and
+                    // can therefore hold a trackpad's fraction of a notch
+                    // directly, with no need to bank it until it becomes a
+                    // whole row.
+                    MouseEventKind::Scroll { dy, .. } => {
+                        if Self::over_history(x, y) {
+                            self.scroll_history_by(wheel::pixels(dy, HISTORY_ROW_HEIGHT));
+                            EventResult::Consumed
+                        } else {
+                            EventResult::Ignored
+                        }
+                    }
                     _ => EventResult::Ignored,
                 }
             }
@@ -1089,18 +1235,11 @@ impl SpeedTestUI {
         }
 
         // History items.
-        let hist_content_y = HISTORY_Y + 30.0;
-        if (HISTORY_X..=HISTORY_X + HISTORY_WIDTH).contains(&x)
-            && y >= hist_content_y
-            && y <= hist_content_y + HISTORY_HEIGHT - 30.0
-        {
-            let idx = ((y - hist_content_y + self.history_scroll) / HISTORY_ROW_HEIGHT) as usize;
-            if idx < self.history.len() {
-                // Selecting a history item could show details; for now just
-                // highlight it.
-                self.history_hover = Some(idx);
-                return EventResult::Consumed;
-            }
+        if let Some(idx) = self.history_row_at(x, y) {
+            // Selecting a history item could show details; for now just
+            // highlight it.
+            self.history_hover = Some(idx);
+            return EventResult::Consumed;
         }
 
         EventResult::Ignored
@@ -1119,20 +1258,7 @@ impl SpeedTestUI {
             x >= export_x && x <= export_x + 100.0 && y >= export_y && y <= export_y + 28.0;
 
         // History hover.
-        let hist_content_y = HISTORY_Y + 30.0;
-        if (HISTORY_X..=HISTORY_X + HISTORY_WIDTH).contains(&x)
-            && y >= hist_content_y
-            && y <= hist_content_y + HISTORY_HEIGHT - 30.0
-        {
-            let idx = ((y - hist_content_y + self.history_scroll) / HISTORY_ROW_HEIGHT) as usize;
-            self.history_hover = if idx < self.history.len() {
-                Some(idx)
-            } else {
-                None
-            };
-        } else {
-            self.history_hover = None;
-        }
+        self.history_hover = self.history_row_at(x, y);
 
         EventResult::Ignored
     }
@@ -1815,8 +1941,8 @@ impl SpeedTestUI {
             overflow: TextOverflow::Clip,
         });
 
-        let content_y = HISTORY_Y + 30.0;
-        let content_h = HISTORY_HEIGHT - 30.0;
+        let content_y = Self::history_list_top();
+        let content_h = self.history_viewport_height();
 
         // Clip to history area.
         tree.push(RenderCommand::PushClip {
@@ -1838,17 +1964,20 @@ impl SpeedTestUI {
                 overflow: TextOverflow::Ellipsis,
             });
         } else {
-            // Show results newest-first.
-            let results: Vec<&SpeedTestResult> = self.history.results().iter().rev().collect();
-            for (i, result) in results.iter().enumerate() {
-                let ry = content_y + i as f32 * HISTORY_ROW_HEIGHT - self.history_scroll;
-                if ry + HISTORY_ROW_HEIGHT < content_y || ry > content_y + content_h {
+            // Newest-first, and in the same order the hit test reads: both go
+            // through `history_rows`, which is what stops the highlight
+            // landing on a different row from the pointer.
+            let results = self.history.results();
+            for (ry, idx) in self.history_rows() {
+                if ry + HISTORY_ROW_HEIGHT <= content_y || ry >= content_y + content_h {
                     continue;
                 }
+                let Some(result) = results.get(idx) else {
+                    continue;
+                };
 
                 // Hover highlight.
-                let rev_idx = self.history.len().saturating_sub(1).saturating_sub(i);
-                if self.history_hover == Some(rev_idx) {
+                if self.history_hover == Some(idx) {
                     tree.push(RenderCommand::FillRect {
                         x: HISTORY_X + 4.0,
                         y: ry,
@@ -1985,6 +2114,9 @@ mod tests {
     )]
 
     use super::*;
+    // Not in the production imports above, because nothing outside the tests
+    // builds a `MouseEvent` -- the app only ever destructures one.
+    use guitk::event::MouseEvent;
 
     // --- SpeedTestPhase tests ---
 
@@ -2655,6 +2787,309 @@ mod tests {
             report.contains("Server:       Metro East\n"),
             "folding altered a name that needed no folding: {report:?}",
         );
+    }
+
+    // ====================================================================
+    // History list: layout, hit test and wheel
+    //
+    // The regression suite for a list whose renderer and hit test each had
+    // their own copy of the layout arithmetic. Every position below is read
+    // out of `render()`'s own commands rather than from the layout helpers,
+    // because a test that asks the layout where a row is cannot catch the
+    // drawing and the clicking disagreeing -- both would be wrong together
+    // and the test would still pass. That is exactly how the mirrored
+    // highlight survived a test suite for as long as it did.
+    // ====================================================================
+
+    /// An x well inside the history panel.
+    const HIST_X: f32 = HISTORY_X + 20.0;
+
+    /// An app holding `n` results, each identifiable by its download speed
+    /// and therefore by the summary line drawn for it.
+    fn ui_with_history(n: usize) -> SpeedTestUI {
+        let mut ui = SpeedTestUI::new();
+        for i in 0..n {
+            ui.history.push(make_result(i as f64, 50.0, 10.0));
+        }
+        ui
+    }
+
+    /// Where the renderer actually painted each history row, read out of the
+    /// render commands: `(y of the row's top, the summary line drawn there)`.
+    fn painted_rows(ui: &SpeedTestUI) -> Vec<(f32, String)> {
+        ui.render()
+            .commands
+            .iter()
+            .filter_map(|cmd| match cmd {
+                RenderCommand::Text {
+                    x,
+                    y,
+                    text,
+                    font_size,
+                    ..
+                } if *x == HISTORY_X + 12.0 && *font_size == 10.0 => Some((*y - 6.0, text.clone())),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Where the renderer painted the hover highlight, if it painted one.
+    fn painted_highlight(ui: &SpeedTestUI) -> Option<f32> {
+        ui.render().commands.iter().find_map(|cmd| match cmd {
+            RenderCommand::FillRect { x, y, height, .. }
+                if *x == HISTORY_X + 4.0 && *height == HISTORY_ROW_HEIGHT =>
+            {
+                Some(*y)
+            }
+            _ => None,
+        })
+    }
+
+    fn hover(ui: &mut SpeedTestUI, y: f32) {
+        ui.handle_event(&Event::Mouse(MouseEvent {
+            x: HIST_X,
+            y,
+            kind: MouseEventKind::Move,
+        }));
+    }
+
+    fn wheel_over_history(ui: &mut SpeedTestUI, dy: f32) -> EventResult {
+        ui.handle_event(&Event::Mouse(MouseEvent {
+            x: HIST_X,
+            y: HISTORY_Y + 60.0,
+            kind: MouseEventKind::Scroll { dx: 0.0, dy },
+        }))
+    }
+
+    /// The regression test for a list drawn upside down relative to the way
+    /// it was pointed at.
+    ///
+    /// The renderer reversed the history so the newest result was on top; the
+    /// hit test stored the raw draw position, which the renderer then compared
+    /// against a *history* index. Pointing at the top row therefore lit up the
+    /// bottom one. Only the middle row of an odd-length list highlighted
+    /// itself, which is why a spot check could miss it entirely.
+    #[test]
+    fn the_highlight_lands_on_the_row_the_pointer_is_over() {
+        let mut ui = ui_with_history(5);
+        let rows = painted_rows(&ui);
+        assert_eq!(rows.len(), 5, "all five rows should fit");
+
+        for (top, _) in rows {
+            hover(&mut ui, top + HISTORY_ROW_HEIGHT / 2.0);
+            assert_eq!(
+                painted_highlight(&ui),
+                Some(top),
+                "hovering the row drawn at y={top} highlighted a different row",
+            );
+        }
+    }
+
+    /// Clicking must name the same row as hovering, and the row it draws.
+    #[test]
+    fn clicking_a_row_highlights_the_row_it_is_drawn_in() {
+        let mut ui = ui_with_history(5);
+        for (top, _) in painted_rows(&ui) {
+            let y = top + HISTORY_ROW_HEIGHT / 2.0;
+            ui.history_hover = None;
+            assert_eq!(
+                ui.handle_event(&Event::Mouse(MouseEvent {
+                    x: HIST_X,
+                    y,
+                    kind: MouseEventKind::Press(MouseButton::Left),
+                })),
+                EventResult::Consumed,
+            );
+            assert_eq!(painted_highlight(&ui), Some(top));
+        }
+    }
+
+    /// A row's hit rectangle is the whole of the rectangle it is painted in
+    /// and nothing beyond it. Probing the edges is what makes the hit test
+    /// independent of the renderer; probing centres alone passes just as
+    /// happily when both regions are shifted together.
+    #[test]
+    fn a_rows_hit_rectangle_is_exactly_the_rectangle_it_is_painted_in() {
+        let mut ui = ui_with_history(5);
+        for (top, _) in painted_rows(&ui) {
+            hover(&mut ui, top);
+            let at_top = ui.history_hover;
+            hover(&mut ui, top + HISTORY_ROW_HEIGHT / 2.0);
+            let middle = ui.history_hover;
+            hover(&mut ui, top + HISTORY_ROW_HEIGHT - 0.5);
+            let at_bottom = ui.history_hover;
+            assert!(middle.is_some(), "nothing painted at y={top} is hoverable");
+            assert_eq!(
+                at_top, middle,
+                "the row's top edge is not where it is drawn"
+            );
+            assert_eq!(
+                at_bottom, middle,
+                "the row's bottom edge is not where it is drawn"
+            );
+        }
+    }
+
+    /// The newest result goes on top -- the ordering the renderer's `rev()`
+    /// was there to produce, now stated where a change to `history_rows` has
+    /// to answer for it.
+    #[test]
+    fn the_newest_result_is_drawn_in_the_top_row() {
+        let ui = ui_with_history(4);
+        let rows = painted_rows(&ui);
+        assert_eq!(rows[0].1, make_result(3.0, 50.0, 10.0).summary_line());
+        assert_eq!(rows[3].1, make_result(0.0, 50.0, 10.0).summary_line());
+    }
+
+    /// The stats strip at the foot of the panel is opaque and painted over
+    /// the list. A row underneath it is drawn nowhere, so it must not be
+    /// hoverable -- the hit test used the panel's full height and happily
+    /// selected an invisible result when the pointer was on "avg 84.2 Mbps".
+    #[test]
+    fn a_row_under_the_stats_strip_cannot_be_pointed_at() {
+        let mut ui = ui_with_history(MAX_HISTORY);
+        let strip_top = HISTORY_Y + HISTORY_HEIGHT - HISTORY_STATS_HEIGHT;
+        // Inside the panel, below the visible list, above the panel's foot.
+        hover(&mut ui, strip_top + HISTORY_STATS_HEIGHT / 2.0);
+        assert_eq!(ui.history_hover, None);
+        // No row begins under the strip either. A row *straddling* the edge is
+        // fine -- the clip below cuts it -- but one starting past it would be
+        // drawn nowhere at all.
+        assert!(
+            painted_rows(&ui).iter().all(|&(top, _)| top < strip_top),
+            "a row was drawn entirely under the stats strip",
+        );
+    }
+
+    /// The clip the renderer pushes and the bound the hit test enforces must
+    /// be the same rectangle.
+    ///
+    /// This is the invariant the whole refactor rests on, stated directly:
+    /// they were two separate expressions before, and the hit test's ran to
+    /// the foot of the panel while the renderer's stopped at the stats strip.
+    /// Reading the clip out of the render commands is what keeps the two
+    /// honest, since neither test nor hit test may consult the other's copy.
+    #[test]
+    fn the_lists_clip_is_the_region_the_hit_test_accepts() {
+        let ui = ui_with_history(MAX_HISTORY);
+        let clip = ui
+            .render()
+            .commands
+            .iter()
+            .find_map(|cmd| match cmd {
+                RenderCommand::PushClip { x, y, height, .. } if *x == HISTORY_X => {
+                    Some((*y, *height))
+                }
+                _ => None,
+            })
+            .expect("the history list is drawn under a clip");
+        assert_eq!(clip.0, SpeedTestUI::history_list_top());
+        assert_eq!(clip.1, ui.history_viewport_height());
+
+        // And the hit test agrees at both edges of that rectangle.
+        let mut ui = ui;
+        hover(&mut ui, clip.0);
+        assert!(ui.history_hover.is_some(), "the clip's top edge is dead");
+        hover(&mut ui, clip.0 + clip.1 - 0.5);
+        assert!(ui.history_hover.is_some(), "the clip's bottom edge is dead");
+        hover(&mut ui, clip.0 + clip.1);
+        assert_eq!(ui.history_hover, None, "the hit test runs past the clip");
+    }
+
+    /// `MouseEventKind::Scroll` carries notches. Three rows a notch is the
+    /// toolkit's shared convention; a handler that treated `dy` as a pixel
+    /// count would move a fortieth of this.
+    #[test]
+    fn one_wheel_notch_moves_three_history_rows() {
+        let mut ui = ui_with_history(MAX_HISTORY);
+        assert_eq!(wheel_over_history(&mut ui, -1.0), EventResult::Consumed);
+        assert_eq!(ui.history_scroll, 3.0 * HISTORY_ROW_HEIGHT);
+    }
+
+    /// A trackpad sends fractions of a notch, and the offset is an `f32`, so
+    /// they move the list now rather than being banked or truncated away.
+    #[test]
+    fn a_fraction_of_a_notch_moves_the_history_now() {
+        let mut ui = ui_with_history(MAX_HISTORY);
+        wheel_over_history(&mut ui, -0.2);
+        assert!(ui.history_scroll > 0.0 && ui.history_scroll < HISTORY_ROW_HEIGHT);
+    }
+
+    /// The wheel stops with the last row on screen. `history_scroll` had no
+    /// upper bound because nothing knew the list's height -- and no wheel
+    /// handler at all, so twelve of twenty results were unreachable.
+    #[test]
+    fn the_wheel_stops_with_the_last_row_on_screen() {
+        let mut ui = ui_with_history(MAX_HISTORY);
+        for _ in 0..50 {
+            wheel_over_history(&mut ui, -1.0);
+        }
+        assert_eq!(ui.history_scroll, ui.max_history_scroll());
+        assert!(ui.max_history_scroll() > 0.0, "this list should scroll");
+
+        let rows = painted_rows(&ui);
+        let last = rows.last().expect("some rows are drawn");
+        assert_eq!(last.1, make_result(0.0, 50.0, 10.0).summary_line());
+        assert!(
+            last.0 + HISTORY_ROW_HEIGHT <= list_bottom(&ui) + 0.01,
+            "the oldest row hangs past the bottom of the viewport",
+        );
+    }
+
+    /// The lowest y the list is visible at -- the top of the stats strip.
+    fn list_bottom(ui: &SpeedTestUI) -> f32 {
+        SpeedTestUI::history_list_top() + ui.history_viewport_height()
+    }
+
+    /// A list shorter than its viewport does not scroll at all.
+    #[test]
+    fn a_short_history_does_not_scroll() {
+        let mut ui = ui_with_history(3);
+        assert_eq!(ui.max_history_scroll(), 0.0);
+        wheel_over_history(&mut ui, -5.0);
+        assert_eq!(ui.history_scroll, 0.0);
+    }
+
+    /// The wheel elsewhere in the window leaves the history where it is.
+    #[test]
+    fn scrolling_outside_the_panel_leaves_the_history_alone() {
+        let mut ui = ui_with_history(MAX_HISTORY);
+        let before = ui.history_scroll;
+        let res = ui.handle_event(&Event::Mouse(MouseEvent {
+            x: GAUGE_CENTER_X,
+            y: GAUGE_CENTER_Y,
+            kind: MouseEventKind::Scroll { dx: 0.0, dy: -3.0 },
+        }));
+        assert_eq!(res, EventResult::Ignored);
+        assert_eq!(ui.history_scroll, before);
+    }
+
+    /// A non-finite delta must not poison the offset -- once it is NaN every
+    /// later comparison is false and the list never moves again.
+    #[test]
+    fn a_nonfinite_delta_does_not_freeze_the_history() {
+        let mut ui = ui_with_history(MAX_HISTORY);
+        wheel_over_history(&mut ui, f32::NAN);
+        wheel_over_history(&mut ui, f32::INFINITY);
+        assert!(ui.history_scroll.is_finite());
+        wheel_over_history(&mut ui, -1.0);
+        assert_eq!(ui.history_scroll, 3.0 * HISTORY_ROW_HEIGHT);
+    }
+
+    /// Scrolled to the end, a new result both lengthens the list and evicts
+    /// the oldest once it is full -- so the offset has to be re-checked, or
+    /// the view is left parked past the end of a list that no longer reaches.
+    #[test]
+    fn recording_a_result_pulls_a_scrolled_view_back_inside() {
+        let mut ui = ui_with_history(MAX_HISTORY);
+        for _ in 0..50 {
+            wheel_over_history(&mut ui, -1.0);
+        }
+        let at_end = ui.history_scroll;
+        ui.history.push(make_result(99.0, 50.0, 10.0));
+        ui.clamp_history_scroll();
+        assert!(ui.history_scroll <= ui.max_history_scroll());
+        assert_eq!(ui.history_scroll, at_end, "a full list's height is fixed");
     }
 
     // --- Test helper ---

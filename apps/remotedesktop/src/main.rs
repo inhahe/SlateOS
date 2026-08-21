@@ -28,6 +28,7 @@ use guitk::event::{Event, EventResult, Key, KeyEvent, Modifiers, MouseButton, Mo
 use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 #[allow(unused_imports)]
 use guitk::style::CornerRadii;
+use guitk::{scroll_window, wheel};
 
 use std::collections::VecDeque;
 
@@ -65,6 +66,17 @@ const TOOLBAR_HEIGHT: f32 = 36.0;
 const SIDEBAR_WIDTH: f32 = 260.0;
 const STATUS_BAR_HEIGHT: f32 = 28.0;
 const SIDEBAR_ITEM_HEIGHT: f32 = 52.0;
+/// Height of a group heading in the connections sidebar.
+///
+/// Named because two places need it and they must agree: the renderer that
+/// advances past a heading, and the hit-test that has to skip the same
+/// distance. It was a bare `22.0` in the renderer and absent altogether from
+/// the hit-test, which is how clicking a profile came to select another one.
+const SIDEBAR_HEADER_HEIGHT: f32 = 22.0;
+/// Distance from the top of the content area down to the first history row.
+const HISTORY_LIST_INSET: f32 = SECTION_PADDING + 32.0;
+/// Same for the file-transfer list, which has a row of buttons above it.
+const TRANSFER_LIST_INSET: f32 = SECTION_PADDING + 68.0;
 const SECTION_PADDING: f32 = 14.0;
 const FIELD_HEIGHT: f32 = 28.0;
 const FIELD_LABEL_WIDTH: f32 = 130.0;
@@ -600,8 +612,22 @@ pub struct RemoteDesktopApp {
     pub detail_tab: DetailTab,
 
     // --- Scroll state ---
-    pub sidebar_scroll: f32,
-    pub content_scroll: f32,
+    //
+    // Row indices, not pixels. As pixels these were wrong in three separate
+    // ways: nothing clamped the far end, so the sidebar would happily scroll
+    // a list clean off the top and show blank space; the renderer's geometry
+    // and the hit-test's geometry were derived independently and disagreed;
+    // and `content_scroll` was written by the wheel but never read by
+    // anything, so the history and transfer lists could not be scrolled at
+    // all. `scroll_window` now owns the clamping for all four lists.
+    pub sidebar_scroll: usize,
+    pub content_scroll: usize,
+
+    /// Sub-row remainders of a high-resolution wheel or trackpad — one per
+    /// scrollable region, so a fraction earned over the sidebar cannot
+    /// deliver a row in the content pane.
+    sidebar_wheel: wheel::Accumulator,
+    content_wheel: wheel::Accumulator,
 
     // --- Misc ---
     pub status_message: Option<String>,
@@ -611,6 +637,49 @@ pub struct RemoteDesktopApp {
 impl Default for RemoteDesktopApp {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// The shape of a scrollable list: how many rows, how tall each is, and how
+/// much vertical room they have.
+#[derive(Clone, Copy, Debug)]
+struct ListMetrics {
+    total: usize,
+    row_h: f32,
+    avail_h: f32,
+}
+
+/// One visual row of the connections sidebar, in draw order.
+///
+/// The sidebar interleaves group headings with the profiles under them, and
+/// the two are different heights. The renderer and the click hit-test both
+/// need that sequence, and when each derived it separately they disagreed —
+/// see [`RemoteDesktopApp::sidebar_rows`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SidebarRow {
+    /// A group heading. Occupies space but cannot be selected.
+    Header(String),
+    /// A profile, identified by its index in `profiles`.
+    Profile(usize),
+}
+
+impl SidebarRow {
+    /// How tall this row is drawn.
+    #[must_use]
+    pub fn height(&self) -> f32 {
+        match self {
+            Self::Header(_) => SIDEBAR_HEADER_HEIGHT,
+            Self::Profile(_) => SIDEBAR_ITEM_HEIGHT,
+        }
+    }
+
+    /// The profile this row selects, if it is selectable at all.
+    #[must_use]
+    pub fn profile(&self) -> Option<usize> {
+        match self {
+            Self::Header(_) => None,
+            Self::Profile(i) => Some(*i),
+        }
     }
 }
 
@@ -636,8 +705,10 @@ impl RemoteDesktopApp {
             escape_hotkey: Key::F11,
             current_view: MainView::Connections,
             detail_tab: DetailTab::General,
-            sidebar_scroll: 0.0,
-            content_scroll: 0.0,
+            sidebar_scroll: 0,
+            content_scroll: 0,
+            sidebar_wheel: wheel::Accumulator::default(),
+            content_wheel: wheel::Accumulator::default(),
             status_message: None,
             confirm_delete: None,
         };
@@ -841,9 +912,10 @@ impl RemoteDesktopApp {
             if self.profiles.is_empty() {
                 self.selected_profile = None;
             } else if let Some(sel) = self.selected_profile
-                && sel >= self.profiles.len() {
-                    self.selected_profile = Some(self.profiles.len().saturating_sub(1));
-                }
+                && sel >= self.profiles.len()
+            {
+                self.selected_profile = Some(self.profiles.len().saturating_sub(1));
+            }
             true
         } else {
             false
@@ -872,11 +944,7 @@ impl RemoteDesktopApp {
 
     /// Get all distinct group names.
     pub fn groups(&self) -> Vec<String> {
-        let mut groups: Vec<String> = self
-            .profiles
-            .iter()
-            .map(|p| p.group.clone())
-            .collect();
+        let mut groups: Vec<String> = self.profiles.iter().map(|p| p.group.clone()).collect();
         groups.sort();
         groups.dedup();
         groups
@@ -890,6 +958,108 @@ impl RemoteDesktopApp {
             .filter(|(_, p)| p.group == group)
             .map(|(i, _)| i)
             .collect()
+    }
+
+    /// The connections sidebar as it is actually laid out: each group heading
+    /// followed by the profiles in that group, in draw order.
+    ///
+    /// The single source of truth for that sequence, because two callers need
+    /// it and they used to derive it independently and disagree. The renderer
+    /// walked `groups()` and `profiles_in_group()`, placing a 22px heading
+    /// before each run; the hit-test divided the click's y by
+    /// `SIDEBAR_ITEM_HEIGHT` and used the quotient as an index straight into
+    /// `profiles`. That is a different sequence in two ways at once — the
+    /// headings occupy space the hit-test never accounted for, and `groups()`
+    /// sorts alphabetically, so profiles `[Work/A, Home/B]` draw as B-then-A
+    /// while the hit-test still answers A for the first row. Clicking a
+    /// profile selected a different profile.
+    #[must_use]
+    pub fn sidebar_rows(&self) -> Vec<SidebarRow> {
+        let mut rows = Vec::new();
+        for group in self.groups() {
+            let indices = self.profiles_in_group(&group);
+            rows.push(SidebarRow::Header(group));
+            rows.extend(indices.into_iter().map(SidebarRow::Profile));
+        }
+        rows
+    }
+
+    /// The heights of [`Self::sidebar_rows`], for `scroll_window`.
+    fn sidebar_row_heights(rows: &[SidebarRow]) -> Vec<f32> {
+        rows.iter().map(SidebarRow::height).collect()
+    }
+
+    /// Top of the main content area, below the title bar, toolbar and tabs.
+    #[must_use]
+    pub fn content_top() -> f32 {
+        TITLE_BAR_HEIGHT + TOOLBAR_HEIGHT + TAB_HEIGHT
+    }
+
+    /// Height of the main content area.
+    #[must_use]
+    pub fn content_height() -> f32 {
+        WINDOW_HEIGHT - Self::content_top() - STATUS_BAR_HEIGHT
+    }
+
+    /// The shape of whichever list the content pane is currently showing.
+    ///
+    /// Returned from one place and consumed by both the renderer and the
+    /// wheel's clamp, so that the two cannot come to disagree about where the
+    /// list ends — which is precisely the mistake the sidebar's hit-test made
+    /// against its own renderer.
+    fn content_list_metrics(&self) -> Option<ListMetrics> {
+        let avail = Self::content_height();
+        match self.current_view {
+            MainView::FileTransfer => Some(ListMetrics {
+                total: self.transfers.len(),
+                row_h: TRANSFER_ITEM_HEIGHT + 4.0,
+                avail_h: avail - TRANSFER_LIST_INSET,
+            }),
+            MainView::History => Some(ListMetrics {
+                total: self.history.len(),
+                row_h: HISTORY_ITEM_HEIGHT + 4.0,
+                avail_h: avail - HISTORY_LIST_INSET,
+            }),
+            MainView::Connections | MainView::ActiveSessions => None,
+        }
+    }
+
+    /// Which rows of the current content list are on screen.
+    fn content_rows(&self) -> scroll_window::Rows {
+        self.content_list_metrics()
+            .map_or(scroll_window::Rows::NONE, |m| {
+                scroll_window::visible(m.total, m.row_h, m.avail_h, self.content_scroll)
+            })
+    }
+
+    /// The furthest the content list can usefully be scrolled.
+    ///
+    /// `scroll_window` clamps what it *returns*, so rendering is already safe
+    /// for any offset; this clamps what is *stored*. Without it the offset
+    /// climbs forever while the view stays put, and the user then has to
+    /// scroll back exactly as far as they overshot before anything moves.
+    fn max_content_scroll(&self) -> usize {
+        self.content_list_metrics().map_or(0, |m| {
+            scroll_window::visible(m.total, m.row_h, m.avail_h, usize::MAX).start
+        })
+    }
+
+    /// The furthest the sidebar can usefully be scrolled, for the list the
+    /// current view puts there. See [`Self::max_content_scroll`].
+    fn max_sidebar_scroll(&self) -> usize {
+        let avail = Self::content_height();
+        match self.current_view {
+            MainView::Connections => {
+                let rows = self.sidebar_rows();
+                let heights = Self::sidebar_row_heights(&rows);
+                scroll_window::visible_variable(&heights, avail, usize::MAX).start
+            }
+            MainView::ActiveSessions => {
+                scroll_window::visible(self.sessions.len(), SIDEBAR_ITEM_HEIGHT, avail, usize::MAX)
+                    .start
+            }
+            MainView::FileTransfer | MainView::History => 0,
+        }
     }
 
     // ========================================================================
@@ -962,13 +1132,14 @@ impl RemoteDesktopApp {
         self.sessions
             .retain(|s| s.state != SessionState::Disconnected);
         if let Some(sel) = self.selected_session
-            && sel >= self.sessions.len() {
-                self.selected_session = if self.sessions.is_empty() {
-                    None
-                } else {
-                    Some(self.sessions.len().saturating_sub(1))
-                };
-            }
+            && sel >= self.sessions.len()
+        {
+            self.selected_session = if self.sessions.is_empty() {
+                None
+            } else {
+                Some(self.sessions.len().saturating_sub(1))
+            };
+        }
     }
 
     // ========================================================================
@@ -998,10 +1169,11 @@ impl RemoteDesktopApp {
     /// Cancel a transfer by index.
     pub fn cancel_transfer(&mut self, index: usize) -> bool {
         if let Some(t) = self.transfers.get_mut(index)
-            && (t.state == TransferState::Queued || t.state == TransferState::InProgress) {
-                t.state = TransferState::Cancelled;
-                return true;
-            }
+            && (t.state == TransferState::Queued || t.state == TransferState::InProgress)
+        {
+            t.state = TransferState::Cancelled;
+            return true;
+        }
         false
     }
 
@@ -1019,9 +1191,8 @@ impl RemoteDesktopApp {
 
     /// Clear completed/failed/cancelled transfers.
     pub fn clear_finished_transfers(&mut self) {
-        self.transfers.retain(|t| {
-            t.state == TransferState::Queued || t.state == TransferState::InProgress
-        });
+        self.transfers
+            .retain(|t| t.state == TransferState::Queued || t.state == TransferState::InProgress);
     }
 
     // ========================================================================
@@ -1052,12 +1223,13 @@ impl RemoteDesktopApp {
     pub fn apply_quality_preset(&mut self, preset: QualityPreset) {
         let (depth, rate, scaling) = preset.settings();
         if let Some(idx) = self.selected_profile
-            && let Some(profile) = self.profiles.get_mut(idx) {
-                profile.quality = preset;
-                profile.display.color_depth = depth;
-                profile.display.refresh_rate = rate;
-                profile.display.scaling = scaling;
-            }
+            && let Some(profile) = self.profiles.get_mut(idx)
+        {
+            profile.quality = preset;
+            profile.display.color_depth = depth;
+            profile.display.refresh_rate = rate;
+            profile.display.scaling = scaling;
+        }
     }
 
     /// Set monitor mode.
@@ -1154,11 +1326,20 @@ impl RemoteDesktopApp {
                 EventResult::Consumed
             }
             MouseEventKind::Scroll { dy, .. } => {
-                let x = mouse.x;
-                if x < SIDEBAR_WIDTH {
-                    self.sidebar_scroll = (self.sidebar_scroll - dy).max(0.0);
+                // `dy` is a notch count, not a pixel distance. Subtracting it
+                // raw moved these lists one pixel per notch — a 52px sidebar
+                // row took 52 turns of the wheel to clear, which reads as a
+                // wheel that does not work. The accumulator also keeps the
+                // fractions a trackpad sends, which any per-event rounding
+                // would throw away.
+                if mouse.x < SIDEBAR_WIDTH {
+                    let rows = self.sidebar_wheel.rows(dy);
+                    self.sidebar_scroll = scroll_window::shift(self.sidebar_scroll, rows)
+                        .min(self.max_sidebar_scroll());
                 } else {
-                    self.content_scroll = (self.content_scroll - dy).max(0.0);
+                    let rows = self.content_wheel.rows(dy);
+                    self.content_scroll = scroll_window::shift(self.content_scroll, rows)
+                        .min(self.max_content_scroll());
                 }
                 EventResult::Consumed
             }
@@ -1203,20 +1384,46 @@ impl RemoteDesktopApp {
         EventResult::Consumed
     }
 
+    /// `y` is relative to the top of the sidebar's content area.
     fn handle_sidebar_click(&mut self, _x: f32, y: f32) -> EventResult {
+        // `y < 0.0` alone lets a NaN through, because a NaN is less than
+        // nothing -- and `NaN as usize` is 0 rather than a trap, so the
+        // ActiveSessions arm below selected the first session for a click that
+        // is nowhere at all. The Connections arm survived it by accident: it
+        // walks rows with `y < next`, which is also false for a NaN, so its
+        // loop simply ran off the end and selected nothing.
+        if !y.is_finite() || y < 0.0 {
+            return EventResult::Consumed;
+        }
         match self.current_view {
             MainView::Connections => {
-                let scrolled_y = y + self.sidebar_scroll;
-                let idx = (scrolled_y / SIDEBAR_ITEM_HEIGHT) as usize;
-                if idx < self.profiles.len() {
-                    self.selected_profile = Some(idx);
+                // Walk the very rows the renderer drew, rather than dividing
+                // by a row height the list does not actually have. Group
+                // headings are taller than nothing and shorter than a
+                // profile, and they are not selectable, so a click that
+                // lands on one selects nothing instead of silently sliding
+                // to a neighbour.
+                let rows = self.sidebar_rows();
+                let mut cy = 0.0_f32;
+                for row in rows.iter().skip(self.sidebar_scroll) {
+                    let next = cy + row.height();
+                    if y < next {
+                        if let Some(pi) = row.profile() {
+                            self.selected_profile = Some(pi);
+                        }
+                        break;
+                    }
+                    cy = next;
                 }
             }
             MainView::ActiveSessions => {
-                let scrolled_y = y + self.sidebar_scroll;
-                let idx = (scrolled_y / SIDEBAR_ITEM_HEIGHT) as usize;
-                if idx < self.sessions.len() {
-                    self.selected_session = Some(idx);
+                // Uniform rows here, but still offset by whole rows.
+                #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+                let row = (y / SIDEBAR_ITEM_HEIGHT) as usize;
+                if let Some(idx) = self.sidebar_scroll.checked_add(row) {
+                    if idx < self.sessions.len() {
+                        self.selected_session = Some(idx);
+                    }
                 }
             }
             _ => {}
@@ -1284,9 +1491,10 @@ impl RemoteDesktopApp {
             // Navigate profiles up/down
             Key::Up if self.current_view == MainView::Connections => {
                 if let Some(sel) = self.selected_profile
-                    && sel > 0 {
-                        self.selected_profile = Some(sel.saturating_sub(1));
-                    }
+                    && sel > 0
+                {
+                    self.selected_profile = Some(sel.saturating_sub(1));
+                }
                 EventResult::Consumed
             }
             Key::Down if self.current_view == MainView::Connections => {
@@ -1669,28 +1877,35 @@ impl RemoteDesktopApp {
             height: content_h,
         });
 
-        let mut cy = content_y - self.sidebar_scroll;
+        // Only the rows that fit, starting where the offset asks. This used
+        // to draw the whole list from `content_y - sidebar_scroll` and lean
+        // on the clip to hide the overflow, which is why nothing ever
+        // clamped the offset: with every row drawn, scrolling past the end
+        // just pushed the list off the top and left the panel blank.
+        let rows = self.sidebar_rows();
+        let heights = Self::sidebar_row_heights(&rows);
+        let visible = scroll_window::visible_variable(&heights, content_h, self.sidebar_scroll);
 
-        // Group-based listing
-        let groups = self.groups();
-        for group in &groups {
-            // Group header
-            cmds.push(RenderCommand::Text {
-                x: SECTION_PADDING,
-                y: cy + 6.0,
-                text: group.clone(),
-                font_size: 10.0,
-                color: OVERLAY0,
-                font_weight: FontWeightHint::Bold,
-                max_width: Some(SIDEBAR_WIDTH - 2.0 * SECTION_PADDING),
-                overflow: TextOverflow::Ellipsis,
-            });
-            cy += 22.0;
-
-            let indices = self.profiles_in_group(group);
-            for &pi in &indices {
-                if let Some(profile) = self.profiles.get(pi) {
-                    let is_selected = self.selected_profile == Some(pi);
+        let mut cy = content_y;
+        for row in rows.iter().skip(visible.start).take(visible.count) {
+            match row {
+                SidebarRow::Header(group) => {
+                    cmds.push(RenderCommand::Text {
+                        x: SECTION_PADDING,
+                        y: cy + 6.0,
+                        text: group.clone(),
+                        font_size: 10.0,
+                        color: OVERLAY0,
+                        font_weight: FontWeightHint::Bold,
+                        max_width: Some(SIDEBAR_WIDTH - 2.0 * SECTION_PADDING),
+                        overflow: TextOverflow::Ellipsis,
+                    });
+                }
+                SidebarRow::Profile(pi) => {
+                    let Some(profile) = self.profiles.get(*pi) else {
+                        continue;
+                    };
+                    let is_selected = self.selected_profile == Some(*pi);
                     let bg = if is_selected { SURFACE0 } else { MANTLE };
 
                     cmds.push(RenderCommand::FillRect {
@@ -1756,10 +1971,9 @@ impl RemoteDesktopApp {
                         max_width: Some(SIDEBAR_WIDTH - 80.0),
                         overflow: TextOverflow::Ellipsis,
                     });
-
-                    cy += SIDEBAR_ITEM_HEIGHT;
                 }
             }
+            cy += row.height();
         }
 
         cmds.push(RenderCommand::PopClip);
@@ -1888,8 +2102,14 @@ impl RemoteDesktopApp {
         let fields: Vec<(&str, String)> = vec![
             ("Scaling", profile.display.scaling.label()),
             ("Color Depth", profile.display.color_depth.label().into()),
-            ("Refresh Rate", format!("{} Hz", profile.display.refresh_rate)),
-            ("Resolution", format!("{}x{}", profile.display.width, profile.display.height)),
+            (
+                "Refresh Rate",
+                format!("{} Hz", profile.display.refresh_rate),
+            ),
+            (
+                "Resolution",
+                format!("{}x{}", profile.display.width, profile.display.height),
+            ),
         ];
 
         for (label, value) in &fields {
@@ -2022,10 +2242,7 @@ impl RemoteDesktopApp {
                 "Auto Reconnect",
                 if profile.auto_reconnect { "Yes" } else { "No" }.into(),
             ),
-            (
-                "Escape Hotkey",
-                format!("{:?}", self.escape_hotkey),
-            ),
+            ("Escape Hotkey", format!("{:?}", self.escape_hotkey)),
         ];
 
         for (label, value) in &fields {
@@ -2051,15 +2268,9 @@ impl RemoteDesktopApp {
             ("Mode", self.clipboard.mode.label().into()),
             (
                 "Last Sync",
-                self.clipboard
-                    .last_sync_direction
-                    .unwrap_or("Never")
-                    .into(),
+                self.clipboard.last_sync_direction.unwrap_or("Never").into(),
             ),
-            (
-                "Content",
-                format!("{:?}", self.clipboard.content_type),
-            ),
+            ("Content", format!("{:?}", self.clipboard.content_type)),
             ("Sync Count", self.clipboard.sync_count.to_string()),
         ];
 
@@ -2099,8 +2310,23 @@ impl RemoteDesktopApp {
                 overflow: TextOverflow::Ellipsis,
             });
         } else {
+            // This list ignored `sidebar_scroll` outright — it drew every
+            // session and let the clip cut the tail off, so a session past
+            // the bottom of the panel could not be reached at all.
+            let visible = scroll_window::visible(
+                self.sessions.len(),
+                SIDEBAR_ITEM_HEIGHT,
+                content_h,
+                self.sidebar_scroll,
+            );
             let mut cy = content_y;
-            for (i, session) in self.sessions.iter().enumerate() {
+            for (i, session) in self
+                .sessions
+                .iter()
+                .enumerate()
+                .skip(visible.start)
+                .take(visible.count)
+            {
                 let is_sel = self.selected_session == Some(i);
                 let bg = if is_sel { SURFACE0 } else { MANTLE };
 
@@ -2241,7 +2467,15 @@ impl RemoteDesktopApp {
         // Action buttons
         let btn_y = content_y + SECTION_PADDING + 28.0;
         render_button(cmds, px, btn_y, 100.0, 28.0, "Upload File", BLUE);
-        render_button(cmds, px + 110.0, btn_y, 120.0, 28.0, "Clear Finished", OVERLAY0);
+        render_button(
+            cmds,
+            px + 110.0,
+            btn_y,
+            120.0,
+            28.0,
+            "Clear Finished",
+            OVERLAY0,
+        );
 
         // Transfer list
         let list_y = btn_y + 40.0;
@@ -2264,8 +2498,17 @@ impl RemoteDesktopApp {
                 overflow: TextOverflow::Ellipsis,
             });
         } else {
+            // `content_scroll` had no reader at all before this: the wheel
+            // wrote to it and every list ignored it, so the transfers past
+            // the bottom edge were simply unreachable.
+            let visible = self.content_rows();
             let mut ty = list_y;
-            for transfer in &self.transfers {
+            for transfer in self
+                .transfers
+                .iter()
+                .skip(visible.start)
+                .take(visible.count)
+            {
                 self.render_transfer_item(cmds, transfer, px, ty, pw);
                 ty += TRANSFER_ITEM_HEIGHT + 4.0;
             }
@@ -2430,8 +2673,9 @@ impl RemoteDesktopApp {
                 overflow: TextOverflow::Ellipsis,
             });
         } else {
+            let visible = self.content_rows();
             let mut hy = list_y;
-            for entry in &self.history {
+            for entry in self.history.iter().skip(visible.start).take(visible.count) {
                 self.render_history_entry(cmds, entry, px, hy, pw);
                 hy += HISTORY_ITEM_HEIGHT + 4.0;
             }
@@ -2503,7 +2747,11 @@ impl RemoteDesktopApp {
         cmds.push(RenderCommand::Text {
             x: px + 70.0,
             y: hy + 24.0,
-            text: format!("{} - {}", entry.hostname, format_duration(entry.duration_secs)),
+            text: format!(
+                "{} - {}",
+                entry.hostname,
+                format_duration(entry.duration_secs)
+            ),
             font_size: 11.0,
             color: SUBTEXT0,
             font_weight: FontWeightHint::Regular,
@@ -2512,15 +2760,7 @@ impl RemoteDesktopApp {
         });
 
         // Quick connect button
-        render_button(
-            cmds,
-            pw - 80.0,
-            hy + 8.0,
-            80.0,
-            28.0,
-            "Connect",
-            BLUE,
-        );
+        render_button(cmds, pw - 80.0, hy + 8.0, 80.0, 28.0, "Connect", BLUE);
     }
 
     fn render_status_bar(&self, cmds: &mut Vec<RenderCommand>) {
@@ -2699,11 +2939,7 @@ impl RemoteDesktopApp {
                 format!("{:.1} fps", self.perf_metrics.frame_rate),
                 fps_color(self.perf_metrics.frame_rate),
             ),
-            (
-                "Sent",
-                format_bytes(self.perf_metrics.bytes_sent),
-                SUBTEXT0,
-            ),
+            ("Sent", format_bytes(self.perf_metrics.bytes_sent), SUBTEXT0),
             (
                 "Received",
                 format_bytes(self.perf_metrics.bytes_received),
@@ -2911,6 +3147,17 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
+    // A test that indexes out of range should fail loudly and point at the
+    // line that did it — that is the diagnosis. The defensive lints exist to
+    // keep panics out of code that runs on a user's data, which this is not.
+    #![allow(
+        clippy::indexing_slicing,
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::arithmetic_side_effects
+    )]
+
     use super::*;
 
     // ====================================================================
@@ -3238,10 +3485,11 @@ mod tests {
         let mut app = RemoteDesktopApp::new();
         app.disconnect_session(0);
         app.cleanup_sessions();
-        assert!(app
-            .sessions
-            .iter()
-            .all(|s| s.state != SessionState::Disconnected));
+        assert!(
+            app.sessions
+                .iter()
+                .all(|s| s.state != SessionState::Disconnected)
+        );
     }
 
     #[test]
@@ -3275,10 +3523,7 @@ mod tests {
     fn test_clipboard_sync_updates_state() {
         let mut app = RemoteDesktopApp::new();
         app.sync_clipboard("local->remote", ClipboardContentType::Text, 256);
-        assert_eq!(
-            app.clipboard.last_sync_direction,
-            Some("local->remote")
-        );
+        assert_eq!(app.clipboard.last_sync_direction, Some("local->remote"));
         assert_eq!(app.clipboard.content_type, ClipboardContentType::Text);
         assert_eq!(app.clipboard.content_size_bytes, 256);
         assert_eq!(app.clipboard.sync_count, 1);
@@ -3299,24 +3544,15 @@ mod tests {
         app.sync_clipboard("local->remote", ClipboardContentType::Text, 10);
         app.sync_clipboard("remote->local", ClipboardContentType::Image, 5000);
         assert_eq!(app.clipboard.sync_count, 2);
-        assert_eq!(
-            app.clipboard.last_sync_direction,
-            Some("remote->local")
-        );
+        assert_eq!(app.clipboard.last_sync_direction, Some("remote->local"));
     }
 
     #[test]
     fn test_clipboard_sync_mode_labels() {
         assert_eq!(ClipboardSyncMode::Disabled.label(), "Disabled");
         assert_eq!(ClipboardSyncMode::Bidirectional.label(), "Bidirectional");
-        assert_eq!(
-            ClipboardSyncMode::LocalToRemote.label(),
-            "Local -> Remote"
-        );
-        assert_eq!(
-            ClipboardSyncMode::RemoteToLocal.label(),
-            "Remote -> Local"
-        );
+        assert_eq!(ClipboardSyncMode::LocalToRemote.label(), "Local -> Remote");
+        assert_eq!(ClipboardSyncMode::RemoteToLocal.label(), "Remote -> Local");
     }
 
     // ====================================================================
@@ -3393,9 +3629,7 @@ mod tests {
         // has sample data with various states
         app.clear_finished_transfers();
         for t in &app.transfers {
-            assert!(
-                t.state == TransferState::Queued || t.state == TransferState::InProgress
-            );
+            assert!(t.state == TransferState::Queued || t.state == TransferState::InProgress);
         }
     }
 
@@ -3625,6 +3859,9 @@ mod tests {
         assert!(!cmds.is_empty());
     }
 
+    // Exact: these are the constants handed to the renderer, echoed back
+    // unchanged, with no arithmetic in between to round.
+    #[allow(clippy::float_cmp)]
     #[test]
     fn test_render_starts_with_background() {
         let app = RemoteDesktopApp::new();
@@ -3892,18 +4129,274 @@ mod tests {
         assert_eq!(app.confirm_delete, Some(1));
     }
 
+    // ------------------------------------------------------------------
+    // Sidebar layout: renderer and hit-test must agree
+    // ------------------------------------------------------------------
+
+    /// The sample profiles are `[Dev(Development), Prod(Production),
+    /// Build(Development), Staging(Staging)]`, and `groups()` sorts, so the
+    /// sidebar draws them regrouped and reordered. Pinned here because the
+    /// click tests below rest on this exact geometry.
     #[test]
-    fn test_scroll_event_updates_sidebar() {
+    fn sidebar_rows_interleave_headings_with_their_group() {
+        let app = RemoteDesktopApp::new();
+        assert_eq!(
+            app.sidebar_rows(),
+            vec![
+                SidebarRow::Header("Development".into()),
+                SidebarRow::Profile(0),
+                SidebarRow::Profile(2),
+                SidebarRow::Header("Production".into()),
+                SidebarRow::Profile(1),
+                SidebarRow::Header("Staging".into()),
+                SidebarRow::Profile(3),
+            ]
+        );
+    }
+
+    /// The regression test for the mis-selection.
+    ///
+    /// The old hit-test was `(y / SIDEBAR_ITEM_HEIGHT) as usize`, indexed
+    /// straight into `profiles`. That is wrong twice over: it does not know
+    /// headings occupy 22px, and it does not know the sidebar is sorted by
+    /// group while `profiles` is in insertion order. With the sample data
+    /// laid out as
+    ///
+    /// ```text
+    ///   0..22    Header "Development"
+    ///   22..74   Profile 0  Dev Server
+    ///   74..126  Profile 2  Build Machine
+    ///  126..148  Header "Production"
+    ///  148..200  Profile 1  Production DB
+    ///  200..222  Header "Staging"
+    ///  222..274  Profile 3  Staging Web
+    /// ```
+    ///
+    /// a click at y=100 is plainly on Build Machine, but the old code
+    /// answered `100 / 52 = 1` — Production DB, two rows further down and in
+    /// a different group.
+    #[test]
+    fn clicking_a_profile_selects_the_one_that_was_drawn_there() {
+        for (y, expected, who) in [
+            (30.0, 0_usize, "Dev Server"),
+            (100.0, 2, "Build Machine"),
+            (160.0, 1, "Production DB"),
+            (240.0, 3, "Staging Web"),
+        ] {
+            let mut app = RemoteDesktopApp::new();
+            app.current_view = MainView::Connections;
+            app.handle_sidebar_click(10.0, y);
+            assert_eq!(
+                app.selected_profile,
+                Some(expected),
+                "a click at y={y} is on {who}"
+            );
+        }
+    }
+
+    /// A heading is not a profile, so landing on one picks nothing rather
+    /// than sliding to whichever row happens to be adjacent.
+    #[test]
+    fn clicking_a_group_heading_selects_nothing() {
         let mut app = RemoteDesktopApp::new();
-        let event = Event::Mouse(guitk::event::MouseEvent {
-            x: 50.0, // inside sidebar
+        app.current_view = MainView::Connections;
+        app.selected_profile = None;
+        app.handle_sidebar_click(10.0, 10.0);
+        assert_eq!(app.selected_profile, None);
+    }
+
+    /// Clicking below the last row is not a click on the last row.
+    #[test]
+    fn clicking_past_the_end_of_the_sidebar_selects_nothing() {
+        let mut app = RemoteDesktopApp::new();
+        app.current_view = MainView::Connections;
+        app.selected_profile = None;
+        app.handle_sidebar_click(10.0, 5_000.0);
+        assert_eq!(app.selected_profile, None);
+    }
+
+    /// A coordinate that is not a number is not a coordinate, and must not
+    /// name the row that happens to sit at zero.
+    ///
+    /// The guard was `y < 0.0`, which a NaN passes -- a NaN is not less than
+    /// anything -- and `NaN as usize` is `0` in Rust rather than a trap or a
+    /// wrap. The session list divides, so it selected session 0; the profile
+    /// list walks its rows with `y < next`, which is also false for a NaN, so
+    /// that arm ran off the end and escaped by luck rather than by design.
+    /// Both are checked here so the luck is not what holds.
+    #[test]
+    fn a_sidebar_coordinate_that_is_not_a_number_selects_nothing() {
+        for y in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+            let mut app = RemoteDesktopApp::new();
+            app.current_view = MainView::ActiveSessions;
+            app.selected_session = None;
+            app.handle_sidebar_click(10.0, y);
+            assert_eq!(app.selected_session, None, "y={y} selected a session");
+
+            app.current_view = MainView::Connections;
+            app.selected_profile = None;
+            app.handle_sidebar_click(10.0, y);
+            assert_eq!(app.selected_profile, None, "y={y} selected a profile");
+        }
+    }
+
+    /// A scrolled sidebar hit-tests against what is on screen, not against
+    /// the top of the list.
+    #[test]
+    fn a_scrolled_sidebar_selects_by_what_is_visible() {
+        let mut app = RemoteDesktopApp::new();
+        app.current_view = MainView::Connections;
+        // Skip the "Development" heading, so the top row on screen is
+        // Profile(0); skip one more and it is Profile(2).
+        app.sidebar_scroll = 1;
+        app.handle_sidebar_click(10.0, 10.0);
+        assert_eq!(app.selected_profile, Some(0));
+
+        app.sidebar_scroll = 2;
+        app.handle_sidebar_click(10.0, 10.0);
+        assert_eq!(app.selected_profile, Some(2));
+    }
+
+    // ------------------------------------------------------------------
+    // The wheel
+    // ------------------------------------------------------------------
+
+    /// One turn of the wheel at the given x, as the compositor sends it: a
+    /// notch *count*, not a pixel distance.
+    fn wheel_at(x: f32, dy: f32) -> Event {
+        Event::Mouse(guitk::event::MouseEvent {
+            x,
             y: 200.0,
-            kind: MouseEventKind::Scroll {
-                dx: 0.0,
-                dy: -10.0,
-            },
-        });
-        app.handle_event(&event);
-        assert!(app.sidebar_scroll > 0.0);
+            kind: MouseEventKind::Scroll { dx: 0.0, dy },
+        })
+    }
+
+    /// How many rows one notch delivers.
+    fn rows_per_notch() -> usize {
+        wheel::ROWS_PER_NOTCH as usize
+    }
+
+    /// A history list long enough to actually overflow the content pane.
+    ///
+    /// The shipped sample is seven entries against a pane that fits eleven,
+    /// so a scroll test built on it would be asserting about a list that
+    /// cannot move.
+    fn app_with_long_history() -> RemoteDesktopApp {
+        let mut app = RemoteDesktopApp::new();
+        app.current_view = MainView::History;
+        let seed = app
+            .history
+            .front()
+            .cloned()
+            .expect("sample data provides history");
+        app.history = (0..60).map(|_| seed.clone()).collect();
+        assert!(
+            app.max_content_scroll() > 0,
+            "the fixture must overflow the pane, or these tests prove nothing"
+        );
+        app
+    }
+
+    /// The regression test. `content_scroll -= dy` moved by one *pixel* per
+    /// notch — and nothing read the field anyway, so the list did not move at
+    /// all. The test this replaces sent `dy: -10.0`, a pixel distance chosen
+    /// so the raw subtraction would produce a visible number, and then
+    /// asserted only `> 0.0`.
+    #[test]
+    fn one_notch_scrolls_the_content_list_by_whole_rows() {
+        let mut app = app_with_long_history();
+        app.handle_event(&wheel_at(WINDOW_WIDTH - 40.0, -1.0));
+        assert_eq!(app.content_scroll, rows_per_notch());
+    }
+
+    #[test]
+    fn the_content_wheel_scrolls_both_ways() {
+        let mut app = app_with_long_history();
+        app.handle_event(&wheel_at(WINDOW_WIDTH - 40.0, -2.0));
+        assert!(app.content_scroll > 0);
+        app.handle_event(&wheel_at(WINDOW_WIDTH - 40.0, 2.0));
+        assert_eq!(
+            app.content_scroll, 0,
+            "the same notches back return to the top"
+        );
+    }
+
+    /// The *stored* offset is clamped, not merely the rendered one.
+    ///
+    /// Without this the offset climbs forever while the view stands still,
+    /// and the user must then wind the wheel back exactly as far as they
+    /// overshot before the list moves at all.
+    #[test]
+    fn the_content_wheel_cannot_scroll_into_empty_space() {
+        let mut app = app_with_long_history();
+        for _ in 0..200 {
+            app.handle_event(&wheel_at(WINDOW_WIDTH - 40.0, -1.0));
+        }
+        let max = app.max_content_scroll();
+        assert_eq!(app.content_scroll, max);
+
+        app.handle_event(&wheel_at(WINDOW_WIDTH - 40.0, 1.0));
+        assert!(
+            app.content_scroll < max,
+            "one notch back must move at once, not work off a debt run up past the end"
+        );
+    }
+
+    /// A trackpad sends a stream of fractions of a notch. Rounding each event
+    /// on its own would discard every one of them and the list would never
+    /// move.
+    #[test]
+    fn a_trackpads_fractions_of_a_notch_eventually_scroll() {
+        let mut app = app_with_long_history();
+        for _ in 0..10 {
+            app.handle_event(&wheel_at(WINDOW_WIDTH - 40.0, -0.1));
+        }
+        assert_eq!(app.content_scroll, rows_per_notch());
+    }
+
+    /// The two regions bank their fractions separately, so a partial turn
+    /// over the sidebar cannot deliver a row in the content pane.
+    #[test]
+    fn the_sidebar_and_content_wheels_keep_separate_remainders() {
+        let mut app = app_with_long_history();
+        for _ in 0..5 {
+            app.handle_event(&wheel_at(10.0, -0.1));
+            app.handle_event(&wheel_at(WINDOW_WIDTH - 40.0, -0.1));
+        }
+        // Each region banked 0.5 of a notch = 1.5 rows, which is one whole
+        // row apiece — not three rows in whichever one was asked last.
+        assert_eq!(app.content_scroll, 1);
+    }
+
+    /// A list that fits in its pane has nowhere to go.
+    #[test]
+    fn a_list_that_fits_cannot_be_scrolled() {
+        let mut app = RemoteDesktopApp::new();
+        app.current_view = MainView::History;
+        assert_eq!(
+            app.max_content_scroll(),
+            0,
+            "the seven sample entries fit the pane"
+        );
+        app.handle_event(&wheel_at(WINDOW_WIDTH - 40.0, -5.0));
+        assert_eq!(app.content_scroll, 0);
+    }
+
+    /// The sidebar wheel drives the session list too, which previously
+    /// ignored the offset outright and drew every session under the clip.
+    #[test]
+    fn the_sidebar_wheel_scrolls_the_session_list() {
+        let mut app = RemoteDesktopApp::new();
+        app.current_view = MainView::ActiveSessions;
+        let seed = app
+            .sessions
+            .first()
+            .cloned()
+            .expect("sample data provides a session");
+        app.sessions = (0..60).map(|_| seed.clone()).collect();
+        assert!(app.max_sidebar_scroll() > 0);
+
+        app.handle_event(&wheel_at(10.0, -1.0));
+        assert_eq!(app.sidebar_scroll, rows_per_notch());
     }
 }

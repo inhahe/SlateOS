@@ -54,7 +54,9 @@ pub mod render;
 /// reasonably depend on a GUI toolkit. The name stays so that
 /// `guitk::rng::SeededRng` keeps meaning what it meant.
 pub use randrange as rng;
+pub mod row_strip;
 pub mod scaling;
+pub mod scroll_window;
 pub mod signal;
 pub mod style;
 pub mod svg;
@@ -64,6 +66,7 @@ pub mod text;
 pub mod textview;
 pub mod theme;
 pub mod tree;
+pub mod wheel;
 pub mod widget;
 
 // Text-format escaping lives in `textfmt`, a dependency-free crate, because

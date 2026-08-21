@@ -121,16 +121,43 @@ pub struct RegexT {
     pub re_nsub: usize,
     /// Internal: pointer to compiled program.
     program: *mut RegexProgram,
+    /// The 48 bytes of musl's `regex_t` that our two fields do not use.
+    ///
+    /// Never read or written.  Present so that `size_of::<RegexT>()` equals
+    /// what `<regex.h>` declares — see the assertion below.
+    _reserved: [u8; 48],
 }
 
-/// Our `regex_t` must fit inside the one the caller's `<regex.h>` reserved.
+impl RegexT {
+    /// An uncompiled `regex_t`: no sub-expressions, no program, zeroed tail.
+    ///
+    /// Constructed through this rather than with a struct literal so the
+    /// `_reserved` tail can track its header without touching a call site.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self {
+            re_nsub: 0,
+            program: core::ptr::null_mut(),
+            _reserved: [0; 48],
+        }
+    }
+}
+
+impl Default for RegexT {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Our `regex_t` is exactly the one the caller's `<regex.h>` reserved.
 ///
-/// See `pthread.rs`'s module note for why this is a `const` and why the bound
-/// is `<=`.  We are at 16 bytes against musl's 64.  `re_nsub` is public and
-/// sits at offset 0 in both, which is the one field POSIX lets a caller read,
-/// so the undersizing is invisible to conforming code.
+/// See `pthread.rs`'s module note for why this is a `const` rather than a
+/// `#[test]`.  `re_nsub` is public and sits at offset 0 in musl, glibc and
+/// here alike — it is the one field POSIX lets a caller read — and the
+/// `_reserved` tail brings the whole object to musl's 64 bytes, so `==` holds
+/// and a by-value copy of a `regex_t` moves our bytes and only ours.
 const _: () = {
-    assert!(size_of::<RegexT>() <= 64, "musl/glibc regex_t");
+    assert!(size_of::<RegexT>() == 64, "musl/glibc regex_t is 64 bytes");
     assert!(align_of::<RegexT>() <= 8);
 };
 
@@ -1247,13 +1274,41 @@ fn char_in_class(
 mod tests {
     use super::*;
 
+    // -- ABI layout --
+
+    /// `regex_t` is 64 bytes with `re_nsub` first, as musl and glibc declare
+    /// it.  `re_nsub` is the only field POSIX lets a caller read, and it is at
+    /// offset 0 in all three.
+    ///
+    /// The size is also a `const` assertion above; this test adds the offsets.
+    #[test]
+    fn test_regex_t_matches_musl_layout() {
+        use core::mem::{align_of, size_of};
+        assert_eq!(size_of::<RegexT>(), 64, "musl/glibc regex_t is 64 bytes");
+        assert_eq!(align_of::<RegexT>(), 8);
+        let r = RegexT::new();
+        let base = (&raw const r).cast::<u8>() as usize;
+        assert_eq!((&raw const r.re_nsub).cast::<u8>() as usize - base, 0);
+        assert_eq!((&raw const r.program).cast::<u8>() as usize - base, 8);
+        assert_eq!((&raw const r._reserved).cast::<u8>() as usize - base, 16);
+        assert_eq!(r.re_nsub, 0);
+        assert!(r.program.is_null());
+        assert_eq!(r._reserved, [0u8; 48]);
+    }
+
     // -----------------------------------------------------------------------
     // Helpers
     //
-    // Because the POSIX API (`regcomp`/`regfree`) allocates memory via our
-    // custom `malloc` (which calls `mmap` → `syscall`), it cannot run on the
-    // host test target.  Instead we construct `RegexProgram` on the stack and
-    // call the internal `compile_pattern`/`try_match` functions directly.
+    // These build a `RegexProgram` on the stack and call the internal
+    // `compile_pattern`/`try_match` directly, rather than going through
+    // `regcomp`/`regfree`.  That started as a workaround — our `malloc` sits
+    // on `mmap` → `syscall`, which returned `-ENOSYS` on the host, so the
+    // public API could not run here at all.  `malloc` now has a host backing
+    // store (see malloc.rs), so the public path *is* reachable; these helpers
+    // stay because they let a test exercise one pattern without a compile
+    // step, and because they keep the match tests independent of allocator
+    // behaviour.  A regcomp-level test would be a genuine addition, not a
+    // replacement — tracked in known-issues.md.
     // -----------------------------------------------------------------------
 
     /// Create a zeroed `RegexProgram` with the given flags.

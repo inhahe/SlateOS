@@ -44,10 +44,26 @@
 //! `posix_spawnattr_t` had a size test and was correct.
 //!
 //! So the bound below is asserted at **compile** time, not in a `#[test]`
-//! that has to be run to help.  It is `<=`, not `==`, because undersized
-//! is safe — we simply use less of the caller's slot than it reserved —
-//! while oversized always smashes.  `<=` is therefore the exact safety
-//! property, and it keeps firing if a field is ever added.
+//! that has to be run to help.
+//!
+//! ### `<=` here, `==` in semaphore.rs / regex.rs / glob.rs
+//!
+//! `<=` is the exact *safety* property: oversized always smashes the
+//! caller's frame, undersized never can — we simply use less of the slot
+//! than the caller reserved.  The four pthread types below are genuinely
+//! smaller than their headers (a futex word or two against musl's 40–56)
+//! and no `_reserved` tail is added, because unlike `sem_t` these are never
+//! copied: POSIX leaves it undefined to move an initialised
+//! `pthread_mutex_t`/`_cond_t`/`_rwlock_t`/`_barrier_t` at all, so a
+//! by-value copy is already wrong whatever the size.  `<=` states what
+//! matters for them and keeps firing if a field is ever added.
+//!
+//! Where an explicit `_reserved` tail *is* carried — `SemT`, `RegexT`,
+//! `GlobT`, and `PosixSpawnFileActionsT` — the assertion is tightened to
+//! `==`, which says strictly more: it catches a field *removal* as well as
+//! an addition, and a removal is what would silently shorten a by-value
+//! copy of one of those.  (See `TD-B-THREE-C-VISIBLE-TYPES-ARE-SMALLER-
+//! THAN-THEIR-HEADERS` in known-issues.md, now closed.)
 //!
 //! ## Features
 //!

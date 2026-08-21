@@ -52214,7 +52214,7 @@ that a rewrite cannot be argued out of: every other finding from the lint sweep
 was fixed in place, and this one was left because the correct fix is a new
 primitive rather than an edit.
 
-## TD-B-THREE-C-VISIBLE-TYPES-ARE-SMALLER-THAN-THEIR-HEADERS (lane B, 2026-08-21)
+## TD-B-THREE-C-VISIBLE-TYPES-ARE-SMALLER-THAN-THEIR-HEADERS (lane B, 2026-08-21) — FIXED 2026-08-21
 
 **In short:** three of our opaque libc types are *smaller* than the type the C
 header declares — `sem_t` is 4 bytes where `<semaphore.h>` says 32, `regex_t` is
@@ -52255,3 +52255,81 @@ should land on its own so that it is separately revertible.
 `posix/src`, done while filing the file-actions bug — the same table that
 confirmed `posix_spawn_file_actions_t` was the only one in the dangerous
 direction.
+
+### Resolution — 2026-08-21, lane B
+
+Done as described: each of the three grew a `_reserved` tail to its header's
+size, each gained a `const fn new()` so the tail is not a call-site concern,
+and each `const` assertion tightened from `<=` to `==`.
+
+| type | was | now | tail |
+|---|---|---|---|
+| `SemT` | 4 | 32 | `_reserved: [u8; 28]` |
+| `RegexT` | 16 | 64 | `_reserved: [u8; 48]` |
+| `GlobT` | 24 | 72 | `_reserved: [u8; 48]` |
+
+`==` says strictly more than `<=`: it fires on a field *removal* as well as an
+addition, and a removal is exactly what would silently shorten the by-value
+copy this entry was about. The four pthread types keep `<=` — they have no
+`_reserved` tail because POSIX leaves it undefined to move an initialised
+`pthread_mutex_t` at all, so their by-value copy is already wrong whatever the
+size. `posix/src/pthread.rs`'s module note now records that split.
+
+**`sem_t`'s alignment is 4, and that is the correct answer, not a leftover.**
+The two headers disagree — musl's `sem_t` is `struct { volatile int __val[8]; }`
+(align 4), glibc's is `union { char __size[32]; long int __align; }` (align 8).
+Ours must be no *stricter* than the loosest caller, because the caller supplies
+the storage: had we forced 8 and a musl-compiled program handed us a `sem_t`
+its compiler had placed at a 4-aligned address, every access would be
+misaligned. Size must match exactly (it is the caller's slot); alignment must
+only be no stricter. The first draft of the new test asserted 8 and failed,
+which is how this got noticed.
+
+**Two more tests were asserting the bug.** Fixing the sizes broke
+`semaphore::tests::test_sem_size` (`assert_eq!(size_of::<SemT>(), 4)`) and
+`glob::tests::test_glob_t_size` (`assert_eq!(size_of::<GlobT>(), 24)`). Both
+had written our own undersizing down as the expected answer, so the one test
+that could have caught each gap instead certified it. Both were derived from
+our struct definition rather than from the header, which is why they could only
+ever agree with whatever we had written. This is the third instance of the
+species today — the other two were the three `malloc` tests that asserted a
+NULL return (see `B-HOST-MALLOC-NEVER-WORKED-…` above). Replaced by
+`test_sem_t_matches_musl_layout` and `test_glob_t_matches_glibc_layout`, which
+assert size *and* every field offset against the header, plus
+`test_regex_t_matches_musl_layout` for the third type, which had no size test
+at all.
+
+**Verified:** `cargo test -p posix --target x86_64-pc-windows-gnu` →
+20,491 passed, 0 failed; `cargo clippy -p posix --target x86_64-pc-windows-gnu
+--all-targets` → clean.
+
+## TD-B-REGCOMP-HAS-NO-TEST-THROUGH-THE-PUBLIC-API (lane B, 2026-08-21)
+
+**In short:** every one of `regex.rs`'s ~200 match tests calls the *internal*
+`compile_pattern`/`try_match` on a stack-allocated `RegexProgram`. Not one goes
+through `regcomp`/`regexec`/`regfree`, which is the only path a C caller can
+use. So the public API's own error mapping, its `regex_t` handling and its
+`malloc`/`free` pairing are untested.
+
+**Why it was like that, and why that reason is gone.** The test module said
+plainly: "Because the POSIX API allocates memory via our custom `malloc`
+(which calls `mmap` → `syscall`), it cannot run on the host test target." That
+was true and is no longer — `malloc` gained a host backing store today (see
+`B-HOST-MALLOC-NEVER-WORKED-…` above), so the public path is now reachable from
+`cargo test`. The comment has been updated in place so nobody re-derives the
+old conclusion.
+
+**Where.** `posix/src/regex.rs`, the `tests` module's "Helpers" preamble and
+the `new_program`-based tests below it.
+
+**Proper fix.** Add regcomp-level tests alongside the existing ones — they are
+an addition, not a replacement, since the internal helpers usefully isolate the
+matcher from allocator behaviour. At minimum: compile-then-exec round trip,
+`regfree` leaves `re_nsub == 0` and a null `program`, double `regfree` is safe,
+`regcomp` of a bad pattern returns the right `REG_*` code and leaves nothing
+allocated, and `regexec` on an unfreed-but-never-compiled `regex_t` does not
+dereference a wild pointer.
+
+**Related.** The same "it cannot run on the host" reasoning may be load-bearing
+in other modules' test preambles for the same now-false reason. Worth a grep
+for `mmap`/`syscall`/`host` in `#[cfg(test)]` comments across `posix/src`.

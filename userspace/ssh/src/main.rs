@@ -62,10 +62,10 @@
 //! `ssh host cmd > file` puts output in the file and diagnostics on the
 //! terminal, as it would locally.
 
-#![deny(clippy::all)]
+// Lints come from `[lints] workspace = true` in Cargo.toml. The crate-local
+// `#![deny(clippy::all)]` that used to stand here on its own said strictly
+// less, and hid the fact that nothing else was switched on.
 #![allow(clippy::manual_range_contains)]
-// Allow these in this simplified userspace utility where panics are acceptable
-// failure modes (the process just exits).
 #![allow(clippy::module_name_repetitions)]
 
 use std::env;
@@ -196,19 +196,27 @@ fn tcp_send(handle: u64, data: &[u8]) -> Result<usize, SshError> {
 
 /// Send all bytes, looping until the entire buffer is transmitted.
 fn tcp_send_all(handle: u64, data: &[u8]) -> Result<(), SshError> {
-    let mut offset = 0;
-    while offset < data.len() {
-        let n = tcp_send(handle, &data[offset..])?;
-        if n == 0 {
+    // Walking a shrinking `rest` rather than an offset keeps "how much is left"
+    // and "where that starts" from being two facts that can disagree.
+    let mut rest = data;
+    while !rest.is_empty() {
+        let sent = tcp_send(handle, rest)?;
+        if sent == 0 {
             return Err(SshError::SendFailed);
         }
-        offset = offset.checked_add(n).ok_or(SshError::SendFailed)?;
+        rest = rest.get(sent..).ok_or(SshError::SendFailed)?;
     }
     Ok(())
 }
 
-/// Receive data from a TCP connection. Returns 0 when the peer has closed.
-fn tcp_recv(handle: u64, buf: &mut [u8]) -> Result<usize, SshError> {
+/// Receive from a TCP connection, returning the prefix of `buf` the kernel
+/// actually filled. An empty slice means the peer has closed.
+///
+/// Handing back the slice rather than a count is deliberate: the kernel's
+/// number is turned into a range in exactly one place, here, where a byte count
+/// that does not fit the buffer we handed over is rejected as `RecvFailed`
+/// rather than travelling into a caller's `buf[..n]` and panicking there.
+fn tcp_recv(handle: u64, buf: &mut [u8]) -> Result<&[u8], SshError> {
     // SAFETY: We pass a valid handle and a mutable buffer pointer with its
     // correct length. The kernel writes at most `buf.len()` bytes into the buffer.
     let ret = unsafe {
@@ -222,7 +230,8 @@ fn tcp_recv(handle: u64, buf: &mut [u8]) -> Result<usize, SshError> {
     if ret < 0 {
         return Err(SshError::RecvFailed);
     }
-    Ok(ret as usize)
+    let received = usize::try_from(ret).map_err(|_| SshError::RecvFailed)?;
+    buf.get(..received).ok_or(SshError::RecvFailed)
 }
 
 /// Close a TCP connection handle.
@@ -318,6 +327,15 @@ const MAX_PACKET_SIZE: usize = 35000;
 /// Minimum block size for packet alignment.
 const BLOCK_SIZE_UNENCRYPTED: usize = 8;
 
+/// Largest `SSH_MSG_CHANNEL_DATA` payload we will send in one packet.
+///
+/// This is the same 32 KiB that `channel_open` advertises to the server as our
+/// maximum packet size; it was written out as a bare `32768` in both places,
+/// which is two independent copies of one promise. RFC 4254 s5.1 makes the
+/// advertised figure binding, so a change to one that missed the other would
+/// have us overrun a limit we had just announced.
+const MAX_CHANNEL_CHUNK: usize = 32768;
+
 /// Build a raw SSH binary packet from a payload.
 ///
 /// Format: `[u32 packet_length][u8 padding_length][payload][random_padding]`
@@ -332,19 +350,34 @@ fn build_packet(payload: &[u8], encrypted: bool, seq: u32, enc: &EncryptionState
 
     // Compute padding: packet_length + padding_length + payload must be
     // a multiple of block_size, with at least 4 bytes of padding.
-    let unpadded = 1 + payload.len(); // padding_length byte + payload
-    let mut padding = block_size - ((4 + unpadded) % block_size);
+    //
+    // Saturating rather than wrapping throughout: every input here is ours
+    // (a payload we built, a block size of 8 or 16), so none of these can
+    // actually overflow — but a saturating form that produces a too-long
+    // packet the server rejects beats a wrapping one that silently produces a
+    // *valid-looking* packet describing the wrong length.
+    let unpadded = payload.len().saturating_add(1); // padding_length byte + payload
+    let overhang = unpadded
+        .saturating_add(4)
+        .checked_rem(block_size)
+        .unwrap_or(0);
+    let mut padding = block_size.saturating_sub(overhang);
     if padding < 4 {
-        padding += block_size;
+        padding = padding.saturating_add(block_size);
     }
 
-    let packet_length = unpadded + padding;
-    let mut pkt = Vec::with_capacity(4 + packet_length);
-    pkt.extend_from_slice(&(packet_length as u32).to_be_bytes());
-    pkt.push(padding as u8);
+    let packet_length = unpadded.saturating_add(padding);
+    let total_len = packet_length.saturating_add(4);
+    let mut pkt = Vec::with_capacity(total_len);
+    pkt.extend_from_slice(
+        &u32::try_from(packet_length)
+            .unwrap_or(u32::MAX)
+            .to_be_bytes(),
+    );
+    pkt.push(u8::try_from(padding).unwrap_or(u8::MAX));
     pkt.extend_from_slice(payload);
     // Zero-fill padding (simplified; a real implementation would use random bytes).
-    pkt.resize(4 + packet_length, 0);
+    pkt.resize(total_len, 0);
 
     if encrypted {
         // Compute MAC over sequence number + unencrypted packet.
@@ -371,59 +404,83 @@ fn read_packet(
         BLOCK_SIZE_UNENCRYPTED
     };
 
-    // We need at least one block to read packet_length.
-    buf.ensure(handle, block_size)?;
-
     // Peek/decrypt the first block to get packet_length.
-    let first_block = buf.peek(block_size);
+    let first_block = buf.peek(handle, block_size)?;
     let first_decrypted = if encrypted {
         decrypt_block_aes_ctr(first_block, &enc.enc_key_s2c, &enc.iv_s2c, seq, 0)
     } else {
         first_block.to_vec()
     };
 
-    let packet_length = u32::from_be_bytes([
-        first_decrypted[0],
-        first_decrypted[1],
-        first_decrypted[2],
-        first_decrypted[3],
-    ]) as usize;
+    let [len_b0, len_b1, len_b2, len_b3, ..] = *first_decrypted.as_slice() else {
+        return Err(SshError::ProtocolError("short packet header".into()));
+    };
+    let packet_length = u32::from_be_bytes([len_b0, len_b1, len_b2, len_b3]) as usize;
 
-    if packet_length > MAX_PACKET_SIZE {
+    // Both bounds matter, and only the upper one used to be checked. A server
+    // announcing `packet_length` 0 or 1 produced a `decrypted` of four or five
+    // bytes, and the `decrypted[4]` below — the padding-length byte, which the
+    // wire format says is inside the packet — then indexed off the end and
+    // panicked. RFC 4253 s6 puts the floor at one padding-length byte plus the
+    // four-byte minimum padding, so anything under 5 is malformed by
+    // definition and is rejected here rather than surviving to be indexed.
+    if packet_length < 5 || packet_length > MAX_PACKET_SIZE {
         return Err(SshError::ProtocolError(format!(
-            "packet too large: {packet_length}"
+            "bad packet length: {packet_length}"
         )));
     }
 
     let mac_len = if encrypted { enc.mac_len } else { 0 };
-    let total = 4 + packet_length + mac_len;
-    buf.ensure(handle, total)?;
+    let body_len = packet_length
+        .checked_add(4)
+        .ok_or_else(|| SshError::ProtocolError("packet length overflow".into()))?;
+    let total = body_len
+        .checked_add(mac_len)
+        .ok_or_else(|| SshError::ProtocolError("packet length overflow".into()))?;
 
-    let raw = buf.consume(total);
+    let raw = buf.take(handle, total)?;
 
     // Decrypt if needed.
     let decrypted = if encrypted {
-        let (pkt_data, mac_data) = raw.split_at(4 + packet_length);
+        let (pkt_data, mac_data) = raw.split_at(body_len);
         let mut dec = pkt_data.to_vec();
         decrypt_packet_aes_ctr(&mut dec, &enc.enc_key_s2c, &enc.iv_s2c, seq);
 
-        // Verify MAC.
+        // Verify MAC. The `get` failing means the server sent a short MAC, and
+        // that has to *reject*: the previous form guarded the comparison with
+        // `mac_data.len() >= mac_len`, so a truncated MAC skipped the check
+        // entirely and the packet was accepted unauthenticated.
         let expected_mac = compute_mac(&enc.mac_key_s2c, seq, &dec);
-        if mac_data.len() >= mac_len
-            && !constant_time_eq(mac_data.get(..mac_len).unwrap_or_default(), &expected_mac)
-        {
+        let received_mac = mac_data
+            .get(..mac_len)
+            .ok_or_else(|| SshError::ProtocolError("truncated MAC".into()))?;
+        if !constant_time_eq(received_mac, &expected_mac) {
             return Err(SshError::ProtocolError("MAC verification failed".into()));
         }
         dec
     } else {
-        raw[..4 + packet_length].to_vec()
+        raw.get(..body_len)
+            .ok_or_else(|| SshError::ProtocolError("short packet".into()))?
+            .to_vec()
     };
 
-    let padding_length = decrypted[4] as usize;
+    // Layout: [0..4] length, [4] padding_length, [5..] payload then padding.
+    let padding_length = usize::from(
+        *decrypted
+            .get(4)
+            .ok_or_else(|| SshError::ProtocolError("short packet".into()))?,
+    );
     let payload_len = packet_length
-        .checked_sub(1 + padding_length)
+        .checked_sub(1)
+        .and_then(|n| n.checked_sub(padding_length))
         .ok_or_else(|| SshError::ProtocolError("invalid padding length".into()))?;
-    Ok(decrypted[5..5 + payload_len].to_vec())
+    let payload_end = payload_len
+        .checked_add(5)
+        .ok_or_else(|| SshError::ProtocolError("invalid padding length".into()))?;
+    Ok(decrypted
+        .get(5..payload_end)
+        .ok_or_else(|| SshError::ProtocolError("short packet".into()))?
+        .to_vec())
 }
 
 // ============================================================================
@@ -445,37 +502,51 @@ impl StreamBuffer {
 
     /// Return how many unconsumed bytes are buffered.
     fn available(&self) -> usize {
-        self.data.len() - self.pos
+        self.data.len().saturating_sub(self.pos)
     }
 
-    /// Ensure at least `needed` bytes are buffered, reading from TCP as needed.
-    fn ensure(&mut self, handle: u64, needed: usize) -> Result<(), SshError> {
-        while self.available() < needed {
-            // Compact if we have consumed a lot.
-            if self.pos > 4096 {
-                self.data.drain(..self.pos);
-                self.pos = 0;
-            }
-            let mut tmp = [0u8; 8192];
-            let n = tcp_recv(handle, &mut tmp)?;
-            if n == 0 {
-                return Err(SshError::ProtocolError("connection closed".into()));
-            }
-            self.data.extend_from_slice(&tmp[..n]);
+    /// The unconsumed bytes.
+    fn unread(&self) -> &[u8] {
+        self.data.get(self.pos..).unwrap_or_default()
+    }
+
+    /// Read once from TCP and append. Errors if the peer has closed.
+    fn fill_once(&mut self, handle: u64) -> Result<(), SshError> {
+        // Compact if we have consumed a lot, so a long session does not grow
+        // `data` without bound behind an ever-advancing `pos`.
+        if self.pos > 4096 {
+            self.data.drain(..self.pos);
+            self.pos = 0;
         }
+        let mut tmp = [0u8; 8192];
+        let received = tcp_recv(handle, &mut tmp)?;
+        if received.is_empty() {
+            return Err(SshError::ProtocolError("connection closed".into()));
+        }
+        self.data.extend_from_slice(received);
         Ok(())
     }
 
-    /// Peek at the first `n` bytes without consuming them.
-    fn peek(&self, n: usize) -> &[u8] {
-        &self.data[self.pos..self.pos + n]
+    /// Read from TCP until at least `n` bytes are buffered, then return them
+    /// without consuming.
+    ///
+    /// Fusing "make sure `n` bytes are there" with "hand me `n` bytes" is the
+    /// point: as two separate calls it was possible — and, at the two
+    /// `available() >= block_size` shortcuts in `try_recv_packet`, actually
+    /// the case — for a caller to reach the taking half with a different `n`
+    /// than it had ensured, and the taking half indexed unchecked.
+    fn peek(&mut self, handle: u64, n: usize) -> Result<&[u8], SshError> {
+        while self.available() < n {
+            self.fill_once(handle)?;
+        }
+        self.unread().get(..n).ok_or(SshError::RecvFailed)
     }
 
-    /// Consume and return `n` bytes.
-    fn consume(&mut self, n: usize) -> Vec<u8> {
-        let result = self.data[self.pos..self.pos + n].to_vec();
-        self.pos += n;
-        result
+    /// Read from TCP until at least `n` bytes are buffered, then consume them.
+    fn take(&mut self, handle: u64, n: usize) -> Result<Vec<u8>, SshError> {
+        let taken = self.peek(handle, n)?.to_vec();
+        self.pos = self.pos.saturating_add(n);
+        Ok(taken)
     }
 }
 
@@ -485,55 +556,52 @@ impl StreamBuffer {
 
 /// Encode a string/bytes as SSH `string` type: u32 length + data.
 fn ssh_string(data: &[u8]) -> Vec<u8> {
-    let mut out = Vec::with_capacity(4 + data.len());
-    out.extend_from_slice(&(data.len() as u32).to_be_bytes());
+    let mut out = Vec::with_capacity(data.len().saturating_add(4));
+    out.extend_from_slice(&u32::try_from(data.len()).unwrap_or(u32::MAX).to_be_bytes());
     out.extend_from_slice(data);
     out
 }
 
 /// Read an SSH `string` from a byte slice at the given offset.
 /// Returns (value, new_offset).
+///
+/// The length prefix is entirely the server's to choose, so it is added to the
+/// offset with `checked_add` and turned into a range only by `get`, which
+/// returns `None` rather than panicking when the server claims more bytes than
+/// it sent. The previous `offset + 4 > data.len()` guard was itself the hazard:
+/// the addition it performed to decide whether indexing was safe could
+/// overflow, and on overflow it concluded that it was.
 fn read_ssh_string(data: &[u8], offset: usize) -> Result<(&[u8], usize), SshError> {
-    if offset + 4 > data.len() {
-        return Err(SshError::ProtocolError("truncated string length".into()));
-    }
-    let len = u32::from_be_bytes([
-        data[offset],
-        data[offset + 1],
-        data[offset + 2],
-        data[offset + 3],
-    ]) as usize;
-    let start = offset + 4;
-    let end = start + len;
-    if end > data.len() {
-        return Err(SshError::ProtocolError(format!(
+    let (len, start) = read_u32(data, offset)?;
+    let len = usize::try_from(len)
+        .map_err(|_| SshError::ProtocolError(format!("string length {len} out of range")))?;
+    let end = start
+        .checked_add(len)
+        .ok_or_else(|| SshError::ProtocolError("string length overflow".into()))?;
+    let value = data.get(start..end).ok_or_else(|| {
+        SshError::ProtocolError(format!(
             "string length {len} exceeds packet (have {})",
-            data.len() - start
-        )));
-    }
-    Ok((&data[start..end], end))
+            data.len().saturating_sub(start)
+        ))
+    })?;
+    Ok((value, end))
 }
 
 /// Read a u32 from a byte slice at the given offset.
 fn read_u32(data: &[u8], offset: usize) -> Result<(u32, usize), SshError> {
-    if offset + 4 > data.len() {
-        return Err(SshError::ProtocolError("truncated u32".into()));
-    }
-    let v = u32::from_be_bytes([
-        data[offset],
-        data[offset + 1],
-        data[offset + 2],
-        data[offset + 3],
-    ]);
-    Ok((v, offset + 4))
+    let bytes = data
+        .get(offset..)
+        .and_then(<[u8]>::first_chunk::<4>)
+        .ok_or_else(|| SshError::ProtocolError("truncated u32".into()))?;
+    Ok((u32::from_be_bytes(*bytes), offset.saturating_add(4)))
 }
 
 /// Read a byte from a slice at the given offset.
 fn read_byte(data: &[u8], offset: usize) -> Result<(u8, usize), SshError> {
-    if offset >= data.len() {
-        return Err(SshError::ProtocolError("truncated byte".into()));
-    }
-    Ok((data[offset], offset + 1))
+    let byte = *data
+        .get(offset)
+        .ok_or_else(|| SshError::ProtocolError("truncated byte".into()))?;
+    Ok((byte, offset.saturating_add(1)))
 }
 
 /// Encode an SSH `mpint` from a big-endian unsigned byte array.
@@ -541,13 +609,15 @@ fn read_byte(data: &[u8], offset: usize) -> Result<(u8, usize), SshError> {
 fn encode_mpint(value: &[u8]) -> Vec<u8> {
     // Strip leading zeros.
     let stripped = strip_leading_zeros(value);
-    if stripped.is_empty() {
+    let Some(&high) = stripped.first() else {
         return vec![0, 0, 0, 0]; // mpint zero
-    }
-    let needs_pad = (stripped[0] & 0x80) != 0;
-    let total_len = stripped.len() + if needs_pad { 1 } else { 0 };
-    let mut out = Vec::with_capacity(4 + total_len);
-    out.extend_from_slice(&(total_len as u32).to_be_bytes());
+    };
+    // A leading byte with the top bit set would read as negative, and mpint is
+    // two's complement; the zero pad is what keeps it unsigned.
+    let needs_pad = (high & 0x80) != 0;
+    let total_len = stripped.len().saturating_add(usize::from(needs_pad));
+    let mut out = Vec::with_capacity(total_len.saturating_add(4));
+    out.extend_from_slice(&u32::try_from(total_len).unwrap_or(u32::MAX).to_be_bytes());
     if needs_pad {
         out.push(0);
     }
@@ -564,72 +634,136 @@ fn read_mpint(data: &[u8], offset: usize) -> Result<(Vec<u8>, usize), SshError> 
 }
 
 fn strip_leading_zeros(data: &[u8]) -> &[u8] {
-    let first_nonzero = data.iter().position(|&b| b != 0).unwrap_or(data.len());
-    &data[first_nonzero..]
+    // `trim_ascii_start` is for whitespace; this is the same shape for zeros,
+    // expressed so the "everything was zero" case is the empty slice by
+    // construction rather than by a `position`/`unwrap_or(len)` pairing.
+    let mut rest = data;
+    while let [0, tail @ ..] = rest {
+        rest = tail;
+    }
+    rest
 }
 
 // ============================================================================
 // Minimal big-integer arithmetic for Diffie-Hellman
 //
-// We represent big integers as big-endian byte vectors. This is a simplified
-// implementation sufficient for the DH key exchange — not a general-purpose
-// bignum library.
+// Enough of a bignum to run the group-14 key exchange, and no more. The
+// representation is little-endian 32-bit limbs: little-endian because every
+// algorithm here -- addition, multiplication, shifting, division -- carries
+// from the least significant end upward, so storing that end first makes a
+// digit's place its own index instead of `len - 1 - i`; 32-bit limbs because
+// the products fit exactly in a `u64`, which is the widest exact integer we
+// have.
+//
+// This was previously big-endian *bytes*, which cost on both counts. See
+// `div_rem` for what that cost in practice.
 // ============================================================================
 
-/// Big-endian unsigned big integer.
+/// Unsigned big integer.
 #[derive(Clone, Debug)]
 struct BigUint {
-    /// Digits stored big-endian (most significant byte first). No leading zeros
-    /// except for the value zero itself, which is represented as an empty vec.
-    bytes: Vec<u8>,
+    /// Digits stored little-endian (least significant limb first), with no
+    /// trailing zero limbs. Zero is the empty vector.
+    limbs: Vec<u32>,
 }
 
 impl BigUint {
+    /// The one place a limb vector becomes a `BigUint`.
+    ///
+    /// `mul`, `div_rem`, `shl1` and `sub` each used to end with their own copy
+    /// of this -- a `while bytes.len() > 1 && bytes[0] == 0 { bytes.remove(0) }`
+    /// loop followed by a `== [0]` special case. Four copies of an invariant is
+    /// four chances for one to drift out of step with the others, and each copy
+    /// was quadratic besides, since `Vec::remove(0)` shifts the whole buffer
+    /// per zero digit. Routing every producer through here makes "no leading
+    /// zeros, and zero is the empty vector" a property of construction rather
+    /// than a convention every arithmetic routine has to remember to restore.
+    /// In little-endian order the trimming is `pop`, so it is also linear.
+    fn normalized(mut limbs: Vec<u32>) -> Self {
+        while limbs.last() == Some(&0) {
+            limbs.pop();
+        }
+        Self { limbs }
+    }
+
     fn zero() -> Self {
-        Self { bytes: Vec::new() }
+        Self { limbs: Vec::new() }
     }
 
     fn one() -> Self {
-        Self { bytes: vec![1] }
+        Self { limbs: vec![1] }
     }
 
+    /// Read a big-endian byte string.
     fn from_bytes_be(data: &[u8]) -> Self {
-        let stripped = strip_leading_zeros(data);
-        Self {
-            bytes: stripped.to_vec(),
-        }
+        // `rchunks` groups from the least significant end, so a byte length
+        // that is not a multiple of four leaves the short group at the *top*,
+        // where a partial limb is exactly what is wanted. Grouping forwards
+        // would put it at the bottom, where it would misalign every limb.
+        let limbs = data
+            .rchunks(4)
+            .map(|chunk| chunk.iter().fold(0u32, |acc, &b| acc << 8 | u32::from(b)))
+            .collect();
+        Self::normalized(limbs)
     }
 
+    /// Write a big-endian byte string, with no leading zero byte. Zero is a
+    /// single zero byte rather than nothing, since callers hand the result to
+    /// `encode_mpint`, which is what decides how zero goes on the wire.
     fn to_bytes_be(&self) -> Vec<u8> {
-        if self.bytes.is_empty() {
+        let Some((&top, rest)) = self.limbs.split_last() else {
             return vec![0];
+        };
+        // Normalisation guarantees `top != 0`, so skipping its zero bytes
+        // cannot consume the whole number.
+        let mut out: Vec<u8> = top
+            .to_be_bytes()
+            .into_iter()
+            .skip_while(|&b| b == 0)
+            .collect();
+        for &limb in rest.iter().rev() {
+            out.extend_from_slice(&limb.to_be_bytes());
         }
-        self.bytes.clone()
+        out
     }
 
     fn is_zero(&self) -> bool {
-        self.bytes.is_empty()
+        self.limbs.is_empty()
     }
 
     /// Return the number of bits.
     fn bit_length(&self) -> usize {
-        if self.bytes.is_empty() {
+        let Some(&top) = self.limbs.last() else {
             return 0;
-        }
-        let top = self.bytes[0];
-        let top_bits = 8 - top.leading_zeros() as usize;
-        (self.bytes.len() - 1) * 8 + top_bits
+        };
+        let top_bits = 32usize.saturating_sub(top.leading_zeros() as usize);
+        self.limbs
+            .len()
+            .saturating_sub(1)
+            .saturating_mul(32)
+            .saturating_add(top_bits)
     }
 
     /// Test bit at position `pos` (0 = least significant).
+    ///
+    /// Little-endian storage makes this a plain lookup. The big-endian version
+    /// had to reverse the index with two checked subtractions, whose only job
+    /// was to undo the storage order.
     fn bit(&self, pos: usize) -> bool {
-        let byte_idx = pos / 8;
-        let bit_idx = pos % 8;
-        if byte_idx >= self.bytes.len() {
-            return false;
-        }
-        let idx = self.bytes.len() - 1 - byte_idx;
-        (self.bytes[idx] >> bit_idx) & 1 == 1
+        self.limbs
+            .get(pos / 32)
+            .is_some_and(|&limb| (limb >> (pos % 32)) & 1 == 1)
+    }
+
+    /// Compare magnitudes.
+    fn cmp_unsigned(&self, other: &BigUint) -> std::cmp::Ordering {
+        // Normalisation means the limb count *is* the comparison whenever the
+        // counts differ; when they agree, the most significant limb that
+        // differs decides, which is what comparing the reversed sequences does.
+        self.limbs
+            .len()
+            .cmp(&other.limbs.len())
+            .then_with(|| self.limbs.iter().rev().cmp(other.limbs.iter().rev()))
     }
 
     /// Modular exponentiation: self^exp mod modulus.
@@ -664,49 +798,113 @@ impl BigUint {
         self.div_rem(modulus).1
     }
 
-    /// Full multiplication (schoolbook, O(n^2)).
+    /// Full multiplication (schoolbook, O(n*m) limb products).
+    //
+    // The arithmetic in the inner loop is plain rather than checked, and the
+    // bound is a proof rather than a hope. With `a`, `b` and `slot` all below
+    // 2^32 and `carry` below 2^32, the widest the expression can reach is
+    // (2^32-1)^2 + (2^32-1) + (2^32-1) = 2^64 - 1, which is exactly `u64::MAX`
+    // -- the classic reason schoolbook multiplication picks a limb half the
+    // width of its accumulator. `carry` stays below 2^32 because it is that
+    // value shifted right by 32. Writing these as `checked_mul(..).unwrap_or`
+    // would replace a provably exact result with a silently wrong fallback on
+    // a branch that cannot be taken, in the innermost loop of the key
+    // exchange.
+    #[allow(clippy::arithmetic_side_effects)]
     fn mul(&self, other: &BigUint) -> BigUint {
         if self.is_zero() || other.is_zero() {
             return BigUint::zero();
         }
-        let a = &self.bytes;
-        let b = &other.bytes;
-        let mut result = vec![0u32; a.len() + b.len()];
+        let mut acc = vec![0u32; self.limbs.len().saturating_add(other.limbs.len())];
 
-        for (i, &av) in a.iter().enumerate().rev() {
-            let ai = a.len() - 1 - i;
-            for (j, &bv) in b.iter().enumerate().rev() {
-                let bj = b.len() - 1 - j;
-                let pos = ai + bj;
-                let prod = u32::from(av) * u32::from(bv) + result[pos];
-                result[pos] = prod & 0xFF;
-                if pos + 1 < result.len() {
-                    result[pos + 1] += prod >> 8;
-                }
+        for (i, &av) in self.limbs.iter().enumerate() {
+            let Some(window) = acc.get_mut(i..) else {
+                break;
+            };
+            let mut carry = 0u64;
+            for (slot, &bv) in window.iter_mut().zip(&other.limbs) {
+                let prod = u64::from(av) * u64::from(bv) + u64::from(*slot) + carry;
+                *slot = prod as u32;
+                carry = prod >> 32;
+            }
+            // The carry-out lands in the limb one past the ones just written.
+            // That limb has never been written before -- iteration `i` reaches
+            // at most `i + other.len()` -- so this is an assignment rather than
+            // an addition, and the accumulator never needs a second
+            // carry-propagation pass to restore "every limb is a limb".
+            if let Some(slot) = window.get_mut(other.limbs.len()) {
+                *slot = carry as u32;
             }
         }
 
-        // Propagate carries.
-        for i in 0..result.len() - 1 {
-            if result[i] > 255 {
-                result[i + 1] += result[i] >> 8;
-                result[i] &= 0xFF;
-            }
-        }
+        BigUint::normalized(acc)
+    }
 
-        // Convert back to big-endian bytes.
-        let mut bytes: Vec<u8> = result.iter().rev().map(|&v| v as u8).collect();
-        // Strip leading zeros.
-        while bytes.len() > 1 && bytes[0] == 0 {
-            bytes.remove(0);
+    /// Shift a limb sequence left by `bits` (0..32), appending the limb that
+    /// carries out. Used by `div_rem`'s normalisation step and by `shl1`.
+    //
+    // `bits < 32` is enforced by the callers (it comes from `leading_zeros` of
+    // a non-zero `u32`, or is the literal 1), and `u64::from(u32) << 31` is
+    // under 2^63, so neither the shift nor the or can overflow.
+    #[allow(clippy::arithmetic_side_effects)]
+    fn shifted_left(limbs: &[u32], bits: u32) -> Vec<u32> {
+        let mut out = Vec::with_capacity(limbs.len().saturating_add(1));
+        let mut carry = 0u64;
+        for &limb in limbs {
+            let widened = (u64::from(limb) << bits) | carry;
+            out.push(widened as u32);
+            carry = widened >> 32;
         }
-        if bytes == [0] {
-            bytes.clear();
+        out.push(carry as u32);
+        out
+    }
+
+    /// Shift a limb sequence right by `bits` (0..32). The inverse of
+    /// `shifted_left` for the same `bits`, which is what `div_rem` needs to
+    /// undo its normalisation before returning the remainder.
+    //
+    // `carry` is below `2^bits` by construction, so `carry << 32` is below
+    // 2^63; and `widened >> bits` is below 2^32, so the truncation is exact.
+    #[allow(clippy::arithmetic_side_effects)]
+    fn shifted_right(limbs: &[u32], bits: u32) -> Vec<u32> {
+        let mut out = vec![0u32; limbs.len()];
+        let mut carry = 0u64;
+        for (slot, &limb) in out.iter_mut().zip(limbs).rev() {
+            let widened = (carry << 32) | u64::from(limb);
+            *slot = (widened >> bits) as u32;
+            carry = widened & ((1u64 << bits) - 1);
         }
-        BigUint { bytes }
+        out
     }
 
     /// Division with remainder. Returns (quotient, remainder).
+    ///
+    /// Knuth's algorithm D (TAOCP vol. 2 s4.3.1), in base 2^32.
+    ///
+    /// The previous implementation was long division one *bit* at a time, and
+    /// allocated three fresh `Vec`s per bit -- one for the shift, one for the
+    /// compare, one for the subtract. Reducing a 4096-bit product modulo the
+    /// 2048-bit group-14 prime therefore took 4096 iterations and some twelve
+    /// thousand allocations, and a key exchange, which performs a few hundred
+    /// such reductions, took over eighty seconds of CPU. That is not a slow
+    /// handshake, it is an unusable client. Algorithm D does the same work in
+    /// one pass of `m * n` limb operations with no allocation in the inner
+    /// loop at all.
+    //
+    // Bounds for the plain arithmetic below, each of which is the standard
+    // algorithm-D argument:
+    //   * `j + n` and `j + i` are in range because `j <= m`, `i < n` and `u`
+    //     has exactly `m + n + 1` limbs.
+    //   * `qhat * v_second` is only evaluated when the short-circuiting `||`
+    //     has already established `qhat < 2^32`, so it is under 2^64.
+    //   * `rhat << 32` is only reached in that same branch, where `rhat` is a
+    //     remainder modulo `v_top < 2^32`.
+    //   * `t` lies in `-(2^32) ..= 2^32 - 1`, so `t >> 32` is 0 or -1 -- which
+    //     *is* the borrow -- and `k` stays in `0 ..= 2^32`.
+    // Substituting saturating or checked forms here would not make any of
+    // those true; it would only replace an exact result with a wrong one on
+    // paths that cannot be taken.
+    #[allow(clippy::arithmetic_side_effects)]
     fn div_rem(&self, divisor: &BigUint) -> (BigUint, BigUint) {
         if divisor.is_zero() {
             return (BigUint::zero(), BigUint::zero());
@@ -715,86 +913,116 @@ impl BigUint {
             return (BigUint::zero(), self.clone());
         }
 
-        let mut remainder = BigUint::zero();
-        let mut quotient_bits = Vec::new();
-
-        for i in (0..self.bit_length()).rev() {
-            // Left-shift remainder by 1 and add the next bit.
-            remainder = remainder.shl1();
-            if self.bit(i) {
-                remainder = remainder.add_small(1);
+        // A single-limb divisor needs no trial quotient: a 64-by-32 divide is
+        // exact, and the estimation machinery below wants two divisor limbs to
+        // estimate from anyway.
+        if let [d] = *divisor.limbs.as_slice() {
+            let d = u64::from(d);
+            let mut quotient = vec![0u32; self.limbs.len()];
+            let mut rem = 0u64;
+            for (slot, &limb) in quotient.iter_mut().zip(&self.limbs).rev() {
+                let current = (rem << 32) | u64::from(limb);
+                *slot = (current / d) as u32;
+                rem = current % d;
             }
-            if remainder.cmp_unsigned(divisor) != std::cmp::Ordering::Less {
-                remainder = remainder.sub(divisor);
-                quotient_bits.push(i);
+            return (
+                BigUint::normalized(quotient),
+                BigUint::normalized(vec![rem as u32]),
+            );
+        }
+
+        let n = divisor.limbs.len();
+        let Some(m) = self.limbs.len().checked_sub(n) else {
+            return (BigUint::zero(), self.clone());
+        };
+
+        // D1. Normalise, so that the divisor's top limb has its high bit set.
+        // That is the condition under which the trial quotient below is at
+        // most two too large, which is what makes a single correction step
+        // enough.
+        let shift = divisor.limbs.last().map_or(0, |&top| top.leading_zeros());
+        let scaled_divisor = Self::shifted_left(&divisor.limbs, shift);
+        let mut u = Self::shifted_left(&self.limbs, shift);
+        // `shifted_left` always appends the carry-out limb: `u` therefore has
+        // exactly the `m + n + 1` limbs algorithm D wants, and the divisor's
+        // extra limb is zero (the shift is chosen to fill its top limb) and is
+        // dropped here.
+        let (Some(v), Some(&[v_second, v_top])) = (
+            scaled_divisor.get(..n),
+            scaled_divisor.get(..n).and_then(<[u32]>::last_chunk::<2>),
+        ) else {
+            return (BigUint::zero(), self.clone());
+        };
+
+        let mut quotient = vec![0u32; m.saturating_add(1)];
+
+        for j in (0..=m).rev() {
+            // D3. Estimate this quotient limb from the top two limbs of the
+            // running remainder over the divisor's top limb, then walk the
+            // estimate down until it is provably right or one too large.
+            let Some(&[u_low, u_mid, u_top]) = u.get(j..=j + n).and_then(<[u32]>::last_chunk::<3>)
+            else {
+                break;
+            };
+            let numerator = (u64::from(u_top) << 32) | u64::from(u_mid);
+            let mut qhat = numerator / u64::from(v_top);
+            let mut rhat = numerator % u64::from(v_top);
+            while qhat > u64::from(u32::MAX)
+                || qhat * u64::from(v_second) > (rhat << 32) | u64::from(u_low)
+            {
+                qhat -= 1;
+                rhat += u64::from(v_top);
+                if rhat > u64::from(u32::MAX) {
+                    break;
+                }
+            }
+
+            // D4. Multiply the divisor by the estimate and subtract, carrying
+            // the product's high half and the subtraction's borrow in one
+            // signed accumulator: `k` is `(product >> 32) - borrow`, so the
+            // two never need separate bookkeeping.
+            let Some(window) = u.get_mut(j..) else { break };
+            let mut k = 0i64;
+            for (slot, &vi) in window.iter_mut().zip(v) {
+                let product = qhat * u64::from(vi);
+                let t = i64::from(*slot) - k - i64::from((product & 0xffff_ffff) as u32);
+                *slot = t as u32;
+                k = (product >> 32) as i64 - (t >> 32);
+            }
+            let Some(top_slot) = window.get_mut(n) else {
+                break;
+            };
+            let t = i64::from(*top_slot) - k;
+            *top_slot = t as u32;
+
+            // D5/D6. A negative top limb means the estimate was one too large
+            // after all. Add the divisor back and step the quotient down; the
+            // carry out of the add-back cancels the borrow that made `t`
+            // negative, so it is discarded.
+            if t < 0 {
+                qhat -= 1;
+                let mut carry = 0u64;
+                for (slot, &vi) in window.iter_mut().zip(v) {
+                    let sum = u64::from(*slot) + u64::from(vi) + carry;
+                    *slot = sum as u32;
+                    carry = sum >> 32;
+                }
+                if let Some(top_slot) = window.get_mut(n) {
+                    *top_slot = top_slot.wrapping_add(carry as u32);
+                }
+            }
+
+            if let Some(slot) = quotient.get_mut(j) {
+                *slot = qhat as u32;
             }
         }
 
-        // Build quotient from bit positions.
-        if quotient_bits.is_empty() {
-            return (BigUint::zero(), remainder);
-        }
-
-        let max_bit = quotient_bits[0];
-        let num_bytes = max_bit / 8 + 1;
-        let mut qbytes = vec![0u8; num_bytes];
-        for pos in quotient_bits {
-            let byte_idx = pos / 8;
-            let bit_idx = pos % 8;
-            let idx = num_bytes - 1 - byte_idx;
-            qbytes[idx] |= 1 << bit_idx;
-        }
-        // Strip leading zeros.
-        while qbytes.len() > 1 && qbytes[0] == 0 {
-            qbytes.remove(0);
-        }
-        if qbytes == [0] {
-            qbytes.clear();
-        }
-        (BigUint { bytes: qbytes }, remainder)
-    }
-
-    /// Left-shift by 1 bit.
-    fn shl1(&self) -> BigUint {
-        if self.is_zero() {
-            return BigUint::zero();
-        }
-        let mut result = vec![0u8; self.bytes.len() + 1];
-        let mut carry = 0u8;
-        for i in (0..self.bytes.len()).rev() {
-            let v = (u16::from(self.bytes[i]) << 1) | u16::from(carry);
-            result[i + 1] = v as u8;
-            carry = (v >> 8) as u8;
-        }
-        result[0] = carry;
-        while result.len() > 1 && result[0] == 0 {
-            result.remove(0);
-        }
-        if result == [0] {
-            result.clear();
-        }
-        BigUint { bytes: result }
-    }
-
-    /// Add a small u8 value.
-    fn add_small(&self, val: u8) -> BigUint {
-        if val == 0 {
-            return self.clone();
-        }
-        if self.is_zero() {
-            return BigUint { bytes: vec![val] };
-        }
-        let mut result = self.bytes.clone();
-        let mut carry = u16::from(val);
-        for b in result.iter_mut().rev() {
-            let sum = u16::from(*b) + carry;
-            *b = sum as u8;
-            carry = sum >> 8;
-        }
-        if carry > 0 {
-            result.insert(0, carry as u8);
-        }
-        BigUint { bytes: result }
+        // D8. Undo the normalisation shift on the remainder, which is what is
+        // left in the low `n` limbs of `u`.
+        let remainder = u.get(..n).map_or_else(BigUint::zero, |low| {
+            BigUint::normalized(Self::shifted_right(low, shift))
+        });
+        (BigUint::normalized(quotient), remainder)
     }
 
     /// Subtract (self - other). Assumes self >= other.
@@ -802,47 +1030,34 @@ impl BigUint {
         if other.is_zero() {
             return self.clone();
         }
-        let a = &self.bytes;
-        let b = &other.bytes;
-        let len = a.len();
-        let mut result = vec![0u8; len];
-        let mut borrow: i16 = 0;
+        // Little-endian storage means the two operands are already aligned at
+        // the end the borrow starts from, so the shorter one simply runs out:
+        // this states the alignment that the big-endian version computed as a
+        // signed index (`i as isize - (len as isize - b.len() as isize)`), a
+        // mixed-signedness expression whose only purpose was to answer "has
+        // the subtrahend ended yet".
+        //
+        // The digit itself is computed with `overflowing_sub` rather than by
+        // widening, subtracting and folding a negative result back: wrapping
+        // *is* the modular result the algorithm wants, and the overflow flag
+        // *is* the borrow, so neither has to be reconstructed from the sign of
+        // a wider intermediate.
+        let mut result: Vec<u32> = Vec::with_capacity(self.limbs.len());
+        let mut borrow = 0u32;
+        let mut subtrahend = other.limbs.iter();
 
-        for i in (0..len).rev() {
-            let av = i16::from(a[i]);
-            let bi = i as isize - (len as isize - b.len() as isize);
-            let bv = if bi >= 0 {
-                i16::from(b[bi as usize])
-            } else {
-                0
-            };
-            let diff = av - bv - borrow;
-            if diff < 0 {
-                result[i] = (diff + 256) as u8;
-                borrow = 1;
-            } else {
-                result[i] = diff as u8;
-                borrow = 0;
-            }
+        for &av in &self.limbs {
+            let bv = subtrahend.next().copied().unwrap_or(0);
+            let (partial, borrowed_b) = av.overflowing_sub(bv);
+            let (digit, borrowed_carry) = partial.overflowing_sub(borrow);
+            // At most one of the two can borrow: if `bv > av` then `partial` is
+            // `2^32 - (bv - av)`, which is at least 1, so it cannot underflow
+            // against a `borrow` of 0 or 1.
+            borrow = u32::from(borrowed_b | borrowed_carry);
+            result.push(digit);
         }
 
-        // Strip leading zeros.
-        while result.len() > 1 && result[0] == 0 {
-            result.remove(0);
-        }
-        if result == [0] {
-            result.clear();
-        }
-        BigUint { bytes: result }
-    }
-
-    fn cmp_unsigned(&self, other: &BigUint) -> std::cmp::Ordering {
-        let a = strip_leading_zeros(&self.bytes);
-        let b = strip_leading_zeros(&other.bytes);
-        match a.len().cmp(&b.len()) {
-            std::cmp::Ordering::Equal => a.cmp(b),
-            ord => ord,
-        }
+        BigUint::normalized(result)
     }
 }
 
@@ -867,35 +1082,36 @@ fn sha256(data: &[u8]) -> [u8; 32] {
 
 /// Compute HMAC-SHA256(key, data).
 fn hmac_sha256(key: &[u8], data: &[u8]) -> [u8; 32] {
-    let block_size = 64;
+    /// SHA-256's block size, and therefore HMAC's (RFC 2104).
+    const BLOCK_SIZE: usize = 64;
 
-    // If key is longer than block size, hash it first.
-    let key_used;
+    // A key longer than one block is replaced by its digest. That is what makes
+    // the pad below total rather than conditional: `key_used` is now at most 64
+    // bytes, either because it already was or because it is a 32-byte hash.
     let key_hash;
-    if key.len() > block_size {
+    let key_used: &[u8] = if key.len() > BLOCK_SIZE {
         key_hash = sha256(key);
-        key_used = &key_hash[..];
+        &key_hash
     } else {
-        key_used = key;
-    }
+        key
+    };
 
-    // Pad key to block_size.
-    let mut k_padded = vec![0u8; block_size];
-    k_padded[..key_used.len()].copy_from_slice(key_used);
+    // A fixed-size array rather than a `vec![0u8; block_size]`, so "the pad is
+    // exactly one block" is the type and not a runtime length.
+    let mut k_padded = [0u8; BLOCK_SIZE];
+    if let Some(head) = k_padded.get_mut(..key_used.len()) {
+        head.copy_from_slice(key_used);
+    }
 
     // Inner: SHA256((key XOR ipad) || data)
-    let mut inner = Vec::with_capacity(block_size + data.len());
-    for &b in &k_padded {
-        inner.push(b ^ 0x36);
-    }
+    let mut inner = Vec::with_capacity(BLOCK_SIZE.saturating_add(data.len()));
+    inner.extend(k_padded.iter().map(|b| b ^ 0x36));
     inner.extend_from_slice(data);
     let inner_hash = sha256(&inner);
 
     // Outer: SHA256((key XOR opad) || inner_hash)
-    let mut outer = Vec::with_capacity(block_size + 32);
-    for &b in &k_padded {
-        outer.push(b ^ 0x5c);
-    }
+    let mut outer = Vec::with_capacity(BLOCK_SIZE.saturating_add(inner_hash.len()));
+    outer.extend(k_padded.iter().map(|b| b ^ 0x5c));
     outer.extend_from_slice(&inner_hash);
     sha256(&outer)
 }
@@ -903,7 +1119,7 @@ fn hmac_sha256(key: &[u8], data: &[u8]) -> [u8; 32] {
 /// Compute the SSH MAC for a packet.
 /// MAC = HMAC-SHA256(key, sequence_number(u32_be) || unencrypted_packet)
 fn compute_mac(key: &[u8], seq: u32, packet: &[u8]) -> Vec<u8> {
-    let mut mac_input = Vec::with_capacity(4 + packet.len());
+    let mut mac_input = Vec::with_capacity(packet.len().saturating_add(4));
     mac_input.extend_from_slice(&seq.to_be_bytes());
     mac_input.extend_from_slice(packet);
     hmac_sha256(key, &mac_input).to_vec()
@@ -951,9 +1167,20 @@ const AES_SBOX: [u8; 256] = [
 /// AES round constants.
 const AES_RCON: [u8; 10] = [0x01, 0x02, 0x04, 0x08, 0x10, 0x20, 0x40, 0x80, 0x1b, 0x36];
 
+/// S-box substitution. A `u8` always indexes a 256-entry table, so the
+/// fallback is unreachable; saying it with `get` costs nothing and keeps the
+/// one genuinely computed index in this cipher out of the unchecked column.
+fn sbox(byte: u8) -> u8 {
+    AES_SBOX.get(usize::from(byte)).copied().unwrap_or(0)
+}
+
 /// Galois Field multiplication by 2 in GF(2^8).
 fn gf_mul2(x: u8) -> u8 {
-    let shifted = x << 1;
+    // Double, then reduce if a bit fell off the top, by the AES field
+    // polynomial x^8 + x^4 + x^3 + x + 1 (0x11b, low byte 0x1b). `wrapping_shl`
+    // rather than `<<` because discarding that bit is the definition of the
+    // operation, not an accident of the width.
+    let shifted = x.wrapping_shl(1);
     if (x & 0x80) != 0 {
         shifted ^ 0x1b
     } else {
@@ -969,45 +1196,59 @@ fn gf_mul3(x: u8) -> u8 {
 /// AES-128 key expansion. Produces 11 round keys (176 bytes total).
 fn aes128_key_expand(key: &[u8; 16]) -> [[u8; 16]; 11] {
     let mut round_keys = [[0u8; 16]; 11];
-    round_keys[0] = *key;
+    let mut prev = *key;
 
-    for i in 1..11 {
-        let prev = round_keys[i - 1];
-        let mut word = [prev[12], prev[13], prev[14], prev[15]];
+    // Zipping the round-constant table against the output slots states the
+    // rule "one round key per round constant" once. The old `for i in 1..11`
+    // had the count 11 written in the loop bound and the count 10 implied by
+    // `AES_RCON`, and reached back into the array it was filling with
+    // `round_keys[i - 1]` -- three facts that had to agree by hand.
+    let mut slots = round_keys.iter_mut();
+    if let Some(first) = slots.next() {
+        *first = prev;
+    }
 
-        // RotWord + SubWord + Rcon
+    for (&rcon, slot) in AES_RCON.iter().zip(slots) {
+        // RotWord + SubWord + Rcon over the previous key's last column.
+        let mut word = *prev.last_chunk::<4>().unwrap_or(&[0; 4]);
         word.rotate_left(1);
         for b in &mut word {
-            *b = AES_SBOX[*b as usize];
+            *b = sbox(*b);
         }
-        word[0] ^= AES_RCON[i - 1];
+        if let Some(top) = word.first_mut() {
+            *top ^= rcon;
+        }
 
-        for j in 0..4 {
-            let off = j * 4;
-            for k in 0..4 {
-                round_keys[i][off + k] = prev[off + k] ^ word[k];
+        let mut next = [0u8; 16];
+        for (prev_col, next_col) in prev.chunks_exact(4).zip(next.chunks_exact_mut(4)) {
+            for ((dst, &p), &w) in next_col.iter_mut().zip(prev_col).zip(word.iter()) {
+                *dst = p ^ w;
             }
-            // Update word for next column.
-            word = [
-                round_keys[i][off],
-                round_keys[i][off + 1],
-                round_keys[i][off + 2],
-                round_keys[i][off + 3],
-            ];
+            // The column just written feeds the next one.
+            word = <[u8; 4]>::try_from(&*next_col).unwrap_or([0; 4]);
         }
+
+        *slot = next;
+        prev = next;
     }
     round_keys
 }
 
 /// Encrypt one 16-byte block with AES-128.
 fn aes128_encrypt_block(block: &[u8; 16], round_keys: &[[u8; 16]; 11]) -> [u8; 16] {
+    // Destructuring says what `round_keys[0]`, `.take(10).skip(1)` and
+    // `round_keys[10]` said, but the compiler checks the arithmetic instead of
+    // the reader: "first, all but the last, last" cannot be off by one, whereas
+    // a `take`/`skip` pair silently loses or repeats a round if either constant
+    // drifts from the array's length.
+    let [first_key, middle_keys @ .., last_key] = round_keys;
     let mut state = *block;
 
     // Initial round key addition.
-    xor_block(&mut state, &round_keys[0]);
+    xor_block(&mut state, first_key);
 
     // Rounds 1..9: SubBytes, ShiftRows, MixColumns, AddRoundKey.
-    for round_key in round_keys.iter().take(10).skip(1) {
+    for round_key in middle_keys {
         sub_bytes(&mut state);
         shift_rows(&mut state);
         mix_columns(&mut state);
@@ -1017,7 +1258,7 @@ fn aes128_encrypt_block(block: &[u8; 16], round_keys: &[[u8; 16]; 11]) -> [u8; 1
     // Final round (no MixColumns).
     sub_bytes(&mut state);
     shift_rows(&mut state);
-    xor_block(&mut state, &round_keys[10]);
+    xor_block(&mut state, last_key);
 
     state
 }
@@ -1030,10 +1271,17 @@ fn xor_block(state: &mut [u8; 16], key: &[u8; 16]) {
 
 fn sub_bytes(state: &mut [u8; 16]) {
     for b in state.iter_mut() {
-        *b = AES_SBOX[*b as usize];
+        *b = sbox(*b);
     }
 }
 
+// Every index below is a literal into a `[u8; 16]`, so the bound is checked at
+// compile time by the array's own type -- there is no runtime index here for
+// `indexing_slicing` to be warning about. Writing the row rotations through
+// `get`/`get_mut` would add sixteen `Option`s that can never be `None` and
+// would obscure the one thing this function has to get right, which is which
+// index moves where.
+#[allow(clippy::indexing_slicing)]
 fn shift_rows(state: &mut [u8; 16]) {
     // AES state is column-major: indices [row + 4*col]
     // Row 0: no shift
@@ -1058,13 +1306,18 @@ fn shift_rows(state: &mut [u8; 16]) {
 }
 
 fn mix_columns(state: &mut [u8; 16]) {
-    for col in 0..4 {
-        let off = col * 4;
-        let (a0, a1, a2, a3) = (state[off], state[off + 1], state[off + 2], state[off + 3]);
-        state[off] = gf_mul2(a0) ^ gf_mul3(a1) ^ a2 ^ a3;
-        state[off + 1] = a0 ^ gf_mul2(a1) ^ gf_mul3(a2) ^ a3;
-        state[off + 2] = a0 ^ a1 ^ gf_mul2(a2) ^ gf_mul3(a3);
-        state[off + 3] = gf_mul3(a0) ^ a1 ^ a2 ^ gf_mul2(a3);
+    // `chunks_exact_mut(4)` hands out the four columns directly, so the
+    // `col * 4` base and its four `off + k` offsets -- five chances to write
+    // one column while reading another -- are gone. A 16-byte state is four
+    // whole columns, so the remainder is always empty.
+    for col in state.chunks_exact_mut(4) {
+        let [a0, a1, a2, a3] = *col else { continue };
+        col.copy_from_slice(&[
+            gf_mul2(a0) ^ gf_mul3(a1) ^ a2 ^ a3,
+            a0 ^ gf_mul2(a1) ^ gf_mul3(a2) ^ a3,
+            a0 ^ a1 ^ gf_mul2(a2) ^ gf_mul3(a3),
+            gf_mul3(a0) ^ a1 ^ a2 ^ gf_mul2(a3),
+        ]);
     }
 }
 
@@ -1079,44 +1332,33 @@ fn increment_counter(counter: &mut [u8; 16]) {
     }
 }
 
-/// AES-128-CTR keystream block for a given counter offset from the base IV.
-fn aes_ctr_keystream_block(
-    _key: &[u8; 16],
-    iv: &[u8; 16],
-    round_keys: &[[u8; 16]; 11],
-    block_offset: usize,
-) -> [u8; 16] {
-    let mut counter = *iv;
-    // Add block_offset to the counter.
-    for _ in 0..block_offset {
-        increment_counter(&mut counter);
-    }
-    aes128_encrypt_block(&counter, round_keys)
-}
-
 /// Encrypt a packet in-place using AES-128-CTR.
 ///
 /// For SSH, the counter starts from the IV and increments for each 16-byte
 /// block within the packet. Across packets, we track the IV globally (the
 /// EncryptionState's IV is incremented after each packet).
 fn encrypt_packet_aes_ctr(packet: &mut [u8], key: &[u8], iv: &[u8], _seq: u32) {
-    if key.len() < 16 || iv.len() < 16 {
+    // `first_chunk` performs the length check and the copy in one step, so the
+    // `len() < 16` guard and the `[..16]` slice that followed it can no longer
+    // disagree about which 16 bytes were checked.
+    let (Some(key16), Some(iv16)) = (key.first_chunk::<16>(), iv.first_chunk::<16>()) else {
         return;
-    }
-    let mut key16 = [0u8; 16];
-    key16.copy_from_slice(&key[..16]);
-    let mut iv16 = [0u8; 16];
-    iv16.copy_from_slice(&iv[..16]);
-    let round_keys = aes128_key_expand(&key16);
+    };
+    let round_keys = aes128_key_expand(key16);
 
-    let num_blocks = packet.len().div_ceil(16);
-    for block_idx in 0..num_blocks {
-        let keystream = aes_ctr_keystream_block(&key16, &iv16, &round_keys, block_idx);
-        let start = block_idx * 16;
-        let end = (start + 16).min(packet.len());
-        for i in start..end {
-            packet[i] ^= keystream[i - start];
+    // One counter walked forward across the packet. It used to be re-derived
+    // from the IV for every block, by incrementing a fresh copy `block_idx`
+    // times, which made an N-block packet cost O(N^2) counter steps: a 32 KiB
+    // packet paid over two million increments to produce 2048 blocks. Walking
+    // it also removes the `start`/`end`/`i - start` index triple, whose short
+    // final block was the only thing keeping the last `min` honest.
+    let mut counter = *iv16;
+    for chunk in packet.chunks_mut(16) {
+        let keystream = aes128_encrypt_block(&counter, &round_keys);
+        for (b, k) in chunk.iter_mut().zip(keystream) {
+            *b ^= k;
         }
+        increment_counter(&mut counter);
     }
 }
 
@@ -1198,42 +1440,43 @@ const DH_GROUP14_P_HEX: &str = concat!(
 /// DH generator g = 2.
 const DH_G: u8 = 2;
 
-/// Parse a hex string into bytes.
+/// Parse a hex string into bytes. A trailing odd digit is dropped.
 fn hex_to_bytes(hex: &str) -> Vec<u8> {
-    let hex = hex.as_bytes();
-    let mut result = Vec::with_capacity(hex.len() / 2);
-    let mut i = 0;
-    while i + 1 < hex.len() {
-        let hi = hex_digit(hex[i]);
-        let lo = hex_digit(hex[i + 1]);
-        result.push((hi << 4) | lo);
-        i += 2;
-    }
-    result
+    // `chunks_exact(2)` *is* the "pairs of digits, ignore a dangling one"
+    // rule, so the `i + 1 < len` guard and the manual `i += 2` stride that
+    // used to encode it — the two places a hex walk goes wrong — are gone.
+    hex.as_bytes()
+        .chunks_exact(2)
+        .filter_map(|pair| match *pair {
+            [hi, lo] => Some((hex_digit(hi) << 4) | hex_digit(lo)),
+            _ => None,
+        })
+        .collect()
 }
 
 fn hex_digit(c: u8) -> u8 {
-    match c {
-        b'0'..=b'9' => c - b'0',
-        b'a'..=b'f' => c - b'a' + 10,
-        b'A'..=b'F' => c - b'A' + 10,
-        _ => 0,
-    }
+    // A non-hex byte reads as 0; every caller passes a literal from this file.
+    char::from(c)
+        .to_digit(16)
+        .and_then(|d| u8::try_from(d).ok())
+        .unwrap_or(0)
 }
 
 /// Format bytes as a hex string.
 fn bytes_to_hex(data: &[u8]) -> String {
-    let mut s = String::with_capacity(data.len() * 2);
+    let mut s = String::with_capacity(data.len().saturating_mul(2));
     for &b in data {
-        s.push(HEX_CHARS[(b >> 4) as usize]);
-        s.push(HEX_CHARS[(b & 0x0f) as usize]);
+        s.push(hex_char(b >> 4));
+        s.push(hex_char(b & 0x0f));
     }
     s
 }
 
-const HEX_CHARS: [char; 16] = [
-    '0', '1', '2', '3', '4', '5', '6', '7', '8', '9', 'a', 'b', 'c', 'd', 'e', 'f',
-];
+/// The lowercase hex character for a nibble. Values above 15 cannot occur --
+/// every caller masks first -- and would read as `'0'`.
+fn hex_char(nibble: u8) -> char {
+    char::from_digit(u32::from(nibble), 16).unwrap_or('0')
+}
 
 /// Generate the Diffie-Hellman private exponent `x`.
 ///
@@ -1423,27 +1666,42 @@ fn host_key_fingerprint(key_blob: &[u8]) -> String {
 
 /// Minimal base64 encoder (no padding variant for fingerprints).
 fn base64_encode(data: &[u8]) -> String {
-    const ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut result = String::new();
-    let mut i = 0;
-    while i + 2 < data.len() {
-        let n = (u32::from(data[i]) << 16) | (u32::from(data[i + 1]) << 8) | u32::from(data[i + 2]);
-        result.push(ALPHABET[((n >> 18) & 0x3f) as usize] as char);
-        result.push(ALPHABET[((n >> 12) & 0x3f) as usize] as char);
-        result.push(ALPHABET[((n >> 6) & 0x3f) as usize] as char);
-        result.push(ALPHABET[(n & 0x3f) as usize] as char);
-        i += 3;
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+    /// One base64 digit from the low six bits of `sextet`.
+    ///
+    /// Masking to `0x3f` before the lookup makes the index provably in range
+    /// for a 64-entry table, so the fallback is unreachable.
+    fn digit(sextet: u32) -> char {
+        ALPHABET
+            .get((sextet & 0x3f) as usize)
+            .map_or('A', |&b| char::from(b))
     }
-    let remaining = data.len() - i;
-    if remaining == 1 {
-        let n = u32::from(data[i]) << 16;
-        result.push(ALPHABET[((n >> 18) & 0x3f) as usize] as char);
-        result.push(ALPHABET[((n >> 12) & 0x3f) as usize] as char);
-    } else if remaining == 2 {
-        let n = (u32::from(data[i]) << 16) | (u32::from(data[i + 1]) << 8);
-        result.push(ALPHABET[((n >> 18) & 0x3f) as usize] as char);
-        result.push(ALPHABET[((n >> 12) & 0x3f) as usize] as char);
-        result.push(ALPHABET[((n >> 6) & 0x3f) as usize] as char);
+
+    // The three cases used to be three separate index expressions over `i`,
+    // with a `while i + 2 < data.len()` head and a `data.len() - i` tail that
+    // had to agree about where the full groups stopped. `chunks(3)` decides
+    // that once: the bit layout is identical in all three cases, and only the
+    // number of digits emitted -- which is the chunk's own length -- differs.
+    let mut result = String::new();
+    for chunk in data.chunks(3) {
+        let [b0, b1, b2] = match *chunk {
+            [b0, b1, b2] => [b0, b1, b2],
+            [b0, b1] => [b0, b1, 0],
+            [b0] => [b0, 0, 0],
+            // `chunks(3)` never yields an empty or over-long slice; the arm
+            // exists only because the compiler cannot know that.
+            _ => continue,
+        };
+        let n = (u32::from(b0) << 16) | (u32::from(b1) << 8) | u32::from(b2);
+        result.push(digit(n >> 18));
+        result.push(digit(n >> 12));
+        if chunk.len() >= 2 {
+            result.push(digit(n >> 6));
+        }
+        if chunk.len() >= 3 {
+            result.push(digit(n));
+        }
     }
     result
 }
@@ -1455,6 +1713,76 @@ fn base64_encode_padded(data: &[u8]) -> String {
         s.push('=');
     }
     s
+}
+
+/// The name a host is filed under in `known_hosts`: bare for the default port,
+/// bracketed otherwise, as OpenSSH writes it.
+///
+/// One function so the reader and the writer cannot disagree about the form --
+/// `check_known_hosts` and `add_known_host` each built this string themselves,
+/// and a host filed under a spelling the lookup does not produce is a host that
+/// is silently re-asked about on every connection.
+fn known_hosts_pattern(hostname: &str, port: u16) -> String {
+    if port == 22 {
+        hostname.to_string()
+    } else {
+        format!("[{hostname}]:{port}")
+    }
+}
+
+/// What `known_hosts` has to say about a host.
+#[derive(Debug, PartialEq, Eq)]
+enum KnownHostsVerdict {
+    /// No line names this host.
+    Unknown,
+    /// A line names this host and carries exactly this key.
+    Match,
+    /// A line names this host and carries a *different* key.
+    Mismatch,
+}
+
+/// Search already-read `known_hosts` text for `host_pattern`.
+///
+/// Split out from `check_known_hosts` so that the part which decides whether a
+/// key is trusted can be tested without a filesystem or a `$HOME`. This is the
+/// function that says "this is the same server you connected to last time";
+/// leaving it welded to a file read meant the man-in-the-middle check was the
+/// one piece of this client that no test could reach.
+fn known_hosts_lookup(content: &str, host_pattern: &str, key_blob: &[u8]) -> KnownHostsVerdict {
+    for line in content.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        // Taking the three fields straight off the iterator makes "there are
+        // three of them" and "here they are" the same step: the `len() < 3`
+        // check and the three indexes that followed it were two statements of
+        // one fact, and only the first of them was enforced. The key type is
+        // deliberately unread -- the blob carries its own algorithm name, and
+        // that is what `verify_host_key` checks against.
+        let mut fields = line.splitn(3, ' ');
+        let (Some(hosts), Some(_), Some(rest)) = (fields.next(), fields.next(), fields.next())
+        else {
+            continue;
+        };
+        let key_b64 = rest.split_whitespace().next().unwrap_or("");
+
+        // Check if our host matches any of the comma-separated host patterns.
+        if !hosts.split(',').any(|h| h.trim() == host_pattern) {
+            continue;
+        }
+
+        // Decode the stored key and compare. The first line naming this host
+        // decides: a later line cannot rehabilitate a key the earlier one
+        // contradicts.
+        return if base64_decode(key_b64) == key_blob {
+            KnownHostsVerdict::Match
+        } else {
+            KnownHostsVerdict::Mismatch
+        };
+    }
+
+    KnownHostsVerdict::Unknown
 }
 
 /// Check the known_hosts file for a matching host key.
@@ -1469,46 +1797,19 @@ fn check_known_hosts(hostname: &str, port: u16, key_blob: &[u8]) -> Result<bool,
         Err(_) => return Ok(false), // File does not exist — host is unknown.
     };
 
-    let host_pattern = if port == 22 {
-        hostname.to_string()
-    } else {
-        format!("[{hostname}]:{port}")
-    };
+    let host_pattern = known_hosts_pattern(hostname, port);
 
-    for line in content.lines() {
-        let line = line.trim();
-        if line.is_empty() || line.starts_with('#') {
-            continue;
-        }
-        let parts: Vec<&str> = line.splitn(3, ' ').collect();
-        if parts.len() < 3 {
-            continue;
-        }
-        let hosts = parts[0];
-        let _key_type = parts[1];
-        let key_b64 = parts[2].split_whitespace().next().unwrap_or("");
-
-        // Check if our host matches any of the comma-separated host patterns.
-        let host_match = hosts.split(',').any(|h| h.trim() == host_pattern);
-        if !host_match {
-            continue;
-        }
-
-        // Decode the stored key and compare.
-        let stored_key = base64_decode(key_b64);
-        if stored_key == key_blob {
-            return Ok(true);
-        }
-        return Err(SshError::HostKeyMismatch(format!(
+    match known_hosts_lookup(&content, &host_pattern, key_blob) {
+        KnownHostsVerdict::Match => Ok(true),
+        KnownHostsVerdict::Unknown => Ok(false),
+        KnownHostsVerdict::Mismatch => Err(SshError::HostKeyMismatch(format!(
             "host key for {host_pattern} has changed!\n\
              Someone could be eavesdropping on you (man-in-the-middle attack).\n\
              The fingerprint for the new key is:\n  {}\n\
              Remove the old entry from {path} to accept the new key.",
             host_key_fingerprint(key_blob),
-        )));
+        ))),
     }
-
-    Ok(false)
 }
 
 /// Add a host key to the known_hosts file.
@@ -1520,12 +1821,7 @@ fn add_known_host(hostname: &str, port: u16, key_type: &str, key_blob: &[u8]) {
     // Ensure ~/.ssh directory exists.
     let _ = std::fs::create_dir_all(&dir);
 
-    let host_pattern = if port == 22 {
-        hostname.to_string()
-    } else {
-        format!("[{hostname}]:{port}")
-    };
-
+    let host_pattern = known_hosts_pattern(hostname, port);
     let key_b64 = base64_encode_padded(key_blob);
     let entry = format!("{host_pattern} {key_type} {key_b64}\n");
 
@@ -1545,6 +1841,10 @@ fn add_known_host(hostname: &str, port: u16, key_type: &str, key_blob: &[u8]) {
 
 /// Minimal base64 decoder.
 fn base64_decode(input: &str) -> Vec<u8> {
+    // Subtracting the range's own start cannot underflow inside the arm that
+    // established the range, and the largest sum is `b'z' - b'a' + 26` = 51,
+    // so every branch is bounded by inspection.
+    #[allow(clippy::arithmetic_side_effects)]
     fn b64val(c: u8) -> Option<u8> {
         match c {
             b'A'..=b'Z' => Some(c - b'A'),
@@ -1560,31 +1860,26 @@ fn base64_decode(input: &str) -> Vec<u8> {
         .bytes()
         .filter(|&b| b != b'=' && b != b'\n' && b != b'\r')
         .collect();
-    let mut result = Vec::with_capacity(bytes.len() * 3 / 4);
-    let mut i = 0;
-    while i + 3 < bytes.len() {
-        let (a, b, c, d) = (
-            b64val(bytes[i]).unwrap_or(0),
-            b64val(bytes[i + 1]).unwrap_or(0),
-            b64val(bytes[i + 2]).unwrap_or(0),
-            b64val(bytes[i + 3]).unwrap_or(0),
-        );
+
+    // As with the encoder, `chunks(4)` replaces a `while i + 3 < len` head and
+    // a `bytes.len() - i` tail that separately decided where the whole groups
+    // ended. Missing characters decode as zero sextets, and how many whole
+    // bytes the group yields is a function of its length: 4 characters carry
+    // three bytes, 3 carry two, 2 carry one. A lone trailing character carries
+    // no whole byte and is dropped -- which is what the old `remaining >= 2`
+    // guard did.
+    let mut result = Vec::with_capacity(bytes.len().saturating_mul(3) / 4);
+    for chunk in bytes.chunks(4) {
+        let mut sextets = [0u8; 4];
+        for (slot, &c) in sextets.iter_mut().zip(chunk) {
+            *slot = b64val(c).unwrap_or(0);
+        }
+        let [a, b, c, d] = sextets;
         let n = (u32::from(a) << 18) | (u32::from(b) << 12) | (u32::from(c) << 6) | u32::from(d);
-        result.push((n >> 16) as u8);
-        result.push((n >> 8) as u8);
-        result.push(n as u8);
-        i += 4;
-    }
-    let remaining = bytes.len() - i;
-    if remaining >= 2 {
-        let a = b64val(bytes[i]).unwrap_or(0);
-        let b = b64val(bytes[i + 1]).unwrap_or(0);
-        let n = (u32::from(a) << 18) | (u32::from(b) << 12);
-        result.push((n >> 16) as u8);
-        if remaining >= 3 {
-            let c = b64val(bytes[i + 2]).unwrap_or(0);
-            let n = n | (u32::from(c) << 6);
-            result.push((n >> 8) as u8);
+        for (shift, needed) in [(16, 2), (8, 3), (0, 4)] {
+            if chunk.len() >= needed {
+                result.push(((n >> shift) & 0xff) as u8);
+            }
         }
     }
     result
@@ -1630,14 +1925,20 @@ fn parse_args() -> Result<Config, String> {
     let mut destination: Option<String> = None;
     let mut command_parts: Vec<String> = Vec::new();
 
-    let mut i = 1;
-    while i < args.len() {
-        let arg = &args[i];
+    // Walked with an iterator rather than an index. An option's value is
+    // whatever `it.next()` yields, so the `i += 1` inside each value-taking arm
+    // -- and the second `i += 1` at the bottom of the loop that existed only to
+    // undo it -- are both gone, and with them the chance of the two getting out
+    // of step. The trailing remote command needs no `args[i..]` slice either:
+    // the iterator is already standing exactly there.
+    let mut it = args.into_iter();
+    it.next(); // argv[0], already consumed for the usage message above.
+
+    while let Some(arg) = it.next() {
         match arg.as_str() {
             "-p" => {
-                i += 1;
-                let val = args
-                    .get(i)
+                let val = it
+                    .next()
                     .ok_or_else(|| "-p requires a port number".to_string())?;
                 port = val.parse().map_err(|_| format!("invalid port: {val}"))?;
             }
@@ -1645,9 +1946,8 @@ fn parse_args() -> Result<Config, String> {
                 verbose = true;
             }
             "-o" => {
-                i += 1;
-                let opt = args
-                    .get(i)
+                let opt = it
+                    .next()
                     .ok_or_else(|| "-o requires an option=value".to_string())?;
                 if let Some(val) = opt.strip_prefix("ConnectTimeout=") {
                     connect_timeout = val.parse().unwrap_or(30);
@@ -1662,22 +1962,25 @@ fn parse_args() -> Result<Config, String> {
             }
             _ => {
                 if destination.is_none() {
-                    destination = Some(arg.clone());
+                    destination = Some(arg);
                 } else {
-                    // Everything after destination is the remote command.
-                    command_parts.extend_from_slice(&args[i..]);
+                    // Everything from the destination on is the remote command.
+                    command_parts.push(arg);
+                    command_parts.extend(it.by_ref());
                     break;
                 }
             }
         }
-        i += 1;
     }
 
     let dest = destination.ok_or_else(|| "no destination specified".to_string())?;
 
-    // Parse user@hostname.
-    let (user, hostname) = if let Some(at_pos) = dest.find('@') {
-        (dest[..at_pos].to_string(), dest[at_pos + 1..].to_string())
+    // Parse user@hostname. `split_once` names the two halves in one step; the
+    // `find` plus `[..at]` and `[at + 1..]` it replaces re-derived both ends
+    // from an offset, and the `at + 1` was a byte index into a string whose
+    // contents come from the command line.
+    let (user, hostname) = if let Some((name, host)) = dest.split_once('@') {
+        (name.to_string(), host.to_string())
     } else {
         // Default to current user or "root".
         let user = env::var("USER").unwrap_or_else(|_| "root".to_string());
@@ -1830,14 +2133,13 @@ impl SshSession {
         // the version line starts with "SSH-".
         let mut line = String::new();
         loop {
-            let mut byte = [0u8; 1];
-            let n = tcp_recv(self.handle, &mut byte)?;
-            if n == 0 {
+            let mut buf = [0u8; 1];
+            let [byte] = *tcp_recv(self.handle, &mut buf)? else {
                 return Err(SshError::ProtocolError(
                     "connection closed during version exchange".into(),
                 ));
-            }
-            if byte[0] == b'\n' {
+            };
+            if byte == b'\n' {
                 let trimmed = line.trim_end_matches('\r').to_string();
                 if trimmed.starts_with("SSH-") {
                     self.server_version = trimmed;
@@ -1847,7 +2149,7 @@ impl SshSession {
                 self.verbose(&format!("banner: {trimmed}"));
                 line.clear();
             } else {
-                line.push(byte[0] as char);
+                line.push(char::from(byte));
                 if line.len() > 1024 {
                     return Err(SshError::ProtocolError("version line too long".into()));
                 }
@@ -2105,58 +2407,50 @@ impl SshSession {
         key_type: &str,
         fingerprint: &str,
     ) -> Result<(), SshError> {
-        match check_known_hosts(&self.config.hostname, self.config.port, key_blob)? {
-            true => {
-                self.verbose("host key matches known_hosts");
-                Ok(())
-            }
-            false => {
-                // Host not in known_hosts.
-                match self.config.strict_host_key {
-                    StrictHostKey::Yes => Err(SshError::HostKeyMismatch(format!(
-                        "host '{}' not found in known_hosts (StrictHostKeyChecking=yes)",
+        if check_known_hosts(&self.config.hostname, self.config.port, key_blob)? {
+            self.verbose("host key matches known_hosts");
+            Ok(())
+        } else {
+            // Host not in known_hosts.
+            match self.config.strict_host_key {
+                StrictHostKey::Yes => Err(SshError::HostKeyMismatch(format!(
+                    "host '{}' not found in known_hosts (StrictHostKeyChecking=yes)",
+                    self.config.hostname
+                ))),
+                StrictHostKey::No => {
+                    eprintln!(
+                        "Warning: Permanently added '{}' ({key_type}) to the list of known hosts.",
                         self.config.hostname
-                    ))),
-                    StrictHostKey::No => {
+                    );
+                    add_known_host(&self.config.hostname, self.config.port, key_type, key_blob);
+                    Ok(())
+                }
+                StrictHostKey::Ask => {
+                    eprint!(
+                        "The authenticity of host '{}' ({}) can't be established.\n\
+                         {key_type} key fingerprint is {fingerprint}.\n\
+                         Are you sure you want to continue connecting (yes/no)? ",
+                        self.config.hostname, self.config.hostname,
+                    );
+                    io::stderr().flush().ok();
+
+                    let mut answer = String::new();
+                    io::stdin().read_line(&mut answer).map_err(|e| {
+                        SshError::ProtocolError(format!("failed to read answer: {e}"))
+                    })?;
+                    let answer = answer.trim().to_lowercase();
+
+                    if answer == "yes" {
                         eprintln!(
                             "Warning: Permanently added '{}' ({key_type}) to the list of known hosts.",
                             self.config.hostname
                         );
                         add_known_host(&self.config.hostname, self.config.port, key_type, key_blob);
                         Ok(())
-                    }
-                    StrictHostKey::Ask => {
-                        eprint!(
-                            "The authenticity of host '{}' ({}) can't be established.\n\
-                             {key_type} key fingerprint is {fingerprint}.\n\
-                             Are you sure you want to continue connecting (yes/no)? ",
-                            self.config.hostname, self.config.hostname,
-                        );
-                        io::stderr().flush().ok();
-
-                        let mut answer = String::new();
-                        io::stdin().read_line(&mut answer).map_err(|e| {
-                            SshError::ProtocolError(format!("failed to read answer: {e}"))
-                        })?;
-                        let answer = answer.trim().to_lowercase();
-
-                        if answer == "yes" {
-                            eprintln!(
-                                "Warning: Permanently added '{}' ({key_type}) to the list of known hosts.",
-                                self.config.hostname
-                            );
-                            add_known_host(
-                                &self.config.hostname,
-                                self.config.port,
-                                key_type,
-                                key_blob,
-                            );
-                            Ok(())
-                        } else {
-                            Err(SshError::HostKeyMismatch(
-                                "host key verification declined by user".into(),
-                            ))
-                        }
+                    } else {
+                        Err(SshError::HostKeyMismatch(
+                            "host key verification declined by user".into(),
+                        ))
                     }
                 }
             }
@@ -2259,7 +2553,7 @@ impl SshSession {
 
         self.channel_id = 0;
         let initial_window: u32 = 2_097_152; // 2 MiB
-        let max_packet: u32 = 32768;
+        let max_packet = u32::try_from(MAX_CHANNEL_CHUNK).unwrap_or(u32::MAX);
 
         let mut payload = Vec::new();
         payload.push(msg::SSH_MSG_CHANNEL_OPEN);
@@ -2482,7 +2776,17 @@ impl SshSession {
                         closed = true;
                     }
                     Ok(n) => {
-                        self.send_channel_data(&stdin_buf[..n])?;
+                        // `get` rather than `[..n]`. `Read::read` is
+                        // contractually bound never to report more than the
+                        // buffer holds, so this cannot fail -- but the same was
+                        // said of the kernel's recv length, and saying it with
+                        // a range that has to be valid costs nothing.
+                        let data = stdin_buf.get(..n).ok_or_else(|| {
+                            SshError::ProtocolError(
+                                "stdin read reported more bytes than were asked for".into(),
+                            )
+                        })?;
+                        self.send_channel_data(data)?;
                     }
                     Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
                         // No stdin data — continue.
@@ -2522,12 +2826,7 @@ impl SshSession {
         }
 
         // Try one non-blocking recv.
-        let mut tmp = [0u8; 8192];
-        let n = tcp_recv(self.handle, &mut tmp)?;
-        if n == 0 {
-            return Err(SshError::ProtocolError("connection closed".into()));
-        }
-        self.buf.data.extend_from_slice(&tmp[..n]);
+        self.buf.fill_once(self.handle)?;
 
         if self.buf.available() >= block_size {
             let payload = read_packet(
@@ -2710,19 +3009,25 @@ impl SshSession {
 
     /// Send data to the remote channel.
     fn send_channel_data(&mut self, data: &[u8]) -> Result<(), SshError> {
-        // Respect the remote window size.
-        let mut offset = 0;
-        while offset < data.len() {
+        // Respect the remote window size. Walking a shrinking `rest` rather
+        // than an offset keeps "how much is left" and "where that starts" from
+        // being two facts that can disagree: `data[offset..offset + chunk_size]`
+        // re-derived both ends from a running counter and a length computed
+        // three lines earlier, and `split_at` derives them from one number
+        // that the `.min` on the line above has just bounded.
+        let mut rest = data;
+        while !rest.is_empty() {
             if self.remote_window == 0 {
                 // Wait for a window adjust.
                 let payload = self.recv_packet()?;
                 let _ = self.process_server_message(&payload);
                 continue;
             }
-            let chunk_size = (data.len() - offset)
+            let chunk_size = rest
+                .len()
                 .min(self.remote_window as usize)
-                .min(32768);
-            let chunk = &data[offset..offset + chunk_size];
+                .min(MAX_CHANNEL_CHUNK);
+            let (chunk, tail) = rest.split_at(chunk_size);
 
             let mut payload = Vec::new();
             payload.push(msg::SSH_MSG_CHANNEL_DATA);
@@ -2730,8 +3035,10 @@ impl SshSession {
             payload.extend_from_slice(&ssh_string(chunk));
             self.send_packet(&payload)?;
 
-            self.remote_window = self.remote_window.saturating_sub(chunk_size as u32);
-            offset += chunk_size;
+            self.remote_window = self
+                .remote_window
+                .saturating_sub(u32::try_from(chunk_size).unwrap_or(u32::MAX));
+            rest = tail;
         }
         Ok(())
     }
@@ -2877,7 +3184,17 @@ fn main() {
 // Tests
 // ============================================================================
 
+// Panicking on bad data is what a test is *for*: a test that carefully
+// propagates an error instead of unwrapping just reports "ok" less loudly.
+// The defensive lints stay on for the production code above.
 #[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects
+)]
 mod tests {
     use super::*;
 
@@ -3286,5 +3603,624 @@ mod tests {
         let (_kex, off) = read_ssh_string(&payload, 17).expect("kex list");
         let (host_key, _) = read_ssh_string(&payload, off).expect("host key list");
         assert_eq!(host_key, b"ssh-ed25519");
+    }
+
+    // ========================================================================
+    // BigUint
+    //
+    // These had no tests at all, which is the worst place in this file to have
+    // none: an arithmetic slip here does not fail loudly, it produces a shared
+    // secret that differs from the server's, and that surfaces four steps later
+    // as an opaque "MAC verification failed" with nothing pointing back here.
+    // ========================================================================
+
+    fn big(hex: &str) -> BigUint {
+        BigUint::from_bytes_be(&hex_to_bytes(hex))
+    }
+
+    fn hex_of(n: &BigUint) -> String {
+        bytes_to_hex(&n.to_bytes_be())
+    }
+
+    /// Zero is the empty vector and every other value ends with a nonzero
+    /// limb. Every arithmetic routine returns through `normalized`, so this is
+    /// the invariant the whole type rests on.
+    #[test]
+    fn construction_normalizes_leading_zeros_away() {
+        assert!(big("0000").is_zero());
+        assert!(BigUint::from_bytes_be(&[]).is_zero());
+        assert_eq!(big("000001").limbs, vec![1]);
+        assert_eq!(big("0000ff00").limbs, vec![0xff00]);
+        // A limb boundary is four bytes in, so this is the case where the
+        // partial top group and the whole low group have to line up.
+        assert_eq!(big("0000000102030405").limbs, vec![0x0203_0405, 0x01]);
+        // A normalized zero prints as a single zero byte, not as nothing.
+        assert_eq!(BigUint::zero().to_bytes_be(), vec![0]);
+    }
+
+    /// Byte strings whose length is not a multiple of the limb width are the
+    /// case a limb-based representation can most easily get wrong, and every
+    /// SSH `mpint` is one: the group-14 prime is 256 bytes, but a shared
+    /// secret is whatever length it came out.
+    #[test]
+    fn byte_strings_round_trip_at_every_offset_from_a_limb_boundary() {
+        for hex in [
+            "01",
+            "0102",
+            "010203",
+            "01020304",
+            "0102030405",
+            "0102030405060708090a",
+            "ff",
+            "ffffffffffffffffffffff",
+            "0100000000",
+        ] {
+            assert_eq!(hex_of(&big(hex)), hex, "round trip of {hex}");
+        }
+    }
+
+    #[test]
+    fn bit_length_counts_from_the_top_set_bit() {
+        assert_eq!(BigUint::zero().bit_length(), 0);
+        assert_eq!(big("01").bit_length(), 1);
+        assert_eq!(big("02").bit_length(), 2);
+        assert_eq!(big("ff").bit_length(), 8);
+        assert_eq!(big("0100").bit_length(), 9);
+        assert_eq!(big("ffff").bit_length(), 16);
+    }
+
+    /// `bit` indexes from the least significant end into a big-endian buffer,
+    /// so the index runs backwards; a position past the top is `false`, not a
+    /// panic and not a wrap.
+    #[test]
+    fn bit_indexes_from_the_least_significant_end() {
+        let n = big("0102"); // 0b1_0000_0010
+        assert!(!n.bit(0));
+        assert!(n.bit(1));
+        assert!(!n.bit(2));
+        assert!(n.bit(8));
+        assert!(!n.bit(9));
+        assert!(!n.bit(1_000_000));
+        assert!(!BigUint::zero().bit(0));
+    }
+
+    #[test]
+    fn multiplication_matches_hand_computed_products() {
+        assert_eq!(hex_of(&big("00").mul(&big("ff"))), "00");
+        assert_eq!(hex_of(&big("02").mul(&big("03"))), "06");
+        // 255 * 255 = 65025 = 0xFE01: the carry crosses a byte.
+        assert_eq!(hex_of(&big("ff").mul(&big("ff"))), "fe01");
+        // 65535 * 65535 = 4294836225 = 0xFFFE0001: carries across three.
+        assert_eq!(hex_of(&big("ffff").mul(&big("ffff"))), "fffe0001");
+        // Asymmetric widths, to catch an operand-order mistake.
+        assert_eq!(hex_of(&big("0100").mul(&big("02"))), "0200");
+        assert_eq!(hex_of(&big("02").mul(&big("0100"))), "0200");
+    }
+
+    /// The carry out of a full-width column must travel all the way up rather
+    /// than land in one higher digit and be tidied later. `2^64 - 1` squared
+    /// exercises eight consecutive carries.
+    #[test]
+    fn multiplication_propagates_carries_the_whole_way() {
+        let all_ones = big("ffffffffffffffff");
+        assert_eq!(
+            hex_of(&all_ones.mul(&all_ones)),
+            "fffffffffffffffe0000000000000001"
+        );
+    }
+
+    #[test]
+    fn multiplication_is_commutative_and_associative() {
+        let a = big("0123456789abcdef");
+        let b = big("fedcba9876543210");
+        let c = big("00ff00ff00ff");
+        assert_eq!(hex_of(&a.mul(&b)), hex_of(&b.mul(&a)));
+        assert_eq!(hex_of(&a.mul(&b).mul(&c)), hex_of(&a.mul(&b.mul(&c))));
+    }
+
+    #[test]
+    fn subtraction_borrows_across_bytes() {
+        assert_eq!(hex_of(&big("0100").sub(&big("01"))), "ff");
+        assert_eq!(hex_of(&big("010000").sub(&big("01"))), "ffff");
+        assert_eq!(hex_of(&big("05").sub(&big("05"))), "00");
+        assert_eq!(hex_of(&big("05").sub(&BigUint::zero())), "05");
+        // Operands of different widths: the shorter one runs out and the
+        // borrow keeps travelling.
+        assert_eq!(hex_of(&big("00010000").sub(&big("0001"))), "ffff");
+    }
+
+    /// `div_rem` normalises its operands with a left shift and un-normalises
+    /// the remainder with the matching right shift. If those two ever disagree
+    /// the quotient still looks plausible while the remainder is silently
+    /// scaled, so they are checked directly against each other.
+    #[test]
+    fn the_division_normalisation_shift_is_reversible() {
+        let shifted = |hex: &str, bits: u32| {
+            BigUint::normalized(BigUint::shifted_left(&big(hex).limbs, bits))
+        };
+        assert!(shifted("00", 1).is_zero());
+        assert_eq!(hex_of(&shifted("01", 1)), "02");
+        assert_eq!(hex_of(&shifted("80", 1)), "0100");
+        assert_eq!(hex_of(&shifted("ffff", 1)), "01fffe");
+        // A shift that crosses the limb boundary, which the byte-based version
+        // could not have got wrong and this one can.
+        assert_eq!(hex_of(&shifted("80000000", 1)), "0100000000");
+
+        for hex in ["01", "80", "ffff", "0123456789abcdef", "ff00000000000001"] {
+            for bits in [0u32, 1, 7, 31] {
+                let up = BigUint::shifted_left(&big(hex).limbs, bits);
+                let back = BigUint::normalized(BigUint::shifted_right(&up, bits));
+                assert_eq!(hex_of(&back), hex, "{hex} shifted by {bits} and back");
+            }
+        }
+    }
+
+    #[test]
+    fn division_returns_quotient_and_remainder() {
+        let (q, r) = big("0a").div_rem(&big("03"));
+        assert_eq!((hex_of(&q), hex_of(&r)), ("03".into(), "01".into()));
+
+        // Exact division leaves no remainder.
+        let (q, r) = big("0100").div_rem(&big("10"));
+        assert_eq!((hex_of(&q), hex_of(&r)), ("10".into(), "00".into()));
+
+        // A divisor larger than the dividend: quotient zero, remainder self.
+        let (q, r) = big("05").div_rem(&big("0a"));
+        assert_eq!((hex_of(&q), hex_of(&r)), ("00".into(), "05".into()));
+
+        // Division by zero is defined as (0, 0) rather than a panic.
+        let (q, r) = big("0a").div_rem(&BigUint::zero());
+        assert!(q.is_zero() && r.is_zero());
+    }
+
+    /// The property that actually matters: `a - q*b == r`, with `r < b`. Stated
+    /// as a subtraction rather than as `q*b + r == a` so that it exercises
+    /// `mul`, `div_rem` and `sub` together on the same numbers.
+    ///
+    /// The list below is chosen for algorithm D's correction paths rather than
+    /// for variety. A trial quotient estimated from two limbs can come out one
+    /// or two too large, and the cases that make it do so are rare enough that
+    /// random inputs essentially never find them -- which is exactly why they
+    /// are the cases a hand-written divider gets wrong. `7fff800000000000 /
+    /// 800000000001` and `2^127 / (2^96 - 2^64 + 1)` are the classical add-back
+    /// triggers from Knuth's own exercises; the rest cover a divisor whose top
+    /// limb is
+    /// small (so the normalisation shift is large), a divisor that is an exact
+    /// multiple, and operands that differ by many limbs.
+    #[test]
+    fn division_reconstructs_the_dividend() {
+        for (a_hex, b_hex) in [
+            ("ffffffff", "0101"),
+            ("0123456789abcdef", "fedc"),
+            ("8000000000000000", "03"),
+            ("ff00ff00ff00ff00", "0100ff"),
+            // Trial-quotient corrections.
+            ("7fff800000000000", "800000000001"),
+            (
+                "80000000000000000000000000000000",
+                "ffffffff0000000000000001",
+            ),
+            ("ffffffffffffffffffffffff", "ffffffff00000001"),
+            // A divisor whose top limb is 1, so the normalisation shift is 31.
+            ("ffffffffffffffffffffffffffffffff", "0000000100000000"),
+            // Exact multiples leave a zero remainder, which is the case where
+            // the final `normalized` has to collapse the limbs to nothing.
+            ("0100000000000000000000000000", "0100000000"),
+            // Many more limbs above than below.
+            (
+                "fedcba9876543210fedcba9876543210fedcba9876543210",
+                "0123456789abcdef",
+            ),
+            ("80000000000000000000000000000001", "7fffffffffffffff"),
+        ] {
+            let (a, b) = (big(a_hex), big(b_hex));
+            let (q, r) = a.div_rem(&b);
+            assert_eq!(
+                hex_of(&a.sub(&q.mul(&b))),
+                hex_of(&r),
+                "a - q*b != r for {a_hex} / {b_hex}"
+            );
+            assert_eq!(
+                r.cmp_unsigned(&b),
+                std::cmp::Ordering::Less,
+                "remainder not less than divisor for {a_hex} / {b_hex}"
+            );
+        }
+    }
+
+    /// The same `a - q*b == r, r < b` property over a few hundred pseudorandom
+    /// operands of assorted widths.
+    ///
+    /// The hand-picked cases above name the corrections algorithm D is known to
+    /// need; this one is there for the ones nobody thought to name. The
+    /// generator is a fixed-seed LCG rather than a real CSPRNG so that a
+    /// failure is reproducible from the test alone -- a randomised test that
+    /// cannot be re-run on the input that broke it is a report without a bug.
+    /// It is only affordable at this size because division stopped being
+    /// bit-at-a-time; the whole sweep runs in well under a second.
+    #[test]
+    fn division_reconstructs_the_dividend_over_pseudorandom_operands() {
+        let mut seed: u64 = 0x2545_f491_4f6c_dd1d;
+        let mut next = || {
+            // xorshift64*, chosen for being four lines rather than for quality.
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed.wrapping_mul(0x2545_f491_4f6c_dd1d)
+        };
+
+        for case in 0..400 {
+            let a_limbs = 1 + case % 9;
+            let b_limbs = 1 + (case / 9) % 6;
+            let build = |count: usize, next: &mut dyn FnMut() -> u64| {
+                BigUint::normalized(
+                    (0..count)
+                        .map(|_| {
+                            let word = next();
+                            // Deliberately biased towards limbs that are all
+                            // ones or all zeros: those are what make a trial
+                            // quotient come out too large.
+                            match word % 4 {
+                                0 => 0,
+                                1 => u32::MAX,
+                                _ => word as u32,
+                            }
+                        })
+                        .collect(),
+                )
+            };
+
+            let a = build(a_limbs, &mut next);
+            let b = build(b_limbs, &mut next);
+            if b.is_zero() {
+                continue;
+            }
+
+            let (q, r) = a.div_rem(&b);
+            assert_eq!(
+                hex_of(&a.sub(&q.mul(&b))),
+                hex_of(&r),
+                "a - q*b != r for a={} b={}",
+                hex_of(&a),
+                hex_of(&b)
+            );
+            assert_eq!(
+                r.cmp_unsigned(&b),
+                std::cmp::Ordering::Less,
+                "remainder not less than divisor for a={} b={}",
+                hex_of(&a),
+                hex_of(&b)
+            );
+        }
+    }
+
+    #[test]
+    fn modular_exponentiation_matches_known_values() {
+        // 2^10 mod 1000 = 24.
+        assert_eq!(hex_of(&big("02").mod_pow(&big("0a"), &big("03e8"))), "18");
+        // 3^5 mod 7 = 5.
+        assert_eq!(hex_of(&big("03").mod_pow(&big("05"), &big("07"))), "05");
+        // Anything^0 = 1.
+        assert_eq!(
+            hex_of(&big("abcdef").mod_pow(&BigUint::zero(), &big("0101"))),
+            "01"
+        );
+        // Fermat: 2^(p-1) = 1 mod p for the prime 65537.
+        assert_eq!(
+            hex_of(&big("02").mod_pow(&big("010000"), &big("010001"))),
+            "01"
+        );
+    }
+
+    /// The end-to-end property the key exchange depends on: both sides of a
+    /// Diffie-Hellman over group 14 must land on the same secret. This runs the
+    /// full 2048-bit modular exponentiation, which is the only exercise the
+    /// carry paths get at their real width.
+    #[test]
+    fn diffie_hellman_over_group14_agrees_from_both_sides() {
+        let p = BigUint::from_bytes_be(&hex_to_bytes(DH_GROUP14_P_HEX));
+        let g = big("02");
+
+        // Fixed exponents: this checks the arithmetic, not the CSPRNG.
+        let a = big("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef");
+        let b = big("fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543211");
+
+        let big_a = g.mod_pow(&a, &p); // client public
+        let big_b = g.mod_pow(&b, &p); // server public
+
+        let secret_client = big_b.mod_pow(&a, &p);
+        let secret_server = big_a.mod_pow(&b, &p);
+
+        assert_eq!(hex_of(&secret_client), hex_of(&secret_server));
+        // A shared secret that came out zero or one would mean the whole
+        // exponentiation collapsed rather than agreed.
+        assert!(secret_client.bit_length() > 1024);
+    }
+
+    #[test]
+    fn hex_helpers_round_trip() {
+        assert_eq!(bytes_to_hex(&hex_to_bytes("00ff10ab")), "00ff10ab");
+        assert_eq!(hex_to_bytes(""), Vec::<u8>::new());
+        // A dangling digit is dropped rather than read as half a byte.
+        assert_eq!(hex_to_bytes("abc"), vec![0xab]);
+    }
+
+    #[test]
+    fn mpint_encoding_pads_a_high_bit_and_strips_leading_zeros() {
+        // 0 encodes as an empty string.
+        assert_eq!(encode_mpint(&[]), vec![0, 0, 0, 0]);
+        assert_eq!(encode_mpint(&[0, 0, 0]), vec![0, 0, 0, 0]);
+        // Top bit clear: no pad.
+        assert_eq!(encode_mpint(&[0x7f]), vec![0, 0, 0, 1, 0x7f]);
+        // Top bit set: a zero byte goes in front so it does not read negative.
+        assert_eq!(encode_mpint(&[0x80]), vec![0, 0, 0, 2, 0x00, 0x80]);
+        // Leading zeros in the input are not part of the value.
+        assert_eq!(encode_mpint(&[0, 0, 0x01]), vec![0, 0, 0, 1, 0x01]);
+    }
+
+    // ------------------------------------------------------------------
+    // AES-128 and AES-128-CTR
+    //
+    // The cipher had no tests at all, which is how `aes128_key_expand`,
+    // `mix_columns` and the CTR counter walk could all be rewritten with
+    // nothing but the compiler checking the result. These are the published
+    // known-answer vectors, so they check this implementation against the
+    // standard rather than against its own previous output.
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn aes128_matches_the_fips_197_known_answer() {
+        // FIPS-197 appendix C.1.
+        let key: [u8; 16] = hex_to_bytes("000102030405060708090a0b0c0d0e0f")
+            .try_into()
+            .unwrap();
+        let plain: [u8; 16] = hex_to_bytes("00112233445566778899aabbccddeeff")
+            .try_into()
+            .unwrap();
+
+        let round_keys = aes128_key_expand(&key);
+        let cipher = aes128_encrypt_block(&plain, &round_keys);
+
+        assert_eq!(bytes_to_hex(&cipher), "69c4e0d86a7b0430d8cdb78070b4c55a");
+    }
+
+    #[test]
+    fn aes128_key_expansion_matches_the_published_schedule() {
+        // FIPS-197 appendix A.1: the last round key for the all-zero-ish
+        // C.1 key. Checking the *final* round key is what catches an
+        // expansion that went wrong partway and then stayed wrong.
+        let key: [u8; 16] = hex_to_bytes("000102030405060708090a0b0c0d0e0f")
+            .try_into()
+            .unwrap();
+        let round_keys = aes128_key_expand(&key);
+
+        assert_eq!(
+            bytes_to_hex(&round_keys[0]),
+            "000102030405060708090a0b0c0d0e0f"
+        );
+        assert_eq!(
+            bytes_to_hex(&round_keys[1]),
+            "d6aa74fdd2af72fadaa678f1d6ab76fe"
+        );
+        assert_eq!(
+            bytes_to_hex(&round_keys[10]),
+            "13111d7fe3944a17f307a78b4d2b30c5"
+        );
+    }
+
+    #[test]
+    fn aes_ctr_matches_the_nist_sp_800_38a_vector() {
+        // NIST SP 800-38A F.5.1, CTR-AES128.Encrypt. Four blocks, so the
+        // counter has to advance three times: this is the test that would
+        // have caught the counter walk being wrong, which the previous
+        // O(N^2) "re-derive from the IV each block" form got right only by
+        // repeating the whole increment sequence from scratch.
+        let key = hex_to_bytes("2b7e151628aed2a6abf7158809cf4f3c");
+        let iv = hex_to_bytes("f0f1f2f3f4f5f6f7f8f9fafbfcfdfeff");
+        let mut data = hex_to_bytes(concat!(
+            "6bc1bee22e409f96e93d7e117393172a",
+            "ae2d8a571e03ac9c9eb76fac45af8e51",
+            "30c81c46a35ce411e5fbc1191a0a52ef",
+            "f69f2445df4f9b17ad2b417be66c3710",
+        ));
+
+        encrypt_packet_aes_ctr(&mut data, &key, &iv, 0);
+
+        assert_eq!(
+            bytes_to_hex(&data),
+            concat!(
+                "874d6191b620e3261bef6864990db6ce",
+                "9806f66b7970fdff8617187bb9fffdff",
+                "5ae4df3edbd5d35e5b4f09020db03eab",
+                "1e031dda2fbe03d1792170a0f3009cee",
+            )
+        );
+    }
+
+    #[test]
+    fn aes_ctr_round_trips_a_length_that_is_not_a_block_multiple() {
+        // CTR is its own inverse, and the short final block is the part the
+        // old `(start + 16).min(len)` arithmetic had to get right by hand.
+        let key = hex_to_bytes("2b7e151628aed2a6abf7158809cf4f3c");
+        let iv = hex_to_bytes("f0f1f2f3f4f5f6f7f8f9fafbfcfdfeff");
+        let original: Vec<u8> = (0u8..37).collect();
+
+        let mut data = original.clone();
+        encrypt_packet_aes_ctr(&mut data, &key, &iv, 0);
+        assert_ne!(data, original, "encryption left the plaintext alone");
+        assert_eq!(data.len(), original.len());
+
+        decrypt_packet_aes_ctr(&mut data, &key, &iv, 0);
+        assert_eq!(data, original);
+    }
+
+    #[test]
+    fn aes_ctr_declines_a_short_key_or_iv_rather_than_encrypting_with_padding() {
+        let mut data = vec![1, 2, 3, 4];
+        encrypt_packet_aes_ctr(&mut data, &[0; 15], &[0; 16], 0);
+        assert_eq!(data, vec![1, 2, 3, 4], "a 15-byte key must not be used");
+        encrypt_packet_aes_ctr(&mut data, &[0; 16], &[0; 15], 0);
+        assert_eq!(data, vec![1, 2, 3, 4], "a 15-byte IV must not be used");
+    }
+
+    #[test]
+    fn the_ctr_counter_carries_across_byte_boundaries() {
+        let mut counter = [0xffu8; 16];
+        increment_counter(&mut counter);
+        assert_eq!(counter, [0u8; 16], "an all-ones counter wraps to zero");
+
+        let mut counter = [0u8; 16];
+        counter[15] = 0xff;
+        counter[14] = 0x01;
+        increment_counter(&mut counter);
+        assert_eq!(counter[14], 0x02);
+        assert_eq!(counter[15], 0x00);
+    }
+
+    // ------------------------------------------------------------------
+    // base64
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn base64_matches_the_rfc_4648_vectors() {
+        // The three tail lengths are the whole difficulty here, and each of
+        // them used to be a separate hand-indexed branch.
+        for (plain, padded) in [
+            ("", ""),
+            ("f", "Zg=="),
+            ("fo", "Zm8="),
+            ("foo", "Zm9v"),
+            ("foob", "Zm9vYg=="),
+            ("fooba", "Zm9vYmE="),
+            ("foobar", "Zm9vYmFy"),
+        ] {
+            assert_eq!(
+                base64_encode_padded(plain.as_bytes()),
+                padded,
+                "encoding {plain:?}"
+            );
+            assert_eq!(
+                base64_encode(plain.as_bytes()),
+                padded.trim_end_matches('='),
+                "unpadded encoding of {plain:?}"
+            );
+            assert_eq!(base64_decode(padded), plain.as_bytes(), "decoding {padded}");
+        }
+    }
+
+    #[test]
+    fn base64_round_trips_every_length_up_to_three_blocks() {
+        for len in 0..=12usize {
+            let data: Vec<u8> = (0..len)
+                .map(|i| u8::try_from(i * 17 % 251).unwrap())
+                .collect();
+            let encoded = base64_encode_padded(&data);
+            assert_eq!(base64_decode(&encoded), data, "round trip at length {len}");
+        }
+    }
+
+    #[test]
+    fn base64_decoding_ignores_whitespace_padding_and_stray_characters() {
+        // known_hosts lines are wrapped and hand-edited, so the decoder has to
+        // survive line endings; a bad character decodes as a zero sextet
+        // rather than shifting everything after it.
+        assert_eq!(base64_decode("Zm9v\r\nYmFy"), b"foobar");
+        assert_eq!(base64_decode("Zm9vYmFy===="), b"foobar");
+        // A lone trailing character carries no whole byte and is dropped.
+        assert_eq!(base64_decode("Zm9vYmFyZ"), b"foobar");
+    }
+
+    // ------------------------------------------------------------------
+    // known_hosts
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn known_hosts_names_a_nondefault_port_the_way_openssh_does() {
+        assert_eq!(known_hosts_pattern("example.com", 22), "example.com");
+        assert_eq!(
+            known_hosts_pattern("example.com", 2222),
+            "[example.com]:2222"
+        );
+    }
+
+    #[test]
+    fn known_hosts_recognises_a_stored_key() {
+        let blob = b"\x00\x00\x00\x0bssh-ed25519some-key-bytes".to_vec();
+        let content = format!(
+            "# a comment\n\n\
+             other.example ssh-ed25519 {}\n\
+             example.com ssh-ed25519 {} a trailing comment\n",
+            base64_encode_padded(b"a different key"),
+            base64_encode_padded(&blob),
+        );
+
+        assert_eq!(
+            known_hosts_lookup(&content, "example.com", &blob),
+            KnownHostsVerdict::Match
+        );
+        assert_eq!(
+            known_hosts_lookup(&content, "unlisted.example", &blob),
+            KnownHostsVerdict::Unknown
+        );
+    }
+
+    #[test]
+    fn known_hosts_reports_a_changed_key_rather_than_treating_it_as_unknown() {
+        // The distinction is the whole point: an unknown host may be added on
+        // the operator's say-so, but a host whose key has *changed* must not
+        // be, because that is what a man in the middle looks like.
+        let stored = b"the-real-host-key".to_vec();
+        let content = format!(
+            "example.com ssh-ed25519 {}\n",
+            base64_encode_padded(&stored)
+        );
+
+        assert_eq!(
+            known_hosts_lookup(&content, "example.com", b"an-impostors-key"),
+            KnownHostsVerdict::Mismatch
+        );
+    }
+
+    #[test]
+    fn known_hosts_matches_any_name_in_a_comma_separated_list() {
+        let blob = b"shared-key".to_vec();
+        let content = format!(
+            "alias.example,example.com,[example.com]:2222 ssh-ed25519 {}\n",
+            base64_encode_padded(&blob),
+        );
+
+        for pattern in ["alias.example", "example.com", "[example.com]:2222"] {
+            assert_eq!(
+                known_hosts_lookup(&content, pattern, &blob),
+                KnownHostsVerdict::Match,
+                "pattern {pattern}"
+            );
+        }
+    }
+
+    #[test]
+    fn known_hosts_skips_lines_that_are_not_three_fields() {
+        // A truncated line must not be read as naming the host: the old code
+        // checked `parts.len() < 3` and then indexed `parts[0..3]` separately,
+        // so this is the case where those two could have parted company.
+        let blob = b"key".to_vec();
+        let content = "example.com\nexample.com ssh-ed25519\n\n   \n";
+        assert_eq!(
+            known_hosts_lookup(content, "example.com", &blob),
+            KnownHostsVerdict::Unknown
+        );
+    }
+
+    #[test]
+    fn known_hosts_does_not_match_a_host_that_is_merely_a_prefix() {
+        let blob = b"key".to_vec();
+        let content = format!(
+            "example.com.evil.test ssh-ed25519 {}\n",
+            base64_encode_padded(&blob)
+        );
+        assert_eq!(
+            known_hosts_lookup(&content, "example.com", &blob),
+            KnownHostsVerdict::Unknown
+        );
     }
 }

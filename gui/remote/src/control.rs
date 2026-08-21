@@ -56,6 +56,7 @@
 //! bits, oversized counts and non-UTF-8 strings are all [`DecodeError`]s
 //! naming what was wrong.
 
+use crate::zones::SnapSlot;
 use crate::{DecodeError, Reader, capacity_hint, write_f32, write_string, write_u32, write_u64};
 
 /// Request-frame magic: `b"CREQ"` (client → compositor).
@@ -240,8 +241,9 @@ impl Layer {
 ///
 /// The actions are the ones a shell surface actually offers: a taskbar button
 /// (activate, minimise), its context menu (maximise, restore, close), an
-/// Alt-Tab switcher (activate), and the keyboard shortcuts that tile a window
-/// to one half of the screen (snap left/right).
+/// Alt-Tab switcher (activate), the keyboard shortcuts that tile a window to
+/// one half of the screen (snap left/right), and the zone picker that tiles it
+/// into one cell of a named layout ([`SnapToZone`](Self::SnapToZone)).
 ///
 /// Deliberately not move/resize: placing windows is the compositor's, and a
 /// shell that could move any window would be a second window manager — the
@@ -283,18 +285,51 @@ pub enum ShellControlAction {
     SnapLeft,
     /// Fill the right half of the work area.
     SnapRight,
+    /// Fill one cell of a named multi-window layout.
+    ///
+    /// `SnapLeft`/`SnapRight` are the two-window case a keyboard shortcut can
+    /// reach; this is what the zone picker offers — thirds, quadrants, a
+    /// six-cell grid. The rule the rest of this enum keeps is kept here too:
+    /// the slot names *which zone of which layout*, never a rectangle. The
+    /// compositor resolves it against its own work area with
+    /// [`SnapSlot::rect`], and it is the only party that could, since the shell
+    /// is never told what the display bounds are.
+    ///
+    /// The payload does not break the one-byte-per-action encoding either. A
+    /// [`SnapSlot`] is one of exactly [`SnapSlot::COUNT`] values, so it is
+    /// folded into the same byte as the action rather than encoded beside it —
+    /// [`as_byte`](Self::as_byte) still determines the whole action, and no
+    /// reader or writer of a frame grows a case for a nested field. That is the
+    /// distinction the `SnapLeft`/`SnapRight` note above is drawing: what was
+    /// rejected there was not a payload as such, it was a *separately encoded*
+    /// one.
+    SnapToZone(SnapSlot),
 }
 
 impl ShellControlAction {
-    /// Every action there is.
+    /// The first wire byte used by [`SnapToZone`](Self::SnapToZone).
+    ///
+    /// The zoneless actions take 0..=6 and the slots run end to end from here,
+    /// so the whole enum still fits one byte with room to spare. **Wire
+    /// format**: inserting a zoneless action rather than appending one would
+    /// slide every slot onto a different byte.
+    const ZONE_BYTE_BASE: u8 = 7;
+
+    /// Every action that names no zone.
     ///
     /// Exists so that the codec tests iterate the actions rather than a
     /// hand-written list of them: the list they used to hold was the kind that
     /// goes stale silently, leaving a newly-added action with no test that it
-    /// survives the wire at all. Adding a variant now breaks the compile of
-    /// `all_really_is_every_action` until it is added here too, and the fixed
-    /// array length breaks it again if it is added without being counted.
-    pub const ALL: [Self; 7] = [
+    /// survives the wire at all. Adding a variant breaks the compile of
+    /// `all_really_is_every_action` until it is named there, and the fixed
+    /// array length breaks it again if it is added here without being counted.
+    ///
+    /// The zone-tiling actions are excluded because there are
+    /// [`SnapSlot::COUNT`] of them and they are *generated* —
+    /// [`SnapSlot::all`] is their list, and listing them again here would be
+    /// the stale hand-written list this array exists to avoid. The tests below
+    /// iterate both together.
+    pub const ZONELESS: [Self; 7] = [
         Self::Activate,
         Self::Minimize,
         Self::Restore,
@@ -305,6 +340,11 @@ impl ShellControlAction {
     ];
 
     /// The wire byte for this action.
+    ///
+    /// The `saturating_add` cannot saturate: the largest slot index is
+    /// [`SnapSlot::COUNT`] − 1 = 21, so the largest byte is 28. It is written
+    /// that way so the function stays total and `const` without an unreachable
+    /// panicking branch.
     #[must_use]
     pub const fn as_byte(self) -> u8 {
         match self {
@@ -315,6 +355,7 @@ impl ShellControlAction {
             Self::Close => 4,
             Self::SnapLeft => 5,
             Self::SnapRight => 6,
+            Self::SnapToZone(slot) => Self::ZONE_BYTE_BASE.saturating_add(slot.index()),
         }
     }
 
@@ -323,7 +364,10 @@ impl ShellControlAction {
     /// `None` rather than a default, for [`Layer::from_byte`]'s reason and one
     /// of its own: the actions are not interchangeable, and guessing would let
     /// a peer speaking a later protocol have a window minimised when it asked
-    /// for something else.
+    /// for something else. A byte in the zone range but past the last slot is
+    /// refused for the same reason — a peer that knows a layout we do not
+    /// should be told so, not have its window tiled into whichever zone we
+    /// happened to round down to.
     #[must_use]
     pub const fn from_byte(b: u8) -> Option<Self> {
         match b {
@@ -334,7 +378,11 @@ impl ShellControlAction {
             4 => Some(Self::Close),
             5 => Some(Self::SnapLeft),
             6 => Some(Self::SnapRight),
-            _ => None,
+            // Cannot underflow: the arms above cover everything below the base.
+            _ => match SnapSlot::from_index(b.saturating_sub(Self::ZONE_BYTE_BASE)) {
+                Some(slot) => Some(Self::SnapToZone(slot)),
+                None => None,
+            },
         }
     }
 }
@@ -1038,8 +1086,7 @@ fn decode_request_body(r: &mut Reader<'_>) -> Result<RequestBody, DecodeError> {
             let b = r.read_u8()?;
             RequestBody::ShellControl {
                 window,
-                action: ShellControlAction::from_byte(b)
-                    .ok_or(DecodeError::BadShellAction(b))?,
+                action: ShellControlAction::from_byte(b).ok_or(DecodeError::BadShellAction(b))?,
             }
         }
     })
@@ -1196,22 +1243,36 @@ mod tests {
         assert_eq!(round_trip_requests(&reqs), reqs);
     }
 
+    /// Every action there is: the seven that name no zone, and one per
+    /// [`SnapSlot`].
+    ///
+    /// A helper rather than a constant because the zone-tiling actions are
+    /// generated from `SnapSlot::all` — a hand-written list of the other 22
+    /// would be exactly the list that goes stale silently, which is what
+    /// `ZONELESS` exists to avoid rather than to duplicate.
+    fn every_action() -> Vec<ShellControlAction> {
+        ShellControlAction::ZONELESS
+            .into_iter()
+            .chain(SnapSlot::all().map(ShellControlAction::SnapToZone))
+            .collect()
+    }
+
     /// Every action, not a sample: the action is one byte and an encoder that
     /// wrote a constant would round-trip whichever one the sample happened to
-    /// pick. Listing them also makes adding a sixth action fail here until it
+    /// pick. Listing them also makes adding an eighth action fail here until it
     /// is added to the list, which is the point of an exhaustive test.
-    /// `ALL` is what every other test here iterates, so it being complete is a
-    /// precondition of all of them rather than a nicety.
+    /// `every_action` is what every other test here iterates, so it being
+    /// complete is a precondition of all of them rather than a nicety.
     ///
     /// The `match` is the mechanism: it is exhaustive, so adding a variant to
     /// the enum stops this file compiling until the variant is named here, and
-    /// the arm then leads the reader to `ALL`. The length assertion catches the
-    /// other half — a variant named in the match and in `ALL` but not counted
-    /// in `ALL`'s fixed length is a compile error, and one that is somehow
-    /// neither fails here.
+    /// the arm then leads the reader to `ZONELESS`. The length assertion
+    /// catches the other half — a variant named in the match and in `ZONELESS`
+    /// but not counted in its fixed length is a compile error, and one that is
+    /// somehow neither fails here.
     #[test]
     fn all_really_is_every_action() {
-        for action in ShellControlAction::ALL {
+        for action in every_action() {
             match action {
                 ShellControlAction::Activate
                 | ShellControlAction::Minimize
@@ -1219,24 +1280,29 @@ mod tests {
                 | ShellControlAction::Maximize
                 | ShellControlAction::Close
                 | ShellControlAction::SnapLeft
-                | ShellControlAction::SnapRight => {}
+                | ShellControlAction::SnapRight
+                | ShellControlAction::SnapToZone(_) => {}
             }
         }
 
-        // Every byte the decoder accepts names an action that is in `ALL`, and
-        // there are exactly as many of them. A variant reachable from the wire
-        // but missing from `ALL` would be one no test above ever exercises.
-        let decodable: Vec<ShellControlAction> =
-            (0..=u8::MAX).filter_map(ShellControlAction::from_byte).collect();
-        assert_eq!(decodable.len(), ShellControlAction::ALL.len());
+        // Every byte the decoder accepts names an action the tests above
+        // exercise, and there are exactly as many of them. A variant reachable
+        // from the wire but missing from the list would be one nothing covers.
+        let decodable: Vec<ShellControlAction> = (0..=u8::MAX)
+            .filter_map(ShellControlAction::from_byte)
+            .collect();
+        assert_eq!(decodable.len(), every_action().len());
         for action in decodable {
-            assert!(ShellControlAction::ALL.contains(&action));
+            assert!(
+                every_action().contains(&action),
+                "{action:?} is unreachable"
+            );
         }
     }
 
     #[test]
     fn every_shell_control_action_survives_the_wire() {
-        let actions = ShellControlAction::ALL;
+        let actions = every_action();
         let reqs: Vec<Request> = actions
             .iter()
             .enumerate()
@@ -1255,6 +1321,69 @@ mod tests {
         seen.sort_unstable();
         seen.dedup();
         assert_eq!(seen.len(), actions.len(), "two actions share a wire byte");
+    }
+
+    #[test]
+    fn a_zone_tiling_action_still_costs_exactly_one_byte() {
+        // The property the whole `SnapSlot` design exists to preserve. If the
+        // slot were encoded beside the action rather than folded into it, a
+        // zone request would be longer than every other shell-control request
+        // and every reader of the frame would need to know which.
+        let plain = encode_requests(&[Request::new(
+            1,
+            RequestBody::ShellControl {
+                window: 7,
+                action: ShellControlAction::Maximize,
+            },
+        )]);
+        for slot in SnapSlot::all() {
+            let zoned = encode_requests(&[Request::new(
+                1,
+                RequestBody::ShellControl {
+                    window: 7,
+                    action: ShellControlAction::SnapToZone(slot),
+                },
+            )]);
+            assert_eq!(
+                zoned.len(),
+                plain.len(),
+                "{slot:?} encodes to {} bytes where a zoneless action takes {}",
+                zoned.len(),
+                plain.len()
+            );
+        }
+    }
+
+    #[test]
+    fn a_byte_past_the_last_zone_is_refused_rather_than_rounded_down() {
+        // A peer that knows a layout we do not must be told so. Silently
+        // decoding its byte as the nearest zone we *do* have would tile the
+        // user's window into a rectangle nobody asked for, which is worse than
+        // the request failing.
+        let last = ShellControlAction::ZONE_BYTE_BASE + SnapSlot::COUNT - 1;
+        assert!(ShellControlAction::from_byte(last).is_some());
+        for b in (last + 1)..=u8::MAX {
+            assert_eq!(
+                ShellControlAction::from_byte(b),
+                None,
+                "byte {b} decoded to something"
+            );
+        }
+    }
+
+    #[test]
+    fn the_zoneless_actions_keep_the_bytes_they_always_had() {
+        // Wire format, and the one thing in this file that a refactor could
+        // change without any other test noticing: renumbering the zoneless
+        // actions to make room for the zone range would leave both ends
+        // self-consistent and silently incompatible with every build before it.
+        assert_eq!(ShellControlAction::Activate.as_byte(), 0);
+        assert_eq!(ShellControlAction::Minimize.as_byte(), 1);
+        assert_eq!(ShellControlAction::Restore.as_byte(), 2);
+        assert_eq!(ShellControlAction::Maximize.as_byte(), 3);
+        assert_eq!(ShellControlAction::Close.as_byte(), 4);
+        assert_eq!(ShellControlAction::SnapLeft.as_byte(), 5);
+        assert_eq!(ShellControlAction::SnapRight.as_byte(), 6);
     }
 
     /// An action byte this decoder does not know is refused, not guessed at.

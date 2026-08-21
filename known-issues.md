@@ -51598,7 +51598,7 @@ files mid-test.
 
 ---
 
-## TD-C-ZONE-SNAPPING-HAS-NO-PATH-TO-A-WINDOW (lane C, 2026-08-21)
+## TD-C-ZONE-SNAPPING-HAS-NO-PATH-TO-A-WINDOW (lane C, 2026-08-21) — RESOLVED 2026-08-21
 
 **In short:** The desktop shell contains a complete, tested implementation of
 multi-window tiling layouts — halves, thirds, quadrants, a six-cell grid —
@@ -51641,11 +51641,36 @@ keeping it.
 1. Extend `ShellControlAction` with a zone verb — `SnapToZone { preset, zone }`
    or equivalent — in `gui/remote` (lane C).
 2. Teach `gui/compositor`'s `snap_window` to resolve a preset + zone index into
-   a rectangle against its own display bounds, reusing `snap.rs`'s arithmetic
-   rather than restating it. The compositor is the only party that knows the
-   bounds, so the *rectangle* must be computed there; `snap.rs` should be
-   factored so the layout math is callable from both (lane C owns both trees).
-3. Wire the shell's zone picker (`snap.rs`'s overlay/picker render trees) to
+   a rectangle against its own display bounds. The compositor is the only party
+   that knows the bounds, so the *rectangle* must be computed there.
+
+   **The layout arithmetic has to move somewhere both crates can see it, and
+   where is an open fork.** The compositor needs it to place the window; the
+   shell needs it too, because its zone picker draws the zones the user aims
+   at — so it cannot simply be handed to the compositor and deleted from the
+   shell. `gui/compositor` does not depend on `gui/desktop` and must not start
+   to (the dependency runs the other way round conceptually, and nothing in the
+   tree depends on `desktop` today, which is a property worth keeping). The two
+   candidates:
+   - **Into `gui/remote`**, beside `Layer`, `WindowInfo` and `CursorShape` —
+     the crate that already holds the vocabulary both ends share. Fits the
+     existing pattern, no new crate. Against: `gui/remote` is a *protocol*
+     crate, and `SnapZone` carries a `String` label and returns a `Vec`, which
+     is heavier than anything else in there.
+   - **A new `gui/zones` crate.** Honest about what it is, keeps the protocol
+     crate to protocol. Against: ~300 lines of arithmetic is thin for a crate,
+     and it adds a node to the graph for one caller on each side.
+
+   Resolve this *before* writing the compositor half — picking wrong means
+   moving the code twice.
+3. Design the wire verb against `ShellControlAction`'s one-byte-per-action
+   rule (`gui/remote/src/control.rs:307`, `as_byte`/`from_byte`). The 22
+   distinct (preset, zone) pairs across the seven presets all fit in the unused
+   byte space above 6, so the rule can be kept exactly rather than bent: the
+   byte still fully determines the action, and no reader or writer of the frame
+   grows a special case. A `SnapToZone { preset, zone }` with a separately
+   encoded payload would be the thing the enum's doc explicitly warns against.
+4. Wire the shell's zone picker (`snap.rs`'s overlay/picker render trees) to
    emit that request from `handle_mouse`/`handle_hotkey`, and drop the
    snap-history bookkeeping from the shell — restoring a snapped window is
    already the compositor's (`restoring_a_snapped_window_returns_it_to_where_it_was`).
@@ -51655,6 +51680,88 @@ the one most people use — but 2293 lines of tested code stay unreachable, whic
 invites the next reader to assume the feature exists because the tests are
 green. `design.txt` does not mandate zone presets, so this is a feature the
 project chose to build and has not yet connected, not a spec violation.
+
+**RESOLVED 2026-08-21.** All four steps done, in three commits:
+
+| Step | Commit | What landed |
+|---|---|---|
+| 1, 3 | `d17ef6149` | `SnapSlot` (`gui/remote/src/zones.rs`) and the `SnapToZone` wire verb. The one-byte rule is **kept, not bent**: the 22 (preset, zone) pairs occupy bytes above the existing actions, so the byte still fully determines the action. |
+| 2 | `d04192fc5` | The compositor's `SnapTarget` / `snap_window_to_zone` / `place_snapped` / `zone_rect`, resolving a slot against `display_manager.virtual_bounds()` — the bounds only it has. |
+| 4 | `7d138bb51` | Super+Z opens the chooser; a press on a zone emits `ShellControlAction::SnapToZone(slot)` for the window focused now. The snap history is gone from the shell, as the step said. |
+
+**The open fork in step 2 was resolved into `gui/remote`**, not a new
+`gui/zones` crate — see `design-decisions.md` §507 for the argument (a zone
+table *is* protocol: `SnapSlot`'s index ranges and the geometry those indices
+name are the same fact stated twice, and the one place they cannot drift is the
+same file). The `String` label objection was answered by the type carrying a
+`&'static str`.
+
+Eight new tests in `gui/desktop/src/pointer_tests.rs`, each proved to bite by
+reintroducing the defect it names (twelve defects, twelve deterministic
+failures naming the test back): hit-test order, work-area staleness, the
+empty-desktop guard, the zone id, the focused window, the dismissal, the
+visibility gate, the hover, the thumbnail grid, and all three close paths.
+
+**What did not land with it:** the *other* way desktops offer this — drag a
+window to an edge and drop — still has no drag to fire on. See
+`TD-C-EDGE-DRAG-TILING-HAS-NO-DRAG-TO-FIRE-ON` below.
+
+---
+
+## TD-C-EDGE-DRAG-TILING-HAS-NO-DRAG-TO-FIRE-ON (lane C, 2026-08-21) — OPEN
+
+**In short:** There are two ways every desktop lets you tile a window: press a
+keyboard shortcut and pick a slot from a menu, or drag the window to the edge
+of the screen and let go. The first now works (Super+Z). The second does not,
+and not because the tiling is missing — the code that says "a drop against the
+left edge means the left half" is written and tested. What is missing is anyone
+to tell the shell that a drag is happening. The shell never sees a window being
+moved; the compositor does that by itself and does not mention it.
+
+**Where.** `gui/desktop/src/snap.rs`: `SnapManager::action_for_edge(x, y)`
+turns a cursor position near an edge or corner into the
+`ShellControlAction` that drop should send, and `edge_snap_hit` is the other
+half — the overlay preview drawn while the cursor is there. Both are public,
+both are covered by the module's own tests
+(`an_edge_drop_asks_for_the_tile_that_edge_means`,
+`an_edge_drop_ignores_the_layout_the_picker_has_selected`), and **neither has a
+caller anywhere in the tree.**
+
+The reason is structural, not an oversight: the shell has no window dragging at
+all. `grep` for a drag-start/drag-move/drag-end in `gui/desktop` finds nothing,
+because interactive moves are the compositor's — it owns the pointer grab and
+the window geometry, and `gui/remote`'s event stream carries no "the user is
+moving window N, the pointer is at (x, y)" message for the shell to hook.
+
+**Why it was kept rather than deleted.** It is the correct half of a gesture
+whose other half is a protocol addition in the same lane's tree. Deleting it
+would mean re-deriving the edge/corner thresholds and the deliberate rule that
+an edge drop ignores the layout the picker has selected (dragging left means
+*the left half*, whatever grid is chosen — see `design-decisions.md`), which is
+exactly the "re-writing it later would be strictly worse" argument that §506
+already made about `snap.rs` as a whole.
+
+**The proper fix:**
+
+1. Add an interactive-move notification to `gui/remote`'s event stream — the
+   window id and the pointer position, sent while the compositor has a move
+   grab, plus the drop. The compositor is the sender; this is lane C's tree on
+   both ends.
+2. Have the shell show the overlay on move-start, call `edge_snap_hit` per
+   motion to draw the preview, and `action_for_edge` on drop to emit the
+   request. Both functions already return exactly what those three moments
+   need.
+3. Decide whether the *zone* overlay (not just the edge preview) should appear
+   during a drag, as Windows' FancyZones does. That is a user-visible policy
+   call and belongs in `open-questions.md` if it is not obvious when the time
+   comes.
+
+**If never fixed:** no breakage and no regression — Super+Z reaches every zone
+of every layout, so the feature is usable. What remains is a discoverability
+gap (edge-drag is the gesture most users try first) and two tested public
+functions with no caller, which is the same stale-code smell §506 named,
+narrowed from a whole module to two functions. It does not get worse with time.
+
 
 ---
 
@@ -52012,3 +52119,127 @@ edit) is largely the single codegen unit, and "build release but with 16 units"
 would have been the obvious way to buy release-only bug coverage without the
 penalty. That option is unavailable until this is understood, and Q46's write-up
 now says so.
+
+## TD-B-DIG-TRACE-EXITS-ZERO-WHEN-THE-TRACE-GOT-NOWHERE (lane B, 2026-08-21)
+
+**In short:** `dig +trace` walks down from the DNS root servers, printing each
+step. If every server along the way refuses or times out, it prints the failures
+and then exits with status 0 — "success". A script that runs `dig +trace` and
+checks the exit code is told the lookup worked when nothing was resolved at all.
+
+**Where.** `userspace/dig/src/main.rs`, `trace_query`. Every failure inside the
+walk is handled in place: the error is printed as a line of trace output and the
+loop either moves to the next server or `break`s. The function then falls off
+the end. `run` calls it and returns `Ok(())`.
+
+**How it was found.** The crate was put under the workspace lints
+(`TD-B-USERSPACE-CRATES-DO-NOT-INHERIT-THE-WORKSPACE-LINTS`, stage 2) and
+clippy's `unnecessary_wraps` pointed out that `trace_query` returned
+`Result<(), DigError>` without a single `Err` path — the signature was
+advertising an error channel nothing ever used. Removing the phantom `Result`
+is what made the exit-code behaviour visible; it did not cause it.
+
+**The proper fix.** Have `trace_query` report whether it reached an answer —
+the natural shape is to return whether the final iteration produced an answer
+record — and have `run` map "got nowhere" to a non-zero exit. Real `dig` exits 9
+("no reply from server") for this case, which is the value to match.
+
+**Why it wasn't done in the same change.** The change that found it was a lint
+sweep, and an exit code is a user-visible contract: a script that currently
+treats `dig +trace; echo $?` as always-0 would start failing. That belongs in
+its own commit with its own reasoning, not folded into a batch of lint fixes
+where nobody would look for it.
+
+**If never fixed:** unchanged from today — no regression, but `+trace` stays
+unusable in any script that checks status rather than parsing stdout. Note this
+affects only `+trace`; ordinary lookups already propagate their errors through
+`run` and exit non-zero.
+
+
+## TD-B-SSH-KEY-EXCHANGE-LEAKS-ITS-SECRET-THROUGH-TIMING (lane B, 2026-08-21)
+
+**In short:** When `ssh` connects, it and the server each pick a secret random
+number and combine them to agree on a session key -- this is Diffie-Hellman key
+exchange. Our client computes its half with an algorithm whose *running time
+depends on the secret*: bits of the secret that are 1 take measurably longer
+than bits that are 0. Anyone who can time the handshake precisely -- a process
+on the same machine, or in principle a well-placed network observer -- can read
+the secret back out of those timings and then decrypt the whole session. The fix
+is to stop using this key exchange and use X25519 instead, which is designed so
+that every secret takes exactly the same time.
+
+**Where.** `userspace/ssh/src/main.rs`, the `BigUint` section. Two data-dependent
+branches, both on the security-critical path:
+
+- `mod_pow` is square-and-multiply: `for i in (0..bits).rev() { result =
+  result.mod_mul(&result, modulus); if exp.bit(i) { result =
+  result.mod_mul(&base, modulus); } }`. The extra multiply happens only for a
+  1 bit, so total time is (roughly) linear in the popcount of the exponent, and
+  the *pattern* of fast/slow rounds is the exponent itself.
+- `div_rem`'s Knuth add-back step (`if t < 0 { ... }`) runs an extra pass over
+  the divisor only when the trial quotient digit was one too large. That is
+  operand-dependent, so even the "constant" squarings are not constant-time.
+
+The exponent in question is the DH private exponent generated in
+`key_exchange`; the modulus is the 2048-bit group 14 prime.
+
+**How it was found.** While rewriting `BigUint` onto 32-bit limbs to fix the
+unusable 77-second handshake (commit `07cfa2521`). The rewrite made the
+arithmetic ~350x faster; it did not make it constant-time, and it was never
+written to be.
+
+**How bad it is, honestly.** Bounded, but not negligible. The exponent is
+ephemeral: a fresh one is drawn per connection, so an attacker gets exactly one
+timing trace per secret rather than the thousands that classic RSA/DSA timing
+attacks accumulate against a long-lived key. A single trace of a 2048-bit
+modexp is not obviously enough to recover the exponent end-to-end. But "not
+obviously enough" is not a security argument, the leak is a per-bit one rather
+than a statistical aggregate, and a co-resident process can time far more
+precisely than a network attacker. Treat it as a real weakness that has not yet
+been demonstrated, not as a theoretical one.
+
+**The proper fix, and why it is a replacement rather than a repair.** Making
+this code constant-time means rewriting `mod_pow` as a fixed-window ladder with
+constant-time table selection, and rewriting `div_rem` to do the add-back
+unconditionally under a mask -- i.e. writing a constant-time bignum library by
+hand, unreviewed, which is the exact category of code that is famously got
+wrong. The better answer is to delete the requirement:
+
+1. Get an **X25519 (RFC 7748)** into the tree, beside the existing `ed25519`.
+   The Montgomery ladder is naturally constant-time -- it performs the same
+   operations for every scalar bit and selects between them with arithmetic
+   rather than a branch -- the scalar is a fixed 32 bytes so there is no
+   variable-length loop, and RFC 7748 s5.2 ships known-answer vectors to test
+   against.
+2. Switch ssh's key exchange to **`curve25519-sha256`** (RFC 8731), which is
+   what OpenSSH prefers by default anyway, keeping
+   `diffie-hellman-group14-sha256` only as a fallback for servers that lack it.
+
+That removes the hand-rolled 2048-bit modexp from the handshake entirely. The
+`BigUint` code would remain only for the fallback path (and could then be
+dropped altogether if the fallback is dropped).
+
+**Step 1 is a *port*, not an implementation -- decided 2026-08-21.** This entry
+was first written saying "implement X25519 in `posix/`". The operator answered
+C-Q5 the same day with **option C: vendor the cryptographic primitives, keep our
+own glue** (`design-decisions.md`, lane C's band). X25519 is a primitive by any
+reading, and it is a primitive whose *entire* value here is a property no test
+can check -- so hand-writing it would reproduce, in new code, precisely the
+defect this entry is about. Vendor a vetted implementation (RustCrypto's
+`curve25519-dalek`, or BearSSL's `c25519` if a C port is preferred) and keep the
+SSH-side plumbing ours. That also means step 1 is no longer lane B's to write
+alone: which implementation gets vendored, and where it lands, is the same
+decision C-Q5 set in motion for the vault and the password hash, and should be
+made once for all three consumers rather than three times.
+
+**Checked 2026-08-21:** `posix/src` has no X25519 today. Grepping
+`x25519|curve25519` there matches only Linux uapi *type definitions*
+(`linux_wireguard*.rs`, `linux_crypto_kpp*.rs`) -- names in an ABI, not an
+implementation. So there is nothing in the tree to wire up yet either way.
+
+**If never fixed:** no regression -- this is how the client has behaved since it
+was written, and the 350x speedup neither introduced nor worsened it. It does
+not get worse with time on its own. But it is the one remaining defect in ssh
+that a rewrite cannot be argued out of: every other finding from the lint sweep
+was fixed in place, and this one was left because the correct fix is a new
+primitive rather than an edit.

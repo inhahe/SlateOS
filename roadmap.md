@@ -6060,7 +6060,7 @@ _Depends on: Phase 2 (drivers, filesystem, basic userspace). Goal: boot to a gra
 - [x] Resource monitor widget (resmon.rs: compact/expanded sparklines, CPU/memory/disk/network tracking, 64-sample circular buffers, bar graphs)
 - [x] Global hotkey manager (hotkeys.rs: HotkeyRegistry, 22 action types, 20+ default bindings, conflict detection, config persistence, settings panel)
 - [x] Animation system (animations.rs: 9 easing functions, window open/close/minimize/snap animations, desktop slide transitions, color interpolation, fade overlays, reduced-motion support)
-- [x] Snap zones (snap.rs: 7 layout presets, edge/corner detection, zone picker popup, snap history for restore-on-unsnap)
+- [x] Snap zones (snap.rs: 7 layout presets, edge/corner detection, zone picker popup) — **reachable since 2026-08-21.** This was ticked while the geometry was a library with no caller; it is now wired end to end: Super+Z opens the chooser, a press on a zone sends `ShellControlAction::SnapToZone(slot)`, and the compositor resolves the slot against its own display bounds (`gui/remote/src/zones.rs` `SnapSlot`, `gui/compositor` `snap_window_to_zone`). Snap *history* moved to the compositor, which is the only party that knows where a window was. Remaining gap: edge-drag-and-drop has no drag event to fire on — `known-issues.md` `TD-C-EDGE-DRAG-TILING-HAS-NO-DRAG-TO-FIRE-ON`.
 - [x] Clipboard history viewer (clipboard_viewer.rs: Super+V popup, format filters, search, pin support, size/age display)
 - [x] Window peek preview (window_peek.rs: taskbar hover thumbnails, close buttons, fade animation, multi-window layout)
 - [x] Virtual desktop overview (overview.rs: Exposé/Mission Control grid layout, search, lane view, keyboard/mouse nav, animations)

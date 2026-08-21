@@ -31890,3 +31890,471 @@ action encoding is a deliberate constraint that adding one has to reckon with.
 **Revisit if:** zone tiling is still unreachable when someone next touches
 `gui/remote`'s control encoding. At that point either wire it up or delete it —
 the one outcome to avoid is a third year of tested, unreachable geometry.
+
+---
+
+## §350 — The clock, the privileged ports and the resource limits each get a real kernel object, rather than staying permanently denied
+
+**Date:** 2026-08-21
+**Decided by:** Operator (option B; Claude recommended B for the clock and the
+limits but C for the port, and the operator chose B for all three)
+
+**In short:** Our C library used to *claim* a program could do anything
+privileged, and then let the kernel say no. §312 replaced that with the truth:
+work out what the program may do from the tokens the kernel actually handed it.
+The catch is that a handful of privileges have no token to derive from, so the
+honest answer for them is "no", forever, for everyone — and that would
+permanently break setting the clock, running a web server on port 80, and
+raising your own resource limits. The decision is to build the missing tokens
+rather than accept the breakage or carve out exceptions.
+
+**Answers:** `open-questions.md` Q48 (deleted from that file by this entry).
+**Related:** §312 (privileges are computed from held tokens), §314 (the guesses
+that could safely be deleted because the kernel checks again), `known-issues.md`
+→ `TD-POSIX-CAPS-ARE-NOT-THE-KERNEL'S` step 3.
+
+### What was decided
+
+Three new kernel resource types, and the `kernel_view::project` rules that map
+them onto the Linux capability names ported software asks about:
+
+| New object | Grants | Feeds the Linux name | Gate site |
+|---|---|---|---|
+| system clock | setting absolute time and slewing it | `CAP_SYS_TIME` | `posix/src/time.rs` (`clock_settime`, `settimeofday`), `posix/src/sys_timex.rs` (`adjtimex`), `posix/src/epoll.rs` (`timerfd_create` with `TFD_TIMER_CANCEL_ON_SET`) |
+| privileged ports | binding a local port below 1024 | `CAP_NET_BIND_SERVICE` | `posix/src/socket.rs` (`bind`) |
+| resource limits | raising a *hard* limit; lowering stays free | `CAP_SYS_RESOURCE` | `posix/src/resource.rs` (`setrlimit`), `posix/src/mman.rs` (`check_mlock_caps`) |
+
+Lowering a soft limit needs no token and never did — only raising the hard
+ceiling is gated, which is the Unix rule and the one worth keeping.
+
+### Why the operator's answer differs from the recommendation, and why that is right
+
+The recommendation was to build objects for the clock and the limits but to
+*drop* the privileged-port rule as a Unix relic: port 1024 protects a namespace
+of numbers rather than a thing, and it exists because 1980s Unix had no better
+way to say "this daemon is the real one." Linux itself now lets you set the
+threshold to zero.
+
+The operator took B for all three, and the argument for it is the stronger one
+on reflection: option C is not actually "no policy", it is a *different* policy
+— "everyone may bind port 80" — chosen once and unchangeable, whereas an object
+is a policy *mechanism* that can express both. A system that hands the port
+token to every process at boot behaves exactly like C, and can stop doing so
+later without a code change. Dropping the check throws that away to save one
+resource type. The relic argument also proves less than it seems: what is a
+relic is the *number* 1024, not the idea that some ports are claimed by the
+system, and an object lets us keep the idea while choosing any set of numbers we
+like.
+
+The cost of B over C is one more kernel resource type and one more boot-time
+grant decision. That is small, and it is paid once.
+
+### Consequences, and what happens next
+
+- **A request to lane A** for the three resource types, since `kernel/**` is not
+  lane B's to write. Until it lands, step 3 of §312 stays parked — which is the
+  status quo and breaks nothing.
+- **A boot-time grant policy is now needed and did not exist before.** Who holds
+  the clock token: `init`? An NTP service and nothing else? This is a real
+  question that B creates and C would have avoided for the port case. The
+  default taken until someone decides otherwise: `init` holds all three and
+  passes them down explicitly, because a token nobody holds is
+  indistinguishable from option A.
+- `sethostname` remains denied with no object, and is deliberately *not* in the
+  table. §312 already refused to invent an object for it and nothing here
+  changes that; if the same reasoning applies to it later, it is a fourth row
+  rather than a revision of this entry.
+
+**Revisit if:** the boot-time grant policy turns out to hand all three tokens to
+every process, in which case the objects are ceremony and C's argument was right
+after all. The way to tell is to look at what `init` actually does with them
+once the kernel types exist.
+
+
+## §351 — Diagnostics quote an option's argument with the curly marks, matching GNU under a UTF-8 locale
+
+**Date:** 2026-08-21
+**Decided by:** Operator (option B; Claude recommended this option, weakly)
+
+**In short:** When a command-line utility complains about text you typed, it puts
+quotation marks around it. GNU picks which marks based on the character set:
+`'zzz'` on an ASCII system, `‘zzz’` — the curly typographic ones — on a UTF-8
+system, which is every modern one and the only kind SlateOS will ever be. Ours
+always printed the straight ones. They now print the curly ones in the one
+message family where GNU does.
+
+**Answers:** `open-questions.md` B-Q2 (deleted from that file by this entry).
+**Related:** Q38 (osh's string layer is UTF-8, full stop) — this is the same
+premise applied to diagnostics.
+
+### The scope, which is narrower than "all our error messages"
+
+GNU has three quoting styles and only one of them moves with the locale. This
+was measured against real GNU, not inferred:
+
+| What is quoted | Example | Locale-sensitive? |
+|---|---|---|
+| An **option's argument**, and other non-file text | `invalid argument ‘zzz’ for ‘--sort’` | **yes** — this and only this |
+| A **file name inside a sentence** | `cannot open 'missing.txt' for reading` | no — straight, every locale |
+| A **file name ending the message** | `wc: missing.txt: No such file …` | no — usually unquoted |
+| Text from the **option parser** | `unrecognized option '--nope'` | no — that string is glibc's |
+
+So this touches the `invalid argument` / `ambiguous argument` family. File names
+— the text most likely to be pasted back into a shell or matched by a script —
+are unaffected, which is what makes the change safe to make wholesale.
+
+### Why B, and the objection that does not survive contact
+
+The reason the differential harnesses exist is that guessing at GNU's behaviour
+produces something that looks right and differs in a dozen corners. This is one
+of those corners, found the same way as the rest, and the alternative is a
+permanent deliberate divergence carried as an `xfail` in every future utility's
+`*-diff.sh`.
+
+The objection is that curly marks are hard to type into a `grep`. It is true and
+it does not distinguish the options, because it applies with exactly equal force
+to real GNU, which has printed them on desktop Linux since 2009. A script that
+matches our diagnostics with `grep "'"` is already GNU-incompatible; making it
+*also* SlateOS-incompatible costs it nothing it had.
+
+The recommendation was weak because this is a visible change to error messages
+across the system and "straight quotes on principle" is a coherent taste. The
+operator settled it.
+
+### Where it lands
+
+`userspace/coreutils/src/quote.rs` → `quote` emits U+2018/U+2019;
+`quotef`/`quoteaf` are untouched, which is what keeps file names straight. Its
+caller that matters is `getopt.rs` → `argmatch`. The fixture
+`userspace/coreutils/tests/quotearg-gnu.txt` was generated by
+`scripts/quote-probe.py` under `LC_ALL=C` and must be regenerated under
+`C.UTF-8` — until it is, the fixture asserts the old behaviour and will fail,
+which is the correct order to do it in. Three `xfail` cases in
+`scripts/wc-diff.sh` marked `quote-marks-under-a-utf8-locale` become passes and
+lose their annotation.
+
+**No fallback for non-UTF-8 locales is implemented, on purpose.** GNU needs the
+ASCII branch because it runs where `LC_ALL=C` is real; we decided in Q38 that it
+is not real here. Adding a branch on a locale that cannot occur would be dead
+code that looks load-bearing.
+
+**Revisit if:** SlateOS ever gains a non-UTF-8 locale, at which point the ASCII
+branch stops being dead code and this becomes a two-way choice again.
+
+
+## §352 — Password entries written by the old, broken hashers stay refused; nobody is let in one last time
+
+**Date:** 2026-08-21
+**Decided by:** Operator (option A; Claude recommended this option)
+
+**In short:** `/etc/shadow` stores one scrambled password per user. It used to be
+written by three programs that disagreed about *how* to scramble, so a password
+set with `passwd` could not be used to log in at all. That is fixed — all three
+now share one implementation (§329). The leftover question was what to do about
+entries the old code already wrote. They are refused: those accounts cannot log
+in until root runs `passwd <user>`, and `login` says so. The alternative was to
+accept such an entry once and silently rewrite it during login. We keep
+refusing.
+
+**Answers:** `open-questions.md` B-Q3 (deleted from that file by this entry).
+**Related:** §329 (the three disagreeing hashers, and the two authentication
+bypasses found in `login` while fixing them), §341 (`authlib`).
+
+### What makes this a small decision rather than a risky one
+
+The two populations are distinguishable with certainty, not heuristically. A
+correct entry's hash field is exactly 22, 43 or 86 characters depending on the
+method and drawn from the standard alphabet; every entry the old code wrote is
+exactly 64 characters from a different alphabet. There is no overlap, so a
+correct entry can never be mistaken for a broken one or the reverse. Both
+options were therefore *implementable*; the choice is about what should happen,
+not about what can be detected.
+
+It also only affects test accounts on a development machine. Nothing has
+shipped.
+
+### Why A
+
+Option B's entire benefit is saving one `passwd` command per account. It buys
+that by keeping code alive in `login` that treats a known non-hash as if it were
+a password check — in the one place in the system where a wrong answer is a
+break-in — and by adding a rewrite of `/etc/shadow` to the login path, running
+as root before privileges are dropped. A rewrite interrupted by power loss
+damages the file that gates every login. That is a poor trade for a saved
+keystroke.
+
+Option C — an offline converter — cannot work and is recorded only so it is
+visibly ruled out rather than quietly overlooked. The old scramble is not
+reversible enough to re-derive a correct hash from, so the converter could only
+*blank* the entries, which is option A with extra steps and a new tool.
+
+The failure mode of A is "a developer resets a test password." The failure mode
+of B is "authentication code that accepts something that is not a hash." Those
+are not comparable.
+
+**Revisit if:** this ever recurs *after* the system has real users — i.e. a
+future hash-format migration on a machine somebody depends on. The reasoning
+above is about a development tree; on a live machine the arithmetic of "one
+command per account" changes, and the right answer there is a planned migration
+with the accounts offline, not a rewrite inside the login path.
+
+
+## §353 — `/etc/users.yaml` is the truth and the flat files are generated from it, read-only
+
+**Date:** 2026-08-21
+**Decided by:** Operator (option C; Claude recommended this option)
+
+**In short:** Two files on this system each claimed to be *the* list of user
+accounts — `/etc/users.yaml`, and the classic pair `/etc/passwd` +
+`/etc/shadow` — and nothing copied anything between them. Twenty-three programs
+read one or the other, so a user created with `useradd` could log in over SSH
+but did not exist to the graphical login screen, and a user created with
+`useradm` was the reverse. The decision: the YAML file is the real one, and the
+two flat files are *generated* from it whenever it changes, for the benefit of
+ported software that reads them directly. Both exist and they always agree.
+
+**Answers:** `open-questions.md` B-Q4 (deleted from that file by this entry).
+**Related:** §330 (the five broken YAML parsers unified into `userdb`), §329
+(the three broken hashers unified), §341 (`authlib`, which is where the guess
+currently lives), `known-issues.md` → the two-`sudo`-binaries entry, which this
+unblocks.
+
+### Why not either of the single-file answers
+
+**A — YAML wins outright, delete the flat files.** This is what `design.txt`
+asks for ("configuration files will be yaml", line 1108) and it is one file
+instead of three. It breaks every piece of ported software that calls
+`getpwnam()` and then reads `/etc/passwd` itself — and we do not know how many
+of those there will be, because the answer arrives with each new port rather
+than now. Betting the account system on that unknown is the expensive kind of
+guess.
+
+**B — flat files win, delete the YAML.** Ported software works untouched and
+administrators know the format. But it contradicts `design.txt` for the most
+security-sensitive file on the system, and the desktop's extra fields (avatar,
+auto-login, last-login count) have nowhere to live in a colon-separated line —
+so they need a second file, which re-creates the exact split this option was
+meant to end.
+
+C is the only option that does not choose between `design.txt` and every future
+port. And its cost is work option A needs anyway: `useradd` and `passwd` write
+accounts, so they must be redirected at the YAML in either case. If C turns out
+to be more machinery than it is worth it degrades into A by simply not
+generating the flat files — the truth does not move.
+
+### What has to be built
+
+1. **Redirect the two writers.** `useradd` and `passwd` write to the YAML via
+   `userdb`, not to `/etc/passwd`/`/etc/shadow` directly. Without this the
+   generated files are stale the moment anyone uses them.
+2. **Generate on change.** Every `userdb` write regenerates both flat files.
+   They must be written the way any critical file is — to a temporary and
+   renamed — so a crash mid-generation cannot leave a truncated `/etc/passwd`.
+3. **Collapse `authlib`'s guess.** Today `authlib` picks a store per lookup:
+   YAML if it has the user, `/etc/shadow` otherwise. That fallback is a policy
+   invented in the absence of this decision. It becomes a straight YAML lookup;
+   the `/etc/shadow` branch becomes dead and is deleted rather than left as a
+   fallback, because a fallback that fires means the generation broke, and
+   silently reading a stale account file is worse than failing.
+4. **The generated files are read-only in intent, not in permission.** A
+   hand-edit of `/etc/passwd` survives until the next `useradm` run and is then
+   silently undone. This is the one genuinely surprising thing about C. The
+   mitigation is a generated header comment naming the source file, which is
+   what every other generated config on this system does.
+
+### The known cost
+
+A file that looks writable and is not surprises people. Accepted: this is what
+macOS does — its truth is a database and the flat files are vestigial — and it
+has surprised people for twenty years without being the wrong call. The
+alternative surprise, two disjoint sets of users, is strictly worse: it has
+already produced two of the nastiest defects in this tree, where `sudo` and
+`doas` answer "is this person an administrator?" from different files, as do the
+two `login`s. A machine could genuinely believe an account was an administrator
+at the graphical prompt and not exist at all over SSH.
+
+**Revisit if:** the generation step turns out to be the only thing anyone
+maintains — i.e. a year passes and nothing ported ever read `/etc/passwd`
+directly. Then stop generating and this is option A, with no other change.
+
+
+## §354 — The console login prompt and `su` join the shared failure tally and obey its delay; `passwd` contributes but is never delayed
+
+**Date:** 2026-08-21
+**Decided by:** Operator ("i'll go with your recommendation", covering Q52, Q53,
+Q54 and B-Q6 together; Claude's recommendation was option A with `su` joining)
+
+**In short:** Getting a password wrong now makes you wait longer before the next
+try — one second, then two, four, up to five minutes — and that count is shared
+across programs, so failures at one prompt slow the others. The console `login:`
+prompt and `su` were the last two left out, which meant the two prompts a human
+actually types a password into were the two with no rate limit at all. They now
+join. The known side effect, accepted deliberately: a program already running on
+the machine can fail a password on purpose and thereby make the next person at
+the keyboard wait, up to five minutes.
+
+**Answers:** `open-questions.md` B-Q6 (deleted from that file by this entry).
+**Related:** §347 (the tally is one shared fixed-slot file), §346 (an account
+with no password may log in at the console but may not become root), §341
+(`authlib`), `known-issues.md` →
+`B-DOAS-COULD-NOT-VERIFY-ANY-PASSWORD-THE-SYSTEM-ACTUALLY-SETS` and
+`B-PASSWD-VERIFIES-WITHOUT-AUTHLIB`.
+
+### What changes
+
+`login` and `su` read and write the shared tally, and honour its delay, for
+every account **including root**. Before this, the console's only protection was
+a per-process cap of three tries — after which `login` exited and was
+immediately respawned, fresh. Guessing at the console was therefore not
+rate-limited in any meaningful sense: fail three times, get a new prompt, repeat
+forever. That is the same defect that was fixed for `doas`, in the more exposed
+place.
+
+`authlib`'s `Authenticator` gains a `rate_limited` / `note_failure` pair, so a
+caller that owns its own verdict can still share the count. `login` needs this
+because it owns the console's empty-password policy (§346) and therefore calls
+the checking half of `authlib` directly rather than handing over the whole
+decision.
+
+### The cost, stated plainly
+
+A program running as you can hold you at a delayed console prompt by failing
+`doas` on purpose. Bounded at five minutes, never a lockout, always clears by
+waiting — and the attacker is already running as you, which is the weakest
+possible position from which to complain about being inconvenienced.
+
+The sharper version, which `su` joining creates: `su` guesses at the *target's*
+password, so a local user could hold **root** at a five-minute console delay
+indefinitely, without ever having had root. That is a stranger's program
+delaying the administrator rather than your own program delaying you, and it is
+the real cost of this option.
+
+It is accepted because the alternatives are worse in kind, not merely in degree:
+
+| Option | Leaves unlimited guessing at | Why rejected |
+|---|---|---|
+| B — root exempt from the delay | the root account, at the console | Root is the highest-value account on the machine; exempting exactly it from the rate limit inverts the priority. `pam_faillock` has this switch (`even_deny_root`, default off) so it is mainstream, not absurd — but mainstream here is a compatibility default, not an argument. |
+| C — console contributes but never obeys | the console, exactly as today | The justification is "a keyboard is human-speed", which stops being true the moment the console is a serial line or a VM monitor — both scriptable, both already supported. |
+| D — leave it | the console *and* `su` | The current state, and the defect this whole change set exists to remove. |
+
+A trades a bounded inconvenience for an unbounded exposure. Each of B, C and D
+does the reverse.
+
+### `passwd` stays outside the delay, and this is the decision for it too
+
+B-Q6 noted that whatever is decided for `login` should be decided for `passwd`
+in the same breath, since "the two prompts a human uses disagree about whether a
+shared count applies" is precisely the inconsistency `authlib` exists to
+prevent. So: `passwd`, when it asks for your *current* password before setting a
+new one, **contributes to the tally but is never delayed by it**.
+
+That is option C's shape applied to exactly one program, and the reason is
+specific rather than a weakening of the rule. Changing your password is the
+action you most want available at the moment you suspect it is compromised, and
+a rate limit is precisely the mechanism that would take it away from you —
+including from an attacker who could then *prevent* you locking them out by
+holding your account at a delay. Every other prompt gates access to something;
+`passwd` gates the remedy.
+
+It still contributes, so guesses made there are not free elsewhere, and
+`B-PASSWD-VERIFIES-WITHOUT-AUTHLIB` is closed by routing it through `authlib`
+rather than by leaving it with its own verification.
+
+**Revisit if:** the delay-your-neighbour effect turns out to be reachable in
+practice rather than theoretically — e.g. anything in the desktop session fails
+an authentication on a timer. The fix then is not option C but making that
+program stop, since a program that routinely fails passwords is a bug on its own
+terms.
+
+---
+
+## 507. The zone *shapes* move into the protocol crate; the shell keeps only the chooser, and pulls its work area on use
+
+**Date:** 2026-08-21
+**Decided by:** Claude (autonomous) — lane C
+
+**In short:** The desktop has a "snap layouts" feature — press Super+Z and a
+grid of rectangles appears over the screen; click one and the window you were
+using jumps to fill it. Until now the grid was a picture and nothing more: the
+shell drew it, worked out which rectangle you clicked, and then had nowhere to
+send that. It cannot move windows — only the compositor (the program that
+actually owns the screen) can. The question was what the shell should send.
+The answer taken is that it sends a *name* ("zone 3 of the three-column
+layout"), never a rectangle, and that the table saying what zone 3 *is* lives
+in the crate both programs already share, so neither can hold a different idea
+of it. Two smaller calls come with it: the layout menu is not shown until you
+reach for it, and the shell re-measures the screen at every gesture rather than
+being told when it changes.
+
+### The decision that `snap.rs`'s module doc points at: where the shapes live
+
+`SnapLayoutPreset` and the `SnapZone`s it builds over a `WorkArea` moved from
+`gui/desktop/src/snap.rs` into `gui/remote/src/zones.rs` — the *protocol* crate
+(`guiremote`), the one that already defines every message the shell and the
+compositor exchange — and are re-exported from `snap.rs` so shell code reads
+unchanged.
+
+They had to move somewhere: a named zone means nothing unless both ends compute
+the same rectangle for it, and the two ends are two crates. The three homes
+considered:
+
+| Home | *What changes* |
+|---|---|
+| Stay in `gui/desktop` | the compositor would depend on the desktop shell to resolve a message the shell sent it — a dependency backwards through the protocol |
+| A new crate, `gui/zones` | one more crate in the workspace, whose only two users are the two that already share `guiremote` |
+| **`guiremote` (taken)** | the layout tables sit beside the wire verb that names them, and version together by construction |
+
+The deciding argument is that a zone table *is* protocol. `SnapSlot` encodes
+`(preset, index)` in one byte because `ShellControlAction`'s encoding is one
+byte per action; the index ranges that make that encoding work (`first_slot`,
+`from_index`) and the geometry the index refers to are the same fact stated
+twice, and the one place they cannot drift apart is the same file. A separate
+crate would have been defensible, but it buys isolation that nothing wants —
+neither user exists without `guiremote` — at the price of a third place to look.
+
+**Against:** `guiremote` is meant to be small, and it now carries ~500 lines of
+tiling geometry that is not, strictly, a message format. Accepted: the
+alternative is a crate that would exist only to avoid that appearance.
+
+### The layout picker is summoned, not shown with the overlay
+
+The chooser could have opened with the layout menu already up — one gesture
+instead of two. It does not, and the reason is arithmetic rather than taste.
+The picker is a 340×284 panel centred on the top of the work area; on a
+1000×800 screen the work area is 1000×760 and the panel occupies x 330..670,
+y 20..304. SixGrid's top-middle zone has its centre at (500, 190) — *inside*
+the panel. Always-up, a click aimed at the middle of a drawn zone would select
+a layout instead of placing the window, and every layout with an odd number of
+top-row zones has the same collision.
+
+*What changes:* the panel appears when the cursor reaches the top edge band
+(the existing `is_in_picker_trigger`, 16 px), and goes away when it leaves both
+band and panel. Choosing a layout does not close the chooser, because choosing
+a layout is not choosing a zone.
+
+### The work area is pulled on use, not pushed on change
+
+`SnapManager` holds the rectangle it tiles. Keeping it current could be done by
+notifying it whenever the screen or the taskbar changes, or by re-reading it at
+the top of every gesture. The second was taken.
+
+`screen_width`, `taskbar_height` and `appearance` are all *public fields* that
+anything may assign, and `work_area()` derives from all three. A push scheme is
+therefore only correct while every writer remembers to call the notifier — and
+the failure is silent: zones drawn against a screen size that no longer exists,
+with the window placed exactly where the stale rectangle says. `sync_snap_area()`
+re-seeds instead, at the top of `handle_press`, of the motion path, and of
+`toggle_zone_overlay`, guarded on inequality because `set_work_area` rebuilds
+the layout and would otherwise clear the hover on every mouse move.
+
+*Cost:* three float comparisons per gesture, against a correctness property
+that cannot be broken by adding a call site. `the_chooser_tiles_the_work_area_
+and_not_the_screen` pins it by moving the taskbar and asserting the zones
+follow at the next gesture.
+
+### If this is never revisited
+
+Nothing degrades. The one thing to watch is the reverse of the first decision:
+if a third program ever needs zone geometry *without* speaking the shell
+protocol, `guiremote` becomes the wrong home and `gui/zones` becomes right.
+Nothing on the roadmap implies such a program.

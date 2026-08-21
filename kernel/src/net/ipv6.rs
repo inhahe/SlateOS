@@ -40,6 +40,7 @@ use core::fmt;
 use crate::error::{KernelError, KernelResult};
 use crate::virtio::net::MacAddress;
 
+use super::checksum;
 use super::ethernet;
 use super::interface;
 
@@ -610,43 +611,11 @@ pub fn compute_transport_checksum(
     next_header: u8,
     segment: &[u8],
 ) -> u16 {
-    let mut sum: u32 = 0;
-
-    // Pseudo-header: source address (16 bytes = 8 words).
-    for i in 0..8 {
-        let word = u16::from_be_bytes([src.0[i * 2], src.0[i * 2 + 1]]);
-        sum = sum.wrapping_add(u32::from(word));
-    }
-    // Pseudo-header: destination address.
-    for i in 0..8 {
-        let word = u16::from_be_bytes([dst.0[i * 2], dst.0[i * 2 + 1]]);
-        sum = sum.wrapping_add(u32::from(word));
-    }
-    // Pseudo-header: upper-layer packet length (32 bits).
     let seg_len = segment.len() as u32;
-    sum = sum.wrapping_add(seg_len >> 16);
-    sum = sum.wrapping_add(seg_len & 0xFFFF);
-    // Pseudo-header: zero + next header.
-    sum = sum.wrapping_add(u32::from(next_header));
-
-    // Sum the segment (16-bit words).
-    let mut i = 0;
-    while i + 1 < segment.len() {
-        let word = u16::from_be_bytes([segment[i], segment[i + 1]]);
-        sum = sum.wrapping_add(u32::from(word));
-        i += 2;
-    }
-    // Handle odd trailing byte.
-    if i < segment.len() {
-        sum = sum.wrapping_add(u32::from(segment[i]) << 8);
-    }
-
-    // Fold 32-bit sum into 16 bits.
-    while sum > 0xFFFF {
-        sum = (sum & 0xFFFF).wrapping_add(sum >> 16);
-    }
-
-    let cksum = !sum as u16;
+    let cksum = checksum::finish(checksum::sum_bytes(
+        checksum::pseudo_v6(src, dst, next_header, seg_len),
+        segment,
+    ));
 
     // For UDP over IPv6, a checksum of 0 is transmitted as 0xFFFF (RFC 8200).
     if next_header == NH_UDP && cksum == 0 {
@@ -666,42 +635,12 @@ pub fn verify_transport_checksum(
     next_header: u8,
     segment: &[u8],
 ) -> bool {
-    let mut sum: u32 = 0;
-
-    // Pseudo-header: source address.
-    for i in 0..8 {
-        let word = u16::from_be_bytes([src.0[i * 2], src.0[i * 2 + 1]]);
-        sum = sum.wrapping_add(u32::from(word));
-    }
-    // Pseudo-header: destination address.
-    for i in 0..8 {
-        let word = u16::from_be_bytes([dst.0[i * 2], dst.0[i * 2 + 1]]);
-        sum = sum.wrapping_add(u32::from(word));
-    }
-    // Pseudo-header: upper-layer packet length (32 bits).
     let seg_len = segment.len() as u32;
-    sum = sum.wrapping_add(seg_len >> 16);
-    sum = sum.wrapping_add(seg_len & 0xFFFF);
-    // Pseudo-header: next header.
-    sum = sum.wrapping_add(u32::from(next_header));
-
-    // Sum the segment.
-    let mut i = 0;
-    while i + 1 < segment.len() {
-        let word = u16::from_be_bytes([segment[i], segment[i + 1]]);
-        sum = sum.wrapping_add(u32::from(word));
-        i += 2;
-    }
-    if i < segment.len() {
-        sum = sum.wrapping_add(u32::from(segment[i]) << 8);
-    }
-
-    // Fold.
-    while sum > 0xFFFF {
-        sum = (sum & 0xFFFF).wrapping_add(sum >> 16);
-    }
-
-    sum == 0xFFFF
+    let sum = checksum::sum_bytes(
+        checksum::pseudo_v6(src, dst, next_header, seg_len),
+        segment,
+    );
+    checksum::fold(sum) == checksum::VALID
 }
 
 // ---------------------------------------------------------------------------

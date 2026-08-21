@@ -54461,3 +54461,33 @@ NOT DONE, and deliberately — do not treat as an oversight:
     neither a trace nor a position map, and the position map cannot be
     reconstructed: records are written with `sort_keys=True`, so `entries` was
     alphabetised on the way to disk and the suite order is gone.
+
+================================================================================
+2026-08-20 (lane B) — `logind::force_unlock_session` has no caller check yet
+================================================================================
+
+`unlock_session` (userspace/logind/src/main.rs) now refuses unless
+`authenticate_session` has just accepted a password, which is what
+design-decisions.md §341 and
+requests/b-c-desktop-password-checks-go-through-a-privileged-verifier.md
+promise. Alongside it there is `force_unlock_session`, the administrator's
+override — systemd's `loginctl unlock-session`, which polkit gates on an
+administrator authenticating.
+
+WHAT IS MISSING: that gate. `force_unlock_session` checks nothing about its
+caller, because there is nothing to check it against — `logind` has no resident
+event loop and no socket, so there is no peer whose credentials could be asked
+for. The only thing that reaches it today is the `loginctl` personality, a
+short-lived process operating on an in-memory `Daemon` it built itself and
+throws away, so today the override cannot clear anyone's real screen.
+
+CORRECT FIX, and WHEN: when the logind socket lands, `force_unlock_session`
+must take the caller's credentials and refuse anyone who is neither root nor
+holding the administrator capability. The trigger is the transport, not a date:
+the moment `Daemon` is reachable from another process, this function becomes a
+way to clear a lock screen without a password. Do not add the socket without
+adding the check in the same change.
+
+Everything else about it is already right: the override clears the ticket as
+well as the lock, so it cannot leave a session whose *next* lock opens for
+free (`the_administrative_override_needs_no_password_and_leaves_no_ticket`).

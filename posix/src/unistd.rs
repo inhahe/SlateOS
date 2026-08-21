@@ -1593,70 +1593,78 @@ pub extern "C" fn realpath(path: *const u8, resolved_path: *mut u8) -> *mut u8 {
     resolved_path
 }
 
-/// Resolve a pathname to an absolute path (GNU extension).
-///
-/// Equivalent to `realpath(path, NULL)` — allocates a buffer via `malloc`
-/// and writes the resolved path into it.  The caller must `free()` the
-/// returned pointer.
-///
-/// Returns a `malloc`'d null-terminated string on success, or null on
-/// error with errno set.  A null `path` returns null with `EINVAL`,
-/// matching glibc (which forwards straight to `__realpath`).
-///
-/// # Safety
-///
-/// `path` must be a valid null-terminated string.
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn canonicalize_file_name(path: *const u8) -> *mut u8 {
-    if path.is_null() {
-        // EINVAL, not EFAULT: glibc implements this as `__realpath (name,
-        // NULL)`, and __realpath rejects a NULL `name` with EINVAL before
-        // dereferencing it.  See the note on `realpath` above.
-        errno::set_errno(errno::EINVAL);
-        return core::ptr::null_mut();
-    }
+/// Own archive member — gnulib replaces `canonicalize_file_name`, and until
+/// 2026-08-20 ours shared an object with `abort`, which every program pulls in.
+/// See `string.rs`'s module header and `design-decisions.md` §339.
+mod gnu_canonicalize_file_name {
+    use super::*;
 
-    // Use a stack buffer for resolution, then copy to a malloc'd buffer.
-    let mut resolved = [0u8; PATH_MAX];
-    let Some(resolved_len) = (unsafe { resolve_path(path, &mut resolved) }) else {
-        if unsafe { *path } == 0 {
-            errno::set_errno(errno::ENOENT);
-        } else {
-            errno::set_errno(errno::ENAMETOOLONG);
+    /// Resolve a pathname to an absolute path (GNU extension).
+    ///
+    /// Equivalent to `realpath(path, NULL)` — allocates a buffer via `malloc`
+    /// and writes the resolved path into it.  The caller must `free()` the
+    /// returned pointer.
+    ///
+    /// Returns a `malloc`'d null-terminated string on success, or null on
+    /// error with errno set.  A null `path` returns null with `EINVAL`,
+    /// matching glibc (which forwards straight to `__realpath`).
+    ///
+    /// # Safety
+    ///
+    /// `path` must be a valid null-terminated string.
+    #[cfg_attr(target_os = "none", unsafe(no_mangle))]
+    pub extern "C" fn canonicalize_file_name(path: *const u8) -> *mut u8 {
+        if path.is_null() {
+            // EINVAL, not EFAULT: glibc implements this as `__realpath (name,
+            // NULL)`, and __realpath rejects a NULL `name` with EINVAL before
+            // dereferencing it.  See the note on `realpath` above.
+            errno::set_errno(errno::EINVAL);
+            return core::ptr::null_mut();
         }
-        return core::ptr::null_mut();
-    };
 
-    // Verify the path exists (like realpath).
-    let mut stat_buf = core::mem::MaybeUninit::<crate::stat::Stat>::zeroed();
-    let ret = syscall3(
-        SYS_FS_STAT,
-        resolved.as_ptr() as u64,
-        resolved_len as u64,
-        stat_buf.as_mut_ptr() as u64,
-    );
+        // Use a stack buffer for resolution, then copy to a malloc'd buffer.
+        let mut resolved = [0u8; PATH_MAX];
+        let Some(resolved_len) = (unsafe { resolve_path(path, &mut resolved) }) else {
+            if unsafe { *path } == 0 {
+                errno::set_errno(errno::ENOENT);
+            } else {
+                errno::set_errno(errno::ENAMETOOLONG);
+            }
+            return core::ptr::null_mut();
+        };
 
-    if ret < 0 {
-        let _ = errno::translate(ret);
-        return core::ptr::null_mut();
+        // Verify the path exists (like realpath).
+        let mut stat_buf = core::mem::MaybeUninit::<crate::stat::Stat>::zeroed();
+        let ret = syscall3(
+            SYS_FS_STAT,
+            resolved.as_ptr() as u64,
+            resolved_len as u64,
+            stat_buf.as_mut_ptr() as u64,
+        );
+
+        if ret < 0 {
+            let _ = errno::translate(ret);
+            return core::ptr::null_mut();
+        }
+
+        // Allocate buffer for the resolved path (+1 for null terminator).
+        let buf = crate::malloc::malloc(resolved_len.wrapping_add(1));
+        if buf.is_null() {
+            errno::set_errno(errno::ENOMEM);
+            return core::ptr::null_mut();
+        }
+
+        // Copy the resolved path and null-terminate.
+        // SAFETY: buf is valid for resolved_len+1 bytes; resolved is valid.
+        unsafe {
+            core::ptr::copy_nonoverlapping(resolved.as_ptr(), buf, resolved_len);
+            *buf.add(resolved_len) = 0;
+        }
+
+        buf
     }
-
-    // Allocate buffer for the resolved path (+1 for null terminator).
-    let buf = crate::malloc::malloc(resolved_len.wrapping_add(1));
-    if buf.is_null() {
-        errno::set_errno(errno::ENOMEM);
-        return core::ptr::null_mut();
-    }
-
-    // Copy the resolved path and null-terminate.
-    // SAFETY: buf is valid for resolved_len+1 bytes; resolved is valid.
-    unsafe {
-        core::ptr::copy_nonoverlapping(resolved.as_ptr(), buf, resolved_len);
-        *buf.add(resolved_len) = 0;
-    }
-
-    buf
 }
+pub use gnu_canonicalize_file_name::canonicalize_file_name;
 
 // ---------------------------------------------------------------------------
 // sync / sethostname / chroot

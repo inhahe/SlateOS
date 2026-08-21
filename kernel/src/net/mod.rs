@@ -19,6 +19,7 @@
 
 pub mod arp;
 pub mod bridge;
+pub mod checksum;
 pub mod dashboard;
 pub mod dhcp;
 pub mod dhcpd;

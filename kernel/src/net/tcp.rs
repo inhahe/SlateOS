@@ -123,6 +123,7 @@ use alloc::vec::Vec;
 
 use crate::error::{KernelError, KernelResult};
 
+use super::checksum;
 use super::interface::{self, IpAddr, Ipv4Addr};
 use super::ipv4::{self, Ipv4Packet, PROTO_TCP};
 use super::ipv6::{self, Ipv6Addr, Ipv6Packet};
@@ -810,48 +811,33 @@ fn build_segment_with_options(
 }
 
 /// Compute TCP checksum including the IPv4 pseudo-header.
-#[allow(clippy::arithmetic_side_effects)]
-fn tcp_checksum(segment: &[u8], src_ip: Ipv4Addr, dst_ip: Ipv4Addr) -> u16 {
-    let mut sum: u32 = 0;
-
-    // Pseudo-header: src IP, dst IP, zero, protocol (6), TCP length.
-    let pseudo = [
-        src_ip.0[0],
-        src_ip.0[1],
-        src_ip.0[2],
-        src_ip.0[3],
-        dst_ip.0[0],
-        dst_ip.0[1],
-        dst_ip.0[2],
-        dst_ip.0[3],
-        0,
-        6, // zero + protocol TCP.
-        (segment.len() >> 8) as u8,
-        segment.len() as u8,
-    ];
-
-    for chunk in pseudo.chunks(2) {
-        let word = u16::from_be_bytes([chunk[0], chunk.get(1).copied().unwrap_or(0)]);
-        sum = sum.wrapping_add(u32::from(word));
-    }
-
-    // TCP segment.
-    let mut i = 0;
-    while i + 1 < segment.len() {
-        let word = u16::from_be_bytes([segment[i], segment[i + 1]]);
-        sum = sum.wrapping_add(u32::from(word));
-        i += 2;
-    }
-    if i < segment.len() {
-        sum = sum.wrapping_add(u32::from(segment[i]) << 8);
-    }
-
-    // Fold.
-    while sum > 0xFFFF {
-        sum = (sum & 0xFFFF).wrapping_add(sum >> 16);
-    }
-
-    !sum as u16
+///
+/// `pub(crate)` solely so `crate::bench` can time the function that actually
+/// runs. It previously timed a hand-unrolled copy living in `bench.rs`, whose
+/// stated justification was "to avoid depending on the tcp module internals" —
+/// but a benchmark that avoids depending on the code under test is not
+/// measuring it. The copy skipped the `pseudo` array and its `chunks(2)` walk
+/// entirely, so the pseudo-header cost — the whole point of comparing this
+/// against [`tcp_checksum_v6`] — was the one part it did not measure. Widening
+/// a module's surface by one function is the cheaper price. See
+/// design-decisions.md §251.
+#[must_use]
+pub(crate) fn tcp_checksum(segment: &[u8], src_ip: Ipv4Addr, dst_ip: Ipv4Addr) -> u16 {
+    // The pseudo-header is summed as the six 16-bit words it is, not
+    // materialised as a `[u8; 12]` and read back: design-decisions.md §251,
+    // where the array form cost 688 cycles per call. The segment loop lives in
+    // `net::checksum` — see that module's docs for why the copy that used to be
+    // here made this function look 34% dearer than its IPv6 twin.
+    //
+    // The length truncates to 16 bits by definition: the IPv4 pseudo-header's
+    // length field *is* 16 bits (IPv6's is 32), and a segment cannot exceed a
+    // 64 KiB datagram anyway.
+    #[allow(clippy::cast_possible_truncation)]
+    let seg_len = segment.len() as u16;
+    checksum::finish(checksum::sum_bytes(
+        checksum::pseudo_v4(src_ip, dst_ip, PROTO_TCP, seg_len),
+        segment,
+    ))
 }
 
 /// Compute TCP checksum including the IPv6 pseudo-header (RFC 8200 §8.1).
@@ -859,44 +845,19 @@ fn tcp_checksum(segment: &[u8], src_ip: Ipv4Addr, dst_ip: Ipv4Addr) -> u16 {
 /// The IPv6 pseudo-header is 40 bytes: source address (16), destination
 /// address (16), upper-layer packet length (4, u32), zero (3) + next
 /// header (1).
-#[allow(clippy::arithmetic_side_effects)]
-fn tcp_checksum_v6(segment: &[u8], src_ip: &Ipv6Addr, dst_ip: &Ipv6Addr) -> u16 {
-    let mut sum: u32 = 0;
-
-    // Pseudo-header: source address (16 bytes).
-    for i in 0..8 {
-        let word = u16::from_be_bytes([src_ip.0[i * 2], src_ip.0[i * 2 + 1]]);
-        sum = sum.wrapping_add(u32::from(word));
-    }
-    // Pseudo-header: destination address (16 bytes).
-    for i in 0..8 {
-        let word = u16::from_be_bytes([dst_ip.0[i * 2], dst_ip.0[i * 2 + 1]]);
-        sum = sum.wrapping_add(u32::from(word));
-    }
-    // Pseudo-header: upper-layer packet length (32 bits).
+///
+/// `pub(crate)` for the same reason as [`tcp_checksum`]: `crate::bench` timed a
+/// copy of this, which summed src and dst in one interleaved 8-iteration loop
+/// where this walks each address in its own. See design-decisions.md §251.
+#[must_use]
+pub(crate) fn tcp_checksum_v6(segment: &[u8], src_ip: &Ipv6Addr, dst_ip: &Ipv6Addr) -> u16 {
+    // 32-bit upper-layer length per RFC 8200 §8.1; a segment cannot reach 4 GiB.
+    #[allow(clippy::cast_possible_truncation)]
     let seg_len = segment.len() as u32;
-    sum = sum.wrapping_add(seg_len >> 16);
-    sum = sum.wrapping_add(seg_len & 0xFFFF);
-    // Pseudo-header: zero (3 bytes) + next header = 6 (TCP).
-    sum = sum.wrapping_add(6);
-
-    // TCP segment.
-    let mut i = 0;
-    while i + 1 < segment.len() {
-        let word = u16::from_be_bytes([segment[i], segment[i + 1]]);
-        sum = sum.wrapping_add(u32::from(word));
-        i += 2;
-    }
-    if i < segment.len() {
-        sum = sum.wrapping_add(u32::from(segment[i]) << 8);
-    }
-
-    // Fold.
-    while sum > 0xFFFF {
-        sum = (sum & 0xFFFF).wrapping_add(sum >> 16);
-    }
-
-    !sum as u16
+    checksum::finish(checksum::sum_bytes(
+        checksum::pseudo_v6(src_ip, dst_ip, PROTO_TCP, seg_len),
+        segment,
+    ))
 }
 
 /// Compute TCP checksum with the appropriate pseudo-header for the
@@ -5690,10 +5651,129 @@ pub fn self_test() -> KernelResult<()> {
     test_sack_blocks()?;
     test_seq_lt()?;
     test_ipv6_checksum()?;
+    test_v4_pseudo_header_unchanged()?;
     test_dual_stack_ip_addr()?;
     test_namespace_isolation()?;
 
-    crate::serial_println!("[tcp] TCP self-test PASSED (9 tests)");
+    crate::serial_println!("[tcp] TCP self-test PASSED (10 tests)");
+    Ok(())
+}
+
+/// Test: the unrolled IPv4 pseudo-header sums exactly what the array did.
+///
+/// [`tcp_checksum`] used to build a `[u8; 12]` pseudo-header and walk it with
+/// `chunks(2)`; it now adds the same six 16-bit words directly, because the
+/// materialisation cost ~2500 TCG cycles and dominated the function (see the
+/// comment at the rewrite). That is a pure cost change, so the thing to pin is
+/// that the *value* did not move — and pinning it needs the old computation
+/// present to compare against.
+///
+/// Keeping a copy of the old code **in a test** is the legitimate use of the
+/// pattern design-decisions.md §251 removed from `bench.rs`. §251's objection
+/// was that a copy cannot stand in for the original when the question is
+/// *cost*; here the question is *behaviour*, which is exactly what a copy can
+/// answer.
+///
+/// Odd-length segments are included deliberately: the old `chunks(2)` carried a
+/// `.get(1).copied().unwrap_or(0)` tail that could never fire (12 is even), and
+/// the odd-length path that *does* exist is in the segment loop below it. A
+/// rewrite of the prologue must not disturb it.
+fn test_v4_pseudo_header_unchanged() -> KernelResult<()> {
+    /// The pre-rewrite pseudo-header computation, verbatim.
+    fn pseudo_sum_via_array(len: usize, src_ip: Ipv4Addr, dst_ip: Ipv4Addr) -> u32 {
+        let pseudo = [
+            src_ip.0[0],
+            src_ip.0[1],
+            src_ip.0[2],
+            src_ip.0[3],
+            dst_ip.0[0],
+            dst_ip.0[1],
+            dst_ip.0[2],
+            dst_ip.0[3],
+            0,
+            6,
+            (len >> 8) as u8,
+            len as u8,
+        ];
+        let mut sum: u32 = 0;
+        for chunk in pseudo.chunks(2) {
+            let word = u16::from_be_bytes([chunk[0], chunk.get(1).copied().unwrap_or(0)]);
+            sum = sum.wrapping_add(u32::from(word));
+        }
+        sum
+    }
+
+    /// The current computation — the *real* one, not a copy of it.
+    ///
+    /// This calls [`checksum::pseudo_v4`] rather than restating its six adds.
+    /// A restatement would drift silently the moment the real code changed,
+    /// leaving a test that proves two dead copies agree with each other; that
+    /// is the same mistake as §251's, just small enough to feel harmless.
+    fn pseudo_sum_current(len: usize, src_ip: Ipv4Addr, dst_ip: Ipv4Addr) -> u32 {
+        // `as u16` truncates exactly as the array form's `(len >> 8) as u8` /
+        // `len as u8` pair did.
+        #[allow(clippy::cast_possible_truncation)]
+        let seg_len = len as u16;
+        checksum::pseudo_v4(src_ip, dst_ip, PROTO_TCP, seg_len)
+    }
+
+    // Addresses chosen so every byte lane is distinct: a lane swapped with its
+    // neighbour would still sum equal if the bytes matched, so equal bytes
+    // would make the test blind to exactly the reordering it is checking for.
+    let cases: [(Ipv4Addr, Ipv4Addr); 3] = [
+        (
+            Ipv4Addr([0x01, 0x02, 0x03, 0x04]),
+            Ipv4Addr([0x05, 0x06, 0x07, 0x08]),
+        ),
+        // All-ones and all-zeros: the carry-heavy and carry-free extremes.
+        (Ipv4Addr([0xFF, 0xFF, 0xFF, 0xFF]), Ipv4Addr([0, 0, 0, 0])),
+        (
+            Ipv4Addr([10, 0, 0, 1]),
+            Ipv4Addr([192, 168, 255, 254]),
+        ),
+    ];
+    // 0 and 65535 bracket the 16-bit length field; 1461 is odd and realistic;
+    // 65536 checks that a length past the field's width truncates the way the
+    // array form did (`len as u8` discarded the high bits) rather than
+    // wrapping some other way.
+    let lengths: [usize; 5] = [0, 1, 1460, 1461, 65536];
+
+    for (src, dst) in cases {
+        for len in lengths {
+            let old = pseudo_sum_via_array(len, src, dst);
+            let new = pseudo_sum_current(len, src, dst);
+            if old != new {
+                crate::serial_println!(
+                    "[tcp]   FAIL: v4 pseudo-header sum changed for len={len}: {old} != {new}"
+                );
+                return Err(KernelError::InternalError);
+            }
+        }
+    }
+
+    // End-to-end: a real segment must still verify against its own checksum.
+    let src = Ipv4Addr::new(10, 0, 0, 1);
+    let dst = Ipv4Addr::new(10, 0, 0, 2);
+    // An odd payload length exercises the segment loop's trailing-byte branch.
+    let payload = [0xDEu8, 0xAD, 0xBE, 0xEF, 0x42];
+    let seg = build_segment(
+        12345,
+        80,
+        1000,
+        0,
+        TCP_SYN,
+        65535,
+        &payload,
+        IpAddr::V4(src),
+        IpAddr::V4(dst),
+    );
+    // A segment carrying a correct checksum sums to zero over its own fields.
+    if tcp_checksum(&seg, src, dst) != 0 {
+        crate::serial_println!("[tcp]   FAIL: v4 segment did not verify after pseudo-header rewrite");
+        return Err(KernelError::InternalError);
+    }
+
+    crate::serial_println!("[tcp]   v4 pseudo-header rewrite: value unchanged (15 vectors)");
     Ok(())
 }
 

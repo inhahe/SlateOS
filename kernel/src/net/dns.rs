@@ -539,7 +539,16 @@ fn build_query_typed(name: &str, query_id: u16, qtype: u16) -> Vec<u8> {
 }
 
 /// Build a DNS query packet for an A record.
-fn build_query(name: &str, query_id: u16) -> Vec<u8> {
+///
+/// `pub(crate)` solely so `crate::bench` can time the real builder rather than
+/// a copy of it. The copy differed *behaviourally*, not just in cost: it lacked
+/// [`encode_name`]'s `.filter(|l| !l.is_empty())`, so it skipped the
+/// trailing-dot FQDN handling this path does, and the figure it reported
+/// described a builder that would emit an invalid name. Exposing this rather
+/// than [`build_query_typed`] keeps `TYPE_A` and the qtype constants private —
+/// the benchmark wants the A-record path, which is exactly what this is. See
+/// design-decisions.md §251.
+pub(crate) fn build_query(name: &str, query_id: u16) -> Vec<u8> {
     build_query_typed(name, query_id, TYPE_A)
 }
 

@@ -24610,6 +24610,300 @@ noise, and the balance above flips. Likewise if execution-trace-derived coverage
 becomes available and can distinguish "executed" from "would detect a
 regression", the hand-written map should give way to it.
 
+## §251 — Four benchmarks timed a copy of the code; they now time the code
+
+**Date:** 2026-08-21
+**Decided by:** Claude (autonomous)
+
+**In short.** Four of the kernel's 86 benchmarks were not measuring the kernel.
+Each one had a private copy of the function it claimed to time, written out by
+hand inside `bench.rs`, and it timed the copy. So the two TCP-checksum numbers,
+the IP-checksum number and the DNS-query number described code that never runs
+on a real packet — you could have made the shipping versions ten times slower
+and all four would still have reported the same figure and passed. The fix is
+to delete the four copies and let the benchmarks call the real functions, which
+costs widening three functions from private to crate-visible. The consequence
+to expect: three of the four numbers will move when next recorded, because the
+real code does more work than the copies did. That movement is not a
+regression — it is cost that was always being paid and never being measured.
+
+**What was there.** Found while writing §250's coverage map, which is what
+forced the question "which kernel file does this benchmark actually run?" for
+every benchmark in turn.
+
+| Benchmark | Timed | Faithful to the real function? |
+|---|---|---|
+| `net_checksum` | `bench.rs::internet_checksum` | Yes — character-equivalent to `ipv4::ip_checksum` |
+| `tcp_checksum_v4` | `bench.rs::tcp_checksum_bench` | **No** |
+| `tcp_checksum_v6` | `bench.rs::tcp_checksum_v6_bench` | No |
+| `dns_build_query` | `bench.rs::build_dns_query_bench` | **No — differs in behaviour** |
+
+The stated justification, in `tcp_checksum_bench`'s own doc comment, was
+"duplicated to avoid depending on tcp module internals"; `internet_checksum`'s
+said it measured "pure computation, not module call overhead". Both are
+arguments for a benchmark that avoids depending on the code under test, which
+is a description of a benchmark that does not test it.
+
+**Why "not faithful" is the load-bearing part.** A faithful copy is merely
+redundant — it drifts eventually, but today's number is today's truth. These
+were not faithful, and the divergences fell exactly on the thing being measured:
+
+- `tcp_checksum` builds a 12-byte `pseudo` array and walks it with
+  `chunks(2)` and `.get(1).copied().unwrap_or(0)`. The copy hand-unrolled the
+  pseudo-header into six `wrapping_add`s and never built the array. The
+  pseudo-header is the *entire subject* of comparing v4 against v6 — the v6
+  benchmark's doc comment says it exists "to show the overhead of the larger
+  pseudo-header" — and it was the one part not measured. Both sides of that
+  comparison were hand-optimised copies, so the overhead it reported was the
+  difference between two functions that do not exist.
+- `tcp_checksum_v6` sums source and destination in one interleaved 8-iteration
+  loop; the real one walks each address in its own `for i in 0..8`.
+- `build_dns_query_bench` lacked `encode_name`'s `.filter(|l| !l.is_empty())`.
+  That is not a cost difference but a **behavioural** one: the filter is what
+  makes a trailing-dot FQDN (`example.com.`) encode legally instead of emitting
+  a zero-length label before the root terminator. The benchmark reported the
+  speed of a builder that would produce an invalid packet.
+
+**What changed.** `net::ipv4::ip_checksum` was already `pub`. Three functions
+were widened to `pub(crate)`, each with a doc comment saying that `crate::bench`
+is the only reason: `net::tcp::tcp_checksum`, `net::tcp::tcp_checksum_v6`,
+`net::dns::build_query`. The four copies are deleted.
+
+`net::dns::build_query` rather than `build_query_typed`: the benchmark wants the
+A-record path, `build_query` *is* the A-record path, and exposing it keeps
+`TYPE_A` and the other qtype constants private. Widening the narrower, more
+specific function costs one call site and leaks less.
+
+For the same reason the IPv6 address newtype is wrapped *before* the timed
+closure opens, not inside it — putting `Ipv6Addr(src)` in the window would
+re-introduce, in the act of fixing this, the exact error §250's map calls out
+for `net/interface.rs`.
+
+**On keeping the benchmark names.** The three unfaithful ones will step to a new
+level. The alternative was to rename them so the old series ends cleanly. Kept
+the names, because a name here denotes the *quantity of interest* ("TCP checksum
+over a 1460-byte segment with an IPv4 pseudo-header"), which has not changed —
+only the fidelity of the instrument has. Renaming would orphan ~30 runs of
+history for a measurement that is conceptually the same one, finally taken
+correctly.
+
+The risk in that choice is a silently-reinterpreted series, which is precisely
+§250's sin. It is answered by making the discontinuity loud rather than by
+renaming: each benchmark's doc comment says which direction to expect and why,
+`known-issues.md` records it, and the commit is the boundary. A step that trips
+the regression detector on the next `--bench` run is the *correct* outcome and
+should be annotated, not tuned away — the numbers genuinely got worse, because
+the real code is slower than the copies were.
+
+**Alternatives considered.**
+
+- *Keep the copies and add a test asserting copy and original agree.* Rejected:
+  it pins behaviour, not cost, so it would have caught the DNS divergence and
+  none of the three timing ones — the copies would still have been the things
+  measured.
+- *Leave them and note it in the coverage map.* This is what §250 did as an
+  interim, and it is honest, but it settles for a permanently blind spot in
+  four of 86 benchmarks when the fix is three visibility keywords.
+- *Move the real functions into a shared inner module both call.* More
+  machinery than the problem needs; `pub(crate)` on the function that already
+  exists is the smaller change and leaves the module boundary where the design
+  put it.
+
+**How to reverse.** Restore the four `fn *_bench` copies from this commit's
+parent, point the four `run(...)` closures back at them, and narrow the three
+functions to private. Nothing outside `bench.rs` depends on the wider
+visibility.
+
+**What would change this.** If `pub(crate)` on a hot function ever inhibited an
+optimisation the private version got — cross-crate inlining is unaffected here,
+but if it were measurable — the shared-inner-module alternative becomes the
+right answer rather than merely a heavier one.
+
+### Postscript: the fix opened a *new* way to measure nothing
+
+The first run after the change (`fe9882a55`) reported
+`tcp_checksum_v6` at **18 ns**, down 99% from ~1604 ns. That is not a
+speedup; it is impossible. The segment is 1460 bytes, so the checksum loop
+runs 730 iterations, and 18 ns is ~70 cycles — 0.1 cycles per iteration,
+against a suite that runs at roughly **8 cycles per iteration** under QEMU's
+TCG interpreter, on a host where `rdtsc_overhead` alone measures 138 cycles.
+Nor can SIMD explain it: TCG *emulates* vector instructions, so
+auto-vectorisation there is slower, not faster.
+
+The call had been hoisted out of the timing loop. **And this change is what
+made it hoistable.** The copies took their arguments from mutable locals
+built inside `bench.rs`; re-pointing at the real functions meant passing a
+loop-invariant immutable local to a pure function, which is exactly the shape
+loop-invariant code motion looks for. `black_box` was already wrapped around
+the *return value*, and that is the part worth writing down:
+
+> `core::hint::black_box` on a result prevents **dead-code elimination**. It
+> does not prevent **hoisting**. To stop LLVM computing something once and
+> reusing it, the *input* must be opaque — `black_box(&segment[..])` — which
+> denies the optimiser its proof that the pointed-to bytes are unchanged
+> between iterations.
+
+All three checksum benchmarks now blackbox their input buffer.
+`net_checksum` was demonstrably *not* being hoisted (21 ns = 80 cycles over
+10 iterations, right on the suite's 8-cycles/iteration line), and it was
+guarded anyway: "not hoisted by this LLVM" is a property of a compiler
+version, not of a benchmark, and a future one noticing would collapse the
+series silently. The evidence that unguarded form was worth keeping for —
+that §251's re-pointing did not by itself move the number — had already been
+banked by `fe9882a55`, which ran re-pointed and unguarded. `dns_build_query`
+needs no guard: it allocates, and the global allocator is an opaque call the
+optimiser cannot move.
+
+The v4 and v6 benchmarks had to be guarded *identically* rather than
+individually judged. They exist to be subtracted from each other; if one were
+hoisted and the other not, the "cost of the larger IPv6 pseudo-header" would
+be the difference between a real call and no call at all — which is the same
+species of falsehood §251 was written to remove, arrived at from the opposite
+direction.
+
+**The general lesson, which is why this is recorded rather than just fixed:**
+a benchmark can fail to measure its subject in two ways, and they pull in
+opposite directions. §251's original defect was measuring *something else*
+(a copy) — findable only by reading the code. This one is measuring *nothing* —
+and it falls out of arithmetic in seconds, because a number implying 0.1 cycles
+per iteration cannot be true. **An implausible win is a bug report.**
+
+It should be said plainly that the harness reported this properly:
+`bench-history.py` printed `tcp_checksum_v6: 1604ns -> 18ns (-99% vs suite,
+-99% raw); its own range is 1595-1610ns (median 1602ns over 8 runs)` under its
+`IMPROVED` heading. Detection was never the problem. The problem is that a −99%
+move is filed as good news and the run passes — and no amount of extra
+statistics would change that, because the number is statistically flawless
+(`split 1st=70 2nd=70 (0%)`, a perfectly replicating level shift). Only a
+physical argument rejects it.
+
+The cheapest such argument is already sitting in the suite: `self_test_nop`, the
+empty-closure control, measured **72 cycles** on that same run, and the
+checksum measured **70**. *Nothing real costs less than nothing.* That check is
+exact rather than tuned, and is recorded as the follow-up in `known-issues.md`
+— along with the version of it that does **not** work ("below `rdtsc_overhead`"
+fires on eight legitimate benchmarks, because the harness amortises).
+
+**And this is the third time in this one file.** `measure_access_at`'s doc
+comment already records two: the optimiser removed the `write_volatile` stores
+being measured (nop=400 vs store=244 — the *store* arm cheaper than the empty
+one), and then it unrolled the constant-trip-count empty loop but not the store
+loop, so the delta silently included ~11 cycles of scaffolding asymmetry that
+moved 4× with `N`. That comment draws the moral itself — *"first the optimiser
+removed the thing being measured, then it removed the thing being measured
+against"* — and both fixes were local. A third instance in a different
+benchmark says the moral is right and the response was too small: the property
+"this window measures something" is worth checking mechanically, once, for
+every window, rather than reasoned about per site by whoever writes the next
+benchmark.
+
+## §252 — The Internet checksum exists once, because seven identical copies were not identical code
+
+**Date:** 2026-08-21
+**Decided by:** Claude (autonomous)
+
+**In short.** Every network protocol needs the same little "add up all the
+bytes" routine to detect corrupted packets. This code had written it out seven
+separate times — same twelve lines, copied into TCP, UDP, ICMP and the IPv4
+header check. The copies all behaved the same, so it looked like nothing worse
+than untidiness. It was not: the compiler optimised some copies harder than
+others, so two functions that were *supposed* to be a controlled comparison
+differed by 34% for reasons that had nothing to do with what was being
+compared — and that difference was read as a real finding and acted on. The
+decision is to keep exactly one copy, in `kernel/src/net/checksum.rs`, and have
+all seven callers use it.
+
+**The concrete failure.** `net_tcp_checksum_v4_1460b` and
+`net_tcp_checksum_v6_1460b` exist as a *pair*: they run the same 1460-byte
+segment through the same loop, differing only in which pseudo-header (the small
+block of address/length fields folded into the sum) precedes it. The pair's
+entire purpose is to price one pseudo-header against the other.
+
+On the `e1de4aaaa` kernel, v4 measured 7208 cycles and v6 measured 5364 — a
+1844-cycle, 34% gap, in the direction that says IPv4's *smaller* (12-byte)
+pseudo-header costs far more than IPv6's (40-byte) one. Disassembling that exact
+binary showed why, and it was not the pseudo-header:
+
+- `tcp_checksum_v6` survives as an out-of-line symbol and its segment loop is
+  **unrolled 2×** — `addq $0x4, %rcx`, two 16-bit words per iteration.
+- `tcp_checksum` has no symbol at all. It was inlined into its callers, and the
+  copy that landed in the benchmark was **not** unrolled.
+
+1460 bytes is 730 words: 365 iterations against 730. The benchmark pair was
+reporting an inlining decision and calling it a protocol difference.
+
+**Why duplication was the root cause and not merely an aggravating factor.**
+Seven verbatim copies of the loop existed (`ipv4.rs` ×3, `ipv6.rs` ×2,
+`tcp.rs` ×2), plus four copies of the IPv4 pseudo-header prologue and four of
+the IPv6 one. To LLVM each copy is an independent function body, free to be
+unrolled or not according to its own inlining context. Nothing anywhere
+asserted they agreed, and nothing could have: they agreed on *value*, which is
+all any test checks, while differing on *cost*, which is what the benchmark
+measured.
+
+The sharper point is about inference rather than compilers. **Duplicated code
+that is supposed to be identical invites the reader to attribute any measured
+difference to the one thing that visibly differs.** The two functions differed
+visibly only in their pseudo-headers, so a 34% gap "obviously" meant the
+pseudo-header cost 34%. That inference is valid; its premise — that the rest was
+the same code — was false, and was false in a way that no amount of reading the
+source could expose. Identical source is not identical code.
+
+**Alternatives considered.**
+
+| Option | Why not |
+|---|---|
+| Leave it; just annotate both functions `#[inline(never)]` | Fixes this pair and nothing else. The other five copies stay free to diverge, and the next person to compare two of them re-runs the same mistake. It treats the symptom in the two places we happened to look. |
+| Leave it; add a benchmark that asserts the two loops emit the same code | Enormous machinery (disassembly parsing in the test suite) to defend a property that costs nothing to simply *have*. |
+| Unify, but keep a thin per-protocol copy for "clarity" | This is what the seven copies already were. Each was individually clearer than a call to a shared helper; collectively they cost a wrong measurement and a wrong fix. |
+| **Unify into one `net::checksum` module (chosen)** | One loop, compiled once. The TCP pair now differs by exactly its pseudo-headers, which is what it always claimed to measure. |
+
+**The cost being accepted.** A shared `sum_bytes` is a call rather than
+straight-line code, which matters most for the *shortest* inputs — the
+20-byte IPv4 header check is 10 words, where call overhead is a real fraction.
+It is not being forced either way with `#[inline(never)]`/`#[inline(always)]`
+yet: LLVM may still inline it per-site and, in principle, re-diverge. That is
+deliberate — pinning inlining is a decision that should be made from a
+measurement, not in anticipation of one, and the next bench run supplies it.
+What has definitely changed is that if divergence recurs it is now one
+annotation on one function, not a reconciliation of seven bodies.
+
+**RESOLVED, 2026-08-21, and the answer is "leave it unpinned."** The measurement
+came from `llvm-objdump` rather than the bench, which is both faster and more
+direct. LLVM does inline `sum_bytes` at every site — there is no `sum_bytes`
+symbol in the kernel, and `tcp_checksum` has none either — so the literal worry
+above came true. What did *not* come true is the divergence: all three checksum
+benchmark sites now carry byte-identical loops, unrolled 4× with a 1×
+remainder, matching the still-out-of-line `tcp_checksum_v6`. Before unification
+the same three were 2×, not-at-all, and not-at-all. So `#[inline(never)]` would
+buy nothing and would cost a call on every short checksum in the stack — the
+exact cost this section was worried about — while removing the inlining that
+makes the 20-byte case cheap.
+
+The distinction worth keeping, since blurring it is what hid the original bug:
+sharing a source function did not make the copies *share code*. It made them
+present the optimiser with the same input, which is what made its decisions
+agree. That is a weaker guarantee than one out-of-line body, so it is checked
+rather than assumed — `llvm-objdump -d --disassemble-symbols=` is the check,
+recorded in `known-issues.md` §251 Postscript 2, and `#[inline(never)]` remains
+the one-line fix if a future toolchain diverges again.
+
+**One further consequence, which is really a separate finding.** The new module
+has no `#[cfg(test)] mod tests`, on purpose: `kernel/Cargo.toml` sets
+`test = false` for the kernel binary (it supplies its own `panic_impl` and
+other `no_std` lang items and cannot link against host `std`), so such a module
+would never be compiled, never run, and quietly rot — while being counted as
+coverage. **Tests that cannot run are worse than no tests.** The suite therefore
+lives in `checksum::self_test()`, invoked at boot, and pins RFC 1071 §3's own
+worked example (an external vector, so it cannot share a bug with a test derived
+from this code), the high-side padding of an odd trailing byte, split-invariance
+of the accumulator, the stamp-and-verify round trip, fold boundaries and
+idempotence, and the 64 KiB worst case on which the module's no-overflow claim
+rests. This is worth the target-side cost precisely *because* of the
+unification: every checksum in the stack now funnels through one loop, so a
+single wrong fold would corrupt TCP, UDP, ICMP, ICMPv6 and the IPv4 header check
+at once.
+
 ## §463 — Two shared RNG crates merge into the dependency-free one
 
 **Date:** 2026-08-18
@@ -27625,3 +27919,295 @@ The last two are the instructive ones. They were not weak tests; they were
 *right about the wrong thing*. This is §486 again from another angle — a test
 that asserts what the code does, rather than what the user needs, is a test that
 locks the defect in. All six now assert a rendered value.
+
+---
+
+## §340 — `libc.a`'s shape is now asserted by a script, and seventeen functions were split into one-function modules to satisfy it
+
+**Date:** 2026-08-20
+**Decided by:** Claude (autonomous)
+
+**In short:** Fixing the GNU make link (§339) left a hole: we now *depend* on
+`libc.a` being carved up a particular way, and nothing checked that it was.
+`scripts/check-libc-shape.py` now checks it. The first time it ran it found four
+more places with the same defect make had tripped on — different functions,
+same mechanism — so seventeen functions in `posix` were moved into
+one-function-each inline modules to give them their own object files. Nothing
+about what those functions *do* changed; only which object file they land in.
+
+### Terms used below
+
+- **archive** — `libc.a`: a bag of object files with an index. Linking pulls
+  out only the ones it needs.
+- **object file / member** — one item in that bag. The linker takes a member
+  **whole or not at all**; it cannot take half.
+- **codegen unit (CGU)** — the chunk rustc compiles at a time. One CGU becomes
+  one object file, so CGU boundaries *are* member boundaries.
+- **gnulib** — a library of portability replacements GNU projects copy into
+  their own source. If gnulib supplies `getopt`, the program defines `getopt`
+  itself, and a second definition from libc is a link error.
+
+### What §339 actually fixed, and what it did not
+
+§339 raised `codegen-units` to 4096 so rustc stopped merging unrelated modules.
+That was correct and it fixed make. But the finest granularity that flag can
+buy is **one member per module**, because the partitioner starts from modules
+and only ever merges downward. It cannot split one.
+
+For the four families make collided with — `getopt`, `glob`, `fnmatch`,
+`error` — that was enough, because each already *was* its own module. It was
+easy to conclude the problem was solved. It was not: it was solved for the
+four cases that happened to be shaped conveniently.
+
+`string.rs` is 4,300 lines and holds `memcpy` and `strlen` next to `strndup`,
+`strverscmp`, `stpcpy`, `stpncpy`, `mempcpy`, `strchrnul`, `memrchr`,
+`rawmemchr`, `strcasestr` and `strnlen` — ten names gnulib replaces. One
+module, therefore one member, therefore: any program at all extracts that
+member for `memcpy`, and receives ten definitions it may already have. Same
+story for `getline`/`getdelim`/`fseeko`/`ftello` riding with `fopen` in
+`stdio.rs`, `asprintf`/`vasprintf` riding with `printf` in `printf.rs`, and
+`canonicalize_file_name` riding with `abort` in `unistd.rs`.
+
+Make did not hit these only because its `./configure` did not compile in those
+particular gnulib replacements. coreutils and tar would have.
+
+### Decision 1 — assert the shape, in a script, on the artifact
+
+`scripts/check-libc-shape.py` reads the built archive and makes two assertions:
+
+1. **Strict**, for `getopt`/`glob`/`fnmatch`/`error`: the member defining the
+   family defines *nothing else*. This is glibc's property exactly, and it is
+   the strongest available statement — a program bringing its own copy declines
+   the member and loses nothing.
+2. **Broad**, generalising: no member may define both a name third-party code
+   commonly replaces and a name no C program can avoid (`printf`, `malloc`,
+   `fopen`, `getenv`, `memcpy`, …). That combination is precisely the failure
+   shape, and it needs no per-family curation, so it keeps working as the libc
+   grows.
+
+Three things about how it is built, each of which was a choice:
+
+- **It parses the archive itself rather than shelling out to `nm`.** The
+  sysroot is produced on Windows by `build-sysroot.ps1`, where `nm` is not on
+  PATH — it exists only inside WSL here. A check that cannot run where the
+  artifact is produced is not a check. GNU `ar`'s symbol index already stores
+  the symbol→member map that `nm --defined-only -g` would print, so reading it
+  directly is both simpler and dependency-free.
+- **A missing archive exits 2, not 0.** A fresh checkout with no sysroot is a
+  legitimate state, but it is not a *passing* one, and a caller that treats
+  "could not look" as "looked and it was fine" is exactly how a gate ends up
+  permanently green. This is the same failure the make spike's `config.h` grep
+  had, one day earlier, and it was avoided here only because that one had just
+  been fixed.
+- **It ignores Rust-mangled and `.llvm.`-suffixed symbols.** Its first run
+  flagged `fnmatch` for sharing a member with
+  `_ZN5posix7fnmatch8do_match…llvm.…` — which is `fnmatch`'s own helper, hoisted
+  to an external symbol by LLVM. No C program can define that name, so it is
+  not a hazard. Left unfiltered, the check would have cried wolf about the one
+  family it exists to protect.
+
+### Decision 2 — one inline module per replaceable function
+
+rustc partitions by **module path**, and an *inline* `mod { }` is a distinct
+module path. Verified empirically before relying on it: a three-function
+staticlib built at `codegen-units=4096` with three inline modules produced three
+separate members. So
+
+```rust
+mod gnu_strndup { use super::*; /* … */ }
+pub use gnu_strndup::strndup;
+```
+
+gives `strndup` its own object file while leaving it physically where it was,
+next to its relatives, and leaves every in-crate call site (`string::strndup`)
+working unchanged.
+
+**Alternatives rejected:**
+
+- *One `.rs` file per function, as glibc does.* Same result, far more churn, and
+  it scatters ten string functions across ten files away from the code they
+  belong with. The inline module buys the identical archive layout with the
+  diff confined to indentation.
+- *One `gnulib_compat` module holding all seventeen.* Tempting, and it would
+  satisfy the broad check — that member would define no unavoidable name. But
+  it is wrong: gnulib compiles in only the replacements `./configure` decided
+  were needed, so a program may replace `strndup` and not `getline`. One lump
+  member is declined only by a program that replaces *everything* in it;
+  anyone else takes all seventeen and collides. Independently replaceable
+  functions need independently declinable members.
+- *Wait for the next port to fail.* This is what §339 was, and it cost a
+  full day of a spike to diagnose from an eleven-line duplicate-symbol dump.
+  The check that would have found it takes under a second.
+
+### What this costs
+
+Seventeen more archive members (576 → 593, measured) and a convention (`gnu_*`)
+that a reader has to be told about — hence the long module header in
+`string.rs` explaining the mechanism once, and a one-line pointer at each of
+the other sites.
+
+There is a real risk the convention rots: someone adds an eighteenth
+gnulib-replaceable function to `string.rs` without wrapping it. That is exactly
+why the check exists rather than a comment asking people to be careful, and why
+its failure message names the flag and the design-decision section rather than
+just printing the offending symbols.
+
+### Decision 3 — the check runs from `build-sysroot.ps1`, and it is fatal
+
+Written after the above, and the most important of the three: a check that
+lives in `scripts/` for someone to remember is not a check either. This project
+has now twice shipped something described as proven whose only artifact sat in
+`/tmp`, and once written a `config.h` grep that could not fail. So
+`toolchain/build-sysroot.ps1` invokes `check-libc-shape.py` immediately after
+it assembles the archive, and `throw`s if it does not pass — the sysroot is
+still on disk at that point, but the build reports failure, because a sysroot
+with the wrong archive shape is precisely the thing that looks fine until a
+port fails weeks later.
+
+It is fatal rather than a warning for the same reason. A warning in a build
+that otherwise says `=== Sysroot ready ===` in green is a warning nobody reads.
+
+### Verified in the failing direction, not only the passing one
+
+A gate that has only ever been observed green is not known to be a gate. So
+after wiring it up, `posix` was deliberately rebuilt with the old
+`-C codegen-units=16` into a scratch target dir. The check reported **9
+violations** and reproduced the historical pre-§339 shape exactly: `getopt`
+sharing a member with 97 unrelated symbols, `fnmatch` with 157, `error` with
+82, `glob` with 47. It then passed again on the real archive. (Scratch target
+dir deleted immediately — see CLAUDE.md on build output.)
+
+### Two smaller things found while doing this
+
+- **`global_asm!` is attributed to the CGU of the module it is written in.**
+  `asprintf` is not an ordinary `fn`; it is emitted by the `va_trampoline!`
+  macro as raw assembly. Assembly has no module semantics of its own, so it was
+  not obvious that wrapping it in `mod gnu_asprintf { … }` would move it to its
+  own member — it could equally have been emitted crate-wide. It does land in
+  the module's CGU; confirmed against the built archive, and noted at the call
+  site so nobody has to re-derive it.
+- **The check's own diagnostics had to be made ASCII-only.** It prints from a
+  Windows console during the build, where the code page is often cp437, in
+  which `—`, `§` and `…` are all un-encodable. Python's default
+  `errors="strict"` would then raise `UnicodeEncodeError` *from inside the
+  print explaining what was wrong*, replacing the message that names the
+  dropped compiler flag with a traceback about character encoding. The strings
+  are now plain ASCII, and `sys.stdout`/`sys.stderr` are reconfigured to
+  `errors="backslashreplace"` so that the next person to type an em dash into
+  an error string gets a cosmetic `\u2014` rather than a lost diagnostic.
+
+## §341 — A desktop app asks a privileged verifier "is this the password?"; it never sees a hash
+
+**Date:** 2026-08-20
+**Decided by:** Claude (autonomous) — answering lane C's
+`requests/c-b-the-lock-screen-has-no-way-to-check-a-real-password.md`, which
+recommended this shape. Replied in
+`requests/b-c-desktop-password-checks-go-through-a-privileged-verifier.md`.
+
+**In short:** the desktop lock screen had no way to check a real password. It
+verified against a hash handed to it by whoever constructed it, and nothing on
+the system could produce that hash from the file where passwords actually live
+— the two halves used different scrambling algorithms, so they could not be
+connected by plumbing. The decision is that a graphical application does not
+check passwords at all: it hands the typed password to a privileged program and
+gets back a yes or no. A new crate, `userspace/authlib`, is that program's
+implementation.
+
+**Terms.** *crypt(3)* is the Unix password-scrambling function; an entry it
+writes (`$6$salt$…`) describes its own method and salt, so re-running it on a
+candidate password is the whole of "checking" it. *An oracle* is any interface
+that answers questions about a secret; a password checker is one by
+construction, which is why what it leaks matters as much as what it decides.
+
+### The options, and why A
+
+Lane C laid them out and I agree with their reading:
+
+| | Shape | Why not |
+|---|---|---|
+| **A** | The app sends the password to a privileged verifier and receives a verdict. | **Chosen.** |
+| B | The app is handed the user's stored hash and checks it locally. | Puts a password hash in a process running as the logged-in user — the one most exposed to whoever is standing at the machine — and creates a second implementation of the check. |
+| C | The store keeps a second hash, in the app's format, beside the crypt one. | Two derivations of one password that every `passwd` path must update together. That is §329's defect with extra steps, and §329 is what happens when that rule is broken. |
+
+A is also the only option that does not wait on **B-Q4** (which of the two
+account files is authoritative): the verifier picks the store, behind one
+function, so the answer changes one branch here and no caller anywhere.
+
+### What the crate decides that callers previously each decided
+
+`posix::crypt` already owned the hash (§329) and `userdb` the YAML (§330). What
+was still scattered — and is now in one place:
+
+- **Which stored entry answers for a username.** `/etc/users.yaml` if it has
+  the user, `/etc/shadow` otherwise. One guess in one place until B-Q4 lands.
+- **What a non-verifiable entry means.** An entry in no recomputable format is
+  a *broken system*, not a wrong password, and it is reported separately so an
+  administrator can hear about it while the person typing hears the same
+  "authentication failure" as everyone else.
+- **Whether the caller may ask at all right now.** Per-user failure counting
+  with a doubling delay, capped at five minutes.
+
+### Two properties that are part of the interface rather than left to callers
+
+Both exist because a verifier leaks more than its verdict unless it is built
+not to, and "the caller should remember to…" is how that gets forgotten:
+
+- **Constant cost.** Every path that answers without verifying — no such user,
+  locked account, unusable entry, empty entry — first runs a throwaway
+  SHA-512-crypt over the supplied password and discards it. Without that, "no
+  such user" returns in microseconds and a real user's wrong password takes
+  milliseconds, which is an account-enumeration oracle that works over a
+  network.
+- **A refused attempt is not counted.** Once a user is over budget the call
+  returns `RateLimited` without touching the tally. Counting it would let
+  anyone who can reach the verifier hold a real account out permanently by
+  calling in a loop. For the same reason the delay is capped: the tally is
+  keyed by username, so it is inherently a lever on someone else's account, and
+  an uncapped lever is a denial of service. An account that must be barred
+  outright is *locked*, which is a deliberate act rather than a side effect of
+  someone else guessing.
+
+### What is deliberately not decided
+
+An account with **no password set** returns `NoPassword` rather than a verdict.
+Traditional Unix lets an empty password log such an account in at a console,
+and `login` still does; a lock screen must not, because "press Enter to unlock"
+is not a screen lock. Two callers want opposite answers from one fact, so the
+fact is what the function returns and the policy stays with the caller. The
+desktop-facing `Authenticator` takes the strict side.
+
+### Cost
+
+`login` loses its private copy of the check and its nine-field shadow parser —
+which, as a side effect, fixes a latent bug: that parser required all nine
+fields, so a hand-written `alice:$6$…:` line was not merely un-aged but
+*invisible*, and a correct password for it was refused as "no such user".
+Aging is a policy on top of an account; a missing policy is not a missing
+account.
+
+`logind`'s `unlock_session` stops being unconditional. The transport a GUI
+would use does not exist yet — logind has no resident event loop — so what
+lands today is the verifier, the gate, and their tests; the socket follows the
+event loop.
+
+### The gate is a one-shot ticket, not a mode
+
+`authenticate_session` sets a flag on the session; `unlock_session` requires it
+and clears it in the same call. Locking again clears it, and a *failed* attempt
+clears it too. The alternative — an "authenticated until further notice"
+session flag — is what any of those three omissions would amount to, and each
+has the same failure: a screen that was unlocked once can be unlocked again
+without a password. The revoke-on-failure case is the least obvious and the
+most useful: a user authenticates, is interrupted before the unlock lands, and
+walks away; without it, the next person's wrong guess still leaves a spendable
+authorisation behind.
+
+`loginctl unlock-session` keeps an unconditional path, `force_unlock_session`,
+because an administrator clearing a locked screen is a real operation that no
+password of *theirs* would satisfy — it is the session owner's password the
+screen is asking for. systemd gates it with polkit on an administrator
+authenticating. We cannot yet: there is no socket, so there is no peer to ask
+about. Today it is unreachable from anything but the short-lived `loginctl`
+personality, which operates on an in-memory `Daemon` it built itself and throws
+away; `todo.txt` records that the caller check must land in the same change as
+the transport rather than after it.

@@ -10,5 +10,11 @@ description = "SlateOS login - user login program"
 # format now has exactly one implementation, and this dependency is what
 # makes that true rather than aspirational. See
 # `requests/c-b-passwd-and-login-disagree-about-etc-shadow.md`.
+#
+# `authlib` is the same lesson one level up: which stored entry answers for a
+# username, how `/etc/shadow` is parsed, and what a non-verifiable entry means
+# are decisions this file used to make privately and now only consumes. See
+# `design-decisions.md` §341.
 [dependencies]
+authlib = { path = "../authlib" }
 posix = { path = "../../posix" }

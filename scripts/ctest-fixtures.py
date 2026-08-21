@@ -12,7 +12,7 @@ lines to `services/ctest-jobctl/main.c` (33 new `waitid` checks) without the
 rebuilt ELF, and every boot test still passed, because each worktree happened
 to hold a locally-rebuilt binary that was never staged. All nine tracked ELFs
 were simultaneously ~19,400 bytes behind the current `libc.a`. See
-`known-issues.md` →
+`known-issues.md` ->
 `B-THE-TRACKED-FIXTURE-BINARIES-DRIFT-FROM-THEIR-SOURCES`.
 
 Why not timestamps
@@ -157,6 +157,31 @@ import hashlib
 import subprocess
 import sys
 from pathlib import Path
+
+# Never let an un-encodable character eat the output.
+#
+# This is not defensive programming against a hypothetical: on 2026-08-20
+# `python scripts/ctest-fixtures.py --help` crashed on this machine with
+# `UnicodeEncodeError: 'charmap' codec can't encode character '\u2192'`. The
+# docstring above is passed to argparse as the description, so `--help` prints
+# it, and a Windows console is cp1252 here (cp437 on many others) rather than
+# UTF-8. One right-arrow in a cross-reference was enough to make the script's
+# own help unusable, and on cp437 all 30-odd em dashes would go the same way.
+#
+# The arrow has been replaced with `->`, but a rule that says "keep this file
+# ASCII" is a rule that lasts until the next edit, because the prose style
+# everywhere else in this repo reaches for em dashes by default. So the
+# encoding is made non-fatal instead: a stray non-ASCII character now degrades
+# to a visible `\u2014` rather than replacing the output with a traceback.
+#
+# The same guard, for the same reason, is at the top of
+# scripts/check-libc-shape.py. See design-decisions.md S340.
+for _stream in (sys.stdout, sys.stderr):
+    if hasattr(_stream, "reconfigure"):
+        try:
+            _stream.reconfigure(errors="backslashreplace")
+        except (ValueError, OSError):
+            pass  # redirected to something unreconfigurable; not worth failing over
 
 REPO = Path(__file__).resolve().parent.parent
 SERVICES = REPO / "services"

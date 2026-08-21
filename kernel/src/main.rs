@@ -5396,6 +5396,16 @@ extern "C" fn kernel_main() -> ! {
     // Per-mechanism usage and performance counters.
     ipc::stats::self_test();
 
+    // Step 22e⅞++++n1: Internet-checksum self-test.
+    // Every transport protocol's checksum now funnels through one loop
+    // (net::checksum), so one wrong fold or a mis-padded odd byte would
+    // corrupt TCP, UDP, ICMP, ICMPv6 and the IPv4 header check at once.
+    // Verified at boot rather than only under `cargo test`, because the
+    // kernel's #[cfg(test)] modules never execute on the target.
+    if let Err(e) = net::checksum::self_test() {
+        serial_println!("[WARN] Checksum self-test failed: {:?}", e);
+    }
+
     // Step 22e⅞++++n2: TCP server (bind/listen/accept) self-test.
     // Validates listener lifecycle without needing network hardware.
     if let Err(e) = net::tcp::self_test() {

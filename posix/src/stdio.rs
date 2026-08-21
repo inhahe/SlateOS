@@ -1275,21 +1275,40 @@ pub extern "C" fn rewind(stream: *mut u8) {
 // fseeko / ftello — off_t variants (LP64: same as fseek/ftell)
 // ---------------------------------------------------------------------------
 
-/// Seek in a stream using `off_t` offset.
-///
-/// On LP64 platforms this is identical to `fseek`.
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn fseeko(stream: *mut u8, offset: crate::types::OffT, whence: i32) -> i32 {
-    fseek(stream, offset, whence)
-}
+// `fseeko` and `ftello` each get their own inline module — and therefore their
+// own object file inside `libc.a` — because gnulib ships replacements for both.
+// Sharing a member with `fopen`/`fread`/`fwrite` (which is what happened until
+// 2026-08-20) guarantees the member is extracted by any program at all, so our
+// copies would collide with a gnulib-vendoring program's own. See `string.rs`'s
+// module header and `design-decisions.md` §339.
+//
+// The `*64` aliases below deliberately stay put: nothing replaces them, and
+// they call `fseek`/`ftell` directly rather than going through `fseeko`, so
+// declining the `fseeko` member does not strand them.
 
-/// Get stream position as `off_t`.
-///
-/// On LP64 platforms this is identical to `ftell`.
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn ftello(stream: *mut u8) -> crate::types::OffT {
-    ftell(stream)
+/// Own archive member — gnulib replaces `fseeko`.
+mod gnu_fseeko {
+    /// Seek in a stream using `off_t` offset.
+    ///
+    /// On LP64 platforms this is identical to `fseek`.
+    #[cfg_attr(target_os = "none", unsafe(no_mangle))]
+    pub extern "C" fn fseeko(stream: *mut u8, offset: crate::types::OffT, whence: i32) -> i32 {
+        super::fseek(stream, offset, whence)
+    }
 }
+pub use gnu_fseeko::fseeko;
+
+/// Own archive member — gnulib replaces `ftello`.
+mod gnu_ftello {
+    /// Get stream position as `off_t`.
+    ///
+    /// On LP64 platforms this is identical to `ftell`.
+    #[cfg_attr(target_os = "none", unsafe(no_mangle))]
+    pub extern "C" fn ftello(stream: *mut u8) -> crate::types::OffT {
+        super::ftell(stream)
+    }
+}
+pub use gnu_ftello::ftello;
 
 /// `fseeko64` — LP64 alias.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
@@ -2016,110 +2035,128 @@ pub extern "C" fn putchar_unlocked(c: i32) -> i32 {
 // getline / getdelim — POSIX dynamic line reading
 // ---------------------------------------------------------------------------
 
-/// Read a delimited record from a stream.
-///
-/// Reads until `delimiter` is found or EOF.  The buffer `*lineptr`
-/// is reallocated via `malloc`/`realloc` as needed.  `*n` holds the
-/// current buffer size.
-///
-/// Returns the number of characters read (including the delimiter),
-/// or −1 on error/EOF with no characters read.
-///
-/// # Safety
-///
-/// `lineptr`, `n`, and `stream` must be valid pointers.
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-#[allow(clippy::arithmetic_side_effects)]
-pub unsafe extern "C" fn getdelim(
-    lineptr: *mut *mut u8,
-    n: *mut usize,
-    delimiter: i32,
-    stream: *mut u8,
-) -> isize {
-    if lineptr.is_null() || n.is_null() {
-        crate::errno::set_errno(crate::errno::EINVAL);
-        return -1;
-    }
-    // Note: we don't check stream.is_null() because our stdin sentinel
-    // IS null (STDIN_SENTINEL = 0).  stream_to_file() maps 0 → stdin.
+/// Own archive member — gnulib replaces `getdelim`. See `gnu_fseeko` above.
+mod gnu_getdelim {
+    use super::*;
 
-    let mut buf = unsafe { *lineptr };
-    let mut cap = unsafe { *n };
-    let mut pos: usize = 0;
-
-    // Ensure initial allocation.
-    if buf.is_null() || cap == 0 {
-        cap = 128;
-        buf = crate::malloc::malloc(cap).cast::<u8>();
-        if buf.is_null() {
-            crate::errno::set_errno(crate::errno::ENOMEM);
+    /// Read a delimited record from a stream.
+    ///
+    /// Reads until `delimiter` is found or EOF.  The buffer `*lineptr`
+    /// is reallocated via `malloc`/`realloc` as needed.  `*n` holds the
+    /// current buffer size.
+    ///
+    /// Returns the number of characters read (including the delimiter),
+    /// or −1 on error/EOF with no characters read.
+    ///
+    /// # Safety
+    ///
+    /// `lineptr`, `n`, and `stream` must be valid pointers.
+    #[cfg_attr(target_os = "none", unsafe(no_mangle))]
+    #[allow(clippy::arithmetic_side_effects)]
+    pub unsafe extern "C" fn getdelim(
+        lineptr: *mut *mut u8,
+        n: *mut usize,
+        delimiter: i32,
+        stream: *mut u8,
+    ) -> isize {
+        if lineptr.is_null() || n.is_null() {
+            crate::errno::set_errno(crate::errno::EINVAL);
             return -1;
         }
-        unsafe {
-            *lineptr = buf;
-            *n = cap;
-        }
-    }
+        // Note: we don't check stream.is_null() because our stdin sentinel
+        // IS null (STDIN_SENTINEL = 0).  stream_to_file() maps 0 → stdin.
 
-    loop {
-        // Read through the FILE buffer instead of direct fd read.
-        let c = fgetc(stream);
-        if c == EOF {
-            if pos == 0 {
-                return -1; // EOF with no data.
-            }
-            break;
-        }
+        let mut buf = unsafe { *lineptr };
+        let mut cap = unsafe { *n };
+        let mut pos: usize = 0;
 
-        // Grow buffer if needed (leave room for null terminator).
-        if pos >= cap.wrapping_sub(1) {
-            let Some(new_cap) = cap.checked_mul(2) else {
-                crate::errno::set_errno(crate::errno::ENOMEM);
-                return -1;
-            };
-            // SAFETY: realloc is unsafe extern "C".
-            let new_buf = unsafe { crate::malloc::realloc(buf.cast::<u8>(), new_cap) };
-            if new_buf.is_null() {
+        // Ensure initial allocation.
+        if buf.is_null() || cap == 0 {
+            cap = 128;
+            buf = crate::malloc::malloc(cap).cast::<u8>();
+            if buf.is_null() {
                 crate::errno::set_errno(crate::errno::ENOMEM);
                 return -1;
             }
-            buf = new_buf.cast::<u8>();
-            cap = new_cap;
             unsafe {
                 *lineptr = buf;
                 *n = cap;
             }
         }
 
-        // SAFETY: pos < cap-1, buf is valid for cap bytes.
+        loop {
+            // Read through the FILE buffer instead of direct fd read.
+            let c = fgetc(stream);
+            if c == EOF {
+                if pos == 0 {
+                    return -1; // EOF with no data.
+                }
+                break;
+            }
+
+            // Grow buffer if needed (leave room for null terminator).
+            if pos >= cap.wrapping_sub(1) {
+                let Some(new_cap) = cap.checked_mul(2) else {
+                    crate::errno::set_errno(crate::errno::ENOMEM);
+                    return -1;
+                };
+                // SAFETY: realloc is unsafe extern "C".
+                let new_buf = unsafe { crate::malloc::realloc(buf.cast::<u8>(), new_cap) };
+                if new_buf.is_null() {
+                    crate::errno::set_errno(crate::errno::ENOMEM);
+                    return -1;
+                }
+                buf = new_buf.cast::<u8>();
+                cap = new_cap;
+                unsafe {
+                    *lineptr = buf;
+                    *n = cap;
+                }
+            }
+
+            // SAFETY: pos < cap-1, buf is valid for cap bytes.
+            unsafe {
+                *buf.add(pos) = c as u8;
+            }
+            pos = pos.wrapping_add(1);
+
+            if c == delimiter {
+                break;
+            }
+        }
+
+        // Null-terminate.
         unsafe {
-            *buf.add(pos) = c as u8;
+            *buf.add(pos) = 0;
         }
-        pos = pos.wrapping_add(1);
-
-        if c == delimiter {
-            break;
-        }
+        pos as isize
     }
+}
+pub use gnu_getdelim::getdelim;
 
-    // Null-terminate.
-    unsafe {
-        *buf.add(pos) = 0;
+/// Own archive member — gnulib replaces `getline`. See `gnu_fseeko` above.
+///
+/// Kept separate from `gnu_getdelim` rather than grouped with it: separate
+/// members can be declined independently, so a program that brings its own
+/// `getline` but uses our `getdelim` (or vice versa) still links.
+mod gnu_getline {
+    /// Read a line from a stream (up to and including newline).
+    ///
+    /// Equivalent to `getdelim(lineptr, n, '\n', stream)`.
+    ///
+    /// # Safety
+    ///
+    /// `lineptr`, `n`, and `stream` must be valid pointers.
+    #[cfg_attr(target_os = "none", unsafe(no_mangle))]
+    pub unsafe extern "C" fn getline(
+        lineptr: *mut *mut u8,
+        n: *mut usize,
+        stream: *mut u8,
+    ) -> isize {
+        unsafe { super::getdelim(lineptr, n, i32::from(b'\n'), stream) }
     }
-    pos as isize
 }
-
-/// Read a line from a stream (up to and including newline).
-///
-/// Equivalent to `getdelim(lineptr, n, '\n', stream)`.
-///
-/// # Safety
-///
-/// `lineptr`, `n`, and `stream` must be valid pointers.
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub unsafe extern "C" fn getline(lineptr: *mut *mut u8, n: *mut usize, stream: *mut u8) -> isize {
-    unsafe { getdelim(lineptr, n, i32::from(b'\n'), stream) }
-}
+pub use gnu_getline::getline;
 
 // ---------------------------------------------------------------------------
 // FILE* global symbols

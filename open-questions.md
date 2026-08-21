@@ -1144,6 +1144,18 @@ cleanup in `known-issues.md`, because which one to delete depends on which file
 is authoritative; and I should not spend more effort improving either account
 stack until the losing one is known.
 
+**Update 2026-08-20 — the guess is now made in one place, which makes this
+cheaper to answer, not less necessary.** Lane C needed the desktop lock screen
+to check a real password, and the answer (`design-decisions.md` §341) put the
+check in one privileged library, `userspace/authlib`. That library has to pick
+a store, so it makes exactly one guess — `/etc/users.yaml` if it has the user,
+`/etc/shadow` otherwise — behind one function, and `login` and `logind` both
+consume it rather than each guessing. Whichever way this question lands, one
+branch of that function becomes dead code and no caller changes; the redirect
+is now a few lines rather than a sweep through every account-reading tool. What
+has *not* changed is that the two files still disagree about who exists, and
+that fallback order is a policy I invented rather than one anybody chose.
+
 
 ## B-Q5 — [B] 70 compiled programs are stored in git, and they go out of date without git noticing. Keep storing them, or rebuild them on demand? — Status: OPEN
 

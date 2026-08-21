@@ -1,0 +1,20 @@
+[package]
+name = "authlib"
+version = "0.1.0"
+edition = "2024"
+description = "The one place SlateOS answers \"is this the user's password?\""
+
+[lib]
+path = "src/lib.rs"
+
+# `posix` for `crypt(3)` — the hash construction — and `userdb` for
+# `/etc/users.yaml`. This crate deliberately implements neither: it decides
+# *which* stored entry answers for a user and *whether the caller is allowed to
+# ask right now*, and hands the entry to the one hasher. See
+# `design-decisions.md` §329 (three disagreeing hashers) and §341 (this crate).
+[dependencies]
+posix = { path = "../../posix" }
+userdb = { path = "../userdb" }
+
+[lints]
+workspace = true

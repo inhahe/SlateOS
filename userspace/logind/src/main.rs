@@ -215,6 +215,15 @@ struct Session {
     state: SessionState,
     /// Whether the session screen is locked.
     locked: bool,
+    /// Whether a password check has succeeded for this session and has not
+    /// yet been spent by an unlock.
+    ///
+    /// This is a one-shot ticket, not a mode: [`Daemon::authenticate_session`]
+    /// sets it, [`Daemon::unlock_session`] requires it and immediately clears
+    /// it, and locking the screen again clears it. A ticket that survived its
+    /// unlock would mean the *second* unlock needs no password, which is the
+    /// whole hole this field exists to close.
+    unlock_authorized: bool,
     /// Whether this session is marked as idle.
     idle: bool,
     /// Timestamp (seconds since epoch) when session was created.
@@ -249,6 +258,7 @@ impl Session {
             class: SessionClass::User,
             state: SessionState::Online,
             locked: false,
+            unlock_authorized: false,
             idle: false,
             created_at: 0,
             idle_since: 0,
@@ -714,6 +724,12 @@ struct Daemon {
     config: DaemonConfig,
     /// Whether the daemon is running.
     running: bool,
+    /// The password verifier behind [`Daemon::authenticate_session`].
+    ///
+    /// Held on the daemon rather than constructed per call because it carries
+    /// the per-user failure tally: a rate limit that is rebuilt for every
+    /// attempt is not a rate limit.
+    auth: authlib::Authenticator,
 }
 
 impl Daemon {
@@ -732,7 +748,18 @@ impl Daemon {
             idle_since: 0,
             config,
             running: true,
+            auth: authlib::Authenticator::new(),
         }
+    }
+
+    /// Replace the password verifier.
+    ///
+    /// The default reads the system's real `/etc/users.yaml` and
+    /// `/etc/shadow`. A daemon supervising sessions inside a chroot needs
+    /// stores under that root, and tests need stores they wrote themselves —
+    /// both are the same substitution, so there is one way to make it.
+    fn set_verifier(&mut self, auth: authlib::Authenticator) {
+        self.auth = auth;
     }
 
     /// Allocate a new unique session ID.
@@ -875,12 +902,82 @@ impl Daemon {
     fn lock_session(&mut self, session_id: &str) -> Result<(), &'static str> {
         let session = self.sessions.get_mut(session_id).ok_or("session not found")?;
         session.locked = true;
+        // A lock revokes any unspent ticket. Otherwise a user who authenticated,
+        // was interrupted before the unlock landed, and walked away would leave
+        // a screen that the next person to touch it unlocks for free.
+        session.unlock_authorized = false;
         Ok(())
     }
 
-    /// Unlock a session's screen.
+    /// Ask whether `password` is the password of the user who owns
+    /// `session_id`, and on success authorise one [`Self::unlock_session`].
+    ///
+    /// This is the call the screen-lock app makes. It hands over the typed
+    /// password and gets back a verdict; it never sees a stored hash, because
+    /// the hash lives in a root-only file and a full-screen GUI process is
+    /// exactly the wrong place to put one (`design-decisions.md` §341).
+    ///
+    /// The password is bytes rather than a `&str`: a typed password is
+    /// whatever the user typed, and forcing it through UTF-8 would change some
+    /// of them.
+    ///
+    /// A wrong answer clears any existing ticket, so an attacker cannot spend
+    /// an authorisation the legitimate user earned and then abandoned.
+    fn authenticate_session(
+        &mut self,
+        session_id: &str,
+        password: &[u8],
+    ) -> Result<authlib::Outcome, &'static str> {
+        // The name is copied out before the verifier borrows `self` mutably:
+        // the tally the verifier updates lives on the same struct as the
+        // session map.
+        let user = self
+            .sessions
+            .get(session_id)
+            .ok_or("session not found")?
+            .user
+            .clone();
+
+        let outcome = self.auth.authenticate(&user, password);
+
+        if let Some(session) = self.sessions.get_mut(session_id) {
+            session.unlock_authorized = outcome.is_accepted();
+        }
+        Ok(outcome)
+    }
+
+    /// Unlock a session's screen — only if [`Self::authenticate_session`] has
+    /// just accepted a password for it.
+    ///
+    /// This used to unlock unconditionally, which made the lock screen a
+    /// picture of a lock: anything that could reach logind could clear it
+    /// without knowing a password. Lane C reported it while wiring
+    /// `apps/lockscreen`; see
+    /// `requests/c-b-the-lock-screen-has-no-way-to-check-a-real-password.md`.
     fn unlock_session(&mut self, session_id: &str) -> Result<(), &'static str> {
         let session = self.sessions.get_mut(session_id).ok_or("session not found")?;
+        if !session.unlock_authorized {
+            return Err("unlock requires a successful password check");
+        }
+        // Spend the ticket in the same breath as using it.
+        session.unlock_authorized = false;
+        session.locked = false;
+        Ok(())
+    }
+
+    /// Unlock a session's screen without a password — the administrator's
+    /// override.
+    ///
+    /// systemd's equivalent is `loginctl unlock-session`, gated by polkit on
+    /// an administrator authenticating. We have no way to check a *caller's*
+    /// credentials yet — there is no daemon socket, so there is no peer to
+    /// ask about — so the check that belongs here is recorded in `todo.txt`
+    /// and must land with the transport. Until then this is reachable only
+    /// from the `loginctl` personality, which is a short-lived process
+    /// operating on its own in-memory daemon.
+    fn force_unlock_session(&mut self, session_id: &str) -> Result<(), &'static str> {
+        let session = self.sessions.get_mut(session_id).ok_or("session not found")?;
+        session.unlock_authorized = false;
         session.locked = false;
         Ok(())
     }
@@ -1488,7 +1585,9 @@ fn run_loginctl_command(daemon: &mut Daemon, cmd: &LoginctlCommand) -> i32 {
                 let _ = writeln!(io::stderr(), "loginctl: session ID required");
                 return 1;
             }
-            match daemon.unlock_session(id) {
+            // The administrator's override, not the desktop's unlock: this
+            // personality has no password to offer and no screen to lock.
+            match daemon.force_unlock_session(id) {
                 Ok(()) => {
                     let _ = writeln!(out, "Session {id} unlocked.");
                     0
@@ -2117,8 +2216,12 @@ mod tests {
 
     #[test]
     fn test_unlock_session() {
-        let mut d = test_daemon();
+        let mut d = authenticating_daemon("test_unlock_session");
         d.lock_session("1").unwrap();
+        assert_eq!(
+            d.authenticate_session("1", b"correct horse").unwrap(),
+            authlib::Outcome::Accepted
+        );
         d.unlock_session("1").unwrap();
         assert!(!d.sessions.get("1").unwrap().locked);
     }
@@ -2127,6 +2230,158 @@ mod tests {
     fn test_lock_session_not_found() {
         let mut d = Daemon::new(DaemonConfig::default());
         assert!(d.lock_session("999").is_err());
+    }
+
+    /// The store `authenticating_daemon` writes: `alice`'s password is
+    /// `correct horse`, `bob` has no shadow entry at all.
+    ///
+    /// The hash is computed rather than pasted so the fixture cannot drift
+    /// from the hasher the verifier uses.
+    fn shadow_fixture() -> String {
+        let mut setting_buf = posix::crypt::buf();
+        let setting = posix::crypt::setting_into(
+            posix::crypt::Method::Sha512,
+            b"logindtest",
+            &mut setting_buf,
+        )
+        .expect("setting")
+        .to_string();
+        let mut hash_buf = posix::crypt::buf();
+        let hash = posix::crypt::hash_into(b"correct horse", setting.as_bytes(), &mut hash_buf)
+            .expect("hash");
+        format!("alice:{hash}:19000:0:99999:7:::\n")
+    }
+
+    /// A `test_daemon` whose verifier reads a store this test wrote, with a
+    /// clock frozen at zero so the rate limit is exercised deliberately
+    /// rather than raced against.
+    fn authenticating_daemon(name: &str) -> Daemon {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let shadow = std::env::temp_dir()
+            .join(format!("logind_{}_{nanos}_{name}", std::process::id()));
+        std::fs::write(&shadow, shadow_fixture()).expect("write shadow fixture");
+
+        // No `users.yaml`: the verifier falls through to the shadow store when
+        // the native one is absent, which is what this fixture wants to test.
+        let missing = shadow.with_extension("absent-users-yaml");
+        let mut d = test_daemon();
+        d.set_verifier(authlib::Authenticator::with_stores(&missing, &shadow));
+        d
+    }
+
+    #[test]
+    fn an_unlock_without_a_password_check_is_refused() {
+        let mut d = authenticating_daemon("unlock_without_check");
+        d.lock_session("1").unwrap();
+        assert!(
+            d.unlock_session("1").is_err(),
+            "unlocking must require a password; a lock screen that anything \
+             can clear is a picture of a lock"
+        );
+        assert!(d.sessions.get("1").unwrap().locked);
+    }
+
+    #[test]
+    fn a_wrong_password_does_not_authorise_an_unlock() {
+        let mut d = authenticating_daemon("wrong_password");
+        d.lock_session("1").unwrap();
+        assert_eq!(
+            d.authenticate_session("1", b"correct hors").unwrap(),
+            authlib::Outcome::Rejected
+        );
+        assert!(d.unlock_session("1").is_err());
+        assert!(d.sessions.get("1").unwrap().locked);
+    }
+
+    #[test]
+    fn a_ticket_is_spent_by_the_unlock_it_authorises() {
+        let mut d = authenticating_daemon("ticket_is_spent");
+        d.lock_session("1").unwrap();
+        d.authenticate_session("1", b"correct horse").unwrap();
+        d.unlock_session("1").unwrap();
+
+        // Lock again. The earlier success must not still be good.
+        d.lock_session("1").unwrap();
+        assert!(
+            d.unlock_session("1").is_err(),
+            "one password check must authorise exactly one unlock"
+        );
+    }
+
+    #[test]
+    fn a_wrong_password_revokes_a_ticket_already_earned() {
+        let mut d = authenticating_daemon("wrong_revokes");
+        d.lock_session("1").unwrap();
+        d.authenticate_session("1", b"correct horse").unwrap();
+        // The user walks away without pressing anything; someone else guesses.
+        assert_eq!(
+            d.authenticate_session("1", b"hunter2").unwrap(),
+            authlib::Outcome::Rejected
+        );
+        assert!(
+            d.unlock_session("1").is_err(),
+            "a failed guess must not be able to spend an authorisation the \
+             real user earned and abandoned"
+        );
+    }
+
+    #[test]
+    fn a_session_whose_user_has_no_entry_admits_nobody() {
+        // Session "2" belongs to `bob`, who is in no store.
+        let mut d = authenticating_daemon("no_entry");
+        d.lock_session("2").unwrap();
+        assert_eq!(
+            d.authenticate_session("2", b"correct horse").unwrap(),
+            authlib::Outcome::Rejected
+        );
+        assert!(d.unlock_session("2").is_err());
+    }
+
+    #[test]
+    fn authenticating_an_unknown_session_is_an_error_not_a_verdict() {
+        let mut d = authenticating_daemon("unknown_session");
+        assert!(d.authenticate_session("999", b"correct horse").is_err());
+    }
+
+    #[test]
+    fn the_administrative_override_needs_no_password_and_leaves_no_ticket() {
+        let mut d = authenticating_daemon("force_unlock");
+        d.lock_session("1").unwrap();
+        d.force_unlock_session("1").unwrap();
+        assert!(!d.sessions.get("1").unwrap().locked);
+
+        // The override is not a login: it must not leave the session in a
+        // state where the *next* lock can be cleared for free.
+        d.lock_session("1").unwrap();
+        assert!(d.unlock_session("1").is_err());
+    }
+
+    #[test]
+    fn repeated_guesses_are_slowed_down() {
+        let mut d = authenticating_daemon("rate_limited");
+        d.lock_session("1").unwrap();
+
+        // The clock is the real one here, so this asserts only that the
+        // limit engages at all — `authlib` owns the timing table and tests it
+        // against a fake clock.
+        let mut saw_limit = false;
+        for _ in 0..8 {
+            if matches!(
+                d.authenticate_session("1", b"hunter2").unwrap(),
+                authlib::Outcome::RateLimited { .. }
+            ) {
+                saw_limit = true;
+                break;
+            }
+        }
+        assert!(
+            saw_limit,
+            "a lock screen that accepts guesses as fast as they arrive is a \
+             lock screen that is guessed"
+        );
     }
 
     // --- Idle tracking ---

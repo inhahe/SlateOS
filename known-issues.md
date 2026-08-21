@@ -52470,3 +52470,59 @@ the fingerprint cache and forces rebuilds).
 **Not a blocker.** The suite is green on every other run, and this has been seen
 exactly once. It is logged so that a *second* sighting is recognised as a
 pattern rather than re-diagnosed from scratch.
+
+## TD-B-TWO-PROGRAMS-BOTH-CLAIM-THE-NAME-`sudo` (lane B, 2026-08-21)
+
+**In short:** the tree contains two complete, independent implementations of
+`sudo`, written to two different security policies, and nothing yet decides
+which one becomes `/usr/bin/sudo`. Whichever is installed last wins, and the
+answer to "may this user run this command as root?" changes with it.
+
+**Where.**
+
+| | `userspace/sudo` | `userspace/su` |
+|---|---|---|
+| binary | `sudo` | `su`, which runs `run_sudo` when `argv[0]` is `sudo` (`src/main.rs:827`) |
+| policy source | `/etc/sudoers`, with a real parser: aliases, `Defaults`, per-command rules, `NOPASSWD`, includes | hardcoded: `sudo_authorised` (`src/main.rs:706`) grants everything to root, to `is_admin`, and to members of `wheel`/`admin` |
+| `-l` output | derived from the matching sudoers rules | `(ALL) ALL` or `(NONE)` |
+| authenticates | the caller, against `/etc/users.yaml` | the caller, against `/etc/users.yaml` |
+
+Both are real, both are tested (242 and 50 tests respectively), and both now
+share the system-wide failed-attempt tally, so the *authentication* halves
+agree. It is the **authorization** halves that do not, and that is the half
+that matters: a site that writes a restrictive `/etc/sudoers` granting one user
+one command gets exactly that from `userspace/sudo`, and gets unrestricted root
+for every member of `wheel` from `su`'s `run_sudo` — silently, because the
+second never reads the file.
+
+**How it happened.** `su`'s multi-call personality dispatch is modelled on the
+real `su`/`runuser` pair, and `sudo` was added to it as a third personality
+before `userspace/sudo` existed. Neither crate references the other, so nothing
+made the overlap visible; it was found by grepping for password prompts, not by
+a failing test.
+
+**Why it is not biting yet.** Neither binary is staged into `rootfs.ext4` — see
+the open task "stage coreutils binaries on rootfs.ext4 and run them under ring
+3". The conflict is latent, and the right time to resolve it is *before* that
+staging work picks one by accident.
+
+**The proper fix.** Delete the `sudo` personality from `userspace/su` and keep
+`userspace/sudo` as the only implementation. The reasoning is one-sided:
+`userspace/sudo` reads the configuration file `sudo` is defined by, and
+`su`'s copy cannot be made to agree with a sudoers file without becoming
+`userspace/sudo`. Concretely:
+
+1. Remove `run_sudo`, `parse_sudo_args`, `sudo_authorised`,
+   `sudo_list_permissions` and the `prog == "sudo"` arm at `su/src/main.rs:827`,
+   along with their tests.
+2. Check that nothing invokes `su` under the name `sudo` — at the time of
+   writing nothing installs either binary, so this should be vacuous.
+3. Leave `su`'s `runuser` personality alone: that one has no competitor, and
+   the `su`/`runuser` split is genuine upstream behaviour rather than an
+   accident.
+
+Not done in the change that found it because that change was scoped to the
+shared failed-attempt tally (`design-decisions.md` §354), and deleting a
+program's authorization model is not a rate-limiting change. It should be its
+own commit, with its own reasoning, so that it is reviewable as the policy
+decision it is.

@@ -2028,25 +2028,69 @@ fn prompt_password(prompt: &str) -> Result<String, SudoError> {
 fn authenticate(username: &str, password: &str) -> Result<(), SudoError> {
     let db = userdb::UserDb::load(userdb::DEFAULT_PATH)
         .map_err(|e| SudoError::AuthError(format!("cannot read {}: {e}", userdb::DEFAULT_PATH)))?;
-    authenticate_against(&db, username, password)
+    let mut auth = authlib::Authenticator::new();
+    authenticate_against(&mut auth, &db, username, password)
 }
 
 /// The decision `authenticate` makes, separated from reading the file so that
 /// it can be tested. The bypass this replaced survived 191 passing tests
 /// precisely because the decision was welded to a path only root can write.
+///
+/// # The shared failed-attempt tally
+///
+/// Failures count against the same system-wide tally that `login`, `su`,
+/// `doas`, `sshd` and the graphical greeter use, and a delay earned at any of
+/// them is honoured here (`design-decisions.md` §354). Before this, guessing
+/// at the prompt that grants root was the cheapest guessing on the system:
+/// unlimited, untimed and unrecorded.
+///
+/// **Counted:** a wrong password, and a username that is not in the database.
+/// The second because a tally that only ever grows for real accounts is a list
+/// of which accounts are real.
+///
+/// **Not counted:** a locked account, an account with no password, and an
+/// entry in a format nothing can recompute. No password opens any of the
+/// three, so there is no guess to charge — and charging one would let anyone
+/// delay that account's owner at *every* prompt on the system, for free, by
+/// typing nonsense at a door that was never going to open.
 fn authenticate_against(
+    auth: &mut authlib::Authenticator,
     db: &userdb::UserDb,
     username: &str,
     password: &str,
 ) -> Result<(), SudoError> {
+    // Asked before the database is consulted, so the refusal cannot be used to
+    // tell "you are being slowed down" from "no such user". Asking does not
+    // itself count: if it did, an attacker could hold a real user out for ever
+    // with refusals that each pushed the expiry further away.
+    //
+    // `retry_after_secs` is discarded rather than reported. A countdown tells
+    // whoever is guessing that their guesses are landing on an account that
+    // exists — the graphical greeter can afford to show one because it draws
+    // the user list anyway, and this prompt cannot.
+    if auth.rate_limited(username).is_some() {
+        return Err(SudoError::AuthError(
+            authlib::Outcome::RateLimited {
+                retry_after_secs: 0,
+            }
+            .user_message()
+            .to_string(),
+        ));
+    }
+
     let Some(record) = db.find(username) else {
+        auth.note_failure(username);
         return Err(SudoError::AuthError(format!(
             "user {username} not found in user database"
         )));
     };
 
     match record.check_password(password) {
-        userdb::Auth::Accepted => Ok(()),
+        userdb::Auth::Accepted => {
+            // The run of failures is over, here and at every other prompt.
+            auth.reset(username);
+            Ok(())
+        }
         userdb::Auth::Locked => Err(SudoError::AuthError(format!(
             "account {username} is locked"
         ))),
@@ -2060,9 +2104,12 @@ fn authenticate_against(
             "account {username} has a password stored in a format this system \
              can no longer verify; run `useradm passwd {username}` as root"
         ))),
-        userdb::Auth::Rejected => Err(SudoError::AuthError(
-            "incorrect password attempt".to_string(),
-        )),
+        userdb::Auth::Rejected => {
+            auth.note_failure(username);
+            Err(SudoError::AuthError(
+                "incorrect password attempt".to_string(),
+            ))
+        }
     }
 }
 
@@ -3251,17 +3298,33 @@ mod tests {
         db
     }
 
+    /// An `Authenticator` with no store behind it: the two paths do not exist,
+    /// so no test can read the real `/etc/users.yaml` or write the real
+    /// faillock file. The tally lives in memory for the life of the value,
+    /// which is exactly the scope a test wants.
+    fn scratch_authenticator() -> authlib::Authenticator {
+        let missing = std::path::Path::new("/nonexistent/sudo-tests");
+        authlib::Authenticator::with_stores(missing, missing)
+    }
+
+    /// Enough failures to be past the free allowance and unambiguously into
+    /// the delayed region — used by the tests that assert a count *stays* at
+    /// zero, where stopping at the allowance would prove nothing.
+    const FREE_ATTEMPTS_HEADROOM: u32 = authlib::FREE_ATTEMPTS + 3;
+
     #[test]
     fn auth_accepts_the_right_password() {
         let db = auth_fixture();
-        assert!(authenticate_against(&db, "alice", "hunter2").is_ok());
+        let mut auth = scratch_authenticator();
+        assert!(authenticate_against(&mut auth, &db, "alice", "hunter2").is_ok());
     }
 
     #[test]
     fn auth_refuses_the_wrong_password() {
         let db = auth_fixture();
-        assert!(authenticate_against(&db, "alice", "Hunter2").is_err());
-        assert!(authenticate_against(&db, "alice", "").is_err());
+        let mut auth = scratch_authenticator();
+        assert!(authenticate_against(&mut auth, &db, "alice", "Hunter2").is_err());
+        assert!(authenticate_against(&mut auth, &db, "alice", "").is_err());
     }
 
     /// The heart of the bypass: existing in the file was treated as proof of
@@ -3269,28 +3332,32 @@ mod tests {
     #[test]
     fn auth_refuses_a_known_user_with_no_password_offered() {
         let db = auth_fixture();
-        assert!(authenticate_against(&db, "alice", "anything at all").is_err());
+        let mut auth = scratch_authenticator();
+        assert!(authenticate_against(&mut auth, &db, "alice", "anything at all").is_err());
     }
 
     #[test]
     fn auth_refuses_an_unknown_user() {
         let db = auth_fixture();
-        assert!(authenticate_against(&db, "mallory", "hunter2").is_err());
+        let mut auth = scratch_authenticator();
+        assert!(authenticate_against(&mut auth, &db, "mallory", "hunter2").is_err());
     }
 
     /// The other half of the bypass: an empty database admitted everyone.
     #[test]
     fn auth_refuses_everyone_when_the_database_is_empty() {
         let db = userdb::UserDb::new();
-        assert!(authenticate_against(&db, "root", "").is_err());
-        assert!(authenticate_against(&db, "alice", "hunter2").is_err());
+        let mut auth = scratch_authenticator();
+        assert!(authenticate_against(&mut auth, &db, "root", "").is_err());
+        assert!(authenticate_against(&mut auth, &db, "alice", "hunter2").is_err());
     }
 
     #[test]
     fn auth_refuses_a_locked_account_that_knows_its_password() {
         let mut db = auth_fixture();
         db.find_mut("alice").expect("alice exists").set_locked(true);
-        assert!(authenticate_against(&db, "alice", "hunter2").is_err());
+        let mut auth = scratch_authenticator();
+        assert!(authenticate_against(&mut auth, &db, "alice", "hunter2").is_err());
     }
 
     /// A username that is a substring of another must not authenticate as it.
@@ -3307,7 +3374,198 @@ mod tests {
             .expect("alice was just parsed")
             .set_password_with_salt("hunter2", "0123456789abcdef")
             .expect("a 16-character salt is storable");
-        assert!(authenticate_against(&db, "al", "hunter2").is_err());
+        let mut auth = scratch_authenticator();
+        assert!(authenticate_against(&mut auth, &db, "al", "hunter2").is_err());
+    }
+
+    // -- The shared failed-attempt tally (`design-decisions.md` §354) --
+    //
+    // Before these, this prompt — the one that hands out root — was the one
+    // place on the system where guessing was free: unlimited, untimed, and
+    // invisible to every other prompt's limit.
+
+    /// A wrong password here is a guess, and is charged like a guess anywhere
+    /// else. The delay is not local to `sudo`: it is the same tally `login`,
+    /// `su` and the greeter read, so an attacker cannot walk from one prompt to
+    /// the next to keep guessing at full speed.
+    #[test]
+    fn a_wrong_password_is_charged_to_the_shared_tally() {
+        let db = auth_fixture();
+        let mut auth = scratch_authenticator();
+
+        for expected in 1..=authlib::FREE_ATTEMPTS {
+            assert!(authenticate_against(&mut auth, &db, "alice", "wrong").is_err());
+            assert_eq!(auth.failures("alice"), expected);
+        }
+
+        // The allowance is spent; the next refusal comes with a wait.
+        assert!(authenticate_against(&mut auth, &db, "alice", "wrong").is_err());
+        assert!(auth.rate_limited("alice").is_some());
+    }
+
+    /// A name nobody holds is counted too. If it were not, the only accounts
+    /// ever slowed down would be the real ones — and the delay would then be a
+    /// working answer to "does this user exist?", asked one name at a time.
+    #[test]
+    fn an_unknown_username_is_counted_the_same_as_a_wrong_password() {
+        let db = auth_fixture();
+        let mut auth = scratch_authenticator();
+
+        assert!(authenticate_against(&mut auth, &db, "mallory", "hunter2").is_err());
+        assert_eq!(auth.failures("mallory"), 1);
+    }
+
+    /// Three doors that no password opens: locked, no password stored, and a
+    /// hash in a format nothing can recompute. Guessing at any of them cannot
+    /// succeed, so there is no guess to charge — and charging one would hand
+    /// anybody a free way to keep the account's real owner waiting at *every*
+    /// prompt on the system, by typing nonsense at a door already shut.
+    #[test]
+    fn a_refusal_that_no_password_could_have_passed_is_not_an_attempt() {
+        let mut auth = scratch_authenticator();
+
+        let mut locked = auth_fixture();
+        locked.find_mut("alice").expect("alice exists").set_locked(true);
+        for _ in 0..FREE_ATTEMPTS_HEADROOM {
+            assert!(authenticate_against(&mut auth, &locked, "alice", "hunter2").is_err());
+        }
+        assert_eq!(auth.failures("alice"), 0);
+        assert!(auth.rate_limited("alice").is_none());
+
+        // An account with nothing stored in the password field at all.
+        let bare = userdb::UserDb::parse(
+            "users:\n  - uid: 1001\n    username: \"bob\"\n    groups: [users]\n",
+        );
+        for _ in 0..FREE_ATTEMPTS_HEADROOM {
+            assert!(authenticate_against(&mut auth, &bare, "bob", "anything").is_err());
+        }
+        assert_eq!(auth.failures("bob"), 0);
+    }
+
+    /// The right password ends the run — here and everywhere else, because the
+    /// tally is one tally. A user who mistypes twice and then succeeds is not
+    /// left carrying those two failures into the next prompt they meet.
+    #[test]
+    fn success_clears_the_count() {
+        let db = auth_fixture();
+        let mut auth = scratch_authenticator();
+
+        assert!(authenticate_against(&mut auth, &db, "alice", "wrong").is_err());
+        assert!(authenticate_against(&mut auth, &db, "alice", "wrong").is_err());
+        assert_eq!(auth.failures("alice"), 2);
+
+        assert!(authenticate_against(&mut auth, &db, "alice", "hunter2").is_ok());
+        assert_eq!(auth.failures("alice"), 0);
+    }
+
+    /// Once the wait is running, sudo refuses without looking at the database —
+    /// and the refusal itself is not counted. Counting it would let an attacker
+    /// hold a real user out indefinitely by hammering a prompt they already
+    /// know is closed, each refusal pushing the expiry further away.
+    #[test]
+    fn a_delayed_user_is_refused_and_the_refusal_is_not_counted() {
+        let db = auth_fixture();
+        let mut auth = scratch_authenticator();
+
+        while auth.rate_limited("alice").is_none() {
+            assert!(authenticate_against(&mut auth, &db, "alice", "wrong").is_err());
+        }
+        let counted = auth.failures("alice");
+
+        // Even the *correct* password does not skip the wait.
+        for _ in 0..FREE_ATTEMPTS_HEADROOM {
+            assert!(authenticate_against(&mut auth, &db, "alice", "hunter2").is_err());
+        }
+        assert_eq!(auth.failures("alice"), counted);
+    }
+
+    /// The refusal a delayed caller gets says only that they are being slowed
+    /// down — never how long is left, and never whether the name exists. A
+    /// countdown at a text prompt is a working oracle: it tells whoever is
+    /// guessing that their guesses are landing on a real account.
+    #[test]
+    fn the_delayed_refusal_discloses_neither_the_account_nor_the_countdown() {
+        let db = auth_fixture();
+        let mut auth = scratch_authenticator();
+
+        while auth.rate_limited("alice").is_none() {
+            assert!(authenticate_against(&mut auth, &db, "alice", "wrong").is_err());
+        }
+
+        let SudoError::AuthError(message) =
+            authenticate_against(&mut auth, &db, "alice", "hunter2")
+                .expect_err("the wait is running")
+        else {
+            panic!("a rate-limited refusal is an authentication error");
+        };
+        assert!(!message.contains("alice"), "leaked the username: {message}");
+        assert!(
+            !message.chars().any(|c| c.is_ascii_digit()),
+            "leaked a countdown: {message}"
+        );
+    }
+
+    /// The delay is checked before the database is, so the two refusals a
+    /// probing caller can tell apart — "no such user" and "wrong password" —
+    /// both collapse into the same rate-limited message once the wait is
+    /// running. Otherwise the limit would itself become the oracle it exists
+    /// to protect.
+    #[test]
+    fn the_delay_is_checked_before_any_account_state_is_disclosed() {
+        let db = auth_fixture();
+        let mut auth = scratch_authenticator();
+
+        while auth.rate_limited("mallory").is_none() {
+            assert!(authenticate_against(&mut auth, &db, "mallory", "guess").is_err());
+        }
+
+        let SudoError::AuthError(message) =
+            authenticate_against(&mut auth, &db, "mallory", "guess")
+                .expect_err("the wait is running")
+        else {
+            panic!("a rate-limited refusal is an authentication error");
+        };
+        assert!(
+            !message.contains("not found"),
+            "the limit disclosed what it was meant to hide: {message}"
+        );
+    }
+
+    /// The point of the whole exercise: a delay earned at another prompt is
+    /// honoured here. `Authenticator::with_faillock` is what `login`, `su` and
+    /// the greeter share on a real system; two authenticators pointed at one
+    /// file stand in for two programs.
+    #[test]
+    fn sudo_honours_a_delay_earned_at_another_prompt() {
+        let dir = std::env::temp_dir().join("sudo-faillock-share-test");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("a scratch directory under the temp dir");
+        let faillock = dir.join("faillock");
+        let missing = std::path::Path::new("/nonexistent/sudo-tests");
+
+        // `login` (or `su`, or the greeter) burns through the allowance.
+        {
+            let mut elsewhere =
+                authlib::Authenticator::with_stores(missing, missing).with_faillock(&faillock);
+            while elsewhere.rate_limited("alice").is_none() {
+                elsewhere.note_failure("alice");
+            }
+        }
+
+        // `sudo` starts fresh, reads the same file, and refuses.
+        let db = auth_fixture();
+        let mut auth =
+            authlib::Authenticator::with_stores(missing, missing).with_faillock(&faillock);
+        assert!(
+            auth.rate_limited("alice").is_some(),
+            "a delay earned at another prompt must be honoured here"
+        );
+        assert!(
+            authenticate_against(&mut auth, &db, "alice", "hunter2").is_err(),
+            "the correct password must not skip a wait earned elsewhere"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     // -- Personality detection tests --

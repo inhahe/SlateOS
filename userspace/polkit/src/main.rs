@@ -289,7 +289,11 @@ fn authenticate_admin(users: &UserDb) -> bool {
         return false;
     };
 
-    prompt_and_check(admin)
+    // A name that is not on the list is refused without being charged to the
+    // tally. The list was printed above, so the refusal reveals nothing the
+    // caller was not just told — and charging it would let anyone delay a real
+    // non-admin user at every prompt on the system by typing their name here.
+    prompt_and_check(&mut authlib::Authenticator::new(), admin)
 }
 
 /// Prompt the calling user to authenticate themselves.
@@ -300,7 +304,7 @@ fn authenticate_self(user: &Record) -> bool {
         name_of(user)
     );
 
-    prompt_and_check(user)
+    prompt_and_check(&mut authlib::Authenticator::new(), user)
 }
 
 /// Read a password from stdin and check it against `record`.
@@ -309,18 +313,34 @@ fn authenticate_self(user: &Record) -> bool {
 /// three of them are administrator errors, not wrong passwords, and a user who
 /// is told "authentication failure" when the real answer is "that account was
 /// never given a password" has no way to act on it.
-fn prompt_and_check(record: &Record) -> bool {
-    if record.is_locked() {
-        eprintln!("polkit: account '{}' is locked", name_of(record));
-        return false;
-    }
-    if record.has_legacy_password() {
-        eprintln!(
-            "polkit: account '{}' has a password stored in a format that predates \
-             this system's hashing; run `useradm passwd {}` to reset it",
-            name_of(record),
-            name_of(record)
-        );
+///
+/// # The shared failed-attempt tally
+///
+/// Failures count against the same system-wide tally that `login`, `su`,
+/// `sudo`, `doas`, `sshd` and the graphical greeter use, and a delay earned at
+/// any of them is honoured here (`design-decisions.md` §354). A limit only
+/// some prompts honour is not a limit: an attacker slowed at the console would
+/// otherwise simply run `pkexec` and resume at full speed.
+///
+/// **Counted:** a wrong password. That is a guess, and it is charged like a
+/// guess anywhere else.
+///
+/// **Not counted:** a locked account, an account with no password, and an
+/// entry in a format nothing can recompute. No password opens any of the
+/// three, so there is no guess to charge — and charging one would let anybody
+/// keep that account's owner waiting at *every* prompt on the system, for
+/// free, by typing nonsense at a door that was never going to open.
+///
+/// The unknown-username rule that applies at `login`, `su` and `sudo` — where
+/// a name nobody holds *is* counted, because a tally that only ever grows for
+/// real accounts is a list of which accounts are real — has no work to do
+/// here. This prompt prints the admin names in the clear before asking (see
+/// `authenticate_admin`), exactly as the real polkit agent does, so there is
+/// no membership secret for the tally to leak. Not counting is therefore the
+/// strictly better of the two: it removes a free way to delay any named user.
+fn prompt_and_check(auth: &mut authlib::Authenticator, record: &Record) -> bool {
+    if let Some(refusal) = refusal_before_prompting(auth, record) {
+        eprintln!("polkit: {refusal}");
         return false;
     }
 
@@ -333,16 +353,91 @@ fn prompt_and_check(record: &Record) -> bool {
     }
     let password = password.trim();
 
-    match record.check_password(password) {
-        Auth::Accepted => true,
-        Auth::NoPassword => {
-            eprintln!(
-                "polkit: account '{}' has no password set and cannot authenticate",
-                name_of(record)
-            );
+    match judge_password(auth, record, password) {
+        Ok(()) => true,
+        Err(refusal) => {
+            if !refusal.is_empty() {
+                eprintln!("polkit: {refusal}");
+            }
             false
         }
-        Auth::Rejected | Auth::Locked | Auth::Unusable => false,
+    }
+}
+
+/// The reasons to refuse *before* asking for a password, in the order they
+/// must be asked, or `None` to go ahead and prompt.
+///
+/// Separated from the reading of stdin so that it can be tested. The bypass
+/// this crate shipped for years survived every one of its tests because the
+/// decision was welded to a terminal.
+fn refusal_before_prompting(auth: &mut authlib::Authenticator, record: &Record) -> Option<String> {
+    let username = name_of(record);
+
+    // Asked before any account state is disclosed, so that a caller who is
+    // being slowed down cannot use the difference between "locked" and "wrong
+    // password" as an oracle. Asking does not itself count: if a refused
+    // attempt were charged, an attacker could hold a user out for ever with
+    // refusals that each pushed the expiry further away.
+    //
+    // `retry_after_secs` is discarded rather than printed. A countdown at a
+    // text prompt tells whoever is guessing that their guesses are landing on
+    // a real account; the graphical greeter can afford to show one only
+    // because it draws the user list anyway.
+    if auth.rate_limited(&username).is_some() {
+        return Some(
+            authlib::Outcome::RateLimited {
+                retry_after_secs: 0,
+            }
+            .user_message()
+            .to_string(),
+        );
+    }
+
+    if record.is_locked() {
+        return Some(format!("account '{username}' is locked"));
+    }
+    if record.has_legacy_password() {
+        return Some(format!(
+            "account '{username}' has a password stored in a format that predates \
+             this system's hashing; run `useradm passwd {username}` to reset it"
+        ));
+    }
+
+    None
+}
+
+/// The decision made once a password has actually been typed: `Ok(())` to
+/// admit, `Err(message)` to refuse — with an empty message where there is
+/// nothing to say beyond "no", which is every wrong password.
+///
+/// Also separated from stdin for testability, and the only place in this crate
+/// that adds to the shared tally.
+fn judge_password(
+    auth: &mut authlib::Authenticator,
+    record: &Record,
+    password: &str,
+) -> Result<(), String> {
+    let username = name_of(record);
+
+    match record.check_password(password) {
+        Auth::Accepted => {
+            // The run of failures is over, here and at every other prompt.
+            auth.reset(&username);
+            Ok(())
+        }
+        Auth::NoPassword => Err(format!(
+            "account '{username}' has no password set and cannot authenticate"
+        )),
+        // `Locked` and `Unusable` are refused by `refusal_before_prompting`
+        // and cannot normally reach here; they are matched anyway so that the
+        // decision stays exhaustive if `Record` ever answers one of them for a
+        // new reason. Like `NoPassword`, neither is charged: no password opens
+        // either door, so nothing typed at it was a guess.
+        Auth::Locked | Auth::Unusable => Err(String::new()),
+        Auth::Rejected => {
+            auth.note_failure(&username);
+            Err(String::new())
+        }
     }
 }
 
@@ -1532,6 +1627,188 @@ mod tests {
         r.set_groups(&owned);
         r.set_admin(admin);
         r
+    }
+
+    // --- The shared failed-attempt tally (`design-decisions.md` §354) ---
+    //
+    // Before these, guessing here was free: unlimited, untimed, and invisible
+    // to every other prompt's limit — at a prompt that asks for an
+    // administrator's password and prints the names to try first.
+
+    /// An `Authenticator` with no store behind it: the two paths do not exist,
+    /// so no test can read the real `/etc/users.yaml` or write the real
+    /// faillock file. The tally lives in memory for the life of the value.
+    fn scratch_authenticator() -> authlib::Authenticator {
+        let missing = std::path::Path::new("/nonexistent/polkit-tests");
+        authlib::Authenticator::with_stores(missing, missing)
+    }
+
+    /// Enough failures to be past the free allowance and unambiguously into
+    /// the delayed region — used by the tests that assert a count *stays* at
+    /// zero, where stopping at the allowance would prove nothing.
+    const FREE_ATTEMPTS_HEADROOM: u32 = authlib::FREE_ATTEMPTS + 3;
+
+    /// An admin whose password is `hunter2`.
+    fn admin_with_password(username: &str, password: &str) -> Record {
+        let mut r = test_user(1000, username, &["users", "wheel"], true);
+        r.set_password_with_salt(password, "0123456789abcdef")
+            .expect("a 16-character salt is storable");
+        r
+    }
+
+    #[test]
+    fn a_wrong_password_is_charged_to_the_shared_tally() {
+        let admin = admin_with_password("alice", "hunter2");
+        let mut auth = scratch_authenticator();
+
+        for expected in 1..=authlib::FREE_ATTEMPTS {
+            assert!(judge_password(&mut auth, &admin, "wrong").is_err());
+            assert_eq!(auth.failures("alice"), expected);
+        }
+
+        // The allowance is spent; the next attempt is refused before it is
+        // even asked for.
+        assert!(judge_password(&mut auth, &admin, "wrong").is_err());
+        assert!(refusal_before_prompting(&mut auth, &admin).is_some());
+    }
+
+    /// The right password ends the run — here and everywhere else, because the
+    /// tally is one tally. A user who mistypes twice and then succeeds does not
+    /// carry those two failures to the next prompt they meet.
+    #[test]
+    fn success_clears_the_count() {
+        let admin = admin_with_password("alice", "hunter2");
+        let mut auth = scratch_authenticator();
+
+        assert!(judge_password(&mut auth, &admin, "wrong").is_err());
+        assert!(judge_password(&mut auth, &admin, "wrong").is_err());
+        assert_eq!(auth.failures("alice"), 2);
+
+        assert!(judge_password(&mut auth, &admin, "hunter2").is_ok());
+        assert_eq!(auth.failures("alice"), 0);
+    }
+
+    /// Three doors no password opens: locked, no password stored, and a hash
+    /// in a format nothing can recompute. Guessing at any of them cannot
+    /// succeed, so there is no guess to charge — and charging one would hand
+    /// anybody a free way to keep the account's real owner waiting at *every*
+    /// prompt on the system.
+    #[test]
+    fn a_refusal_that_no_password_could_have_passed_is_not_an_attempt() {
+        let mut auth = scratch_authenticator();
+
+        let mut locked = admin_with_password("alice", "hunter2");
+        locked.set_locked(true);
+        for _ in 0..FREE_ATTEMPTS_HEADROOM {
+            assert!(refusal_before_prompting(&mut auth, &locked).is_some());
+            assert!(judge_password(&mut auth, &locked, "hunter2").is_err());
+        }
+        assert_eq!(auth.failures("alice"), 0);
+        assert!(auth.rate_limited("alice").is_none());
+
+        // An account with nothing in the password field at all.
+        let bare = test_user(1001, "bob", &["users"], true);
+        for _ in 0..FREE_ATTEMPTS_HEADROOM {
+            assert!(judge_password(&mut auth, &bare, "anything").is_err());
+        }
+        assert_eq!(auth.failures("bob"), 0);
+
+        // And an entry whose stored hash predates `posix::crypt`.
+        let mut legacy = test_user(1002, "dave", &["users"], true);
+        legacy.set(
+            userdb::field::PASSWORD_HASH,
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        );
+        for _ in 0..FREE_ATTEMPTS_HEADROOM {
+            assert!(refusal_before_prompting(&mut auth, &legacy).is_some());
+        }
+        assert_eq!(auth.failures("dave"), 0);
+    }
+
+    /// Once the wait is running, polkit refuses before it prints anything about
+    /// the account — and the refusal itself is not counted. Counting it would
+    /// let an attacker hold a real user out indefinitely by hammering a prompt
+    /// they already know is closed, each refusal pushing the expiry further
+    /// away.
+    #[test]
+    fn a_delayed_user_is_refused_and_the_refusal_is_not_counted() {
+        let admin = admin_with_password("alice", "hunter2");
+        let mut auth = scratch_authenticator();
+
+        while auth.rate_limited("alice").is_none() {
+            assert!(judge_password(&mut auth, &admin, "wrong").is_err());
+        }
+        let counted = auth.failures("alice");
+
+        for _ in 0..FREE_ATTEMPTS_HEADROOM {
+            assert!(refusal_before_prompting(&mut auth, &admin).is_some());
+        }
+        assert_eq!(auth.failures("alice"), counted);
+    }
+
+    /// The delay is checked before the account's state is, so a caller who is
+    /// being slowed down cannot tell "locked" from "wrong password" — the two
+    /// refusals a prober most wants to distinguish. Otherwise the limit would
+    /// itself become the oracle it exists to protect.
+    #[test]
+    fn the_delay_is_checked_before_any_account_state_is_disclosed() {
+        let mut locked = admin_with_password("alice", "hunter2");
+        locked.set_locked(true);
+        let mut auth = scratch_authenticator();
+
+        // Earn the delay against the same name by a route that does count.
+        while auth.rate_limited("alice").is_none() {
+            auth.note_failure("alice");
+        }
+
+        let refusal = refusal_before_prompting(&mut auth, &locked)
+            .expect("a delayed caller is refused");
+        assert!(
+            !refusal.contains("locked"),
+            "the limit disclosed what it was meant to hide: {refusal}"
+        );
+        assert!(
+            !refusal.contains("alice"),
+            "leaked the username: {refusal}"
+        );
+        assert!(
+            !refusal.chars().any(|c| c.is_ascii_digit()),
+            "leaked a countdown: {refusal}"
+        );
+    }
+
+    /// The point of the whole exercise: a delay earned at another prompt is
+    /// honoured here. `Authenticator::with_faillock` is what `login`, `su`,
+    /// `sudo` and the greeter share on a real system; two authenticators
+    /// pointed at one file stand in for two programs.
+    #[test]
+    fn polkit_honours_a_delay_earned_at_another_prompt() {
+        let dir = std::env::temp_dir().join("polkit-faillock-share-test");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("a scratch directory under the temp dir");
+        let faillock = dir.join("faillock");
+        let missing = std::path::Path::new("/nonexistent/polkit-tests");
+
+        // `login` (or `su`, or `sudo`) burns through the allowance.
+        {
+            let mut elsewhere =
+                authlib::Authenticator::with_stores(missing, missing).with_faillock(&faillock);
+            while elsewhere.rate_limited("alice").is_none() {
+                elsewhere.note_failure("alice");
+            }
+        }
+
+        // `polkit` starts fresh, reads the same file, and refuses — even the
+        // correct password does not skip a wait earned elsewhere.
+        let admin = admin_with_password("alice", "hunter2");
+        let mut auth =
+            authlib::Authenticator::with_stores(missing, missing).with_faillock(&faillock);
+        assert!(
+            refusal_before_prompting(&mut auth, &admin).is_some(),
+            "a delay earned at another prompt must be honoured here"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     // --- AuthResult ---

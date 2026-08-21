@@ -9,7 +9,13 @@ description = "SlateOS polkit - authorization framework (polkitd/pkexec/pkaction
 # looked to it like one with no administrators at all, and its own
 # `sha256(salt + password)` matched nothing any writer stored. See
 # `design-decisions.md` §330.
+#
+# `authlib` for the shared failed-attempt tally. Guessing at this prompt was
+# free and unlimited, and it is a prompt worth guessing at: it asks for an
+# *administrator's* password, and helpfully prints the list of names to try
+# first. See `design-decisions.md` §354.
 [dependencies]
+authlib = { path = "../authlib" }
 userdb = { path = "../userdb" }
 
 # The defensive lint set from `CLAUDE.md`. This crate answers "may this person

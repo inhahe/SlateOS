@@ -8144,6 +8144,7 @@ version = "0.1.0"
 name = "polkit"
 version = "0.1.0"
 dependencies = [
+ "authlib",
  "userdb",
 ]
 
@@ -10308,6 +10309,7 @@ version = "0.1.0"
 name = "sudo"
 version = "0.1.0"
 dependencies = [
+ "authlib",
  "userdb",
 ]
 

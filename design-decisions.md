@@ -29182,6 +29182,33 @@ comment because the failure is invisible until it fires, and because "one
 version constant per format" is the kind of rule that gets undone by the next
 person who sees three constants with the same value.
 
+### Addendum: the rule was undone at the very next merge, exactly as predicted
+
+The paragraph above guessed how this would be lost, and it took one merge. Lane
+B's `0f0d436df` ("rootfs: stage CPython, and cover non-ELF payload in the image
+manifest") rewrote `cmd_image_stamp` on `main` — correctly widening
+`_staged_elfs()` to `_staged_artifacts()`, since the image now carries a stdlib
+zip as well as ELFs — and, working from a tree that had never seen this entry,
+wrote `version {STAMP_VERSION}` back into the image header.
+
+Git could not have caught it. Both branches rewrote the same two lines, so it
+surfaced as an ordinary text conflict, and either side taken whole is wrong:
+ours loses the non-ELF payload, theirs loses the version split. The merge
+(`d5d94ac1a`) takes `_staged_artifacts()` from `main` and `IMAGE_STAMP_VERSION`
+from here, which is what neither branch could produce alone.
+
+Worth stating as its own lesson, since this arrangement guarantees more of
+them: **a conflict is not a request to choose a side.** When two lanes changed
+the same lines for unrelated reasons, "ours" and "theirs" are both regressions,
+and the merge is the only place the union can be written. The same merge had a
+second instance, and the harder kind — lane A's `_fastpy_toolchain()` demanded
+`PYTHONPATH` while lane B's new `_fastpy_dir()` already located the sibling
+checkout automatically. They never touched the same lines, so there was no
+conflict, and *because* there was no conflict nothing prompted anyone to connect
+them. `check` had been printing "this machine cannot resolve them" on worktrees
+that could resolve them all along. Textual conflicts are the merges git can
+find; these are the ones it cannot.
+
 
 ---
 

@@ -29823,6 +29823,254 @@ and `main` now calls `reload_appearance()` at startup rather than loading the
 file itself, so startup and reload cannot come to disagree about where the
 settings live or what a missing file means.
 
+## 501. The window frame's colours are resolved once, in the settings crate
+
+**Date:** 2026-08-21
+**Decided by:** Claude (autonomous)
+
+**In short:** Two programs draw the title bar at the top of every window — the
+compositor (the program that owns the screen) and the desktop shell (the program
+that draws the taskbar). Until now each one had its own private list of colours,
+and they did not match: if you switched the desktop to light mode, the shell
+switched and the compositor did not, so you got a dark title bar on a light
+desktop. The same was true of the accent colour and of the interface font size.
+The fix is that neither program is allowed to choose any more. There is now one
+list of frame colours, in the crate that owns the settings file, and both read
+it.
+
+### The problem, precisely
+
+The compositor's `DecorationTheme` was twelve hardcoded constants — a dark navy
+desktop, a blue-gray title bar — with a `Default` impl and no other constructor.
+It was marked `#[allow(dead_code)]`, which is what let one of its twelve fields
+(`close_button_hover`) sit unread for the whole life of the type.
+
+Three of the user's settings had no route into it:
+
+| Setting | What the shell did | What the compositor did |
+|---|---|---|
+| `theme_mode` (light/dark) | switched between Latte and Mocha | dark navy, always |
+| `accent_titlebars` + `accent_color` | recoloured the focused title bar | ignored |
+| `fonts.ui_size` | drew titles at the user's size | 16px, always |
+
+Increment 4b/4c had already routed the two *shape* settings (window corners,
+drop shadows) into the compositor. Colours and the title font were what was
+left, and they are the reason `known-issues.md`'s
+`TD-C-THE-DESKTOP-AND-THE-COMPOSITOR-BOTH-DRAW-WINDOW-TITLE-BARS` could not
+simply be closed by deleting the shell's duplicate: deleting first would have
+shipped a visible regression for every user in light mode, every user with an
+accent colour, and every user who had enlarged the interface font.
+
+### Why the resolution lives in `gui/appearance` and not in the compositor
+
+The obvious cheap fix was to copy `DesktopTheme::from_settings` — the light/dark
+table and the accent derivation — into the compositor. That was rejected. The
+copy would have been a second, independently-editable answer to "what colour is
+a title bar", which is exactly the defect
+`TD-THREE-INDEPENDENT-APPEARANCE-MODELS` describes, reintroduced inside the very
+entry that exists to remove a duplicate. Two renderers agree about a colour only
+if neither of them decides it.
+
+So `appearance::DecorationColors` holds the eleven resolved colours, with
+`for_mode(light)` for the base palette and `from_settings` for the palette after
+the user's accent choice. `gui/appearance` is where it belongs because it is
+the crate that already owns the settings, already depends on `guitk` for
+`Color`, and is already depended on by both renderers — adding it there created
+no new edge in the dependency graph.
+
+`readable_on` and `emphasized` moved there with it (the shell still needs them
+for the taskbar), and the shell's private `with_alpha` was deleted in favour of
+`guitk::theme::with_alpha`, which had been there all along.
+
+### Why the compositor still has a type of its own
+
+`DecorationTheme` survives, reduced to `from_settings` plus eleven `u32` fields.
+It is `DecorationColors` with the ARGB packing already done. The alternative —
+holding `DecorationColors` and packing at each blit — would convert five colours
+per window per frame for a value that changes only when the user changes it.
+`set_appearance` re-resolves it, which is the one place that already knows the
+settings changed.
+
+Its `Default` now defers to `AppearanceSettings::default()` rather than
+restating a palette. That is not tidiness: a compositor that has never loaded a
+settings file and one that loaded a file saying nothing unusual used to look
+different, and the difference was only ever visible on screen.
+
+### The desktop background is in the frame palette, and the shadow is real now
+
+`desktop_bg` is not part of a frame. It is in `DecorationColors` because it is
+the surface a frame is seen against, it is painted by the same process from the
+same palette, and splitting it out would mean a caller had to find two answers
+to assemble one screen.
+
+The shadow colour was the dead field's neighbour and turned out to be a third
+opinion: the dead constant said alpha `0x40`, and `render_shadow` actually drew
+with a local constant of `40` decimal. The palette now states `rgba(0, 0, 0, 40)`
+— what is actually drawn — and `render_shadow` reads it, so the colour of a
+shadow is stated in the same place as the colour of the bar above it. Nothing
+changed on screen.
+
+### The title font follows `ui_size`, and cannot follow `ui_font`
+
+`(DEFAULT_FONT_SIZE * scale)` became `(appearance.fonts.ui_size * scale)`. A
+window title is interface text, and someone who enlarged the interface font
+because they could not read 13pt has said something about window titles too.
+The default is 13.0 rather than the old 16.0, which is a visible change and the
+correct one: the shell's own decorator has drawn titles at 13pt × the role ratio
+all along, so 16 was one half of the disagreement rather than a considered size.
+
+`fonts.ui_font` still reaches nothing. `osfont::Family` is `Ui` or `Mono` and
+has no lookup by name, so no renderer in this tree can honour a font *family*
+— the shell's decorator does not either. That is a missing capability, not a
+missing wire, and it is tracked separately.
+
+### Verification
+
+Every test below was confirmed to be a real regression test by putting its bug
+back and watching it fail with the message that names it.
+
+| Test | Bug reintroduced |
+|---|---|
+| `the_two_modes_disagree_about_every_colour_a_frame_is_drawn_with` (appearance) | light `desktop_bg` copied from dark |
+| `a_focused_bar_is_legible_against_whatever_accent_it_was_given` (appearance) | accent bar keeps the base foreground |
+| `accented_title_bars_leave_the_unfocused_windows_in_the_base_palette` (appearance) | accent applied to the unfocused bar too |
+| `the_mode_still_decides_the_palette_when_the_accent_is_off` (appearance) | accent applied unconditionally |
+| `readable_on_answers_with_the_palettes_own_extremes` (appearance) | pure black and white instead of the palette's |
+| `emphasis_stays_visible_at_both_ends_of_the_range` (appearance) | emphasis darkens unconditionally |
+| `the_users_theme_mode_reaches_the_desktop_behind_the_windows` (compositor) | the twelve hardcoded colours |
+| `the_users_accent_reaches_the_title_bar_it_asked_for` (compositor) | as above |
+| `an_accent_title_bar_leaves_every_other_window_alone` (compositor) | as above |
+| `the_users_interface_font_size_reaches_the_window_title` (compositor) | the title font back to a constant |
+| `the_shells_window_colours_are_the_compositors_window_colours` (desktop) | the shell recolours a title bar itself |
+
+The last one is the load-bearing one. It fails the moment someone recolours a
+window in `DesktopTheme`, which is the natural place to do it and the wrong one,
+and it will keep failing for as long as the shell's duplicate decorator exists.
+When that decorator is deleted, the test goes with it.
+
+The compositor tests take their expected colours from `appearance`, never from
+`comp.theme` — reading the answer back out of the thing under test is precisely
+what the old hardcoded palette would also have passed.
+
+
+## 502. Double-click-to-maximize moves to the compositor rather than dying with the shell's decorator
+
+**Date:** 2026-08-21
+**Decided by:** Claude (autonomous)
+
+**In short:** Clicking a window's title bar twice quickly makes it fill the
+screen. That gesture was written into the desktop shell, and the shell's
+title-bar code was about to be deleted as a duplicate of the compositor's. But
+it was not a duplicate: the compositor had never implemented the gesture, so
+deleting the shell's copy would have removed double-click-to-maximize from the
+product entirely, with no test failing and nothing to notice. It was moved into
+the compositor instead. This entry records that, and the three smaller choices
+the move forced.
+
+### Why this was nearly a silent feature deletion
+
+`TD-C-THE-DESKTOP-AND-THE-COMPOSITOR-BOTH-DRAW-WINDOW-TITLE-BARS` had
+established over several increments that the shell's decorator was a strict
+subset of the compositor's: same buttons, same drag-to-move, and the compositor
+additionally does border-resize, which the shell never did. Five prerequisites
+were met to make the deletion regression-free. The natural next step is to
+delete and move on.
+
+The subset claim was true of *drawing* and true of *hit testing*, and false of
+one thing. `Hit::WindowTitleBar`'s `handle_press` arm read:
+
+```rust
+MouseEventKind::DoubleClick(_) => { /* ...toggle maximize... */ }
+```
+
+and grep for `DoubleClick` in `gui/compositor` found only a comment saying the
+compositor never emits it:
+
+> `Enter`/`Leave` and `DoubleClick` exist only on the client side and are never
+> produced here … double-click timing belongs with the widget that has to
+> honour it.
+
+So the compositor had deliberately declined to own double-click timing on the
+grounds that it is a *widget* concern — which is right for a widget inside a
+client's window, and wrong for a title bar, which is not a widget and belongs to
+no client. The comment was correct about the general case and had quietly
+misfiled the one surface the compositor itself draws.
+
+**The alternative considered and rejected:** leave the gesture in the shell and
+have the shell ask the compositor to maximize. Rejected because the shell does
+not receive the press. The compositor hit-tests its own decorations and consumes
+the event before the shell hears anything — that is the entire architecture the
+deletion exists to restore. A shell that owns the timing for an event it is
+never sent is not a design, it is the duplicate coming back in another form.
+
+### The three sub-decisions
+
+**1. The record keys on the window, not only on the time.**
+`last_title_press: Option<(WindowId, Instant)>`, not `Option<Instant>`. Two
+quick clicks on two *different* title bars are two clicks. Pairing them would
+maximize a window the user clicked once — a window moving on its own, which is
+the worst class of window-manager bug because the user cannot attribute it to
+anything they did. The alternative (time only) is one field smaller and
+indefensible.
+
+**2. Any intervening press breaks the pair.** Implemented as a `take()` at the
+top of the left-press path, before anything is dispatched, so that *only* a
+title-bar press can leave a record behind:
+
+```rust
+let previous_title_press = self.last_title_press.take();
+```
+
+Click a title bar, click the desktop, click the same title bar again — however
+fast — and that is two clicks, because the user went somewhere else and came
+back. The alternative is to clear the record only on presses that land
+somewhere "meaningful", which requires deciding what is meaningful and gets it
+wrong the first time something new is added. Clearing unconditionally and
+re-arming on the one path that wants it cannot drift.
+
+**3. A completed double-click does not re-arm.** The doubled branch leaves the
+record cleared (by the `take` above) rather than replacing it. Otherwise a third
+quick click pairs with the second and un-maximizes what the user just
+maximized — so a user who clicks three times in a hurry gets a window that
+flickers between states rather than settling. Three clicks are a double-click
+followed by a single click, which is what every other platform does.
+
+### Why the default is 400 ms and the clamp is 100–2000
+
+Both copied from `desktop::mouse_settings`, which has offered exactly that
+default and exactly that range since it was written. Nothing wires the user's
+choice through yet — that is
+`TD-C-THE-MOUSE-SETTINGS-PANEL-REACHES-NOTHING`, filed with this change and
+blocked on `apps/settings` gaining a compositor connection. Matching the
+numbers now means **wiring it up later changes nothing for a user who never
+touched the slider**, which is the property that makes the pending work safe to
+land at any time.
+
+The bounds are named constants (`MIN_DOUBLE_CLICK_MS`, `MAX_DOUBLE_CLICK_MS`)
+rather than literals in the `clamp` call, because the same two numbers appear in
+the clamp, in the doc comment and in the test, and three copies of a bound is
+how a bound comes to disagree with itself. The test asserts against the
+constants for the two edges and against a literal `250` for the interior — a
+clamp that returned a bound for *every* input would satisfy both edge
+assertions.
+
+### Testing a timing-sensitive gesture without flakiness
+
+The positive tests set the interval to its 2000 ms ceiling: no plausible
+scheduling delay between two synchronous method calls approaches two seconds.
+The negative test (`two_title_clicks_far_enough_apart_are_two_separate_clicks`)
+sets the 100 ms floor and sleeps 160 ms. The asymmetry is deliberate and is the
+whole trick: **a sleep can only overshoot**, so a loaded machine makes the gap
+*larger*, which is the direction the test already expects. There is no
+scheduling outcome in which this test fails spuriously. A test written the other
+way round — sleep a little and assert the clicks *did* pair — would be a genuine
+flake, because an overshoot breaks it.
+
+`click_title_bar` re-reads `title_bar_rect()` on every call rather than caching
+it, because a maximized window's title bar is somewhere else; a cached
+rectangle would make the "click again to restore" half of the test press empty
+desktop and pass for the wrong reason.
+
 ---
 
 ## §348 — A libc function that gnulib also defines must own its archive member, and the guard now asserts that instead of guessing which callers matter

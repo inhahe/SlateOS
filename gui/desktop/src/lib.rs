@@ -18,12 +18,22 @@
 //! plainly because assuming them is how wrong code gets written against this.
 //! Both replace doc claims that used to be here and were not true.
 //!
-//! - **It does not talk to the compositor.** There is no connection, no event
-//!   loop, and nothing that submits a rendered tree to a surface. The protocol
-//!   it would use exists (`guiremote`, including the window-list subscription
-//!   a taskbar needs); the loop that would use it does not. See
-//!   `known-issues.md`
+//! - **It does not talk to the compositor — it only speaks its language.**
+//!   There is no connection, no event loop, and nothing that submits a rendered
+//!   tree to a surface. What there now is: the shell is written *as if* there
+//!   were one. [`DesktopShell::apply_window_list`] takes the compositor's
+//!   window list and is the authority on what windows exist, and a taskbar
+//!   click produces [`ShellAction::Control`] — a request to be sent on, not a
+//!   change already made. So the missing piece is genuinely the loop and
+//!   nothing else, where it used to be the loop *and* a shell that kept its own
+//!   private answers. See `known-issues.md`
 //!   `TD-C-THE-SHELL-CAN-DRAW-ITSELF-AND-NOBODY-CAN-ASK-IT-TO`.
+//!
+//!   One remnant: [`DesktopShell::add_window`] and the geometry methods around
+//!   it ([`snap_window`](DesktopShell::snap_window),
+//!   [`toggle_maximize`](DesktopShell::toggle_maximize)) are the old private
+//!   window manager. They are used only by the demo and the tests, which have
+//!   no compositor to be told by, and should go when the loop lands.
 //! - **Theme support reaches five surfaces, not the desktop.** The appearance
 //!   settings are read and honoured by [`DesktopShell`]'s own render methods.
 //!   The 49 modules beside it — every settings page, dialog and OSD — each hold
@@ -106,13 +116,23 @@ pub mod window_rules;
 mod pointer_tests;
 
 use appearance::config;
-use appearance::{AppearanceSettings, TaskbarStyle, TransparencyLevel};
+use appearance::{
+    AppearanceSettings, DecorationColors, TaskbarStyle, TransparencyLevel, emphasized, readable_on,
+};
+// The protocol's words, not its wire. `ShellControlAction` is what a taskbar
+// button asks for and `WindowInfo` is what a taskbar is drawn from; re-exported
+// below so a caller wiring the shell to a compositor need not name `guiremote`
+// itself. `Layer` arrives with them because the list carries the shell's own
+// surfaces too, and telling those apart is the whole reason the field exists.
+pub use guiremote::control::{Layer, ShellControlAction};
+pub use guiremote::window_list::WindowInfo;
 use guitk::color::Color;
 use guitk::event::{Key, KeyEvent, Modifiers, MouseButton, MouseEvent, MouseEventKind};
 use guitk::render::RenderTree;
 use guitk::step;
 use guitk::style::{Border, CornerRadii, Shadow};
 use guitk::text;
+use guitk::theme::with_alpha;
 use guitk::wheel;
 use launcher::{AppEntry, Category};
 // The same zone engine the libc's `localtime`, osh's `printf '%(…)T'`, the
@@ -268,16 +288,6 @@ const POWER_MENU_GAP: f32 = 6.0;
 /// Distance from a popup row's left edge to the start of its label.
 const POWER_MENU_TEXT_INSET: f32 = 14.0;
 
-// --- Window decorations ----------------------------------------------------
-
-const TITLE_BAR_HEIGHT: f32 = 30.0;
-const WINDOW_BUTTON_SIZE: f32 = 16.0;
-/// Distance between the left edges of two adjacent title-bar buttons.
-const WINDOW_BUTTON_PITCH: f32 = 24.0;
-/// Distance from the window's right edge to the left edge of the close button.
-const WINDOW_BUTTON_MARGIN_RIGHT: f32 = 30.0;
-const WINDOW_BUTTON_MARGIN_TOP: f32 = 7.0;
-
 // --- Drop shadows ----------------------------------------------------------
 
 /// The shadow every floating surface casts — windows, the start menu, the
@@ -376,10 +386,11 @@ pub struct WindowGeometry {
 impl ManagedWindow {
     /// The window's outer rectangle, title bar included.
     ///
-    /// The only part of a window's geometry that is the window's own: it comes
-    /// from the compositor in physical pixels and is not the shell's to scale.
-    /// Everything drawn *around* it is — see
-    /// [`window_chrome`](DesktopShell::window_chrome).
+    /// Comes from the compositor in physical pixels and is not the shell's to
+    /// scale. *Where* a window is, the shell may know — the taskbar and the
+    /// hit test both need it. *What its frame looks like* it may not: the
+    /// compositor owns the decorations, and drew them twice until the shell's
+    /// copy was deleted.
     #[must_use]
     pub fn frame_rect(&self) -> Rect {
         Rect::new(
@@ -389,25 +400,6 @@ impl ManagedWindow {
             self.height as f32,
         )
     }
-}
-
-/// Every rectangle of one window's decorations, resolved together.
-///
-/// Resolved together, and by the shell rather than by the window, because the
-/// sizes depend on the user's display scaling: a `ManagedWindow` knows where it
-/// is but not how large a title bar this desktop draws.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct WindowChrome {
-    /// The whole window, decorations included.
-    pub frame: Rect,
-    /// The title bar, across the top of the frame.
-    pub title_bar: Rect,
-    /// What the client owns — everything below the title bar.
-    pub content: Rect,
-    /// The buttons, right to left.
-    pub close: Rect,
-    pub maximize: Rect,
-    pub minimize: Rect,
 }
 
 /// Window state.
@@ -457,13 +449,13 @@ pub enum Hit {
     /// and must **not** dismiss it. A point off the popup is not this variant
     /// at all, which is how the two are told apart.
     CalendarControl(calendar::CalendarHit),
-    /// A title-bar button.
-    WindowClose(WindowId),
-    WindowMaximize(WindowId),
-    WindowMinimize(WindowId),
-    /// A window's title bar, away from its buttons.
-    WindowTitleBar(WindowId),
-    /// A window's content area, which belongs to the client, not the shell.
+    /// A window, anywhere on it.
+    ///
+    /// Not subdivided into title bar and content, because the parts of a
+    /// window that are not the client's — the title bar, its buttons, the
+    /// resize borders — are the compositor's, and it hit-tests them itself
+    /// before this shell is told the pointer moved at all. A press that
+    /// reaches here landed on the client.
     WindowContent(WindowId),
     /// Bare desktop.
     Desktop,
@@ -498,6 +490,29 @@ pub enum ShellAction {
     Consumed,
     /// Start the program at this path. Implies [`Consumed`](Self::Consumed).
     Launch(String),
+    /// Ask the compositor to act on a window the shell does not own. Implies
+    /// [`Consumed`](Self::Consumed).
+    ///
+    /// A taskbar button does not minimise a window; it *asks* for one to be
+    /// minimised. The distinction is the difference between a shell and a
+    /// second window manager: the compositor owns whether a window is
+    /// minimised, focused and stacked, and a shell that decided those for
+    /// itself would hold a second answer that drifts from the first the moment
+    /// anything else — an Alt-Tab, the window's own close button, a program
+    /// exiting — changes one without telling the other.
+    ///
+    /// The caller sends this on as
+    /// [`guiremote::control::RequestBody::ShellControl`] and learns the result
+    /// the same way it learns everything else about the desktop: from the next
+    /// window list, fed back in through
+    /// [`apply_window_list`](DesktopShell::apply_window_list). Nothing about
+    /// the shell's own state changes here, which is why a click that is refused
+    /// — the window closed between the list the button was drawn from and the
+    /// click — needs no undo.
+    Control {
+        window: WindowId,
+        action: ShellControlAction,
+    },
 }
 
 /// A left-button press at a point — the first event a click delivers.
@@ -661,13 +676,17 @@ pub struct DesktopTheme {
     /// taskbar *is* the accent colour, an accent-coloured glyph on it would be
     /// invisible; this field is then the contrasting colour instead.
     pub taskbar_accent: Color,
-    pub window_border_color: Color,
-    pub window_title_bg: Color,
-    pub window_title_fg: Color,
-    pub window_title_inactive_bg: Color,
-    /// Title text on an unfocused window, whose background may differ from the
-    /// focused one by more than a shade once accented title bars are on.
-    pub window_title_inactive_fg: Color,
+    /// The hairline around the shell's own floating panels — the start menu,
+    /// the power popup.
+    ///
+    /// Taken from the window frame's border rather than chosen separately, so
+    /// that a panel and a window sitting side by side are outlined in the same
+    /// shade. It is not a *window's* border: the shell draws no window borders.
+    pub panel_border_color: Color,
+    /// The emptiness behind every window, painted by the compositor.
+    ///
+    /// Kept here because the shell reports it — the desktop is the surface its
+    /// panels are seen against — not because the shell paints it.
     pub desktop_bg: Color,
     /// The theme's accent, as drawn on ordinary surfaces.
     pub accent_color: Color,
@@ -687,19 +706,19 @@ impl Default for DesktopTheme {
 
 impl DesktopTheme {
     /// The dark palette (Catppuccin Mocha), before any setting is applied.
+    ///
+    /// The border and desktop fields are not this crate's to choose — see
+    /// [`frame_fields_from`](Self::frame_fields_from).
     #[must_use]
     pub fn dark() -> Self {
+        let frame = DecorationColors::for_mode(false);
         Self {
             taskbar_bg: Color::from_hex(0x1E1E2E),
             taskbar_fg: Color::from_hex(0xCDD6F4),
             taskbar_active_bg: Color::from_hex(0x45475A),
             taskbar_accent: Color::from_hex(0x89B4FA),
-            window_border_color: Color::from_hex(0x585B70),
-            window_title_bg: Color::from_hex(0x313244),
-            window_title_fg: Color::from_hex(0xCDD6F4),
-            window_title_inactive_bg: Color::from_hex(0x1E1E2E),
-            window_title_inactive_fg: Color::from_hex(0xA6ADC8),
-            desktop_bg: Color::from_hex(0x11111B),
+            panel_border_color: frame.border_focused,
+            desktop_bg: frame.desktop_bg,
             accent_color: Color::from_hex(0x89B4FA),
             start_menu_bg: Color::from_hex(0x1E1E2E),
             start_menu_fg: Color::from_hex(0xCDD6F4),
@@ -716,17 +735,14 @@ impl DesktopTheme {
     /// on top lands on the same role in either mode.
     #[must_use]
     pub fn light() -> Self {
+        let frame = DecorationColors::for_mode(true);
         Self {
             taskbar_bg: Color::from_hex(0xEFF1F5),
             taskbar_fg: Color::from_hex(0x4C4F69),
             taskbar_active_bg: Color::from_hex(0xBCC0CC),
             taskbar_accent: Color::from_hex(0x1E66F5),
-            window_border_color: Color::from_hex(0xACB0BE),
-            window_title_bg: Color::from_hex(0xCCD0DA),
-            window_title_fg: Color::from_hex(0x4C4F69),
-            window_title_inactive_bg: Color::from_hex(0xEFF1F5),
-            window_title_inactive_fg: Color::from_hex(0x6C6F85),
-            desktop_bg: Color::from_hex(0xDCE0E8),
+            panel_border_color: frame.border_focused,
+            desktop_bg: frame.desktop_bg,
             accent_color: Color::from_hex(0x1E66F5),
             start_menu_bg: Color::from_hex(0xEFF1F5),
             start_menu_fg: Color::from_hex(0x4C4F69),
@@ -734,6 +750,21 @@ impl DesktopTheme {
             overlay_fg: Color::from_hex(0x4C4F69),
             overlay_selected_bg: Color::from_hex(0xBCC0CC),
         }
+    }
+
+    /// Take the two colours the compositor also uses from `frame`, leaving the
+    /// shell's own surfaces alone.
+    ///
+    /// Neither is the shell's to choose. The desktop background is painted by
+    /// the compositor and merely *reported* here, and the border is the one
+    /// drawn around every window on that desktop — a start menu outlined in a
+    /// different shade from the window beside it looks like a bug, and would
+    /// be, because two processes had each picked a colour. Everything else in
+    /// the theme — the taskbar, the menu surfaces, the overlays — is drawn by
+    /// this process alone and stays here.
+    fn frame_fields_from(&mut self, frame: DecorationColors) {
+        self.panel_border_color = frame.border_focused;
+        self.desktop_bg = frame.desktop_bg;
     }
 
     /// Resolve a full palette from what the user chose.
@@ -763,13 +794,10 @@ impl DesktopTheme {
             theme.taskbar_accent = readable_on(accent);
         }
 
-        if settings.accent_titlebars {
-            theme.window_title_bg = accent;
-            theme.window_title_fg = readable_on(accent);
-            // The *inactive* bar deliberately keeps the base palette: an
-            // accent that marks every window marks none of them, and telling
-            // the focused window apart is the title bar's first job.
-        }
+        // Not derived here. The border and the desktop belong to the frames the
+        // compositor draws; deriving them twice is how the two processes come
+        // to disagree. See [`DesktopTheme::frame_fields_from`].
+        theme.frame_fields_from(DecorationColors::from_settings(settings));
 
         theme.taskbar_bg = with_alpha(theme.taskbar_bg, taskbar_alpha(settings));
         let overlay = settings.transparency.panel_alpha();
@@ -778,37 +806,6 @@ impl DesktopTheme {
 
         theme
     }
-}
-
-/// Black-ish or white-ish, whichever can be read on `bg`.
-///
-/// The endpoints are the palettes' own extremes rather than pure `#000`/`#fff`
-/// so that accented surfaces still look like part of this desktop. Perceived
-/// brightness uses the usual luma weights: the eye is far more sensitive to
-/// green than to blue, so an average of the channels would call a saturated
-/// blue "bright" and put black text on it.
-fn readable_on(bg: Color) -> Color {
-    let luma = 0.299 * f32::from(bg.r) + 0.587 * f32::from(bg.g) + 0.114 * f32::from(bg.b);
-    if luma > 140.0 {
-        Color::from_hex(0x11111B)
-    } else {
-        Color::from_hex(0xEFF1F5)
-    }
-}
-
-/// A visibly different shade of `color`, for the pressed state of a control
-/// whose resting state is already `color`.
-///
-/// Moves away from whichever extreme `color` is nearer, so the emphasis is
-/// visible on both a pale and a deep accent instead of vanishing at one end.
-fn emphasized(color: Color) -> Color {
-    let toward = readable_on(color);
-    color.lerp(toward, 0.25)
-}
-
-/// `color` at a given opacity.
-fn with_alpha(color: Color, alpha: u8) -> Color {
-    Color::rgba(color.r, color.g, color.b, alpha)
 }
 
 /// How opaque the taskbar's own panel is.
@@ -1017,13 +1014,6 @@ impl DesktopShell {
         CornerRadii::all(self.scale(self.appearance.window_corners.radius()))
     }
 
-    /// [`corner_radii`](Self::corner_radii), rounded across the top only — for
-    /// a title bar, which shares its lower edge with the client area.
-    #[must_use]
-    pub fn top_corner_radii(&self) -> CornerRadii {
-        CornerRadii::top(self.scale(self.appearance.window_corners.radius()))
-    }
-
     /// The taskbar panel.
     #[must_use]
     pub fn taskbar_rect(&self) -> Rect {
@@ -1230,38 +1220,6 @@ impl DesktopShell {
         self.power_menu_open = !self.power_menu_open;
     }
 
-    /// Every rectangle of one window's decorations.
-    ///
-    /// The shell's, not the window's, because the sizes depend on the display
-    /// scaling — see [`WindowChrome`].
-    #[must_use]
-    pub fn window_chrome(&self, window: &ManagedWindow) -> WindowChrome {
-        let frame = window.frame_rect();
-
-        // A window shorter than the title bar it would be given gets a title
-        // bar the height of the window and an empty content area, rather than
-        // a content rect of negative height that `contains` would answer for
-        // no point at all — or worse, that a renderer would draw inverted.
-        let bar_h = self.scale(TITLE_BAR_HEIGHT).min(frame.h);
-        let title_bar = Rect::new(frame.x, frame.y, frame.w, bar_h);
-        let content = Rect::new(frame.x, frame.y + bar_h, frame.w, frame.h - bar_h);
-
-        let size = self.scale(WINDOW_BUTTON_SIZE);
-        let pitch = self.scale(WINDOW_BUTTON_PITCH);
-        let button_y = frame.y + self.scale(WINDOW_BUTTON_MARGIN_TOP);
-        let close_x = frame.x + frame.w - self.scale(WINDOW_BUTTON_MARGIN_RIGHT);
-        let button = |slot: f32| Rect::new(close_x - slot * pitch, button_y, size, size);
-
-        WindowChrome {
-            frame,
-            title_bar,
-            content,
-            close: button(0.0),
-            maximize: button(1.0),
-            minimize: button(2.0),
-        }
-    }
-
     /// The programs the start menu lists, in menu order.
     ///
     /// System actions — shutdown, lock, log out — are deliberately excluded:
@@ -1413,25 +1371,13 @@ impl DesktopShell {
         }
 
         // `visible_windows` is sorted bottom-to-top, and the topmost window is
-        // the one that receives the click.
+        // the one that receives the click. The frame is not subdivided: the
+        // decorations on it are the compositor's, and it consumes a press on
+        // one of them before this shell hears about it.
         for window in self.visible_windows().into_iter().rev() {
-            let chrome = self.window_chrome(window);
-            if !chrome.frame.contains(x, y) {
-                continue;
+            if window.frame_rect().contains(x, y) {
+                return Hit::WindowContent(window.id);
             }
-            if chrome.close.contains(x, y) {
-                return Hit::WindowClose(window.id);
-            }
-            if chrome.maximize.contains(x, y) {
-                return Hit::WindowMaximize(window.id);
-            }
-            if chrome.minimize.contains(x, y) {
-                return Hit::WindowMinimize(window.id);
-            }
-            if chrome.title_bar.contains(x, y) {
-                return Hit::WindowTitleBar(window.id);
-            }
-            return Hit::WindowContent(window.id);
         }
 
         Hit::Desktop
@@ -1442,9 +1388,13 @@ impl DesktopShell {
     /// Returns what the caller should do with it — see [`ShellAction`].
     pub fn handle_mouse(&mut self, event: &MouseEvent) -> ShellAction {
         match event.kind {
-            MouseEventKind::Press(button) => self.handle_press(event.x, event.y, button, false),
-            MouseEventKind::DoubleClick(button) => {
-                self.handle_press(event.x, event.y, button, true)
+            // The two are the same event to this shell. Nothing it draws does
+            // anything on the second click that it did not do on the first:
+            // double-click-to-maximize is a *title bar* gesture, and the title
+            // bar belongs to the compositor, which resolves the timing itself
+            // rather than being told about it here.
+            MouseEventKind::Press(button) | MouseEventKind::DoubleClick(button) => {
+                self.handle_press(event.x, event.y, button)
             }
             MouseEventKind::Scroll { dy, .. } => self.handle_scroll(event.x, event.y, dy),
             // A release belongs to whoever took the press, so chrome swallows
@@ -1482,7 +1432,7 @@ impl DesktopShell {
         )
     }
 
-    fn handle_press(&mut self, x: f32, y: f32, button: MouseButton, double: bool) -> ShellAction {
+    fn handle_press(&mut self, x: f32, y: f32, button: MouseButton) -> ShellAction {
         let hit = self.hit_test(x, y);
 
         // A click anywhere outside an open menu dismisses it, and is spent
@@ -1574,38 +1524,30 @@ impl DesktopShell {
             }
             Hit::StartMenuPanel | Hit::PowerMenuPanel | Hit::TaskbarPanel => ShellAction::Consumed,
             Hit::TaskbarButton(index) => {
-                let id = self.visible_windows().get(index).map(|w| w.id);
-                if let Some(id) = id {
-                    // The button of the window you are already looking at
-                    // minimises it — the taskbar button is a toggle, not a
-                    // second way to focus what is already focused.
-                    if self.focused_window == Some(id) {
-                        self.minimize_window(id);
-                    } else {
-                        self.focus_window(id);
-                    }
+                match self.visible_windows().get(index).map(|w| w.id) {
+                    Some(id) => ShellAction::Control {
+                        window: id,
+                        // The button of the window you are already looking at
+                        // minimises it — the taskbar button is a toggle, not a
+                        // second way to focus what is already focused.
+                        action: if self.focused_window == Some(id) {
+                            ShellControlAction::Minimize
+                        } else {
+                            // `Activate`, not `Restore`: a window minimised
+                            // while maximised has to come back maximised, and
+                            // restoring would silently drop a state the user
+                            // never asked to leave. See the compositor's
+                            // `activate_window`.
+                            ShellControlAction::Activate
+                        },
+                    },
+                    // The button is gone from under the click — the window
+                    // closed between the frame it was drawn in and this press.
+                    // Consumed rather than passed on: the click landed on the
+                    // taskbar, and a taskbar must not leak clicks to whatever
+                    // is behind it just because a button vanished.
+                    None => ShellAction::Consumed,
                 }
-                ShellAction::Consumed
-            }
-            Hit::WindowClose(id) => {
-                self.remove_window(id);
-                ShellAction::Consumed
-            }
-            Hit::WindowMaximize(id) => {
-                self.focus_window(id);
-                self.toggle_maximize(id);
-                ShellAction::Consumed
-            }
-            Hit::WindowMinimize(id) => {
-                self.minimize_window(id);
-                ShellAction::Consumed
-            }
-            Hit::WindowTitleBar(id) => {
-                self.focus_window(id);
-                if double {
-                    self.toggle_maximize(id);
-                }
-                ShellAction::Consumed
             }
             Hit::WindowContent(id) => {
                 self.focus_window(id);
@@ -1727,6 +1669,110 @@ impl DesktopShell {
         self.windows.insert(id, window);
         self.focus_window(id);
         id
+    }
+
+    /// Replace what the shell believes about the desktop's windows with what
+    /// the compositor just said.
+    ///
+    /// This is the authority. Everything a taskbar shows — which buttons exist,
+    /// what they are labelled, which one is lit — comes from here, because the
+    /// compositor is the only thing that knows: a window can appear, be
+    /// retitled, be minimised by its own program or vanish without the shell
+    /// being involved at all. [`add_window`](Self::add_window) and its
+    /// neighbours remain for the demo and the tests, which have no compositor
+    /// to be told by; a live shell calls this and nothing else.
+    ///
+    /// # What is deliberately dropped
+    ///
+    /// **Windows outside [`Layer::Normal`].** The list describes every surface
+    /// on the display, the shell's own included — a taskbar that listed itself,
+    /// the wallpaper and its own start menu would be mostly buttons for itself.
+    /// `Layer` is the field that tells them apart, and this is the only place
+    /// that reads it.
+    ///
+    /// **Geometry.** A projected window's rectangle is left at zero, and that is
+    /// not a placeholder: `WindowInfo` carries no geometry because the shell
+    /// does not place windows — the compositor does — so there is nothing
+    /// truthful to put there. The one thing that would read it is
+    /// [`Hit::WindowContent`], which a live session never reaches: the
+    /// compositor routes a press to the topmost window containing it, so a
+    /// click on another program's window is delivered to that program and never
+    /// offered to the shell. A zero rectangle matches nothing, which is exactly
+    /// the right answer to a question that is never asked.
+    ///
+    /// # What is kept
+    ///
+    /// Per-window shell-local state that the compositor has no opinion about —
+    /// currently which virtual desktop a window is on, and its icon. A window
+    /// already known keeps those across the update; a newly-seen one gets the
+    /// current desktop, which is where a window that just appeared belongs.
+    ///
+    /// Stacking comes from the list's own order, which the compositor emits
+    /// bottom-to-top, so `visible_windows().last()` is the topmost window here
+    /// for the same reason it is there.
+    pub fn apply_window_list(&mut self, list: &[WindowInfo]) {
+        let mut kept: BTreeMap<WindowId, ManagedWindow> = BTreeMap::new();
+        let mut focused = None;
+
+        for (index, info) in list.iter().enumerate() {
+            if info.layer != Layer::Normal {
+                continue;
+            }
+            let id = WindowId(info.id);
+            let previous = self.windows.get(&id);
+            if info.focused {
+                focused = Some(id);
+            }
+            kept.insert(
+                id,
+                ManagedWindow {
+                    id,
+                    title: info.title.clone(),
+                    x: previous.map_or(0, |w| w.x),
+                    y: previous.map_or(0, |w| w.y),
+                    width: previous.map_or(0, |w| w.width),
+                    height: previous.map_or(0, |w| w.height),
+                    state: if info.minimized {
+                        WindowState::Minimized
+                    } else if info.maximized {
+                        WindowState::Maximized
+                    } else {
+                        WindowState::Normal
+                    },
+                    desktop: previous.map_or(self.current_desktop, |w| w.desktop),
+                    focused: info.focused,
+                    // Both flags have to hold: the compositor distinguishes a
+                    // window that is unmapped from one that is minimised, and a
+                    // taskbar button belongs to the second but not the first.
+                    visible: info.visible && !info.minimized,
+                    // `WindowInfo::pid` is the compositor's `u64`; the shell's
+                    // field is a `u32` for the same reason a pid is one
+                    // everywhere else. Truncating would make two processes
+                    // indistinguishable to a "group this program's windows"
+                    // feature, so it saturates instead — a pid that large is
+                    // already outside anything the system can produce.
+                    pid: u32::try_from(info.pid).unwrap_or(u32::MAX),
+                    icon_id: previous.map_or(0, |w| w.icon_id),
+                    z_order: u32::try_from(index).unwrap_or(u32::MAX),
+                    restored: previous.and_then(|w| w.restored),
+                },
+            );
+        }
+
+        // Snap history is keyed by window id and nothing else prunes it, so a
+        // window that has gone would leave an entry behind for the lifetime of
+        // the session — one per snapped-then-closed window.
+        for id in self.windows.keys() {
+            if !kept.contains_key(id) {
+                self.snap.history.remove(id.0);
+            }
+        }
+
+        self.windows = kept;
+        // Taken from the list rather than preserved: the compositor is the
+        // authority on focus too, and "no window is focused" is a state it can
+        // genuinely be in — every window minimised, or the desktop empty.
+        self.focused_window = focused;
     }
 
     /// Remove a window.
@@ -2363,97 +2409,6 @@ impl DesktopShell {
         tree
     }
 
-    /// Render window decorations (title bar, borders) for all visible windows.
-    pub fn render_window_decorations(&self) -> RenderTree {
-        let mut tree = RenderTree::new();
-
-        let radii = self.corner_radii();
-        let top_radii = self.top_corner_radii();
-        // The buttons are round when the windows are: a circular close button
-        // beside a square corner is the mismatch, not the consistency.
-        let button_radii =
-            CornerRadii::all(radii.top_left.min(self.scale(WINDOW_BUTTON_SIZE) / 2.0));
-
-        for window in self.visible_windows() {
-            let chrome = self.window_chrome(window);
-
-            // A shadow under the whole frame, before anything that casts it.
-            // Maximized and fullscreen windows have no edge to cast from —
-            // there is nothing beside them for a shadow to fall on, and one
-            // drawn anyway would bleed over the screen border.
-            if self.appearance.drop_shadows
-                && !matches!(
-                    window.state,
-                    WindowState::Maximized | WindowState::Fullscreen
-                )
-            {
-                shadow(&mut tree, chrome.frame, radii);
-            }
-
-            // Title bar. The foreground travels with the background: with
-            // accented title bars the two differ by more than a shade, so one
-            // shared text colour would be unreadable on one of them.
-            let (title_bg, title_fg) = if window.focused {
-                (self.theme.window_title_bg, self.theme.window_title_fg)
-            } else {
-                (
-                    self.theme.window_title_inactive_bg,
-                    self.theme.window_title_inactive_fg,
-                )
-            };
-
-            fill_round(&mut tree, chrome.title_bar, title_bg, top_radii);
-
-            // Title text
-            let title: String = window.title.chars().take(40).collect();
-            tree.text(
-                chrome.title_bar.x + self.scale(12.0),
-                chrome.title_bar.y + self.scale(8.0),
-                &title,
-                title_fg,
-                self.font_size(TextRole::Body),
-            );
-
-            // Window control buttons, right to left.
-            fill_round(
-                &mut tree,
-                chrome.close,
-                Color::from_hex(0xF38BA8),
-                button_radii,
-            );
-            tree.text(
-                chrome.close.x + self.scale(3.0),
-                chrome.close.y + self.scale(1.0),
-                "x",
-                Color::WHITE,
-                self.font_size(TextRole::Caption),
-            );
-            fill_round(
-                &mut tree,
-                chrome.maximize,
-                Color::from_hex(0xA6E3A1),
-                button_radii,
-            );
-            fill_round(
-                &mut tree,
-                chrome.minimize,
-                Color::from_hex(0xF9E2AF),
-                button_radii,
-            );
-
-            // Border
-            stroke_round(
-                &mut tree,
-                chrome.frame,
-                self.theme.window_border_color,
-                self.scale(1.0),
-                radii,
-            );
-        }
-
-        tree
-    }
-
     /// Render the Alt+Tab window switcher overlay.
     pub fn render_alt_tab(&self) -> Option<RenderTree> {
         if !self.alt_tab_active {
@@ -2543,7 +2498,7 @@ impl DesktopShell {
         stroke_round(
             &mut tree,
             menu,
-            self.theme.window_border_color,
+            self.theme.panel_border_color,
             self.scale(1.0),
             radii,
         );
@@ -2663,7 +2618,7 @@ impl DesktopShell {
                 foreground: self.theme.start_menu_fg,
                 border: Border {
                     width: self.scale(1.0),
-                    color: self.theme.window_border_color,
+                    color: self.theme.panel_border_color,
                 },
                 radii,
                 font_size: self.font_size(TextRole::Item),
@@ -3087,43 +3042,32 @@ mod theme_tests {
         assert_eq!(theme.taskbar_fg, DesktopTheme::dark().taskbar_fg);
     }
 
-    /// Accenting title bars must not cost the focused/unfocused distinction,
-    /// and must not leave the inactive bar's text on the wrong background.
+    /// The two colours this shell shares with the compositor are the
+    /// compositor's, whatever the settings say.
+    ///
+    /// The shell draws no window frames — the compositor does — but it still
+    /// draws *against* them: its panels are outlined in the frame border and
+    /// sit on the desktop background. Those two it must read rather than
+    /// choose, or the panel beside a window is outlined in a different shade
+    /// from the window. The test fails the moment someone reintroduces a
+    /// literal here, which is the natural place to put one and the wrong one.
     #[test]
-    fn accented_title_bars_still_mark_only_the_focused_window() {
+    fn the_shell_reads_its_frame_colours_rather_than_choosing_them() {
         for &accent in AccentColor::presets() {
             for mode in [ThemeMode::Dark, ThemeMode::Light] {
-                let mut s = settings();
-                s.theme_mode = mode;
-                s.accent_color = accent;
-                s.accent_titlebars = true;
-                let theme = DesktopTheme::from_settings(&s);
-                let base = if mode == ThemeMode::Light {
-                    DesktopTheme::light()
-                } else {
-                    DesktopTheme::dark()
-                };
+                for accent_titlebars in [false, true] {
+                    let mut s = settings();
+                    s.theme_mode = mode;
+                    s.accent_color = accent;
+                    s.accent_titlebars = accent_titlebars;
 
-                assert_eq!(theme.window_title_bg, s.effective_accent());
-                assert_ne!(theme.window_title_bg, theme.window_title_inactive_bg);
-                assert_eq!(
-                    theme.window_title_inactive_bg,
-                    base.window_title_inactive_bg
-                );
+                    let theme = DesktopTheme::from_settings(&s);
+                    let frame = DecorationColors::from_settings(&s);
+                    let what = format!("{mode:?} {accent:?} accent_titlebars={accent_titlebars}");
 
-                let active = contrast(theme.window_title_fg, theme.window_title_bg);
-                assert!(
-                    active >= 4.5,
-                    "{mode:?} {accent:?}: active title {active:.2}"
-                );
-                let inactive = contrast(
-                    theme.window_title_inactive_fg,
-                    theme.window_title_inactive_bg,
-                );
-                assert!(
-                    inactive >= 3.0,
-                    "{mode:?} {accent:?}: inactive title {inactive:.2}"
-                );
+                    assert_eq!(theme.panel_border_color, frame.border_focused, "{what}");
+                    assert_eq!(theme.desktop_bg, frame.desktop_bg, "{what}");
+                }
             }
         }
     }

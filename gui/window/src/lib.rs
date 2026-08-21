@@ -77,7 +77,7 @@ use guiremote::control::{CursorShape, DisplayInfo, RequestBody, ResponseBody, Wi
 
 pub use guiremote::client::{ClientError as ConnectionError, Transport as ConnectionTransport};
 pub use guiremote::control::{
-    CursorShape as Cursor, DisplayInfo as Display, Layer, WindowSpec as Spec,
+    CursorShape as Cursor, DisplayInfo as Display, Layer, ShellControlAction, WindowSpec as Spec,
 };
 /// What a shell learns about the windows it does not own. See
 /// [`EventLoop::watch_desktop`].
@@ -706,6 +706,28 @@ impl<T: Transport> EventLoop<T> {
     /// As [`Connection::confirm`].
     pub fn watch_desktop(&mut self, on: bool) -> Result<(), Error<T>> {
         self.conn.subscribe_window_list(on)
+    }
+
+    /// Activate, minimise, restore, maximise or close a window this loop does
+    /// not own.
+    ///
+    /// The other half of [`watch_desktop`](Self::watch_desktop), and for the
+    /// same callers: a list of the desktop's windows is only useful to a shell
+    /// that can then act on one. `window` is an id from
+    /// [`desktop_windows`](Self::desktop_windows) — this loop's own windows go
+    /// through [`WindowHandle`], which needs no such privilege.
+    ///
+    /// # Errors
+    ///
+    /// As [`Connection::confirm`]. A refusal usually means the window closed
+    /// between the list the button was drawn from and the click, which is an
+    /// ordinary race: a shell should repaint rather than treat it as a fault.
+    pub fn control_window(
+        &mut self,
+        window: u64,
+        action: ShellControlAction,
+    ) -> Result<(), Error<T>> {
+        self.conn.shell_control(window, action)
     }
 
     /// Tell the compositor the user's appearance settings have changed on disk.

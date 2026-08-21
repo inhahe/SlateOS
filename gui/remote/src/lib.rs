@@ -392,6 +392,9 @@ pub enum DecodeError {
     /// *scene* frame, so that a limit hit names the frame that hit it even if
     /// the two limits later diverge.
     TooManyListedWindows(u32),
+    /// A [`ShellControlAction`](control::ShellControlAction) byte is not in this
+    /// decoder's table.
+    BadShellAction(u8),
 }
 
 impl core::fmt::Display for DecodeError {
@@ -451,6 +454,7 @@ impl core::fmt::Display for DecodeError {
                     window_list::MAX_WINDOWS_PER_LIST
                 )
             }
+            Self::BadShellAction(b) => write!(f, "unknown shell control action {b:#04x}"),
         }
     }
 }

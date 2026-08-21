@@ -41,7 +41,9 @@ use guitk::event::Event;
 use guitk::render::RenderTree;
 
 use crate::DecodeError;
-use crate::control::{Request, RequestBody, ResponseBody, encode_requests_into};
+use crate::control::{
+    Request, RequestBody, ResponseBody, ShellControlAction, encode_requests_into,
+};
 use crate::frame::{Frame, try_decode_any};
 use crate::input::InputEvent;
 use crate::submit::encode_submit_into;
@@ -383,6 +385,27 @@ impl<T: Transport> Connection<T> {
     /// [`ClientError::Refused`] if the compositor declined.
     pub fn subscribe_window_list(&mut self, on: bool) -> Result<(), ClientError<T::Error>> {
         self.confirm(RequestBody::SubscribeWindowList { subscribe: on })
+    }
+
+    /// Act on a window this client does not own — what a taskbar button, an
+    /// Alt-Tab switcher and a window menu are made of.
+    ///
+    /// The window id comes from [`window_list`](Self::window_list); there is no
+    /// other way to learn one, which is why this and the subscription are the
+    /// same privilege.
+    ///
+    /// # Errors
+    ///
+    /// [`ClientError::Transport`] if the exchange fails, and
+    /// [`ClientError::Refused`] if the compositor declined — which for a shell
+    /// most often means the window closed between the list it drew from and the
+    /// click, and is a normal race rather than a fault.
+    pub fn shell_control(
+        &mut self,
+        window: u64,
+        action: ShellControlAction,
+    ) -> Result<(), ClientError<T::Error>> {
+        self.confirm(RequestBody::ShellControl { window, action })
     }
 
     /// Take the oldest queued input event, if any.

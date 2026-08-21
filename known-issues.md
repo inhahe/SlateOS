@@ -48450,6 +48450,16 @@ demo and its own tests.
 `render_start_menu` (:2564), `render_calendar` (:2948).
 `gui/desktop/Cargo.toml` — no `[lib]`.
 
+*(Both paragraphs above are as-written and now partly historical. The `[lib]`
+exists — see progress note (3) below — and the file is `src/lib.rs`, not
+`src/main.rs`. **There are four render methods, not five:**
+`render_window_decorations` was deleted with the shell's duplicate decorator
+(`TD-C-THE-DESKTOP-AND-THE-COMPOSITOR-BOTH-DRAW-WINDOW-TITLE-BARS`, resolved),
+which is a simplification for this entry rather than a complication: the loop
+below can submit everything `DesktopShell` renders, with no carve-out for a
+surface the compositor also draws. The remaining four are `render_taskbar`,
+`render_alt_tab`, `render_start_menu` and `render_calendar`.)*
+
 **Why this is logged and not fixed (2026-08-21):** it is the render half of
 `TD-SHELL-HAS-NOWHERE-TO-SEND-A-LAUNCH`, and it has the same single cause —
 the shell has no compositor/IPC event loop yet. That entry covers the outbound
@@ -48520,8 +48530,14 @@ corresponding bug is reintroduced. A taskbar can now be told what to list.
 **What remains is exactly one thing: the loop itself.** `desktop` gains a
 `[lib]`, a binary opens three `Layer`-banded windows (wallpaper, taskbar,
 popups) through `oswindow`, calls `watch_desktop(true)`, and on each
-`desktop_revision` change re-renders the five trees and submits them. Both
+`desktop_revision` change re-renders the four trees and submits them. Both
 named blockers are gone; nothing is waiting on another lane.
+
+*(Was "five trees" when written. It is four: the fifth was
+`render_window_decorations`, and submitting it would have double-drawn every
+title bar in the desktop. It has since been deleted — see
+`TD-C-THE-DESKTOP-AND-THE-COMPOSITOR-BOTH-DRAW-WINDOW-TITLE-BARS`, resolved —
+so the loop can now render everything the shell has without qualification.)*
 
 **Progress 2026-08-21 (3) — `desktop` is a library.** The `[lib]` above now
 exists: `src/main.rs` became `src/lib.rs`, the crate declares both a `[lib]`
@@ -48543,6 +48559,123 @@ keeping both and mapping between them. The shell's map has to become a
 shell's own (virtual-desktop assignment being the real one). Doing that first
 is what stops the loop from being written against a model that disagrees with
 the compositor.
+
+**Progress 2026-08-21 (4) — the second design question the loop has to answer,
+found by reading rather than by writing the loop and hitting it: the shell
+hit-tests in screen coordinates, and a client is only ever told window-local
+ones.** Three facts, each checked in the code rather than assumed:
+
+- *The shell's rects are screen-space.* `taskbar_rect` (`gui/desktop/src/lib.rs`
+  :979) computes its `y` as `(self.screen_height as f32 - height).max(0.0)`, and
+  `start_button_rect` (:1001) and `clock_rect` (:2592) both derive from it. On a
+  1080-tall screen the start button is at y ≈ 1040.
+- *A client is told window-local ones.* `guiremote::InputEvent`'s own doc
+  (`gui/remote/src/input.rs`:71-73): "Mouse coordinates inside `event` are
+  already window-local, so the client needs no knowledge of where it sits on
+  screen to interpret them." The compositor subtracts the client rect's origin
+  before it sends (`gui/compositor/src/lib.rs`:4881, and `wire_event` at :2499
+  only widens `i32`→`f32`). A press on the start button arrives at y ≈ 8.
+- *So a naive loop mis-routes every click it receives.* Feeding the delivered
+  coordinates straight into `DesktopShell::hit_test` tests y ≈ 8 against a
+  taskbar that believes it starts at y ≈ 1040, falls through every chrome arm,
+  and lands on `Hit::Desktop`. The discrepancy is exactly
+  `screen_height - taskbar_height`, i.e. it is invisible on a screen the same
+  height as the taskbar and grows with the display — the shape of bug that
+  passes every test written on a small fixture.
+
+**The fix is an explicit per-surface origin, applied in *both* directions, and
+it is symmetric — which is the reason to state it before writing either half.**
+The loop places the surfaces, so it alone knows each origin. Input needs
+`+origin` on the way in (window-local → screen) before `hit_test` sees it;
+rendering needs `−origin` on the way out (screen → window-local) before the
+tree is submitted, because `render_taskbar` emits its commands at y ≈ 1040
+while the taskbar surface's own buffer starts at 0. Getting one direction right
+and the other wrong yields a desktop that draws correctly and responds to
+clicks in the wrong place, or vice versa, so the two belong to one abstraction
+and one test: a point that hit-tests to a given element must be a point that
+element was drawn at.
+
+**Do not fix it by re-basing the shell's rects per surface.** That would make
+`taskbar_rect` return `y = 0` and put the shell back to two answers for where
+the taskbar is — the thing this entry exists to remove — and it would break the
+hit-test ordering in `hit_test`, which relies on all the chrome rects living in
+one comparable space (start button before taskbar panel before window, :1313-
+1341).
+
+**A related consequence worth deciding before the loop, not during it: two of
+`Hit`'s variants become unreachable, and one popup behaviour stops working on
+its own.**
+
+- `Hit::WindowContent` and `Hit::Desktop` cannot be produced in production once
+  the shell is a client. The compositor routes a press to the topmost window
+  whose *client* rect contains it (`Compositor::window_at`, :4974), so a click
+  on another application's window is delivered to that application and never
+  reaches the shell at all. They stay reachable — and useful — from the shell's
+  own tests, which drive `hit_test` directly over a whole screen; but the loop
+  must not be written as though it will see them.
+- *Click-outside-to-dismiss.* The start menu and the calendar close when the
+  user clicks away from them. If each popup is its own small window, the click
+  that should dismiss it lands on somebody else's window and the shell is never
+  told, so the menu stays open under the window the user just clicked. The
+  answer is the one every real desktop uses: while a popup is open, the shell's
+  `Overlay` surface covers the whole screen and is the popup's dismiss layer,
+  and is unmapped when no popup is open so ordinary clicks pass through. That
+  makes the overlay's origin `(0, 0)` — screen space, no translation — which is
+  why the offset abstraction above must be per-surface rather than one global
+  constant.
+
+**Progress 2026-08-21 (5) — the shell can now ask, and the taskbar asks.** Two
+of the three things this entry says are missing are done; the loop itself is
+not.
+
+- **A shell can act on a window it does not own.** `ShellControl { window,
+  action }` (`gui/remote/src/control.rs`) with five actions — `Activate`,
+  `Minimize`, `Restore`, `Maximize`, `Close` — reaching
+  `Compositor::activate_window` / `minimize_window` / `restore_window` /
+  `maximize_window` / `request_close`. This was the hard blocker: *every* other
+  window request is resolved against the sending connection's own windows
+  (`ClientLink::resolve`), which is the ownership model and refuses every
+  legitimate taskbar click. Deliberately excludes move/resize — placing windows
+  is the compositor's, and a shell that could move any window would be the
+  second window manager this entry exists to remove.
+  - `Activate` is one operation, not restore-then-focus: `focus_window` refuses
+    a minimised window on purpose, so un-minimising has to come first. It is
+    also *not* `restore_window`, which un-maximises too — a window minimised
+    while maximised has to come back maximised.
+  - `Close` asks rather than destroys, pushing the same
+    `EventNotification::WindowClose` the title-bar button does.
+  - Privilege routes through the new `ClientLink::require_shell`, which checks
+    nothing and says so. See `TD-C-ANY-CLIENT-CAN-READ-EVERY-WINDOW-TITLE`
+    below — that gate is still open, and now has two callers instead of one,
+    which is exactly why they were routed through a single function.
+
+- **The shell's window map is a projection, and the taskbar emits intents.**
+  `DesktopShell::apply_window_list(&[WindowInfo])` (`gui/desktop/src/lib.rs`) is
+  now the authority on what exists; `ShellAction::Control { window, action }` is
+  what a taskbar click produces. The click no longer mutates anything. Three
+  things `apply_window_list` decides, each with a test:
+  - It **replaces** rather than merges — the list is the whole truth, and a
+    merge leaves a button for a program that has exited.
+  - It drops everything outside `Layer::Normal`, so the taskbar does not list
+    itself, the wallpaper and its own start menu.
+  - A projected window's geometry is **zero, and that is not a placeholder**:
+    `WindowInfo` carries none because the shell does not place windows, so
+    there is nothing truthful to put there. The only reader would be
+    `Hit::WindowContent`, which a live session never reaches (see above), and a
+    zero rectangle matches nothing — the right answer to a question never asked.
+
+**Still missing, and now the whole of what is left here:** the event loop. The
+three `Layer`-banded surfaces (wallpaper/`Background`, taskbar/`Overlay`,
+popups/full-screen `Overlay`), `watch_desktop(true)`, a re-render of the four
+trees on each `desktop_revision` change, and the per-surface origin translation
+in both directions described above. Also still open: `DesktopShell` retains
+`add_window`, `focus_window`, `minimize_window`, `snap_window*` and
+`toggle_maximize` — the geometry half of the old private window manager. They
+are now used only by the demo and the tests, which have no compositor to be told
+by, but they are a second answer to questions the compositor already answers and
+should go when the loop lands. `main.rs` demonstrates the honest path in its
+`-- taskbar --` section and builds a *fresh* `DesktopShell` to do it, precisely
+because ids from the two regimes must not be mixed.
 
 ## TD-C-ANY-CLIENT-CAN-READ-EVERY-WINDOW-TITLE
 
@@ -48604,7 +48737,7 @@ nothing obeys it. 49 of the shell's modules — every settings page, every
 dialog, the taskbar, the launcher, the login screen, the on-screen displays —
 each declare their own private list of colour constants and paint with those.
 The user can set the desktop to Light and watch the whole of it stay dark
-except the five surfaces `DesktopShell` renders itself. The setting is real,
+except the four surfaces `DesktopShell` renders itself. The setting is real,
 it is saved to disk, it is read back correctly, and then it is ignored.
 
 **Where:** `gui/desktop/src/*.rs` — 549 `const NAME: Color = …` declarations
@@ -48616,7 +48749,7 @@ times. The canonical answer lives in `gui/appearance/src/lib.rs`
 `TransparencyLevel::panel_alpha`, `AppearanceSettings::effective_accent`).
 
 **Reproduce:** set `theme.mode: light` in the appearance config and start the
-shell. `DesktopShell`'s own five render methods respond. Open any settings
+shell. `DesktopShell`'s own four render methods respond. Open any settings
 page, the launcher, or a dialog: unchanged, still Catppuccin Mocha. Same for
 a non-default accent — `effective_accent()` reaches nothing that draws.
 
@@ -49079,6 +49212,12 @@ The fifth is `render_window_decorations`, and submitting it would double-draw
 every title bar in the desktop, at the wrong size. The loop must render four,
 not five, and this entry is why.
 
+*(Resolved: the decorator is deleted, so the shell now has exactly four public
+`render_*` methods and the qualification is no longer needed — the loop
+renders all of them. The note is left standing because it is the reason the
+count in that entry changed, and a future reader comparing the two entries
+would otherwise have to rediscover it.)*
+
 **It also explains a hole in the window-list protocol that is not a hole.**
 `WindowInfo` (`gui/remote/src/window_list.rs`) carries no geometry — no x, y,
 width or height. That looks like an oversight the moment you try to decorate a
@@ -49309,6 +49448,168 @@ what it does. Two findings, both the same shape as everything else here:
    where_it_was` and its neighbours, which pin `ManagedWindow::restored` — are
    rewritten to call the API directly rather than deleted, because the
    behaviour survives and only its trigger moves.
+
+**Progress 2026-08-21 — prerequisites 3, 4 and 5 are done; only the deletion is
+left.** ✅ `gui/appearance` now owns `DecorationColors`: eleven resolved frame
+colours with `for_mode(light)` and `from_settings`. Both renderers read it —
+`DesktopTheme::window_fields_from` takes the shell's six window fields from it,
+and the compositor's `DecorationTheme` is now `from_settings` plus the ARGB
+packing, its twelve hardcoded Catppuccin-ish constants gone along with the
+`#[allow(dead_code)]` that had been hiding a field nothing read. The
+compositor's title font follows `appearance.fonts.ui_size` instead of a
+constant 16. See `design-decisions.md` §501.
+
+So a user in light mode, a user with accented title bars and a user who
+enlarged the interface font now get the same frame from the compositor that the
+shell's duplicate has been drawing all along — which is precisely the condition
+this entry set for the duplicate to be removable without shipping a regression.
+
+Two notes for whoever does the deletion:
+
+- **`the_shells_window_colours_are_the_compositors_window_colours`
+  (`gui/desktop/src/lib.rs`) is a scaffold, not a keeper.** It exists to fail
+  the moment someone recolours a window in `DesktopTheme`, which is the natural
+  place to do it and the wrong one. It is meaningful only while the shell has a
+  decorator at all; delete it with the decorator.
+
+- **`fonts.ui_font` is still unreachable and is not a sixth prerequisite.**
+  `osfont::Family` is `Ui` or `Mono` with no lookup by name, so no renderer in
+  this tree honours a font *family* — the shell's decorator does not either, and
+  `RenderTree::text` takes no family argument. Deleting the duplicate therefore
+  loses nothing on this axis. Tracked as a missing capability rather than a
+  missing wire.
+
+What remains for this entry is the deletion itself, exactly as scoped in the
+correction above: `render_window_decorations`, `window_chrome`, `WindowChrome`,
+the four `Hit::Window{Close,Maximize,Minimize,TitleBar}` variants and their
+`handle_mouse` arms, the `gui/desktop/src/main.rs:45` demo caller, and the
+`pointer_tests.rs` tests that assert the duplicate. `ManagedWindow::frame_rect`
+stays.
+
+## RESOLVED 2026-08-21 — the duplicate is gone, and one feature moved rather than died
+
+✅ **The deletion is done and this entry is closed.** All five prerequisites had
+been met, so the shell's copy came out exactly as scoped: the 92-line
+`render_window_decorations`, `window_chrome`, `WindowChrome`, the
+`TITLE_BAR_HEIGHT`/`WINDOW_BUTTON_*` constant block, `top_corner_radii`, the
+four `Hit::Window{Close,Maximize,Minimize,TitleBar}` variants with their
+`handle_mouse` arms, the `main.rs` demo caller, and six `pointer_tests.rs` tests
+that asserted the duplicate. `ManagedWindow::frame_rect` stays, as specified.
+`Hit` is now `WindowContent(id)` for a window and nothing finer, because
+everything finer belonged to the compositor and was consumed before this shell
+heard about the press. Two processes now draw one title bar. Net −467/+425 lines
+across five files.
+
+**Two things the deletion would have silently taken with it were caught by
+reading the duplicate line by line first, and were moved rather than dropped.**
+This is the third time in this entry that reading beat trusting the entry's own
+summary, and it is why the deletion was done last rather than first:
+
+1. **Double-click-to-maximize was only ever implemented in the shell.** The
+   `Hit::WindowTitleBar` arm was its sole home, and the compositor never
+   produces `MouseEventKind::DoubleClick` at all — its own comment says so:
+   `Enter`/`Leave` and `DoubleClick` "exist only on the client side and are
+   never produced here". So deleting the arm would have removed the gesture
+   from the product with nothing to notice. It now lives in
+   `Compositor::handle_mouse_button`, beside the hit test that already resolves
+   a press on the same strip. See `design-decisions.md` §502 for the three
+   sub-decisions it needed (keying on the window, breaking the pair on an
+   intervening press, and not re-arming after a completed double-click).
+2. **The shell's decorator test was the only WCAG contrast check in the tree.**
+   `accented_title_bars_still_mark_only_the_focused_window` measured real
+   contrast *ratios* (≥ 4.5 focused, ≥ 3.0 unfocused) across 14 accents × 2
+   modes. The surviving `gui/appearance` tests asserted only the *identity*
+   `title_focused_fg == readable_on(accent)`, which a drifted luma threshold
+   satisfies perfectly while returning the wrong extreme. The ratio assertions
+   moved to `gui/appearance` as
+   `a_title_is_readable_on_every_bar_the_settings_can_produce`, and the
+   distinction is not theoretical: drifting `readable_on`'s threshold from 140
+   to 200 leaves `readable_on_answers_with_the_palettes_own_extremes` passing
+   and produces a **1.86:1** blue title bar, which the new test catches.
+
+**One survivor was renamed, because the deletion revealed it was misnamed.**
+`DesktopTheme::window_border_color` is still read — by the start menu and the
+power menu — but the shell draws no window borders any more, so it is now
+`panel_border_color`. It is still sourced from `DecorationColors::border_focused`
+on purpose: a panel outlined in a different shade from the window beside it
+looks like a bug, and would be one, because two processes had each picked a
+colour. `window_fields_from` shrank from six fields to two and is now
+`frame_fields_from`. The scaffold test named in the notes above
+(`the_shells_window_colours_are_the_compositors_window_colours`) was deleted
+with the decorator as instructed, replaced by
+`the_shell_reads_its_frame_colours_rather_than_choosing_them`, which guards the
+two fields that remain.
+
+**Eleven reintroductions, eleven caught — but one only after the test was
+repaired**, and that failure is the more useful half of the exercise.
+`a_double_click_is_the_same_event_to_this_shell_as_a_single_one` originally
+asserted that a double-click returns `Pass` and does not maximize. Both remain
+true of a `DoubleClick` arm that silently returns `Pass` without dispatching
+anything — so the test would have watched the shell drop click-to-focus and
+every menu it opens on a press, and said nothing. It now asserts the *positive*:
+that a double-click focuses a background window and opens the start menu, on
+both kinds of surface the shell hit-tests. The general lesson, which has now bitten
+three times in this entry's history: **a test that asserts the absence of the
+behaviour you just deleted is satisfied by deleting too much.** Assert what
+survives, not what went.
+
+---
+
+## TD-C-THE-MOUSE-SETTINGS-PANEL-REACHES-NOTHING
+
+**In short:** Settings has a mouse panel with sliders for double-click speed,
+pointer speed and so on. Moving them changes a number in a file and nothing
+else. The compositor — the only thing in the tree that actually acts on a
+double-click — has never heard of that file and uses its own built-in default.
+So the double-click-speed slider does nothing today, and it is the one setting
+on the panel that now has a real consumer sitting right there ignoring it.
+
+**Where:**
+
+| | |
+|---|---|
+| The setting | `desktop::mouse_settings` (`gui/desktop/src/mouse_settings.rs`), `double_click_ms`, default **400**, clamped 100–2000 (`:185`, `:205`) |
+| The consumer | `Compositor::double_click_interval` (`gui/compositor/src/lib.rs`), default `DEFAULT_DOUBLE_CLICK_MS = 400`, clamped by `set_double_click_ms` to `MIN_DOUBLE_CLICK_MS`..=`MAX_DOUBLE_CLICK_MS` = 100–2000 |
+| What connects them | nothing |
+
+The two defaults and the two clamp ranges were deliberately made to match when
+the double-click gesture moved into the compositor, precisely so that **a user
+who never touches the slider sees no change when this is wired up**. That is the
+mitigation, not the fix: a user who *does* move it still sees nothing.
+
+**Why it is not simply a missing function call.** `set_double_click_ms` is
+public and takes the value the panel already produces, so the compositor end is
+done. The missing piece is the same one that blocks the appearance settings from
+reloading live: **`apps/settings` has no compositor connection at all**
+(`TD-NO-APP-CONNECTS-TO-THE-COMPOSITOR`). The appearance half of this problem
+was solved by adding a `ReloadAppearance` control verb (tag `0x0F`, no payload,
+no `link.resolve` — see `TD-C-THE-DESKTOP-AND-THE-COMPOSITOR-BOTH-DRAW-WINDOW-TITLE-BARS`
+above), and the mouse settings want the same shape.
+
+**The design question to answer first, and it is a real one:** should this be a
+second verb (`ReloadInput`), or should the input settings move *into*
+`AppearanceSettings` so the existing `ReloadAppearance` carries both? The second
+is tempting because it needs no protocol change, but "appearance" is the wrong
+home for pointer behaviour, and a struct that accretes every settings panel
+because it happens to have a reload verb is how a settings blob becomes
+untyped. Lean toward a second verb reading a second file.
+
+**Scope beyond double-click.** `mouse_settings` also holds pointer speed,
+acceleration, scroll direction/lines and left-handed button swap. The compositor
+consumes none of them, and unlike double-click speed most have no consumer
+anywhere — pointer acceleration in particular has nothing to apply it to,
+because the compositor is fed absolute coordinates by
+`handle_mouse_button`/`handle_mouse_move` rather than raw deltas. Wiring
+double-click alone is honest and small; wiring the rest is a larger question
+about where input transformation belongs and should not be bundled in.
+
+**Trigger:** do this when `apps/settings` gains a compositor connection — the
+same moment `ReloadAppearance` gets its first real caller. Both are lane C's.
+
+**If never fixed:** a slider that lies. The user moves it, the panel writes the
+file, and the double-click speed is whatever the compositor's constant says.
+Worse than an absent setting, because an absent one cannot be misread as tried
+and rejected.
 
 ## B-SSHD-EXEC-REPLIED-WITH-THE-COMMAND-INSTEAD-OF-RUNNING-IT — 2026-08-21 — FIXED
 
@@ -49928,6 +50229,114 @@ into the ability to pass a `doas` prompt. So: real, bounded, not urgent.
 `requests/c-b-passwd-and-login-disagree-about-etc-shadow.md` —
 `grep -rn 'crypt::verify' posix/src userspace/*/src services init`, which
 returns exactly three production call sites and requires each to be justified.
+
+---
+
+## B-FTPD-SSHD-AUTH-TESTS-SHARE-TEMP-FILES-AND-FLAKE — 2026-08-21 — lane B
+
+**In short:** The tests that check FTP and SSH password handling build their
+throwaway `/etc/shadow` files by stamping the current time into the filename.
+The clock is not fine-grained enough for that: when cargo runs the tests side by
+side, two of them get the *same* file, one overwrites the other, and whichever
+reads second is authenticating against the wrong data. Measured collision rate
+on this machine: **13%**. It shows up as an occasional red in a full-workspace
+run and is otherwise invisible.
+
+**Found by:** lane C, during the full-workspace gate for the window-decorator
+deletion. Not lane C's change — `ftpd` depends only on `authlib`, and the
+change touched nothing outside `gui/**`. Filed to lane B as
+`requests/c-b-ftpd-sshd-auth-tests-share-tmp-files-and-flake.md`, which carries
+the full diagnosis and three suggested fixes; this entry exists so the bug is
+tracked rather than living only in a request another lane may not merge for a
+while.
+
+**Where:** `userspace/ftpd/src/main.rs:3040` (`tmp_path`), and the same helper at
+`userspace/sshd/src/main.rs:4700`. sshd's copy adds a `get_pid()` prefix, which
+does **not** help — every test in a binary shares one process, so it separates
+concurrent *runs* of the suite and not the concurrent *threads* inside one.
+
+**Symptom:**
+
+```
+---- tests::an_unrecomputable_entry_is_broken_not_wrong stdout ----
+assertion `left == right` failed
+  left: Rejected
+ right: Unusable
+```
+
+`Rejected` instead of `Unusable` is the diagnostic, not noise: the test writes a
+plaintext shadow field (which must report `Unusable`) and reads back some other
+test's line — a locked or validly-hashed one — which it then correctly
+rejects. The assertion is right; the file under it changed.
+
+**Reproduce:** `cargo test --workspace --target x86_64-pc-windows-gnu`. It is
+load-dependent — `cargo test -p ftpd --bin ftpd` alone was 8/8 green across
+eight consecutive runs.
+
+**Why it matters more than an ordinary flake.** These tests pin *authentication
+outcomes*: locked accounts, plaintext shadow fields, unknown users, rate
+limiting. A test reading another test's shadow file can fail spuriously — which
+is what was seen — but it can just as easily **pass** spuriously, and a green
+run is precisely the evidence that would be cited for "auth is covered". Until
+this is fixed the suite is not a reliable witness to its own claims.
+
+**Secondary defect in the same helper:** cleanup is `let _ =
+fs::remove_file(shadow)` at the end of each test body, so a panicking test leaks
+its file. No `Drop` guard. A per-test temp *directory* would fix uniqueness and
+cleanup together.
+
+**If never fixed:** an intermittent red in the shared merge gate that each lane
+pays for in turn, over exactly the code where a false green is most expensive.
+## TD-C-RUSTDOC-LINKS-GO-NOWHERE-IN-FIVE-GUI-CRATES
+
+**In short:** The GUI crates' generated documentation has 55 broken or
+misleading cross-references. Some are links that point at nothing at all, so a
+reader clicking "see `export_text`" lands on an error page; some point at
+internals a reader of the public docs cannot see; and two in the toolkit are
+unclosed HTML tags, which make rustdoc swallow the rest of that paragraph. None
+of it affects behaviour — this is documentation quality only.
+
+**Where:** counted 2026-08-21 with `cargo doc -p <crate> --no-deps
+--target x86_64-pc-windows-gnu`, one warning per problem:
+
+| Crate | Warnings | Worst class |
+|---|---|---|
+| `osfont` (`gui/font`) | 18 | 14 links to private items, 3 unresolved |
+| `desktop` (`gui/desktop`) | 11 | 8 links to private items, 2 unresolved |
+| `guitk` (`gui/toolkit`) | 11 | 2 **unclosed HTML tags** — these eat text |
+| `compositor` | 8 | 3 unresolved, 3 private |
+| `guiremote` (`gui/remote`) | 7 | 3 private, 1 unresolved |
+| `oswindow`, `appearance` | 0 | — |
+
+**The three kinds, worst first:**
+
+1. **`unresolved link to X` (9 total).** The link target does not exist —
+   usually a method that was renamed or removed and the doc comment beside it
+   was not. `gui/desktop/src/calendar.rs:547` promises "the text format produced
+   by `export_text`"; there is no `export_text`. This is the only class that is
+   actively *wrong* rather than merely unhelpful, because it documents an API
+   that is not there.
+2. **`unclosed HTML tag` (2, both `guitk`).** Rustdoc treats `<` as markup, so
+   an unescaped one in prose opens a tag that never closes and the remainder of
+   the paragraph is absorbed into it and never rendered. The text exists in the
+   source and is invisible in the docs, which is the failure mode hardest to
+   notice.
+3. **`links to private item` (34).** A public doc comment links to something a
+   reader of the public documentation cannot follow. Not wrong, but the link is
+   dead for its audience.
+
+**The proper fix** is per-warning and mechanical: repoint or delete the
+unresolved links (checking which is right — an unresolved link often means the
+sentence around it is also stale), escape or close the two HTML tags, and for
+the private-item links either make the target public, drop the link and name the
+item in plain text, or move the sentence to a `//` comment where it is not
+promising a reader a hyperlink. There is no design decision here.
+
+**If never fixed:** the docs stay quietly worse than the code, and the noise
+floor hides the next real one. Three of these are already *stale claims* about
+APIs that do not exist, which is how a reader ends up writing against a function
+that was deleted. It does not get worse on its own, but every new crate adds to
+it, and a warning count nobody watches is one nobody will ever bring to zero.
 
 ---
 

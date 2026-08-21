@@ -10,7 +10,7 @@
 //! real session runs; keeping this here as a `[[bin]]` is what stops the
 //! library's only caller from being its own tests.
 
-use desktop::{DesktopShell, ShellAction, calendar, click};
+use desktop::{DesktopShell, ShellAction, WindowInfo, calendar, click};
 use guitk::event::{Key, KeyEvent, Modifiers};
 
 fn main() {
@@ -40,10 +40,6 @@ fn main() {
     // Render taskbar
     let taskbar = desktop.render_taskbar();
     println!("Taskbar rendered: {} commands", taskbar.len());
-
-    // Render window decorations
-    let decorations = desktop.render_window_decorations();
-    println!("Window decorations: {} commands", decorations.len());
 
     // Test keyboard shortcuts
     let alt_f4 = KeyEvent {
@@ -132,6 +128,53 @@ fn main() {
         "Switched to desktop {}: {} visible windows",
         desktop.current_desktop_number(),
         desktop.visible_windows().len()
+    );
+
+    // The taskbar the way a live session drives it, which is the one path in
+    // this file that does not go through the shell's own bookkeeping: the
+    // compositor says what exists, a click produces a *request*, and the only
+    // thing that moves the shell is the next list. Standing in for the
+    // compositor here is this function, which is why the request is printed
+    // rather than sent — but the shape is the real one, and the demo would stop
+    // agreeing with itself if the shell ever went back to acting on its own.
+    //
+    // A shell of its own for this, deliberately. The session above opened its
+    // windows with `add_window` and moved them between virtual desktops, and
+    // ids from that regime would collide with the compositor's — which is
+    // itself the point: the two ways of learning what exists are not meant to
+    // be mixed, and a live shell only ever uses the second.
+    println!("\n-- taskbar --");
+    let mut desktop = DesktopShell::new(1920, 1080);
+    let mut editor = WindowInfo::new(1, 1001, "notes.txt");
+    editor.focused = true;
+    desktop.apply_window_list(&[WindowInfo::new(0, 1000, "Terminal"), editor]);
+    println!(
+        "Compositor says {} windows, focused {:?}",
+        desktop.visible_windows().len(),
+        desktop.focused_window
+    );
+
+    let button = desktop.taskbar_button_rect(1);
+    match desktop.handle_mouse(&click(button.x + button.w / 2.0, button.y + button.h / 2.0)) {
+        ShellAction::Control { window, action } => {
+            println!("Taskbar asked the compositor for {action:?} on {window:?}");
+        }
+        other => println!("Taskbar returned {other:?}"),
+    }
+    println!(
+        "...and until the compositor answers, the shell still shows {} windows",
+        desktop.visible_windows().len()
+    );
+
+    // The compositor did as it was asked, and the shell finds out the only way
+    // it can.
+    let mut away = WindowInfo::new(1, 1001, "notes.txt");
+    away.minimized = true;
+    desktop.apply_window_list(&[WindowInfo::new(0, 1000, "Terminal"), away]);
+    println!(
+        "After the next list: {} windows, focused {:?}",
+        desktop.visible_windows().len(),
+        desktop.focused_window
     );
 
     println!("\nDesktop shell initialized successfully.");

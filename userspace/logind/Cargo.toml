@@ -24,3 +24,8 @@ libservicebus = { path = "../libservicebus" }
 # changes.
 [dev-dependencies]
 posix = { path = "../../posix" }
+# And `scratchdir` for the fixture's store itself. These tests decide whether a
+# password unlocks a locked screen, so two of them sharing one file can produce
+# a false green as easily as a red. See known-issues.md
+# `B-FTPD-SSHD-AUTH-TESTS-SHARE-TEMP-FILES-AND-FLAKE`.
+scratchdir = { path = "../scratchdir" }

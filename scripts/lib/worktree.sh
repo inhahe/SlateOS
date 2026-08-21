@@ -130,6 +130,34 @@ SLATE_MAKE_VERSION="4.4.1"
 SLATE_MAKE_SHA256="dd16fb1d67bfab79a72f5e8390735c49e3e8e70b4945a15ab1f81ddb78658fb3"
 SLATE_MAKE_TARBALL="$SLATE_ZIG_CACHE/make-$SLATE_MAKE_VERSION.tar.gz"
 
+# Upstream GNU coreutils, the fifth port's source. 9.5 rather than the current
+# 9.11 for one reason: the two attestations below both pin *this* release, and a
+# version nobody but the distfiles server vouches for defeats the point of the
+# rule. Re-pin upward when two independent packagers agree on a newer one.
+#
+#   Buildroot 2024.11  package/coreutils/coreutils.hash — the identical sha256
+#                      below, above the comment "Locally calculated after
+#                      checking pgp signature". So this attestation carries a
+#                      signature check we do not perform ourselves; no script in
+#                      this tree verifies GNU's .sig files (the stray
+#                      gnu-keyring.gpg in ~/.cache/slateos is left over from a
+#                      manual experiment and is wired into nothing).
+#   Alpine 3.20-stable main/coreutils/APKBUILD, which pins sha512 —
+#                      2ca0deac…65401c — a *different function* over the same
+#                      artifact, which corroborates more strongly than a second
+#                      copy of the same digest would. Verified byte-for-byte
+#                      against the downloaded tarball, not by eye.
+#
+# Both were checked with `cmp` rather than by reading them side by side. The
+# first attempt to confirm the sha512 used a grep whose pattern was mangled by
+# nested shell quoting; it printed `0` next to two strings that were in fact
+# identical. Eyeballing would have called that a match and the grep would have
+# called it a mismatch, and both would have been reasoning about the wrong
+# thing.
+SLATE_COREUTILS_VERSION="9.5"
+SLATE_COREUTILS_SHA256="cd328edeac92f6a665de9f323c93b712af1858bc2e0d88f3f7100469470a1b8a"
+SLATE_COREUTILS_TARBALL="$SLATE_ZIG_CACHE/coreutils-$SLATE_COREUTILS_VERSION.tar.xz"
+
 # Scratch, keyed by worktree. The hard-coded paths were only half the problem:
 # these scripts also wrote fixed names like /tmp/libc_syms.txt and
 # /tmp/bash_needs.txt, and they hand results to each other through those files
@@ -371,6 +399,50 @@ slate_ensure_make_src() {
     fi
 
     SLATE_MAKE_TARBALL="$tarball"
+}
+
+# The coreutils counterpart of slate_ensure_make_src, and deliberately the same
+# shape: check the lane's scratch and build/spike for an already-verified copy,
+# otherwise fetch to the shared cache through a .part file, and refuse to hand
+# back a path whose sha256 is not the pin. `--fail` and the `.part` rename are
+# the two details the pkgconf fetch originally lacked, which is how a 404 body
+# once became a permanent "cached tarball".
+slate_ensure_coreutils_src() {
+    local name="coreutils-$SLATE_COREUTILS_VERSION.tar.xz"
+    local cand got
+    for cand in "/tmp/coreutils-spike-$SLATE_LANE/$name" "$SLATE_SPIKE/$name"; do
+        [ -f "$cand" ] || continue
+        got="$(sha256sum "$cand" | cut -d' ' -f1)"
+        if [ "$got" = "$SLATE_COREUTILS_SHA256" ]; then
+            SLATE_COREUTILS_TARBALL="$cand"
+            return 0
+        fi
+        echo "worktree.sh: ignoring $cand — sha256 $got, pin is $SLATE_COREUTILS_SHA256" >&2
+    done
+
+    local tarball="$SLATE_ZIG_CACHE/$name"
+    local url="https://ftp.gnu.org/gnu/coreutils/$name"
+    mkdir -p "$SLATE_ZIG_CACHE" || return 1
+    if [ ! -f "$tarball" ]; then
+        echo "worktree.sh: coreutils $SLATE_COREUTILS_VERSION source not found; fetching to $SLATE_ZIG_CACHE" >&2
+        curl -sSL --fail --max-time 900 -o "$tarball.part" "$url" || {
+            echo "worktree.sh: download failed: $url" >&2
+            rm -f "$tarball.part"
+            return 1
+        }
+        mv "$tarball.part" "$tarball"
+    fi
+
+    got="$(sha256sum "$tarball" | cut -d' ' -f1)"
+    if [ "$got" != "$SLATE_COREUTILS_SHA256" ]; then
+        echo "worktree.sh: coreutils tarball sha256 mismatch — refusing to extract." >&2
+        echo "             expected $SLATE_COREUTILS_SHA256" >&2
+        echo "             got      $got" >&2
+        echo "             ($tarball — delete it to retry the download)" >&2
+        return 1
+    fi
+
+    SLATE_COREUTILS_TARBALL="$tarball"
 }
 
 slate_make_zig_wrappers() {

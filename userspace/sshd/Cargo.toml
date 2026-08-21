@@ -24,5 +24,12 @@ sha2 = { path = "../../sha2" }
 posix = { path = "../../posix" }
 authlib = { path = "../authlib" }
 
+# Test-only. The fixtures write a shadow line and read it back, so two tests
+# naming one file make each assert against the other's data -- over the code
+# that decides whether a password is correct. See that crate's module docs and
+# known-issues.md `B-FTPD-SSHD-AUTH-TESTS-SHARE-TEMP-FILES-AND-FLAKE`.
+[dev-dependencies]
+scratchdir = { path = "../scratchdir" }
+
 [lints]
 workspace = true

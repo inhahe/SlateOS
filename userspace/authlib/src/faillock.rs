@@ -446,9 +446,8 @@ mod tests {
 
     #[test]
     fn a_stored_table_reloads_from_disk() {
-        let path =
-            std::env::temp_dir().join(format!("authlib-faillock-{}.tbl", std::process::id()));
-        drop(std::fs::remove_file(&path));
+        let dir = scratchdir::ScratchDir::new("authlib_faillock_test");
+        let path = dir.path("faillock.tbl");
 
         let mut table = Table::default();
         table.set(
@@ -463,14 +462,12 @@ mod tests {
         let loaded = Table::load(&path);
         assert_eq!(loaded.get("alice").unwrap().failures, 2);
         assert_eq!(loaded.get("alice").unwrap().last_failure_secs, 43);
-
-        drop(std::fs::remove_file(&path));
     }
 
     #[test]
     fn a_missing_file_loads_as_an_empty_table() {
-        let path = std::env::temp_dir().join("authlib-faillock-does-not-exist.tbl");
-        drop(std::fs::remove_file(&path));
+        let dir = scratchdir::ScratchDir::new("authlib_faillock_test");
+        let path = dir.path("does-not-exist.tbl");
         assert_eq!(Table::load(&path), Table::default());
     }
 
@@ -478,8 +475,8 @@ mod tests {
     /// is the disk exhaustion this module is built to avoid.
     #[test]
     fn storing_leaves_no_scratch_file() {
-        let path = std::env::temp_dir().join(format!("authlib-scratch-{}.tbl", std::process::id()));
-        drop(std::fs::remove_file(&path));
+        let dir = scratchdir::ScratchDir::new("authlib_faillock_test");
+        let path = dir.path("scratch.tbl");
 
         let mut table = Table::default();
         table.set("alice", once(1));
@@ -487,8 +484,6 @@ mod tests {
 
         let tmp = path.with_extension(format!("tmp.{}", std::process::id()));
         assert!(!tmp.exists(), "scratch file survived a successful store");
-
-        drop(std::fs::remove_file(&path));
     }
 
     /// The default path is `/var/run/authlib/tally`, and nothing else creates
@@ -497,10 +492,9 @@ mod tests {
     /// indistinguishable from not having written it.
     #[test]
     fn storing_creates_a_missing_parent_directory_and_locks_it_down() {
-        let root = std::env::temp_dir().join(format!("authlib-dir-{}", std::process::id()));
-        let dir = root.join("nested");
+        let scratch = scratchdir::ScratchDir::new("authlib_faillock_test");
+        let dir = scratch.path("absent-parent/nested");
         let path = dir.join("tally");
-        drop(std::fs::remove_dir_all(&root));
         assert!(!dir.exists(), "fixture directory was not clean");
 
         let mut table = Table::default();
@@ -518,7 +512,5 @@ mod tests {
             assert_eq!(mode(&dir), 0o700, "tally directory is not owner-only");
             assert_eq!(mode(&path), 0o600, "tally file is not owner-only");
         }
-
-        drop(std::fs::remove_dir_all(&root));
     }
 }

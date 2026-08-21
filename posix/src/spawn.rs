@@ -67,6 +67,8 @@
 
 use crate::errno;
 use crate::mman;
+#[cfg(target_os = "none")]
+use crate::printf::{VaList, va_trampoline};
 use crate::syscall::*;
 use crate::types::*;
 
@@ -1615,6 +1617,184 @@ pub extern "C" fn fexecve(fd: i32, argv: *const *const u8, envp: *const *const u
 
     execve(path_buf.as_ptr(), argv, envp)
 }
+
+// ---------------------------------------------------------------------------
+// execl / execlp / execle — the variadic exec family
+// ---------------------------------------------------------------------------
+//
+// These are the forms a C programmer writes when the argument list is known
+// at the call site: `execl("/bin/sh", "sh", "-c", cmd, (char *)NULL)`.  We had
+// the vector forms (`execv`/`execvp`/`execve`) and not the list forms, which
+// is invisible until something real is linked: `scripts/coreutils-spike/run.sh`
+// found `execl` and `execlp` among the nineteen symbols missing from
+// `libc.a`.  zig's musl headers *declare* them, so `./configure` concluded
+// they existed and compiled calls to them; the gap appeared only at link time.
+//
+// `execle` is not in the spike's list — coreutils happens not to call it — but
+// it is the third member of the same POSIX family, it is missing for exactly
+// the same reason, and it costs one extra line given the shared body below.
+// Adding only the two the spike named would leave a hole of the same shape for
+// the next program to fall into.
+//
+// The trampoline is the same `va_trampoline!` that `printf` uses: it spills
+// the argument registers, builds a genuine System V `va_list` on its own
+// frame, and tail-calls the `v*` worker.  One named integer parameter (`path`)
+// means the list starts at `%rsi`, i.e. at the *first* argument — which is
+// `argv[0]`, exactly as POSIX specifies.  (The C prototype names two
+// parameters, `path` and `arg`, but that is a source-level detail: the caller
+// places arguments identically either way, so counting `path` alone and
+// letting `arg` fall inside the list is both correct and simpler.)
+
+/// Argument vector slots assembled on the stack before falling back to `malloc`.
+///
+/// Sized for the realistic case — an `execl` call site is a literal argument
+/// list written out in source, so this is generous — while the heap fallback
+/// below means exceeding it costs an allocation rather than an error.  glibc
+/// uses `alloca` here and so has no fixed point at all; we cannot, so we pick
+/// a threshold instead of a limit.
+#[cfg(target_os = "none")]
+const EXECL_STACK_ARGV: usize = 64;
+
+/// Which of the three list-form execs is being performed.
+#[cfg(target_os = "none")]
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ExecLMode {
+    /// `execl` — use `path` verbatim, inherit the environment.
+    Direct,
+    /// `execlp` — search `PATH` for `path`, inherit the environment.
+    SearchPath,
+    /// `execle` — use `path` verbatim; `envp` follows the terminating NULL.
+    WithEnv,
+}
+
+/// Shared body of `execl`, `execlp` and `execle`.
+///
+/// # Safety
+/// `ap` must be a valid, ABI-conformant `va_list` positioned at `argv[0]`,
+/// whose remaining arguments are `char *` values terminated by a NULL — and,
+/// for [`ExecLMode::WithEnv`], one further `char *const *` after that NULL.
+#[cfg(target_os = "none")]
+unsafe fn execl_body(path: *const u8, ap: *mut VaList, mode: ExecLMode) -> i32 {
+    if path.is_null() || ap.is_null() {
+        errno::set_errno(errno::EFAULT);
+        return -1;
+    }
+    // SAFETY: non-null per the check above, and valid per this function's
+    // safety contract.
+    let ap = unsafe { &mut *ap };
+
+    // Pass 1 — count the arguments, on a *copy* of the list, so pass 2 starts
+    // from the same place.  `VaList` is `Copy` and duplicating it is precisely
+    // what C's `va_copy` does: the cursors are per-copy, while the register
+    // save and overflow areas they index are only ever read.  Two passes are
+    // needed because the vector has to be one contiguous NULL-terminated
+    // array and we cannot know how long it is without walking it first.
+    let mut argc = 0usize;
+    {
+        let mut probe = *ap;
+        // SAFETY: `probe` is an independent cursor over the same conformant
+        // save areas; `va_arg_int` reads one 8-byte slot per call.
+        while !(unsafe { crate::printf::va_arg_int(&mut probe) } as *const u8).is_null() {
+            argc = argc.saturating_add(1);
+        }
+    }
+
+    // Storage for `argc` pointers plus the terminating NULL.
+    let mut stack_argv = [core::ptr::null::<u8>(); EXECL_STACK_ARGV];
+    let mut heap: *mut u8 = core::ptr::null_mut();
+    let argv: *mut *const u8 = if argc < EXECL_STACK_ARGV {
+        stack_argv.as_mut_ptr()
+    } else {
+        let slots = argc.saturating_add(1);
+        let bytes = slots.saturating_mul(core::mem::size_of::<*const u8>());
+        heap = crate::malloc::malloc(bytes);
+        if heap.is_null() {
+            errno::set_errno(errno::ENOMEM);
+            return -1;
+        }
+        heap.cast()
+    };
+
+    // Pass 2 — collect.  This consumes the terminating NULL as well, which is
+    // what leaves `ap` positioned at `envp` for `execle`.
+    for i in 0..argc {
+        // SAFETY: `ap` has the same contents pass 1 walked, so exactly `argc`
+        // non-NULL slots precede the NULL; `i < argc`.
+        let arg = unsafe { crate::printf::va_arg_int(ap) } as *const u8;
+        // SAFETY: `argv` has room for `argc + 1` slots by construction.
+        unsafe { *argv.add(i) = arg };
+    }
+    // SAFETY: as above — this reads the NULL that terminated pass 1.
+    let _ = unsafe { crate::printf::va_arg_int(ap) };
+    // SAFETY: slot `argc` is the last of the `argc + 1` allocated.
+    unsafe { *argv.add(argc) = core::ptr::null() };
+
+    let envp: *const *const u8 = if mode == ExecLMode::WithEnv {
+        // SAFETY: per the safety contract, one `char *const *` follows the NULL.
+        unsafe { crate::printf::va_arg_int(ap) as *const *const u8 }
+    } else {
+        core::ptr::null()
+    };
+
+    let argv = argv.cast_const();
+    let ret = match mode {
+        ExecLMode::Direct => execv(path, argv),
+        ExecLMode::SearchPath => execvp(path, argv),
+        ExecLMode::WithEnv => execve(path, argv, envp),
+    };
+
+    // Reached only when the exec failed, since a successful exec replaces the
+    // process image.  `free` may itself touch errno, so save the failure
+    // reason across it — the caller is about to read it.
+    if !heap.is_null() {
+        let saved = errno::get_errno();
+        // SAFETY: `heap` came from `malloc` above and has not been freed.
+        unsafe { crate::malloc::free(heap) };
+        errno::set_errno(saved);
+    }
+    ret
+}
+
+/// `execl(path, arg0, ..., NULL)` — `execv` with a literal argument list.
+///
+/// # Safety
+/// `ap` must be a conformant `va_list` of NUL-terminated `char *` values
+/// terminated by a NULL pointer.
+#[cfg(target_os = "none")]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn vexecl(path: *const u8, ap: *mut VaList) -> i32 {
+    // SAFETY: forwarded from the caller's contract.
+    unsafe { execl_body(path, ap, ExecLMode::Direct) }
+}
+
+/// `execlp(file, arg0, ..., NULL)` — `execvp` with a literal argument list.
+///
+/// # Safety
+/// As [`vexecl`].
+#[cfg(target_os = "none")]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn vexeclp(file: *const u8, ap: *mut VaList) -> i32 {
+    // SAFETY: forwarded from the caller's contract.
+    unsafe { execl_body(file, ap, ExecLMode::SearchPath) }
+}
+
+/// `execle(path, arg0, ..., NULL, envp)` — `execve` with a literal argument list.
+///
+/// # Safety
+/// As [`vexecl`], plus: one `char *const *` must follow the terminating NULL.
+#[cfg(target_os = "none")]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn vexecle(path: *const u8, ap: *mut VaList) -> i32 {
+    // SAFETY: forwarded from the caller's contract.
+    unsafe { execl_body(path, ap, ExecLMode::WithEnv) }
+}
+
+#[cfg(target_os = "none")]
+va_trampoline!("execl", "vexecl", "8", "rsi");
+#[cfg(target_os = "none")]
+va_trampoline!("execlp", "vexeclp", "8", "rsi");
+#[cfg(target_os = "none")]
+va_trampoline!("execle", "vexecle", "8", "rsi");
 
 // ---------------------------------------------------------------------------
 // Helpers

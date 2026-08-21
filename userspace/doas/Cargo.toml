@@ -19,3 +19,8 @@ authlib = { path = "../authlib" }
 # exact way this crate's own hash came to disagree with the system's.
 [dev-dependencies]
 posix = { path = "../../posix" }
+# And `scratchdir` for the per-test shadow files themselves: two tests naming
+# one file make each assert against the other's data, over the code that decides
+# whether a password is correct. See known-issues.md
+# `B-FTPD-SSHD-AUTH-TESTS-SHARE-TEMP-FILES-AND-FLAKE`.
+scratchdir = { path = "../scratchdir" }

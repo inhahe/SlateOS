@@ -16,5 +16,13 @@ path = "src/lib.rs"
 posix = { path = "../../posix" }
 userdb = { path = "../userdb" }
 
+# Test-only. The fixtures here write a shadow line or a failure tally and read
+# it back, so two tests naming one file make each assert against the other's
+# data -- over the code that decides whether a password is correct. See that
+# crate's module docs and known-issues.md
+# `B-FTPD-SSHD-AUTH-TESTS-SHARE-TEMP-FILES-AND-FLAKE`.
+[dev-dependencies]
+scratchdir = { path = "../scratchdir" }
+
 [lints]
 workspace = true

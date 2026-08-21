@@ -548,6 +548,75 @@ core::arch::global_asm!(
     "ret",
 );
 
+// The `_l` variants: same conversion, explicit locale object.
+//
+// They exist because a program that has to parse a number in a *known* format
+// — a config file, a `/proc` field, a `--size=` argument — cannot use `strtod`
+// safely when the process locale might make the decimal separator a comma.
+// gnulib and glibc's own `strtod` internals reach for `strtod_l` for exactly
+// that reason, which is how they turned up among the nineteen symbols missing
+// from `libc.a` in `scripts/coreutils-spike/run.sh`.
+//
+// We support one locale, `C`, so honouring the argument is a no-op today — but
+// it is a no-op *in the direction that stays correct*: the `_l` caller is
+// asking for the C-locale format and that is what it gets, whereas the plain
+// `strtod` caller is the one who would be surprised if we ever grew a second
+// locale.  The parameter is therefore ignored rather than validated; see
+// `locale.rs`, where `newlocale` likewise returns a single opaque tag.
+
+/// `strtod_l(nptr, endptr, loc)` — `strtod` in an explicit locale.
+///
+/// # Safety
+///
+/// `nptr` must be a valid null-terminated string, and `endptr` either NULL or
+/// a valid `char **`.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub unsafe extern "C" fn strtod_l(
+    nptr: *const u8,
+    endptr: *mut *const u8,
+    _loc: crate::locale::LocaleT,
+) -> f64 {
+    // SAFETY: identical requirements, forwarded.
+    unsafe { strtod(nptr, endptr) }
+}
+
+/// `strtold_l(nptr, endptr, loc)` — `strtold` in an explicit locale.
+///
+/// Exported through the same `fld`-widening thunk as `strtold`; see the
+/// commentary on that one for why Rust cannot return the value directly.
+///
+/// # Safety
+///
+/// As [`strtod_l`].
+#[cfg_attr(target_os = "none", unsafe(export_name = "__strtold_l_f64"))]
+pub unsafe extern "C" fn strtold_l(
+    nptr: *const u8,
+    endptr: *mut *const u8,
+    _loc: crate::locale::LocaleT,
+) -> f64 {
+    // SAFETY: identical requirements, forwarded.
+    unsafe { strtod(nptr, endptr) }
+}
+
+// As for `strtold`: `%rdi`/`%rsi`/`%rdx` carry `nptr`/`endptr`/`loc` and are
+// left untouched, so the thunk only has to move the `f64` result out of
+// `%xmm0` and back in through the x87 stack.
+#[cfg(target_os = "none")]
+core::arch::global_asm!(
+    ".global strtold_l",
+    ".type strtold_l, @function",
+    "strtold_l:",
+    "push rbp",
+    "mov rbp, rsp",
+    "sub rsp, 16",
+    "call __strtold_l_f64",
+    "movsd [rsp], xmm0",
+    "fld qword ptr [rsp]",
+    "add rsp, 16",
+    "pop rbp",
+    "ret",
+);
+
 /// Convert a C string to a double (`atof`).
 ///
 /// # Safety
@@ -682,10 +751,361 @@ pub extern "C" fn lldiv(numer: i64, denom: i64) -> LldivT {
 // Sorting and searching
 // ---------------------------------------------------------------------------
 
+// `qsort` and `qsort_r` share one engine, `qsort_core` below.
+//
+// That engine is an **introsort**: median-of-three quicksort, dropping to
+// insertion sort on short ranges and to heapsort once the partition depth
+// exceeds 2·log₂n.  It is O(n log n) in the worst case, entirely in place, and
+// allocates nothing.
+//
+// It replaces a plain insertion sort (O(n²)) that borrowed a 256-byte stack
+// buffer for the element hold and `mmap`'d one for elements larger than that.
+// Both properties were defects rather than merely slow:
+//
+//   * O(n²) is not a theoretical concern for a libc whose first real consumer
+//     is coreutils — `ls` sorts a directory, `sort` sorts a file.  A 100 000
+//     entry directory is 10^10 comparisons on the old code and about 1.7×10^6
+//     on this one.
+//   * If the `mmap` failed the old code **returned silently, leaving the array
+//     unsorted** — which a caller cannot detect, because `qsort` has no return
+//     value.  Allocating nothing removes the failure mode rather than
+//     reporting it.
+//
+// The new engine is not stable.  Neither was required: POSIX explicitly leaves
+// the relative order of equal elements unspecified, and glibc's quicksort path
+// is unstable too.  Callers needing stability must sort on a tie-breaking key.
+
+/// Ranges at or below this length are insertion-sorted rather than partitioned.
+///
+/// Insertion sort wins on short ranges because its inner loop is branch-light
+/// and touches only adjacent elements; the usual crossover for a byte-wise
+/// element swap is around a dozen.
+const QSORT_INSERTION_MAX: usize = 12;
+
+/// Exchange the `size`-byte elements at `a` and `b`.
+///
+/// # Safety
+/// `a` and `b` must each point to `size` readable and writable bytes, and must
+/// either be equal or not overlap at all — which holds for two slots of one
+/// array.
+#[inline]
+unsafe fn qsort_swap(a: *mut u8, b: *mut u8, size: usize) {
+    if core::ptr::eq(a, b) {
+        return;
+    }
+    // SAFETY: distinct elements of one array never *partially* overlap, so the
+    // equality test above is enough to establish `swap_nonoverlapping`'s
+    // precondition.
+    unsafe { core::ptr::swap_nonoverlapping(a, b, size) };
+}
+
+/// Sort the inclusive index range `lo..=hi` by insertion, exchanging adjacent
+/// elements rather than holding one aside.
+///
+/// Swapping costs roughly three times the memory traffic of the usual
+/// shift-and-reinsert, but needs no element-sized temporary — which is what
+/// lets the whole engine work without allocating, for any element size.  Over
+/// ranges of at most [`QSORT_INSERTION_MAX`] the difference is noise.
+///
+/// # Safety
+/// `base` must address at least `hi + 1` elements of `size` bytes, and `cmp`
+/// must be a valid comparator over them.
+unsafe fn qsort_insertion<C: Fn(*const u8, *const u8) -> i32>(
+    base: *mut u8,
+    size: usize,
+    lo: usize,
+    hi: usize,
+    cmp: &C,
+) {
+    let mut i = lo.saturating_add(1);
+    while i <= hi {
+        let mut j = i;
+        while j > lo {
+            // SAFETY: `j <= hi` and `j - 1 >= lo`, both within the array.
+            let cur = unsafe { base.add(j.wrapping_mul(size)) };
+            // SAFETY: as above.
+            let prev = unsafe { base.add(j.wrapping_sub(1).wrapping_mul(size)) };
+            if cmp(cur.cast_const(), prev.cast_const()) >= 0 {
+                break;
+            }
+            // SAFETY: two distinct in-bounds elements of the same array.
+            unsafe { qsort_swap(cur, prev, size) };
+            j = j.wrapping_sub(1);
+        }
+        i = i.wrapping_add(1);
+    }
+}
+
+/// Restore the max-heap property at `root` within the `count`-element heap
+/// based at element index `lo`.
+///
+/// # Safety
+/// `base` must address at least `lo + count` elements of `size` bytes, `root`
+/// must be `< count`, and `cmp` must be a valid comparator over them.
+unsafe fn qsort_sift_down<C: Fn(*const u8, *const u8) -> i32>(
+    base: *mut u8,
+    size: usize,
+    lo: usize,
+    mut root: usize,
+    count: usize,
+    cmp: &C,
+) {
+    loop {
+        let child = match root.checked_mul(2).and_then(|c| c.checked_add(1)) {
+            Some(c) if c < count => c,
+            _ => return,
+        };
+        // Pick the larger of the two children.
+        let mut swap_with = child;
+        let right = child.wrapping_add(1);
+        if right < count {
+            // SAFETY: `child` and `right` are both `< count`, hence in bounds.
+            let lc = unsafe { base.add(lo.wrapping_add(child).wrapping_mul(size)) };
+            // SAFETY: as above.
+            let rc = unsafe { base.add(lo.wrapping_add(right).wrapping_mul(size)) };
+            if cmp(rc.cast_const(), lc.cast_const()) > 0 {
+                swap_with = right;
+            }
+        }
+        // SAFETY: `root < count` and `swap_with < count`, both in bounds.
+        let rp = unsafe { base.add(lo.wrapping_add(root).wrapping_mul(size)) };
+        // SAFETY: as above.
+        let cp = unsafe { base.add(lo.wrapping_add(swap_with).wrapping_mul(size)) };
+        if cmp(rp.cast_const(), cp.cast_const()) >= 0 {
+            return;
+        }
+        // SAFETY: two distinct in-bounds elements of the same array.
+        unsafe { qsort_swap(rp, cp, size) };
+        root = swap_with;
+    }
+}
+
+/// Heapsort the inclusive index range `lo..=hi`.
+///
+/// This is introsort's escape hatch: slower than quicksort on typical input
+/// but with no bad case, so reaching it bounds the whole sort at O(n log n)
+/// however adversarial the data or the pivot choices.
+///
+/// # Safety
+/// As [`qsort_insertion`].
+unsafe fn qsort_heap<C: Fn(*const u8, *const u8) -> i32>(
+    base: *mut u8,
+    size: usize,
+    lo: usize,
+    hi: usize,
+    cmp: &C,
+) {
+    let count = hi.wrapping_sub(lo).wrapping_add(1);
+    if count <= 1 {
+        return;
+    }
+    // Build the heap bottom-up, from the last parent down to the root.  That
+    // is O(n), unlike inserting one element at a time.
+    let mut k = count / 2;
+    while k > 0 {
+        k = k.wrapping_sub(1);
+        // SAFETY: `k < count`; the range is in bounds per this fn's contract.
+        unsafe { qsort_sift_down(base, size, lo, k, count, cmp) };
+    }
+    // Repeatedly move the maximum to the end of the shrinking heap.
+    let mut end = count;
+    while end > 1 {
+        end = end.wrapping_sub(1);
+        // SAFETY: `lo` and `lo + end` are both within `lo..=hi`.
+        let root = unsafe { base.add(lo.wrapping_mul(size)) };
+        // SAFETY: as above.
+        let last = unsafe { base.add(lo.wrapping_add(end).wrapping_mul(size)) };
+        // SAFETY: two distinct in-bounds elements of the same array.
+        unsafe { qsort_swap(root, last, size) };
+        // SAFETY: the remaining `end` elements form a heap but for the root.
+        unsafe { qsort_sift_down(base, size, lo, 0, end, cmp) };
+    }
+}
+
+/// Partition the inclusive range `lo..=hi` and return the pivot's final index.
+///
+/// Median-of-three chooses the pivot and parks it at `lo`; the scan is
+/// Sedgewick's two-pointer form, which **stops on keys equal to the pivot**
+/// rather than sweeping past them.  That detail is what keeps an array of
+/// identical elements — the classic degenerate input, and a realistic one when
+/// sorting records by a low-cardinality field — splitting evenly instead of
+/// peeling off one element per pass.
+///
+/// # Safety
+/// As [`qsort_insertion`], with `lo < hi`.
+unsafe fn qsort_partition<C: Fn(*const u8, *const u8) -> i32>(
+    base: *mut u8,
+    size: usize,
+    lo: usize,
+    hi: usize,
+    cmp: &C,
+) -> usize {
+    // SAFETY (all uses below): every index passed to `at` lies within
+    // `lo..=hi`, which this function's contract places inside the array.
+    let at = |i: usize| unsafe { base.add(i.wrapping_mul(size)) };
+
+    // Median of three: order (lo, mid, hi), then park the median at `lo`.
+    let mid = lo.wrapping_add(hi.wrapping_sub(lo) / 2);
+    if cmp(at(mid).cast_const(), at(lo).cast_const()) < 0 {
+        // SAFETY: distinct in-bounds elements.
+        unsafe { qsort_swap(at(mid), at(lo), size) };
+    }
+    if cmp(at(hi).cast_const(), at(mid).cast_const()) < 0 {
+        // SAFETY: distinct in-bounds elements.
+        unsafe { qsort_swap(at(hi), at(mid), size) };
+        if cmp(at(mid).cast_const(), at(lo).cast_const()) < 0 {
+            // SAFETY: distinct in-bounds elements.
+            unsafe { qsort_swap(at(mid), at(lo), size) };
+        }
+    }
+    // SAFETY: distinct in-bounds elements.  The scan below never moves `lo`,
+    // so the pivot stays readable throughout.
+    unsafe { qsort_swap(at(mid), at(lo), size) };
+
+    let mut i = lo;
+    let mut j = hi.wrapping_add(1);
+    loop {
+        // Scan right for an element >= pivot.  Bounded explicitly by `hi`: the
+        // pivot sits *behind* `i`, so it cannot act as a sentinel here.
+        loop {
+            i = i.wrapping_add(1);
+            if i > hi || cmp(at(i).cast_const(), at(lo).cast_const()) >= 0 {
+                break;
+            }
+        }
+        // Scan left for an element <= pivot.  Self-limiting: the pivot at `lo`
+        // compares equal to itself and stops the scan.
+        loop {
+            j = j.wrapping_sub(1);
+            if j <= lo || cmp(at(j).cast_const(), at(lo).cast_const()) <= 0 {
+                break;
+            }
+        }
+        if i >= j {
+            break;
+        }
+        // SAFETY: `lo < i < j <= hi`; two distinct in-bounds elements.
+        unsafe { qsort_swap(at(i), at(j), size) };
+    }
+    // SAFETY: `j` lies within `lo..=hi`; this seats the pivot at its final index.
+    unsafe { qsort_swap(at(lo), at(j), size) };
+    j
+}
+
+/// The shared introsort engine behind `qsort` and `qsort_r`.
+///
+/// Recursion is replaced by an explicit stack that always defers the *smaller*
+/// partition and iterates on the larger.  Each deferred range is therefore at
+/// most half the one it came from, so the stack can never exceed `usize::BITS`
+/// entries however the pivots fall — which is why the fixed-size array below
+/// needs no overflow path.
+///
+/// # Safety
+/// `base` must point to at least `nmemb` elements of `size` bytes, and `cmp`
+/// must be a valid comparator over them.
+unsafe fn qsort_core<C: Fn(*const u8, *const u8) -> i32>(
+    base: *mut u8,
+    nmemb: usize,
+    size: usize,
+    cmp: &C,
+) {
+    if nmemb <= 1 || size == 0 || base.is_null() {
+        return;
+    }
+
+    // Introsort's depth budget: 2·floor(log2 n).  Exceeding it means the
+    // pivots have been pathologically bad (or the input was crafted to make
+    // them so), and the range is finished by heapsort instead.
+    let log2 = usize::BITS
+        .saturating_sub(nmemb.leading_zeros())
+        .saturating_sub(1) as usize;
+    let depth0 = log2.saturating_mul(2).max(1);
+
+    // (lo, hi, remaining depth); `hi` is inclusive.
+    let mut stack = [(0usize, 0usize, 0usize); usize::BITS as usize];
+    let mut sp = 0usize;
+    let mut cur = (0usize, nmemb.wrapping_sub(1), depth0);
+
+    loop {
+        let (mut lo, mut hi, mut depth) = cur;
+        while hi.wrapping_sub(lo) > QSORT_INSERTION_MAX {
+            if depth == 0 {
+                // SAFETY: `lo..=hi` is in bounds; see the loop invariant.
+                unsafe { qsort_heap(base, size, lo, hi, cmp) };
+                lo = hi;
+                break;
+            }
+            depth = depth.wrapping_sub(1);
+            // SAFETY: `lo < hi` here, since `hi - lo > QSORT_INSERTION_MAX`.
+            let p = unsafe { qsort_partition(base, size, lo, hi, cmp) };
+
+            // Either side is empty when the pivot lands at an end; carrying
+            // that as `None` is what keeps `p - 1` from underflowing at
+            // `p == lo`.
+            let left = if p == lo {
+                None
+            } else {
+                Some((lo, p.wrapping_sub(1)))
+            };
+            let right = if p == hi {
+                None
+            } else {
+                Some((p.wrapping_add(1), hi))
+            };
+
+            // Defer the smaller side, iterate on the larger.
+            let (defer, next) = if p.wrapping_sub(lo) < hi.wrapping_sub(p) {
+                (left, right)
+            } else {
+                (right, left)
+            };
+
+            if let Some((dlo, dhi)) = defer {
+                match stack.get_mut(sp) {
+                    Some(slot) => {
+                        *slot = (dlo, dhi, depth);
+                        sp = sp.wrapping_add(1);
+                    }
+                    // Unreachable given the halving bound documented above.
+                    // Handled anyway rather than dropped, because an unsorted
+                    // tail is invisible to the caller — `qsort` has no return
+                    // value with which to report that it gave up.
+                    // SAFETY: `dlo..=dhi` is in bounds; see the loop invariant.
+                    None => unsafe { qsort_heap(base, size, dlo, dhi, cmp) },
+                }
+            }
+            match next {
+                Some((nlo, nhi)) => {
+                    lo = nlo;
+                    hi = nhi;
+                }
+                None => {
+                    lo = hi;
+                    break;
+                }
+            }
+        }
+        if hi > lo {
+            // SAFETY: `lo..=hi` is in bounds; see the loop invariant.
+            unsafe { qsort_insertion(base, size, lo, hi, cmp) };
+        }
+        if sp == 0 {
+            break;
+        }
+        sp = sp.wrapping_sub(1);
+        match stack.get(sp) {
+            Some(&range) => cur = range,
+            // Unreachable: `sp` was non-zero and never exceeds `stack.len()`.
+            None => break,
+        }
+    }
+}
+
 /// Sort an array using the comparison function.
 ///
-/// This is a simple insertion sort — O(n²) but correct and compact.
-/// A real libc would use introsort or merge sort.
+/// Introsort — see the commentary above [`QSORT_INSERTION_MAX`].  O(n log n)
+/// worst case, in place, allocation-free.  Not stable; POSIX does not require
+/// it to be.
 ///
 /// # Safety
 ///
@@ -698,67 +1118,69 @@ pub unsafe extern "C" fn qsort(
     size: usize,
     compar: unsafe extern "C" fn(*const u8, *const u8) -> i32,
 ) {
-    if nmemb <= 1 || size == 0 {
-        return;
+    // SAFETY: forwarded from this function's contract; the closure only calls
+    // the caller's comparator on the pointers the engine hands it.
+    unsafe { qsort_core(base, nmemb, size, &|a, b| compar(a, b)) };
+}
+
+/// `qsort_r(base, nmemb, size, compar, arg)` — `qsort` with a context pointer.
+///
+/// The **GNU** form, in which `arg` is the comparator's *last* parameter.  (The
+/// BSD/macOS `qsort_r` puts it first and reorders the comparator's arguments
+/// too; the two are not interchangeable, and a program compiled for one and
+/// linked against the other passes a `void *` where a `const void *` is
+/// expected and crashes.  glibc and musl both use the GNU order, and so does
+/// everything targeting Linux, which is what we are ABI-compatible with.)
+///
+/// Own archive member: gnulib ships a `qsort_r` replacement for platforms that
+/// lack it, so a GNU program that vendors that module defines the symbol
+/// itself and must be able to decline ours.  See `string.rs`'s module header
+/// and `design-decisions.md` §339–§340.
+#[cfg(target_os = "none")]
+mod gnu_qsort_r {
+    use super::qsort_core;
+
+    /// See the module-level documentation.
+    ///
+    /// # Safety
+    /// As [`super::qsort`], and `arg` must be valid for whatever `compar` does
+    /// with it.
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn qsort_r(
+        base: *mut u8,
+        nmemb: usize,
+        size: usize,
+        compar: unsafe extern "C" fn(*const u8, *const u8, *mut core::ffi::c_void) -> i32,
+        arg: *mut core::ffi::c_void,
+    ) {
+        // SAFETY: forwarded from this function's contract.
+        unsafe { qsort_core(base, nmemb, size, &|a, b| compar(a, b, arg)) };
     }
+}
 
-    // Insertion sort.  Simple, in-place, stable.
-    // A 256-byte stack buffer avoids mmap for small elements.
-    let mut swap_buf = [0u8; 256];
-    let use_stack = size <= swap_buf.len();
+#[cfg(target_os = "none")]
+pub use gnu_qsort_r::qsort_r;
 
-    let temp = if use_stack {
-        swap_buf.as_mut_ptr()
-    } else {
-        // Allocate temp space via mmap for large elements.
-        let ptr = crate::mman::mmap(
-            core::ptr::null_mut(),
-            size,
-            crate::mman::PROT_READ | crate::mman::PROT_WRITE,
-            crate::mman::MAP_PRIVATE | crate::mman::MAP_ANONYMOUS,
-            -1,
-            0,
-        );
-        if ptr == crate::mman::MAP_FAILED {
-            return; // Cannot sort without temp space.
-        }
-        ptr.cast::<u8>()
-    };
-
-    let mut i: usize = 1;
-    while i < nmemb {
-        // Save element[i] into temp.
-        let elem_i = unsafe { base.add(i.wrapping_mul(size)) };
-        unsafe {
-            core::ptr::copy_nonoverlapping(elem_i, temp, size);
-        }
-
-        // Shift elements right until we find the insertion point.
-        let mut j = i;
-        while j > 0 {
-            let elem_j_minus_1 = unsafe { base.add(j.wrapping_sub(1).wrapping_mul(size)) };
-            if unsafe { compar(elem_j_minus_1, temp) } <= 0 {
-                break;
-            }
-            let elem_j = unsafe { base.add(j.wrapping_mul(size)) };
-            unsafe {
-                core::ptr::copy_nonoverlapping(elem_j_minus_1, elem_j, size);
-            }
-            j = j.wrapping_sub(1);
-        }
-
-        // Insert the saved element at position j.
-        let dest = unsafe { base.add(j.wrapping_mul(size)) };
-        unsafe {
-            core::ptr::copy_nonoverlapping(temp, dest, size);
-        }
-
-        i = i.wrapping_add(1);
-    }
-
-    if !use_stack {
-        let _ = crate::mman::munmap(temp.cast::<core::ffi::c_void>(), size);
-    }
+/// `qsort_r` — host build.
+///
+/// Written out twice rather than `cfg`-switched inside one definition: the
+/// target build needs the body inside `mod gnu_qsort_r` so it lands in its own
+/// archive member, and the host build should not carry an extra public module
+/// that exists only to serve a linker concern.
+///
+/// # Safety
+///
+/// As [`qsort`], and `arg` must be valid for whatever `compar` does with it.
+#[cfg(not(target_os = "none"))]
+pub unsafe extern "C" fn qsort_r(
+    base: *mut u8,
+    nmemb: usize,
+    size: usize,
+    compar: unsafe extern "C" fn(*const u8, *const u8, *mut core::ffi::c_void) -> i32,
+    arg: *mut core::ffi::c_void,
+) {
+    // SAFETY: forwarded from this function's contract.
+    unsafe { qsort_core(base, nmemb, size, &|a, b| compar(a, b, arg)) };
 }
 
 /// Binary search a sorted array.
@@ -917,86 +1339,90 @@ pub unsafe extern "C" fn setstate(statebuf: *mut u8) -> *mut u8 {
 // Temporary files
 // ---------------------------------------------------------------------------
 
-/// Create a unique temporary file.
-///
-/// The `template` string must end with exactly six 'X' characters
-/// (e.g., `"/tmp/fileXXXXXX"`).  These are replaced with unique
-/// characters and the file is created atomically.
-///
-/// Returns an open file descriptor on success, or -1 on error.
-///
-/// # Safety
-///
-/// `template` must be a writable null-terminated string with at least
-/// 6 trailing 'X' characters.
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub unsafe extern "C" fn mkstemp(template: *mut u8) -> i32 {
-    if template.is_null() {
-        crate::errno::set_errno(crate::errno::EINVAL);
-        return -1;
-    }
-
-    let len = unsafe { crate::string::strlen(template) };
-    if len < 6 {
-        crate::errno::set_errno(crate::errno::EINVAL);
-        return -1;
-    }
-
-    // Verify the last 6 characters are 'X'.
-    let suffix_start = len.wrapping_sub(6);
-    let mut i: usize = 0;
-    while i < 6 {
-        if unsafe { *template.add(suffix_start.wrapping_add(i)) } != b'X' {
+/// Own archive member — gnulib replaces `mkstemp`. See string.rs's module header.
+mod gnu_mkstemp {
+    /// Create a unique temporary file.
+    ///
+    /// The `template` string must end with exactly six 'X' characters
+    /// (e.g., `"/tmp/fileXXXXXX"`).  These are replaced with unique
+    /// characters and the file is created atomically.
+    ///
+    /// Returns an open file descriptor on success, or -1 on error.
+    ///
+    /// # Safety
+    ///
+    /// `template` must be a writable null-terminated string with at least
+    /// 6 trailing 'X' characters.
+    #[cfg_attr(target_os = "none", unsafe(no_mangle))]
+    pub unsafe extern "C" fn mkstemp(template: *mut u8) -> i32 {
+        if template.is_null() {
             crate::errno::set_errno(crate::errno::EINVAL);
             return -1;
         }
-        i = i.wrapping_add(1);
-    }
 
-    // Try up to 100 unique names.
-    let mut attempt: u32 = 0;
-    while attempt < 100 {
-        // Generate random bytes for the suffix.  Use getrandom (backed
-        // by RDRAND) for unpredictability — predictable temp file names
-        // are a security vulnerability (symlink attacks).
-        let mut rand_bytes = [0u8; 6];
-        crate::unistd::getrandom(rand_bytes.as_mut_ptr(), 6, 0);
-
-        // Fill the 6 X's with alphanumeric characters from random bytes.
-        let mut j: usize = 0;
-        while j < 6 {
-            let rb = rand_bytes.get(j).copied().unwrap_or(0);
-            let idx = rb % 36;
-            let ch = if idx < 10 {
-                b'0'.wrapping_add(idx)
-            } else {
-                b'a'.wrapping_add(idx.wrapping_sub(10))
-            };
-            // SAFETY: suffix_start + j < len, template is writable.
-            unsafe {
-                *template.add(suffix_start.wrapping_add(j)) = ch;
-            }
-            j = j.wrapping_add(1);
-        }
-
-        // Try to create the file exclusively.
-        let flags = crate::fcntl::O_RDWR | crate::fcntl::O_CREAT | crate::fcntl::O_EXCL;
-        let fd = crate::file::open(template, flags, 0o600);
-        if fd >= 0 {
-            return fd;
-        }
-
-        // If EEXIST, try again.  Any other error, bail.
-        if crate::errno::get_errno() != crate::errno::EEXIST {
+        let len = unsafe { crate::string::strlen(template) };
+        if len < 6 {
+            crate::errno::set_errno(crate::errno::EINVAL);
             return -1;
         }
 
-        attempt = attempt.wrapping_add(1);
-    }
+        // Verify the last 6 characters are 'X'.
+        let suffix_start = len.wrapping_sub(6);
+        let mut i: usize = 0;
+        while i < 6 {
+            if unsafe { *template.add(suffix_start.wrapping_add(i)) } != b'X' {
+                crate::errno::set_errno(crate::errno::EINVAL);
+                return -1;
+            }
+            i = i.wrapping_add(1);
+        }
 
-    crate::errno::set_errno(crate::errno::EEXIST);
-    -1
+        // Try up to 100 unique names.
+        let mut attempt: u32 = 0;
+        while attempt < 100 {
+            // Generate random bytes for the suffix.  Use getrandom (backed
+            // by RDRAND) for unpredictability — predictable temp file names
+            // are a security vulnerability (symlink attacks).
+            let mut rand_bytes = [0u8; 6];
+            crate::unistd::getrandom(rand_bytes.as_mut_ptr(), 6, 0);
+
+            // Fill the 6 X's with alphanumeric characters from random bytes.
+            let mut j: usize = 0;
+            while j < 6 {
+                let rb = rand_bytes.get(j).copied().unwrap_or(0);
+                let idx = rb % 36;
+                let ch = if idx < 10 {
+                    b'0'.wrapping_add(idx)
+                } else {
+                    b'a'.wrapping_add(idx.wrapping_sub(10))
+                };
+                // SAFETY: suffix_start + j < len, template is writable.
+                unsafe {
+                    *template.add(suffix_start.wrapping_add(j)) = ch;
+                }
+                j = j.wrapping_add(1);
+            }
+
+            // Try to create the file exclusively.
+            let flags = crate::fcntl::O_RDWR | crate::fcntl::O_CREAT | crate::fcntl::O_EXCL;
+            let fd = crate::file::open(template, flags, 0o600);
+            if fd >= 0 {
+                return fd;
+            }
+
+            // If EEXIST, try again.  Any other error, bail.
+            if crate::errno::get_errno() != crate::errno::EEXIST {
+                return -1;
+            }
+
+            attempt = attempt.wrapping_add(1);
+        }
+
+        crate::errno::set_errno(crate::errno::EEXIST);
+        -1
+    }
 }
+pub use gnu_mkstemp::mkstemp;
 
 /// Generate a unique temporary filename (DEPRECATED — use `mkstemp`).
 ///
@@ -1087,260 +1513,278 @@ pub extern "C" fn tmpfile() -> *mut u8 {
 // mkostemp — mkstemp with flags
 // ---------------------------------------------------------------------------
 
-/// Create a unique temporary file with additional open flags.
-///
-/// Like `mkstemp` but `flags` can include `O_CLOEXEC`, `O_APPEND`,
-/// etc.  Currently, the flags are accepted but not enforced (our open
-/// implementation doesn't support `O_CLOEXEC`).
-///
-/// # Safety
-///
-/// `template` must be a writable null-terminated string with at least
-/// 6 trailing 'X' characters.
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub unsafe extern "C" fn mkostemp(template: *mut u8, flags: i32) -> i32 {
-    if template.is_null() {
-        crate::errno::set_errno(crate::errno::EINVAL);
-        return -1;
-    }
-
-    let len = unsafe { crate::string::strlen(template) };
-    if len < 6 {
-        crate::errno::set_errno(crate::errno::EINVAL);
-        return -1;
-    }
-
-    // Verify the last 6 characters are 'X'.
-    let suffix_start = len.wrapping_sub(6);
-    let mut i: usize = 0;
-    while i < 6 {
-        if unsafe { *template.add(suffix_start.wrapping_add(i)) } != b'X' {
+/// Own archive member — gnulib replaces `mkostemp`. See string.rs's module header.
+mod gnu_mkostemp {
+    /// Create a unique temporary file with additional open flags.
+    ///
+    /// Like `mkstemp` but `flags` can include `O_CLOEXEC`, `O_APPEND`,
+    /// etc.  Currently, the flags are accepted but not enforced (our open
+    /// implementation doesn't support `O_CLOEXEC`).
+    ///
+    /// # Safety
+    ///
+    /// `template` must be a writable null-terminated string with at least
+    /// 6 trailing 'X' characters.
+    #[cfg_attr(target_os = "none", unsafe(no_mangle))]
+    pub unsafe extern "C" fn mkostemp(template: *mut u8, flags: i32) -> i32 {
+        if template.is_null() {
             crate::errno::set_errno(crate::errno::EINVAL);
             return -1;
         }
-        i = i.wrapping_add(1);
-    }
 
-    // Try up to 100 unique names.
-    let mut attempt: u32 = 0;
-    while attempt < 100 {
-        // Use getrandom for unpredictable suffix (same rationale as mkstemp).
-        let mut rand_bytes = [0u8; 6];
-        crate::unistd::getrandom(rand_bytes.as_mut_ptr(), 6, 0);
-
-        let mut j: usize = 0;
-        while j < 6 {
-            let rb = rand_bytes.get(j).copied().unwrap_or(0);
-            let idx = rb % 36;
-            let ch = if idx < 10 {
-                b'0'.wrapping_add(idx)
-            } else {
-                b'a'.wrapping_add(idx.wrapping_sub(10))
-            };
-            unsafe {
-                *template.add(suffix_start.wrapping_add(j)) = ch;
-            }
-            j = j.wrapping_add(1);
-        }
-
-        // OR the caller's flags (e.g., O_CLOEXEC, O_APPEND) with the
-        // mandatory O_RDWR | O_CREAT | O_EXCL flags.
-        let open_flags =
-            crate::fcntl::O_RDWR | crate::fcntl::O_CREAT | crate::fcntl::O_EXCL | flags;
-        let fd = crate::file::open(template, open_flags, 0o600);
-        if fd >= 0 {
-            return fd;
-        }
-
-        if crate::errno::get_errno() != crate::errno::EEXIST {
+        let len = unsafe { crate::string::strlen(template) };
+        if len < 6 {
+            crate::errno::set_errno(crate::errno::EINVAL);
             return -1;
         }
 
-        attempt = attempt.wrapping_add(1);
-    }
+        // Verify the last 6 characters are 'X'.
+        let suffix_start = len.wrapping_sub(6);
+        let mut i: usize = 0;
+        while i < 6 {
+            if unsafe { *template.add(suffix_start.wrapping_add(i)) } != b'X' {
+                crate::errno::set_errno(crate::errno::EINVAL);
+                return -1;
+            }
+            i = i.wrapping_add(1);
+        }
 
-    crate::errno::set_errno(crate::errno::EEXIST);
-    -1
+        // Try up to 100 unique names.
+        let mut attempt: u32 = 0;
+        while attempt < 100 {
+            // Use getrandom for unpredictable suffix (same rationale as mkstemp).
+            let mut rand_bytes = [0u8; 6];
+            crate::unistd::getrandom(rand_bytes.as_mut_ptr(), 6, 0);
+
+            let mut j: usize = 0;
+            while j < 6 {
+                let rb = rand_bytes.get(j).copied().unwrap_or(0);
+                let idx = rb % 36;
+                let ch = if idx < 10 {
+                    b'0'.wrapping_add(idx)
+                } else {
+                    b'a'.wrapping_add(idx.wrapping_sub(10))
+                };
+                unsafe {
+                    *template.add(suffix_start.wrapping_add(j)) = ch;
+                }
+                j = j.wrapping_add(1);
+            }
+
+            // OR the caller's flags (e.g., O_CLOEXEC, O_APPEND) with the
+            // mandatory O_RDWR | O_CREAT | O_EXCL flags.
+            let open_flags =
+                crate::fcntl::O_RDWR | crate::fcntl::O_CREAT | crate::fcntl::O_EXCL | flags;
+            let fd = crate::file::open(template, open_flags, 0o600);
+            if fd >= 0 {
+                return fd;
+            }
+
+            if crate::errno::get_errno() != crate::errno::EEXIST {
+                return -1;
+            }
+
+            attempt = attempt.wrapping_add(1);
+        }
+
+        crate::errno::set_errno(crate::errno::EEXIST);
+        -1
+    }
 }
+pub use gnu_mkostemp::mkostemp;
 
 // ---------------------------------------------------------------------------
 // mkstemps — create a temporary file with a suffix
 // ---------------------------------------------------------------------------
 
-/// Create a unique temporary file with a user-specified suffix.
-///
-/// Like `mkstemp`, but the last `suffixlen` characters of `template`
-/// are preserved as a suffix (e.g., `"/tmp/fileXXXXXX.txt"` with
-/// `suffixlen=4`).  The 6 'X' characters before the suffix are replaced
-/// with unique characters.
-///
-/// Returns an open fd on success, -1 on error.
-///
-/// # Safety
-///
-/// `template` must be a writable null-terminated string.
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub unsafe extern "C" fn mkstemps(template: *mut u8, suffixlen: i32) -> i32 {
-    unsafe { mkostemps(template, suffixlen, 0) }
+/// Own archive member — gnulib replaces `mkstemps`. See string.rs's module header.
+mod gnu_mkstemps {
+    use super::*;
+
+    /// Create a unique temporary file with a user-specified suffix.
+    ///
+    /// Like `mkstemp`, but the last `suffixlen` characters of `template`
+    /// are preserved as a suffix (e.g., `"/tmp/fileXXXXXX.txt"` with
+    /// `suffixlen=4`).  The 6 'X' characters before the suffix are replaced
+    /// with unique characters.
+    ///
+    /// Returns an open fd on success, -1 on error.
+    ///
+    /// # Safety
+    ///
+    /// `template` must be a writable null-terminated string.
+    #[cfg_attr(target_os = "none", unsafe(no_mangle))]
+    pub unsafe extern "C" fn mkstemps(template: *mut u8, suffixlen: i32) -> i32 {
+        unsafe { mkostemps(template, suffixlen, 0) }
+    }
 }
+pub use gnu_mkstemps::mkstemps;
 
 // ---------------------------------------------------------------------------
 // mkostemps — create a temporary file with suffix + flags
 // ---------------------------------------------------------------------------
 
-/// Create a unique temporary file with a suffix and open flags.
-///
-/// Combines `mkstemps` (suffix support) with `mkostemp` (additional
-/// open flags like `O_CLOEXEC`).
-///
-/// Returns an open fd on success, -1 on error.
-///
-/// # Safety
-///
-/// `template` must be a writable null-terminated string.
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub unsafe extern "C" fn mkostemps(template: *mut u8, suffixlen: i32, flags: i32) -> i32 {
-    if template.is_null() || suffixlen < 0 {
-        crate::errno::set_errno(crate::errno::EINVAL);
-        return -1;
-    }
-
-    let slen = suffixlen as usize;
-    let len = unsafe { crate::string::strlen(template) };
-    // Need at least 6 'X' before the suffix.
-    if len < 6_usize.wrapping_add(slen) {
-        crate::errno::set_errno(crate::errno::EINVAL);
-        return -1;
-    }
-
-    // Check that the 6 chars before the suffix are 'X'.
-    let x_start = len.wrapping_sub(slen).wrapping_sub(6);
-    let mut i: usize = 0;
-    while i < 6 {
-        if unsafe { *template.add(x_start.wrapping_add(i)) } != b'X' {
+/// Own archive member — gnulib replaces `mkostemps`. See string.rs's module header.
+mod gnu_mkostemps {
+    /// Create a unique temporary file with a suffix and open flags.
+    ///
+    /// Combines `mkstemps` (suffix support) with `mkostemp` (additional
+    /// open flags like `O_CLOEXEC`).
+    ///
+    /// Returns an open fd on success, -1 on error.
+    ///
+    /// # Safety
+    ///
+    /// `template` must be a writable null-terminated string.
+    #[cfg_attr(target_os = "none", unsafe(no_mangle))]
+    pub unsafe extern "C" fn mkostemps(template: *mut u8, suffixlen: i32, flags: i32) -> i32 {
+        if template.is_null() || suffixlen < 0 {
             crate::errno::set_errno(crate::errno::EINVAL);
             return -1;
         }
-        i = i.wrapping_add(1);
-    }
 
-    // Try up to 100 unique names.
-    let mut attempt: u32 = 0;
-    while attempt < 100 {
-        let mut rand_bytes = [0u8; 6];
-        crate::unistd::getrandom(rand_bytes.as_mut_ptr(), 6, 0);
-
-        let mut j: usize = 0;
-        while j < 6 {
-            // `j < 6 == rand_bytes.len()`, so the index is in bounds.
-            #[allow(clippy::indexing_slicing)]
-            let ch = rand_bytes[j] % 36;
-            let c = if ch < 10 {
-                b'0'.wrapping_add(ch)
-            } else {
-                b'a'.wrapping_add(ch.wrapping_sub(10))
-            };
-            unsafe {
-                *template.add(x_start.wrapping_add(j)) = c;
-            }
-            j = j.wrapping_add(1);
-        }
-
-        let base_flags = crate::fcntl::O_RDWR | crate::fcntl::O_CREAT | crate::fcntl::O_EXCL;
-        let fd = crate::file::open(template, base_flags | flags, 0o600);
-        if fd >= 0 {
-            return fd;
-        }
-
-        if crate::errno::get_errno() != crate::errno::EEXIST {
+        let slen = suffixlen as usize;
+        let len = unsafe { crate::string::strlen(template) };
+        // Need at least 6 'X' before the suffix.
+        if len < 6_usize.wrapping_add(slen) {
+            crate::errno::set_errno(crate::errno::EINVAL);
             return -1;
         }
 
-        attempt = attempt.wrapping_add(1);
-    }
+        // Check that the 6 chars before the suffix are 'X'.
+        let x_start = len.wrapping_sub(slen).wrapping_sub(6);
+        let mut i: usize = 0;
+        while i < 6 {
+            if unsafe { *template.add(x_start.wrapping_add(i)) } != b'X' {
+                crate::errno::set_errno(crate::errno::EINVAL);
+                return -1;
+            }
+            i = i.wrapping_add(1);
+        }
 
-    crate::errno::set_errno(crate::errno::EEXIST);
-    -1
+        // Try up to 100 unique names.
+        let mut attempt: u32 = 0;
+        while attempt < 100 {
+            let mut rand_bytes = [0u8; 6];
+            crate::unistd::getrandom(rand_bytes.as_mut_ptr(), 6, 0);
+
+            let mut j: usize = 0;
+            while j < 6 {
+                // `j < 6 == rand_bytes.len()`, so the index is in bounds.
+                #[allow(clippy::indexing_slicing)]
+                let ch = rand_bytes[j] % 36;
+                let c = if ch < 10 {
+                    b'0'.wrapping_add(ch)
+                } else {
+                    b'a'.wrapping_add(ch.wrapping_sub(10))
+                };
+                unsafe {
+                    *template.add(x_start.wrapping_add(j)) = c;
+                }
+                j = j.wrapping_add(1);
+            }
+
+            let base_flags = crate::fcntl::O_RDWR | crate::fcntl::O_CREAT | crate::fcntl::O_EXCL;
+            let fd = crate::file::open(template, base_flags | flags, 0o600);
+            if fd >= 0 {
+                return fd;
+            }
+
+            if crate::errno::get_errno() != crate::errno::EEXIST {
+                return -1;
+            }
+
+            attempt = attempt.wrapping_add(1);
+        }
+
+        crate::errno::set_errno(crate::errno::EEXIST);
+        -1
+    }
 }
+pub use gnu_mkostemps::mkostemps;
 
 // ---------------------------------------------------------------------------
 // mkdtemp — create a unique temporary directory
 // ---------------------------------------------------------------------------
 
-/// Create a unique temporary directory.
-///
-/// Modifies `template` in-place (replacing the trailing 6 'X' chars
-/// with a unique suffix) and creates the directory with mode 0700.
-/// Returns `template` on success, or null on error.
-///
-/// # Safety
-///
-/// `template` must be a writable null-terminated string with at least
-/// 6 trailing 'X' characters.
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub unsafe extern "C" fn mkdtemp(template: *mut u8) -> *mut u8 {
-    if template.is_null() {
-        crate::errno::set_errno(crate::errno::EINVAL);
-        return core::ptr::null_mut();
-    }
-
-    let len = unsafe { crate::string::strlen(template) };
-    if len < 6 {
-        crate::errno::set_errno(crate::errno::EINVAL);
-        return core::ptr::null_mut();
-    }
-
-    // Verify the last 6 characters are 'X'.
-    let suffix_start = len.wrapping_sub(6);
-    let mut i: usize = 0;
-    while i < 6 {
-        if unsafe { *template.add(suffix_start.wrapping_add(i)) } != b'X' {
+/// Own archive member — gnulib replaces `mkdtemp`. See string.rs's module header.
+mod gnu_mkdtemp {
+    /// Create a unique temporary directory.
+    ///
+    /// Modifies `template` in-place (replacing the trailing 6 'X' chars
+    /// with a unique suffix) and creates the directory with mode 0700.
+    /// Returns `template` on success, or null on error.
+    ///
+    /// # Safety
+    ///
+    /// `template` must be a writable null-terminated string with at least
+    /// 6 trailing 'X' characters.
+    #[cfg_attr(target_os = "none", unsafe(no_mangle))]
+    pub unsafe extern "C" fn mkdtemp(template: *mut u8) -> *mut u8 {
+        if template.is_null() {
             crate::errno::set_errno(crate::errno::EINVAL);
             return core::ptr::null_mut();
         }
-        i = i.wrapping_add(1);
-    }
 
-    // Try up to 100 unique names.
-    let mut attempt: u32 = 0;
-    while attempt < 100 {
-        // Generate a cryptographically random suffix via RDRAND-backed getrandom.
-        let mut rand_bytes = [0u8; 6];
-        crate::unistd::getrandom(rand_bytes.as_mut_ptr(), 6, 0);
-
-        let mut j: usize = 0;
-        while j < 6 {
-            let rb = rand_bytes.get(j).copied().unwrap_or(0);
-            let idx = rb % 36;
-            let ch = if idx < 10 {
-                b'0'.wrapping_add(idx)
-            } else {
-                b'a'.wrapping_add(idx.wrapping_sub(10))
-            };
-            // SAFETY: suffix_start + j < len, template is writable.
-            unsafe {
-                *template.add(suffix_start.wrapping_add(j)) = ch;
-            }
-            j = j.wrapping_add(1);
-        }
-
-        // Try to create the directory.
-        let ret = crate::file::mkdir(template, 0o700);
-        if ret == 0 {
-            return template;
-        }
-
-        // If EEXIST, try again.
-        if crate::errno::get_errno() != crate::errno::EEXIST {
+        let len = unsafe { crate::string::strlen(template) };
+        if len < 6 {
+            crate::errno::set_errno(crate::errno::EINVAL);
             return core::ptr::null_mut();
         }
 
-        attempt = attempt.wrapping_add(1);
-    }
+        // Verify the last 6 characters are 'X'.
+        let suffix_start = len.wrapping_sub(6);
+        let mut i: usize = 0;
+        while i < 6 {
+            if unsafe { *template.add(suffix_start.wrapping_add(i)) } != b'X' {
+                crate::errno::set_errno(crate::errno::EINVAL);
+                return core::ptr::null_mut();
+            }
+            i = i.wrapping_add(1);
+        }
 
-    crate::errno::set_errno(crate::errno::EEXIST);
-    core::ptr::null_mut()
+        // Try up to 100 unique names.
+        let mut attempt: u32 = 0;
+        while attempt < 100 {
+            // Generate a cryptographically random suffix via RDRAND-backed getrandom.
+            let mut rand_bytes = [0u8; 6];
+            crate::unistd::getrandom(rand_bytes.as_mut_ptr(), 6, 0);
+
+            let mut j: usize = 0;
+            while j < 6 {
+                let rb = rand_bytes.get(j).copied().unwrap_or(0);
+                let idx = rb % 36;
+                let ch = if idx < 10 {
+                    b'0'.wrapping_add(idx)
+                } else {
+                    b'a'.wrapping_add(idx.wrapping_sub(10))
+                };
+                // SAFETY: suffix_start + j < len, template is writable.
+                unsafe {
+                    *template.add(suffix_start.wrapping_add(j)) = ch;
+                }
+                j = j.wrapping_add(1);
+            }
+
+            // Try to create the directory.
+            let ret = crate::file::mkdir(template, 0o700);
+            if ret == 0 {
+                return template;
+            }
+
+            // If EEXIST, try again.
+            if crate::errno::get_errno() != crate::errno::EEXIST {
+                return core::ptr::null_mut();
+            }
+
+            attempt = attempt.wrapping_add(1);
+        }
+
+        crate::errno::set_errno(crate::errno::EEXIST);
+        core::ptr::null_mut()
+    }
 }
+pub use gnu_mkdtemp::mkdtemp;
 
 // ---------------------------------------------------------------------------
 // system — execute a shell command
@@ -1637,133 +2081,137 @@ pub extern "C" fn jrand48(xsubi: *mut u16) -> i64 {
 // getsubopt — parse suboption strings
 // ---------------------------------------------------------------------------
 
-/// Parse comma-separated suboptions.
-///
-/// Scans `*optionp` for the next suboption from the null-terminated
-/// `tokens` array.  On match, `*valuep` points to the value after `=`
-/// (or null if no `=`), `*optionp` is advanced past the suboption,
-/// and the matching token index is returned.  Returns -1 if no match.
-///
-/// # Safety
-///
-/// `optionp` must point to a valid `*mut u8` pointing into a
-/// modifiable string.  `tokens` must be a null-terminated array of
-/// null-terminated C strings.  `valuep` must be a valid pointer.
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub unsafe extern "C" fn getsubopt(
-    optionp: *mut *mut u8,
-    tokens: *const *const u8,
-    valuep: *mut *mut u8,
-) -> i32 {
-    if optionp.is_null() || tokens.is_null() || valuep.is_null() {
-        return -1;
-    }
-
-    let opt = unsafe { *optionp };
-    if opt.is_null() || unsafe { *opt } == 0 {
-        return -1;
-    }
-
-    // Find the end of this suboption (comma or null).
-    let mut end: usize = 0;
-    while unsafe { *opt.add(end) } != 0 && unsafe { *opt.add(end) } != b',' {
-        end = end.wrapping_add(1);
-    }
-
-    // Find '=' within this suboption to separate key from value.
-    let mut eq_pos: Option<usize> = None;
-    let mut j: usize = 0;
-    while j < end {
-        if unsafe { *opt.add(j) } == b'=' {
-            eq_pos = Some(j);
-            break;
-        }
-        j = j.wrapping_add(1);
-    }
-
-    let key_len = eq_pos.unwrap_or(end);
-
-    // Try to match against each token.
-    let mut idx: i32 = 0;
-    loop {
-        let token = unsafe { *tokens.add(idx as usize) };
-        if token.is_null() {
-            break;
+/// Own archive member — gnulib replaces `getsubopt`. See string.rs's module header.
+mod gnu_getsubopt {
+    /// Parse comma-separated suboptions.
+    ///
+    /// Scans `*optionp` for the next suboption from the null-terminated
+    /// `tokens` array.  On match, `*valuep` points to the value after `=`
+    /// (or null if no `=`), `*optionp` is advanced past the suboption,
+    /// and the matching token index is returned.  Returns -1 if no match.
+    ///
+    /// # Safety
+    ///
+    /// `optionp` must point to a valid `*mut u8` pointing into a
+    /// modifiable string.  `tokens` must be a null-terminated array of
+    /// null-terminated C strings.  `valuep` must be a valid pointer.
+    #[cfg_attr(target_os = "none", unsafe(no_mangle))]
+    pub unsafe extern "C" fn getsubopt(
+        optionp: *mut *mut u8,
+        tokens: *const *const u8,
+        valuep: *mut *mut u8,
+    ) -> i32 {
+        if optionp.is_null() || tokens.is_null() || valuep.is_null() {
+            return -1;
         }
 
-        // Compare key_len bytes of opt against this token.
-        let tok_len = unsafe { crate::string::strlen(token) };
-        if tok_len == key_len {
-            let mut matched = true;
-            let mut k: usize = 0;
-            while k < key_len {
-                if unsafe { *opt.add(k) } != unsafe { *token.add(k) } {
-                    matched = false;
-                    break;
-                }
-                k = k.wrapping_add(1);
+        let opt = unsafe { *optionp };
+        if opt.is_null() || unsafe { *opt } == 0 {
+            return -1;
+        }
+
+        // Find the end of this suboption (comma or null).
+        let mut end: usize = 0;
+        while unsafe { *opt.add(end) } != 0 && unsafe { *opt.add(end) } != b',' {
+            end = end.wrapping_add(1);
+        }
+
+        // Find '=' within this suboption to separate key from value.
+        let mut eq_pos: Option<usize> = None;
+        let mut j: usize = 0;
+        while j < end {
+            if unsafe { *opt.add(j) } == b'=' {
+                eq_pos = Some(j);
+                break;
+            }
+            j = j.wrapping_add(1);
+        }
+
+        let key_len = eq_pos.unwrap_or(end);
+
+        // Try to match against each token.
+        let mut idx: i32 = 0;
+        loop {
+            let token = unsafe { *tokens.add(idx as usize) };
+            if token.is_null() {
+                break;
             }
 
-            if matched {
-                // Set valuep to the value after '=' (or null).
-                if let Some(ep) = eq_pos {
-                    unsafe {
-                        *valuep = opt.add(ep.wrapping_add(1));
+            // Compare key_len bytes of opt against this token.
+            let tok_len = unsafe { crate::string::strlen(token) };
+            if tok_len == key_len {
+                let mut matched = true;
+                let mut k: usize = 0;
+                while k < key_len {
+                    if unsafe { *opt.add(k) } != unsafe { *token.add(k) } {
+                        matched = false;
+                        break;
                     }
-                } else {
-                    unsafe {
-                        *valuep = core::ptr::null_mut();
-                    }
+                    k = k.wrapping_add(1);
                 }
 
-                // Advance optionp past this suboption.
-                if unsafe { *opt.add(end) } == b',' {
-                    unsafe {
-                        *optionp = opt.add(end.wrapping_add(1));
+                if matched {
+                    // Set valuep to the value after '=' (or null).
+                    if let Some(ep) = eq_pos {
+                        unsafe {
+                            *valuep = opt.add(ep.wrapping_add(1));
+                        }
+                    } else {
+                        unsafe {
+                            *valuep = core::ptr::null_mut();
+                        }
                     }
-                } else {
-                    unsafe {
-                        *optionp = opt.add(end);
+
+                    // Advance optionp past this suboption.
+                    if unsafe { *opt.add(end) } == b',' {
+                        unsafe {
+                            *optionp = opt.add(end.wrapping_add(1));
+                        }
+                    } else {
+                        unsafe {
+                            *optionp = opt.add(end);
+                        }
                     }
-                }
 
-                // Null-terminate the key portion (write '\0' at '=' or end).
-                unsafe {
-                    *opt.add(key_len) = 0;
-                }
+                    // Null-terminate the key portion (write '\0' at '=' or end).
+                    unsafe {
+                        *opt.add(key_len) = 0;
+                    }
 
-                return idx;
+                    return idx;
+                }
+            }
+
+            idx = idx.wrapping_add(1);
+        }
+
+        // No match — still advance past this suboption.
+        if let Some(ep) = eq_pos {
+            unsafe {
+                *valuep = opt.add(ep.wrapping_add(1));
+            }
+        } else {
+            unsafe {
+                *valuep = core::ptr::null_mut();
             }
         }
+        if unsafe { *opt.add(end) } == b',' {
+            unsafe {
+                *optionp = opt.add(end.wrapping_add(1));
+            }
+        } else {
+            unsafe {
+                *optionp = opt.add(end);
+            }
+        }
+        unsafe {
+            *opt.add(key_len) = 0;
+        }
 
-        idx = idx.wrapping_add(1);
+        -1
     }
-
-    // No match — still advance past this suboption.
-    if let Some(ep) = eq_pos {
-        unsafe {
-            *valuep = opt.add(ep.wrapping_add(1));
-        }
-    } else {
-        unsafe {
-            *valuep = core::ptr::null_mut();
-        }
-    }
-    if unsafe { *opt.add(end) } == b',' {
-        unsafe {
-            *optionp = opt.add(end.wrapping_add(1));
-        }
-    } else {
-        unsafe {
-            *optionp = opt.add(end);
-        }
-    }
-    unsafe {
-        *opt.add(key_len) = 0;
-    }
-
-    -1
 }
+pub use gnu_getsubopt::getsubopt;
 
 // ---------------------------------------------------------------------------
 // a64l / l64a — base-64 encoding (POSIX XSI)
@@ -2339,6 +2787,316 @@ mod tests {
         }
         unsafe { qsort(arr.as_mut_ptr().cast(), 11, 4, cmp) };
         assert_eq!(arr, [1, 1, 2, 3, 3, 4, 5, 5, 5, 6, 9]);
+    }
+
+    // -----------------------------------------------------------------------
+    // qsort — the introsort engine
+    //
+    // Everything above this line is at most eleven elements long, so all of it
+    // is handled by the insertion-sort leaf and none of it ever reaches a
+    // partition.  These exercise the parts the old O(n²) implementation did
+    // not have: median-of-three partitioning, the deferred-range stack, and
+    // the heapsort fallback.
+    // -----------------------------------------------------------------------
+
+    /// Deterministic pseudo-random source (the SplitMix/PCG multiplier pair).
+    ///
+    /// A fixed sequence rather than a real RNG so a failure is reproducible
+    /// from the seed alone — a sort bug that only shows up one run in fifty is
+    /// worthless to debug.
+    fn qsort_test_rand(state: &mut u64) -> u32 {
+        *state = state
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1_442_695_040_888_963_407);
+        (*state >> 33) as u32
+    }
+
+    /// Total-order `int` comparator.
+    ///
+    /// Deliberately *not* the `cmp_i32` above, which returns `a - b`: that is
+    /// the idiom every C tutorial uses and it reports the wrong sign whenever
+    /// the difference overflows, which these tests hit constantly because they
+    /// draw keys from the whole `i32` range.
+    extern "C" fn qcmp_i32(a: *const u8, b: *const u8) -> i32 {
+        // SAFETY: only ever passed to `qsort` over an `i32` array.
+        let (x, y) = unsafe { (*a.cast::<i32>(), *b.cast::<i32>()) };
+        match x.cmp(&y) {
+            core::cmp::Ordering::Less => -1,
+            core::cmp::Ordering::Equal => 0,
+            core::cmp::Ordering::Greater => 1,
+        }
+    }
+
+    /// Sort `arr` with our `qsort` and assert the result is both ordered *and*
+    /// a permutation of the input.
+    ///
+    /// The permutation half matters specifically for a swap-based sort: a
+    /// mis-indexed swap duplicates one element and loses another while leaving
+    /// the array perfectly ordered, so an order-only check passes.
+    fn check_qsort_i32(mut arr: Vec<i32>) {
+        let mut expected = arr.clone();
+        expected.sort_unstable();
+        let n = arr.len();
+        unsafe { qsort(arr.as_mut_ptr().cast(), n, 4, qcmp_i32) };
+        assert_eq!(arr, expected, "n = {n}");
+    }
+
+    #[test]
+    fn qsort_sorts_random_arrays_across_the_threshold() {
+        let mut seed = 0x5EED_1234_u64;
+        // Sizes chosen to straddle QSORT_INSERTION_MAX (12) in both directions
+        // and to include lengths that are and are not powers of two.
+        for n in [
+            0usize, 1, 2, 3, 11, 12, 13, 14, 16, 17, 31, 32, 33, 63, 100, 127, 128, 129, 1000, 4096,
+        ] {
+            let arr: Vec<i32> = (0..n)
+                .map(|_| qsort_test_rand(&mut seed) as i32)
+                .collect();
+            check_qsort_i32(arr);
+        }
+    }
+
+    #[test]
+    fn qsort_handles_all_elements_equal() {
+        // The classic quicksort killer: a Lomuto partition peels off one
+        // element per pass here and goes quadratic.  Sedgewick's scan stops on
+        // equal keys, so this splits down the middle instead.
+        check_qsort_i32(vec![7i32; 5000]);
+    }
+
+    #[test]
+    fn qsort_handles_sorted_and_reversed_input() {
+        // Both are worst cases for a first-element pivot; median-of-three
+        // turns them into the best case.
+        check_qsort_i32((0..2000i32).collect());
+        check_qsort_i32((0..2000i32).rev().collect());
+    }
+
+    #[test]
+    fn qsort_handles_adversarial_shapes() {
+        // Organ pipe: ascends then descends.
+        let organ: Vec<i32> = (0..1000i32).chain((0..1000i32).rev()).collect();
+        check_qsort_i32(organ);
+        // Sawtooth: many short runs, each a repeat of the last.
+        let saw: Vec<i32> = (0..2000).map(|i| (i % 17) as i32).collect();
+        check_qsort_i32(saw);
+        // Two values only — maximal ties without being constant.
+        let binary: Vec<i32> = (0..3000).map(|i| i32::from(i % 2 == 0)).collect();
+        check_qsort_i32(binary);
+    }
+
+    #[test]
+    fn qsort_handles_elements_larger_than_the_old_stack_buffer() {
+        // The previous implementation held one element in a 256-byte stack
+        // buffer and `mmap`'d for anything bigger — and silently gave up if
+        // that `mmap` failed.  This engine swaps in place and has no such
+        // threshold, so a 512-byte element must behave exactly like a 4-byte
+        // one.  The element carries its key in the first four bytes and a
+        // checksum-ish tail, so a partial swap is detectable.
+        const W: usize = 512;
+        let mut seed = 0xC0FF_EE01_u64;
+        let n = 300usize;
+        let mut buf = vec![0u8; n * W];
+        let mut keys = Vec::with_capacity(n);
+        for i in 0..n {
+            let key = qsort_test_rand(&mut seed) as i32;
+            keys.push(key);
+            let elem = &mut buf[i * W..(i + 1) * W];
+            elem[..4].copy_from_slice(&key.to_ne_bytes());
+            // Fill the tail deterministically from the key.
+            for (j, b) in elem[4..].iter_mut().enumerate() {
+                *b = (key as u8).wrapping_add(j as u8);
+            }
+        }
+        unsafe { qsort(buf.as_mut_ptr(), n, W, qcmp_i32) };
+
+        keys.sort_unstable();
+        for (i, want) in keys.iter().enumerate() {
+            let elem = &buf[i * W..(i + 1) * W];
+            let got = i32::from_ne_bytes([elem[0], elem[1], elem[2], elem[3]]);
+            assert_eq!(got, *want, "key at index {i}");
+            // The tail must still belong to this key — i.e. the whole element
+            // moved, not just its first word.
+            for (j, b) in elem[4..].iter().enumerate() {
+                assert_eq!(*b, (got as u8).wrapping_add(j as u8), "tail byte {j} at {i}");
+            }
+        }
+    }
+
+    #[test]
+    fn qsort_handles_element_sizes_that_are_not_a_multiple_of_a_word() {
+        // Three-byte elements: any swap written in terms of `u64` chunks
+        // rather than bytes would corrupt neighbours here.
+        const W: usize = 3;
+        let n = 500usize;
+        let mut buf = vec![0u8; n * W];
+        let mut seed = 0xABCD_0F0F_u64;
+        for i in 0..n {
+            let v = (qsort_test_rand(&mut seed) & 0x00FF_FFFF) as u32;
+            buf[i * W] = (v >> 16) as u8;
+            buf[i * W + 1] = (v >> 8) as u8;
+            buf[i * W + 2] = v as u8;
+        }
+        let mut expected: Vec<[u8; 3]> = (0..n)
+            .map(|i| [buf[i * W], buf[i * W + 1], buf[i * W + 2]])
+            .collect();
+        expected.sort_unstable();
+
+        unsafe extern "C" fn cmp_be3(a: *const u8, b: *const u8) -> i32 {
+            for k in 0..3 {
+                // SAFETY: the comparator is only ever called with pointers to
+                // 3-byte elements of the array under test.
+                let (x, y) = unsafe { (*a.add(k), *b.add(k)) };
+                if x != y {
+                    return if x < y { -1 } else { 1 };
+                }
+            }
+            0
+        }
+        unsafe { qsort(buf.as_mut_ptr(), n, W, cmp_be3) };
+
+        for (i, want) in expected.iter().enumerate() {
+            assert_eq!(&buf[i * W..i * W + 3], &want[..], "element {i}");
+        }
+    }
+
+    #[test]
+    fn qsort_heapsort_fallback_sorts_correctly() {
+        // The depth-limited fallback is unreachable from `qsort` on any input
+        // we can construct here (it needs 2·log₂n consecutive bad pivots), so
+        // exercise it directly.  If it were wrong, the only symptom through
+        // the public entry point would be a rare mis-sort on adversarial data.
+        let mut seed = 0x1357_9BDF_u64;
+        for n in [2usize, 3, 8, 17, 64, 1000] {
+            let mut arr: Vec<i32> = (0..n)
+                .map(|_| qsort_test_rand(&mut seed) as i32)
+                .collect();
+            let mut expected = arr.clone();
+            expected.sort_unstable();
+            unsafe {
+                qsort_heap(arr.as_mut_ptr().cast(), 4, 0, n - 1, &|a, b| qcmp_i32(a, b));
+            }
+            assert_eq!(arr, expected, "heapsort, n = {n}");
+        }
+    }
+
+    #[test]
+    fn qsort_heapsort_fallback_sorts_a_subrange_only() {
+        // `qsort_heap` is handed an inclusive sub-range by the engine, so it
+        // must leave everything outside it untouched.
+        let mut arr: Vec<i32> = vec![100, 99, 5, 4, 3, 2, 1, 98, 97];
+        unsafe {
+            qsort_heap(arr.as_mut_ptr().cast(), 4, 2, 6, &|a, b| qcmp_i32(a, b));
+        }
+        assert_eq!(arr, vec![100, 99, 1, 2, 3, 4, 5, 98, 97]);
+    }
+
+    #[test]
+    fn qsort_r_sorts_and_passes_its_context_through() {
+        // `arg` selects the sort direction, which is both the point of
+        // `qsort_r` and a check that the pointer survives every comparison.
+        unsafe extern "C" fn cmp_dir(
+            a: *const u8,
+            b: *const u8,
+            arg: *mut core::ffi::c_void,
+        ) -> i32 {
+            // SAFETY: the caller below passes a live `&mut i32`.
+            let dir = unsafe { *arg.cast::<i32>() };
+            // SAFETY: elements of the `i32` array under test.
+            qcmp_i32(a, b) * dir
+        }
+
+        let mut seed = 0x2468_ACE0_u64;
+        let mut arr: Vec<i32> = (0..500).map(|_| qsort_test_rand(&mut seed) as i32).collect();
+        let mut ascending = arr.clone();
+        ascending.sort_unstable();
+        let mut descending = ascending.clone();
+        descending.reverse();
+
+        let n = arr.len();
+        let mut dir: i32 = 1;
+        unsafe {
+            qsort_r(
+                arr.as_mut_ptr().cast(),
+                n,
+                4,
+                cmp_dir,
+                (&raw mut dir).cast::<core::ffi::c_void>(),
+            );
+        }
+        assert_eq!(arr, ascending);
+
+        dir = -1;
+        unsafe {
+            qsort_r(
+                arr.as_mut_ptr().cast(),
+                n,
+                4,
+                cmp_dir,
+                (&raw mut dir).cast::<core::ffi::c_void>(),
+            );
+        }
+        assert_eq!(arr, descending);
+    }
+
+    #[test]
+    fn qsort_rejects_degenerate_arguments_without_touching_memory() {
+        unsafe extern "C" fn cmp_never(_a: *const u8, _b: *const u8) -> i32 {
+            panic!("comparator must not be called");
+        }
+        let mut arr = [3i32, 1, 2];
+        // size == 0: nothing can be swapped meaningfully.
+        unsafe { qsort(arr.as_mut_ptr().cast(), 3, 0, cmp_never) };
+        assert_eq!(arr, [3, 1, 2]);
+        // A NULL base with a non-zero count must not be dereferenced.
+        unsafe { qsort(core::ptr::null_mut(), 5, 4, cmp_never) };
+    }
+
+    // -----------------------------------------------------------------------
+    // strtod_l / strtold_l
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn strtod_l_matches_strtod_and_ignores_the_locale() {
+        for s in [
+            &b"3.14159\0"[..],
+            &b"-0.5e3\0"[..],
+            &b"0x1.8p+1\0"[..],
+            &b"  42\0"[..],
+            &b"nonsense\0"[..],
+        ] {
+            let mut end_plain: *const u8 = core::ptr::null();
+            let mut end_l: *const u8 = core::ptr::null();
+            let plain = unsafe { strtod(s.as_ptr(), &mut end_plain) };
+            let with_locale = unsafe {
+                strtod_l(
+                    s.as_ptr(),
+                    &mut end_l,
+                    crate::locale::LC_GLOBAL_LOCALE,
+                )
+            };
+            assert!(
+                (plain - with_locale).abs() < f64::EPSILON || (plain.is_nan() && with_locale.is_nan()),
+                "value mismatch for {s:?}"
+            );
+            // The end pointer must advance identically, not merely the value.
+            assert_eq!(
+                end_plain as usize - s.as_ptr() as usize,
+                end_l as usize - s.as_ptr() as usize,
+                "endptr mismatch for {s:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn strtold_l_matches_strtold() {
+        let s = b"2.718281828\0";
+        let mut e1: *const u8 = core::ptr::null();
+        let mut e2: *const u8 = core::ptr::null();
+        let a = unsafe { strtold(s.as_ptr(), &mut e1) };
+        let b = unsafe { strtold_l(s.as_ptr(), &mut e2, crate::locale::LC_GLOBAL_LOCALE) };
+        assert!((a - b).abs() < f64::EPSILON);
+        assert_eq!(e1, e2);
     }
 
     // -----------------------------------------------------------------------

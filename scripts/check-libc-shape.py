@@ -49,6 +49,22 @@ the furthest possible point from the change that caused it.
 Hence an assertion on the artifact itself. It is cheap: it reads the archive's
 symbol index and nothing else.
 
+GRANULARITY IS NOT THE WHOLE STORY -- SEE CHECK 3
+=================================================
+
+`-C codegen-units=4096` is a *ceiling*, not a splitter. rustc partitions at
+module granularity and will not divide a single module, so a 156 KB `wchar.rs`
+is one codegen unit and hence one member -- exporting 78 symbols -- however
+high the ceiling goes. The actual mechanism behind S340's fix was wrapping each
+affected function in its own `mod gnu_<name> { ... }` block, which is what
+creates a new unit.
+
+The GNU coreutils spike (`scripts/coreutils-spike/`) proved this the expensive
+way: five binaries collided on `wmempcpy`, which shares `wchar.rs`'s member
+with `mbrtowc`. CHECK 2 could not see it, because it only fires when a member
+mixes a replaceable name with one a *hello-world* needs, and `mbrtowc` is not
+that. CHECK 3 states the property without that proxy. See its comment block.
+
 NO EXTERNAL TOOLS
 =================
 
@@ -105,7 +121,7 @@ for _stream in (sys.stdout, sys.stderr):
 
 # --- what we assert -----------------------------------------------------------
 #
-# Two checks, because they fail for different reasons and generalise
+# Three checks, because they fail for different reasons and generalise
 # differently.
 #
 # CHECK 1 (strict, narrow): for each family below, the member defining it must
@@ -181,22 +197,62 @@ STRICT_FAMILIES: dict[str, frozenset[str]] = {
 # Sourced from gnulib's module list: these are functions gnulib ships a
 # replacement for and compiles in unconditionally or near-enough on a
 # non-glibc target, which is what we look like to a `./configure` run.
+#
+# HOW TO DECIDE WHETHER A NEW NAME BELONGS HERE. gnulib has two ways of
+# replacing a function, and only one of them can collide with us:
+#
+#   * The function exists on the target but is buggy -> gnulib compiles its
+#     copy as `rpl_foo` and adds `#define foo rpl_foo`. Different symbol; it
+#     can never collide. (`fflush` is replaced this way, which is why `fflush`
+#     is safe to leave in UNAVOIDABLE below rather than here.)
+#   * The function is *absent* from the target -> gnulib compiles its copy
+#     under the plain name `foo`. That one collides with ours.
+#
+# `./configure` decides which case applies by probing the reference libc the
+# spikes compile against -- zig's bundled musl. So the hazard set is, near
+# enough, **the names our libc defines that musl does not**. `wmempcpy`
+# qualifies (glibc-only, so gnulib defines it plainly, so it collided with our
+# wchar member). `execl` does not (musl has it, so gnulib never defines it),
+# which is why the exec family is absent from this list even though gnulib has
+# modules named after it.
+#
+# List whole families, not just the member you happened to trip over. CHECK 3
+# asserts that a replaceable name shares its member only with other replaceable
+# names, so a family listed half-way reports its own missing half as an
+# intruder -- `optarg` without `opterr` makes `getopt`'s member look impure.
 REPLACEABLE = frozenset(
     {
-        # the four that actually bit us
-        "getopt", "getopt_long", "getopt_long_only", "optarg", "optind",
-        "glob", "globfree", "fnmatch",
-        "error", "error_at_line", "verror",
+        # the four that actually bit us (GNU make, design-decisions.md S339),
+        # listed family-complete including the data symbols
+        "getopt", "getopt_long", "getopt_long_only",
+        "optarg", "opterr", "optind", "optopt", "optreset",
+        "__getopt_initialized",
+        "glob", "globfree", "glob64", "globfree64", "fnmatch",
+        "error", "error_at_line", "verror", "verror_at_line",
+        "error_message_count", "error_one_per_line", "error_print_progname",
         # regex: gnulib vendors the whole engine
         "regcomp", "regexec", "regfree", "regerror", "re_compile_pattern",
         # string/memory helpers gnulib routinely replaces
         "strverscmp", "strndup", "strnlen", "memrchr", "rawmemchr",
         "stpcpy", "stpncpy", "strchrnul", "strcasestr", "mempcpy",
+        # wide-character: musl lacks `wmempcpy`, so gnulib defines it plainly.
+        # This is the one the coreutils spike caught (5 binaries, 1 duplicate)
+        # and the reason CHECK 3 exists -- see the note above CHECK 3.
+        "wmempcpy",
         # stdio-ish
         "getline", "getdelim", "fseeko", "ftello", "vasprintf", "asprintf",
+        # stdio_ext.h: gnulib's freadahead/freadptr/fpending/fpurge/fseterr
+        # modules supply these when the target has no glibc-compatible copy.
+        # Names not yet implemented are listed anyway, so that implementing one
+        # without its own `mod gnu_*` block is caught at once.
+        "__fpending", "__fpurge", "__freadahead", "__freadptr",
+        "__freadptrinc", "__fseterr", "__freadable", "__fwritable",
+        "__freading", "__fwriting", "__flbf", "__fbufsize", "__fsetlocking",
         # misc POSIX-fillers
-        "mkstemp", "mkdtemp", "canonicalize_file_name", "obstack_free",
+        "mkstemp", "mkostemp", "mkstemps", "mkostemps", "mkdtemp",
+        "canonicalize_file_name", "obstack_free",
         "argp_parse", "getsubopt", "timegm", "strptime",
+        "qsort_r", "timespec_get",
     }
 )
 
@@ -219,6 +275,42 @@ UNAVOIDABLE = frozenset(
         "exit", "abort",
     }
 )
+
+# CHECK 3 (the generalisation of CHECK 2): a REPLACEABLE name must own its
+# member outright, or share it only with other REPLACEABLE names.
+#
+# WHY CHECK 2 IS NOT ENOUGH. CHECK 2 approximates "the program under port
+# references something else in this member" with "this member also defines a
+# name no C program can avoid". That approximation has a hole, and the GNU
+# coreutils spike fell straight through it:
+#
+#   `posix::wchar` compiled to one member defining 78 symbols, among them
+#   `wmempcpy` (REPLACEABLE -- musl lacks it, so gnulib defines it plainly)
+#   and `mbrtowc` (which coreutils calls). Five binaries -- ls, dir, vdir, du,
+#   dircolors -- referenced `mbrtowc`, extracted the member, and collided on
+#   `wmempcpy`. CHECK 2 stayed silent throughout, because `mbrtowc` is not in
+#   UNAVOIDABLE: a hello-world does not call it.
+#
+# UNAVOIDABLE is "what a hello-world references", which is a proxy for "what
+# the program under port references" -- and a weak one, since a real program
+# references hundreds of names outside it. Widening UNAVOIDABLE until it covers
+# them is not a fix; the honest limit of that process is "every name in libc",
+# at which point the rule is just CHECK 3.
+#
+# So state the property directly instead. If a program brings its own copy of a
+# replaceable function, our member holding that function must be one the
+# program can afford to decline entirely. That is true exactly when the member
+# holds nothing the program might need -- i.e. nothing but other replaceable
+# names, which by definition the program is equally happy to supply itself.
+#
+# This subsumes CHECK 2 (an UNAVOIDABLE name is not REPLACEABLE, so any member
+# CHECK 2 flags CHECK 3 flags too), so a member CHECK 2 already reported is
+# skipped here to avoid reporting it twice. CHECK 2 is kept because its
+# diagnosis is the sharper one when it does apply: "every program needs this"
+# is a stronger statement than "some program might".
+#
+# It is also weaker than CHECK 1, which additionally forbids sharing between
+# two replaceable families and demands the family live in exactly one member.
 
 AR_MAGIC = b"!<arch>\n"
 
@@ -359,10 +451,12 @@ def check(path: Path, verbose: bool) -> list[str]:
                       f"({len(syms)} symbol(s), nothing else)")
 
     # --- CHECK 2: no member mixes replaceable with unavoidable ----------------
+    reported_mixed: set[int] = set()
     for off, syms in sorted(members.items()):
         repl = syms & REPLACEABLE
         unav = syms & UNAVOIDABLE
         if repl and unav:
+            reported_mixed.add(off)
             violations.append(
                 f"[mixed] member {member_name(path, off)} defines replaceable name(s) "
                 f"{{{', '.join(sorted(repl))}}} alongside unavoidable name(s) "
@@ -370,6 +464,32 @@ def check(path: Path, verbose: bool) -> list[str]:
                 f"member is always extracted, so the former is always defined -- and any "
                 f"program supplying its own copy fails to link."
             )
+
+    # --- CHECK 3: a replaceable name shares its member only with replaceables -
+    for off, syms in sorted(members.items()):
+        if off in reported_mixed:
+            continue  # CHECK 2 already said this, in sharper words
+        collidable = {s for s in syms if is_collidable(s)}
+        repl = collidable & REPLACEABLE
+        if not repl:
+            continue
+        riders = collidable - REPLACEABLE
+        if not riders:
+            if verbose:
+                print(f"  ok  member {member_name(path, off)} holds only replaceable "
+                      f"name(s): {', '.join(sorted(repl))}")
+            continue
+        shown = ", ".join(sorted(riders)[:12])
+        more = f" (+{len(riders) - 12} more)" if len(riders) > 12 else ""
+        violations.append(
+            f"[rider] member {member_name(path, off)} defines replaceable name(s) "
+            f"{{{', '.join(sorted(repl))}}} alongside {len(riders)} name(s) a program "
+            f"may well reference without supplying: {shown}{more}. Referencing any one "
+            f"of those extracts the member, and a program that vendors its own copy of "
+            f"the replaceable name then gets a duplicate definition. Fix by moving the "
+            f"replaceable one into its own `mod gnu_<name>` block (see posix/src/"
+            f"string.rs's module header), not by widening this script's lists."
+        )
 
     return violations
 
@@ -413,14 +533,26 @@ def main(argv: list[str] | None = None) -> int:
               file=sys.stderr)
         for v in violations:
             print(f"  - {v}\n", file=sys.stderr)
-        print("The usual cause is that `-C codegen-units=4096` has been dropped from",
-              file=sys.stderr)
-        print("$sysrootFlags in toolchain/build-sysroot.ps1, letting rustc's partitioner",
-              file=sys.stderr)
-        print("merge unrelated modules into a handful of objects again. See",
-              file=sys.stderr)
-        print("design-decisions.md S339 for why that breaks every gnulib-using port.",
-              file=sys.stderr)
+        if any(v.startswith("[rider]") for v in violations):
+            print("A [rider] means one module exports a replaceable name next to names a",
+                  file=sys.stderr)
+            print("program may reference. Raising codegen-units will NOT split it: rustc",
+                  file=sys.stderr)
+            print("partitions at module granularity and never divides a single module. Wrap",
+                  file=sys.stderr)
+            print("the replaceable function in its own `mod gnu_<name> { ... }` block, as",
+                  file=sys.stderr)
+            print("posix/src/string.rs does. See design-decisions.md S340 and S348.",
+                  file=sys.stderr)
+        else:
+            print("The usual cause is that `-C codegen-units=4096` has been dropped from",
+                  file=sys.stderr)
+            print("$sysrootFlags in toolchain/build-sysroot.ps1, letting rustc's partitioner",
+                  file=sys.stderr)
+            print("merge unrelated modules into a handful of objects again. See",
+                  file=sys.stderr)
+            print("design-decisions.md S339 for why that breaks every gnulib-using port.",
+                  file=sys.stderr)
         return 1
 
     print(f"libc.a shape OK: {path}")

@@ -2557,24 +2557,52 @@ pub unsafe extern "C" fn fgetws(ws: *mut WcharT, n: i32, stream: *mut u8) -> *mu
     ws
 }
 
-/// Copy wide characters, returning pointer past last written.
+/// Own archive member — gnulib replaces `wmempcpy`.
 ///
-/// Like `wmemcpy` but returns a pointer to the wide character after
-/// the last one written (i.e., `dest + n`).
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub unsafe extern "C" fn wmempcpy(dest: *mut WcharT, src: *const WcharT, n: usize) -> *mut WcharT {
-    if !dest.is_null() && !src.is_null() {
-        let mut i: usize = 0;
-        while i < n {
-            unsafe {
-                *dest.add(i) = *src.add(i);
+/// This module is otherwise one Rust module and therefore one codegen unit and
+/// one archive member holding 78 externally visible symbols, `mbrtowc` among
+/// them. Any program that calls `mbrtowc` extracts that whole member. gnulib
+/// supplies its own `wmempcpy` (musl has none), so without this split the two
+/// definitions collide and the program cannot decline half a member.
+///
+/// Measured, not theorised: `scripts/coreutils-spike/run.sh` failed `ls`,
+/// `dir`, `vdir`, `du` and `dircolors` on exactly this symbol and no other.
+///
+/// Note that `-C codegen-units=4096` does not help here and never could —
+/// `codegen-units` is a ceiling, not a splitter, and rustc's partitioner does
+/// not divide a single module. Only a nested `mod` creates a new unit. See
+/// `string.rs`'s module header and `design-decisions.md` §339/§340.
+mod gnu_wmempcpy {
+    use super::*;
+
+    /// Copy wide characters, returning pointer past last written.
+    ///
+    /// Like `wmemcpy` but returns a pointer to the wide character after
+    /// the last one written (i.e., `dest + n`).
+    ///
+    /// # Safety
+    ///
+    /// `dest` and `src` must be valid for `n` wide characters.
+    #[cfg_attr(target_os = "none", unsafe(no_mangle))]
+    pub unsafe extern "C" fn wmempcpy(
+        dest: *mut WcharT,
+        src: *const WcharT,
+        n: usize,
+    ) -> *mut WcharT {
+        if !dest.is_null() && !src.is_null() {
+            let mut i: usize = 0;
+            while i < n {
+                unsafe {
+                    *dest.add(i) = *src.add(i);
+                }
+                i = i.wrapping_add(1);
             }
-            i = i.wrapping_add(1);
         }
+        // SAFETY: dest + n is one past the last element written.
+        unsafe { dest.add(n) }
     }
-    // SAFETY: dest + n is one past the last element written.
-    unsafe { dest.add(n) }
 }
+pub use gnu_wmempcpy::wmempcpy;
 
 // ---------------------------------------------------------------------------
 // Wide strftime

@@ -243,6 +243,71 @@ pub extern "C" fn clock_gettime(clk_id: ClockidT, tp: *mut Timespec) -> i32 {
     0
 }
 
+/// `base` value for [`timespec_get`] meaning "seconds since the Unix epoch".
+///
+/// C11 defines exactly this one; C23 adds `TIME_MONOTONIC`, `TIME_ACTIVE` and
+/// `TIME_THREAD_ACTIVE`, which glibc still does not implement and which no
+/// caller we care about uses.  Recognising only `TIME_UTC` is conforming — the
+/// standard requires an unsupported base to return zero, which is what the
+/// implementation below does.
+pub const TIME_UTC: i32 = 1;
+
+/// `timespec_get(ts, base)` — C11's clock reader.
+///
+/// Returns `base` on success and **0** on failure, which is the inverse of
+/// every POSIX convention in this file and is easy to get backwards: there is
+/// no errno involved and no -1.
+///
+/// Own archive member: gnulib ships a `timespec_get` replacement for platforms
+/// that lack it (it is C11, so plenty do), meaning a GNU program that vendors
+/// that module defines the symbol itself and must be able to decline ours.
+/// `scripts/coreutils-spike/run.sh` found this symbol missing from `libc.a`
+/// altogether; giving it its own member at the same time is what keeps it from
+/// turning into a *duplicate* on the next run.  See `string.rs`'s module header
+/// and `design-decisions.md` §339–§340.
+#[cfg(target_os = "none")]
+mod gnu_timespec_get {
+    use super::{CLOCK_REALTIME, TIME_UTC, Timespec, clock_gettime};
+
+    /// See the module-level documentation.
+    ///
+    /// # Safety
+    /// `ts` must be NULL or point to a writable `struct timespec`.
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn timespec_get(ts: *mut Timespec, base: i32) -> i32 {
+        if base != TIME_UTC || ts.is_null() {
+            return 0;
+        }
+        if clock_gettime(CLOCK_REALTIME, ts) != 0 {
+            return 0;
+        }
+        base
+    }
+}
+
+#[cfg(target_os = "none")]
+pub use gnu_timespec_get::timespec_get;
+
+/// `timespec_get(ts, base)` — host build.
+///
+/// Written out twice rather than `cfg`-switched inside one definition: the
+/// target build needs the body inside `mod gnu_timespec_get` so it lands in
+/// its own archive member, and the host build should not carry an extra public
+/// module that exists only to serve a linker concern.
+///
+/// # Safety
+/// `ts` must be NULL or point to a writable `struct timespec`.
+#[cfg(not(target_os = "none"))]
+pub unsafe extern "C" fn timespec_get(ts: *mut Timespec, base: i32) -> i32 {
+    if base != TIME_UTC || ts.is_null() {
+        return 0;
+    }
+    if clock_gettime(CLOCK_REALTIME, ts) != 0 {
+        return 0;
+    }
+    base
+}
+
 /// Check whether a clock ID reports wall-clock (Unix-epoch) time.
 ///
 /// Only `CLOCK_REALTIME` and its coarse variant track the wall clock; all
@@ -937,23 +1002,29 @@ pub extern "C" fn mktime(tm: *mut Tm) -> TimeT {
     utc
 }
 
-/// Convert broken-down **UTC** time to seconds since epoch.
-///
-/// The zone-independent counterpart to `mktime`: the `Tm` is read as UTC
-/// whatever `TZ` says.  (It used to be an alias for `mktime`, which was
-/// harmless only while `mktime` itself was UTC-only.)
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn timegm(tm: *mut Tm) -> TimeT {
-    if tm.is_null() {
-        return -1;
+/// Own archive member — gnulib replaces `timegm`. See string.rs's module header.
+mod gnu_timegm {
+    use super::*;
+
+    /// Convert broken-down **UTC** time to seconds since epoch.
+    ///
+    /// The zone-independent counterpart to `mktime`: the `Tm` is read as UTC
+    /// whatever `TZ` says.  (It used to be an alias for `mktime`, which was
+    /// harmless only while `mktime` itself was UTC-only.)
+    #[cfg_attr(target_os = "none", unsafe(no_mangle))]
+    pub extern "C" fn timegm(tm: *mut Tm) -> TimeT {
+        if tm.is_null() {
+            return -1;
+        }
+        let t = unsafe { &mut *tm };
+        let secs = tm_to_secs(t);
+        t.tm_isdst = 0;
+        t.tm_gmtoff = 0;
+        t.tm_zone = UTC_NAME.as_ptr().cast::<u8>();
+        secs
     }
-    let t = unsafe { &mut *tm };
-    let secs = tm_to_secs(t);
-    t.tm_isdst = 0;
-    t.tm_gmtoff = 0;
-    t.tm_zone = UTC_NAME.as_ptr().cast::<u8>();
-    secs
 }
+pub use gnu_timegm::timegm;
 
 /// The zone name UTC renderings report, independent of `TZ`.
 static UTC_NAME: &core::ffi::CStr = c"UTC";
@@ -1927,345 +1998,351 @@ pub extern "C" fn clock() -> i64 {
 // strptime — parse time strings
 // ---------------------------------------------------------------------------
 
-/// Parse a time string according to a format.
-///
-/// Inverse of `strftime`.  Reads from `buf` according to `format`,
-/// filling fields in `tm`.  Returns a pointer to the first character
-/// not consumed, or NULL if the input doesn't match.
-///
-/// Supports: `%Y`, `%C`, `%y`, `%m`, `%d`, `%e`, `%H`, `%I`, `%M`,
-/// `%S`, `%j`, `%w`, `%u`, `%p`, `%n`, `%t`, `%%`.
-///
-/// # Safety
-///
-/// `buf` and `format` must be valid null-terminated strings.
-/// `tm` must point to a valid `Tm`.
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-#[allow(clippy::arithmetic_side_effects, clippy::too_many_lines)]
-pub unsafe extern "C" fn strptime(buf: *const u8, format: *const u8, tm: *mut Tm) -> *const u8 {
-    if buf.is_null() || format.is_null() || tm.is_null() {
-        return core::ptr::null();
-    }
+/// Own archive member — gnulib replaces `strptime`. See string.rs's module header.
+mod gnu_strptime {
+    use super::*;
 
-    let mut bi: usize = 0; // Index into buf.
-    let mut fi: usize = 0; // Index into format.
-
-    loop {
-        let fc = unsafe { *format.add(fi) };
-        if fc == 0 {
-            // End of format — success. Return pointer to remaining input.
-            return unsafe { buf.add(bi) };
+    /// Parse a time string according to a format.
+    ///
+    /// Inverse of `strftime`.  Reads from `buf` according to `format`,
+    /// filling fields in `tm`.  Returns a pointer to the first character
+    /// not consumed, or NULL if the input doesn't match.
+    ///
+    /// Supports: `%Y`, `%C`, `%y`, `%m`, `%d`, `%e`, `%H`, `%I`, `%M`,
+    /// `%S`, `%j`, `%w`, `%u`, `%p`, `%n`, `%t`, `%%`.
+    ///
+    /// # Safety
+    ///
+    /// `buf` and `format` must be valid null-terminated strings.
+    /// `tm` must point to a valid `Tm`.
+    #[cfg_attr(target_os = "none", unsafe(no_mangle))]
+    #[allow(clippy::arithmetic_side_effects, clippy::too_many_lines)]
+    pub unsafe extern "C" fn strptime(buf: *const u8, format: *const u8, tm: *mut Tm) -> *const u8 {
+        if buf.is_null() || format.is_null() || tm.is_null() {
+            return core::ptr::null();
         }
 
-        if fc == b'%' {
-            fi = fi.wrapping_add(1);
-            let spec = unsafe { *format.add(fi) };
-            if spec == 0 {
-                return core::ptr::null();
-            }
-            fi = fi.wrapping_add(1);
+        let mut bi: usize = 0; // Index into buf.
+        let mut fi: usize = 0; // Index into format.
 
-            match spec {
-                b'Y' => {
-                    // 4-digit year.
-                    let (val, consumed) = parse_int(buf, bi, 4);
-                    if consumed == 0 {
-                        return core::ptr::null();
-                    }
-                    unsafe {
-                        (*tm).tm_year = val - 1900;
-                    }
-                    bi = bi.wrapping_add(consumed);
-                }
-                b'C' => {
-                    // Century (2 digits).  Sets year = century*100 + (year%100).
-                    let (val, consumed) = parse_int(buf, bi, 2);
-                    if consumed == 0 {
-                        return core::ptr::null();
-                    }
-                    unsafe {
-                        let cur_y2 = ((*tm).tm_year.wrapping_add(1900)) % 100;
-                        (*tm).tm_year = val
-                            .wrapping_mul(100)
-                            .wrapping_add(cur_y2)
-                            .wrapping_sub(1900);
-                    }
-                    bi = bi.wrapping_add(consumed);
-                }
-                b'y' => {
-                    // 2-digit year. 69-99 → 1969-1999, 00-68 → 2000-2068.
-                    let (val, consumed) = parse_int(buf, bi, 2);
-                    if consumed == 0 {
-                        return core::ptr::null();
-                    }
-                    let full_year = if val >= 69 {
-                        val.wrapping_add(1900)
-                    } else {
-                        val.wrapping_add(2000)
-                    };
-                    unsafe {
-                        (*tm).tm_year = full_year.wrapping_sub(1900);
-                    }
-                    bi = bi.wrapping_add(consumed);
-                }
-                b'm' => {
-                    // Month 01-12.
-                    let (val, consumed) = parse_int(buf, bi, 2);
-                    if consumed == 0 {
-                        return core::ptr::null();
-                    }
-                    unsafe {
-                        (*tm).tm_mon = val - 1;
-                    }
-                    bi = bi.wrapping_add(consumed);
-                }
-                b'd' | b'e' => {
-                    // Day 01-31 (or space-padded for %e).
-                    // Skip leading space for %e.
-                    if spec == b'e' {
-                        while (unsafe { *buf.add(bi) }) == b' ' {
-                            bi = bi.wrapping_add(1);
-                        }
-                    }
-                    let (val, consumed) = parse_int(buf, bi, 2);
-                    if consumed == 0 {
-                        return core::ptr::null();
-                    }
-                    unsafe {
-                        (*tm).tm_mday = val;
-                    }
-                    bi = bi.wrapping_add(consumed);
-                }
-                b'H' | b'k' => {
-                    // Hour 00-23 (%k allows space-padded).
-                    if spec == b'k' {
-                        while (unsafe { *buf.add(bi) }) == b' ' {
-                            bi = bi.wrapping_add(1);
-                        }
-                    }
-                    let (val, consumed) = parse_int(buf, bi, 2);
-                    if consumed == 0 {
-                        return core::ptr::null();
-                    }
-                    unsafe {
-                        (*tm).tm_hour = val;
-                    }
-                    bi = bi.wrapping_add(consumed);
-                }
-                b'I' | b'l' => {
-                    // Hour 01-12 (12-hour clock).
-                    if spec == b'l' {
-                        while (unsafe { *buf.add(bi) }) == b' ' {
-                            bi = bi.wrapping_add(1);
-                        }
-                    }
-                    let (val, consumed) = parse_int(buf, bi, 2);
-                    if consumed == 0 {
-                        return core::ptr::null();
-                    }
-                    // Store as-is; %p adjusts for AM/PM later.
-                    unsafe {
-                        (*tm).tm_hour = val;
-                    }
-                    bi = bi.wrapping_add(consumed);
-                }
-                b'M' => {
-                    // Minute 00-59.
-                    let (val, consumed) = parse_int(buf, bi, 2);
-                    if consumed == 0 {
-                        return core::ptr::null();
-                    }
-                    unsafe {
-                        (*tm).tm_min = val;
-                    }
-                    bi = bi.wrapping_add(consumed);
-                }
-                b'S' => {
-                    // Second 00-60.
-                    let (val, consumed) = parse_int(buf, bi, 2);
-                    if consumed == 0 {
-                        return core::ptr::null();
-                    }
-                    unsafe {
-                        (*tm).tm_sec = val;
-                    }
-                    bi = bi.wrapping_add(consumed);
-                }
-                b'j' => {
-                    // Day of year 001-366.
-                    let (val, consumed) = parse_int(buf, bi, 3);
-                    if consumed == 0 {
-                        return core::ptr::null();
-                    }
-                    unsafe {
-                        (*tm).tm_yday = val - 1;
-                    }
-                    bi = bi.wrapping_add(consumed);
-                }
-                b'w' => {
-                    // Weekday 0-6 (Sunday=0).
-                    let (val, consumed) = parse_int(buf, bi, 1);
-                    if consumed == 0 {
-                        return core::ptr::null();
-                    }
-                    unsafe {
-                        (*tm).tm_wday = val;
-                    }
-                    bi = bi.wrapping_add(consumed);
-                }
-                b'u' => {
-                    // ISO weekday 1-7 (Monday=1).
-                    let (val, consumed) = parse_int(buf, bi, 1);
-                    if consumed == 0 {
-                        return core::ptr::null();
-                    }
-                    unsafe {
-                        (*tm).tm_wday = if val == 7 { 0 } else { val };
-                    }
-                    bi = bi.wrapping_add(consumed);
-                }
-                b'p' | b'P' => {
-                    // AM/PM (or am/pm). Adjusts tm_hour for 12-hour input.
-                    let c1 = unsafe { *buf.add(bi) };
-                    let c2 = unsafe { *buf.add(bi.wrapping_add(1)) };
-                    let afternoon = (c1 == b'P' || c1 == b'p') && (c2 == b'M' || c2 == b'm');
-                    let morning = (c1 == b'A' || c1 == b'a') && (c2 == b'M' || c2 == b'm');
-                    if !afternoon && !morning {
-                        return core::ptr::null();
-                    }
-                    unsafe {
-                        if afternoon && (*tm).tm_hour < 12 {
-                            (*tm).tm_hour = (*tm).tm_hour.wrapping_add(12);
-                        } else if morning && (*tm).tm_hour == 12 {
-                            (*tm).tm_hour = 0;
-                        }
-                    }
-                    bi = bi.wrapping_add(2);
-                }
-                b'b' | b'B' | b'h' => {
-                    // Month name (abbreviated or full).
-                    if let Some((mon, consumed)) = match_month_name(buf, bi) {
-                        unsafe {
-                            (*tm).tm_mon = mon;
-                        }
-                        bi = bi.wrapping_add(consumed);
-                    } else {
-                        return core::ptr::null();
-                    }
-                }
-                b'a' | b'A' => {
-                    // Weekday name (abbreviated or full).
-                    if let Some((wday, consumed)) = match_wday_name(buf, bi) {
-                        unsafe {
-                            (*tm).tm_wday = wday;
-                        }
-                        bi = bi.wrapping_add(consumed);
-                    } else {
-                        return core::ptr::null();
-                    }
-                }
-                b'V' => {
-                    // ISO 8601 week number (01-53) — informational only,
-                    // we parse the digits but don't derive date fields from
-                    // the week number alone (would need %G too).
-                    let (_, consumed) = parse_int(buf, bi, 2);
-                    if consumed == 0 {
-                        return core::ptr::null();
-                    }
-                    bi = bi.wrapping_add(consumed);
-                }
-                b'G' => {
-                    // ISO 8601 week-based year — treat as regular year.
-                    let (val, consumed) = parse_int(buf, bi, 4);
-                    if consumed == 0 {
-                        return core::ptr::null();
-                    }
-                    unsafe {
-                        (*tm).tm_year = val - 1900;
-                    }
-                    bi = bi.wrapping_add(consumed);
-                }
-                b'g' => {
-                    // ISO 8601 week-based year (2-digit).
-                    let (val, consumed) = parse_int(buf, bi, 2);
-                    if consumed == 0 {
-                        return core::ptr::null();
-                    }
-                    let full_year = if val >= 69 {
-                        val.wrapping_add(1900)
-                    } else {
-                        val.wrapping_add(2000)
-                    };
-                    unsafe {
-                        (*tm).tm_year = full_year.wrapping_sub(1900);
-                    }
-                    bi = bi.wrapping_add(consumed);
-                }
-                b'z' => {
-                    // Timezone offset (`+HHMM` or `-HHMM`), recorded in
-                    // `tm_gmtoff` the way glibc's strptime does — discarding
-                    // it would silently drop the one piece of zone
-                    // information the input actually carried.
-                    let sign = unsafe { *buf.add(bi) };
-                    if sign != b'+' && sign != b'-' {
-                        return core::ptr::null();
-                    }
-                    bi = bi.wrapping_add(1);
-                    let (val, consumed) = parse_int(buf, bi, 4);
-                    if consumed < 2 {
-                        return core::ptr::null();
-                    }
-                    // Two digits mean whole hours; four mean `hhmm`.
-                    let secs = if consumed >= 4 {
-                        i64::from(val / 100) * 3600 + i64::from(val % 100) * 60
-                    } else {
-                        i64::from(val) * 3600
-                    };
-                    unsafe {
-                        (*tm).tm_gmtoff = if sign == b'-' { -secs } else { secs };
-                    }
-                    bi = bi.wrapping_add(consumed);
-                }
-                b'Z' => {
-                    // Timezone abbreviation — skip alphabetic chars.
-                    while (unsafe { *buf.add(bi) }).is_ascii_alphabetic() {
-                        bi = bi.wrapping_add(1);
-                    }
-                }
-                b'n' | b't' => {
-                    // Skip any whitespace.
-                    while (unsafe { *buf.add(bi) }) == b' ' || (unsafe { *buf.add(bi) }) == b'\t' {
-                        bi = bi.wrapping_add(1);
-                    }
-                }
-                b'%' => {
-                    // Literal %.
-                    if unsafe { *buf.add(bi) } != b'%' {
-                        return core::ptr::null();
-                    }
-                    bi = bi.wrapping_add(1);
-                }
-                _ => {
-                    // Unknown specifier — fail.
+        loop {
+            let fc = unsafe { *format.add(fi) };
+            if fc == 0 {
+                // End of format — success. Return pointer to remaining input.
+                return unsafe { buf.add(bi) };
+            }
+
+            if fc == b'%' {
+                fi = fi.wrapping_add(1);
+                let spec = unsafe { *format.add(fi) };
+                if spec == 0 {
                     return core::ptr::null();
                 }
-            }
-        } else if fc == b' ' || fc == b'\t' {
-            // Whitespace in format matches any amount of whitespace in buf.
-            while (unsafe { *buf.add(bi) }) == b' ' || (unsafe { *buf.add(bi) }) == b'\t' {
+                fi = fi.wrapping_add(1);
+
+                match spec {
+                    b'Y' => {
+                        // 4-digit year.
+                        let (val, consumed) = parse_int(buf, bi, 4);
+                        if consumed == 0 {
+                            return core::ptr::null();
+                        }
+                        unsafe {
+                            (*tm).tm_year = val - 1900;
+                        }
+                        bi = bi.wrapping_add(consumed);
+                    }
+                    b'C' => {
+                        // Century (2 digits).  Sets year = century*100 + (year%100).
+                        let (val, consumed) = parse_int(buf, bi, 2);
+                        if consumed == 0 {
+                            return core::ptr::null();
+                        }
+                        unsafe {
+                            let cur_y2 = ((*tm).tm_year.wrapping_add(1900)) % 100;
+                            (*tm).tm_year = val
+                                .wrapping_mul(100)
+                                .wrapping_add(cur_y2)
+                                .wrapping_sub(1900);
+                        }
+                        bi = bi.wrapping_add(consumed);
+                    }
+                    b'y' => {
+                        // 2-digit year. 69-99 → 1969-1999, 00-68 → 2000-2068.
+                        let (val, consumed) = parse_int(buf, bi, 2);
+                        if consumed == 0 {
+                            return core::ptr::null();
+                        }
+                        let full_year = if val >= 69 {
+                            val.wrapping_add(1900)
+                        } else {
+                            val.wrapping_add(2000)
+                        };
+                        unsafe {
+                            (*tm).tm_year = full_year.wrapping_sub(1900);
+                        }
+                        bi = bi.wrapping_add(consumed);
+                    }
+                    b'm' => {
+                        // Month 01-12.
+                        let (val, consumed) = parse_int(buf, bi, 2);
+                        if consumed == 0 {
+                            return core::ptr::null();
+                        }
+                        unsafe {
+                            (*tm).tm_mon = val - 1;
+                        }
+                        bi = bi.wrapping_add(consumed);
+                    }
+                    b'd' | b'e' => {
+                        // Day 01-31 (or space-padded for %e).
+                        // Skip leading space for %e.
+                        if spec == b'e' {
+                            while (unsafe { *buf.add(bi) }) == b' ' {
+                                bi = bi.wrapping_add(1);
+                            }
+                        }
+                        let (val, consumed) = parse_int(buf, bi, 2);
+                        if consumed == 0 {
+                            return core::ptr::null();
+                        }
+                        unsafe {
+                            (*tm).tm_mday = val;
+                        }
+                        bi = bi.wrapping_add(consumed);
+                    }
+                    b'H' | b'k' => {
+                        // Hour 00-23 (%k allows space-padded).
+                        if spec == b'k' {
+                            while (unsafe { *buf.add(bi) }) == b' ' {
+                                bi = bi.wrapping_add(1);
+                            }
+                        }
+                        let (val, consumed) = parse_int(buf, bi, 2);
+                        if consumed == 0 {
+                            return core::ptr::null();
+                        }
+                        unsafe {
+                            (*tm).tm_hour = val;
+                        }
+                        bi = bi.wrapping_add(consumed);
+                    }
+                    b'I' | b'l' => {
+                        // Hour 01-12 (12-hour clock).
+                        if spec == b'l' {
+                            while (unsafe { *buf.add(bi) }) == b' ' {
+                                bi = bi.wrapping_add(1);
+                            }
+                        }
+                        let (val, consumed) = parse_int(buf, bi, 2);
+                        if consumed == 0 {
+                            return core::ptr::null();
+                        }
+                        // Store as-is; %p adjusts for AM/PM later.
+                        unsafe {
+                            (*tm).tm_hour = val;
+                        }
+                        bi = bi.wrapping_add(consumed);
+                    }
+                    b'M' => {
+                        // Minute 00-59.
+                        let (val, consumed) = parse_int(buf, bi, 2);
+                        if consumed == 0 {
+                            return core::ptr::null();
+                        }
+                        unsafe {
+                            (*tm).tm_min = val;
+                        }
+                        bi = bi.wrapping_add(consumed);
+                    }
+                    b'S' => {
+                        // Second 00-60.
+                        let (val, consumed) = parse_int(buf, bi, 2);
+                        if consumed == 0 {
+                            return core::ptr::null();
+                        }
+                        unsafe {
+                            (*tm).tm_sec = val;
+                        }
+                        bi = bi.wrapping_add(consumed);
+                    }
+                    b'j' => {
+                        // Day of year 001-366.
+                        let (val, consumed) = parse_int(buf, bi, 3);
+                        if consumed == 0 {
+                            return core::ptr::null();
+                        }
+                        unsafe {
+                            (*tm).tm_yday = val - 1;
+                        }
+                        bi = bi.wrapping_add(consumed);
+                    }
+                    b'w' => {
+                        // Weekday 0-6 (Sunday=0).
+                        let (val, consumed) = parse_int(buf, bi, 1);
+                        if consumed == 0 {
+                            return core::ptr::null();
+                        }
+                        unsafe {
+                            (*tm).tm_wday = val;
+                        }
+                        bi = bi.wrapping_add(consumed);
+                    }
+                    b'u' => {
+                        // ISO weekday 1-7 (Monday=1).
+                        let (val, consumed) = parse_int(buf, bi, 1);
+                        if consumed == 0 {
+                            return core::ptr::null();
+                        }
+                        unsafe {
+                            (*tm).tm_wday = if val == 7 { 0 } else { val };
+                        }
+                        bi = bi.wrapping_add(consumed);
+                    }
+                    b'p' | b'P' => {
+                        // AM/PM (or am/pm). Adjusts tm_hour for 12-hour input.
+                        let c1 = unsafe { *buf.add(bi) };
+                        let c2 = unsafe { *buf.add(bi.wrapping_add(1)) };
+                        let afternoon = (c1 == b'P' || c1 == b'p') && (c2 == b'M' || c2 == b'm');
+                        let morning = (c1 == b'A' || c1 == b'a') && (c2 == b'M' || c2 == b'm');
+                        if !afternoon && !morning {
+                            return core::ptr::null();
+                        }
+                        unsafe {
+                            if afternoon && (*tm).tm_hour < 12 {
+                                (*tm).tm_hour = (*tm).tm_hour.wrapping_add(12);
+                            } else if morning && (*tm).tm_hour == 12 {
+                                (*tm).tm_hour = 0;
+                            }
+                        }
+                        bi = bi.wrapping_add(2);
+                    }
+                    b'b' | b'B' | b'h' => {
+                        // Month name (abbreviated or full).
+                        if let Some((mon, consumed)) = match_month_name(buf, bi) {
+                            unsafe {
+                                (*tm).tm_mon = mon;
+                            }
+                            bi = bi.wrapping_add(consumed);
+                        } else {
+                            return core::ptr::null();
+                        }
+                    }
+                    b'a' | b'A' => {
+                        // Weekday name (abbreviated or full).
+                        if let Some((wday, consumed)) = match_wday_name(buf, bi) {
+                            unsafe {
+                                (*tm).tm_wday = wday;
+                            }
+                            bi = bi.wrapping_add(consumed);
+                        } else {
+                            return core::ptr::null();
+                        }
+                    }
+                    b'V' => {
+                        // ISO 8601 week number (01-53) — informational only,
+                        // we parse the digits but don't derive date fields from
+                        // the week number alone (would need %G too).
+                        let (_, consumed) = parse_int(buf, bi, 2);
+                        if consumed == 0 {
+                            return core::ptr::null();
+                        }
+                        bi = bi.wrapping_add(consumed);
+                    }
+                    b'G' => {
+                        // ISO 8601 week-based year — treat as regular year.
+                        let (val, consumed) = parse_int(buf, bi, 4);
+                        if consumed == 0 {
+                            return core::ptr::null();
+                        }
+                        unsafe {
+                            (*tm).tm_year = val - 1900;
+                        }
+                        bi = bi.wrapping_add(consumed);
+                    }
+                    b'g' => {
+                        // ISO 8601 week-based year (2-digit).
+                        let (val, consumed) = parse_int(buf, bi, 2);
+                        if consumed == 0 {
+                            return core::ptr::null();
+                        }
+                        let full_year = if val >= 69 {
+                            val.wrapping_add(1900)
+                        } else {
+                            val.wrapping_add(2000)
+                        };
+                        unsafe {
+                            (*tm).tm_year = full_year.wrapping_sub(1900);
+                        }
+                        bi = bi.wrapping_add(consumed);
+                    }
+                    b'z' => {
+                        // Timezone offset (`+HHMM` or `-HHMM`), recorded in
+                        // `tm_gmtoff` the way glibc's strptime does — discarding
+                        // it would silently drop the one piece of zone
+                        // information the input actually carried.
+                        let sign = unsafe { *buf.add(bi) };
+                        if sign != b'+' && sign != b'-' {
+                            return core::ptr::null();
+                        }
+                        bi = bi.wrapping_add(1);
+                        let (val, consumed) = parse_int(buf, bi, 4);
+                        if consumed < 2 {
+                            return core::ptr::null();
+                        }
+                        // Two digits mean whole hours; four mean `hhmm`.
+                        let secs = if consumed >= 4 {
+                            i64::from(val / 100) * 3600 + i64::from(val % 100) * 60
+                        } else {
+                            i64::from(val) * 3600
+                        };
+                        unsafe {
+                            (*tm).tm_gmtoff = if sign == b'-' { -secs } else { secs };
+                        }
+                        bi = bi.wrapping_add(consumed);
+                    }
+                    b'Z' => {
+                        // Timezone abbreviation — skip alphabetic chars.
+                        while (unsafe { *buf.add(bi) }).is_ascii_alphabetic() {
+                            bi = bi.wrapping_add(1);
+                        }
+                    }
+                    b'n' | b't' => {
+                        // Skip any whitespace.
+                        while (unsafe { *buf.add(bi) }) == b' ' || (unsafe { *buf.add(bi) }) == b'\t' {
+                            bi = bi.wrapping_add(1);
+                        }
+                    }
+                    b'%' => {
+                        // Literal %.
+                        if unsafe { *buf.add(bi) } != b'%' {
+                            return core::ptr::null();
+                        }
+                        bi = bi.wrapping_add(1);
+                    }
+                    _ => {
+                        // Unknown specifier — fail.
+                        return core::ptr::null();
+                    }
+                }
+            } else if fc == b' ' || fc == b'\t' {
+                // Whitespace in format matches any amount of whitespace in buf.
+                while (unsafe { *buf.add(bi) }) == b' ' || (unsafe { *buf.add(bi) }) == b'\t' {
+                    bi = bi.wrapping_add(1);
+                }
+                fi = fi.wrapping_add(1);
+            } else {
+                // Literal character — must match.
+                if unsafe { *buf.add(bi) } != fc {
+                    return core::ptr::null();
+                }
                 bi = bi.wrapping_add(1);
+                fi = fi.wrapping_add(1);
             }
-            fi = fi.wrapping_add(1);
-        } else {
-            // Literal character — must match.
-            if unsafe { *buf.add(bi) } != fc {
-                return core::ptr::null();
-            }
-            bi = bi.wrapping_add(1);
-            fi = fi.wrapping_add(1);
         }
     }
 }
+pub use gnu_strptime::strptime;
 
 /// Parse up to `max_digits` decimal digits from `buf` starting at offset `off`.
 ///
@@ -5203,6 +5280,78 @@ mod tests {
         let ret = clock_gettime(CLOCK_MONOTONIC, core::ptr::null_mut());
         assert_eq!(ret, -1);
         assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
+    }
+
+    // ---------------------------------------------------------------
+    // timespec_get — C11
+    //
+    // The return convention is inverted relative to everything else in
+    // this file: `base` on success, 0 on failure, no errno.  Each of
+    // these asserts the *value*, not merely success/failure, because
+    // `return 1` and `return base` are indistinguishable while TIME_UTC
+    // is the only base we accept.
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn timespec_get_fills_the_struct_and_returns_its_base() {
+        let mut ts = Timespec {
+            tv_sec: -1,
+            tv_nsec: -1,
+        };
+        let ret = unsafe { timespec_get(&raw mut ts, TIME_UTC) };
+        assert_eq!(ret, TIME_UTC, "success must return `base`, not 1 or 0");
+        assert!(ts.tv_sec > 0, "wall clock must be past the epoch");
+        assert!(
+            (0..1_000_000_000).contains(&ts.tv_nsec),
+            "nanoseconds must be normalised, got {}",
+            ts.tv_nsec
+        );
+    }
+
+    #[test]
+    fn timespec_get_agrees_with_clock_gettime() {
+        // It must read CLOCK_REALTIME, not the monotonic counter — the two
+        // differ by decades, and picking the wrong one would still produce a
+        // plausible-looking struct.
+        let mut a = Timespec {
+            tv_sec: 0,
+            tv_nsec: 0,
+        };
+        let mut b = Timespec {
+            tv_sec: 0,
+            tv_nsec: 0,
+        };
+        assert_eq!(unsafe { timespec_get(&raw mut a, TIME_UTC) }, TIME_UTC);
+        assert_eq!(clock_gettime(CLOCK_REALTIME, &raw mut b), 0);
+        assert!(
+            (b.tv_sec - a.tv_sec).abs() <= 2,
+            "timespec_get {} vs clock_gettime(CLOCK_REALTIME) {}",
+            a.tv_sec,
+            b.tv_sec
+        );
+    }
+
+    #[test]
+    fn timespec_get_rejects_an_unsupported_base() {
+        // C23's TIME_MONOTONIC is 2; we do not implement it, and the standard
+        // says an unsupported base returns zero rather than guessing.
+        let mut ts = Timespec {
+            tv_sec: -1,
+            tv_nsec: -1,
+        };
+        assert_eq!(unsafe { timespec_get(&raw mut ts, 2) }, 0);
+        assert_eq!(unsafe { timespec_get(&raw mut ts, 0) }, 0);
+        assert_eq!(unsafe { timespec_get(&raw mut ts, -1) }, 0);
+        assert_eq!(ts.tv_sec, -1, "a rejected call must not write through ts");
+    }
+
+    #[test]
+    fn timespec_get_rejects_a_null_struct() {
+        assert_eq!(
+            unsafe { timespec_get(core::ptr::null_mut(), TIME_UTC) },
+            0,
+            "NULL must be reported, not dereferenced"
+        );
     }
 
     #[test]

@@ -341,6 +341,78 @@ pub enum ResourceType {
     ResourceLimit = 29,
 }
 
+impl ResourceType {
+    /// The highest discriminant in use.
+    ///
+    /// Discriminants are contiguous from `Channel = 1`, so this doubles as the
+    /// variant count. Consumers that need "every type" iterate `1..=LAST`
+    /// rather than keeping their own list — see
+    /// [`groups::test_admin_grants_every_resource_type`](crate::cap::groups).
+    pub const LAST: u16 = Self::ResourceLimit as u16;
+
+    /// This type's wire discriminant, as sent to userspace.
+    ///
+    /// Written as an exhaustive match rather than `self as u16` — which would
+    /// be one line and generate identical code — so that it doubles as a
+    /// **compile-time tripwire**: adding a variant makes this fail to compile,
+    /// which lands whoever added it *here*, reading the list below. Two other
+    /// exhaustive matches (`ipc::cleanup_handles`, `proc::fork::dup_one`) would
+    /// also break, but neither of them can tell you about the four items below,
+    /// and a compile error that only says "handle this in fork" invites
+    /// handling it in fork and stopping.
+    ///
+    /// **When this breaks, update — in this order:**
+    ///
+    /// 1. [`Self::LAST`], above. Everything that iterates the types reads it.
+    /// 2. `cap::groups::init`'s `admin_grants` list. The `admin` group is
+    ///    documented to grant *every* type and is boot-tested against
+    ///    `1..=LAST`, so omitting it turns a green boot red — which is the
+    ///    intended outcome, not an inconvenience: it forces the "should admin
+    ///    have this?" question to be answered rather than defaulted.
+    /// 3. `test_cap_entry_info_abi`'s discriminant pin, if the new variant is
+    ///    now the last one.
+    /// 4. Lane B's mirrored copy in `posix/src/sys_capability.rs`, which no
+    ///    compiler here can see. File a request; do not assume they will
+    ///    notice.
+    ///
+    /// The single or-pattern arm is deliberate — per-variant arms would invite
+    /// someone to give the new one a body and consider the matter closed.
+    #[must_use]
+    pub const fn discriminant(self) -> u16 {
+        match self {
+            Self::Channel
+            | Self::Pipe
+            | Self::SharedMemory
+            | Self::EventFd
+            | Self::CompletionPort
+            | Self::Process
+            | Self::Thread
+            | Self::PortIo
+            | Self::DeviceIrq
+            | Self::File
+            | Self::Socket
+            | Self::Timer
+            | Self::IoScheduler
+            | Self::Service
+            | Self::Namespace
+            | Self::StreamSocket
+            | Self::MemFd
+            | Self::Epoll
+            | Self::SignalFd
+            | Self::Timerfd
+            | Self::Inotify
+            | Self::AlsaPcm
+            | Self::Drm
+            | Self::NetRaw
+            | Self::NetSocket
+            | Self::Pty
+            | Self::SystemClock
+            | Self::PrivilegedPort
+            | Self::ResourceLimit => self as u16,
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Enumeration ABI
 // ---------------------------------------------------------------------------
@@ -396,7 +468,7 @@ impl CapEntryInfo {
     #[must_use]
     pub fn from_entry(entry: &table::CapEntry) -> Self {
         Self {
-            resource_type: entry.resource_type as u16,
+            resource_type: entry.resource_type.discriminant(),
             _reserved: [0; 3],
             rights: entry.rights.raw(),
             resource_id: entry.resource_id,

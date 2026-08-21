@@ -19037,7 +19037,31 @@ fn stat_meta_for_path(path: &Path, follow: bool) -> Result<crate::fs::FileMeta, 
     };
     r.map_err(|e| match e {
         KernelError::NotFound => linux_err(errno::ENOENT),
-        other => linux_err(linux_errno_for(other)),
+        other => {
+            // `NotFound` is the overwhelmingly common failure here — every
+            // `$PATH` probe, every `make` implicit-rule search — so it stays
+            // silent. Anything *else* is an anomaly worth a line: the caller
+            // sees only an errno, and programs routinely mistranslate a failed
+            // stat into "does not exist" and then fail somewhere unrelated.
+            //
+            // That is not hypothetical. GNU make's `f_mtime` maps any stat
+            // failure to `NONEXISTENT_MTIME`, so an EACCES on a makefile it had
+            // just read successfully surfaced three thousand lines later as
+            // "No rule to make target '/Makefile'" — a message that names
+            // neither stat nor a permission problem. Lane B narrowed that to
+            // this exact return by elimination, from outside `kernel/**`,
+            // because there was nothing to read. See
+            // `requests/b-a-path-z-real-make-fails-because-stat-of-Makefile-
+            // returns-eacces.md`.
+            crate::serial_println!(
+                "[stat] {} '{}' failed: {:?} (errno {})",
+                if follow { "stat" } else { "lstat" },
+                path.display(),
+                other,
+                linux_errno_for(other),
+            );
+            linux_err(linux_errno_for(other))
+        }
     })
 }
 

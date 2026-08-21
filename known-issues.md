@@ -590,11 +590,24 @@ on an invariant maintained by four other methods. All three are now a single
 
 ## The same broken reduction is copy-pasted into 27 crates, and `randrange` now exists to replace it (lane C)
 
-**Status: OPEN 2026-08-16 — fourteen of 27 crates fixed** (`simon`,
-`battleship`, `sliding`, `asteroids`, `yahtzee`, `hearts`, `solitaire`,
-`freecell`, `minesweeper`, `flood`, `snake`, `wordsearch`, `pacman`,
-`breakout`); the shared crate that the rest should move to is written and
-green.
+**Status: CLOSED 2026-08-20 — the sweep finished; no private copy remains.**
+The status line below sat at "fourteen of 27" from 2026-08-16 while the
+migration actually ran to completion (`7d147cb83` retired the last three
+private `Lcg`s), so the entry was stale rather than open. Verified two ways on
+2026-08-20: `build/scratch/lcg_scan.py` — the scan that produced the 27-crate
+figure in the first place — now prints **nothing** across `apps/**` and
+`gui/**`, and a plain grep for the LCG multiplier over `apps`, `gui`, `net*`
+and `pkg` finds exactly **one** hit, inside `apps/breakout`'s `#[cfg(test)]`
+`opening_angle_lattice_points`, which *deliberately* reimplements the old
+`Lcg::next_u64` so the new generator can be compared against the old one on a
+single lattice. That is a regression test *about* the defect, not a surviving
+instance of it, and it should stay. 16 crates now depend on `randrange`.
+
+Original status line, kept for the record: *OPEN 2026-08-16 — fourteen of 27
+crates fixed (`simon`, `battleship`, `sliding`, `asteroids`, `yahtzee`,
+`hearts`, `solitaire`, `freecell`, `minesweeper`, `flood`, `snake`,
+`wordsearch`, `pacman`, `breakout`); the shared crate that the rest should
+move to is written and green.*
 
 The defect above is not `simon`'s. A scan of the tree
 (`build/scratch/lcg_scan.py`) finds the same LCG constants in **~36 places** and

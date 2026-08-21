@@ -28,6 +28,7 @@
 #[allow(unused_imports)]
 use guitk::color::Color;
 #[allow(unused_imports)]
+use guitk::ratio;
 use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 use guitk::scroll_window;
 #[allow(unused_imports)]
@@ -835,12 +836,11 @@ impl DefragProgress {
         }
     }
 
-    /// Progress as a fraction (0.0 to 1.0).
+    /// Progress as a fraction (0.0 to 1.0). A run with nothing to move has
+    /// made no progress rather than being finished — it has not started.
+    #[must_use]
     pub fn fraction(&self) -> f32 {
-        if self.total_blocks_to_move == 0 {
-            return 0.0;
-        }
-        (self.blocks_moved as f64 / self.total_blocks_to_move as f64) as f32
+        ratio::fraction(self.blocks_moved, self.total_blocks_to_move).unwrap_or(0.0) as f32
     }
 
     /// Progress as a percentage (0.0 to 100.0).
@@ -849,12 +849,15 @@ impl DefragProgress {
     }
 
     /// Improvement percentage (how much fragmentation was reduced).
+    ///
+    /// A volume that started unfragmented cannot be improved, so it reports
+    /// no improvement rather than dividing by the nothing it started with.
+    #[must_use]
     pub fn improvement_percent(&self) -> f32 {
-        if self.initial_fragmentation <= 0.0 {
-            return 0.0;
-        }
         let reduction = self.initial_fragmentation - self.current_fragmentation;
-        (reduction / self.initial_fragmentation * 100.0).max(0.0)
+        ratio::percent(reduction, self.initial_fragmentation)
+            .unwrap_or(0.0)
+            .max(0.0) as f32
     }
 }
 

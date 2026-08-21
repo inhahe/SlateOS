@@ -15,6 +15,7 @@
 
 use guitk::color::Color;
 use guitk::idseq::IdSeq;
+use guitk::ratio;
 use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::style::CornerRadii;
 
@@ -370,13 +371,11 @@ impl RecordingStats {
         (self.frames_captured as f64 * 1000.0) / self.elapsed_ms as f64
     }
 
-    /// Drop rate as percentage.
+    /// Drop rate as a percentage of the frames the recorder saw at all.
+    #[must_use]
     pub fn drop_rate_pct(&self) -> f64 {
-        let total = self.frames_captured + self.dropped_frames;
-        if total == 0 {
-            return 0.0;
-        }
-        (self.dropped_frames as f64 / total as f64) * 100.0
+        let total = self.frames_captured.saturating_add(self.dropped_frames);
+        ratio::percent(self.dropped_frames, total).unwrap_or(0.0)
     }
 
     /// Format bytes_written as human-readable.

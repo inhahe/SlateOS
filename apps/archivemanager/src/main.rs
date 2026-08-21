@@ -17,6 +17,7 @@
 //! Uses the guitk library for UI rendering.
 
 use guitk::color::Color;
+use guitk::ratio;
 use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::style::CornerRadii;
 use guitk::text;
@@ -133,8 +134,7 @@ impl ArchiveFormat {
 // ============================================================================
 
 /// Compression level presets.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-#[derive(Default)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Default)]
 pub enum CompressionLevel {
     /// No compression, store only.
     Store,
@@ -173,7 +173,6 @@ impl CompressionLevel {
         &[Self::Store, Self::Fast, Self::Normal, Self::Best]
     }
 }
-
 
 // ============================================================================
 // Encryption settings
@@ -643,13 +642,9 @@ pub enum ArchiveOperation {
         level: CompressionLevel,
     },
     /// Add files to an existing archive.
-    AddFiles {
-        files: Vec<PathBuf>,
-    },
+    AddFiles { files: Vec<PathBuf> },
     /// Remove entries from an archive.
-    RemoveEntries {
-        paths: Vec<String>,
-    },
+    RemoveEntries { paths: Vec<String> },
     /// Test archive integrity.
     TestArchive,
     /// Close the current archive.
@@ -697,14 +692,15 @@ impl OperationProgress {
     }
 
     /// Percentage complete (0.0..100.0).
+    ///
+    /// Measured in bytes where there are bytes to measure, in files where
+    /// there are not, and reported complete when there is neither — an
+    /// archive of nothing is finished the moment it starts.
+    #[must_use]
     pub fn percent(&self) -> f64 {
-        if self.bytes_total == 0 {
-            if self.files_total == 0 {
-                return 100.0;
-            }
-            return (self.files_done as f64 / self.files_total as f64) * 100.0;
-        }
-        (self.bytes_done as f64 / self.bytes_total as f64) * 100.0
+        ratio::percent(self.bytes_done, self.bytes_total)
+            .or_else(|| ratio::percent(self.files_done, self.files_total))
+            .unwrap_or(100.0)
     }
 
     /// Update progress for a file.
@@ -738,8 +734,7 @@ impl OperationProgress {
 // ============================================================================
 
 /// Drag state for drag-and-drop operations.
-#[derive(Clone, Debug)]
-#[derive(Default)]
+#[derive(Clone, Debug, Default)]
 pub enum DragState {
     /// Not dragging anything.
     #[default]
@@ -761,7 +756,6 @@ pub enum DragState {
         mouse_y: f32,
     },
 }
-
 
 impl DragState {
     /// Whether a drag is currently active.
@@ -1140,8 +1134,7 @@ impl CreateArchiveSettings {
 // ============================================================================
 
 /// View mode for the file list.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[derive(Default)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum ViewMode {
     /// Flat list of all entries.
     FlatList,
@@ -1149,7 +1142,6 @@ pub enum ViewMode {
     #[default]
     DirectoryView,
 }
-
 
 /// The full application state.
 #[derive(Clone, Debug)]
@@ -1309,11 +1301,7 @@ impl AppState {
                 let total_files = archive.file_count;
                 let ratio = archive.overall_ratio();
                 if selected > 0 {
-                    let sel_size: u64 = archive
-                        .selected_entries()
-                        .iter()
-                        .map(|e| e.size)
-                        .sum();
+                    let sel_size: u64 = archive.selected_entries().iter().map(|e| e.size).sum();
                     format!(
                         "{selected} of {total_files} files selected ({}) | Ratio: {ratio:.1}%",
                         ArchiveEntry::format_size(sel_size)
@@ -1760,12 +1748,7 @@ pub fn render_file_row(
             y,
             width,
             height: row_h,
-            color: Color::rgba(
-                theme::BLUE.r,
-                theme::BLUE.g,
-                theme::BLUE.b,
-                60,
-            ),
+            color: Color::rgba(theme::BLUE.r, theme::BLUE.g, theme::BLUE.b, 60),
             corner_radii: CornerRadii::ZERO,
         });
     } else if is_hovered {
@@ -1943,12 +1926,7 @@ pub fn render_file_list(
                 y: ry,
                 width,
                 height: row_h,
-                color: Color::rgba(
-                    theme::SURFACE0.r,
-                    theme::SURFACE0.g,
-                    theme::SURFACE0.b,
-                    40,
-                ),
+                color: Color::rgba(theme::SURFACE0.r, theme::SURFACE0.g, theme::SURFACE0.b, 40),
                 corner_radii: CornerRadii::ZERO,
             });
         }
@@ -2008,10 +1986,7 @@ pub fn render_progress_bar(
     cmds.push(RenderCommand::Text {
         x: x + 8.0,
         y: y + 4.0,
-        text: format!(
-            "{}: {}",
-            progress.operation, progress.current_file
-        ),
+        text: format!("{}: {}", progress.operation, progress.current_file),
         color: theme::TEXT,
         font_size: 11.0,
         font_weight: FontWeightHint::Regular,
@@ -2072,10 +2047,7 @@ pub fn render_progress_bar(
     cmds.push(RenderCommand::Text {
         x: x + 8.0,
         y: y + 36.0,
-        text: format!(
-            "{}/{} files",
-            progress.files_done, progress.files_total
-        ),
+        text: format!("{}/{} files", progress.files_done, progress.files_total),
         color: theme::SUBTEXT0,
         font_size: 10.0,
         font_weight: FontWeightHint::Regular,
@@ -2154,7 +2126,9 @@ pub fn render_drag_overlay(
     match drag {
         DragState::Idle => {}
         DragState::DraggingOut {
-            entries, mouse_x, mouse_y,
+            entries,
+            mouse_x,
+            mouse_y,
         } => {
             // Semi-transparent overlay.
             cmds.push(RenderCommand::FillRect {
@@ -2188,7 +2162,9 @@ pub fn render_drag_overlay(
             });
         }
         DragState::DraggingIn {
-            files, mouse_x, mouse_y,
+            files,
+            mouse_x,
+            mouse_y,
         } => {
             cmds.push(RenderCommand::FillRect {
                 x: 0.0,
@@ -2307,18 +2283,84 @@ pub fn create_sample_archive() -> ArchiveModel {
 
     let sample_entries = vec![
         ("src/", true, 0, 0, 1716000000, 0, "Stored"),
-        ("src/main.rs", false, 4096, 1820, 1716000000, 0xABCD1234, "Deflate"),
-        ("src/lib.rs", false, 8192, 3100, 1716000000, 0x12345678, "Deflate"),
+        (
+            "src/main.rs",
+            false,
+            4096,
+            1820,
+            1716000000,
+            0xABCD1234,
+            "Deflate",
+        ),
+        (
+            "src/lib.rs",
+            false,
+            8192,
+            3100,
+            1716000000,
+            0x12345678,
+            "Deflate",
+        ),
         ("src/utils/", true, 0, 0, 1716000000, 0, "Stored"),
-        ("src/utils/helpers.rs", false, 2048, 980, 1716000000, 0xDEADBEEF, "Deflate"),
+        (
+            "src/utils/helpers.rs",
+            false,
+            2048,
+            980,
+            1716000000,
+            0xDEADBEEF,
+            "Deflate",
+        ),
         ("tests/", true, 0, 0, 1716000000, 0, "Stored"),
-        ("tests/test_main.rs", false, 1024, 620, 1716000000, 0xFEEDFACE, "Deflate"),
-        ("Cargo.toml", false, 512, 380, 1716000000, 0xCAFEBABE, "Deflate"),
-        ("README.md", false, 3072, 1400, 1716000000, 0x87654321, "Deflate"),
-        ("LICENSE", false, 1070, 640, 1716000000, 0x11223344, "Deflate"),
+        (
+            "tests/test_main.rs",
+            false,
+            1024,
+            620,
+            1716000000,
+            0xFEEDFACE,
+            "Deflate",
+        ),
+        (
+            "Cargo.toml",
+            false,
+            512,
+            380,
+            1716000000,
+            0xCAFEBABE,
+            "Deflate",
+        ),
+        (
+            "README.md",
+            false,
+            3072,
+            1400,
+            1716000000,
+            0x87654321,
+            "Deflate",
+        ),
+        (
+            "LICENSE", false, 1070, 640, 1716000000, 0x11223344, "Deflate",
+        ),
         ("docs/", true, 0, 0, 1716000000, 0, "Stored"),
-        ("docs/guide.md", false, 15360, 5200, 1716000000, 0xAABBCCDD, "Deflate"),
-        ("docs/api.md", false, 8700, 3100, 1716000000, 0x55667788, "Deflate"),
+        (
+            "docs/guide.md",
+            false,
+            15360,
+            5200,
+            1716000000,
+            0xAABBCCDD,
+            "Deflate",
+        ),
+        (
+            "docs/api.md",
+            false,
+            8700,
+            3100,
+            1716000000,
+            0x55667788,
+            "Deflate",
+        ),
     ];
 
     for (path_str, is_dir, size, compressed, modified, crc, method) in sample_entries {
@@ -2536,7 +2578,11 @@ mod tests {
     #[test]
     fn test_encryption_method_display() {
         assert_eq!(EncryptionMethod::Aes256.display_name(), "AES-256");
-        assert!(EncryptionMethod::ZipCrypto.display_name().contains("legacy"));
+        assert!(
+            EncryptionMethod::ZipCrypto
+                .display_name()
+                .contains("legacy")
+        );
     }
 
     // --- SplitSettings tests ---
@@ -3029,10 +3075,13 @@ mod tests {
         let mut r = ArchiveTestResults::new(3);
         r.record("a.txt", TestResult::Ok);
         r.record("b.txt", TestResult::Ok);
-        r.record("c.txt", TestResult::CrcMismatch {
-            expected: 0,
-            actual: 1,
-        });
+        r.record(
+            "c.txt",
+            TestResult::CrcMismatch {
+                expected: 0,
+                actual: 1,
+            },
+        );
         assert_eq!(r.tested, 3);
         assert_eq!(r.passed, 2);
         assert_eq!(r.failed, 1);
@@ -3418,7 +3467,10 @@ mod tests {
             ..Default::default()
         };
         let problems = s.validate();
-        assert!(problems.is_empty(), "expected no problems, got: {problems:?}");
+        assert!(
+            problems.is_empty(),
+            "expected no problems, got: {problems:?}"
+        );
     }
 
     #[test]
@@ -3586,7 +3638,10 @@ mod tests {
             ..AppState::default()
         };
         let cmds = render_frame(&state);
-        assert!(cmds.len() > 20, "should produce many render commands with an archive open");
+        assert!(
+            cmds.len() > 20,
+            "should produce many render commands with an archive open"
+        );
     }
 
     #[test]

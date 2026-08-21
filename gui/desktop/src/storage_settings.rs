@@ -5,6 +5,7 @@
 //! reclamation policies.
 
 use guitk::color::Color;
+use guitk::ratio;
 use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::style::CornerRadii;
 
@@ -147,11 +148,11 @@ impl DriveInfo {
         self.total_bytes.saturating_sub(self.used_bytes)
     }
 
+    /// Used space as a percentage. A volume of unknown size is at 0%, so it
+    /// is not reported as low on space by [`Self::is_low_space`].
+    #[must_use]
     pub fn used_pct(&self) -> u32 {
-        if self.total_bytes == 0 {
-            return 0;
-        }
-        ((self.used_bytes as f64 / self.total_bytes as f64) * 100.0) as u32
+        ratio::percent_whole(self.used_bytes, self.total_bytes).unwrap_or(0)
     }
 
     pub fn is_low_space(&self) -> bool {

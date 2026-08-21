@@ -11,6 +11,7 @@
 //! - Print history / job log
 
 use guitk::color::Color;
+use guitk::ratio;
 use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::style::CornerRadii;
 
@@ -348,12 +349,10 @@ pub struct PrintJob {
 }
 
 impl PrintJob {
-    /// Progress as percentage (0-100).
+    /// Progress as percentage (0-100). A job with no page count is at 0%.
+    #[must_use]
     pub fn progress_pct(&self) -> u32 {
-        if self.total_pages == 0 {
-            return 0;
-        }
-        ((self.pages_printed as u64 * 100) / self.total_pages as u64) as u32
+        ratio::percent_whole(self.pages_printed, self.total_pages).unwrap_or(0)
     }
 
     /// Size display.

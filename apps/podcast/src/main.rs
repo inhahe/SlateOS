@@ -22,6 +22,7 @@
 use std::collections::HashMap;
 
 use guitk::color::Color;
+use guitk::ratio;
 use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::scroll_window;
 use guitk::style::CornerRadii;
@@ -347,15 +348,16 @@ impl PlaybackSpeed {
         let all = Self::ALL;
         for i in 0..all.len() {
             if let Some(s) = all.get(i)
-                && (s.0 - self.0).abs() < 0.001 {
-                    // `all` is non-empty inside this loop by construction —
-                    // we are iterating it — so the zero case is unreachable
-                    // and index 0 is the right answer for it anyway.
-                    let next_idx = i.saturating_add(1).checked_rem(all.len()).unwrap_or(0);
-                    if let Some(n) = all.get(next_idx) {
-                        return *n;
-                    }
+                && (s.0 - self.0).abs() < 0.001
+            {
+                // `all` is non-empty inside this loop by construction —
+                // we are iterating it — so the zero case is unreachable
+                // and index 0 is the right answer for it anyway.
+                let next_idx = i.saturating_add(1).checked_rem(all.len()).unwrap_or(0);
+                if let Some(n) = all.get(next_idx) {
+                    return *n;
                 }
+            }
         }
         Self::NORMAL
     }
@@ -476,11 +478,7 @@ impl Episode {
     pub fn progress_pct(&self) -> f32 {
         match self.status {
             EpisodeStatus::InProgress { position_secs } => {
-                if self.duration_secs == 0 {
-                    0.0
-                } else {
-                    (position_secs as f32 / self.duration_secs as f32) * 100.0
-                }
+                ratio::percent(position_secs, self.duration_secs).unwrap_or(0.0) as f32
             }
             EpisodeStatus::Played => 100.0,
             EpisodeStatus::Unplayed => 0.0,
@@ -520,12 +518,18 @@ pub struct Podcast {
 impl Podcast {
     /// Count of unplayed episodes.
     pub fn unplayed_count(&self) -> usize {
-        self.episodes.iter().filter(|e| e.status.is_unplayed()).count()
+        self.episodes
+            .iter()
+            .filter(|e| e.status.is_unplayed())
+            .count()
     }
 
     /// Count of in-progress episodes.
     pub fn in_progress_count(&self) -> usize {
-        self.episodes.iter().filter(|e| e.status.is_in_progress()).count()
+        self.episodes
+            .iter()
+            .filter(|e| e.status.is_in_progress())
+            .count()
     }
 
     /// Count of downloaded episodes.
@@ -981,8 +985,7 @@ impl PodcastApp {
             // Remove queue items for this podcast.
             self.play_queue.retain(|q| q.podcast_id != podcast_id);
             self.download_queue.retain(|d| d.podcast_id != podcast_id);
-            self.stats.subscriptions_count =
-                self.stats.subscriptions_count.saturating_sub(1);
+            self.stats.subscriptions_count = self.stats.subscriptions_count.saturating_sub(1);
             // Reset current playback if it was from this podcast.
             if self.current_podcast_id == Some(podcast_id) {
                 self.stop_playback();
@@ -1092,20 +1095,22 @@ impl PodcastApp {
     /// Mark an episode as played.
     pub fn mark_played(&mut self, podcast_id: u64, episode_id: u64) -> bool {
         if let Some(podcast) = self.podcasts.iter_mut().find(|p| p.id == podcast_id)
-            && let Some(ep) = podcast.episodes.iter_mut().find(|e| e.id == episode_id) {
-                ep.status = EpisodeStatus::Played;
-                return true;
-            }
+            && let Some(ep) = podcast.episodes.iter_mut().find(|e| e.id == episode_id)
+        {
+            ep.status = EpisodeStatus::Played;
+            return true;
+        }
         false
     }
 
     /// Mark an episode as unplayed.
     pub fn mark_unplayed(&mut self, podcast_id: u64, episode_id: u64) -> bool {
         if let Some(podcast) = self.podcasts.iter_mut().find(|p| p.id == podcast_id)
-            && let Some(ep) = podcast.episodes.iter_mut().find(|e| e.id == episode_id) {
-                ep.status = EpisodeStatus::Unplayed;
-                return true;
-            }
+            && let Some(ep) = podcast.episodes.iter_mut().find(|e| e.id == episode_id)
+        {
+            ep.status = EpisodeStatus::Unplayed;
+            return true;
+        }
         false
     }
 
@@ -1175,17 +1180,13 @@ impl PodcastApp {
     // ========================================================================
 
     /// Set notes text for an episode.
-    pub fn set_episode_notes(
-        &mut self,
-        podcast_id: u64,
-        episode_id: u64,
-        text: &str,
-    ) -> bool {
+    pub fn set_episode_notes(&mut self, podcast_id: u64, episode_id: u64, text: &str) -> bool {
         if let Some(p) = self.podcasts.iter_mut().find(|p| p.id == podcast_id)
-            && let Some(ep) = p.episodes.iter_mut().find(|e| e.id == episode_id) {
-                ep.notes.set_notes(text);
-                return true;
-            }
+            && let Some(ep) = p.episodes.iter_mut().find(|e| e.id == episode_id)
+        {
+            ep.notes.set_notes(text);
+            return true;
+        }
         false
     }
 
@@ -1198,10 +1199,11 @@ impl PodcastApp {
         label: &str,
     ) -> bool {
         if let Some(p) = self.podcasts.iter_mut().find(|p| p.id == podcast_id)
-            && let Some(ep) = p.episodes.iter_mut().find(|e| e.id == episode_id) {
-                ep.notes.add_bookmark(timestamp_secs, label);
-                return true;
-            }
+            && let Some(ep) = p.episodes.iter_mut().find(|e| e.id == episode_id)
+        {
+            ep.notes.add_bookmark(timestamp_secs, label);
+            return true;
+        }
         false
     }
 
@@ -1213,9 +1215,10 @@ impl PodcastApp {
         bookmark_index: usize,
     ) -> bool {
         if let Some(p) = self.podcasts.iter_mut().find(|p| p.id == podcast_id)
-            && let Some(ep) = p.episodes.iter_mut().find(|e| e.id == episode_id) {
-                return ep.notes.remove_bookmark(bookmark_index);
-            }
+            && let Some(ep) = p.episodes.iter_mut().find(|e| e.id == episode_id)
+        {
+            return ep.notes.remove_bookmark(bookmark_index);
+        }
         false
     }
 
@@ -1246,11 +1249,12 @@ impl PodcastApp {
 
             // Mark as in-progress.
             if let Some(p) = self.podcasts.iter_mut().find(|p| p.id == podcast_id)
-                && let Some(ep) = p.episodes.iter_mut().find(|e| e.id == episode_id) {
-                    ep.status = EpisodeStatus::InProgress {
-                        position_secs: position,
-                    };
-                }
+                && let Some(ep) = p.episodes.iter_mut().find(|e| e.id == episode_id)
+            {
+                ep.status = EpisodeStatus::InProgress {
+                    position_secs: position,
+                };
+            }
             true
         } else {
             false
@@ -1315,8 +1319,7 @@ impl PodcastApp {
     /// Seek backward by a number of seconds.
     pub fn seek_backward(&mut self, secs: u32) {
         if self.player_state != PlayerState::Stopped {
-            self.playback_position_secs =
-                self.playback_position_secs.saturating_sub(secs);
+            self.playback_position_secs = self.playback_position_secs.saturating_sub(secs);
             self.update_episode_position();
         }
     }
@@ -1324,8 +1327,7 @@ impl PodcastApp {
     /// Seek to an absolute position.
     pub fn seek_to(&mut self, position_secs: u32) {
         if self.player_state != PlayerState::Stopped {
-            self.playback_position_secs =
-                position_secs.min(self.playback_duration_secs);
+            self.playback_position_secs = position_secs.min(self.playback_duration_secs);
             self.update_episode_position();
         }
     }
@@ -1367,11 +1369,10 @@ impl PodcastApp {
         let pos = self.playback_position_secs;
         if let (Some(podcast_id), Some(episode_id)) = (pod_id, ep_id)
             && let Some(p) = self.podcasts.iter_mut().find(|p| p.id == podcast_id)
-                && let Some(ep) = p.episodes.iter_mut().find(|e| e.id == episode_id) {
-                    ep.status = EpisodeStatus::InProgress {
-                        position_secs: pos,
-                    };
-                }
+            && let Some(ep) = p.episodes.iter_mut().find(|e| e.id == episode_id)
+        {
+            ep.status = EpisodeStatus::InProgress { position_secs: pos };
+        }
     }
 
     /// Complete the current episode and optionally auto-play next.
@@ -1383,9 +1384,10 @@ impl PodcastApp {
         if let (Some(podcast_id), Some(episode_id)) = (pod_id, ep_id) {
             // Mark as played.
             if let Some(p) = self.podcasts.iter_mut().find(|p| p.id == podcast_id)
-                && let Some(ep) = p.episodes.iter_mut().find(|e| e.id == episode_id) {
-                    ep.status = EpisodeStatus::Played;
-                }
+                && let Some(ep) = p.episodes.iter_mut().find(|e| e.id == episode_id)
+            {
+                ep.status = EpisodeStatus::Played;
+            }
 
             // Gather podcast title for stats (immutable borrow).
             let podcast_title = self
@@ -1424,10 +1426,11 @@ impl PodcastApp {
 
         // Auto-play next.
         if self.auto_play_next
-            && let Some(next) = self.play_queue.first().cloned() {
-                self.play_episode(next.podcast_id, next.episode_id);
-                return;
-            }
+            && let Some(next) = self.play_queue.first().cloned()
+        {
+            self.play_episode(next.podcast_id, next.episode_id);
+            return;
+        }
 
         self.player_state = PlayerState::Stopped;
         self.current_episode_id = None;
@@ -1479,11 +1482,7 @@ impl PodcastApp {
     /// Add an episode to the play queue.
     pub fn queue_episode(&mut self, podcast_id: u64, episode_id: u64) -> bool {
         // Avoid duplicates.
-        if self
-            .play_queue
-            .iter()
-            .any(|q| q.episode_id == episode_id)
-        {
+        if self.play_queue.iter().any(|q| q.episode_id == episode_id) {
             return false;
         }
 
@@ -1492,13 +1491,8 @@ impl PodcastApp {
             .iter()
             .find(|p| p.id == podcast_id)
             .and_then(|p| {
-                p.find_episode(episode_id).map(|ep| {
-                    (
-                        ep.title.clone(),
-                        p.title.clone(),
-                        ep.duration_secs,
-                    )
-                })
+                p.find_episode(episode_id)
+                    .map(|ep| (ep.title.clone(), p.title.clone(), ep.duration_secs))
             });
 
         if let Some((ep_title, pod_title, duration)) = info {
@@ -1575,9 +1569,10 @@ impl PodcastApp {
 
             // Mark episode as queued.
             if let Some(p) = self.podcasts.iter_mut().find(|p| p.id == podcast_id)
-                && let Some(ep) = p.episodes.iter_mut().find(|e| e.id == episode_id) {
-                    ep.download_status = DownloadStatus::Queued;
-                }
+                && let Some(ep) = p.episodes.iter_mut().find(|e| e.id == episode_id)
+            {
+                ep.download_status = DownloadStatus::Queued;
+            }
 
             self.download_queue.push(DownloadQueueItem {
                 episode_id,
@@ -1602,13 +1597,11 @@ impl PodcastApp {
         if let Some(i) = idx {
             let item = self.download_queue.remove(i);
             // Reset episode download status.
-            if let Some(p) = self
-                .podcasts
-                .iter_mut()
-                .find(|p| p.id == item.podcast_id)
-                && let Some(ep) = p.episodes.iter_mut().find(|e| e.id == episode_id) {
-                    ep.download_status = DownloadStatus::NotDownloaded;
-                }
+            if let Some(p) = self.podcasts.iter_mut().find(|p| p.id == item.podcast_id)
+                && let Some(ep) = p.episodes.iter_mut().find(|e| e.id == episode_id)
+            {
+                ep.download_status = DownloadStatus::NotDownloaded;
+            }
             true
         } else {
             false
@@ -1621,17 +1614,17 @@ impl PodcastApp {
 
         // Start first queued item if nothing is active.
         let has_active = self.download_queue.iter().any(|d| d.active);
-        if !has_active
-            && let Some(item) = self.download_queue.iter_mut().find(|d| !d.active) {
-                item.active = true;
-                // Mark episode as downloading.
-                let pod_id = item.podcast_id;
-                let ep_id = item.episode_id;
-                if let Some(p) = self.podcasts.iter_mut().find(|p| p.id == pod_id)
-                    && let Some(ep) = p.episodes.iter_mut().find(|e| e.id == ep_id) {
-                        ep.download_status = DownloadStatus::Downloading { progress: 0.0 };
-                    }
+        if !has_active && let Some(item) = self.download_queue.iter_mut().find(|d| !d.active) {
+            item.active = true;
+            // Mark episode as downloading.
+            let pod_id = item.podcast_id;
+            let ep_id = item.episode_id;
+            if let Some(p) = self.podcasts.iter_mut().find(|p| p.id == pod_id)
+                && let Some(ep) = p.episodes.iter_mut().find(|e| e.id == ep_id)
+            {
+                ep.download_status = DownloadStatus::Downloading { progress: 0.0 };
             }
+        }
 
         // Advance active downloads.
         for item in &mut self.download_queue {
@@ -1650,9 +1643,10 @@ impl PodcastApp {
         // Mark completed downloads.
         for (pod_id, ep_id, size) in &completed_episodes {
             if let Some(p) = self.podcasts.iter_mut().find(|p| p.id == *pod_id)
-                && let Some(ep) = p.episodes.iter_mut().find(|e| e.id == *ep_id) {
-                    ep.download_status = DownloadStatus::Downloaded;
-                }
+                && let Some(ep) = p.episodes.iter_mut().find(|e| e.id == *ep_id)
+            {
+                ep.download_status = DownloadStatus::Downloaded;
+            }
             self.used_disk_bytes = self.used_disk_bytes.saturating_add(*size);
         }
 
@@ -1664,12 +1658,12 @@ impl PodcastApp {
     pub fn delete_download(&mut self, podcast_id: u64, episode_id: u64) -> bool {
         if let Some(p) = self.podcasts.iter_mut().find(|p| p.id == podcast_id)
             && let Some(ep) = p.episodes.iter_mut().find(|e| e.id == episode_id)
-                && ep.download_status.is_downloaded() {
-                    self.used_disk_bytes =
-                        self.used_disk_bytes.saturating_sub(ep.file_size_bytes);
-                    ep.download_status = DownloadStatus::NotDownloaded;
-                    return true;
-                }
+            && ep.download_status.is_downloaded()
+        {
+            self.used_disk_bytes = self.used_disk_bytes.saturating_sub(ep.file_size_bytes);
+            ep.download_status = DownloadStatus::NotDownloaded;
+            return true;
+        }
         false
     }
 
@@ -1679,11 +1673,9 @@ impl PodcastApp {
     }
 
     /// Get disk usage percentage.
+    #[must_use]
     pub fn disk_usage_pct(&self) -> f32 {
-        if self.total_disk_bytes == 0 {
-            return 0.0;
-        }
-        (self.used_disk_bytes as f64 / self.total_disk_bytes as f64 * 100.0) as f32
+        ratio::percent(self.used_disk_bytes, self.total_disk_bytes).unwrap_or(0.0) as f32
     }
 
     // ========================================================================
@@ -1724,19 +1716,9 @@ impl PodcastApp {
         let mut count: usize = 0;
         for outline in &outlines {
             // Skip if already subscribed.
-            let already = self
-                .podcasts
-                .iter()
-                .any(|p| p.rss_url == outline.xml_url);
+            let already = self.podcasts.iter().any(|p| p.rss_url == outline.xml_url);
             if !already {
-                self.subscribe(
-                    &outline.text,
-                    "",
-                    "",
-                    &outline.xml_url,
-                    "",
-                    Vec::new(),
-                );
+                self.subscribe(&outline.text, "", "", &outline.xml_url, "", Vec::new());
                 count = count.saturating_add(1);
             }
         }
@@ -1857,9 +1839,10 @@ impl PodcastApp {
 
         // Mark news episodes as played.
         if let Some(podcast) = self.podcasts.iter_mut().find(|p| p.id == p3)
-            && let Some(ep) = podcast.episodes.get_mut(0) {
-                ep.status = EpisodeStatus::Played;
-            }
+            && let Some(ep) = podcast.episodes.get_mut(0)
+        {
+            ep.status = EpisodeStatus::Played;
+        }
 
         // Podcast 4: True Crime
         let p4 = self.subscribe(
@@ -1900,8 +1883,10 @@ impl PodcastApp {
         }
 
         // Add some history.
-        self.stats.record_listening(p1, "The Rustacean Station", 3600, true);
-        self.stats.record_listening(p2, "StarTalk Radio", 2700, true);
+        self.stats
+            .record_listening(p1, "The Rustacean Station", 3600, true);
+        self.stats
+            .record_listening(p2, "StarTalk Radio", 2700, true);
         self.stats.episodes_completed = 2;
 
         // Update used disk space for downloaded episodes.
@@ -1946,12 +1931,22 @@ impl PodcastApp {
         });
 
         match self.main_view {
-            MainView::EpisodeList => self.render_episode_list(&mut cmds, content_x, content_w, content_h),
-            MainView::EpisodeDetail => self.render_episode_detail(&mut cmds, content_x, content_w, content_h),
+            MainView::EpisodeList => {
+                self.render_episode_list(&mut cmds, content_x, content_w, content_h)
+            }
+            MainView::EpisodeDetail => {
+                self.render_episode_detail(&mut cmds, content_x, content_w, content_h)
+            }
             MainView::Queue => self.render_queue_view(&mut cmds, content_x, content_w, content_h),
-            MainView::Downloads => self.render_downloads_view(&mut cmds, content_x, content_w, content_h),
-            MainView::History => self.render_history_view(&mut cmds, content_x, content_w, content_h),
-            MainView::Statistics => self.render_statistics_view(&mut cmds, content_x, content_w, content_h),
+            MainView::Downloads => {
+                self.render_downloads_view(&mut cmds, content_x, content_w, content_h)
+            }
+            MainView::History => {
+                self.render_history_view(&mut cmds, content_x, content_w, content_h)
+            }
+            MainView::Statistics => {
+                self.render_statistics_view(&mut cmds, content_x, content_w, content_h)
+            }
             MainView::Search => self.render_search_view(&mut cmds, content_x, content_w, content_h),
         }
 
@@ -2087,11 +2082,7 @@ impl PodcastApp {
         };
 
         let mut rows = vec![
-            item(
-                "Search",
-                BLUE,
-                matches!(self.main_view, MainView::Search),
-            ),
+            item("Search", BLUE, matches!(self.main_view, MainView::Search)),
             item(
                 "All Episodes",
                 LAVENDER,
@@ -2148,7 +2139,6 @@ impl PodcastApp {
 
         rows
     }
-
 
     fn render_sidebar_item(
         &self,
@@ -2291,7 +2281,6 @@ impl PodcastApp {
                 overflow: TextOverflow::Ellipsis,
             });
         }
-
     }
 
     fn render_content_header(
@@ -2323,13 +2312,7 @@ impl PodcastApp {
         });
     }
 
-    fn render_filter_bar(
-        &self,
-        cmds: &mut Vec<RenderCommand>,
-        x: f32,
-        y: f32,
-        width: f32,
-    ) {
+    fn render_filter_bar(&self, cmds: &mut Vec<RenderCommand>, x: f32, y: f32, width: f32) {
         cmds.push(RenderCommand::FillRect {
             x,
             y,
@@ -2528,9 +2511,10 @@ impl PodcastApp {
         let (pod_id, ep_id) = match self.selected_episode_id {
             Some(eid) => {
                 // Find which podcast owns this episode.
-                let found = self.podcasts.iter().find_map(|p| {
-                    p.find_episode(eid).map(|_| (p.id, eid))
-                });
+                let found = self
+                    .podcasts
+                    .iter()
+                    .find_map(|p| p.find_episode(eid).map(|_| (p.id, eid)));
                 match found {
                     Some(pair) => pair,
                     None => return,
@@ -3409,17 +3393,18 @@ impl PodcastApp {
                     break;
                 }
                 if let Some(podcast) = self.find_podcast(*pod_id)
-                    && let Some(ep) = podcast.find_episode(*ep_id) {
-                        self.render_episode_row(
-                            cmds,
-                            content_x + 8.0,
-                            ep_y,
-                            content_w - 16.0,
-                            ep,
-                            &podcast.title,
-                            false,
-                        );
-                    }
+                    && let Some(ep) = podcast.find_episode(*ep_id)
+                {
+                    self.render_episode_row(
+                        cmds,
+                        content_x + 8.0,
+                        ep_y,
+                        content_w - 16.0,
+                        ep,
+                        &podcast.title,
+                        false,
+                    );
+                }
                 ep_y += EPISODE_ROW_HEIGHT;
             }
         }
@@ -3688,10 +3673,19 @@ mod tests {
 
     #[test]
     fn test_category_from_str() {
-        assert_eq!(Category::from_str_name("technology"), Some(Category::Technology));
+        assert_eq!(
+            Category::from_str_name("technology"),
+            Some(Category::Technology)
+        );
         assert_eq!(Category::from_str_name("tech"), Some(Category::Technology));
-        assert_eq!(Category::from_str_name("true crime"), Some(Category::TrueCrime));
-        assert_eq!(Category::from_str_name("truecrime"), Some(Category::TrueCrime));
+        assert_eq!(
+            Category::from_str_name("true crime"),
+            Some(Category::TrueCrime)
+        );
+        assert_eq!(
+            Category::from_str_name("truecrime"),
+            Some(Category::TrueCrime)
+        );
         assert_eq!(Category::from_str_name("unknown"), None);
     }
 
@@ -4150,18 +4144,26 @@ mod tests {
             categories: vec![],
             episodes: vec![
                 Episode {
-                    id: 1, podcast_id: 1, title: "E1".to_string(),
-                    description: String::new(), date: String::new(),
-                    duration_secs: 100, enclosure_url: String::new(),
+                    id: 1,
+                    podcast_id: 1,
+                    title: "E1".to_string(),
+                    description: String::new(),
+                    date: String::new(),
+                    duration_secs: 100,
+                    enclosure_url: String::new(),
                     file_size_bytes: 100,
                     status: EpisodeStatus::Unplayed,
                     download_status: DownloadStatus::NotDownloaded,
                     notes: EpisodeNotes::new(),
                 },
                 Episode {
-                    id: 2, podcast_id: 1, title: "E2".to_string(),
-                    description: String::new(), date: String::new(),
-                    duration_secs: 100, enclosure_url: String::new(),
+                    id: 2,
+                    podcast_id: 1,
+                    title: "E2".to_string(),
+                    description: String::new(),
+                    date: String::new(),
+                    duration_secs: 100,
+                    enclosure_url: String::new(),
                     file_size_bytes: 100,
                     status: EpisodeStatus::Played,
                     download_status: DownloadStatus::NotDownloaded,
@@ -4183,17 +4185,19 @@ mod tests {
             rss_url: String::new(),
             artwork_url: String::new(),
             categories: vec![],
-            episodes: vec![
-                Episode {
-                    id: 1, podcast_id: 1, title: "E1".to_string(),
-                    description: String::new(), date: String::new(),
-                    duration_secs: 100, enclosure_url: String::new(),
-                    file_size_bytes: 100,
-                    status: EpisodeStatus::InProgress { position_secs: 50 },
-                    download_status: DownloadStatus::NotDownloaded,
-                    notes: EpisodeNotes::new(),
-                },
-            ],
+            episodes: vec![Episode {
+                id: 1,
+                podcast_id: 1,
+                title: "E1".to_string(),
+                description: String::new(),
+                date: String::new(),
+                duration_secs: 100,
+                enclosure_url: String::new(),
+                file_size_bytes: 100,
+                status: EpisodeStatus::InProgress { position_secs: 50 },
+                download_status: DownloadStatus::NotDownloaded,
+                notes: EpisodeNotes::new(),
+            }],
             auto_download: false,
         };
         assert_eq!(podcast.in_progress_count(), 1);
@@ -4209,17 +4213,19 @@ mod tests {
             rss_url: String::new(),
             artwork_url: String::new(),
             categories: vec![],
-            episodes: vec![
-                Episode {
-                    id: 1, podcast_id: 1, title: "E1".to_string(),
-                    description: String::new(), date: String::new(),
-                    duration_secs: 100, enclosure_url: String::new(),
-                    file_size_bytes: 5000,
-                    status: EpisodeStatus::Unplayed,
-                    download_status: DownloadStatus::Downloaded,
-                    notes: EpisodeNotes::new(),
-                },
-            ],
+            episodes: vec![Episode {
+                id: 1,
+                podcast_id: 1,
+                title: "E1".to_string(),
+                description: String::new(),
+                date: String::new(),
+                duration_secs: 100,
+                enclosure_url: String::new(),
+                file_size_bytes: 5000,
+                status: EpisodeStatus::Unplayed,
+                download_status: DownloadStatus::Downloaded,
+                notes: EpisodeNotes::new(),
+            }],
             auto_download: false,
         };
         assert_eq!(podcast.downloaded_count(), 1);
@@ -4236,17 +4242,19 @@ mod tests {
             rss_url: String::new(),
             artwork_url: String::new(),
             categories: vec![],
-            episodes: vec![
-                Episode {
-                    id: 10, podcast_id: 1, title: "Found".to_string(),
-                    description: String::new(), date: String::new(),
-                    duration_secs: 100, enclosure_url: String::new(),
-                    file_size_bytes: 100,
-                    status: EpisodeStatus::Unplayed,
-                    download_status: DownloadStatus::NotDownloaded,
-                    notes: EpisodeNotes::new(),
-                },
-            ],
+            episodes: vec![Episode {
+                id: 10,
+                podcast_id: 1,
+                title: "Found".to_string(),
+                description: String::new(),
+                date: String::new(),
+                duration_secs: 100,
+                enclosure_url: String::new(),
+                file_size_bytes: 100,
+                status: EpisodeStatus::Unplayed,
+                download_status: DownloadStatus::NotDownloaded,
+                notes: EpisodeNotes::new(),
+            }],
             auto_download: false,
         };
         assert!(podcast.find_episode(10).is_some());
@@ -4301,7 +4309,14 @@ mod tests {
     fn test_subscribe() {
         let mut app = PodcastApp::new(800.0, 600.0);
         let initial_count = app.podcasts.len();
-        let id = app.subscribe("New Pod", "Author", "Desc", "https://rss.example.com", "", vec![Category::Technology]);
+        let id = app.subscribe(
+            "New Pod",
+            "Author",
+            "Desc",
+            "https://rss.example.com",
+            "",
+            vec![Category::Technology],
+        );
         assert!(app.find_podcast(id).is_some());
         assert_eq!(app.podcasts.len(), initial_count + 1);
     }
@@ -4309,7 +4324,14 @@ mod tests {
     #[test]
     fn test_unsubscribe() {
         let mut app = PodcastApp::new(800.0, 600.0);
-        let id = app.subscribe("Temp", "Auth", "Desc", "https://temp.example.com", "", vec![]);
+        let id = app.subscribe(
+            "Temp",
+            "Auth",
+            "Desc",
+            "https://temp.example.com",
+            "",
+            vec![],
+        );
         assert!(app.unsubscribe(id));
         assert!(app.find_podcast(id).is_none());
     }
@@ -4338,9 +4360,22 @@ mod tests {
     fn test_add_episode() {
         let mut app = PodcastApp::new(800.0, 600.0);
         let pid = app.subscribe("P", "A", "", "https://x.com", "", vec![]);
-        let eid = app.add_episode(pid, "Ep1", "Desc", "2026-01-01", 600, "https://x.com/ep1.mp3", 10000);
+        let eid = app.add_episode(
+            pid,
+            "Ep1",
+            "Desc",
+            "2026-01-01",
+            600,
+            "https://x.com/ep1.mp3",
+            10000,
+        );
         assert!(eid.is_some());
-        assert!(app.find_podcast(pid).unwrap().find_episode(eid.unwrap()).is_some());
+        assert!(
+            app.find_podcast(pid)
+                .unwrap()
+                .find_episode(eid.unwrap())
+                .is_some()
+        );
     }
 
     #[test]
@@ -4354,13 +4389,29 @@ mod tests {
     fn test_mark_played_unplayed() {
         let mut app = PodcastApp::new(800.0, 600.0);
         let pid = app.subscribe("P", "", "", "rss://x", "", vec![]);
-        let eid = app.add_episode(pid, "Ep", "", "2026-01-01", 100, "", 100).unwrap();
+        let eid = app
+            .add_episode(pid, "Ep", "", "2026-01-01", 100, "", 100)
+            .unwrap();
 
         assert!(app.mark_played(pid, eid));
-        assert!(app.find_podcast(pid).unwrap().find_episode(eid).unwrap().status.is_played());
+        assert!(
+            app.find_podcast(pid)
+                .unwrap()
+                .find_episode(eid)
+                .unwrap()
+                .status
+                .is_played()
+        );
 
         assert!(app.mark_unplayed(pid, eid));
-        assert!(app.find_podcast(pid).unwrap().find_episode(eid).unwrap().status.is_unplayed());
+        assert!(
+            app.find_podcast(pid)
+                .unwrap()
+                .find_episode(eid)
+                .unwrap()
+                .status
+                .is_unplayed()
+        );
     }
 
     #[test]
@@ -4394,7 +4445,9 @@ mod tests {
     fn test_app_set_episode_notes() {
         let mut app = PodcastApp::new(800.0, 600.0);
         let pid = app.subscribe("P", "", "", "rss://x", "", vec![]);
-        let eid = app.add_episode(pid, "Ep", "", "2026-01-01", 100, "", 100).unwrap();
+        let eid = app
+            .add_episode(pid, "Ep", "", "2026-01-01", 100, "", 100)
+            .unwrap();
         assert!(app.set_episode_notes(pid, eid, "My notes"));
         let ep = app.find_podcast(pid).unwrap().find_episode(eid).unwrap();
         assert_eq!(ep.notes.text, "My notes");
@@ -4404,7 +4457,9 @@ mod tests {
     fn test_app_add_episode_bookmark() {
         let mut app = PodcastApp::new(800.0, 600.0);
         let pid = app.subscribe("P", "", "", "rss://x", "", vec![]);
-        let eid = app.add_episode(pid, "Ep", "", "2026-01-01", 100, "", 100).unwrap();
+        let eid = app
+            .add_episode(pid, "Ep", "", "2026-01-01", 100, "", 100)
+            .unwrap();
         assert!(app.add_episode_bookmark(pid, eid, 30, "Good part"));
         let ep = app.find_podcast(pid).unwrap().find_episode(eid).unwrap();
         assert_eq!(ep.notes.bookmarks.len(), 1);
@@ -4415,7 +4470,9 @@ mod tests {
     fn test_app_remove_episode_bookmark() {
         let mut app = PodcastApp::new(800.0, 600.0);
         let pid = app.subscribe("P", "", "", "rss://x", "", vec![]);
-        let eid = app.add_episode(pid, "Ep", "", "2026-01-01", 100, "", 100).unwrap();
+        let eid = app
+            .add_episode(pid, "Ep", "", "2026-01-01", 100, "", 100)
+            .unwrap();
         app.add_episode_bookmark(pid, eid, 30, "A");
         app.add_episode_bookmark(pid, eid, 60, "B");
         assert!(app.remove_episode_bookmark(pid, eid, 0));
@@ -4431,7 +4488,9 @@ mod tests {
     fn test_play_episode() {
         let mut app = PodcastApp::new(800.0, 600.0);
         let pid = app.subscribe("P", "", "", "rss://x", "", vec![]);
-        let eid = app.add_episode(pid, "Ep", "", "2026-01-01", 600, "", 100).unwrap();
+        let eid = app
+            .add_episode(pid, "Ep", "", "2026-01-01", 600, "", 100)
+            .unwrap();
         assert!(app.play_episode(pid, eid));
         assert_eq!(app.player_state, PlayerState::Playing);
         assert_eq!(app.current_episode_id, Some(eid));
@@ -4442,7 +4501,9 @@ mod tests {
     fn test_pause_resume() {
         let mut app = PodcastApp::new(800.0, 600.0);
         let pid = app.subscribe("P", "", "", "rss://x", "", vec![]);
-        let eid = app.add_episode(pid, "Ep", "", "2026-01-01", 600, "", 100).unwrap();
+        let eid = app
+            .add_episode(pid, "Ep", "", "2026-01-01", 600, "", 100)
+            .unwrap();
         app.play_episode(pid, eid);
         app.pause_playback();
         assert_eq!(app.player_state, PlayerState::Paused);
@@ -4454,7 +4515,9 @@ mod tests {
     fn test_toggle_playback() {
         let mut app = PodcastApp::new(800.0, 600.0);
         let pid = app.subscribe("P", "", "", "rss://x", "", vec![]);
-        let eid = app.add_episode(pid, "Ep", "", "2026-01-01", 600, "", 100).unwrap();
+        let eid = app
+            .add_episode(pid, "Ep", "", "2026-01-01", 600, "", 100)
+            .unwrap();
         app.play_episode(pid, eid);
         app.toggle_playback();
         assert_eq!(app.player_state, PlayerState::Paused);
@@ -4466,7 +4529,9 @@ mod tests {
     fn test_stop_playback() {
         let mut app = PodcastApp::new(800.0, 600.0);
         let pid = app.subscribe("P", "", "", "rss://x", "", vec![]);
-        let eid = app.add_episode(pid, "Ep", "", "2026-01-01", 600, "", 100).unwrap();
+        let eid = app
+            .add_episode(pid, "Ep", "", "2026-01-01", 600, "", 100)
+            .unwrap();
         app.play_episode(pid, eid);
         app.stop_playback();
         assert_eq!(app.player_state, PlayerState::Stopped);
@@ -4477,7 +4542,9 @@ mod tests {
     fn test_seek_forward() {
         let mut app = PodcastApp::new(800.0, 600.0);
         let pid = app.subscribe("P", "", "", "rss://x", "", vec![]);
-        let eid = app.add_episode(pid, "Ep", "", "2026-01-01", 600, "", 100).unwrap();
+        let eid = app
+            .add_episode(pid, "Ep", "", "2026-01-01", 600, "", 100)
+            .unwrap();
         app.play_episode(pid, eid);
         app.seek_forward(15);
         assert_eq!(app.playback_position_secs, 15);
@@ -4487,7 +4554,9 @@ mod tests {
     fn test_seek_backward() {
         let mut app = PodcastApp::new(800.0, 600.0);
         let pid = app.subscribe("P", "", "", "rss://x", "", vec![]);
-        let eid = app.add_episode(pid, "Ep", "", "2026-01-01", 600, "", 100).unwrap();
+        let eid = app
+            .add_episode(pid, "Ep", "", "2026-01-01", 600, "", 100)
+            .unwrap();
         app.play_episode(pid, eid);
         app.seek_forward(30);
         app.seek_backward(15);
@@ -4498,7 +4567,9 @@ mod tests {
     fn test_seek_backward_saturates() {
         let mut app = PodcastApp::new(800.0, 600.0);
         let pid = app.subscribe("P", "", "", "rss://x", "", vec![]);
-        let eid = app.add_episode(pid, "Ep", "", "2026-01-01", 600, "", 100).unwrap();
+        let eid = app
+            .add_episode(pid, "Ep", "", "2026-01-01", 600, "", 100)
+            .unwrap();
         app.play_episode(pid, eid);
         app.seek_backward(100);
         assert_eq!(app.playback_position_secs, 0);
@@ -4508,7 +4579,9 @@ mod tests {
     fn test_seek_forward_clamped() {
         let mut app = PodcastApp::new(800.0, 600.0);
         let pid = app.subscribe("P", "", "", "rss://x", "", vec![]);
-        let eid = app.add_episode(pid, "Ep", "", "2026-01-01", 100, "", 100).unwrap();
+        let eid = app
+            .add_episode(pid, "Ep", "", "2026-01-01", 100, "", 100)
+            .unwrap();
         app.play_episode(pid, eid);
         app.seek_forward(200);
         // Should be clamped to duration and marked played.
@@ -4519,7 +4592,9 @@ mod tests {
     fn test_seek_to() {
         let mut app = PodcastApp::new(800.0, 600.0);
         let pid = app.subscribe("P", "", "", "rss://x", "", vec![]);
-        let eid = app.add_episode(pid, "Ep", "", "2026-01-01", 600, "", 100).unwrap();
+        let eid = app
+            .add_episode(pid, "Ep", "", "2026-01-01", 600, "", 100)
+            .unwrap();
         app.play_episode(pid, eid);
         app.seek_to(300);
         assert_eq!(app.playback_position_secs, 300);
@@ -4544,7 +4619,9 @@ mod tests {
     fn test_tick_advances_position() {
         let mut app = PodcastApp::new(800.0, 600.0);
         let pid = app.subscribe("P", "", "", "rss://x", "", vec![]);
-        let eid = app.add_episode(pid, "Ep", "", "2026-01-01", 600, "", 100).unwrap();
+        let eid = app
+            .add_episode(pid, "Ep", "", "2026-01-01", 600, "", 100)
+            .unwrap();
         app.play_episode(pid, eid);
         app.tick(5000); // 5 seconds at 1x
         assert!(app.playback_position_secs >= 5);
@@ -4561,7 +4638,9 @@ mod tests {
     fn test_tick_paused_no_advance() {
         let mut app = PodcastApp::new(800.0, 600.0);
         let pid = app.subscribe("P", "", "", "rss://x", "", vec![]);
-        let eid = app.add_episode(pid, "Ep", "", "2026-01-01", 600, "", 100).unwrap();
+        let eid = app
+            .add_episode(pid, "Ep", "", "2026-01-01", 600, "", 100)
+            .unwrap();
         app.play_episode(pid, eid);
         app.pause_playback();
         let pos = app.playback_position_secs;
@@ -4577,7 +4656,9 @@ mod tests {
     fn test_queue_episode() {
         let mut app = PodcastApp::new(800.0, 600.0);
         let pid = app.subscribe("P", "", "", "rss://x", "", vec![]);
-        let eid = app.add_episode(pid, "Ep", "", "2026-01-01", 600, "", 100).unwrap();
+        let eid = app
+            .add_episode(pid, "Ep", "", "2026-01-01", 600, "", 100)
+            .unwrap();
         let initial_queue = app.play_queue.len();
         assert!(app.queue_episode(pid, eid));
         assert_eq!(app.play_queue.len(), initial_queue + 1);
@@ -4587,7 +4668,9 @@ mod tests {
     fn test_queue_no_duplicates() {
         let mut app = PodcastApp::new(800.0, 600.0);
         let pid = app.subscribe("P", "", "", "rss://x", "", vec![]);
-        let eid = app.add_episode(pid, "Ep", "", "2026-01-01", 600, "", 100).unwrap();
+        let eid = app
+            .add_episode(pid, "Ep", "", "2026-01-01", 600, "", 100)
+            .unwrap();
         app.queue_episode(pid, eid);
         let count = app.play_queue.len();
         assert!(!app.queue_episode(pid, eid));
@@ -4598,7 +4681,9 @@ mod tests {
     fn test_dequeue_episode() {
         let mut app = PodcastApp::new(800.0, 600.0);
         let pid = app.subscribe("P", "", "", "rss://x", "", vec![]);
-        let eid = app.add_episode(pid, "Ep", "", "2026-01-01", 600, "", 100).unwrap();
+        let eid = app
+            .add_episode(pid, "Ep", "", "2026-01-01", 600, "", 100)
+            .unwrap();
         app.queue_episode(pid, eid);
         let count = app.play_queue.len();
         assert!(app.dequeue_episode(count - 1));
@@ -4616,9 +4701,15 @@ mod tests {
         let mut app = PodcastApp::new(800.0, 600.0);
         app.clear_queue();
         let pid = app.subscribe("P", "", "", "rss://x", "", vec![]);
-        let e1 = app.add_episode(pid, "A", "", "2026-01-01", 100, "", 100).unwrap();
-        let e2 = app.add_episode(pid, "B", "", "2026-01-02", 100, "", 100).unwrap();
-        let e3 = app.add_episode(pid, "C", "", "2026-01-03", 100, "", 100).unwrap();
+        let e1 = app
+            .add_episode(pid, "A", "", "2026-01-01", 100, "", 100)
+            .unwrap();
+        let e2 = app
+            .add_episode(pid, "B", "", "2026-01-02", 100, "", 100)
+            .unwrap();
+        let e3 = app
+            .add_episode(pid, "C", "", "2026-01-03", 100, "", 100)
+            .unwrap();
         app.queue_episode(pid, e1);
         app.queue_episode(pid, e2);
         app.queue_episode(pid, e3);
@@ -4649,7 +4740,9 @@ mod tests {
     fn test_queue_download() {
         let mut app = PodcastApp::new(800.0, 600.0);
         let pid = app.subscribe("P", "", "", "rss://x", "", vec![]);
-        let eid = app.add_episode(pid, "Ep", "", "2026-01-01", 600, "", 10_000).unwrap();
+        let eid = app
+            .add_episode(pid, "Ep", "", "2026-01-01", 600, "", 10_000)
+            .unwrap();
         assert!(app.queue_download(pid, eid));
         assert_eq!(app.download_queue.len(), 1);
     }
@@ -4658,7 +4751,9 @@ mod tests {
     fn test_queue_download_no_duplicate() {
         let mut app = PodcastApp::new(800.0, 600.0);
         let pid = app.subscribe("P", "", "", "rss://x", "", vec![]);
-        let eid = app.add_episode(pid, "Ep", "", "2026-01-01", 600, "", 10_000).unwrap();
+        let eid = app
+            .add_episode(pid, "Ep", "", "2026-01-01", 600, "", 10_000)
+            .unwrap();
         app.queue_download(pid, eid);
         assert!(!app.queue_download(pid, eid));
     }
@@ -4667,7 +4762,9 @@ mod tests {
     fn test_cancel_download() {
         let mut app = PodcastApp::new(800.0, 600.0);
         let pid = app.subscribe("P", "", "", "rss://x", "", vec![]);
-        let eid = app.add_episode(pid, "Ep", "", "2026-01-01", 600, "", 10_000).unwrap();
+        let eid = app
+            .add_episode(pid, "Ep", "", "2026-01-01", 600, "", 10_000)
+            .unwrap();
         app.queue_download(pid, eid);
         assert!(app.cancel_download(eid));
         assert!(app.download_queue.is_empty());
@@ -4683,7 +4780,9 @@ mod tests {
     fn test_simulate_download_tick() {
         let mut app = PodcastApp::new(800.0, 600.0);
         let pid = app.subscribe("P", "", "", "rss://x", "", vec![]);
-        let eid = app.add_episode(pid, "Ep", "", "2026-01-01", 600, "", 10_000).unwrap();
+        let eid = app
+            .add_episode(pid, "Ep", "", "2026-01-01", 600, "", 10_000)
+            .unwrap();
         app.queue_download(pid, eid);
         app.simulate_download_tick();
         // First tick should activate the download.
@@ -4694,7 +4793,9 @@ mod tests {
     fn test_delete_download() {
         let mut app = PodcastApp::new(800.0, 600.0);
         let pid = app.subscribe("P", "", "", "rss://x", "", vec![]);
-        let eid = app.add_episode(pid, "Ep", "", "2026-01-01", 600, "", 10_000).unwrap();
+        let eid = app
+            .add_episode(pid, "Ep", "", "2026-01-01", 600, "", 10_000)
+            .unwrap();
         // Manually set as downloaded.
         if let Some(p) = app.find_podcast_mut(pid)
             && let Some(ep) = p.find_episode_mut(eid)
@@ -4805,7 +4906,9 @@ mod tests {
     fn test_playback_records_history() {
         let mut app = PodcastApp::new(800.0, 600.0);
         let pid = app.subscribe("P", "", "", "rss://x", "", vec![]);
-        let eid = app.add_episode(pid, "Ep", "", "2026-01-01", 600, "", 100).unwrap();
+        let eid = app
+            .add_episode(pid, "Ep", "", "2026-01-01", 600, "", 100)
+            .unwrap();
         let before = app.history.len();
         app.play_episode(pid, eid);
         app.seek_forward(100);
@@ -4824,7 +4927,11 @@ mod tests {
         app.set_auto_download(pid, true);
         app.add_episode(pid, "Auto Ep", "", "2026-01-01", 100, "", 5000);
         // Should be queued for download.
-        assert!(app.download_queue.iter().any(|d| d.episode_title == "Auto Ep"));
+        assert!(
+            app.download_queue
+                .iter()
+                .any(|d| d.episode_title == "Auto Ep")
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -4874,7 +4981,9 @@ mod tests {
     #[test]
     fn test_render_with_episode_detail() {
         let mut app = PodcastApp::new(800.0, 600.0);
-        let first_ep = app.podcasts.first()
+        let first_ep = app
+            .podcasts
+            .first()
             .and_then(|p| p.episodes.first())
             .map(|e| e.id);
         app.selected_episode_id = first_ep;
@@ -4965,11 +5074,7 @@ mod tests {
 
     /// The lines of one prose field: every text of that colour and size drawn
     /// below the named section heading, top to bottom.
-    fn prose_under(
-        cmds: &[RenderCommand],
-        heading: &str,
-        size: f32,
-    ) -> Vec<(f32, String)> {
+    fn prose_under(cmds: &[RenderCommand], heading: &str, size: f32) -> Vec<(f32, String)> {
         let heading_y = cmds
             .iter()
             .find_map(|c| match c {
@@ -4986,10 +5091,7 @@ mod tests {
                     color,
                     font_size,
                     ..
-                } if *color == SUBTEXT0
-                    && (*font_size - size).abs() < 0.01
-                    && *y > heading_y =>
-                {
+                } if *color == SUBTEXT0 && (*font_size - size).abs() < 0.01 && *y > heading_y => {
                     Some((*y, text.clone()))
                 }
                 _ => None,
@@ -5005,9 +5107,7 @@ mod tests {
             .filter_map(|c| match c {
                 RenderCommand::FillRect {
                     y, width, height, ..
-                } if (*width - 60.0).abs() < 0.01 && (*height - 20.0).abs() < 0.01 => {
-                    Some(*y)
-                }
+                } if (*width - 60.0).abs() < 0.01 && (*height - 20.0).abs() < 0.01 => Some(*y),
                 _ => None,
             })
             .fold(f32::INFINITY, f32::min)
@@ -5145,7 +5245,9 @@ mod tests {
     fn test_unsubscribe_clears_queue_items() {
         let mut app = PodcastApp::new(800.0, 600.0);
         let pid = app.subscribe("P", "", "", "rss://x", "", vec![]);
-        let eid = app.add_episode(pid, "Ep", "", "2026-01-01", 100, "", 100).unwrap();
+        let eid = app
+            .add_episode(pid, "Ep", "", "2026-01-01", 100, "", 100)
+            .unwrap();
         app.queue_episode(pid, eid);
         app.unsubscribe(pid);
         assert!(!app.play_queue.iter().any(|q| q.podcast_id == pid));
@@ -5155,7 +5257,9 @@ mod tests {
     fn test_unsubscribe_stops_playing() {
         let mut app = PodcastApp::new(800.0, 600.0);
         let pid = app.subscribe("P", "", "", "rss://x", "", vec![]);
-        let eid = app.add_episode(pid, "Ep", "", "2026-01-01", 100, "", 100).unwrap();
+        let eid = app
+            .add_episode(pid, "Ep", "", "2026-01-01", 100, "", 100)
+            .unwrap();
         app.play_episode(pid, eid);
         app.unsubscribe(pid);
         assert_eq!(app.player_state, PlayerState::Stopped);
@@ -5167,7 +5271,9 @@ mod tests {
         app.total_disk_bytes = 100;
         app.used_disk_bytes = 90;
         let pid = app.subscribe("P", "", "", "rss://x", "", vec![]);
-        let eid = app.add_episode(pid, "Ep", "", "2026-01-01", 100, "", 1000).unwrap();
+        let eid = app
+            .add_episode(pid, "Ep", "", "2026-01-01", 100, "", 1000)
+            .unwrap();
         assert!(!app.queue_download(pid, eid));
     }
 
@@ -5198,7 +5304,10 @@ mod tests {
     fn test_extract_attr_basic() {
         let tag = r#"<outline text="Hello" xmlUrl="https://example.com" />"#;
         assert_eq!(extract_attr(tag, "text"), Some("Hello".to_string()));
-        assert_eq!(extract_attr(tag, "xmlUrl"), Some("https://example.com".to_string()));
+        assert_eq!(
+            extract_attr(tag, "xmlUrl"),
+            Some("https://example.com".to_string())
+        );
         assert_eq!(extract_attr(tag, "missing"), None);
     }
     // --- sidebar subscription list ---
@@ -5259,7 +5368,10 @@ mod tests {
     fn the_sidebar_stops_at_the_last_subscription_that_fits() {
         let app = app_with_subscriptions(200);
         let drawn = drawn_subscriptions(&app);
-        assert!(!drawn.is_empty(), "the sidebar drew no subscriptions at all");
+        assert!(
+            !drawn.is_empty(),
+            "the sidebar drew no subscriptions at all"
+        );
         assert!(
             drawn.len() < 200,
             "the sidebar drew all 200 subscriptions into a 600px window"
@@ -5348,7 +5460,10 @@ mod tests {
         assert!(!labels.is_empty(), "the sidebar must not go blank");
         // The last page ends on the last row, which is the last category.
         let last = Category::ALL.last().map(|c| c.name());
-        assert_eq!(labels.iter().rev().find(|t| Some(t.as_str()) == last), last.map(String::from).as_ref());
+        assert_eq!(
+            labels.iter().rev().find(|t| Some(t.as_str()) == last),
+            last.map(String::from).as_ref()
+        );
     }
 
     /// Scrolling up from the top stays at the top rather than wrapping.
@@ -5387,7 +5502,9 @@ mod tests {
                 RenderCommand::Text { text, .. }
                     if text.len() == 4
                         && text.starts_with('E')
-                        && text.get(1..).is_some_and(|d| d.chars().all(|c| c.is_ascii_digit())) =>
+                        && text
+                            .get(1..)
+                            .is_some_and(|d| d.chars().all(|c| c.is_ascii_digit())) =>
                 {
                     Some(text)
                 }
@@ -5403,7 +5520,10 @@ mod tests {
     fn the_episode_list_stops_at_the_last_row_that_fits() {
         let app = app_with_episodes(100);
         let drawn = drawn_episodes(&app);
-        assert!(!drawn.is_empty(), "the content area drew no episodes at all");
+        assert!(
+            !drawn.is_empty(),
+            "the content area drew no episodes at all"
+        );
         assert!(
             drawn.len() < 100,
             "the list drew all 100 episodes into a 600px window"
@@ -5506,7 +5626,6 @@ mod tests {
         );
     }
 
-
     /// A sidebar hiding rows says how many.
     #[test]
     fn a_sidebar_that_is_hiding_rows_says_so() {
@@ -5532,5 +5651,4 @@ mod tests {
             "a complete sidebar should not claim to be hiding rows"
         );
     }
-
 }

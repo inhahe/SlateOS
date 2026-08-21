@@ -38,6 +38,7 @@
 
 use guitk::color::Color;
 use guitk::history::SampleHistory;
+use guitk::ratio;
 use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::style::CornerRadii;
 
@@ -187,11 +188,9 @@ pub struct MemoryInfo {
 
 impl MemoryInfo {
     /// Memory usage as a percentage, clamped to 0..100.
+    #[must_use]
     pub fn usage_pct(&self) -> f32 {
-        if self.total_mb == 0 {
-            return 0.0;
-        }
-        ((self.used_mb as f64 / self.total_mb as f64) * 100.0) as f32
+        ratio::percent(self.used_mb, self.total_mb).unwrap_or(0.0) as f32
     }
 }
 

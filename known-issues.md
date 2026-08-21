@@ -46340,18 +46340,19 @@ with no pipe on the command.
 
 ---
 
-## `apps/**` bug-hunt sweep, round 1: three live defects (lane C)
-**Status:** FIXED 2026-08-20 — `5b4dd7731` (calendar), `80dd0a5f3` (slices).
+## `apps/**` bug-hunt sweep, round 1: four live defects and one latent (lane C)
+**Status:** FIXED 2026-08-20 — `5b4dd7731` (calendar), `80dd0a5f3` (slices),
+`c989b21d0` (clipboard preview), `e1390abb1` (sticky-note columns).
 
 The roadmap asks lane C to run bug-hunt sweeps over `apps/**` between
 features; ~200 crates there have never had a systematic audit. This is the
-first round's findings, filed closed because all three were fixed in the same
+first round's findings, filed closed because all five were fixed in the same
 sitting. They are recorded rather than merely committed because the *shape* of
 each recurs, and the next sweep should start by grepping for it.
 
 ### The shape, again: a proof that lives in a different statement than the code it justifies
 
-All three are the same fault the `gui/**` lint sweep kept finding. A value is
+All five are the same fault the `gui/**` lint sweep kept finding. A value is
 checked in one statement and used in another, and in between, something makes
 the check not mean what it looks like it means.
 
@@ -46427,6 +46428,59 @@ Fixed by defining `action_text` in terms of the same framing and verb split
 `parse` uses, and `is_action` in terms of `action_text`. `parse` also folds case
 with ASCII rules rather than `to_uppercase`, so the two cannot drift on
 `"actıon"` (dotless i, which *does* uppercase to `ACTION`).
+
+### 4 & 5. `String::truncate`/`insert`/`remove` panic off a character boundary
+
+The byte/character confusion again, in the standard library's most
+panic-prone corner. Found by grepping for `String` mutators that take an
+offset, after `String::truncate` turned one up.
+
+**`apps/clipmanager::ClipEntry::preview` — live, and a crash in a render
+path.** Documented as "`PREVIEW_MAX_CHARS` total characters", implemented
+entirely in bytes: it compared `out.len()` against the limit and cut with
+`out.truncate(120)`. The clipboard holds whatever the user copied, so copying
+a couple of sentences of Greek, Cyrillic, Hebrew, Arabic, CJK or emoji took the
+clipboard manager down *while drawing its own list* — and because the entry was
+already in the history, it recurred on every restart until the entry aged out.
+Counting bytes was wrong even when it did not crash: 120 bytes of Japanese is
+40 characters, so a preview that filled a row in English was cut to a third of
+it. The one existing test used `"a".repeat(200)`; ASCII is exactly the input
+that cannot fail, the same blind spot that let `apps/explorer`'s date bug live
+behind a test that only sampled 2024.
+
+**`apps/stickynotes::Note::insert_char`/`delete_char` — latent.** Both take a
+byte offset and clamped it to the line's length and no further. Clamping stops
+an offset running off the *end*; it says nothing about the *boundary*. Nothing
+outside the tests calls either today, which is why the 2026-08-16 audit
+recorded in `GUI-TEXT-INPUT-CURSORS-STEP-BY-BYTES` missed them: that sweep
+looked for `cursor ± 1` and these have no cursor field, only a parameter whose
+signature never said whether it meant bytes or characters. Now snapped back to
+the boundary, matching `apps/editor::snap_to_boundary` and
+`apps/markdowneditor::clamp_col`, and the unit is stated.
+
+**Everything else in that class was checked and is correct**, mostly by having
+already been fixed on 2026-08-16: `apps/editor` (`snap_to_boundary`),
+`apps/markdowneditor` (`clamp_col`, `len_utf8` steps), `apps/paint` (scans for
+the adjacent character), `apps/launcher` and `apps/jsonviewer` and
+`apps/spreadsheet` (caret counts characters, converted at each use),
+`apps/calculator` (`len() - last.len_utf8()`, which is a boundary by
+construction), `apps/dbviewer` (a `Vec<String>`, so `Vec::truncate`),
+`apps/netscan` (`char_indices().nth`), `apps/unitconverter` (ASCII-only input
+filter, invariant documented at the site).
+
+### A test-design trap worth remembering: 120 is divisible by 2, 3 and 4
+
+The first draft of the clipmanager regression test used `"日".repeat(200)` and
+friends — and **passed against the broken code**. `PREVIEW_MAX_CHARS` is 120,
+which is a multiple of every UTF-8 width, so byte 120 of a solid run of
+2-, 3- or 4-byte characters lands on a boundary by accident. A test of a
+boundary bug has to *shift the grid*: the cases are now a single ASCII prefix
+followed by a run, and each asserts `!is_char_boundary(PREVIEW_MAX_CHARS)` up
+front so it cannot quietly stop testing the bug if the constant changes.
+
+Generally: **a regression test for a "lands inside a character" bug must assert
+that its input actually lands inside a character.** Otherwise the alignment is
+a coincidence, and coincidences are not stable under refactoring.
 
 ### Deliberately not changed: the ~15 `(i + 1) % len()` sites
 

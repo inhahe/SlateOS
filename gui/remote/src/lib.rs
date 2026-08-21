@@ -119,7 +119,10 @@ pub use window_list::{
 };
 
 pub mod zones;
-pub use zones::{SnapLayout, SnapLayoutPreset, SnapSlot, SnapZone, WorkArea, ZONE_GAP, ZoneId};
+pub use zones::{
+    EDGE_THRESHOLD, EdgeDrop, ScreenEdge, SnapLayout, SnapLayoutPreset, SnapSlot, SnapZone,
+    WorkArea, ZONE_GAP, ZoneId, drop_at, drop_at_edge, edge_at,
+};
 
 pub mod frame;
 pub use frame::{Frame, decode_any, try_decode_any};

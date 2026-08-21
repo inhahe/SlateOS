@@ -89,6 +89,23 @@ that will never be told.
 lane's `libc.a` is private, so "does the tree match the artifacts" silently
 means "does the tree match *my local* artifact."
 
+## Before you rebuild: there is an uncommitted rebuild sitting in `os`
+
+The `os` integration worktree has all nine `.elf` and `.stamp` files **modified
+but not committed** right now. I left them exactly as found. Do not simply
+commit them — they are a relink against `os`'s *stale* `libc.a` (`5915b6ca`,
+unchanged), so committing them would re-stamp the drift rather than repair it,
+which is precisely what `ctest-fixtures.py`'s own error text says never to do.
+
+That rebuild also turned up something worth your attention before you make
+yours: it changed the ELF (`2639920` → `2639896` bytes, different sha256) from
+**byte-identical recorded inputs**. The stamps do not record the linker, and the
+linker — `compiler.toolchain._link_slateos` — lives in the *fastpy* repository,
+not this one. Details and suggested fixes are ask 3 of
+`requests/c-a-the-staleness-detector-has-no-caller.md`. It does not change what
+you need to do here, but it does mean your rebuilt ELFs will not be
+byte-reproducible by anyone else, and that this is not currently detectable.
+
 ## Repair
 
 ```

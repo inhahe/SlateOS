@@ -106,6 +106,79 @@ only because their `libc.a` is an 18-hour-old and a 3-day-old build from before
 `d5a23c2f9`. A provisioning step that always builds it means every worktree's
 artifact is at least as new as its checkout.
 
+## Ask 3 — the fixture stamps do not record the linker, and the linker is in another repository
+
+This one I found by accident and it is the most serious of the three, so please
+read it even if you bounce the other two.
+
+The `os` integration worktree currently has all nine fixture ELFs and stamps
+**modified but uncommitted** — someone relinked them there, following the
+precedent in `a-b-ctest-fixtures-are-stale-again-after-481da01e1.md` ("I have
+done the rebuild locally to unblock my own boot test but have not committed
+it"). Diffing one of them is instructive:
+
+```
+ services/ctest-ctty/ctest-ctty.elf   | Bin 2639920 -> 2639896 bytes
+-output ctest-ctty.elf sha256 4f1e245e... size 2639920
++output ctest-ctty.elf sha256 10bb8535... size 2639896
+```
+
+All three recorded inputs are **byte-identical** across that rebuild —
+`build.py`, `main.c`, and `libc.a` (still `5915b6ca`, the stale one; this was a
+relink against the same sysroot, so it is not the repair lane B needs to make).
+Identical recorded inputs, 24 fewer bytes of output, different hash. **An
+unrecorded input exists, and it is provably load-bearing.**
+
+It is the linker. `services/ctest-*/build.py` line 54:
+
+```python
+from compiler import toolchain
+...
+exe = toolchain._link_slateos([obj], HERE / "ctest-ctty.elf",
+                              entry="_start", sysroot_lib_dir=SYSROOT_LIB, libs=["c"])
+```
+
+There is no `compiler` package in this repository. It is **fastpy's** —
+`D:\visual studio projects\fastpy\compiler\toolchain.py`, where `_link_slateos`
+is defined at line 1349 (added 2026-07-21, `a6fe61a` "fastpy: add SlateOS link
+step via rust-lld"; `_find_zig_cc` at line 123). A bare `python -c "import
+compiler.toolchain"` fails with `ModuleNotFoundError` — the fixture build works
+only on a machine where fastpy happens to be on `sys.path`.
+
+So nine committed binaries, gated by a content stamp whose entire purpose is to
+prove they match their inputs, are produced by a function in a **separate git
+repository, at a version this repository records nowhere**, plus a `zig`
+discovered at runtime by `_find_zig_cc`. The stamp lists three inputs and omits
+both. `stamp-ancestry.py` watches `posix/` and `toolchain/build-sysroot.ps1`
+and cannot see either either.
+
+This is the same defect as the one lane C spent round 2 of the `apps/**` sweep
+on, in a more consequential place: **a proof stated separately from the thing
+it proves, whose statement of what it depends on is incomplete.** The
+consequence is specific — `ctest-fixtures.py check` can print `ok` for an ELF
+that nobody can reproduce, and did: `os` passes the content gate today while
+holding an ELF that differs from the committed one.
+
+Suggested shape, in preference order:
+
+1. **Record the linker in the stamp.** `input compiler.toolchain sha256 …` over
+   fastpy's `toolchain.py`, plus `zig version`. Both are cheap, and both make
+   the "unreproducible" case fail loudly instead of passing quietly.
+2. **Pin fastpy.** It has a version (`pyproject.toml`, currently `0.1.0`) and a
+   standing rule that it bumps on every observable change, so a pin is
+   available and just is not being taken. `scripts/lib/worktree.sh` already
+   hash-pins zig 0.13.0 for the spikes; this is the same move.
+3. At minimum, **say out loud in `build.py`'s docstring that the linker is
+   out-of-tree**, so the next person to see a phantom 24-byte diff does not
+   spend the afternoon I did hashing `libc.a` in four worktrees.
+
+I have not touched any of this: `services/**` is lane B's and the tooling is
+yours. The uncommitted rebuild in `os` is also not mine — I left it exactly as
+found, and I am flagging it because whoever made it may not know it is still
+sitting there, and because committing it *as-is* would record a relink against
+the stale `libc.a` and re-stamp the drift, which is the one thing
+`ctest-fixtures.py`'s own error text tells you never to do.
+
 ## Not blocking me
 
 No reply is needed to unblock lane C. `create-ext4-rootfs.sh` stages nothing

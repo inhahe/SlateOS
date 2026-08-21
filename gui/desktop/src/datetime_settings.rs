@@ -1241,7 +1241,10 @@ mod tests {
         // A search for it must find it, since the picker is search-driven.
         let settings = DateTimeSettings::default();
         assert!(
-            settings.search_timezones("utc").iter().any(|t| t.tz_id == "UTC"),
+            settings
+                .search_timezones("utc")
+                .iter()
+                .any(|t| t.tz_id == "UTC"),
             "typing the most common name for the zone must offer the zone"
         );
     }

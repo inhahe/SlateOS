@@ -676,14 +676,7 @@ impl BackupSettingsUI {
     /// `tz` is the zone the History tab dates its runs in — see
     /// [`BackupHistoryEntry::date_display`] for why it is asked for here
     /// rather than assumed.
-    pub fn render(
-        &self,
-        x: f32,
-        y: f32,
-        width: f32,
-        height: f32,
-        tz: &Tz,
-    ) -> Vec<RenderCommand> {
+    pub fn render(&self, x: f32, y: f32, width: f32, height: f32, tz: &Tz) -> Vec<RenderCommand> {
         let mut cmds = Vec::new();
 
         // Panel background

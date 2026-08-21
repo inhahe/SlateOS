@@ -217,9 +217,7 @@ impl BatteryInfo {
     /// can have on screen at once cannot disagree about one number.
     pub fn remaining_formatted(&self) -> String {
         match self.remaining_mins {
-            Some(m) if m > 0 => {
-                guitk::duration::coarse_minutes(u64::from(m).saturating_mul(60))
-            }
+            Some(m) if m > 0 => guitk::duration::coarse_minutes(u64::from(m).saturating_mul(60)),
             _ => "—".into(),
         }
     }

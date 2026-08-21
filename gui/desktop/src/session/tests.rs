@@ -132,7 +132,11 @@ fn the_shell_opens_a_background_a_panel_and_a_menu_surface() {
     // None of them is a window in the ordinary sense.
     for spec in &specs {
         assert!(!spec.decorations, "{} has a title bar", spec.title);
-        assert!(!spec.resizable, "{} can be dragged to a new size", spec.title);
+        assert!(
+            !spec.resizable,
+            "{} can be dragged to a new size",
+            spec.title
+        );
     }
 
     // The panel is exactly the taskbar; the other two are the whole display.
@@ -297,7 +301,10 @@ fn localizing_preserves_every_command_and_wraps_them_in_one_translation() {
     assert_eq!(out.commands.len(), tree.commands.len() + 2);
     assert!(matches!(
         out.commands[0],
-        RenderCommand::PushTranslate { dx: -12.0, dy: -34.0 }
+        RenderCommand::PushTranslate {
+            dx: -12.0,
+            dy: -34.0
+        }
     ));
     assert!(matches!(
         out.commands[out.commands.len() - 1],
@@ -456,9 +463,11 @@ fn alt_f4_asks_the_compositor_to_close_the_focused_window() {
 #[test]
 fn super_d_asks_for_every_window_to_be_minimised() {
     let (mut session, desktop) = session();
-    desktop
-        .borrow_mut()
-        .send_window_list(&[app(1, "Terminal"), app(2, "notes.txt"), app(3, "mail")]);
+    desktop.borrow_mut().send_window_list(&[
+        app(1, "Terminal"),
+        app(2, "notes.txt"),
+        app(3, "mail"),
+    ]);
     session.pump().expect("pump");
 
     desktop.borrow_mut().send_input(&[InputEvent::new(
@@ -688,7 +697,11 @@ fn an_open_menu_is_actually_drawn_on_the_surface_that_was_mapped_for_it() {
     let (mut session, desktop) = session();
     let popups = session.popups().window();
     assert!(
-        !desktop.borrow_mut().drawn().iter().any(|(w, _)| *w == popups),
+        !desktop
+            .borrow_mut()
+            .drawn()
+            .iter()
+            .any(|(w, _)| *w == popups),
         "something was drawn on the menu surface before a menu opened"
     );
 

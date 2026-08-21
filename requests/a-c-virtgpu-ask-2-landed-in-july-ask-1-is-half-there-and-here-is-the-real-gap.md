@@ -59,7 +59,15 @@ all:
 | `MAP` | no | `ENOSYS` ✗ |
 | `WAIT` | no — fence wait | `ENOSYS` ✗ |
 | `EXECBUFFER`, `CONTEXT_INIT` | **yes** | `ENOSYS` ✓ correct |
+| `TRANSFER_FROM_HOST` | **yes**, for a subtler reason | `ENOSYS` ✓ correct |
 | `RESOURCE_CREATE_BLOB` | needs the blob feature | `ENOSYS` ✓ correct |
+
+`TRANSFER_FROM_HOST` is the row worth explaining, because its name looks like it
+should mirror `TRANSFER_TO_HOST` and therefore be serviceable. It is not: the
+base virtio-gpu command set has **no `_2D` form of it at all** — the spec defines
+`VIRTIO_GPU_CMD_TRANSFER_TO_HOST_2D` but only `TRANSFER_FROM_HOST_3D`, which is
+a virgl command. Readback of a 2D resource is simply not something a non-virgl
+device offers, so `ENOSYS` there is the honest answer rather than a shortcut.
 
 The blocker underneath is that `kernel/src/virtio/gpu.rs` is a
 **single-framebuffer** driver, not a resource manager: its whole public surface

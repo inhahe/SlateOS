@@ -9785,6 +9785,7 @@ fn drm_card_ioctl(entry: &FdEntry, request: u32, argp: u64) -> SyscallResult {
         uapi::DRM_IOCTL_VERSION => drm_card_ioctl_version(argp),
         uapi::DRM_IOCTL_GET_CAP => drm_card_ioctl_get_cap(argp),
         uapi::DRM_IOCTL_SET_CLIENT_CAP => drm_card_ioctl_set_client_cap(handle, argp),
+        uapi::DRM_IOCTL_GEM_CLOSE => drm_card_ioctl_gem_close(handle, argp),
         // --- primary-node-only ioctls (no display authority on a render node) ---
         uapi::DRM_IOCTL_GET_MAGIC => {
             if render_node {
@@ -9904,13 +9905,15 @@ fn drm_card_ioctl(entry: &FdEntry, request: u32, argp: u64) -> SyscallResult {
         // These are the `virtgpu_drm.h` render ioctls Mesa's virgl/venus drivers
         // issue. Per the Q18 resolution (§59) we answer them *honestly* on the
         // 2D-only device our CI exposes: GETPARAM reports its policy values
-        // (3D_FEATURES = 0), GET_CAPS advertises no capsets (EINVAL), and every
-        // 3D-requiring ioctl returns ENOSYS ("no virgl backend"). Allowed on both
-        // node types (DRM_RENDER_ALLOW) — a render node is exactly their home.
+        // (3D_FEATURES = 0), GET_CAPS advertises no capsets (EINVAL), the subset
+        // base virtio-gpu really services without `VIRTIO_GPU_F_VIRGL` is
+        // implemented against the driver, and every genuinely 3D-requiring ioctl
+        // returns ENOSYS ("no virgl backend"). Allowed on both node types
+        // (DRM_RENDER_ALLOW) — a render node is exactly their home.
         _ if crate::drm::virtgpu_uapi::ioc_nr(request)
             >= crate::drm::virtgpu_uapi::DRM_COMMAND_BASE =>
         {
-            virtgpu_render_ioctl(request, argp)
+            virtgpu_render_ioctl(handle, request, argp)
         }
         _ => linux_err(errno::ENOTTY),
     }
@@ -9919,7 +9922,34 @@ fn drm_card_ioctl(entry: &FdEntry, request: u32, argp: u64) -> SyscallResult {
 /// Dispatch a virtio-gpu driver-specific (`DRM_COMMAND_BASE`-range) render
 /// ioctl. See [`crate::drm::virtgpu_uapi`] for the ABI and design-decisions §59
 /// (Q18) for the honest "no-3D" policy this implements.
-fn virtgpu_render_ioctl(request: u32, argp: u64) -> SyscallResult {
+///
+/// ## Which ioctls are serviced and which are not
+///
+/// The dividing line is `VIRTIO_GPU_F_VIRGL`, not "2D vs. 3D ioctl name".  Base
+/// virtio-gpu — the device QEMU gives us — has `RESOURCE_CREATE_2D`,
+/// `RESOURCE_ATTACH_BACKING`, `TRANSFER_TO_HOST_2D` and `RESOURCE_UNREF` in its
+/// *unconditional* command set, so `RESOURCE_CREATE`, `RESOURCE_INFO`, `MAP`,
+/// `TRANSFER_TO_HOST` and `WAIT` are all answerable honestly without a virgl
+/// backend.  `EXECBUFFER` and `CONTEXT_INIT` are not: they carry a virgl
+/// command stream with nothing to interpret it.  `TRANSFER_FROM_HOST` is not
+/// either, and for a subtler reason — the base spec has no `_2D` form of it at
+/// all, only `TRANSFER_FROM_HOST_3D`.  `RESOURCE_CREATE_BLOB` needs
+/// `VIRTIO_GPU_F_RESOURCE_BLOB`.  Those four stay `ENOSYS`.
+///
+/// ## Object identity
+///
+/// Linux gives each resource a per-`drm_file` GEM handle *and* a device-scoped
+/// host resource id, and reports both.  We use the resource id for both fields:
+/// the id is what the ABI actually round-trips, and per-fd isolation is
+/// enforced by [`crate::drm::card_fd::owns_resource`] instead of by a private
+/// handle namespace.  Every ioctl below that names an object therefore checks
+/// ownership first — resource ids are guessable, so that check *is* the
+/// isolation between two render-node clients.
+fn virtgpu_render_ioctl(
+    card: crate::drm::card_fd::DrmCardHandle,
+    request: u32,
+    argp: u64,
+) -> SyscallResult {
     use crate::drm::virtgpu_uapi as vg;
     match request {
         // GETPARAM: answer per policy. 3D_FEATURES = 0 and friends make Mesa
@@ -9928,21 +9958,284 @@ fn virtgpu_render_ioctl(request: u32, argp: u64) -> SyscallResult {
         // GET_CAPS: we advertise no capsets, so any query is EINVAL — exactly
         // Linux virtio-gpu's behaviour when `num_capsets == 0`.
         vg::DRM_IOCTL_VIRTGPU_GET_CAPS => linux_err(errno::EINVAL),
-        // Every remaining virtgpu ioctl needs a working 3D/virgl backend we do
-        // not have yet (deferred Mesa half of Q18). Report ENOSYS — "not
-        // implemented on this device" — rather than pretending success.
-        vg::DRM_IOCTL_VIRTGPU_MAP
-        | vg::DRM_IOCTL_VIRTGPU_EXECBUFFER
-        | vg::DRM_IOCTL_VIRTGPU_RESOURCE_CREATE
-        | vg::DRM_IOCTL_VIRTGPU_RESOURCE_INFO
+        vg::DRM_IOCTL_VIRTGPU_RESOURCE_CREATE => virtgpu_resource_create_ioctl(card, argp),
+        vg::DRM_IOCTL_VIRTGPU_RESOURCE_INFO => virtgpu_resource_info_ioctl(card, argp),
+        vg::DRM_IOCTL_VIRTGPU_MAP => virtgpu_map_ioctl(card, argp),
+        vg::DRM_IOCTL_VIRTGPU_TRANSFER_TO_HOST => virtgpu_transfer_to_host_ioctl(card, argp),
+        vg::DRM_IOCTL_VIRTGPU_WAIT => virtgpu_wait_ioctl(card, argp),
+        // The four that genuinely need a feature bit this device does not
+        // negotiate. Report ENOSYS — "not implemented on this device" — rather
+        // than pretending success. See the doc comment for why each one.
+        vg::DRM_IOCTL_VIRTGPU_EXECBUFFER
         | vg::DRM_IOCTL_VIRTGPU_TRANSFER_FROM_HOST
-        | vg::DRM_IOCTL_VIRTGPU_TRANSFER_TO_HOST
-        | vg::DRM_IOCTL_VIRTGPU_WAIT
         | vg::DRM_IOCTL_VIRTGPU_RESOURCE_CREATE_BLOB
         | vg::DRM_IOCTL_VIRTGPU_CONTEXT_INIT => linux_err(errno::ENOSYS),
         // A 'd'-magic ioctl in the driver-private nr range that isn't a defined
         // virtgpu command — no such ioctl.
         _ => linux_err(errno::ENOTTY),
+    }
+}
+
+/// The virtio-gpu 2D pixel formats (`VIRTIO_GPU_FORMAT_*`) a resource may be
+/// created with, and their bytes per pixel.
+///
+/// Every format in base virtio-gpu's 2D set is 32 bits per pixel, which is why
+/// [`crate::virtio::gpu::resource_create_2d`] can size a resource as
+/// `width * height * 4` without being told the format's stride.  This table
+/// exists so that assumption is *checked* rather than assumed: an unlisted
+/// format is rejected, not sized wrongly.
+///
+/// Note this diverges from Linux, which passes `drm_virtgpu_resource_create`'s
+/// `format` through to the host untranslated because virglrenderer reads it as
+/// a Gallium `pipe_format`. With no virgl backend there is nothing to do that
+/// translation, so the field is taken to mean what the *device* means by it.
+const VIRTGPU_2D_FORMATS: [u32; 8] = [
+    1,   // B8G8R8A8_UNORM
+    2,   // B8G8R8X8_UNORM
+    3,   // A8R8G8B8_UNORM
+    4,   // X8R8G8B8_UNORM
+    67,  // R8G8B8A8_UNORM
+    68,  // X8B8G8R8_UNORM
+    121, // A8B8G8R8_UNORM
+    134, // R8G8B8X8_UNORM
+];
+
+/// `DRM_IOCTL_VIRTGPU_RESOURCE_CREATE` — allocate a guest-backed 2D resource.
+///
+/// Mirrors the validation Linux's `virtio_gpu_resource_create_ioctl` applies on
+/// a device without `has_virgl_3d`: a plain non-mipmapped, non-arrayed,
+/// non-multisampled 2D texture, or nothing. Rejecting rather than silently
+/// flattening a 3D request is the point — a client that asked for a mipmapped
+/// array texture and got a flat 2D one would render garbage and have no way to
+/// find out why.
+fn virtgpu_resource_create_ioctl(
+    card: crate::drm::card_fd::DrmCardHandle,
+    argp: u64,
+) -> SyscallResult {
+    use crate::drm::virtgpu_uapi as vg;
+    /// Gallium `PIPE_TEXTURE_2D`, the only target base virtio-gpu can service.
+    const PIPE_TEXTURE_2D: u32 = 2;
+
+    let mut rc = match read_user_struct::<vg::DrmVirtgpuResourceCreate>(argp) {
+        Ok(v) => v,
+        Err(e) => return linux_err(e),
+    };
+    // Exactly Linux's `!vgdev->has_virgl_3d` guard.
+    if rc.target != PIPE_TEXTURE_2D
+        || rc.depth != 1
+        || rc.array_size != 1
+        || rc.last_level != 0
+        || rc.nr_samples != 0
+    {
+        return linux_err(errno::EINVAL);
+    }
+    // Binding an existing buffer object is a virgl-era facility; we always
+    // allocate the backing ourselves.
+    if rc.bo_handle != 0 {
+        return linux_err(errno::EINVAL);
+    }
+    if !VIRTGPU_2D_FORMATS.contains(&rc.format) {
+        return linux_err(errno::EINVAL);
+    }
+
+    let id = match crate::virtio::gpu::resource_create_2d(rc.width, rc.height, rc.format) {
+        Ok(id) => id,
+        Err(e) => return linux_err(drm_kernel_err(e)),
+    };
+    // Record ownership *before* reporting success. If this fails the resource
+    // is unreachable — no fd can name it — so it must be destroyed here rather
+    // than left live on the host.
+    if let Err(e) = crate::drm::card_fd::add_resource(card, id) {
+        let _ = crate::virtio::gpu::resource_unref(id);
+        return linux_err(drm_kernel_err(e));
+    }
+    let Some(info) = crate::virtio::gpu::resource_info(id) else {
+        // Cannot happen: we just created it and hold the only reference to its
+        // id. Handled rather than unwrapped because this is a syscall path.
+        let _ = crate::drm::card_fd::remove_resource(card, id);
+        let _ = crate::virtio::gpu::resource_unref(id);
+        return linux_err(errno::EIO);
+    };
+
+    rc.bo_handle = id;
+    rc.res_handle = id;
+    rc.size = u32::try_from(info.mapped_bytes).unwrap_or(u32::MAX);
+    // Tightly packed: virtio's 2D transfer commands carry no stride and the
+    // host assumes `width * bpp`, so this is a statement of fact, not a choice.
+    rc.stride = rc.width.saturating_mul(4);
+    match write_user_struct(argp, &rc) {
+        Ok(()) => SyscallResult::ok(0),
+        Err(e) => linux_err(e),
+    }
+}
+
+/// `DRM_IOCTL_VIRTGPU_RESOURCE_INFO` — report a resource's host handle and size.
+fn virtgpu_resource_info_ioctl(
+    card: crate::drm::card_fd::DrmCardHandle,
+    argp: u64,
+) -> SyscallResult {
+    use crate::drm::virtgpu_uapi as vg;
+    let mut ri = match read_user_struct::<vg::DrmVirtgpuResourceInfo>(argp) {
+        Ok(v) => v,
+        Err(e) => return linux_err(e),
+    };
+    if !crate::drm::card_fd::owns_resource(card, ri.bo_handle) {
+        return linux_err(errno::ENOENT);
+    }
+    let Some(info) = crate::virtio::gpu::resource_info(ri.bo_handle) else {
+        return linux_err(errno::ENOENT);
+    };
+    ri.res_handle = ri.bo_handle;
+    // The mappable size, not the logical image size: this is what a client
+    // passes to `mmap`, and Linux likewise reports the page-rounded BO size.
+    ri.size = u32::try_from(info.mapped_bytes).unwrap_or(u32::MAX);
+    // 0 = a classic (non-blob) resource. We create no blob resources.
+    ri.blob_mem = 0;
+    match write_user_struct(argp, &ri) {
+        Ok(()) => SyscallResult::ok(0),
+        Err(e) => linux_err(e),
+    }
+}
+
+/// `DRM_IOCTL_VIRTGPU_MAP` — hand out the fake `mmap` offset for a resource.
+///
+/// Same token space as `DRM_IOCTL_MODE_MAP_DUMB`; see
+/// [`crate::drm::dumb_mmap`].
+fn virtgpu_map_ioctl(card: crate::drm::card_fd::DrmCardHandle, argp: u64) -> SyscallResult {
+    use crate::drm::virtgpu_uapi as vg;
+    let mut m = match read_user_struct::<vg::DrmVirtgpuMap>(argp) {
+        Ok(v) => v,
+        Err(e) => return linux_err(e),
+    };
+    if !crate::drm::card_fd::owns_resource(card, m.handle) {
+        return linux_err(errno::ENOENT);
+    }
+    let device = match drm_card_device(card) {
+        Ok(d) => d,
+        Err(e) => return linux_err(e),
+    };
+    let Some(info) = crate::virtio::gpu::resource_info(m.handle) else {
+        return linux_err(errno::ENOENT);
+    };
+    let obj = crate::drm::dumb_mmap::Mappable::VirtgpuResource {
+        device,
+        resource_id: m.handle,
+    };
+    let size = u64::try_from(info.mapped_bytes).unwrap_or(u64::MAX);
+    let Some(offset) = crate::drm::dumb_mmap::offset_for(obj, size) else {
+        return linux_err(errno::ENOMEM);
+    };
+    m.offset = offset;
+    m.pad = 0;
+    match write_user_struct(argp, &m) {
+        Ok(()) => SyscallResult::ok(0),
+        Err(e) => linux_err(e),
+    }
+}
+
+/// `DRM_IOCTL_VIRTGPU_TRANSFER_TO_HOST` — push guest pixels to the host copy.
+///
+/// Serviced by `VIRTIO_GPU_CMD_TRANSFER_TO_HOST_2D`, which takes a rectangle
+/// and a byte offset and nothing else. The 3D-shaped fields of the request must
+/// therefore describe a plain 2D transfer: `z`/`d` a single slice, `level` 0,
+/// and any stride the client states must be the tightly-packed one the host
+/// will actually assume. A mismatched stride is rejected rather than ignored —
+/// Linux's 2D path ignores it, but ignoring it here would silently skew the
+/// image for a client that believed its own value.
+fn virtgpu_transfer_to_host_ioctl(
+    card: crate::drm::card_fd::DrmCardHandle,
+    argp: u64,
+) -> SyscallResult {
+    use crate::drm::virtgpu_uapi as vg;
+    let t = match read_user_struct::<vg::DrmVirtgpu3dTransferToHost>(argp) {
+        Ok(v) => v,
+        Err(e) => return linux_err(e),
+    };
+    if !crate::drm::card_fd::owns_resource(card, t.bo_handle) {
+        return linux_err(errno::ENOENT);
+    }
+    if t.level != 0 || t.r#box.z != 0 || t.r#box.d > 1 {
+        return linux_err(errno::EINVAL);
+    }
+    let packed = t.r#box.w.saturating_mul(4);
+    if t.stride != 0 && t.stride != packed {
+        return linux_err(errno::EINVAL);
+    }
+    // `layer_stride` only means anything for an arrayed resource, which we
+    // never create; a non-zero value means the client thinks it has one.
+    if t.layer_stride != 0 {
+        return linux_err(errno::EINVAL);
+    }
+    match crate::virtio::gpu::resource_transfer_to_host(
+        t.bo_handle,
+        t.r#box.x,
+        t.r#box.y,
+        t.r#box.w,
+        t.r#box.h,
+        u64::from(t.offset),
+    ) {
+        Ok(()) => SyscallResult::ok(0),
+        Err(e) => linux_err(drm_kernel_err(e)),
+    }
+}
+
+/// `DRM_IOCTL_VIRTGPU_WAIT` — wait for a resource to become idle.
+///
+/// Always succeeds immediately for a resource this fd owns, and that is the
+/// truth rather than a stub: every command this driver issues is submitted and
+/// its response consumed synchronously inside the originating ioctl, so no
+/// resource can still be in flight by the time a later ioctl runs. When an
+/// asynchronous submission path exists (it needs `EXECBUFFER`, hence virgl)
+/// this must grow a real fence wait — `VIRTGPU_WAIT_NOWAIT` is accepted now
+/// only because "would block" is currently impossible.
+fn virtgpu_wait_ioctl(card: crate::drm::card_fd::DrmCardHandle, argp: u64) -> SyscallResult {
+    use crate::drm::virtgpu_uapi as vg;
+    let w = match read_user_struct::<vg::DrmVirtgpu3dWait>(argp) {
+        Ok(v) => v,
+        Err(e) => return linux_err(e),
+    };
+    if w.flags & !vg::VIRTGPU_WAIT_NOWAIT != 0 {
+        return linux_err(errno::EINVAL);
+    }
+    if !crate::drm::card_fd::owns_resource(card, w.handle) {
+        return linux_err(errno::ENOENT);
+    }
+    SyscallResult::ok(0)
+}
+
+/// `DRM_IOCTL_GEM_CLOSE` — release a buffer-object handle.
+///
+/// For a virtio-gpu render resource this is the destroy path: there is no
+/// `DRM_IOCTL_VIRTGPU_RESOURCE_UNREF`, because in Linux every driver's buffer
+/// objects are GEM objects and are closed here.
+///
+/// Unknown handles report `ENOENT`. Linux returns `EINVAL` for a handle that
+/// was never in the fd's table, but that conflates "you closed it twice" with
+/// "your request was malformed"; `ENOENT` says which.
+fn drm_card_ioctl_gem_close(
+    handle: crate::drm::card_fd::DrmCardHandle,
+    argp: u64,
+) -> SyscallResult {
+    use crate::drm::uapi;
+    let gc = match read_user_struct::<uapi::DrmGemClose>(argp) {
+        Ok(v) => v,
+        Err(e) => return linux_err(e),
+    };
+    // Take ownership away first: whatever happens on the device, this fd must
+    // not be able to name the object again, or a failed unref would leave a
+    // handle that resolves to nothing on every later ioctl.
+    if !crate::drm::card_fd::remove_resource(handle, gc.handle) {
+        return linux_err(errno::ENOENT);
+    }
+    if let Ok(device) = drm_card_device(handle) {
+        crate::drm::dumb_mmap::forget(crate::drm::dumb_mmap::Mappable::VirtgpuResource {
+            device,
+            resource_id: gc.handle,
+        });
+    }
+    match crate::virtio::gpu::resource_unref(gc.handle) {
+        Ok(()) => SyscallResult::ok(0),
+        Err(e) => linux_err(drm_kernel_err(e)),
     }
 }
 
@@ -10678,7 +10971,11 @@ fn drm_card_ioctl_mode_map_dumb(
         Err(e) => return linux_err(drm_kernel_err(e)),
     };
     let size_u64 = u64::try_from(size).unwrap_or(u64::MAX);
-    let offset = match crate::drm::dumb_mmap::offset_for(device, md.handle, size_u64) {
+    let obj = crate::drm::dumb_mmap::Mappable::Gem {
+        device,
+        gem_handle: md.handle,
+    };
+    let offset = match crate::drm::dumb_mmap::offset_for(obj, size_u64) {
         Some(o) => o,
         // Token space exhausted — closest Linux errno is ENOMEM (the offset
         // manager couldn't allocate a node).
@@ -10712,7 +11009,10 @@ fn drm_card_ioctl_mode_destroy_dumb(
             // buffer (and a recycled handle gets a fresh offset).  Existing
             // user mappings stay valid until the process unmaps/exits — their
             // frames are kept alive by the per-mapping GEM frame refcount.
-            crate::drm::dumb_mmap::forget(device, dd.handle);
+            crate::drm::dumb_mmap::forget(crate::drm::dumb_mmap::Mappable::Gem {
+                device,
+                gem_handle: dd.handle,
+            });
             SyscallResult::ok(0)
         }
         Err(e) => linux_err(drm_kernel_err(e)),
@@ -10946,10 +11246,14 @@ fn drm_mmap_dumb_rollback(pml4: u64, base: u64, count: usize, phys: &[u64], fram
 /// `mmap(/dev/dri/cardN, …, offset)` path).
 ///
 /// `offset` is the fake token previously handed out by
-/// `DRM_IOCTL_MODE_MAP_DUMB`; we resolve it to a `(device, GEM handle)` via
-/// [`crate::drm::dumb_mmap`], confirm it belongs to this fd's device, gather
-/// the buffer's physical frames, and map `length` (rounded up to whole 16 KiB
-/// frames) of them into the process at `prot`-derived permissions.
+/// `DRM_IOCTL_MODE_MAP_DUMB` or `DRM_IOCTL_VIRTGPU_MAP`; we resolve it to a
+/// [`crate::drm::dumb_mmap::Mappable`], confirm it belongs to this fd's device,
+/// gather the object's physical frames, and map `length` (rounded up to whole
+/// 16 KiB frames) of them into the process at `prot`-derived permissions.
+///
+/// A virtio-gpu render resource additionally requires that the *calling fd*
+/// owns it: the resource id is device-scoped, so without that check any client
+/// that guessed an id could map another client's buffer.
 ///
 /// ## Frame lifetime
 ///
@@ -10981,12 +11285,16 @@ fn drm_mmap_dumb(
         return linux_err(errno::EINVAL);
     }
 
-    // Resolve the fake offset → (device, gem handle).  An offset that was
-    // never handed out (or has been forgotten) is EINVAL, matching Linux's
-    // "no drm_vma_offset_node for this pgoff".
-    let (device, gem_handle) = match crate::drm::dumb_mmap::lookup(offset) {
+    // Resolve the fake offset → mappable object.  An offset that was never
+    // handed out (or has been forgotten) is EINVAL, matching Linux's "no
+    // drm_vma_offset_node for this pgoff".
+    use crate::drm::dumb_mmap::Mappable;
+    let obj = match crate::drm::dumb_mmap::lookup(offset) {
         Some(v) => v,
         None => return linux_err(errno::EINVAL),
+    };
+    let device = match obj {
+        Mappable::Gem { device, .. } | Mappable::VirtgpuResource { device, .. } => device,
     };
     // The offset must belong to the device this fd refers to.
     let handle = crate::drm::card_fd::DrmCardHandle::from_raw(entry.raw_handle);
@@ -10996,11 +11304,28 @@ fn drm_mmap_dumb(
         None => return linux_err(errno::EBADF),
     }
 
-    // Gather the buffer's physical frames under the DRM lock, then drop it
-    // before touching page tables (lock-ordering discipline).
-    let phys = match crate::drm::with_device(device, |dev| dev.gem_phys_addrs(gem_handle)) {
-        Ok(v) => v,
-        Err(e) => return linux_err(drm_kernel_err(e)),
+    // Gather the object's physical frames.  For a GEM object that means the
+    // DRM lock, dropped before touching page tables (lock-ordering
+    // discipline); the virtio-gpu resource table is likewise released by the
+    // time `resource_backing` returns.
+    let phys = match obj {
+        Mappable::Gem { gem_handle, .. } => {
+            match crate::drm::with_device(device, |dev| dev.gem_phys_addrs(gem_handle)) {
+                Ok(v) => v,
+                Err(e) => return linux_err(drm_kernel_err(e)),
+            }
+        }
+        Mappable::VirtgpuResource { resource_id, .. } => {
+            // Device-scoped id: the fd must own it.  EACCES rather than EINVAL
+            // so a client can tell "not mine" from "no such offset".
+            if !crate::drm::card_fd::owns_resource(handle, resource_id) {
+                return linux_err(errno::EACCES);
+            }
+            match crate::virtio::gpu::resource_backing(resource_id) {
+                Some(v) => v,
+                None => return linux_err(errno::EINVAL),
+            }
+        }
     };
 
     let frame_size = FRAME_SIZE as u64;

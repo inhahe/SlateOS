@@ -5660,6 +5660,13 @@ extern "C" fn kernel_main() -> ! {
     // Virtio-GPU self-test.
     virtio::gpu::self_test();
 
+    // Virtio-GPU render-node resource manager self-test (the driver half of
+    // the virtgpu render ioctls).
+    if let Err(e) = virtio::gpu::resource_self_test() {
+        serial_println!("FATAL: virtio-gpu render-resource self-test failed: {}", e);
+        cpu::halt_loop();
+    }
+
     // Audio mixer self-test.
     audio_mixer::self_test();
 

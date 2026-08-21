@@ -568,6 +568,47 @@ fn work_area_of(bounds: Rect) -> WorkArea {
     )
 }
 
+/// What letting go of a dragged window would do, **and on which monitor**.
+///
+/// The work area travels with the intent rather than being looked up again at
+/// the release, because the two lookups need not agree. The preview is drawn
+/// from the monitor under the pointer; the window is dragged along with the
+/// pointer but not necessarily *onto* the same monitor — it straddles the seam
+/// while crossing it, and it lags the pointer by however far along its title bar
+/// it was grabbed. A release that re-derived the area from the window would then
+/// tile it on the wrong screen, after showing an outline on the right one.
+/// Carrying the area makes that divergence unrepresentable rather than merely
+/// tested against.
+///
+/// It is also what the preview's damage bookkeeping needs: a preview whose
+/// monitor changed has to be painted over where it *was*, and the outgoing
+/// rectangle cannot be recovered from the drop alone.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct DropIntent {
+    /// What the drop means — maximize, or a named zone.
+    drop: EdgeDrop,
+    /// The monitor's work area the drop was aimed at, which the release resolves
+    /// `drop` against.
+    area: WorkArea,
+}
+
+/// A work area back in whole pixels.
+///
+/// The inverse of [`work_area_of`] for any area that came from one, since every
+/// coordinate a display produces survives the round trip through `f32` exactly.
+/// It exists because the tiling operations divide between two vocabularies:
+/// `guiremote::zones` speaks `WorkArea`, and the compositor's own geometry —
+/// `client_geometry_for_frame`, `Rect::intersect` — speaks `Rect`.
+fn work_rect(area: WorkArea) -> Rect {
+    let (x, y) = (round_px(area.x), round_px(area.y));
+    Rect::new(
+        x,
+        y,
+        u32::try_from(round_px(area.right()).saturating_sub(x)).unwrap_or(0),
+        u32::try_from(round_px(area.bottom()).saturating_sub(y)).unwrap_or(0),
+    )
+}
+
 /// One zone edge, rounded to a whole pixel.
 ///
 /// The clamp is what makes the cast safe rather than merely likely to be: the
@@ -4107,7 +4148,7 @@ pub struct Compositor {
     /// was, and nothing else in the frame knows it was ever there. Its only
     /// writer is [`set_drag_preview`](Compositor::set_drag_preview), which is
     /// what pairs the two rectangles with the damage they need.
-    drag_preview: Option<EdgeDrop>,
+    drag_preview: Option<DropIntent>,
     /// The previous left-press on a title bar, for recognising a double-click.
     ///
     /// The window is part of it, not just the time: two quick clicks on two
@@ -4469,11 +4510,39 @@ impl Compositor {
         Ok(())
     }
 
-    /// Maximize a window to fill the display.
+    /// Maximize a window to fill the monitor it is on.
     ///
     /// Refused for a window the client declared non-resizable: maximising is a
     /// resize, and a window that said it only works at one size means it.
+    ///
+    /// # Errors
+    ///
+    /// [`CompositorError::WindowNotFound`] if the window does not exist, and
+    /// [`CompositorError::NotResizable`] if the client declared it fixed-size.
     pub fn maximize_window(&mut self, window_id: WindowId) -> CompositorResult<()> {
+        let bounds = self
+            .work_area_of_window(window_id)
+            .ok_or(CompositorError::WindowNotFound(window_id))?;
+        self.maximize_window_within(window_id, work_rect(bounds))
+    }
+
+    /// Maximize a window into a work area chosen by the caller.
+    ///
+    /// Split out for the edge drop, which must use the monitor **the pointer is
+    /// over** rather than the one that holds the larger part of the window. A
+    /// move drag carries the window with the pointer, so usually those are the
+    /// same monitor — but a window grabbed far along a wide title bar trails
+    /// the pointer by that offset and can still be wholly on the monitor it
+    /// came from at the moment the pointer reaches a band on the next one.
+    /// Re-deriving the area from the window there would fill the monitor the
+    /// user dragged it *off*. It is also what makes the preview honest, since
+    /// the release resolves the very area the outline was drawn from rather
+    /// than a second opinion about it. See [`Compositor::drop_intent`].
+    fn maximize_window_within(
+        &mut self,
+        window_id: WindowId,
+        display_bounds: Rect,
+    ) -> CompositorResult<()> {
         if !self
             .window_ref(window_id)
             .ok_or(CompositorError::WindowNotFound(window_id))?
@@ -4483,8 +4552,6 @@ impl Compositor {
         }
 
         self.damage_window(window_id);
-
-        let display_bounds = self.display_manager.virtual_bounds();
 
         let (final_w, final_h) = {
             let window = self
@@ -4550,7 +4617,10 @@ impl Compositor {
     /// maximize, then snap, then restore returns to where the window was before
     /// any of it, not to the full-screen rectangle it had in between.
     pub fn snap_window(&mut self, window_id: WindowId, edge: SnapEdge) -> CompositorResult<()> {
-        let bounds = self.display_manager.virtual_bounds();
+        let bounds = work_rect(
+            self.work_area_of_window(window_id)
+                .ok_or(CompositorError::WindowNotFound(window_id))?,
+        );
         // Halve by splitting at the midpoint rather than by giving each side
         // `width / 2`: on an odd width the latter leaves a one-pixel column
         // belonging to neither half, which is a permanently visible seam down
@@ -4596,7 +4666,23 @@ impl Compositor {
         window_id: WindowId,
         slot: SnapSlot,
     ) -> CompositorResult<()> {
-        let area = self.snap_area();
+        let area = self
+            .work_area_of_window(window_id)
+            .ok_or(CompositorError::WindowNotFound(window_id))?;
+        self.snap_window_to_zone_within(window_id, slot, area)
+    }
+
+    /// Tile a window into a zone of a work area chosen by the caller.
+    ///
+    /// Split out for [`maximize_window_within`](Self::maximize_window_within)'s
+    /// reason: an edge drop resolves the slot against the monitor the pointer
+    /// is over, which is the monitor the preview was drawn on.
+    fn snap_window_to_zone_within(
+        &mut self,
+        window_id: WindowId,
+        slot: SnapSlot,
+        area: WorkArea,
+    ) -> CompositorResult<()> {
         let zone = slot
             .rect(area)
             .ok_or(CompositorError::ZoneNotInLayout(window_id))?;
@@ -4604,19 +4690,55 @@ impl Compositor {
         self.place_snapped(window_id, zone_rect(zone), SnapTarget::Zone(slot))
     }
 
-    /// The rectangle tiled windows divide between them.
+    /// The pixels a tiled window may occupy: **one monitor's**, not the whole
+    /// virtual desktop's.
+    ///
+    /// Which monitor is decided by `rect` — the display it overlaps most, by
+    /// [`DisplayManager::display_for`]'s rule — so a caller passes the frame of
+    /// the window being tiled, or a one-pixel rect at the cursor for a gesture
+    /// that has not settled on a window's monitor yet.
+    ///
+    /// **The union of every display is the wrong answer, and used to be the
+    /// one given here.** Maximizing a window on the second of two monitors made
+    /// it as wide as both and moved it onto the first; snapping it left gave it
+    /// the whole first monitor plus a strip of the second. Nothing caught it
+    /// because a one-monitor desktop cannot tell the two readings apart, which
+    /// is what every test had. `virtual_bounds()` survives below only as the
+    /// answer for a compositor with no displays connected at all, where it is
+    /// the empty rectangle and there is nothing better to say.
     ///
     /// Derived on every call rather than cached, because it is a function of
     /// the display arrangement — which a monitor being unplugged changes with
     /// no notice to anything here. A cached copy would be one hotplug away
     /// from tiling a screen that no longer exists, and would do it silently.
     ///
-    /// It is currently the whole display: the compositor has no notion of a
-    /// panel reserving a strip along an edge, so nothing subtracts the
+    /// It is currently the whole of that monitor: the compositor has no notion
+    /// of a panel reserving a strip along an edge, so nothing subtracts the
     /// taskbar's. That is `TD-C-COMPOSITOR-TILES-UNDER-THE-TASKBAR`, and this
     /// method is the one place a fix for it has to land.
-    fn snap_area(&self) -> WorkArea {
-        work_area_of(self.display_manager.virtual_bounds())
+    fn work_bounds_for(&self, rect: Rect) -> Rect {
+        self.display_manager
+            .display_for(&rect)
+            .map_or_else(|| self.display_manager.virtual_bounds(), Display::bounds)
+    }
+
+    /// [`work_bounds_for`](Self::work_bounds_for), as `guiremote::zones` wants it.
+    fn work_area_for(&self, rect: Rect) -> WorkArea {
+        work_area_of(self.work_bounds_for(rect))
+    }
+
+    /// The work area of the monitor the pointer is over.
+    ///
+    /// A one-pixel rectangle rather than a separate lookup, so that "which
+    /// monitor is this point on" and "which monitor is this window on" cannot
+    /// answer differently about the same pixel.
+    fn work_area_at(&self, x: i32, y: i32) -> WorkArea {
+        self.work_area_for(Rect::new(x, y, 1, 1))
+    }
+
+    /// The work area of the monitor a window is on, or `None` if it is gone.
+    fn work_area_of_window(&self, window_id: WindowId) -> Option<WorkArea> {
+        Some(self.work_area_for(self.window_ref(window_id)?.frame_rect()))
     }
 
     /// Move a window into an already-resolved tile rectangle.
@@ -5213,25 +5335,39 @@ impl Compositor {
         clippy::cast_precision_loss,
         reason = "display coordinates are far inside f32's exact-integer range"
     )]
-    fn drop_intent(&self, drag: &DragState, x: i32, y: i32) -> Option<EdgeDrop> {
+    fn drop_intent(&self, drag: &DragState, x: i32, y: i32) -> Option<DropIntent> {
         if drag.mode != DragMode::MoveWindow {
             return None;
         }
         if (x, y) == (drag.start_mouse.x, drag.start_mouse.y) {
             return None;
         }
-        guiremote::zones::drop_at(x as f32, y as f32, self.snap_area())
+        // The monitor under the *pointer*, not under the window. A move drag
+        // carries the window along with the pointer, so for an ordinary grab
+        // near the left end of a title bar the two agree — but not always:
+        //   - at the interior seam the window straddles both monitors, and
+        //     which one holds the larger part is not the one being aimed at;
+        //   - a window grabbed far along a wide title bar trails the pointer
+        //     by that offset, so it can still be wholly on the monitor it
+        //     came from when the pointer has reached a band on the next one.
+        // In both cases aiming at a band on screen two must mean screen two,
+        // because screen two is the one the preview outline was drawn on.
+        // Proved by `a_drop_tiles_the_monitor_the_pointer_is_over_even_when_
+        // the_window_is_not` and `the_interior_seam_is_two_edges_and_not_a_
+        // middle`.
+        let area = self.work_area_at(x, y);
+        let drop = guiremote::zones::drop_at(x as f32, y as f32, area)?;
+        Some(DropIntent { drop, area })
     }
 
     /// The rectangle a drop would place the window's *frame* in.
     ///
-    /// The same rectangle the drop itself lands in, because
-    /// `snap_window_to_zone` and `maximize_window` resolve the same slot
-    /// against the same [`snap_area`](Self::snap_area) — which is what stops
-    /// the outline from promising a shape the release does not deliver, and is
-    /// asserted by `an_edge_drop_lands_in_the_rectangle_the_drop_promised`.
-    fn preview_rect(&self, drop: EdgeDrop) -> Option<Rect> {
-        drop.rect(self.snap_area()).map(zone_rect)
+    /// The same rectangle the drop itself lands in, because the release
+    /// resolves the slot against the very [`WorkArea`] carried here rather than
+    /// deriving a second one — see [`DropIntent`]. Asserted by
+    /// `an_edge_drop_lands_in_the_rectangle_the_drop_promised`.
+    fn preview_rect(&self, intent: DropIntent) -> Option<Rect> {
+        intent.drop.rect(intent.area).map(zone_rect)
     }
 
     /// Show, move or take down the drop preview.
@@ -5244,12 +5380,12 @@ impl Compositor {
     /// Guarded on inequality so that the common case — a drag whose pointer is
     /// nowhere near an edge, moving from one nothing to the same nothing — adds
     /// no damage at all.
-    fn set_drag_preview(&mut self, next: Option<EdgeDrop>) {
+    fn set_drag_preview(&mut self, next: Option<DropIntent>) {
         if self.drag_preview == next {
             return;
         }
-        for drop in [self.drag_preview, next].into_iter().flatten() {
-            if let Some(rect) = self.preview_rect(drop) {
+        for intent in [self.drag_preview, next].into_iter().flatten() {
+            if let Some(rect) = self.preview_rect(intent) {
                 self.damage.add(rect);
             }
         }
@@ -5265,10 +5401,10 @@ impl Compositor {
     /// makes it follow the user's accent instead of being a second opinion
     /// about what the desktop looks like.
     fn render_drag_preview(&mut self) {
-        let Some(drop) = self.drag_preview else {
+        let Some(intent) = self.drag_preview else {
             return;
         };
-        let Some(rect) = self.preview_rect(drop) else {
+        let Some(rect) = self.preview_rect(intent) else {
             return;
         };
         let color = self.theme.border_focused;
@@ -5296,12 +5432,22 @@ impl Compositor {
         // release: a non-resizable window declining to be tiled is the correct
         // outcome of the gesture, and a window that vanished mid-drag has
         // nothing left to place.
+        // The `_within` forms, so that the release places the window in the
+        // work area the preview was drawn from. The public forms would look the
+        // area up again from the window, which is still on the monitor it was
+        // dragged away from.
         match self.drop_intent(drag, x, y) {
-            Some(EdgeDrop::Maximize) => {
-                let _ = self.maximize_window(drag.window_id);
+            Some(DropIntent {
+                drop: EdgeDrop::Maximize,
+                area,
+            }) => {
+                let _ = self.maximize_window_within(drag.window_id, work_rect(area));
             }
-            Some(EdgeDrop::Zone(slot)) => {
-                let _ = self.snap_window_to_zone(drag.window_id, slot);
+            Some(DropIntent {
+                drop: EdgeDrop::Zone(slot),
+                area,
+            }) => {
+                let _ = self.snap_window_to_zone_within(drag.window_id, slot, area);
             }
             None => {}
         }
@@ -12853,7 +12999,7 @@ mod tests {
             .expect("title bar");
         let (x, y) = (bar.x + 2, bar.y + 2);
         assert!(
-            guiremote::zones::edge_at(x as f32, y as f32, comp.snap_area()).is_some(),
+            guiremote::zones::edge_at(x as f32, y as f32, comp.work_area_at(x, y)).is_some(),
             "the test's own press point is not in an edge band, so it proves nothing"
         );
         comp.handle_mouse_button(MouseButton::Left, true, x, y);
@@ -12906,7 +13052,7 @@ mod tests {
         ];
         for (name, (x, y)) in cases {
             let (mut comp, id) = with_one_window();
-            let area = comp.snap_area();
+            let area = comp.work_area_at(x, y);
             let promised = guiremote::zones::drop_at(x as f32, y as f32, area)
                 .unwrap_or_else(|| panic!("{name} should snap"))
                 .rect(area)
@@ -13100,8 +13246,8 @@ mod tests {
         );
         comp.handle_mouse_move(2, 300);
         assert_eq!(
-            comp.drag_preview,
-            guiremote::zones::drop_at(2.0, 300.0, comp.snap_area()),
+            comp.drag_preview.map(|i| i.drop),
+            guiremote::zones::drop_at(2.0, 300.0, comp.work_area_at(2, 300)),
             "the left edge raised something other than the left edge's drop"
         );
         comp.handle_mouse_move(400, 300);
@@ -13203,8 +13349,9 @@ mod tests {
         let scene = |preview: bool| {
             let (mut comp, _) = with_one_unthrottled_window();
             if preview {
-                let area = comp.snap_area();
-                comp.set_drag_preview(guiremote::zones::drop_at(2.0, 300.0, area));
+                let area = comp.work_area_at(2, 300);
+                let drop = guiremote::zones::drop_at(2.0, 300.0, area);
+                comp.set_drag_preview(drop.map(|drop| DropIntent { drop, area }));
             }
             assert!(comp.compose_frame(), "the frame was refused");
             comp.backend.presented_pixels().to_vec()
@@ -13213,7 +13360,7 @@ mod tests {
 
         let area = Compositor::new(800, 600, 60)
             .expect("compositor")
-            .snap_area();
+            .work_area_at(2, 300);
         let rect = zone_rect(
             guiremote::zones::drop_at(2.0, 300.0, area)
                 .expect("the left edge snaps")
@@ -13305,5 +13452,262 @@ mod tests {
             "the preview came down without marking the {covered:?} it had covered, \
              and the frame that takes it down is not composited whole"
         );
+    }
+
+    // ---- tiling divides one monitor, not the whole virtual desktop ----
+
+    /// Two side-by-side monitors, with a window on whichever one is asked for.
+    ///
+    /// 800x600 primary and a 1024x768 secondary, which
+    /// [`DisplayManager::add_display`] places immediately to its right — so the
+    /// seam is at x = 800 and the virtual desktop is 1824 wide, a width no
+    /// single monitor has. The window is placed 100px inside the monitor named,
+    /// well clear of the seam, so `display_for`'s largest-overlap rule cannot
+    /// answer the other one by accident.
+    ///
+    /// Returns both monitors' bounds, because every assertion below is of the
+    /// form "this landed on that monitor and not on the union of both".
+    fn two_monitors(window_on: usize) -> (Compositor, WindowId, [Rect; 2]) {
+        let mut comp = Compositor::new(800, 600, 2_000_000).expect("compositor");
+        comp.display_manager
+            .add_display(Display::new(1, 1024, 768, 60, 1.0, false));
+        let screens = [
+            comp.display_manager.displays()[0].bounds(),
+            comp.display_manager.displays()[1].bounds(),
+        ];
+        let home = screens[window_on];
+        let mut spec = WindowSpec::new("Over there", 200, 150);
+        spec.position = Some((home.x + 100, home.y + 100));
+        let id = comp.create_window_from_spec(&spec, 1);
+        (comp, id, screens)
+    }
+
+    #[test]
+    fn maximizing_fills_the_windows_own_monitor_and_not_every_monitor() {
+        // The bug this pins: `maximize_window` measured the *union* of every
+        // display, so a window on the second monitor was made 1824px wide and
+        // moved to x=0 -- onto the first monitor, spanning both. A one-monitor
+        // desktop cannot tell that reading from the right one, which is why
+        // every test had one.
+        let (mut comp, id, screens) = two_monitors(1);
+        comp.maximize_window(id).expect("maximize");
+        let got = comp.window_ref(id).expect("window").frame_rect();
+        assert_eq!(
+            (got.x, got.width),
+            (screens[1].x, screens[1].width),
+            "maximize did not fill the window's own monitor"
+        );
+        assert!(
+            got.intersect(&screens[0]).is_none(),
+            "the maximized window spilled onto the other monitor"
+        );
+    }
+
+    #[test]
+    fn snapping_takes_half_of_the_windows_own_monitor() {
+        for (edge, want_x) in [(SnapEdge::Left, 0), (SnapEdge::Right, 512)] {
+            let (mut comp, id, screens) = two_monitors(1);
+            comp.snap_window(id, edge).expect("snap");
+            let got = comp.window_ref(id).expect("window").frame_rect();
+            assert_eq!(
+                (got.x, got.width),
+                (screens[1].x + want_x, screens[1].width / 2),
+                "{edge:?} did not take half of the window's own monitor"
+            );
+        }
+    }
+
+    #[test]
+    fn a_zone_snap_resolves_against_the_windows_own_monitor() {
+        // The leftmost zone of the three-column layout: a third of one monitor,
+        // not a third of the desktop.
+        let (mut comp, id, screens) = two_monitors(1);
+        let target = slot(SnapLayoutPreset::ThreeColumns, 0);
+        comp.snap_window_to_zone(id, target).expect("snap to zone");
+        let want = zone_rect(
+            target
+                .rect(work_area_of(screens[1]))
+                .expect("the preset has a zone 0"),
+        );
+        assert_eq!(
+            comp.window_ref(id).expect("window").frame_rect(),
+            want,
+            "the zone was resolved against something other than the window's monitor"
+        );
+    }
+
+    #[test]
+    fn an_edge_drop_uses_the_monitor_the_pointer_is_over() {
+        // Drag a window that lives on the *first* monitor to the *second*
+        // monitor's left edge. At the moment of release the window is still
+        // mostly on the first -- so a release that re-derived the work area
+        // from the window would tile it on the screen it was dragged away
+        // from, after showing an outline on the screen it was dragged to.
+        let (mut comp, id, screens) = two_monitors(0);
+        let aim = (screens[1].x + 2, screens[1].y + 300);
+        drag_title_bar_to(&mut comp, id, aim.0, aim.1);
+        assert_eq!(
+            comp.window_ref(id).expect("window").frame_rect(),
+            edge_drop_rect(aim.0, aim.1, screens[1]),
+            "the drop tiled against a monitor other than the one aimed at"
+        );
+    }
+
+    /// Where a drop at `(x, y)` belongs if `screen` is the monitor it is aimed
+    /// at — computed from `guiremote::zones` rather than by halving the width,
+    /// because a zone rectangle carries the layout's gap and a hand-computed
+    /// half does not.
+    #[allow(
+        clippy::cast_precision_loss,
+        reason = "test coordinates are far inside f32's exact-integer range"
+    )]
+    fn edge_drop_rect(x: i32, y: i32, screen: Rect) -> Rect {
+        let area = work_area_of(screen);
+        match guiremote::zones::drop_at(x as f32, y as f32, area)
+            .expect("the aim point is in an edge band")
+        {
+            EdgeDrop::Maximize => screen,
+            EdgeDrop::Zone(slot) => zone_rect(slot.rect(area).expect("the slot resolves")),
+        }
+    }
+
+    #[test]
+    fn a_drop_tiles_the_monitor_the_pointer_is_over_even_when_the_window_is_not() {
+        // The case the tests above cannot reach. A move drag carries the window
+        // along under the pointer, so for an ordinary grab near the *left* end
+        // of the title bar the window and the pointer are on the same monitor
+        // by the time the pointer reaches an edge band, and "which of the two
+        // decides the monitor" makes no difference.
+        //
+        // Grab a wide window a long way along its title bar and the two come
+        // apart: the window trails 600px behind the pointer, so when the
+        // pointer is 100px into the second monitor the window is still mostly
+        // on the first. That is the only configuration in which a release that
+        // re-derived the work area from the window tiles a different screen
+        // from the one whose outline the user was watching.
+        let mut comp = Compositor::new(800, 600, 2_000_000).expect("compositor");
+        comp.display_manager
+            .add_display(Display::new(1, 1024, 768, 60, 1.0, false));
+        let screens = [
+            comp.display_manager.displays()[0].bounds(),
+            comp.display_manager.displays()[1].bounds(),
+        ];
+        let mut spec = WindowSpec::new("Wide", 900, 150);
+        spec.position = Some((20, 100));
+        let id = comp.create_window_from_spec(&spec, 1);
+
+        let bar = comp
+            .window_ref(id)
+            .expect("window")
+            .title_bar_rect()
+            .expect("a decorated window has a title bar");
+        // Two thirds along, well clear of the buttons at the right-hand end.
+        let grab = bar.x + (bar.width as i32 * 2) / 3;
+        let grab_y = bar.y + bar.height as i32 / 2;
+        comp.handle_mouse_button(MouseButton::Left, true, grab, grab_y);
+        assert!(comp.drag.is_some(), "the title-bar press started no drag");
+
+        // The top band of the second monitor, clear of both its corners, so
+        // the drop means Maximize rather than a quarter zone.
+        let (aim_x, aim_y) = (screens[1].x + 100, screens[1].y + 2);
+        comp.handle_mouse_move(aim_x, aim_y);
+
+        let dragged = comp.window_ref(id).expect("window").frame_rect();
+        let on_first = dragged.intersect(&screens[0]).map_or(0, |r| r.width);
+        let on_second = dragged.intersect(&screens[1]).map_or(0, |r| r.width);
+        assert!(
+            on_first > on_second,
+            "the fixture failed to separate the two: the window is already \
+             mostly on the monitor the pointer is over ({on_first} vs {on_second})"
+        );
+        assert_eq!(
+            previewed_rect(&comp),
+            screens[1],
+            "the outline promised something other than the pointer's monitor"
+        );
+
+        comp.handle_mouse_button(MouseButton::Left, false, aim_x, aim_y);
+        assert_eq!(
+            comp.window_ref(id).expect("window").frame_rect(),
+            screens[1],
+            "the drop filled a different monitor from the one the outline promised"
+        );
+    }
+
+    #[test]
+    fn the_preview_crosses_the_seam_with_the_pointer() {
+        // The other half of the test above: what the user is *shown* while the
+        // pointer is over the second monitor. Two aims that are the same edge
+        // of two different screens, so a preview computed against the union
+        // would answer the same rectangle for both.
+        let (mut comp, id, screens) = two_monitors(0);
+        drag_title_bar_toward(&mut comp, id, screens[1].x + 2, 300);
+        let on_second = previewed_rect(&comp);
+        comp.handle_mouse_move(screens[0].x + 2, 300);
+        let on_first = previewed_rect(&comp);
+        assert_eq!(
+            on_second,
+            edge_drop_rect(screens[1].x + 2, 300, screens[1]),
+            "the preview on the second monitor was not that monitor's left half"
+        );
+        assert_eq!(
+            on_first,
+            edge_drop_rect(screens[0].x + 2, 300, screens[0]),
+            "the preview on the first monitor was not that monitor's left half"
+        );
+        assert_ne!(
+            on_first, on_second,
+            "the two monitors' left halves came out as the same rectangle"
+        );
+    }
+
+    #[test]
+    fn the_interior_seam_is_two_edges_and_not_a_middle() {
+        // Between two monitors there is no "middle of the desktop": the last
+        // column of the left screen is that screen's *right* edge and the first
+        // column of the right screen is that screen's *left* edge. Against the
+        // union both points were interior and neither tiled anything.
+        // A fresh compositor per case rather than a restore between them: two
+        // synchronous drags of the same title bar fall inside the double-click
+        // interval, so the second press would be read as a double-click and
+        // maximize the window instead of starting a drag.
+        let seam = two_monitors(0).2;
+        for (name, at, screen) in [
+            ("the left screen's right edge", seam[0].right() - 2, 0),
+            ("the right screen's left edge", seam[1].x + 2, 1),
+        ] {
+            let (mut comp, id, screens) = two_monitors(0);
+            drag_title_bar_to(&mut comp, id, at, 300);
+            let want = edge_drop_rect(at, 300, screens[screen]);
+            assert_eq!(
+                comp.window_ref(id).expect("window").frame_rect(),
+                want,
+                "a drop at {name} did not tile against it"
+            );
+            assert!(
+                want.intersect(&screens[1 - screen]).is_none(),
+                "a drop at {name} reached across the seam"
+            );
+        }
+    }
+
+    #[test]
+    fn a_work_area_survives_the_round_trip_back_to_pixels() {
+        // `work_rect` is the inverse of `work_area_of`, and the drop path
+        // relies on it: the release maximizes into `work_rect(intent.area)`,
+        // so a lossy conversion would put a maximized window a pixel off the
+        // rectangle its own preview promised.
+        for bounds in [
+            Rect::new(0, 0, 800, 600),
+            Rect::new(800, 0, 1024, 768),
+            Rect::new(-1920, -120, 1920, 1080),
+            Rect::new(0, 0, 0, 0),
+        ] {
+            assert_eq!(
+                work_rect(work_area_of(bounds)),
+                bounds,
+                "the work area of {bounds:?} did not come back as itself"
+            );
+        }
     }
 }

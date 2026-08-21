@@ -49767,8 +49767,12 @@ that user at a delayed console prompt by failing `doas` on purpose — which is
 `pam_faillock`'s behaviour on Linux too, and is bounded here by
 `MAX_DELAY_SECS` (five minutes, never a permanent lockout). Whether five
 minutes of console delay purchasable by any local process is the right price
-for one tally per user is a judgement call; see `design-decisions.md` §347,
-which records it as the open half.
+for one tally per user is a judgement call — and if `su` joins at the same
+time it is sharper still, because `su` guesses at the *target's* password, so
+any local user could hold **root** at a delayed console prompt without ever
+having had root. That is the operator's call, not mine: it is queued as
+`open-questions.md` → **B-Q6**, with four options and a recommendation.
+`design-decisions.md` §347 records it as the open half.
 
 
 ## B-PASSWD-VERIFIES-WITHOUT-AUTHLIB — 2026-08-21 — OPEN (tech debt, small)

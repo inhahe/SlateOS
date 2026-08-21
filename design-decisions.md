@@ -28858,7 +28858,11 @@ the user can hold that user at a delayed *console* prompt by failing `doas` on
 purpose. It is bounded (five minutes, never a lockout) and it is what Linux
 does, but "any local process can add five minutes to your console login" is a
 user-visible policy, not an implementation detail. It is written up in
-`known-issues.md` → "Still open — `login` and `su` do not share the tally".
+`known-issues.md` → "Still open — `login` and `su` do not share the tally",
+and queued for the operator as `open-questions.md` → **B-Q6**, which lays out
+four answers. Note that `su` sharpens it: `su` guesses at the *target's*
+password, so if `su` joins too, any local user could hold **root** at a delayed
+console prompt without ever having had root.
 
 ---
 

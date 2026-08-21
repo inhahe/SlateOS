@@ -2173,6 +2173,129 @@ question as its cheapest fix; that was a prediction and it did not survive the
 measurement.
 
 
+## B-Q6 — [B] Failed password guesses now slow the next attempt system-wide. Should the *console* login prompt obey that too — knowing any local program could then add five minutes to your login? — Status: OPEN
+
+**In short:** When you get a password wrong, this system now makes you wait a
+little longer before the next try — one second, then two, four, up to a maximum
+of five minutes — and as of today that count is shared, so failures at one
+prompt slow down the others. The one prompt still left out is the console login
+screen itself. Adding it is a small change, but it has a side effect worth your
+opinion: once the console obeys the shared count, any program already running
+on the machine can deliberately fail a password and thereby make the *next
+person at the keyboard* wait up to five minutes. That is what Linux does. It
+may still not be what we want.
+
+**Terms:**
+
+- **the tally** — a per-account count of consecutive wrong passwords, stored in
+  one file. It resets to zero the moment a correct password is accepted.
+- **the delay** — how long the account must wait before the next guess is even
+  looked at. Three free tries, then 1s, 2s, 4s … capped at 5 minutes. It is
+  never a permanent lockout; waiting always clears it.
+- **`doas`** — "run this one command as root", after you type *your own*
+  password. Any user can run it at any time.
+- **`su`** — "become another user", after you type *that user's* password.
+  Guessing at `su root` is guessing at root's password.
+- **`login`** — the console prompt that says `login:` when the machine boots.
+
+### What is true today
+
+Four programs share the tally: `doas`, `sshd` (remote login), `ftpd`, and
+`logind` (the desktop lock screen). `login` and `su` do not — they reach the
+right yes/no answer through shared code, but they neither read nor write the
+count. So today:
+
+- Wrong guesses at the console do **not** slow a subsequent `doas` guess.
+- Nothing any program does can slow *you* down at the console.
+- The console's own protection is a per-process cap of three tries, after which
+  `login` exits and is immediately restarted by the system, fresh. So guessing
+  at the console is, in effect, not rate-limited at all — the same defect that
+  was just fixed for `doas`.
+
+### The options
+
+**Option A — the console obeys the shared tally, for every account including root.**
+
+*What changes:* after enough wrong passwords, the `login:` prompt itself makes
+you wait, up to five minutes, and console failures start slowing `doas` and
+`ssh` too.
+
+- The console stops being the one unlimited guessing prompt on the machine.
+- One account = one count, which is the whole point of a shared tally and is
+  what Linux's `pam_faillock` does.
+- **The cost:** a program running as you can hold you at a delayed console
+  prompt by failing `doas` on purpose. Bounded at five minutes, never a
+  lockout, and the attacker is already running as you.
+- **The sharper cost, if `su` also joins:** `su` guesses at the *target's*
+  password, so any local user could hold **root** at a five-minute console
+  delay indefinitely, without ever having had root. That is a stranger's
+  program delaying the administrator, not just your own program delaying you.
+
+**Option B — the console obeys the tally, but root is exempt from the delay
+(root's failures are still counted).**
+
+*What changes:* same as A, except root can always log in at the console
+immediately; ordinary users wait.
+
+- Guarantees the machine is never slow to enter for the person who can fix it.
+- `pam_faillock` has exactly this switch (`even_deny_root`, default off), so
+  it is the mainstream answer, not an invention.
+- **The cost:** root becomes the one account you may guess at, at the console,
+  without limit. That is the highest-value account on the machine.
+
+**Option C — the console *contributes* to the tally but never obeys it.**
+
+*What changes:* console failures slow down `doas` and `ssh`; nothing ever slows
+down the console.
+
+- Removes the delay-your-neighbour problem completely: no program can affect
+  what happens at the keyboard.
+- Justifiable on the grounds that a keyboard is already human-speed, so the
+  automated guessing the delay exists to stop cannot happen there.
+- **The cost:** it leaves the console exactly as guessable as it is today —
+  three tries, exit, respawn, repeat — which is the defect this whole change
+  set exists to remove. It also stops being true the moment the "console" is a
+  serial line or a virtual machine's monitor, which can be driven by a script.
+
+**Option D — leave it as it is.** `login` and `su` stay outside the tally.
+
+*What changes:* nothing.
+
+- No new way to inconvenience anyone.
+- **The cost:** the two prompts a human actually uses to authenticate are the
+  two the rate limit does not cover, which is close to the worst place to have
+  the gap.
+
+### My recommendation
+
+**Option A, and let `su` join with it.** The delay is capped at five minutes
+and always clears on its own, so the worst case is an annoyance, not a lockout
+— whereas each of B, C and D leaves a prompt that can be guessed at without
+limit, which is a real path to someone's password. Between A's cost and the
+others' costs, A trades a bounded inconvenience for an unbounded exposure, and
+that is the right direction.
+
+If the root-delay part of A is the objectionable bit specifically, B is the
+next-best and is one line different.
+
+### If this is never answered
+
+Nothing gets worse and nothing is blocked; the system stays in the state
+described under "What is true today". The cost of leaving it is standing, not
+growing: the console and `su` remain the two prompts where guessing is free.
+The code change behind any of A/B/C is small and does not depend on anything
+else being built first — this is a policy choice, not a prerequisite problem.
+
+**Where it bites:** `userspace/authlib/src/lib.rs` (`Authenticator`, which would
+gain a `rate_limited` / `note_failure` pair so a caller that owns its own
+verdict can still share the count), `userspace/login/src/main.rs:176`
+(`check_password`, which owns the console's empty-password policy and is why
+`login` calls the checking half of `authlib` directly), and
+`userspace/su/src/main.rs`. Background: `design-decisions.md` §347 and §346;
+`known-issues.md` → `B-DOAS-COULD-NOT-VERIFY-ANY-PASSWORD-THE-SYSTEM-ACTUALLY-SETS`
+→ "Still open — `login` and `su` do not share the tally".
+
+
 # Resolved
 
 **The body above holds OPEN questions only.** When the operator answers one,

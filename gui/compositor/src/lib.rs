@@ -617,6 +617,30 @@ fn work_rect(area: WorkArea) -> Rect {
     )
 }
 
+/// `rect` moved by the smallest amount that puts it inside `bounds`.
+///
+/// The size is never changed, so a rectangle too large to fit cannot be made to
+/// fit; it is pinned at the top-left corner instead. That choice is not
+/// arbitrary — for a window frame the top-left is where the title bar is, and
+/// any other anchor would push the title bar off the top or left edge and leave
+/// the window exactly as ungrabbable as it started.
+fn pulled_onto(rect: Rect, bounds: Rect) -> Rect {
+    let last_x = bounds
+        .right()
+        .saturating_sub(i32::try_from(rect.width).unwrap_or(i32::MAX))
+        .max(bounds.x);
+    let last_y = bounds
+        .bottom()
+        .saturating_sub(i32::try_from(rect.height).unwrap_or(i32::MAX))
+        .max(bounds.y);
+    Rect::new(
+        rect.x.clamp(bounds.x, last_x),
+        rect.y.clamp(bounds.y, last_y),
+        rect.width,
+        rect.height,
+    )
+}
+
 /// One zone edge, rounded to a whole pixel.
 ///
 /// The clamp is what makes the cast safe rather than merely likely to be: the
@@ -4911,6 +4935,19 @@ impl Compositor {
         let affected: Vec<(WindowId, Option<SnapTarget>)> = self
             .windows
             .iter()
+            // A fullscreen window is excluded even when `maximized` is also
+            // set, which it is for anything maximised before it went
+            // fullscreen. Fullscreen is defined against the whole scanout
+            // surface and outranks both tiling states while it lasts, so
+            // re-tiling one replaces the display-sized geometry that earns it
+            // the direct-scanout bypass with a work-area rectangle: a game
+            // visibly shrinking away from the screen edges because a taskbar
+            // appeared behind it, and never growing back, since nothing
+            // re-asserts fullscreen afterwards on this path.
+            //
+            // `maximized` is deliberately left set rather than cleared, so that
+            // leaving fullscreen still finds a tiling state to fall back to.
+            .filter(|w| !w.fullscreen)
             .filter(|w| w.maximized || w.snapped.is_some())
             .filter(|w| self.work_bounds_for(w.frame_rect()) == bounds)
             .map(|w| (w.id, w.snapped))
@@ -7013,18 +7050,170 @@ impl Compositor {
     // -----------------------------------------------------------------------
 
     /// Handle a display resolution change.
+    ///
+    /// Everything on the desktop that was placed *by a rule* is re-derived
+    /// against the new size, because a window stores the rectangle its rule
+    /// produced and not the rule itself — the same fact that makes
+    /// [`retile_for_work_area_change`](Self::retile_for_work_area_change)
+    /// necessary when a taskbar changes height. A mode switch is that problem
+    /// at its largest, and this used to do none of it: a maximised window kept
+    /// its 1920-wide rectangle on a 1280-wide screen, with its right-hand third
+    /// in pixels that no longer existed and its close button among them; a
+    /// fullscreen client kept the old framebuffer's dimensions; and a window
+    /// that happened to be sitting near the old bottom-right corner was left
+    /// entirely off the new screen with no title bar on it to drag it back by.
+    ///
+    /// What is deliberately *not* re-derived is a window the user placed
+    /// themselves and can still reach. A resize is not permission to re-lay-out
+    /// the desktop, so only windows that would otherwise be unrecoverable are
+    /// moved, and only by the smallest amount that recovers them.
+    ///
+    /// Single-head, like the rest of the mode-setting path: it resizes the
+    /// primary display and the one framebuffer behind it. See
+    /// `known-issues.md` → `TD-COMPOSITOR-DRIVES-ONE-HEAD`.
+    ///
+    /// # Errors
+    ///
+    /// Whatever the backend's `resize` returns — an allocation failure for the
+    /// new surface. Nothing else has been touched at that point, so the
+    /// compositor carries on drawing the size it already had rather than
+    /// half-adopting one it cannot paint.
     pub fn resize_display(&mut self, width: u32, height: u32) -> CompositorResult<()> {
         self.backend.resize(width, height)?;
 
-        // Update the primary display.
-        if let Some(display) = self.display_manager.displays.first_mut() {
-            display.width = width;
-            display.height = height;
-        }
+        // `displays[0]` is the primary by construction: `DisplayManager::new`
+        // creates it, and `add_display` only ever appends beside it.
+        let Some(display) = self.display_manager.displays.first_mut() else {
+            self.full_recomposite = true;
+            self.damage.mark_full(width, height);
+            return Ok(());
+        };
+        display.width = width;
+        display.height = height;
+        let bounds = display.bounds();
+
+        // The first two cannot fight over a window that is both maximised and
+        // fullscreen — the re-tile excludes fullscreen outright — so their
+        // order is free. The rescue must follow both, because a window placed
+        // by either rule is by definition not stranded and asking before they
+        // have run would move one that was about to be re-placed anyway.
+        self.retile_for_work_area_change(bounds);
+        self.refit_fullscreen_windows(width, height);
+        self.bring_stranded_windows_back(bounds);
+        self.pull_pointer_onto_the_desktop();
 
         self.full_recomposite = true;
         self.damage.mark_full(width, height);
         Ok(())
+    }
+
+    /// Re-fit every fullscreen window to a framebuffer that just changed size.
+    ///
+    /// Fullscreen is defined against the *scanout surface* rather than against a
+    /// work area — that is what makes such a window eligible for the
+    /// direct-scanout bypass in [`compose_frame`](Self::compose_frame) — so it
+    /// is re-derived from the new framebuffer size here rather than by the
+    /// re-tile, which divides up work areas and would hand it back the taskbar's
+    /// leftovers.
+    ///
+    /// The client is told, for the same reason [`set_fullscreen`] tells it: its
+    /// surface is now a different size, and it is the only party that can
+    /// redraw at it.
+    ///
+    /// [`set_fullscreen`]: Self::set_fullscreen
+    fn refit_fullscreen_windows(&mut self, width: u32, height: u32) {
+        let affected: Vec<WindowId> = self
+            .windows
+            .iter()
+            .filter(|w| w.fullscreen)
+            // Nothing to say to a client whose surface did not move or change
+            // size — a spurious `WindowResized` is a repaint it did not need.
+            .filter(|w| w.x != 0 || w.y != 0 || w.width != width || w.height != height)
+            .map(|w| w.id)
+            .collect();
+
+        for window_id in affected {
+            self.damage_window(window_id);
+            if let Some(window) = self.window_mut(window_id) {
+                window.x = 0;
+                window.y = 0;
+                window.width = width;
+                window.height = height;
+                window.dirty = true;
+            }
+            self.damage_window(window_id);
+            self.pending_notifications
+                .push_back(EventNotification::WindowResized {
+                    window_id,
+                    width,
+                    height,
+                });
+        }
+    }
+
+    /// Move back any window the new display size left entirely off the screen.
+    ///
+    /// The test is *no part of the frame is on `bounds`*, and it is that strict
+    /// on purpose. A window hanging half off an edge is still visible and still
+    /// has a title bar to grab, so its owner's choice of position stands; a
+    /// window with nothing on screen has no title bar, cannot be dragged, cannot
+    /// be reached with the pointer at all, and is gone until the display is made
+    /// large again. Only the second case is a rescue rather than a re-layout.
+    ///
+    /// Tiled and fullscreen windows are excluded because their geometry was
+    /// already re-derived from the new size by the two passes before this one: a
+    /// window that follows a rule cannot be stranded by the rule moving.
+    fn bring_stranded_windows_back(&mut self, bounds: Rect) {
+        let moves: Vec<(WindowId, i32, i32)> = self
+            .windows
+            .iter()
+            .filter(|w| !w.fullscreen && !w.maximized && w.snapped.is_none())
+            .filter(|w| w.frame_rect().intersect(&bounds).is_none())
+            .map(|w| {
+                // Through the frame rather than the client area: it is the
+                // decorated box that has to land on screen, and `pulled_onto`
+                // pins its top-left — where the title bar is — when it is too
+                // large to fit.
+                let (x, y, _, _) = w.client_geometry_for_frame(pulled_onto(w.frame_rect(), bounds));
+                (w.id, x, y)
+            })
+            .collect();
+
+        for (window_id, x, y) in moves {
+            // `WindowNotFound` is unreachable: every id came from the list above
+            // and nothing between there and here removes a window. Dropped
+            // rather than propagated because a caller adopting a new display
+            // mode has no answer to "one window declined to move" and must not
+            // abandon the rest of the resize over it.
+            drop(self.move_window(window_id, x, y));
+        }
+    }
+
+    /// Bring the pointer inside the desktop it may have just fallen off.
+    ///
+    /// The cursor position is not derived from anything — it is whatever the
+    /// last motion event said — so a screen that shrinks under it leaves it at a
+    /// coordinate the display no longer has: an invisible pointer that
+    /// hit-tests against nothing, and stays that way until the user moves the
+    /// mouse and the input source volunteers a fresh position.
+    ///
+    /// Clamped to the *virtual* bounds rather than to one monitor because the
+    /// pointer crosses monitors and the desktop is their union; clamping it to
+    /// the primary would teleport it off a second screen that a resize of the
+    /// first did not touch.
+    fn pull_pointer_onto_the_desktop(&mut self) {
+        let bounds = self.display_manager.virtual_bounds();
+        if bounds.width == 0 || bounds.height == 0 {
+            // No desktop to be on. The clamp below would also be malformed —
+            // its lower bound would exceed its upper — which panics.
+            return;
+        }
+        self.cursor_x = self
+            .cursor_x
+            .clamp(bounds.x, bounds.right().saturating_sub(1));
+        self.cursor_y = self
+            .cursor_y
+            .clamp(bounds.y, bounds.bottom().saturating_sub(1));
     }
 
     /// Get the display manager.
@@ -14319,5 +14508,248 @@ mod tests {
             comp.reserve_edge(panel, PanelEdge::Bottom, 40).is_err(),
             "reserving against a destroyed window succeeded"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // Display resolution changes -- TD-C-COMPOSITOR-CANNOT-CHANGE-MODE
+    // -----------------------------------------------------------------------
+
+    /// An ordinary decorated application window at a chosen place and size.
+    fn app_at(comp: &mut Compositor, x: i32, y: i32, width: u32, height: u32) -> WindowId {
+        let mut spec = WindowSpec::new("App", width, height);
+        spec.position = Some((x, y));
+        comp.create_window_from_spec(&spec, 1)
+    }
+
+    #[test]
+    fn a_maximised_window_follows_the_display_to_its_new_size() {
+        // A tiled window holds the *rectangle* its rule produced and not the
+        // rule, so a mode switch left it exactly where it was. On a screen that
+        // shrank, the right-hand third of the window was in pixels that no
+        // longer existed; on one that grew, a band of bare desktop ran down two
+        // sides of a window still claiming to be maximised.
+        for &(width, height) in &[(1280_u32, 1024_u32), (2560, 1440)] {
+            let mut comp = Compositor::new(1920, 1080, 60).expect("compositor");
+            let id = app_at(&mut comp, 40, 40, 200, 150);
+            comp.maximize_window(id).expect("maximize");
+            comp.resize_display(width, height).expect("resize");
+            assert_eq!(
+                comp.window_ref(id).expect("window").frame_rect(),
+                Rect::new(0, 0, width, height),
+                "a maximised window did not follow the display to {width}x{height}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_half_snapped_window_follows_the_display_to_its_new_size() {
+        // Maximise and snap are separate rules with separate stored rectangles,
+        // so proving one followed says nothing about the other.
+        let mut comp = Compositor::new(1920, 1080, 60).expect("compositor");
+        let id = app_at(&mut comp, 40, 40, 200, 150);
+        comp.snap_window(id, SnapEdge::Left).expect("snap");
+        comp.resize_display(1280, 1024).expect("resize");
+        assert_eq!(
+            comp.window_ref(id).expect("window").frame_rect(),
+            Rect::new(0, 0, 640, 1024),
+            "a left-snapped window kept half of the *old* screen"
+        );
+    }
+
+    #[test]
+    fn a_resize_re_tiles_around_the_taskbar_rather_than_over_it() {
+        // The re-tile has to go through `work_area_for`, not straight to the
+        // display bounds: a maximised window that filled the new screen exactly
+        // would be a window drawn underneath the taskbar, which is the bug
+        // reservations exist to prevent.
+        let mut comp = Compositor::new(1920, 1080, 60).expect("compositor");
+        let screen = comp.display_manager.displays()[0].bounds();
+        let panel = add_panel(&mut comp, screen, 40);
+        comp.reserve_edge(panel, PanelEdge::Bottom, 40)
+            .expect("reserve");
+        let app = app_at(&mut comp, 40, 40, 200, 150);
+        comp.maximize_window(app).expect("maximize");
+
+        comp.resize_display(1280, 1024).expect("resize");
+        assert_eq!(
+            comp.window_ref(app).expect("window").frame_rect(),
+            Rect::new(0, 0, 1280, 1024 - 40),
+            "the re-tile ignored the strip the taskbar had reserved"
+        );
+    }
+
+    #[test]
+    fn a_fullscreen_window_follows_the_display_to_its_new_size() {
+        // `set_fullscreen` sizes the window from the framebuffer, so a
+        // fullscreen game kept the *old* framebuffer's dimensions across a mode
+        // switch: letterboxed on a screen that grew, and spilling off the
+        // bottom-right on one that shrank.
+        let mut comp = Compositor::new(1920, 1080, 60).expect("compositor");
+        let id = app_at(&mut comp, 40, 40, 200, 150);
+        comp.set_fullscreen(id, true).expect("fullscreen");
+        comp.pending_notifications.clear();
+
+        comp.resize_display(1280, 1024).expect("resize");
+        assert_eq!(
+            comp.window_ref(id).expect("window").client_rect(),
+            Rect::new(0, 0, 1280, 1024),
+            "a fullscreen window kept the old display's size"
+        );
+        assert!(
+            comp.pending_notifications.iter().any(|n| matches!(
+                n,
+                EventNotification::WindowResized {
+                    window_id,
+                    width: 1280,
+                    height: 1024,
+                } if *window_id == id
+            )),
+            "the client was never told its fullscreen surface had changed size"
+        );
+    }
+
+    /// A window that is fullscreen *and* still carries the `maximized` state
+    /// underneath it, which is what `set_fullscreen` leaves behind for anything
+    /// maximised first.
+    fn fullscreen_game_over_a_taskbar(comp: &mut Compositor) -> WindowId {
+        let screen = comp.display_manager.displays()[0].bounds();
+        let panel = add_panel(comp, screen, 40);
+        comp.reserve_edge(panel, PanelEdge::Bottom, 40)
+            .expect("reserve");
+        let game = app_at(comp, 40, 40, 200, 150);
+        comp.maximize_window(game).expect("maximize");
+        comp.set_fullscreen(game, true).expect("fullscreen");
+        game
+    }
+
+    #[test]
+    fn a_taskbar_appearing_does_not_shrink_a_fullscreen_window() {
+        // The re-tile hunts for `maximized || snapped`, and a fullscreen window
+        // maximised beforehand matches. Handing it the taskbar's leftovers
+        // shrinks a game away from the screen edges with nothing on this path
+        // to re-assert fullscreen afterwards, and silently disqualifies it from
+        // the direct-scanout bypass, which needs a display-sized surface.
+        let mut comp = Compositor::new(1920, 1080, 60).expect("compositor");
+        let game = fullscreen_game_over_a_taskbar(&mut comp);
+        let full = comp.window_ref(game).expect("window").client_rect();
+
+        let second = add_panel(&mut comp, Rect::new(0, 0, 1920, 1080), 60);
+        comp.reserve_edge(second, PanelEdge::Top, 60)
+            .expect("reserve");
+        assert_eq!(
+            comp.window_ref(game).expect("window").client_rect(),
+            full,
+            "a panel's reservation took the screen away from a fullscreen window"
+        );
+    }
+
+    #[test]
+    fn a_fullscreen_window_outranks_the_maximised_state_underneath_it() {
+        // Same collision, reached through the resize instead: whatever order
+        // the re-tile and the re-fit run in, the answer for a window that is
+        // both has to be the whole new screen and not the work area.
+        let mut comp = Compositor::new(1920, 1080, 60).expect("compositor");
+        let game = fullscreen_game_over_a_taskbar(&mut comp);
+
+        comp.resize_display(1280, 1024).expect("resize");
+        assert_eq!(
+            comp.window_ref(game).expect("window").client_rect(),
+            Rect::new(0, 0, 1280, 1024),
+            "the re-tile took the whole screen away from a fullscreen window"
+        );
+    }
+
+    #[test]
+    fn a_window_stranded_off_the_new_screen_is_brought_back() {
+        // The window is not merely inconvenient to reach: with no pixel of its
+        // title bar on the screen there is nothing left to drag it back by, so
+        // without this it is lost until the display is made large again.
+        let mut comp = Compositor::new(1920, 1080, 60).expect("compositor");
+        let id = app_at(&mut comp, 1500, 900, 300, 150);
+        comp.resize_display(800, 600).expect("resize");
+
+        let frame = comp.window_ref(id).expect("window").frame_rect();
+        assert!(
+            frame.intersect(&Rect::new(0, 0, 800, 600)).is_some(),
+            "a window stranded by the shrink was left off the screen at {frame:?}"
+        );
+        assert_eq!(
+            (frame.x, frame.y),
+            (
+                800 - i32::try_from(frame.width).expect("frame width"),
+                600 - i32::try_from(frame.height).expect("frame height"),
+            ),
+            "the rescue moved the window further than it had to"
+        );
+    }
+
+    #[test]
+    fn a_window_still_on_the_new_screen_is_left_exactly_where_it_was() {
+        // The rescue must be a rescue and not a re-layout: a window the user
+        // can still see and still grab keeps the position they put it in, even
+        // if part of it now hangs off the edge.
+        let mut comp = Compositor::new(1920, 1080, 60).expect("compositor");
+        let near = app_at(&mut comp, 10, 10, 300, 150);
+        let straddling = app_at(&mut comp, 700, 500, 300, 150);
+        let before = (
+            comp.window_ref(near).expect("window").frame_rect(),
+            comp.window_ref(straddling).expect("window").frame_rect(),
+        );
+
+        comp.resize_display(800, 600).expect("resize");
+        assert_eq!(
+            (
+                comp.window_ref(near).expect("window").frame_rect(),
+                comp.window_ref(straddling).expect("window").frame_rect(),
+            ),
+            before,
+            "the resize moved a window that was still reachable"
+        );
+    }
+
+    #[test]
+    fn a_window_larger_than_the_new_screen_keeps_its_title_bar_reachable() {
+        // Pulling the frame fully inside is impossible here, so the clamp has
+        // to prefer the top-left: a bottom-right anchor would put the title bar
+        // above the top edge and leave the window as unreachable as it started.
+        let mut comp = Compositor::new(1920, 1080, 60).expect("compositor");
+        let id = app_at(&mut comp, 1500, 900, 1200, 900);
+        comp.resize_display(800, 600).expect("resize");
+
+        let win = comp.window_ref(id).expect("window");
+        let bar = win.title_bar_rect().expect("decorated");
+        assert_eq!(
+            (win.frame_rect().x, win.frame_rect().y),
+            (0, 0),
+            "an oversized window was not pinned to the top-left corner"
+        );
+        assert!(
+            bar.intersect(&Rect::new(0, 0, 800, 600))
+                .is_some_and(|seen| seen.height == bar.height),
+            "the whole title bar has to be on screen to be grabbed"
+        );
+    }
+
+    #[test]
+    fn the_pointer_is_brought_inside_a_display_that_shrank() {
+        // The cursor is drawn at this position and every hit test starts from
+        // it, so a pointer left at a coordinate the screen no longer has is an
+        // invisible pointer that reports hovering over nothing.
+        let mut comp = Compositor::new(1920, 1080, 60).expect("compositor");
+        comp.handle_input(InputEvent::MouseMove { x: 1900, y: 1000 });
+        comp.resize_display(800, 600).expect("resize");
+        assert_eq!(
+            comp.cursor_position(),
+            (799, 599),
+            "the pointer was left outside the new display"
+        );
+    }
+
+    #[test]
+    fn a_pointer_already_on_the_new_screen_is_not_moved() {
+        let mut comp = Compositor::new(1920, 1080, 60).expect("compositor");
+        comp.handle_input(InputEvent::MouseMove { x: 100, y: 200 });
+        comp.resize_display(800, 600).expect("resize");
+        assert_eq!(comp.cursor_position(), (100, 200), "the pointer was moved");
     }
 }

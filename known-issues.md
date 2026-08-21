@@ -32217,19 +32217,86 @@ the mode we keep. The compositor binary reports `--size` as ignored on this path
 rather than silently obeying it, since obeying it would compose frames the
 display cannot show.
 
-**What is missing:** `SETCRTC` in lane A's `kernel/src/drm/`, and then the
-matching call here, plus a `Compositor` that can be resized after construction —
-which is a second, separate piece of work: `Compositor::new` takes a size and
-everything downstream of it assumes that size for its lifetime.
+**What is missing:** `SETCRTC` in lane A's `kernel/src/drm/`, a re-allocation of
+the pair of dumb buffers at the new mode's size in `DrmScanout`, and the call
+that sequences the two.
 
 **Severity.** Low. A display running its own native mode is the right default,
 and it is what the user is already looking at. This bites only when the native
 mode is wrong for the user (a projector, a scaled-down mode for performance, a
 panel whose EDID lies).
 
-**Filed to lane A?** Not yet — deliberately. A `SETCRTC` with no caller is worse
-than none, and the caller needs compositor resize first, which is lane C's work
-and not started. File it when resize lands.
+**Update 2026-08-21 — the compositor half is done.** What this entry used to
+call "a second, separate piece of work" — `Compositor::new` takes a size and
+everything downstream assumes it for its lifetime — is finished.
+`Compositor::resize_display` now re-derives, against the new size, everything
+that was placed *by a rule* rather than by the user: maximised and snapped
+windows are re-tiled through the work area (so they land above a taskbar, not
+under it), fullscreen windows are re-fitted to the new framebuffer and told
+about it, any window the shrink left entirely off-screen is pulled back by the
+smallest movement that recovers it, and the pointer is clamped onto the virtual
+desktop. A window the user placed themselves and can still reach is left exactly
+where it was — a resize is not permission to re-lay-out the desktop. 12 tests,
+each proved a regression test by reintroducing the defect it names. Rationale
+and the four separate failures it fixes: `design-decisions.md` §512.
+
+**Filed to lane A?** Yes —
+`requests/c-a-drm-setcrtc-and-a-page-flip-that-refuses-a-mismatched-framebuffer.md`
+(2026-08-21). It was deliberately *not* filed before now: a `SETCRTC` with no
+caller is worse than none, and the caller needed compositor resize first. Resize
+has landed, so the caller exists. That request also carries a second, separate
+bug found while writing it — see `BUG-DRM-PAGE-FLIP-ACCEPTS-A-MISMATCHED-FB`
+below.
+
+## BUG-DRM-PAGE-FLIP-ACCEPTS-A-MISMATCHED-FB (found by lane C 2026-08-21; lives in lane A's tree)
+
+**In short:** the kernel lets a program hand the graphics card a picture that is
+the wrong size for the screen, and then each of the three supported cards does
+something *different* with it — one quietly changes the resolution, one quietly
+crops the picture, and both then report the old resolution when asked. The same
+sequence of calls therefore produces a different result on different hardware,
+and the program that made them cannot tell which happened.
+
+**Where.** `DrmDevice::page_flip` (`kernel/src/drm/mod.rs:385`), reached from
+`drm_card_ioctl_mode_page_flip` (`kernel/src/syscall/linux.rs:11125`). It checks
+that the CRTC id, the framebuffer id and the backing GEM object *exist*, and
+nothing else. Linux's `drm_mode_page_flip_ioctl` compares the framebuffer's
+dimensions against the CRTC's current mode and returns `EINVAL`; we do not.
+
+**The three divergent behaviours:**
+
+* **ATI** silently performs a full mode-set. `ati/backend.rs:409` does
+  `timing::lookup(fb.width, fb.height, 60)` and applies the result if it differs
+  from `self.mode`. A page flip changes the resolution.
+* **virtio-gpu** silently crops. `drm/driver.rs:500` computes
+  `copy_h = fb.height.min(self.height)` and
+  `copy_w_bytes = fb.width.min(self.width) * bpp`, so an oversized framebuffer
+  loses its right and bottom edges and an undersized one leaves stale pixels
+  around itself. The display never changes size.
+* **`GETCRTC` lies afterwards on both.** ATI updates its own private
+  `self.mode` (`backend.rs:415`), but nothing writes `dev.crtcs[i].mode`, so the
+  DRM object model keeps reporting the boot mode after the hardware has been
+  reprogrammed.
+
+**Severity.** Medium, and latent. No current client triggers it — the
+compositor's `DrmScanout` builds its buffers from the connector's preferred mode
+and has only ever flipped matching-size framebuffers, so the check would have
+been a no-op for every flip we have issued. It becomes live the moment anything
+tries to change resolution, which is precisely what
+`TD-COMPOSITOR-CANNOT-CHANGE-MODE` is about; and it is the sort of defect that,
+left alone, gets *depended on* — a client that discovers ATI's implicit mode-set
+will use it, and then be silently cropped in QEMU.
+
+**Proper fix.** `EINVAL` in `DrmDevice::page_flip` when the framebuffer's size
+differs from the CRTC's mode, so all three backends inherit one answer. Keeping
+ATI's implicit mode-set as a deliberate SlateOS extension is also defensible —
+but then it must be the documented behaviour of *all three* backends, virtio-gpu
+must grow it, and `dev.crtcs[i].mode` must be updated when it fires. The one
+option that is not tenable is the present one, where the answer depends on which
+card is fitted.
+
+**Not lane C's to fix** — `kernel/**` is lane A's. Filed as Ask 2 of
+`requests/c-a-drm-setcrtc-and-a-page-flip-that-refuses-a-mismatched-framebuffer.md`.
 
 ## TD-COMPOSITOR-PICKS-CARD0 (lane C, 2026-08-21) - **(1) and (2) fixed 2026-08-21; (3) open**
 

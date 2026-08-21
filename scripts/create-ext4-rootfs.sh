@@ -1005,6 +1005,94 @@ if [ -n "$SYSROOT_STALE" ] && [ -z "$SYSROOT_PY" ]; then
     echo "[rootfs]            wsl -d Ubuntu -- bash scripts/bash-spike/slatelink.sh # if present"
 fi
 
+# --- Rebuild any spike artifact that is behind libc.a -------------------------
+#
+# The four large ports below (bash, pkgconf, GNU make, CPython) each statically
+# link toolchain/sysroot/lib/libc.a, so a rebuilt libc leaves all four behind.
+# Four gates near the end of this script catch that and refuse to write an
+# image.  Until 2026-08-21 they caught it by *printing the command you should
+# type*, which cost a full build cycle and a human round-trip for a fix the
+# script already knew how to perform.  This pass performs it instead; the gates
+# stay as the backstop for a rebuild that *failed*.
+#
+# This is the same finding as design-decisions.md §355, applied to what was left
+# of the old pattern.  §355's argument: a *gate* has to answer "which side
+# moved?" and cannot, whereas a *build step* never faces the question, because
+# it rebuilds whatever is behind in dependency order.  The 70 ctest fixtures
+# stopped being gated that way then; these four are the remainder.
+#
+# Why these four can be built from here when the fixtures cannot: the fixtures
+# need Windows-side fastpy and zig.exe, which do not resolve from inside WSL.
+# The spike scripts *are* WSL bash scripts and this script is already running
+# under WSL, so for them the objection does not apply.  Measured 2026-08-21: all
+# four end to end took 83 s, against an image build that takes minutes.
+#
+# Two separate opt-outs, because they mean different things:
+#   NO_SPIKE_REBUILD=1    -- "don't spend the 83 s".  Skips this pass; the gates
+#                            below then behave exactly as they did before, so a
+#                            stale artifact still cannot reach an image.
+#   ALLOW_STALE_FIXTURES=1 -- "I know they're stale, pack anyway".  Already
+#                            downgrades the gates to warnings, so rebuilding
+#                            first would be wasted work; this pass skips too.
+#
+# Ordering: this runs *before* the staging blocks below, which `cp` each
+# artifact onto the image tree and only then compare mtimes.  Rebuilding at the
+# gate would produce a fresh ELF that never reached the image.
+SYSROOT_LIBC="$ROOT_DIR/toolchain/sysroot/lib/libc.a"
+
+# Rebuild $1 (an artifact path) by running the remaining arguments as scripts,
+# but only if it exists and is older than libc.a.  A *missing* artifact is left
+# alone on purpose: absent is the documented best-effort case (the self-test
+# self-skips and says so), and a checkout that has never run a spike should not
+# have a multi-minute configure+build silently appended to its first image
+# build.  Stale is the case that lies, and stale is the case this fixes.
+spike_rebuild_if_behind() {
+    local artifact="$1"; shift
+    local name script log
+    name="$(basename "$artifact")"
+    [ -e "$artifact" ] || return 0
+    [ -e "$SYSROOT_LIBC" ] || return 0
+    [ "$SYSROOT_LIBC" -nt "$artifact" ] || return 0
+    echo "[rootfs] $name is behind libc.a — rebuilding it ($*)"
+    for script in "$@"; do
+        # One log per *script*, not per artifact: an artifact rebuilt by two
+        # scripts would otherwise have the first one's output truncated away by
+        # the second, and the first is the one that failed if both did.
+        log="/tmp/spike-rebuild-$(basename "$script" .sh)-$name.log"
+        if ! ( cd "$ROOT_DIR" && bash "$script" ) > "$log" 2>&1; then
+            echo "[rootfs] ERROR: $script failed while rebuilding $name."
+            echo "[rootfs]        Last 20 lines of $log:"
+            tail -20 "$log" | sed 's/^/[rootfs]        | /'
+            echo "[rootfs]        Fix the build, or set NO_SPIKE_REBUILD=1 to skip this pass"
+            echo "[rootfs]        (the staleness gate below will then stop the image instead)."
+            exit 1
+        fi
+    done
+    echo "[rootfs] $name rebuilt."
+}
+
+if [ "${NO_SPIKE_REBUILD:-0}" = "1" ]; then
+    echo "[rootfs] NOTE: NO_SPIKE_REBUILD=1 — not rebuilding stale spike artifacts."
+    echo "[rootfs]       The staleness gates below still apply, so nothing stale ships."
+elif [ "${ALLOW_STALE_FIXTURES:-0}" = "1" ]; then
+    echo "[rootfs] NOTE: ALLOW_STALE_FIXTURES=1 — not rebuilding stale spike artifacts,"
+    echo "[rootfs]       since the gates below are already downgraded to warnings."
+else
+    spike_rebuild_if_behind "$ROOT_DIR/build/spike/bash-slateos.elf" \
+        scripts/bash-spike/slatelink.sh
+    spike_rebuild_if_behind "$ROOT_DIR/build/spike/pkgconf-slateos.elf" \
+        scripts/pkgconf-spike/run.sh
+    spike_rebuild_if_behind "$ROOT_DIR/build/spike/make-slateos.elf" \
+        scripts/make-spike/run.sh
+    # CPython's interpreter and its stdlib zip are separate artifacts with
+    # separate staleness rules (the zip's are content-based: an `encodings`
+    # package must be present and no member may be deflated).  Only the
+    # interpreter is a libc link, so only the interpreter is rebuilt here;
+    # stdlib.sh stays a manual step, and the gate below still names it.
+    spike_rebuild_if_behind "$ROOT_DIR/build/spike/python-slateos.elf" \
+        scripts/cpython-spike/slatelink.sh
+fi
+
 # --- GNU bash 5.2, cross-compiled and linked against OUR OWN libc -------------
 # Every other real-world binary above (dash, make, tcc) is a stock Ubuntu glibc
 # program that SlateOS runs through the staged glibc + ld-linux.  This one is
@@ -1553,6 +1641,13 @@ fi
 
 # Same rule for bash (flagged further up, enforced here so that both artifact
 # families answer to one gate and neither can be stale in a shipped image).
+#
+# Since 2026-08-21 this is a backstop rather than the primary mechanism: the
+# rebuild pass near the top of this script relinks a behind-libc.a bash before
+# staging, so reaching here means either NO_SPIKE_REBUILD=1 was set or the
+# artifact is stale for a reason a relink does not fix.  The message therefore
+# still names the command — whoever is reading it is, by construction, someone
+# the automatic path did not help.
 if [ "$BASH_STALE" -gt 0 ]; then
     if [ "${ALLOW_STALE_FIXTURES:-0}" = "1" ]; then
         echo "[rootfs] WARNING: bash-slateos.elf is stale (see above);" \
@@ -1565,7 +1660,10 @@ if [ "$BASH_STALE" -gt 0 ]; then
         echo "[rootfs]        consumer of our libc on the image, so that is the widest"
         echo "[rootfs]        false-green available. Relink it:"
         echo "[rootfs]          wsl -d Ubuntu -- bash scripts/bash-spike/slatelink.sh"
-        echo "[rootfs]        or set ALLOW_STALE_FIXTURES=1 to build the image anyway."
+        echo "[rootfs]        (this script normally runs that for you — reaching this"
+        echo "[rootfs]        message means NO_SPIKE_REBUILD=1 was set, or the relink ran"
+        echo "[rootfs]        and did not clear the staleness.)"
+        echo "[rootfs]        Or set ALLOW_STALE_FIXTURES=1 to build the image anyway."
         exit 1
     fi
 fi
@@ -1583,7 +1681,9 @@ if [ "$PKGCONF_STALE" -gt 0 ]; then
         echo "[rootfs]        /bin/pkgconf on the image would be built against a libc"
         echo "[rootfs]        that is no longer in the build. Rebuild it:"
         echo "[rootfs]          wsl -d Ubuntu -- bash scripts/pkgconf-spike/run.sh"
-        echo "[rootfs]        or set ALLOW_STALE_FIXTURES=1 to build the image anyway."
+        echo "[rootfs]        (normally run for you — see the bash gate above for why"
+        echo "[rootfs]        you are seeing this.)"
+        echo "[rootfs]        Or set ALLOW_STALE_FIXTURES=1 to build the image anyway."
         exit 1
     fi
 fi
@@ -1603,7 +1703,9 @@ if [ "$MAKE_STALE" -gt 0 ]; then
         echo "[rootfs]        /bin/make on the image would be built against a libc that is"
         echo "[rootfs]        no longer in the build. Rebuild it:"
         echo "[rootfs]          wsl -d Ubuntu -- bash scripts/make-spike/run.sh"
-        echo "[rootfs]        or set ALLOW_STALE_FIXTURES=1 to build the image anyway."
+        echo "[rootfs]        (normally run for you — see the bash gate above for why"
+        echo "[rootfs]        you are seeing this.)"
+        echo "[rootfs]        Or set ALLOW_STALE_FIXTURES=1 to build the image anyway."
         exit 1
     fi
 fi
@@ -1623,7 +1725,16 @@ if [ "$PY_STALE" -gt 0 ]; then
         echo "[rootfs]        so a stale one is the widest false-green available. Rebuild:"
         echo "[rootfs]          wsl -d Ubuntu -- bash scripts/cpython-spike/slatelink.sh"
         echo "[rootfs]          wsl -d Ubuntu -- bash scripts/cpython-spike/stdlib.sh"
-        echo "[rootfs]        or set ALLOW_STALE_FIXTURES=1 to build the image anyway."
+        echo "[rootfs]        The relink is normally run for you; the stdlib rebuild is not,"
+        # No backticks in this message: inside double quotes they are command
+        # substitution, so a literal `encodings` here would run `encodings` and
+        # print "no  package".  shellcheck SC2006 caught it; it is exactly the
+        # kind of thing an error path nobody exercises would have kept forever.
+        echo "[rootfs]        because the zip's staleness is content-based (no 'encodings'"
+        echo "[rootfs]        package, or a deflated member we cannot inflate) rather than a"
+        echo "[rootfs]        libc link — so if the WARNING above named the stdlib, that"
+        echo "[rootfs]        second command is the one you need."
+        echo "[rootfs]        Or set ALLOW_STALE_FIXTURES=1 to build the image anyway."
         exit 1
     fi
 fi

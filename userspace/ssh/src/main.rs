@@ -647,90 +647,123 @@ fn strip_leading_zeros(data: &[u8]) -> &[u8] {
 // ============================================================================
 // Minimal big-integer arithmetic for Diffie-Hellman
 //
-// We represent big integers as big-endian byte vectors. This is a simplified
-// implementation sufficient for the DH key exchange — not a general-purpose
-// bignum library.
+// Enough of a bignum to run the group-14 key exchange, and no more. The
+// representation is little-endian 32-bit limbs: little-endian because every
+// algorithm here -- addition, multiplication, shifting, division -- carries
+// from the least significant end upward, so storing that end first makes a
+// digit's place its own index instead of `len - 1 - i`; 32-bit limbs because
+// the products fit exactly in a `u64`, which is the widest exact integer we
+// have.
+//
+// This was previously big-endian *bytes*, which cost on both counts. See
+// `div_rem` for what that cost in practice.
 // ============================================================================
 
-/// Big-endian unsigned big integer.
+/// Unsigned big integer.
 #[derive(Clone, Debug)]
 struct BigUint {
-    /// Digits stored big-endian (most significant byte first). No leading zeros
-    /// except for the value zero itself, which is represented as an empty vec.
-    bytes: Vec<u8>,
+    /// Digits stored little-endian (least significant limb first), with no
+    /// trailing zero limbs. Zero is the empty vector.
+    limbs: Vec<u32>,
 }
 
 impl BigUint {
-    /// The one place a byte vector becomes a `BigUint`.
+    /// The one place a limb vector becomes a `BigUint`.
     ///
     /// `mul`, `div_rem`, `shl1` and `sub` each used to end with their own copy
-    /// of this — a `while bytes.len() > 1 && bytes[0] == 0 { bytes.remove(0) }`
+    /// of this -- a `while bytes.len() > 1 && bytes[0] == 0 { bytes.remove(0) }`
     /// loop followed by a `== [0]` special case. Four copies of an invariant is
     /// four chances for one to drift out of step with the others, and each copy
     /// was quadratic besides, since `Vec::remove(0)` shifts the whole buffer
-    /// per zero byte. Routing every producer through here makes "no leading
+    /// per zero digit. Routing every producer through here makes "no leading
     /// zeros, and zero is the empty vector" a property of construction rather
     /// than a convention every arithmetic routine has to remember to restore.
-    fn normalized(mut bytes: Vec<u8>) -> Self {
-        let leading_zeros = bytes.iter().take_while(|&&b| b == 0).count();
-        bytes.drain(..leading_zeros);
-        Self { bytes }
+    /// In little-endian order the trimming is `pop`, so it is also linear.
+    fn normalized(mut limbs: Vec<u32>) -> Self {
+        while limbs.last() == Some(&0) {
+            limbs.pop();
+        }
+        Self { limbs }
     }
 
     fn zero() -> Self {
-        Self { bytes: Vec::new() }
+        Self { limbs: Vec::new() }
     }
 
     fn one() -> Self {
-        Self { bytes: vec![1] }
+        Self { limbs: vec![1] }
     }
 
+    /// Read a big-endian byte string.
     fn from_bytes_be(data: &[u8]) -> Self {
-        Self::normalized(data.to_vec())
+        // `rchunks` groups from the least significant end, so a byte length
+        // that is not a multiple of four leaves the short group at the *top*,
+        // where a partial limb is exactly what is wanted. Grouping forwards
+        // would put it at the bottom, where it would misalign every limb.
+        let limbs = data
+            .rchunks(4)
+            .map(|chunk| chunk.iter().fold(0u32, |acc, &b| acc << 8 | u32::from(b)))
+            .collect();
+        Self::normalized(limbs)
     }
 
+    /// Write a big-endian byte string, with no leading zero byte. Zero is a
+    /// single zero byte rather than nothing, since callers hand the result to
+    /// `encode_mpint`, which is what decides how zero goes on the wire.
     fn to_bytes_be(&self) -> Vec<u8> {
-        if self.bytes.is_empty() {
+        let Some((&top, rest)) = self.limbs.split_last() else {
             return vec![0];
+        };
+        // Normalisation guarantees `top != 0`, so skipping its zero bytes
+        // cannot consume the whole number.
+        let mut out: Vec<u8> = top
+            .to_be_bytes()
+            .into_iter()
+            .skip_while(|&b| b == 0)
+            .collect();
+        for &limb in rest.iter().rev() {
+            out.extend_from_slice(&limb.to_be_bytes());
         }
-        self.bytes.clone()
+        out
     }
 
     fn is_zero(&self) -> bool {
-        self.bytes.is_empty()
+        self.limbs.is_empty()
     }
 
     /// Return the number of bits.
     fn bit_length(&self) -> usize {
-        let Some(&top) = self.bytes.first() else {
+        let Some(&top) = self.limbs.last() else {
             return 0;
         };
-        let top_bits = 8usize.saturating_sub(top.leading_zeros() as usize);
-        self.bytes
+        let top_bits = 32usize.saturating_sub(top.leading_zeros() as usize);
+        self.limbs
             .len()
             .saturating_sub(1)
-            .saturating_mul(8)
+            .saturating_mul(32)
             .saturating_add(top_bits)
     }
 
     /// Test bit at position `pos` (0 = least significant).
+    ///
+    /// Little-endian storage makes this a plain lookup. The big-endian version
+    /// had to reverse the index with two checked subtractions, whose only job
+    /// was to undo the storage order.
     fn bit(&self, pos: usize) -> bool {
-        let byte_idx = pos / 8;
-        let bit_idx = pos % 8;
-        // `bytes` is big-endian but `pos` counts up from the least significant
-        // end, so the index runs backwards. Both subtractions are checked:
-        // a `pos` past the top of the number is not an error, it is `false`.
-        let Some(idx) = self
-            .bytes
+        self.limbs
+            .get(pos / 32)
+            .is_some_and(|&limb| (limb >> (pos % 32)) & 1 == 1)
+    }
+
+    /// Compare magnitudes.
+    fn cmp_unsigned(&self, other: &BigUint) -> std::cmp::Ordering {
+        // Normalisation means the limb count *is* the comparison whenever the
+        // counts differ; when they agree, the most significant limb that
+        // differs decides, which is what comparing the reversed sequences does.
+        self.limbs
             .len()
-            .checked_sub(1)
-            .and_then(|last| last.checked_sub(byte_idx))
-        else {
-            return false;
-        };
-        self.bytes
-            .get(idx)
-            .is_some_and(|&byte| (byte >> bit_idx) & 1 == 1)
+            .cmp(&other.limbs.len())
+            .then_with(|| self.limbs.iter().rev().cmp(other.limbs.iter().rev()))
     }
 
     /// Modular exponentiation: self^exp mod modulus.
@@ -765,69 +798,113 @@ impl BigUint {
         self.div_rem(modulus).1
     }
 
-    /// Full multiplication (schoolbook, O(n^2)).
+    /// Full multiplication (schoolbook, O(n*m) limb products).
     //
-    // The arithmetic in the two loops below is plain rather than checked, and
-    // the bound is a proof rather than a hope. Every `acc` entry is kept below
-    // 256 by the carry flush, and `av`/`bv` are `u8`, so the widest value the
-    // inner expression can reach is 255*255 + 255 + carry. The carry itself
-    // satisfies `c = (65025 + 255 + c) >> 8`, whose fixed point is 256, giving
-    // a maximum of 65536 -- sixteen bits inside a `u32`. Writing these as
-    // `checked_mul(..).unwrap_or(u32::MAX)` would replace a provably exact
-    // result with a silently wrong fallback on a branch that cannot be taken,
-    // and this is the innermost loop of the key exchange besides.
+    // The arithmetic in the inner loop is plain rather than checked, and the
+    // bound is a proof rather than a hope. With `a`, `b` and `slot` all below
+    // 2^32 and `carry` below 2^32, the widest the expression can reach is
+    // (2^32-1)^2 + (2^32-1) + (2^32-1) = 2^64 - 1, which is exactly `u64::MAX`
+    // -- the classic reason schoolbook multiplication picks a limb half the
+    // width of its accumulator. `carry` stays below 2^32 because it is that
+    // value shifted right by 32. Writing these as `checked_mul(..).unwrap_or`
+    // would replace a provably exact result with a silently wrong fallback on
+    // a branch that cannot be taken, in the innermost loop of the key
+    // exchange.
     #[allow(clippy::arithmetic_side_effects)]
     fn mul(&self, other: &BigUint) -> BigUint {
         if self.is_zero() || other.is_zero() {
             return BigUint::zero();
         }
-        // Accumulated little-endian, so a digit's place is `i + j` rather than
-        // the pair of `len - 1 - i` reversals the big-endian version needed at
-        // every step -- two subtractions per inner iteration whose only job was
-        // to undo the storage order.
-        let a: Vec<u8> = self.bytes.iter().rev().copied().collect();
-        let b: Vec<u8> = other.bytes.iter().rev().copied().collect();
-        let mut acc = vec![0u32; a.len().saturating_add(b.len())];
+        let mut acc = vec![0u32; self.limbs.len().saturating_add(other.limbs.len())];
 
-        for (i, &av) in a.iter().enumerate() {
-            let mut carry: u32 = 0;
-            for (j, &bv) in b.iter().enumerate() {
-                let Some(slot) = i.checked_add(j).and_then(|pos| acc.get_mut(pos)) else {
-                    break;
-                };
-                // Bounded by 255*255 + 255 + 256, so `u32` cannot overflow.
-                let prod = u32::from(av) * u32::from(bv) + *slot + carry;
-                *slot = prod & 0xFF;
-                carry = prod >> 8;
+        for (i, &av) in self.limbs.iter().enumerate() {
+            let Some(window) = acc.get_mut(i..) else {
+                break;
+            };
+            let mut carry = 0u64;
+            for (slot, &bv) in window.iter_mut().zip(&other.limbs) {
+                let prod = u64::from(av) * u64::from(bv) + u64::from(*slot) + carry;
+                *slot = prod as u32;
+                carry = prod >> 32;
             }
-            // Flush the carry along the accumulator rather than dropping it
-            // into a single higher slot and fixing it up in a second pass:
-            // every entry of `acc` then stays below 256 at all times, which is
-            // the invariant the old separate carry-propagation loop existed to
-            // restore after the fact.
-            let mut pos = i.saturating_add(b.len());
-            while carry != 0 {
-                let Some(slot) = acc.get_mut(pos) else {
-                    break;
-                };
-                let sum = *slot + carry;
-                *slot = sum & 0xFF;
-                carry = sum >> 8;
-                pos = pos.saturating_add(1);
+            // The carry-out lands in the limb one past the ones just written.
+            // That limb has never been written before -- iteration `i` reaches
+            // at most `i + other.len()` -- so this is an assignment rather than
+            // an addition, and the accumulator never needs a second
+            // carry-propagation pass to restore "every limb is a limb".
+            if let Some(slot) = window.get_mut(other.limbs.len()) {
+                *slot = carry as u32;
             }
         }
 
-        // Convert back to big-endian bytes. Every entry is < 256 by the
-        // invariant above, so the truncation is exact.
-        BigUint::normalized(
-            acc.iter()
-                .rev()
-                .map(|&v| u8::try_from(v & 0xFF).unwrap_or(0))
-                .collect(),
-        )
+        BigUint::normalized(acc)
+    }
+
+    /// Shift a limb sequence left by `bits` (0..32), appending the limb that
+    /// carries out. Used by `div_rem`'s normalisation step and by `shl1`.
+    //
+    // `bits < 32` is enforced by the callers (it comes from `leading_zeros` of
+    // a non-zero `u32`, or is the literal 1), and `u64::from(u32) << 31` is
+    // under 2^63, so neither the shift nor the or can overflow.
+    #[allow(clippy::arithmetic_side_effects)]
+    fn shifted_left(limbs: &[u32], bits: u32) -> Vec<u32> {
+        let mut out = Vec::with_capacity(limbs.len().saturating_add(1));
+        let mut carry = 0u64;
+        for &limb in limbs {
+            let widened = (u64::from(limb) << bits) | carry;
+            out.push(widened as u32);
+            carry = widened >> 32;
+        }
+        out.push(carry as u32);
+        out
+    }
+
+    /// Shift a limb sequence right by `bits` (0..32). The inverse of
+    /// `shifted_left` for the same `bits`, which is what `div_rem` needs to
+    /// undo its normalisation before returning the remainder.
+    //
+    // `carry` is below `2^bits` by construction, so `carry << 32` is below
+    // 2^63; and `widened >> bits` is below 2^32, so the truncation is exact.
+    #[allow(clippy::arithmetic_side_effects)]
+    fn shifted_right(limbs: &[u32], bits: u32) -> Vec<u32> {
+        let mut out = vec![0u32; limbs.len()];
+        let mut carry = 0u64;
+        for (slot, &limb) in out.iter_mut().zip(limbs).rev() {
+            let widened = (carry << 32) | u64::from(limb);
+            *slot = (widened >> bits) as u32;
+            carry = widened & ((1u64 << bits) - 1);
+        }
+        out
     }
 
     /// Division with remainder. Returns (quotient, remainder).
+    ///
+    /// Knuth's algorithm D (TAOCP vol. 2 s4.3.1), in base 2^32.
+    ///
+    /// The previous implementation was long division one *bit* at a time, and
+    /// allocated three fresh `Vec`s per bit -- one for the shift, one for the
+    /// compare, one for the subtract. Reducing a 4096-bit product modulo the
+    /// 2048-bit group-14 prime therefore took 4096 iterations and some twelve
+    /// thousand allocations, and a key exchange, which performs a few hundred
+    /// such reductions, took over eighty seconds of CPU. That is not a slow
+    /// handshake, it is an unusable client. Algorithm D does the same work in
+    /// one pass of `m * n` limb operations with no allocation in the inner
+    /// loop at all.
+    //
+    // Bounds for the plain arithmetic below, each of which is the standard
+    // algorithm-D argument:
+    //   * `j + n` and `j + i` are in range because `j <= m`, `i < n` and `u`
+    //     has exactly `m + n + 1` limbs.
+    //   * `qhat * v_second` is only evaluated when the short-circuiting `||`
+    //     has already established `qhat < 2^32`, so it is under 2^64.
+    //   * `rhat << 32` is only reached in that same branch, where `rhat` is a
+    //     remainder modulo `v_top < 2^32`.
+    //   * `t` lies in `-(2^32) ..= 2^32 - 1`, so `t >> 32` is 0 or -1 -- which
+    //     *is* the borrow -- and `k` stays in `0 ..= 2^32`.
+    // Substituting saturating or checked forms here would not make any of
+    // those true; it would only replace an exact result with a wrong one on
+    // paths that cannot be taken.
+    #[allow(clippy::arithmetic_side_effects)]
     fn div_rem(&self, divisor: &BigUint) -> (BigUint, BigUint) {
         if divisor.is_zero() {
             return (BigUint::zero(), BigUint::zero());
@@ -836,91 +913,116 @@ impl BigUint {
             return (BigUint::zero(), self.clone());
         }
 
-        let mut remainder = BigUint::zero();
-        let mut quotient_bits = Vec::new();
-
-        for i in (0..self.bit_length()).rev() {
-            // Left-shift remainder by 1 and add the next bit.
-            remainder = remainder.shl1();
-            if self.bit(i) {
-                remainder = remainder.add_small(1);
+        // A single-limb divisor needs no trial quotient: a 64-by-32 divide is
+        // exact, and the estimation machinery below wants two divisor limbs to
+        // estimate from anyway.
+        if let [d] = *divisor.limbs.as_slice() {
+            let d = u64::from(d);
+            let mut quotient = vec![0u32; self.limbs.len()];
+            let mut rem = 0u64;
+            for (slot, &limb) in quotient.iter_mut().zip(&self.limbs).rev() {
+                let current = (rem << 32) | u64::from(limb);
+                *slot = (current / d) as u32;
+                rem = current % d;
             }
-            if remainder.cmp_unsigned(divisor) != std::cmp::Ordering::Less {
-                remainder = remainder.sub(divisor);
-                quotient_bits.push(i);
-            }
+            return (
+                BigUint::normalized(quotient),
+                BigUint::normalized(vec![rem as u32]),
+            );
         }
 
-        // Build quotient from bit positions. `quotient_bits` was pushed in
-        // descending order by the loop above, so its first element is the
-        // highest set bit and sizes the buffer.
-        let Some(&max_bit) = quotient_bits.first() else {
-            return (BigUint::zero(), remainder);
+        let n = divisor.limbs.len();
+        let Some(m) = self.limbs.len().checked_sub(n) else {
+            return (BigUint::zero(), self.clone());
         };
 
-        let num_bytes = (max_bit / 8).saturating_add(1);
-        let mut qbytes = vec![0u8; num_bytes];
-        for pos in quotient_bits {
-            let byte_idx = pos / 8;
-            let bit_idx = pos % 8;
-            // Big-endian storage, least-significant-first bit numbering; a
-            // position above `max_bit` cannot occur, and if one ever did the
-            // right answer is to drop it, not to index off the front.
-            if let Some(slot) = num_bytes
-                .checked_sub(1)
-                .and_then(|last| last.checked_sub(byte_idx))
-                .and_then(|idx| qbytes.get_mut(idx))
+        // D1. Normalise, so that the divisor's top limb has its high bit set.
+        // That is the condition under which the trial quotient below is at
+        // most two too large, which is what makes a single correction step
+        // enough.
+        let shift = divisor.limbs.last().map_or(0, |&top| top.leading_zeros());
+        let scaled_divisor = Self::shifted_left(&divisor.limbs, shift);
+        let mut u = Self::shifted_left(&self.limbs, shift);
+        // `shifted_left` always appends the carry-out limb: `u` therefore has
+        // exactly the `m + n + 1` limbs algorithm D wants, and the divisor's
+        // extra limb is zero (the shift is chosen to fill its top limb) and is
+        // dropped here.
+        let (Some(v), Some(&[v_second, v_top])) = (
+            scaled_divisor.get(..n),
+            scaled_divisor.get(..n).and_then(<[u32]>::last_chunk::<2>),
+        ) else {
+            return (BigUint::zero(), self.clone());
+        };
+
+        let mut quotient = vec![0u32; m.saturating_add(1)];
+
+        for j in (0..=m).rev() {
+            // D3. Estimate this quotient limb from the top two limbs of the
+            // running remainder over the divisor's top limb, then walk the
+            // estimate down until it is provably right or one too large.
+            let Some(&[u_low, u_mid, u_top]) = u.get(j..=j + n).and_then(<[u32]>::last_chunk::<3>)
+            else {
+                break;
+            };
+            let numerator = (u64::from(u_top) << 32) | u64::from(u_mid);
+            let mut qhat = numerator / u64::from(v_top);
+            let mut rhat = numerator % u64::from(v_top);
+            while qhat > u64::from(u32::MAX)
+                || qhat * u64::from(v_second) > (rhat << 32) | u64::from(u_low)
             {
-                *slot |= 1u8 << bit_idx;
+                qhat -= 1;
+                rhat += u64::from(v_top);
+                if rhat > u64::from(u32::MAX) {
+                    break;
+                }
+            }
+
+            // D4. Multiply the divisor by the estimate and subtract, carrying
+            // the product's high half and the subtraction's borrow in one
+            // signed accumulator: `k` is `(product >> 32) - borrow`, so the
+            // two never need separate bookkeeping.
+            let Some(window) = u.get_mut(j..) else { break };
+            let mut k = 0i64;
+            for (slot, &vi) in window.iter_mut().zip(v) {
+                let product = qhat * u64::from(vi);
+                let t = i64::from(*slot) - k - i64::from((product & 0xffff_ffff) as u32);
+                *slot = t as u32;
+                k = (product >> 32) as i64 - (t >> 32);
+            }
+            let Some(top_slot) = window.get_mut(n) else {
+                break;
+            };
+            let t = i64::from(*top_slot) - k;
+            *top_slot = t as u32;
+
+            // D5/D6. A negative top limb means the estimate was one too large
+            // after all. Add the divisor back and step the quotient down; the
+            // carry out of the add-back cancels the borrow that made `t`
+            // negative, so it is discarded.
+            if t < 0 {
+                qhat -= 1;
+                let mut carry = 0u64;
+                for (slot, &vi) in window.iter_mut().zip(v) {
+                    let sum = u64::from(*slot) + u64::from(vi) + carry;
+                    *slot = sum as u32;
+                    carry = sum >> 32;
+                }
+                if let Some(top_slot) = window.get_mut(n) {
+                    *top_slot = top_slot.wrapping_add(carry as u32);
+                }
+            }
+
+            if let Some(slot) = quotient.get_mut(j) {
+                *slot = qhat as u32;
             }
         }
-        (BigUint::normalized(qbytes), remainder)
-    }
 
-    /// Left-shift by 1 bit.
-    fn shl1(&self) -> BigUint {
-        if self.is_zero() {
-            return BigUint::zero();
-        }
-        // Built least-significant-first and reversed at the end, so the shift
-        // is a plain fold over the digits with a carry rather than a reverse
-        // index walk writing to `i + 1`.
-        let mut result: Vec<u8> = Vec::with_capacity(self.bytes.len().saturating_add(1));
-        let mut carry = 0u8;
-        for &byte in self.bytes.iter().rev() {
-            let shifted = (u16::from(byte) << 1) | u16::from(carry);
-            result.push(u8::try_from(shifted & 0xFF).unwrap_or(0));
-            carry = u8::try_from(shifted >> 8).unwrap_or(0);
-        }
-        result.push(carry);
-        result.reverse();
-        BigUint::normalized(result)
-    }
-
-    /// Add a small u8 value.
-    //
-    // `u16::from(u8) + carry` where `carry` is itself a previous sum shifted
-    // right by 8: both operands are under 256, so the sum is under 512 and a
-    // `u16` has three bits to spare.
-    #[allow(clippy::arithmetic_side_effects)]
-    fn add_small(&self, val: u8) -> BigUint {
-        if val == 0 {
-            return self.clone();
-        }
-        if self.is_zero() {
-            return BigUint { bytes: vec![val] };
-        }
-        let mut result = self.bytes.clone();
-        let mut carry = u16::from(val);
-        for b in result.iter_mut().rev() {
-            let sum = u16::from(*b) + carry;
-            *b = u8::try_from(sum & 0xFF).unwrap_or(0);
-            carry = sum >> 8;
-        }
-        if carry > 0 {
-            result.insert(0, u8::try_from(carry & 0xFF).unwrap_or(0));
-        }
-        BigUint { bytes: result }
+        // D8. Undo the normalisation shift on the remainder, which is what is
+        // left in the low `n` limbs of `u`.
+        let remainder = u.get(..n).map_or_else(BigUint::zero, |low| {
+            BigUint::normalized(Self::shifted_right(low, shift))
+        });
+        (BigUint::normalized(quotient), remainder)
     }
 
     /// Subtract (self - other). Assumes self >= other.
@@ -928,43 +1030,34 @@ impl BigUint {
         if other.is_zero() {
             return self.clone();
         }
-        // Both operands are walked least-significant-first, which is what makes
-        // the shorter one simply run out: `zip`-with-`chain(repeat(0))` states
-        // the alignment that the old version computed as a signed index
-        // (`i as isize - (len as isize - b.len() as isize)`), a mixed-signedness
-        // expression whose only purpose was to answer "has `b` ended yet".
+        // Little-endian storage means the two operands are already aligned at
+        // the end the borrow starts from, so the shorter one simply runs out:
+        // this states the alignment that the big-endian version computed as a
+        // signed index (`i as isize - (len as isize - b.len() as isize)`), a
+        // mixed-signedness expression whose only purpose was to answer "has
+        // the subtrahend ended yet".
         //
         // The digit itself is computed with `overflowing_sub` rather than by
-        // widening to `i16`, subtracting, and folding a negative result back
-        // with `+ 256`: wrapping in `u8` *is* the mod-256 result the algorithm
-        // wants, and the overflow flag *is* the borrow, so neither has to be
-        // reconstructed from the sign of a wider intermediate.
-        let mut result: Vec<u8> = Vec::with_capacity(self.bytes.len());
-        let mut borrow = 0u8;
-        let mut subtrahend = other.bytes.iter().rev();
+        // widening, subtracting and folding a negative result back: wrapping
+        // *is* the modular result the algorithm wants, and the overflow flag
+        // *is* the borrow, so neither has to be reconstructed from the sign of
+        // a wider intermediate.
+        let mut result: Vec<u32> = Vec::with_capacity(self.limbs.len());
+        let mut borrow = 0u32;
+        let mut subtrahend = other.limbs.iter();
 
-        for &av in self.bytes.iter().rev() {
+        for &av in &self.limbs {
             let bv = subtrahend.next().copied().unwrap_or(0);
             let (partial, borrowed_b) = av.overflowing_sub(bv);
             let (digit, borrowed_carry) = partial.overflowing_sub(borrow);
             // At most one of the two can borrow: if `bv > av` then `partial` is
-            // `256 - (bv - av)`, which is at least 1, so it cannot underflow
+            // `2^32 - (bv - av)`, which is at least 1, so it cannot underflow
             // against a `borrow` of 0 or 1.
-            borrow = u8::from(borrowed_b | borrowed_carry);
+            borrow = u32::from(borrowed_b | borrowed_carry);
             result.push(digit);
         }
-        result.reverse();
 
         BigUint::normalized(result)
-    }
-
-    fn cmp_unsigned(&self, other: &BigUint) -> std::cmp::Ordering {
-        let a = strip_leading_zeros(&self.bytes);
-        let b = strip_leading_zeros(&other.bytes);
-        match a.len().cmp(&b.len()) {
-            std::cmp::Ordering::Equal => a.cmp(b),
-            ord => ord,
-        }
     }
 }
 
@@ -3529,17 +3622,41 @@ mod tests {
         bytes_to_hex(&n.to_bytes_be())
     }
 
-    /// Zero is the empty vector and every other value leads with a nonzero
-    /// byte. Every arithmetic routine returns through `normalized`, so this is
+    /// Zero is the empty vector and every other value ends with a nonzero
+    /// limb. Every arithmetic routine returns through `normalized`, so this is
     /// the invariant the whole type rests on.
     #[test]
     fn construction_normalizes_leading_zeros_away() {
         assert!(big("0000").is_zero());
         assert!(BigUint::from_bytes_be(&[]).is_zero());
-        assert_eq!(big("000001").bytes, vec![1]);
-        assert_eq!(big("0000ff00").bytes, vec![0xff, 0x00]);
+        assert_eq!(big("000001").limbs, vec![1]);
+        assert_eq!(big("0000ff00").limbs, vec![0xff00]);
+        // A limb boundary is four bytes in, so this is the case where the
+        // partial top group and the whole low group have to line up.
+        assert_eq!(big("0000000102030405").limbs, vec![0x0203_0405, 0x01]);
         // A normalized zero prints as a single zero byte, not as nothing.
         assert_eq!(BigUint::zero().to_bytes_be(), vec![0]);
+    }
+
+    /// Byte strings whose length is not a multiple of the limb width are the
+    /// case a limb-based representation can most easily get wrong, and every
+    /// SSH `mpint` is one: the group-14 prime is 256 bytes, but a shared
+    /// secret is whatever length it came out.
+    #[test]
+    fn byte_strings_round_trip_at_every_offset_from_a_limb_boundary() {
+        for hex in [
+            "01",
+            "0102",
+            "010203",
+            "01020304",
+            "0102030405",
+            "0102030405060708090a",
+            "ff",
+            "ffffffffffffffffffffff",
+            "0100000000",
+        ] {
+            assert_eq!(hex_of(&big(hex)), hex, "round trip of {hex}");
+        }
     }
 
     #[test]
@@ -3612,12 +3729,30 @@ mod tests {
         assert_eq!(hex_of(&big("00010000").sub(&big("0001"))), "ffff");
     }
 
+    /// `div_rem` normalises its operands with a left shift and un-normalises
+    /// the remainder with the matching right shift. If those two ever disagree
+    /// the quotient still looks plausible while the remainder is silently
+    /// scaled, so they are checked directly against each other.
     #[test]
-    fn shift_left_by_one_doubles() {
-        assert!(BigUint::zero().shl1().is_zero());
-        assert_eq!(hex_of(&big("01").shl1()), "02");
-        assert_eq!(hex_of(&big("80").shl1()), "0100");
-        assert_eq!(hex_of(&big("ffff").shl1()), "01fffe");
+    fn the_division_normalisation_shift_is_reversible() {
+        let shifted = |hex: &str, bits: u32| {
+            BigUint::normalized(BigUint::shifted_left(&big(hex).limbs, bits))
+        };
+        assert!(shifted("00", 1).is_zero());
+        assert_eq!(hex_of(&shifted("01", 1)), "02");
+        assert_eq!(hex_of(&shifted("80", 1)), "0100");
+        assert_eq!(hex_of(&shifted("ffff", 1)), "01fffe");
+        // A shift that crosses the limb boundary, which the byte-based version
+        // could not have got wrong and this one can.
+        assert_eq!(hex_of(&shifted("80000000", 1)), "0100000000");
+
+        for hex in ["01", "80", "ffff", "0123456789abcdef", "ff00000000000001"] {
+            for bits in [0u32, 1, 7, 31] {
+                let up = BigUint::shifted_left(&big(hex).limbs, bits);
+                let back = BigUint::normalized(BigUint::shifted_right(&up, bits));
+                assert_eq!(hex_of(&back), hex, "{hex} shifted by {bits} and back");
+            }
+        }
     }
 
     #[test]
@@ -3641,6 +3776,17 @@ mod tests {
     /// The property that actually matters: `a - q*b == r`, with `r < b`. Stated
     /// as a subtraction rather than as `q*b + r == a` so that it exercises
     /// `mul`, `div_rem` and `sub` together on the same numbers.
+    ///
+    /// The list below is chosen for algorithm D's correction paths rather than
+    /// for variety. A trial quotient estimated from two limbs can come out one
+    /// or two too large, and the cases that make it do so are rare enough that
+    /// random inputs essentially never find them -- which is exactly why they
+    /// are the cases a hand-written divider gets wrong. `7fff800000000000 /
+    /// 800000000001` and `2^127 / (2^96 - 2^64 + 1)` are the classical add-back
+    /// triggers from Knuth's own exercises; the rest cover a divisor whose top
+    /// limb is
+    /// small (so the normalisation shift is large), a divisor that is an exact
+    /// multiple, and operands that differ by many limbs.
     #[test]
     fn division_reconstructs_the_dividend() {
         for (a_hex, b_hex) in [
@@ -3648,6 +3794,24 @@ mod tests {
             ("0123456789abcdef", "fedc"),
             ("8000000000000000", "03"),
             ("ff00ff00ff00ff00", "0100ff"),
+            // Trial-quotient corrections.
+            ("7fff800000000000", "800000000001"),
+            (
+                "80000000000000000000000000000000",
+                "ffffffff0000000000000001",
+            ),
+            ("ffffffffffffffffffffffff", "ffffffff00000001"),
+            // A divisor whose top limb is 1, so the normalisation shift is 31.
+            ("ffffffffffffffffffffffffffffffff", "0000000100000000"),
+            // Exact multiples leave a zero remainder, which is the case where
+            // the final `normalized` has to collapse the limbs to nothing.
+            ("0100000000000000000000000000", "0100000000"),
+            // Many more limbs above than below.
+            (
+                "fedcba9876543210fedcba9876543210fedcba9876543210",
+                "0123456789abcdef",
+            ),
+            ("80000000000000000000000000000001", "7fffffffffffffff"),
         ] {
             let (a, b) = (big(a_hex), big(b_hex));
             let (q, r) = a.div_rem(&b);
@@ -3660,6 +3824,72 @@ mod tests {
                 r.cmp_unsigned(&b),
                 std::cmp::Ordering::Less,
                 "remainder not less than divisor for {a_hex} / {b_hex}"
+            );
+        }
+    }
+
+    /// The same `a - q*b == r, r < b` property over a few hundred pseudorandom
+    /// operands of assorted widths.
+    ///
+    /// The hand-picked cases above name the corrections algorithm D is known to
+    /// need; this one is there for the ones nobody thought to name. The
+    /// generator is a fixed-seed LCG rather than a real CSPRNG so that a
+    /// failure is reproducible from the test alone -- a randomised test that
+    /// cannot be re-run on the input that broke it is a report without a bug.
+    /// It is only affordable at this size because division stopped being
+    /// bit-at-a-time; the whole sweep runs in well under a second.
+    #[test]
+    fn division_reconstructs_the_dividend_over_pseudorandom_operands() {
+        let mut seed: u64 = 0x2545_f491_4f6c_dd1d;
+        let mut next = || {
+            // xorshift64*, chosen for being four lines rather than for quality.
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed.wrapping_mul(0x2545_f491_4f6c_dd1d)
+        };
+
+        for case in 0..400 {
+            let a_limbs = 1 + case % 9;
+            let b_limbs = 1 + (case / 9) % 6;
+            let build = |count: usize, next: &mut dyn FnMut() -> u64| {
+                BigUint::normalized(
+                    (0..count)
+                        .map(|_| {
+                            let word = next();
+                            // Deliberately biased towards limbs that are all
+                            // ones or all zeros: those are what make a trial
+                            // quotient come out too large.
+                            match word % 4 {
+                                0 => 0,
+                                1 => u32::MAX,
+                                _ => word as u32,
+                            }
+                        })
+                        .collect(),
+                )
+            };
+
+            let a = build(a_limbs, &mut next);
+            let b = build(b_limbs, &mut next);
+            if b.is_zero() {
+                continue;
+            }
+
+            let (q, r) = a.div_rem(&b);
+            assert_eq!(
+                hex_of(&a.sub(&q.mul(&b))),
+                hex_of(&r),
+                "a - q*b != r for a={} b={}",
+                hex_of(&a),
+                hex_of(&b)
+            );
+            assert_eq!(
+                r.cmp_unsigned(&b),
+                std::cmp::Ordering::Less,
+                "remainder not less than divisor for a={} b={}",
+                hex_of(&a),
+                hex_of(&b)
             );
         }
     }

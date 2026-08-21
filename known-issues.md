@@ -52471,7 +52471,34 @@ the fingerprint cache and forces rebuilds).
 exactly once. It is logged so that a *second* sighting is recognised as a
 pattern rather than re-diagnosed from scratch.
 
-## TD-B-TWO-PROGRAMS-BOTH-CLAIM-THE-NAME-`sudo` (lane B, 2026-08-21)
+## TD-B-TWO-PROGRAMS-BOTH-CLAIM-THE-NAME-`sudo` (lane B, 2026-08-21) — **RESOLVED 2026-08-21**
+
+**Resolved** by deleting the `sudo` personality from `userspace/su`, as the
+"proper fix" below prescribed. Removed: the `sudo mode` section entire
+(`SudoOptions`, `parse_sudo_args`, `print_sudo_help`, `sudo_authorised`,
+`sudo_list_permissions`, `run_sudo`, `log_sudo_failure`), the now-unused
+`in_admin_group`, the `basename` helper and the `argv[0]` dispatch in `main`,
+and the 13 tests that pinned the deleted policy — 296 lines. `su`'s remaining
+34 tests pass and clippy is clean. `userspace/sudo` is now the only program in
+the tree that answers "may this user run this command as root?", and it answers
+it from `/etc/sudoers`.
+
+Two corrections to what this entry originally said:
+
+- **Step 3 below is wrong: there is no `runuser` personality.** The dispatch
+  was two-way (`prog == "sudo"` → `run_sudo`, everything else → `run_su`), so
+  removing `sudo` left nothing for `argv[0]` to select between and `basename`
+  became dead with it. The claim of a third personality was written from the
+  `su`/`runuser` upstream pairing rather than from this file.
+- **It was a latent security hole, not only a naming collision.** The entry
+  files this under "not biting yet" because neither binary is staged. That is
+  true of the *conflict*, but understates the shape of it: `su`'s copy never
+  opened `/etc/sudoers`, so on any system carrying both, revoking a user's
+  rights in that file would have revoked nothing from a `wheel` member who
+  invoked the other binary. A configuration file that some enforcement points
+  ignore is not a configuration file.
+
+The original entry follows unchanged.
 
 **In short:** the tree contains two complete, independent implementations of
 `sudo`, written to two different security policies, and nothing yet decides

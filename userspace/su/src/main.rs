@@ -1,8 +1,6 @@
-//! Slate OS User Switching Utility (`su` / `sudo`)
+//! Slate OS User Switching Utility (`su`)
 //!
 //! Switch to another user's identity and optionally run a command.
-//! When invoked as `sudo` (detected via `argv[0]`), runs a single command
-//! as root (or another user via `-u`).
 //!
 //! # su usage
 //!
@@ -16,21 +14,30 @@
 //! su -s /bin/shell [username]      Override target user's shell
 //! ```
 //!
-//! # sudo usage
+//! # This program is not `sudo`
 //!
-//! ```text
-//! sudo command [args...]           Run command as root
-//! sudo -u user command [args...]   Run command as user
-//! sudo -l                          List permissions
-//! ```
+//! It used to be, in part: invoked through an `argv[0]` of `sudo` it ran a
+//! second, much smaller command-runner whose entire policy was "root, or a
+//! member of `wheel`/`admin`, may run anything as anyone". That personality is
+//! gone. `userspace/sudo` is the real implementation — it parses
+//! `/etc/sudoers`, honours per-user and per-host rules, `Defaults`, `NOPASSWD`
+//! and `env_keep`, and ships `visudo`.
+//!
+//! Deleting it was a security fix, not tidying. The copy here never read
+//! `/etc/sudoers` at all, so on any system where both binaries existed an
+//! administrator who revoked a user's rights in `/etc/sudoers` had not revoked
+//! anything: the same user invoking the other binary still got `(ALL) ALL` on
+//! the strength of a `wheel` membership. Two programs answering "may this user
+//! run this command as root?" differently is a policy split, and the safe
+//! number of answers to that question is one. See `known-issues.md`
+//! (TD-B-TWO-PROGRAMS-BOTH-CLAIM-THE-NAME-`sudo`).
 //!
 //! # Authentication
 //!
 //! Reads `/etc/users.yaml` through the shared `userdb` crate. Passwords are
 //! `crypt(3)` entries — SHA-512-crypt — and are checked by re-running `crypt`
 //! on the stored entry, which is a valid setting for itself. Root (uid 0) can
-//! switch to any user without a password. For sudo, members of the `wheel` or
-//! `admin` group may run commands as root.
+//! switch to any user without a password.
 //!
 //! # Session tracking
 //!
@@ -61,7 +68,11 @@ const USER_DB_PATH: &str = userdb::DEFAULT_PATH;
 
 /// Load the user database, or print why it could not be loaded.
 ///
-/// `who` is the name the binary was invoked as, `su` or `sudo`.
+/// `who` is the name to report the failure under. It is always `"su"` now that
+/// this binary has one personality, but it stays a parameter because the
+/// messages below are the ones an administrator reads when the database is
+/// unavailable, and hard-coding the program name into them is how a message
+/// ends up naming the wrong program after a rename.
 ///
 /// A missing file and an unreadable one are reported differently on purpose:
 /// this program decides who may become root, so "there is no database" and "I
@@ -101,11 +112,6 @@ fn home_of(record: &Record) -> String {
 /// The record's login shell, or the system default.
 fn shell_of(record: &Record) -> String {
     record.shell().unwrap_or_else(|| "/bin/sh".to_string())
-}
-
-/// Whether `record` is a member of a group that confers administrator rights.
-fn in_admin_group(record: &Record) -> bool {
-    record.groups().iter().any(|g| g == "wheel" || g == "admin")
 }
 
 // ============================================================================
@@ -607,230 +613,19 @@ fn run_su(args: &[String]) -> i32 {
 }
 
 // ============================================================================
-// sudo mode
+// Entry point
 // ============================================================================
 
-/// Parsed options for `sudo`.
-#[derive(Debug)]
-struct SudoOptions {
-    /// Target username (default: "root").
-    target_user: String,
-    /// The command and its arguments.
-    command: Vec<String>,
-    /// List permissions mode (-l).
-    list_mode: bool,
-}
-
-/// Parse `sudo` command-line arguments.
-///
-/// Accepted forms:
-///   sudo command [args...]
-///   sudo -u user command [args...]
-///   sudo -l
-fn parse_sudo_args(args: &[String]) -> Result<SudoOptions, i32> {
-    let mut opts = SudoOptions {
-        target_user: "root".to_string(),
-        command: Vec::new(),
-        list_mode: false,
-    };
-
-    // See `parse_su_args`: driven by the iterator so that an option needing a
-    // value cannot read past the end of the slice.
-    let mut rest = args.iter().skip(1);
-
-    while let Some(arg) = rest.next() {
-        match arg.as_str() {
-            "-u" | "--user" => {
-                let Some(value) = rest.next() else {
-                    eprintln!("sudo: option '{arg}' requires an argument");
-                    return Err(1);
-                };
-                opts.target_user = value.clone();
-            }
-            "-l" | "--list" => {
-                opts.list_mode = true;
-            }
-            "-h" | "--help" => {
-                print_sudo_help();
-                return Err(0);
-            }
-            "-V" | "--version" => {
-                println!("sudo (Slate OS) 0.1.0");
-                return Err(0);
-            }
-            _ => {
-                // Everything from here on is the command and its args. The
-                // first word is the one already taken from the iterator.
-                opts.command = std::iter::once(arg).chain(rest).cloned().collect();
-                break;
-            }
-        }
-    }
-
-    if !opts.list_mode && opts.command.is_empty() {
-        eprintln!("sudo: no command specified");
-        eprintln!("Try 'sudo --help' for usage.");
-        return Err(1);
-    }
-
-    Ok(opts)
-}
-
-fn print_sudo_help() {
-    println!("Slate OS Sudo v0.1.0");
-    println!();
-    println!("Run a command as another user (default: root).");
-    println!();
-    println!("USAGE:");
-    println!("  sudo [options] command [args...]");
-    println!();
-    println!("OPTIONS:");
-    println!("  -u, --user <user>   Run as this user (default: root)");
-    println!("  -l, --list          List caller's permissions");
-    println!("  -h, --help          Show this help");
-    println!("  -V, --version       Show version");
-    println!();
-    println!("POLICY:");
-    println!("  root can run any command as any user.");
-    println!("  Members of the 'wheel' or 'admin' group can sudo to root.");
-}
-
-/// Check whether the caller is authorised to use sudo.
-///
-/// Policy: root (uid 0) can do anything. Members of `wheel` or `admin`
-/// groups can sudo to root. Other combinations are denied.
-/// `_target_uid` is unused: the policy grants an administrator the right to
-/// become *anyone*, so sudo-to-root and sudo-to-alice take the same test. The
-/// parameter is kept because that is a policy choice rather than an oversight,
-/// and a future policy that does distinguish them needs it back.
-fn sudo_authorised(caller: &Record, _target_uid: u32) -> bool {
-    // Root can always sudo.
-    if caller.uid() == Some(0) {
-        return true;
-    }
-    in_admin_group(caller) || caller.is_admin()
-}
-
-/// Print the caller's sudo permissions.
-fn sudo_list_permissions(caller: &Record) {
-    println!("User {} may run the following commands:", name_of(caller));
-    if caller.uid() == Some(0) {
-        println!("    (ALL) ALL");
-    } else if caller.is_admin() || in_admin_group(caller) {
-        println!("    (ALL) ALL  [via wheel/admin group membership]");
-    } else {
-        println!("    (NONE)");
-    }
-}
-
-/// Run the `sudo` command.
-fn run_sudo(args: &[String]) -> i32 {
-    let opts = match parse_sudo_args(args) {
-        Ok(o) => o,
-        Err(code) => return code,
-    };
-
-    let Some(users) = load_users("sudo") else {
-        return 1;
-    };
-
-    let caller_uid = get_caller_uid(&users);
-    let Some(caller) = users.find_uid(caller_uid) else {
-        eprintln!(
-            "sudo: unknown calling user (uid {caller_uid}); \
-             cannot determine permissions"
-        );
-        return 1;
-    };
-
-    if opts.list_mode {
-        sudo_list_permissions(caller);
-        return 0;
-    }
-
-    let Some(target) = users.find(&opts.target_user) else {
-        eprintln!("sudo: unknown user: {}", opts.target_user);
-        return 1;
-    };
-
-    if target.is_locked() {
-        eprintln!("sudo: account '{}' is locked", name_of(target));
-        return 1;
-    }
-
-    // Authorisation check.
-    if !sudo_authorised(caller, target.uid().unwrap_or(u32::MAX)) {
-        let caller_name = name_of(caller);
-        eprintln!(
-            "sudo: user '{caller_name}' is not in the sudoers file. \
-             This incident will be reported."
-        );
-        // Log the failed attempt.
-        log_sudo_failure(&caller_name, &opts.command);
-        return 1;
-    }
-
-    // Authenticate: require the caller's own password (sudo convention),
-    // unless the caller is root.
-    if caller_uid != 0 {
-        // Keyed by the *caller* here, not the target: sudo asks for your own
-        // password, so your own failures are what accumulate.
-        let prompt = format!("[sudo] password for {}: ", name_of(caller));
-        let mut auth = authlib::Authenticator::new();
-        if !authenticate(&mut auth, caller, &prompt, "sudo") {
-            return 1;
-        }
-    }
-
-    // Execute the command as the target user.
-    let command_str = opts.command.join(" ");
-
-    exec_as_user(
-        target,
-        None,
-        Some(&command_str),
-        false, // not a login shell
-        false, // don't preserve env
-    )
-}
-
-/// Log a sudo authorisation failure to syslog or a fallback file.
-fn log_sudo_failure(username: &str, command: &[String]) {
-    let now = current_epoch_secs();
-    let cmd_str = command.join(" ");
-    let msg = format!("{now} sudo: DENIED user={username} command=\"{cmd_str}\"\n");
-    // Best-effort: append to the auth log.
-    if let Ok(mut file) = fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open("/var/log/auth.log")
-    {
-        let _ = file.write_all(msg.as_bytes());
-    }
-}
-
-// ============================================================================
-// Entry point: detect su vs sudo via argv[0]
-// ============================================================================
-
-/// Extract the base name from a path (everything after the last `/` or `\`).
-fn basename(path: &str) -> &str {
-    let after_slash = path.rsplit('/').next().unwrap_or(path);
-    after_slash.rsplit('\\').next().unwrap_or(after_slash)
-}
+// This used to dispatch on `basename(argv[0])`, running a built-in `sudo` when
+// the binary was invoked under that name. It does not any more, and the
+// `basename` helper went with it: there is exactly one program here now, so
+// consulting `argv[0]` to decide what to be could only ever pick wrong. A
+// symlink named `sudo` pointing at this binary now runs `su`, which is the
+// honest outcome — the `sudo` behaviour lives in `userspace/sudo`.
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-
-    let prog = args.first().map(|s| basename(s)).unwrap_or("su");
-
-    let exit_code = if prog == "sudo" || prog == "sudo.exe" {
-        run_sudo(&args)
-    } else {
-        run_su(&args)
-    };
-
-    process::exit(exit_code);
+    process::exit(run_su(&args));
 }
 
 // ============================================================================
@@ -1027,40 +822,13 @@ users:
         assert_eq!(record.check_password("hunter2"), Auth::Locked);
     }
 
-    // --- sudo authorisation ---
-
-    #[test]
-    fn test_sudo_root_always_authorised() {
-        let users = parse_sample_users();
-        let root = users.find("root").unwrap();
-        assert!(sudo_authorised(root, 0));
-        assert!(sudo_authorised(root, 1000));
-        assert!(sudo_authorised(root, 1001));
-    }
-
-    #[test]
-    fn test_sudo_wheel_member_authorised_for_root() {
-        let users = parse_sample_users();
-        let alice = users.find("alice").unwrap();
-        // Alice is in wheel group -> can sudo to root.
-        assert!(sudo_authorised(alice, 0));
-    }
-
-    #[test]
-    fn test_sudo_wheel_member_authorised_for_other() {
-        let users = parse_sample_users();
-        let alice = users.find("alice").unwrap();
-        // Wheel members can sudo to any user.
-        assert!(sudo_authorised(alice, 1001));
-    }
-
-    #[test]
-    fn test_sudo_non_wheel_denied() {
-        let users = parse_sample_users();
-        let bob = users.find("bob").unwrap();
-        // Bob is only in 'users' group -- no sudo.
-        assert!(!sudo_authorised(bob, 0));
-    }
+    // The sudo-authorisation tests that used to sit here are gone with the
+    // policy they tested. They asserted this binary's own "root, wheel or
+    // admin may run anything" rule, which was never consulted by the real
+    // `sudo` and is not the rule `userspace/sudo` applies; keeping them would
+    // have pinned a second, contradictory answer to "who may run what as
+    // root". Authorisation coverage belongs to `userspace/sudo` and its
+    // `/etc/sudoers` parser.
 
     // --- su argument parsing ---
 
@@ -1171,84 +939,6 @@ users:
         assert_eq!(parse_su_args(&args).unwrap_err(), 0);
     }
 
-    // --- sudo argument parsing ---
-
-    #[test]
-    fn test_sudo_args_simple_command() {
-        let args = vec!["sudo".to_string(), "ls".to_string(), "-la".to_string()];
-        let opts = parse_sudo_args(&args).unwrap();
-        assert_eq!(opts.target_user, "root");
-        assert_eq!(opts.command, vec!["ls", "-la"]);
-        assert!(!opts.list_mode);
-    }
-
-    #[test]
-    fn test_sudo_args_user_flag() {
-        let args = vec![
-            "sudo".to_string(),
-            "-u".to_string(),
-            "alice".to_string(),
-            "whoami".to_string(),
-        ];
-        let opts = parse_sudo_args(&args).unwrap();
-        assert_eq!(opts.target_user, "alice");
-        assert_eq!(opts.command, vec!["whoami"]);
-    }
-
-    #[test]
-    fn test_sudo_args_list_mode() {
-        let args = vec!["sudo".to_string(), "-l".to_string()];
-        let opts = parse_sudo_args(&args).unwrap();
-        assert!(opts.list_mode);
-    }
-
-    #[test]
-    fn test_sudo_args_no_command() {
-        let args = vec!["sudo".to_string()];
-        assert_eq!(parse_sudo_args(&args).unwrap_err(), 1);
-    }
-
-    #[test]
-    fn test_sudo_args_user_missing_arg() {
-        let args = vec!["sudo".to_string(), "-u".to_string()];
-        assert_eq!(parse_sudo_args(&args).unwrap_err(), 1);
-    }
-
-    #[test]
-    fn test_sudo_args_help() {
-        let args = vec!["sudo".to_string(), "--help".to_string()];
-        assert_eq!(parse_sudo_args(&args).unwrap_err(), 0);
-    }
-
-    #[test]
-    fn test_sudo_args_version() {
-        let args = vec!["sudo".to_string(), "--version".to_string()];
-        assert_eq!(parse_sudo_args(&args).unwrap_err(), 0);
-    }
-
-    // --- Basename ---
-
-    #[test]
-    fn test_basename_simple() {
-        assert_eq!(basename("su"), "su");
-    }
-
-    #[test]
-    fn test_basename_with_slash() {
-        assert_eq!(basename("/usr/bin/su"), "su");
-        assert_eq!(basename("/usr/bin/sudo"), "sudo");
-    }
-
-    #[test]
-    fn test_basename_with_backslash() {
-        assert_eq!(basename("C:\\Windows\\sudo.exe"), "sudo.exe");
-    }
-
-    #[test]
-    fn test_basename_mixed() {
-        assert_eq!(basename("/usr/bin\\su"), "su");
-    }
-
     // --- Default path ---
 
     #[test]
@@ -1338,19 +1028,6 @@ users:
         assert_eq!(opts.shell.as_deref(), Some("/bin/fish"));
         assert_eq!(opts.command.as_deref(), Some("uname -a"));
         assert_eq!(opts.target_user, "root");
-    }
-
-    #[test]
-    fn test_sudo_command_with_flags() {
-        // Everything after the first non-option arg is the command.
-        let args = vec![
-            "sudo".to_string(),
-            "ls".to_string(),
-            "-la".to_string(),
-            "/tmp".to_string(),
-        ];
-        let opts = parse_sudo_args(&args).unwrap();
-        assert_eq!(opts.command, vec!["ls", "-la", "/tmp"]);
     }
 
     // --- The shared failed-attempt tally (§354) ---

@@ -626,6 +626,21 @@ Roadmap:
   **Still not run on SlateOS**; the ring-3 rung lives in lane A's tree and is
   requested in `requests/b-a-cpython-path-z-self-test.md`. A real pty layer
   remains ahead.
+- `[B]` **Pseudo-terminals — scoped 2026-08-21, blocked on lane A.** The libc
+  half is already written and composed over the primitives
+  (`posix/src/pty.rs`: `openpty`/`forkpty`/`login_tty`), so it starts working
+  with no edit the moment `posix_openpt` can return a master fd. What is
+  missing is a kernel object, and it must be one: a pty's `termios` is shared
+  by two *processes*, and `^C` has to reach the foreground group when it is
+  typed rather than when somebody next calls `read`. Neither is expressible in
+  libc — see design-decisions.md §345 for the alternative and why it fails.
+  The ask is mostly a *generalisation* of the console line discipline that
+  `kernel/src/tty.rs` already implements and self-tests, from one hardwired
+  device to N. Filed as
+  `requests/b-a-pty-devices-need-the-line-discipline-that-the-console-already-has.md`.
+  Blocks: interactive CPython, `apps/terminal` driving a real shell (C), and
+  sshd's PTY support (marked `[x]` at line ~2857, which cannot be true in the
+  sense that matters).
 - `[B]` Translate POSIX calls to native syscalls (line ~1738)
 - `[B]` gcc, cmake, make, pkg-config via the POSIX layer (line ~5343)
 - `[B]` Rust toolchain, CPython, fastpy compiler self-hosting (lines ~5344–5346)

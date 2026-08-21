@@ -14,14 +14,22 @@
 //!
 //! ## Where the frame goes
 //!
-//! On Windows this opens a host window and draws into it, so a person can see
-//! the desktop the compositor composites and type at it — see
-//! [`compositor::present::host`]. That is a **development harness**, not the
-//! target: the target is a SlateOS display driver, which is
-//! `known-issues.md` → `TD-COMPOSITOR-HAS-NO-SCANOUT` and will be another
-//! `impl Present` with nothing else here changing. Everywhere else, and under
-//! `--headless`, the composited frame is produced and dropped, which is right
-//! for a display server whose clients are all remote.
+//! On SlateOS this opens `/dev/dri/card0`, reads the mode the display is
+//! already running, and page-flips composited frames onto it — see
+//! [`compositor::present::drm`]. That is the target. On Windows it opens a host
+//! window and draws into it instead, so a person can see the desktop the
+//! compositor composites and type at it — see [`compositor::present::host`];
+//! that is a **development harness**. Everywhere else, and under `--headless`,
+//! the composited frame is produced and dropped, which is right for a display
+//! server whose clients are all remote.
+//!
+//! One asymmetry follows from the hardware and is not an oversight: with a host
+//! window the size is ours to pick, so `--size` sets it; with a real display the
+//! size is the display's, because the kernel has no `SETCRTC` and the mode
+//! cannot be changed (`known-issues.md` → `TD-COMPOSITOR-CANNOT-CHANGE-MODE`).
+//! `--size` is therefore reported as ignored rather than silently obeyed. This
+//! is also why the compositor is not constructed until `run` has found a
+//! display: until then nobody knows how big it should be.
 
 use compositor::{Compositor, Server};
 
@@ -31,6 +39,11 @@ use compositor::{Compositor, Server};
 /// *client* area does not fit on a 1920x1080 screen once a title bar and a
 /// taskbar have taken their share, and a harness whose bottom edge is off the
 /// display is a harness that hides exactly the thing it exists to show.
+///
+/// Only the host-window harness has a size of its own to choose. On SlateOS the
+/// display's own mode decides the size and this constant would be a lie, so it
+/// is not compiled there.
+#[cfg(windows)]
 const WINDOWED_SIZE: (u32, u32) = (1280, 800);
 
 /// The default size when nothing will be looked at.
@@ -150,7 +163,7 @@ fn main() {
         return;
     }
 
-    let addr = match options.addr {
+    let addr = match options.addr.clone() {
         Some(explicit) => explicit,
         None => match guiremote::socket::display_addr() {
             Ok(a) => a,
@@ -160,28 +173,6 @@ fn main() {
             }
         },
     };
-
-    let (width, height) = options.size.unwrap_or(if options.headless {
-        HEADLESS_SIZE
-    } else {
-        WINDOWED_SIZE
-    });
-
-    let mut compositor = match Compositor::new(width, height, REFRESH_HZ) {
-        Ok(c) => c,
-        Err(e) => {
-            eprintln!("compositor: failed to initialize: {e}");
-            std::process::exit(1);
-        }
-    };
-
-    // The user's window-corner and drop-shadow choices. Read here rather than
-    // in `Compositor::new` so that the library's *constructor* has no opinion
-    // about `$HOME` and its tests do not depend on the machine running them.
-    // The same call a `ReloadAppearance` request makes later, so that startup
-    // and reload cannot come to disagree about where the settings live or what
-    // a missing file means — which on a fresh install is simply the defaults.
-    compositor.reload_appearance();
 
     let mut server = match Server::bind(&addr) {
         Ok(s) => s,
@@ -196,70 +187,125 @@ fn main() {
         }
     };
 
-    eprintln!("compositor: initialized ({width}x{height} @ {REFRESH_HZ}Hz)");
     match server.local_addr() {
         Ok(bound) => eprintln!("compositor: listening on {bound}"),
         Err(e) => eprintln!("compositor: listening, but cannot name the address: {e}"),
     }
 
-    let outcome = run(
-        &mut server,
-        &mut compositor,
-        options.headless,
-        width,
-        height,
-    );
-    if let Err(e) = outcome {
+    if let Err(e) = run(&mut server, &options) {
         eprintln!("compositor: the listening socket failed: {e}");
         std::process::exit(1);
     }
 }
 
-/// Serve, onto a host window where there can be one.
+/// Build the compositor at a given size, or die saying why.
 ///
-/// Split out of `main` so that the `#[cfg]` is in one small place rather than
-/// wrapped around the whole of startup: the argument parsing, the bind and the
-/// diagnostics are identical on every platform and should not be compiled
-/// twice.
-#[cfg(windows)]
-fn run(
-    server: &mut Server,
-    compositor: &mut Compositor,
-    headless: bool,
-    width: u32,
-    height: u32,
-) -> std::io::Result<()> {
-    if headless {
-        return server.run(compositor);
+/// Separated from `run` because every platform needs it and none of them needs
+/// it *first*: the size is not known until the display is, which on a real
+/// screen means after the card has been opened and its mode read.
+fn make_compositor(width: u32, height: u32) -> Compositor {
+    let mut compositor = match Compositor::new(width, height, REFRESH_HZ) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("compositor: failed to initialize: {e}");
+            std::process::exit(1);
+        }
+    };
+    // The user's window-corner and drop-shadow choices. Read here rather than
+    // in `Compositor::new` so that the library's *constructor* has no opinion
+    // about `$HOME` and its tests do not depend on the machine running them.
+    // The same call a `ReloadAppearance` request makes later, so that startup
+    // and reload cannot come to disagree about where the settings live or what
+    // a missing file means — which on a fresh install is simply the defaults.
+    compositor.reload_appearance();
+    eprintln!("compositor: initialized ({width}x{height} @ {REFRESH_HZ}Hz)");
+    compositor
+}
+
+/// Serve with no display, at whatever size was asked for.
+fn run_headless(server: &mut Server, options: &Options) -> std::io::Result<()> {
+    let (width, height) = options.size.unwrap_or(HEADLESS_SIZE);
+    let mut compositor = make_compositor(width, height);
+    server.run(&mut compositor)
+}
+
+/// Serve, scanning out on the machine's own display.
+///
+/// The size is the display's and not the caller's: there is no `SETCRTC` in
+/// this kernel, so `--size` cannot change what the monitor is running at, and
+/// building the compositor at anything else would put a picture in the corner
+/// of the screen with a border round it.
+#[cfg(target_os = "linux")]
+fn run(server: &mut Server, options: &Options) -> std::io::Result<()> {
+    use compositor::present::drm::DrmScanout;
+
+    if options.headless {
+        return run_headless(server, options);
     }
+    match DrmScanout::card0() {
+        Ok(mut screen) => {
+            let (width, height) = screen.size();
+            if let Some(asked) = options.size {
+                if asked != (width, height) {
+                    eprintln!(
+                        "compositor: ignoring --size {}x{}; the display is running at \
+                         {width}x{height} and its mode cannot be changed",
+                        asked.0, asked.1
+                    );
+                }
+            }
+            eprintln!(
+                "compositor: scanning out on connector {} via CRTC {}",
+                screen.connector_id(),
+                screen.crtc_id()
+            );
+            let mut compositor = make_compositor(width, height);
+            server.run_with(&mut compositor, &mut screen)
+        }
+        Err(e) => {
+            // No card, nothing plugged in, or no permission. Serving remote
+            // clients is still entirely useful, so this is a warning and not an
+            // exit — the same judgement the Windows arm makes about a missing
+            // window station.
+            eprintln!("compositor: no display ({e}); compositing headless");
+            run_headless(server, options)
+        }
+    }
+}
+
+/// Serve, onto a host window.
+///
+/// A development harness: this is how a person looks at the desktop on the
+/// machine the tree is written on. See [`compositor::present::host`].
+#[cfg(windows)]
+fn run(server: &mut Server, options: &Options) -> std::io::Result<()> {
+    if options.headless {
+        return run_headless(server, options);
+    }
+    let (width, height) = options.size.unwrap_or(WINDOWED_SIZE);
+    let mut compositor = make_compositor(width, height);
     match compositor::present::host::Window::new("SlateOS", width, height) {
         Ok(mut window) => {
             eprintln!("compositor: showing the desktop in a host window; close it to stop");
-            server.run_with(compositor, &mut window)
+            server.run_with(&mut compositor, &mut window)
         }
         Err(e) => {
             // A missing window station — a service, or a session with no
             // desktop. Serving remote clients is still entirely useful, so
             // this is a warning and not an exit.
             eprintln!("compositor: no host window ({e}); compositing headless");
-            server.run(compositor)
+            server.run(&mut compositor)
         }
     }
 }
 
-/// Serve. There is no window to open on this platform.
-#[cfg(not(windows))]
-fn run(
-    server: &mut Server,
-    compositor: &mut Compositor,
-    headless: bool,
-    _width: u32,
-    _height: u32,
-) -> std::io::Result<()> {
-    if !headless {
-        eprintln!("compositor: this build has no way to open a window; compositing headless");
+/// Serve. There is no display this build knows how to drive.
+#[cfg(not(any(windows, target_os = "linux")))]
+fn run(server: &mut Server, options: &Options) -> std::io::Result<()> {
+    if !options.headless {
+        eprintln!("compositor: this build has no way to open a display; compositing headless");
     }
-    server.run(compositor)
+    run_headless(server, options)
 }
 
 #[cfg(test)]

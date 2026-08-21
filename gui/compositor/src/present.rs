@@ -28,15 +28,24 @@
 //!   with its keyboard and mouse messages translated into
 //!   [`InputEvent`](crate::InputEvent)s. This is a **development harness**, and
 //!   is described as one in that module: it is how a person can look at the
-//!   desktop this compositor draws, on the machine the tree is developed on,
-//!   without a SlateOS display driver existing yet.
+//!   desktop this compositor draws, on the machine the tree is developed on.
+//! * [`drm::DrmScanout`] on SlateOS — the real target. It opens
+//!   `/dev/dri/card0`, finds the connected display and the mode it is already
+//!   running, allocates two dumb buffers, and page-flips composited frames onto
+//!   the screen. This is what closed `known-issues.md` →
+//!   `TD-COMPOSITOR-HAS-NO-SCANOUT`, and it needed no change to
+//!   [`Server::run_with`](crate::Server::run_with) — which is the claim this
+//!   trait was designed to make good on.
 //!
-//! ## What is still missing, and it is the real target
+//! ## What is still missing
 //!
-//! SlateOS's own scanout — asking the display driver for a mapping of the
-//! framebuffer and page-flipping into it. That is `known-issues.md` →
-//! `TD-COMPOSITOR-HAS-NO-SCANOUT`, and this module is the seam it will plug
-//! into: another `impl Present`, with `Server::run_with` unchanged.
+//! Input on SlateOS. [`drm::DrmScanout`] is a screen and only a screen: it
+//! inherits the default [`Present::input`], which returns nothing, because the
+//! kernel exposes no evdev-style device for the keyboard and mouse yet. A
+//! SlateOS desktop therefore draws correctly and cannot be typed at. That is
+//! `known-issues.md` → `TD-COMPOSITOR-HAS-NO-LOCAL-INPUT`, and it plugs into
+//! this same seam — either as a second method on the scanout or as a separate
+//! device the binary polls alongside it.
 
 use crate::InputEvent;
 
@@ -202,6 +211,8 @@ impl Present for Recording {
         self.open && self.close_after.is_none_or(|limit| self.ticks < limit)
     }
 }
+
+pub mod drm;
 
 #[cfg(windows)]
 pub mod host;

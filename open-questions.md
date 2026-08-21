@@ -1252,6 +1252,79 @@ the table costs A at "one rebuild per `posix/` change", and the real cost is
 I have done the rebuild again (fourth time); the recommendation above still
 stands as written, but the gap between A and B is narrower than the table says.
 
+### UPDATE 2026-08-21 (lane A) — C's blocking premise is now **verified**, and today's fifth recurrence produced a new argument *for* C
+
+The operator asked whether `libc.a` builds byte-reproducibly, since that is the
+one thing C's "Against" column rests on. **It does.** Two independent tests,
+both run today:
+
+| Test | Result |
+|---|---|
+| **Cross-worktree.** Lane B built `libc.a` in `D:\…\os-lane-b` and its stamps record `5e252d0d790a2194…`. Lane A rebuilt it from the same (merged) source in `D:\…\os-lane-a` — a *different absolute path* — and a target dir that previously held a different archive (`c4dae9466f23f22f…`). | **Byte-identical: `5e252d0d790a2194…`.** So no build-directory path is embedded in the archive in any way that reaches its bytes. |
+| **Full recompile.** `touch posix/src/lib.rs` to force the whole `posix` crate to rebuild (confirmed — `Compiling posix` ran), then relink. | **`5e252d0d790a2194…` again.** Not a cache hit; the compile-and-archive step is itself deterministic. |
+
+**Honest limits of that claim.** Same machine, same `rustc`, same `zig`. Cross-
+*machine* and cross-*toolchain-version* reproducibility is untested. That does
+not damage C: the gate C proposes compares a freshly built `libc.a` **on your
+own machine** against the recorded id, so a toolchain upgrade would churn the
+file exactly once — and arguably *should*, since the 70 ELFs genuinely are stale
+after a compiler change. The "churns meaninglessly and everyone learns to ignore
+it" failure the Against column feared requires nondeterminism *within* one
+toolchain, and there is none.
+
+**The new argument, which is worth more than the reproducibility result.**
+A fifth recurrence happened today, to lane A, and it exposed something the
+options table does not capture: **the content-stamp gate's remediation advice
+points the wrong way in the more dangerous of the two cases.**
+
+`ctest-fixtures.py check` reported all nine fixtures STALE and said:
+
+```
+input toolchain/sysroot/lib/libc.a: recorded 5e252d0d… but on disk c4dae946…
+Rebuild it (do NOT re-stamp - that only records the drift):
+  scripts/ctest-fixtures.py build --only ctest-ctty
+```
+
+Following that advice would have been **wrong and destructive**. The stale side
+was `libc.a`, not the ELFs — lane A's sysroot predated two `posix/` commits the
+merge had just brought in. Rebuilding the fixtures would have relinked all nine
+against a stale libc and committed them, which is *precisely* incident #2
+(2026-08-16) recreated by hand. The correct action was to rebuild the sysroot;
+the hashes then matched the committed stamps with nothing else touched.
+
+The gate cannot distinguish the two cases, because it has only one hash and no
+way to know which side moved. That is the same "being diligent makes it quieter"
+trap the entry already names — but stated one level sharper: **the tool actively
+instructs you into it.**
+
+What saved it today was `create-ext4-rootfs.sh`'s *mtime* gate, which said
+"`libc.a` is STALE … rebuild the sysroot first, then the fixtures" — the right
+answer. But `ctest-fixtures.py`'s own docstring argues at length that mtime is
+the wrong instrument and is **silent in a fresh clone**, which is true. So in a
+clone — CI, a new machine — only the wrong advice survives.
+
+**This is a direct argument for C** and it is not on the table above. A
+committed `libc.a.id` gives the gate a second reference point, which is exactly
+what it needs to tell the two cases apart and print the correct remedy:
+
+| `libc.a` on disk vs committed id | ELF vs its stamp | Diagnosis | Remedy the gate can now print |
+|---|---|---|---|
+| differs | — | your sysroot is not this tree's | **rebuild the sysroot** |
+| matches | differs | the ELF is behind a current libc | **rebuild the fixture** |
+
+Under A that table is unreachable; under B the whole situation is gone. So the
+reproducibility answer promotes C from "attractive but unverified" to "verified,
+and it fixes a wrong-advice bug that A leaves in place".
+
+**Lane A's revised read, for whatever it is worth to lane B (this is lane B's
+call):** the recommendation above — "A for now, B once every lane has the
+toolchain" — was written when C rested on an unverified claim. It no longer
+does, and C is now the only option that fixes the misdirection *without*
+requiring every lane to own a toolchain. If B remains the destination, C is a
+strictly-better waypoint than A on the way there, and its cost is one small text
+file. The one thing C does **not** do, which B does, is stop the drift from
+being possible at all.
+
 ---
 
 ## Q51 — [A] The thing that blocked 3D graphics for a month has quietly been available all along; it was one wrong command-line flag. Start the 3D work now, or leave it parked? — Status: OPEN

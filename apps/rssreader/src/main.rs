@@ -898,22 +898,23 @@ impl Folder {
 // ============================================================================
 
 /// Format a Unix timestamp into a human-readable date string.
+///
+/// This was the `secs % 86400` decomposition five programs each wrote for
+/// themselves, of which the undelete tool's was a fortnight wrong. A feed
+/// item's publication date is an instant like any other, and the shared
+/// [`guitk::datetime`] is where the tree keeps its one answer.
+///
+/// UTC, explicitly, because this program has no zone to read: there is no
+/// per-process zone plumbing yet (known-issues
+/// `TD-NO-SYSTEM-DEFAULT-ZONE-WITHOUT-TZ`). It matters more here than in most
+/// places — an item's `<pubDate>` carries an offset that
+/// [`parse_date_string`] already normalises to UTC, so the *reader* is the
+/// only thing left that could put it back into local time.
 pub fn format_timestamp(ts: u64) -> String {
-    // Simple epoch-based formatting (no chrono dependency)
-    let secs_per_minute: u64 = 60;
-    let secs_per_hour: u64 = 3600;
-    let secs_per_day: u64 = 86400;
-
-    let days = ts / secs_per_day;
-    let remaining = ts % secs_per_day;
-    let hours = remaining / secs_per_hour;
-    let remaining = remaining % secs_per_hour;
-    let minutes = remaining / secs_per_minute;
-
-    // Simple year/month/day from days since epoch (1970-01-01)
-    let (year, month, day) = days_to_ymd(days);
-
-    format!("{year:04}-{month:02}-{day:02} {hours:02}:{minutes:02}")
+    guitk::datetime::stamp(
+        i64::try_from(ts).unwrap_or(i64::MAX),
+        &guitk::tzrules::Tz::utc(),
+    )
 }
 
 /// The instant the bundled sample articles are dated from, so that the sample
@@ -4981,8 +4982,11 @@ mod tests {
     fn test_format_timestamp_known_date() {
         // 2024-01-01 00:00:00 UTC
         let ts = ymd_hms_to_epoch(2024, 1, 1, 0, 0, 0).expect("2024-01-01 is a date");
-        let formatted = format_timestamp(ts);
-        assert!(formatted.starts_with("2024-01-01"));
+        assert_eq!(format_timestamp(ts), "2024-01-01 00:00");
+        // 2026-08-18 16:30:45 UTC — asserted whole, because a `starts_with`
+        // on the date can pass while the time of day is derived separately
+        // and disagrees with it.
+        assert_eq!(format_timestamp(1_787_070_645), "2026-08-18 16:30");
     }
 
     /// The leap rule, asserted through the function this program actually

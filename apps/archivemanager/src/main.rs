@@ -321,22 +321,30 @@ impl ArchiveEntry {
     }
 
     /// Format a Unix timestamp as a date string.
+    ///
+    /// `"-"` for zero stays here rather than moving into the shared
+    /// formatter: an archive entry with no stored mtime is one whose time is
+    /// unknown, which is a different fact from "written at the epoch".
+    ///
+    /// The rest was the same `secs % 86400` decomposition the file explorer,
+    /// the RSS reader, the task scheduler and the undelete tool each wrote
+    /// for themselves — the same shape, five times, and only four of them
+    /// right. It renders a file's modification time, which is the very object
+    /// the explorer's Date column renders, so it must not be a separate
+    /// answer.
+    ///
+    /// UTC, explicitly, because this program has no zone to read: there is no
+    /// per-process zone plumbing yet (known-issues
+    /// `TD-NO-SYSTEM-DEFAULT-ZONE-WITHOUT-TZ`). Saying so with `Tz::utc()`
+    /// leaves a mark that can be found and fixed when there is one.
     pub fn format_date(timestamp: u64) -> String {
-        // Simplified: just show raw seconds-since-epoch for now.
-        // A real implementation would use a date formatting library.
         if timestamp == 0 {
             return String::from("-");
         }
-        // Rough conversion: seconds since 1970-01-01 to YYYY-MM-DD HH:MM
-        let secs = timestamp;
-        let days = secs / 86400;
-        let time_of_day = secs % 86400;
-        let hours = time_of_day / 3600;
-        let minutes = (time_of_day % 3600) / 60;
-
-        // Approximate year/month/day from days since epoch.
-        let (year, month, day) = days_to_ymd(days);
-        format!("{year:04}-{month:02}-{day:02} {hours:02}:{minutes:02}")
+        guitk::datetime::stamp(
+            i64::try_from(timestamp).unwrap_or(i64::MAX),
+            &guitk::tzrules::Tz::utc(),
+        )
     }
 
     /// Parent directory path, or empty string for root-level entries.
@@ -2697,12 +2705,17 @@ mod tests {
         assert_eq!(ArchiveEntry::format_date(0), "-");
     }
 
+    /// Asserted by value, not by punctuation.
+    ///
+    /// The assertions this replaces were `contains('-')` and `contains(':')`,
+    /// which "2026-13-40 25:99" also satisfies. A test that only checks the
+    /// separators cannot notice a wrong calendar, and a wrong calendar is
+    /// what four sibling programs' copies of this arithmetic turned out to
+    /// hold.
     #[test]
     fn test_entry_format_date_nonzero() {
-        let d = ArchiveEntry::format_date(1716000000);
-        // Should produce a date string with year, month, day.
-        assert!(d.contains('-'));
-        assert!(d.contains(':'));
+        // 2024-05-18 02:40:00 UTC.
+        assert_eq!(ArchiveEntry::format_date(1_716_000_000), "2024-05-18 02:40");
     }
 
     #[test]

@@ -2558,6 +2558,22 @@ impl Default for SchedulerUI {
 // ============================================================================
 
 /// Format a unix timestamp into a human-readable UTC date/time string.
+///
+/// The two sentinels stay here rather than moving into the shared formatter:
+/// `"Never"` means a task that has not run yet and `"--"` a next-run time
+/// that does not exist, and neither is a rendering of an instant.
+///
+/// What replaced the rest is the point. This function decomposed the instant
+/// **twice** — once through `decompose_timestamp` for the time of day and
+/// again through `days_to_ymd(ts / 86400)` for the date — so the two halves
+/// of one string were derived by two different routes, and nothing made them
+/// agree. That is the shape a timezone would have broken first: applying an
+/// offset to one half and not the other yields a clock reading from one day
+/// stamped with another day's date. `guitk::datetime` decomposes once.
+///
+/// UTC, explicitly: there is no per-process zone plumbing yet (known-issues
+/// `TD-NO-SYSTEM-DEFAULT-ZONE-WITHOUT-TZ`), and a scheduler that shows the
+/// wrong hour is a scheduler nobody can set.
 fn format_timestamp(ts: u64) -> String {
     if ts == 0 {
         return String::from("Never");
@@ -2565,12 +2581,9 @@ fn format_timestamp(ts: u64) -> String {
     if ts == u64::MAX {
         return String::from("--");
     }
-
-    let dt = decompose_timestamp(ts);
-    let (year, month, day) = days_to_ymd(ts / 86400);
-    format!(
-        "{year:04}-{month:02}-{day:02} {:02}:{:02}",
-        dt.hour, dt.minute
+    guitk::datetime::stamp(
+        i64::try_from(ts).unwrap_or(i64::MAX),
+        &guitk::tzrules::Tz::utc(),
     )
 }
 
@@ -3497,10 +3510,18 @@ mod tests {
     }
 
     #[test]
+    /// Asserted by value, not by prefix.
+    ///
+    /// `starts_with("2023-")` is satisfied by every one of the 365 days of
+    /// that year, so it could not have noticed a calendar that was a
+    /// fortnight out — which is precisely what `apps/undelete`'s copy of this
+    /// same arithmetic was.
     fn test_format_timestamp_known() {
-        // 1700000000 = 2023-11-14 22:13 UTC
-        let s = format_timestamp(1_700_000_000);
-        assert!(s.starts_with("2023-"));
+        // 2023-11-14 22:13:20 UTC.
+        assert_eq!(format_timestamp(1_700_000_000), "2023-11-14 22:13");
+        // The date and the time of day used to be decomposed by two separate
+        // routes; this asserts they name one instant.
+        assert_eq!(format_timestamp(1_787_070_645), "2026-08-18 16:30");
     }
 
     #[test]

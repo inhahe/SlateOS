@@ -50941,9 +50941,10 @@ shell, whose signals arrive from keypresses. It becomes a genuine hang the
 moment a second terminal exists and something on it kills a job on the console —
 which is the state the pty work creates.
 
-## BUG-POSIX-SPAWN-FILE-ACTIONS-IS-4624-BYTES-IN-AN-80-BYTE-SLOT (found by lane A, 2026-08-21)
+## BUG-POSIX-SPAWN-FILE-ACTIONS-IS-4624-BYTES-IN-AN-80-BYTE-SLOT (found by lane A, 2026-08-21) — FIXED 2026-08-21 by lane B
 
-**Status:** OPEN. **Owner: lane B** (`posix/src/spawn.rs`). Filed as
+**Status:** FIXED — see "Resolution" at the end of this entry. **Owner: lane B**
+(`posix/src/spawn.rs`). Filed as
 `requests/a-b-posix-spawn-file-actions-init-smashes-the-callers-stack.md`,
 which carries the disassembly, the layout table and the recommended fix.
 
@@ -51002,6 +51003,113 @@ all exact. `sem_t` (32→4), `regex_t` (64→16) and `glob_t` (72→24) are
 *undersized*, which does not smash anything; noted in the request as a
 lower-priority correctness point, not a safety one. `posix_spawn_file_actions_t`
 is the only one in the dangerous direction.
+
+### Resolution — 2026-08-21, lane B
+
+The struct is now the 80 bytes, with the actions out of line behind the pointer
+at offset 8 exactly as musl and glibc do it:
+
+```rust
+#[repr(C)]
+pub struct PosixSpawnFileActionsT {
+    allocated: i32,                 //  0
+    used: i32,                      //  4
+    actions: *mut FileActionSlot,   //  8
+    _pad: [i32; 16],                // 16
+}
+```
+
+`init` zeroes and NULLs; `destroy` frees and re-NULLs so it is idempotent; the
+five `add*` entry points share one `push` that allocates on first use.
+
+**Both guards, not either.** A `const _: () = { assert!(size_of::<…>() == 80); … }`
+so the mistake cannot be *built*, which is what lane A asked for and is the
+right call — plus `test_file_actions_matches_musl_layout` pinning the offsets
+0/4/8/16, which a const block cannot express.
+
+**Extended to the whole table lane A audited**, since its point was that no
+Rust-side test can ever see these mismatches. `posix_spawnattr_t`,
+`pthread_mutex_t`, `pthread_cond_t`, `pthread_rwlock_t`, `pthread_barrier_t`,
+`sem_t`, `regex_t` and `glob_t` all now carry a `const` assertion. The bound is
+`size_of::<T>() <= <header size>` rather than `==`, because that is the actual
+safety property — **undersized cannot smash, oversized always can** — so it is
+true today for the three undersized types *and* still fires the day one of them
+grows past its slot. `pthread.rs`'s module doc carries the reasoning once and
+the other files point at it.
+
+**Two of lane A's suggestions were not taken**, both because of local facts its
+report could not have known; the reasoning is in `push`'s doc comment and in the
+reply appended to the request file.
+
+- *The path stays inline at 256 bytes rather than being `strdup`ed.* Shrinking
+  the slot from 288 to ~24 bytes is right for a conventional malloc and
+  backwards for ours: `posix/src/malloc.rs` is one mapping per allocation
+  rounded up to a 16 KiB `REGION_ALIGN`, so a `strdup`ed path costs a **whole
+  16 KiB region each**. Sixteen opens would take 256 KiB where the flat array
+  takes one region. We are charged for allocation *count*, not slot size.
+- *`MAX_FILE_ACTIONS = 16` stays.* The constant is not private to this type: it
+  also sizes `OpenedHandles::handles` and backs the assertion
+  `MAX_FD_MAP >= 3 + MAX_FILE_ACTIONS` against the **fixed-width fd map passed
+  to the kernel's spawn syscall**. Uncapping the list would overrun that map or,
+  via `OpenedHandles::push`'s own bounds check, silently *leak* every handle past
+  the sixteenth. Lifting the cap is a widening of a kernel interface in lane A's
+  tree. Not urgent: glibc's `_add*` also returns `ENOMEM` when it cannot grow, so
+  a capped `ENOMEM` conforms, and nothing we ship approaches sixteen.
+
+**Verified** by `cargo test -p posix --target x86_64-pc-windows-gnu` (20 490
+tests). The ring-3 proof is the Path-Z real-`make` rung the bug was reported
+from, once the sysroot and the four spike ELFs are relinked.
+
+**What fixing it uncovered.** Moving the actions to the heap turned eleven spawn
+tests into `ENOMEM` simultaneously, which is how
+`B-HOST-MALLOC-NEVER-WORKED-SO-EVERY-ALLOCATING-TEST-PASSED-ON-ITS-OOM-PATH`
+below was found. That is a much larger hole than this one and it was invisible
+until an allocation was added to a path that had not needed one.
+
+## B-HOST-MALLOC-NEVER-WORKED-SO-EVERY-ALLOCATING-TEST-PASSED-ON-ITS-OOM-PATH — 2026-08-21 — lane B — FIXED
+
+**In short:** on host builds (`cargo test`), our `malloc` returned NULL for
+every single call, always, and had done for as long as it existed. NULL is a
+*legal* `malloc` result, so nothing looked broken: every libc function that
+allocates quietly took its out-of-memory branch, returned the error POSIX says
+it should, and its test asserted that error and passed. `free`, `realloc` and
+`malloc_usable_size` were never reached at all on the host. The test suite was
+green and was testing the wrong half of every allocating function.
+
+**Where.** `posix/src/malloc.rs`; root cause in `posix/src/syscall.rs` ~line 414.
+
+**Why.** `syscallN()` deliberately returns `HOST_ENOSYS` (-38) on
+`not(target_os = "none")` — see its "Host-build safety gate" comment, and it is
+correct to do so: a raw `SYSCALL` instruction on a Windows host dispatches into
+NT and would do something arbitrary. But `malloc` is built directly on
+`mman::mmap`, so the gate made every `malloc` fail rather than making it
+unavailable. The gate was doing its job; the allocator had no host path.
+
+**How it stayed hidden for so long.** Three tests had written the failure down
+as the *expected* result — `malloc_small_returns_null_in_test`,
+`malloc_page_size_returns_null_in_test` and `reallocarray_one_one_null`, the
+last two even carrying comments explaining that mmap fails in test mode. A test
+that asserts a component does not work will never report that the component does
+not work. This is the same shape as §355's stamp gate and as the per-directory
+`.gitignore` rules: a rule that documents its own exception stops being a rule.
+
+**Found by.** Not by anything looking for it. Fixing
+`BUG-POSIX-SPAWN-FILE-ACTIONS-IS-4624-BYTES-IN-AN-80-BYTE-SLOT` above moved the
+file-actions array onto the heap, and eleven spawn tests failed with `ENOMEM` at
+once. It took adding an allocation to a path that previously had none to make
+the allocator's absence observable.
+
+**Fix.** `map_region`/`unmap_region` now abstract the backing store, `mman::mmap`
+on target and `std::alloc::alloc_zeroed` at `REGION_ALIGN` on the host — the
+same host-shim shape already used by `host_clock` in syscall.rs and
+`host_eventfd_sim` in epoll.rs. The three tests now assert real round-trips
+(allocate, write both ends, `malloc_usable_size`, `free`).
+
+**Consequence to keep in mind.** Every allocating function in `posix/` is now
+being tested on a code path it had never executed on the host. The full suite
+passes, but "passed before and passes now" means something different for these
+than for the rest of the tree: before, most of them never got past the first
+`malloc`.
 
 ## B-THE-SSH-STACK-AUTHENTICATED-NOBODY — 2026-08-21 — FIXED
 
@@ -52105,3 +52213,45 @@ not get worse with time on its own. But it is the one remaining defect in ssh
 that a rewrite cannot be argued out of: every other finding from the lint sweep
 was fixed in place, and this one was left because the correct fix is a new
 primitive rather than an edit.
+
+## TD-B-THREE-C-VISIBLE-TYPES-ARE-SMALLER-THAN-THEIR-HEADERS (lane B, 2026-08-21)
+
+**In short:** three of our opaque libc types are *smaller* than the type the C
+header declares — `sem_t` is 4 bytes where `<semaphore.h>` says 32, `regex_t` is
+16 where `<regex.h>` says 64, `glob_t` is 24 where `<glob.h>` says 72. This is
+safe today and is not the bug that
+`BUG-POSIX-SPAWN-FILE-ACTIONS-IS-4624-BYTES-IN-AN-80-BYTE-SLOT` was; it is the
+opposite direction. A C caller reserves more room than we use, and we simply
+leave the tail untouched. Logged because "safe" is not the same as "right".
+
+**Where.** `posix/src/semaphore.rs` (`SemT`), `posix/src/regex.rs` (`RegexT`),
+`posix/src/glob.rs` (`GlobT`). Each now carries a `const` assertion of the form
+`size_of::<T>() <= <header size>`, which is the property that actually matters
+and which will fire if one ever grows past its slot.
+
+**When it would bite.** Undersizing is invisible as long as the caller only ever
+passes us the *address* of its object. It stops being invisible if the caller
+**copies the object by value** — `sem_t a = b;` moves 28 bytes of whatever the
+caller's stack happened to hold along with our counter, and a `memcpy` or a
+struct-return does the same. Nothing we ship does that today, and POSIX does not
+promise these types are copyable, so no conforming program will. A ported one
+might.
+
+**`glob_t` is the least exposed of the three** despite the largest gap: its
+three POSIX-visible members (`gl_pathc`, `gl_pathv`, `gl_offs`) sit at 0, 8 and
+16, which is where glibc puts them, so a caller reading any documented field
+reads ours. The 48 missing bytes are `gl_flags` and the six replacement-function
+pointers (`gl_closedir`, `gl_readdir`, …) that `GLOB_ALTDIRFUNC` uses, which we
+do not implement.
+
+**Proper fix.** Pad each to its header's size with a `_reserved` tail, the way
+`PosixSpawnattrT` already does to reach musl's 336, and tighten the `const`
+assertions from `<=` to `==`. That is a few lines per type and costs only stack
+bytes. It is deliberately *not* bundled into the file-actions fix, which was a
+memory-safety bug on a boot-blocking path; this one changes no behaviour and
+should land on its own so that it is separately revertible.
+
+**Credit.** Found by lane A's sweep of every C-visible opaque struct in
+`posix/src`, done while filing the file-actions bug — the same table that
+confirmed `posix_spawn_file_actions_t` was the only one in the dangerous
+direction.

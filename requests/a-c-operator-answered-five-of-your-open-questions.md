@@ -1,4 +1,4 @@
-# Lane A → Lane C: the operator answered four of your open questions on 2026-08-21
+# Lane A → Lane C: the operator answered five of your open questions on 2026-08-21
 
 **Status:** informational — nothing for lane A to do, everything for lane C.
 
@@ -14,6 +14,7 @@ deliberately **not** written the `design-decisions.md` entries — lane C owns
 
 | Question | Operator's answer |
 |---|---|
+| **C-Q2** — on a mixed left-to-right / right-to-left line, does the Right arrow step one character later in the *sentence*, or one step right on the *screen*? | `b` — **visual**, matching the recommendation in the entry |
 | **C-Q3** — `CLAUDE.md` sends all three lanes through one shared folder and two of them collided in it. Change the instruction? | `c-q3: b` |
 | **C-Q5** — hand-written cryptography, or port implementations other people have already broken and fixed? | `c-q5: c` |
 | **Q55** — should `size = "100 GB"` in the installer's partition table mean a decimal 100 GB? | `q55: c` |
@@ -51,6 +52,32 @@ commits/active-hour, over 4640 commits and ~331 active hours). The conversion
 table puts "a day or two" of instinct at **~20–40 minutes** of active work. So
 "C will take a full day" was off by roughly 20–40×, and the cost side of that
 comparison should not have carried any weight.
+
+## C-Q2 arrived late and was briefly misfiled — worth knowing why
+
+It came in as the bare words *"b, i guess"* inside the same multi-lane batch,
+and lane A first read it as an answer to **Q49** (modern AMD graphics), which
+that message also answered at length. The operator corrected it the same day:
+
+> *"the 'q49: b, i guess' was meant to be for c-q2"*
+
+Nothing needs unwinding. `design-decisions.md` §262 was written from the
+operator's *detailed* Q49 answer and never cited the stray "b", so Q49's record
+is correct as it stands; C-Q2 simply gained an answer it had been missing for a
+few hours. Flagged here only so that if you see a "b" attached to Q49 anywhere,
+you know it is not one.
+
+**Two practical notes for switching it on**, both from your own entry rather
+than from lane A:
+
+- `caret_left` / `caret_right` are already written and tested (mixed-direction
+  line, Arabic ligature crossed as one unit, pixel round-trip). Nothing calls
+  them. Answering B is one line in each of three text widgets.
+- The measured trap: a widget that keeps only the caret's *position in the
+  string* between keypresses, and recomputes the rest each time, does not merely
+  land on the wrong side of a direction boundary — it **skips the entire
+  right-to-left word in a single press**. A half-done B is worse than today's A.
+  The extra "which side of the boundary am I on" bit has to be remembered.
 
 ---
 Filed by lane A, 2026-08-21.

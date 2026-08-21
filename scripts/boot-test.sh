@@ -124,6 +124,20 @@
 #                                       # unasked.  This is what a fresh
 #                                       # worktree needs; see known-issues.md
 #                                       # A-A-FRESH-CHECKOUT-CANNOT-BOOT-TEST-…
+#   ./scripts/boot-test.sh --usb-image  # build build/slateos-usb.img (real
+#                                       # protective MBR + GPT + FAT32) from the
+#                                       # staged ESP and boot *that*, attached as
+#                                       # a usb-storage device, instead of QEMU's
+#                                       # virtual FAT.  See bare-metal-boot.md.
+#   ./scripts/boot-test.sh --no-rootfs  # do not attach rootfs.ext4, even when it
+#                                       # exists.  This is the shape a real USB
+#                                       # stick has, so it is what --usb-image
+#                                       # runs should be paired with before
+#                                       # trusting the image on hardware.  Tagged
+#                                       # as an experiment in boot-history, since
+#                                       # the Path-Z rungs that read /mnt no-op
+#                                       # and their outcome is therefore not
+#                                       # evidence about the tree.
 
 set -euo pipefail
 
@@ -355,7 +369,15 @@ report_pathz_skips() {
             local n
             n="$(grep -ac '\[spawn\]   SKIP:' "$file")"
             [ "$n" -gt 8 ] && echo "  ... and $((n - 8)) more"
-            echo "  (rebuild the image: wsl -d Ubuntu -- bash scripts/create-ext4-rootfs.sh)"
+            # Two different causes, two different remedies.  Under --no-rootfs
+            # the skips are the point of the run, and telling the reader to
+            # rebuild an image they deliberately unplugged would send them to
+            # fix something that is not broken.
+            if [ "${NO_ROOTFS:-0}" = 1 ]; then
+                echo "  (expected: --no-rootfs was given, so /mnt is empty by design)"
+            else
+                echo "  (rebuild the image: wsl -d Ubuntu -- bash scripts/create-ext4-rootfs.sh)"
+            fi
             ;;
     esac
     return 0
@@ -1071,6 +1093,10 @@ to_win_path() {
 # matters if that block is ever bypassed; it is kept in sync deliberately.
 KERNEL_BIN="$PROJECT_ROOT/target/x86_64-unknown-none/debug/kernel"
 ESP_DIR="$PROJECT_ROOT/build/esp"
+# --usb-image only: the real GPT/FAT32 image built from $ESP_DIR by
+# scripts/build-usb-image.py, attached as a USB mass-storage device instead of
+# QEMU's virtual FAT.  See the --usb-image case in the arg parser.
+USB_IMG="$PROJECT_ROOT/build/slateos-usb.img"
 SERIAL_FILE="$PROJECT_ROOT/build/serial-test.txt"
 # QEMU writes its OS-level PID here so we can reap it reliably.  Under MSYS,
 # `kill "$!"` uses the Cygwin PID and does NOT reliably TerminateProcess a
@@ -1082,6 +1108,7 @@ SERIAL_FILE="$PROJECT_ROOT/build/serial-test.txt"
 PIDFILE="$PROJECT_ROOT/build/qemu.pid"
 # QEMU args need Windows paths
 ESP_DIR_WIN="$(to_win_path "$ESP_DIR")"
+USB_IMG_WIN="$(to_win_path "$USB_IMG")"
 SERIAL_FILE_WIN="$(to_win_path "$SERIAL_FILE")"
 PIDFILE_WIN="$(to_win_path "$PIDFILE")"
 
@@ -1222,6 +1249,14 @@ RECLAIM_SPACE="${BOOT_TEST_RECLAIM_SPACE:-0}"
 # See check_prerequisites.
 BOOTSTRAP="${BOOT_TEST_BOOTSTRAP:-0}"
 
+# Boot a real GPT/FAT32 disk image over USB instead of QEMU's virtual FAT.
+# See the --usb-image case in the arg parser for why this is not the default.
+USB_IMAGE=0
+
+# Suppress the rootfs.ext4 attachment even when the file is present.
+# See the --no-rootfs case in the arg parser.
+NO_ROOTFS=0
+
 # Parse args
 for arg in "$@"; do
     case "$arg" in
@@ -1258,6 +1293,44 @@ for arg in "$@"; do
         --min-free-gb=*) MIN_FREE_GB="${arg#*=}" ;;
         --reclaim-space) RECLAIM_SPACE=1 ;;
         --bootstrap) BOOTSTRAP=1 ;;
+        # --usb-image boots the same bytes a flash drive would hold.
+        #
+        # The default path hands QEMU `fat:rw:build/esp`, which synthesises a
+        # filesystem from a host directory.  Everything a real firmware must
+        # parse before it can reach the kernel -- the protective MBR, both GPT
+        # copies, the FAT32 BPB, the on-disk directory entries -- is therefore
+        # produced by QEMU and never by us, so a defect in any of it is
+        # invisible here and fatal on hardware.  This flag builds the real image
+        # with scripts/build-usb-image.py and attaches it as a `usb-storage`
+        # device on the xHCI controller the harness already has, which is how
+        # firmware will actually see a stick: enumerated over USB, not as a
+        # SATA disk.  OVMF is an independent GPT+FAT32 implementation and Limine
+        # is a second one, so a boot that reaches the kernel here has had the
+        # image validated twice by code that is not ours.
+        #
+        # Kept opt-in rather than made the default: the virtual-FAT path needs
+        # no image rebuild, which is what makes the ordinary edit-boot loop
+        # fast, and a soak wants the ESP it already has (see --no-stage).
+        --usb-image) USB_IMAGE=1 ;;
+        # --no-rootfs boots without rootfs.ext4, which is the shape a USB stick
+        # actually has.
+        #
+        # Step 3b attaches the rootfs on the file's mere existence -- there was
+        # no way to say "not this time" short of renaming it, which races every
+        # other process in the worktree.  But a flash drive carries one FAT32
+        # ESP and nothing else: there is no second virtio-blk disk for a stick,
+        # so every Path-Z rung that reads /mnt will behave on hardware the way
+        # it behaves here with this flag, and no other way.  Pairing this with
+        # --usb-image is what makes a QEMU run actually rehearse the bare-metal
+        # configuration rather than a strictly more capable one.
+        #
+        # READ THE RESULT CAREFULLY.  Removing the rootfs removes the rungs that
+        # currently fail (the inherited posix_spawn_file_actions_init crashes),
+        # so such a run reads *greener* than the tracking run while testing
+        # strictly less.  That is exactly the confusion the experiment tag
+        # exists to prevent, so record_boot_history() adds one -- the run is
+        # excluded from the consecutive-clean streak in both directions.
+        --no-rootfs) NO_ROOTFS=1 ;;
     esac
 done
 
@@ -1813,6 +1886,14 @@ record_boot_outcome() {
     if [ "${GPU_OVERRIDDEN:-0}" = 1 ]; then
         why="${why:+$why; }SLATE_GPU=$GPU_DEVICE (non-default display device)"
     fi
+    # A --no-rootfs run tests strictly less than a tracking run and therefore
+    # reads greener: the Path-Z rungs that read /mnt no-op instead of failing.
+    # Tagging it keeps a deliberately narrower boot out of the consecutive-clean
+    # streak, which four open kernel issues use as their closure bar -- a streak
+    # extended by removing the failing tests would certify nothing.
+    if [ "${NO_ROOTFS:-0}" = 1 ]; then
+        why="${why:+$why; }--no-rootfs (rootfs.ext4 not attached; /mnt rungs no-op)"
+    fi
     if [ -n "$why" ]; then
         args+=(--experiment "$why")
     fi
@@ -1963,11 +2044,20 @@ check_prerequisites() {
     # soak boots the image already in the ESP: it compiles nothing and copies
     # nothing, so neither the embedded service binaries nor limine/ can affect
     # it, and refusing such a run for their absence would be refusing a run that
-    # would have worked.  rootfs.ext4 is always in scope — every boot attaches
-    # it, and its absence silently shrinks the suite rather than blocking it.
-    local need="rootfs"
-    [ "$NO_BUILD" -eq 0 ] && need="services,$need"
-    [ "$NO_STAGE" -eq 0 ] && need="limine,$need"
+    # would have worked.  rootfs.ext4 is in scope for every boot that attaches
+    # it — its absence silently shrinks the suite rather than blocking it — but
+    # not for a --no-rootfs run, which has already decided not to attach it.
+    # Asking about it there would report a missing prerequisite for a run that
+    # does not have one, and print "this run tests LESS than a normal one" as
+    # though the tree were at fault rather than the flag.
+    local need=""
+    [ "$NO_ROOTFS" -eq 0 ] && need="rootfs"
+    [ "$NO_BUILD" -eq 0 ] && need="services${need:+,$need}"
+    [ "$NO_STAGE" -eq 0 ] && need="limine${need:+,$need}"
+    if [ -z "$need" ]; then
+        echo "Prerequisites: nothing this run depends on (--no-build --no-stage --no-rootfs)."
+        return 0
+    fi
 
     local report status
     report="$(bash "$boot" --check --need="$need" 2>&1)" && status=0 || status=$?
@@ -2177,6 +2267,34 @@ fi
 printf '    cmdline: %s\n' "$KERNEL_CMDLINE" >> "$ESP_DIR/limine.conf"
 echo "=== Kernel cmdline: $KERNEL_CMDLINE ==="
 
+# Step 2b: Build the real USB image, if asked for.
+#
+# Built AFTER staging and unconditionally (even under --no-stage): the image is
+# a pure function of $ESP_DIR, so rebuilding it is how the image tracks the
+# staged tree.  Skipping it when the tree looks unchanged would reintroduce
+# exactly the stale-image failure the staging freshness guard above exists to
+# prevent -- and the build is a few seconds on a 40 MiB kernel.
+ESP_DRIVE_ARGS=(-drive "format=raw,file=fat:rw:$ESP_DIR_WIN")
+# The matching `-device usb-storage` cannot live in ESP_DRIVE_ARGS: QEMU
+# realises -device options in command-line order, so one naming bus xhci0.0
+# must appear AFTER the qemu-xhci that creates it or the run dies with
+# "Bus 'xhci0.0' not found".  It is emitted next to usb-kbd instead.
+USB_STICK_ARGS=()
+if [ "$USB_IMAGE" -eq 1 ]; then
+    echo "=== Building USB image (GPT + FAT32) ==="
+    if ! python "$PROJECT_ROOT/scripts/build-usb-image.py" \
+            --source "$ESP_DIR" --output "$USB_IMG"; then
+        echo "ERROR: could not build $USB_IMG." >&2
+        exit 1
+    fi
+    # `if=none` + an explicit id so the image binds ONLY to the usb-storage
+    # device below and is not also auto-attached to the default IDE bus, which
+    # would present the same filesystem twice and let firmware boot the copy
+    # that is not being tested.
+    ESP_DRIVE_ARGS=(-drive "id=usbstick,if=none,format=raw,file=$USB_IMG_WIN")
+    USB_STICK_ARGS=(-device "usb-storage,bus=xhci0.0,drive=usbstick")
+fi
+
 # Step 3: Create a small swap disk image (16 MiB) for disk-backed swap testing.
 SWAP_IMG="$PROJECT_ROOT/build/swap.img"
 SWAP_IMG_WIN="$(to_win_path "$SWAP_IMG")"
@@ -2205,7 +2323,15 @@ fi
 # so the boot test simply omits it (and the self-test no-ops) when it is absent.
 ROOTFS_IMG="$PROJECT_ROOT/rootfs.ext4"
 ROOTFS_ARGS=()
-if [ -f "$ROOTFS_IMG" ]; then
+if [ "$NO_ROOTFS" -eq 1 ] && [ -f "$ROOTFS_IMG" ]; then
+    # Said out loud, because "the rootfs was not attached" and "the rootfs is
+    # not present" produce identical downstream behaviour and must not produce
+    # identical output: one is a deliberate probe, the other is a fresh
+    # worktree that never packed the image.
+    echo "=== Path-Z glibc rootfs suppressed (--no-rootfs); $ROOTFS_IMG exists but is not attached ==="
+    echo "    Rungs that read /mnt will no-op.  This run is tagged as an experiment."
+fi
+if [ "$NO_ROOTFS" -eq 0 ] && [ -f "$ROOTFS_IMG" ]; then
     # Before QEMU is told to attach it: the image is packed by hand and can be
     # older than the tree, and a stale one produces passing Path-Z rungs that
     # tested nothing current.  See check_rootfs_freshness.
@@ -2832,7 +2958,7 @@ QEMU_START_EPOCH=$(date +%s)
     -netdev user,id=net2 \
     -device virtio-net-pci,netdev=net2,mac=52:54:00:12:34:58 \
     -drive "if=pflash,format=raw,readonly=on,file=$OVMF_WIN" \
-    -drive "format=raw,file=fat:rw:$ESP_DIR_WIN" \
+    "${ESP_DRIVE_ARGS[@]}" \
     -device virtio-blk-pci,drive=swap-disk \
     -drive "id=swap-disk,if=none,format=raw,file=$SWAP_IMG_WIN" \
     "${ROOTFS_ARGS[@]}" \
@@ -2850,6 +2976,7 @@ QEMU_START_EPOCH=$(date +%s)
     -device nvme,drive=nvme-disk,serial=SLATE-NVME-1 \
     -device qemu-xhci,id=xhci0 \
     -device usb-kbd,bus=xhci0.0 \
+    "${USB_STICK_ARGS[@]}" \
     -serial "file:$SERIAL_FILE_WIN" \
     -pidfile "$PIDFILE_WIN" \
     "${GPU_DISPLAY_ARGS[@]}" \

@@ -63,9 +63,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use guitk::event::{Event, MouseEvent};
 use guitk::render::RenderTree;
-use oswindow::{
-    ConnectionError, ConnectionTransport as Transport, Error, EventLoop, Layer, Spec,
-};
+use oswindow::{ConnectionError, ConnectionTransport as Transport, Error, EventLoop, Layer, Spec};
 
 use crate::wallpaper::WallpaperManager;
 use crate::{DesktopShell, ShellAction, WindowRequest};
@@ -514,10 +512,7 @@ impl<T: Transport> ShellSession<T> {
     /// the answer turns out to be no.
     fn request(&mut self, request: WindowRequest) -> Result<(), Error<T>> {
         self.dirty = true;
-        match self
-            .events
-            .control_window(request.window.0, request.action)
-        {
+        match self.events.control_window(request.window.0, request.action) {
             Ok(()) => {}
             // A refusal means the window went away between the list the
             // button was drawn from and the click. That is an ordinary

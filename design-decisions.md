@@ -30703,6 +30703,131 @@ by only 29%. That is a defect under TCG too and is being fixed either way. Full
 arithmetic in `known-issues.md` →
 `B-A-THE-CONTAMINATION-CANARY-IS-A-TCG-ONLY-INSTRUMENT`.
 
+## 268. The bootable USB image is built by our own Python, and the boot test can boot it
+
+**Date:** 2026-08-21
+**Decided by:** Claude (autonomous) — implementation choices under the scope
+`design-decisions.md` §263 already settled with the operator.
+
+**In short:** To run SlateOS on the operator's actual PC we need a file that can
+be copied onto a flash drive and started by the machine's firmware. We had
+never made one: the test setup builds a fake filesystem inside the emulator each
+time it runs, which works beautifully for testing and produces nothing you can
+carry across a room. This entry records three choices made while filling that
+gap — writing the image ourselves in Python instead of installing third-party
+disk tools, plugging it into the emulator as a *pretend flash drive* rather than
+as an internal disk, and making the guard against writing to the wrong physical
+drive a refusal rather than a warning.
+
+### The gap
+
+`scripts/boot-test.sh` passes QEMU `-drive format=raw,file=fat:rw:build/esp`.
+That is QEMU's *virtual FAT* — it synthesises a filesystem on the fly from a
+host directory. It is the right thing for a harness: there is no image to
+rebuild, so there is no stale image to boot by accident, and the edit-boot loop
+stays fast. But it means every structure a firmware must parse before reaching
+the kernel — protective MBR, GPT, FAT32 BPB, directory entries — was produced by
+QEMU and never by us. A defect in any of them was **invisible in the only test
+we had and fatal on the only hardware we care about.**
+
+### Decision 1 — write the image in stdlib Python, do not install disk tools
+
+*What changes:* `python scripts/build-usb-image.py` works in a bare checkout;
+nothing new has to be installed on any machine.
+
+| Option | For | Against |
+|---|---|---|
+| **A. `mtools` + `sgdisk`** (or `xorriso`) | Battle-tested; a few lines of shell | Four new hard prerequisites. None is installed here — checked 2026-08-21, all of `xorriso`, `mformat`, `mkfs.vfat`, `sgdisk` are absent |
+| **B. Pure-Python builder** ← chosen | No prerequisites at all; deterministic output; the layout is reviewable | ~600 lines we now own, writing structures we never read back |
+
+The deciding argument is not "fewer dependencies" in the abstract. It is that
+this project has already been bitten by exactly this failure: the boot test
+carries a prerequisite gate written because a missing `limine/` surfaced as a
+`cp: cannot stat` *after* a full workspace build. A tool that is absent in a
+fresh clone fails late, in a confusing place, on someone else's machine. And
+`scripts/create-disk.py` already writes FAT16/FAT32 from scratch in Python for
+the FAT driver self-test, so B is the established pattern rather than a novelty.
+
+`scripts/build-iso.sh` is not a third option: it needs `xorriso` (absent), and
+an ISO9660 image is read-only, so it could never carry a writable ESP or a
+second partition for a rootfs.
+
+**The real cost of B is honest and worth naming:** nothing in this repository
+reads a GPT or a FAT32 directory, so a byte-layout bug's error message is a
+black screen on a machine in another room. That is the worst feedback loop in
+the project. The mitigation is `scripts/test-build-usb-image.py` — a reader
+written *independently of the writer*, checking GPT CRCs, both FAT copies,
+cluster chains, long-filename entries, `.`/`..`, and file bytes. A test that
+re-derived the writer's own arithmetic would agree with it about its mistakes.
+
+### Decision 2 — attach the image as USB storage, not as a disk
+
+*What changes:* under `--usb-image`, QEMU shows the firmware a USB hard drive.
+
+Attaching it as another SATA/virtio disk would have been one word shorter and
+would have tested the GPT and FAT32 equally well. It was rejected because the
+thing being rehearsed is a **flash drive**, and the firmware path for one is not
+the path for an internal disk: a different enumeration, a different boot-option
+class, a different position in the boot order. The verification run shows the
+distinction paying off immediately —
+
+```
+BdsDxe: failed to load Boot0003 "UEFI QEMU NVMe Ctrl SLATE-NVME-1 1" ...: Not Found
+BdsDxe: loading Boot0004 "UEFI QEMU QEMU USB HARDDRIVE 1-0000:00:0d.0-2" ...
+```
+
+OVMF passed over every other device and *chose the USB disk*, which is precisely
+what the operator's firmware will have to do. The cost is nil: the harness
+already carries a `qemu-xhci` controller for the USB keyboard.
+
+### Decision 3 — `--usb-image` is opt-in, and rebuilds unconditionally
+
+*What changes:* an ordinary boot test is unaffected; `--usb-image` adds a few
+seconds and boots the real bytes.
+
+Making it the default would have put every layer under continuous test, which is
+normally the right instinct. Against it: the virtual-FAT path needs no image
+rebuild, which is what keeps the edit-boot loop fast, and `--no-stage` soaks
+exist specifically to boot *the ESP that is already there*. Two defaults cannot
+both be served, and the fast one is used a hundred times more often.
+
+Within `--usb-image`, though, the image is rebuilt **unconditionally**, even
+under `--no-stage`. Skipping the rebuild when the tree "looks unchanged" would
+reintroduce exactly the stale-image failure that the staging freshness guard
+above it already exists to prevent — and the whole point of §263 is that we are
+about to trust this image on hardware.
+
+### Decision 4 — the stick writer refuses, it does not warn
+
+*What changes:* `scripts/write-usb-stick.ps1` cannot target an internal disk at
+all, by any argument.
+
+Writing a raw image to the wrong disk is the one genuinely irreversible act in
+this whole path, and the standing project rule is that irreversible actions are
+the only ones that warrant real caution. A warning printed before a destructive
+default is a warning that gets skimmed. So: USB bus type only (not overridable),
+never the system or boot disk (not overridable), a size cap because a 2 TB "USB"
+disk is far more likely an external backup drive than a boot stick (overridable,
+explicitly), and the target's model name must be **retyped**. That last guard is
+the load-bearing one: a disk *number* is one keystroke away from another disk; a
+model string is not.
+
+Rufus in DD mode would have been a legitimate answer and is still documented as
+an alternative in `bare-metal-boot.md`. It was not made *the* answer because it
+is a download the operator may not have at the moment they need it, and the
+guarded script is available in the worktree that already exists.
+
+### What this does not do
+
+The image carries no rootfs, and the kernel has **no USB mass-storage driver** —
+`kernel/src/xhci.rs` binds interface class `0x03` (HID) and nothing else, so the
+kernel cannot read the stick it booted from. Firmware read the kernel before
+`ExitBootServices`, which is why booting works regardless. The honest goal of
+the first bare-metal boot is therefore narrow: does the kernel come up on a real
+chipset, with a real firmware memory map, real ACPI tables, a real APIC and a
+real PCI bus? Everything needing storage is a later trip. Both gaps are recorded
+in `bare-metal-boot.md` §6 so they are not rediscovered as bugs.
+
 ## 499. The compositor reads the user's appearance settings from the shared model, and reads the whole of it
 
 **Date:** 2026-08-21
@@ -31664,3 +31789,104 @@ shortcut and the desktop is what should have swallowed it. An early version
 collapsed the two (no request ⇒ not consumed) and broke the virtual-desktop
 shortcuts on an empty desktop; that mistake is now a reintroduced defect in the
 sweep, failing four tests.
+
+---
+
+## 506. The shell's private window manager is deleted rather than fixed, and `snap.rs` is kept as a library with no caller
+
+**Date:** 2026-08-21
+**Decided by:** Claude (autonomous)
+
+**In short:** The desktop shell used to keep its own copy of where every window
+was, and its own methods for moving them — open a window, raise it, maximize it,
+snap it to half the screen. None of it ever had any effect on a live desktop:
+the compositor sends the shell a fresh list of every window several times a
+second, and receiving that list *replaces* everything the shell believed. So
+every edit the shell made to its own copy was thrown away, unread, moments
+later. The code has been deleted instead of repaired. One piece was kept even
+though nothing calls it: the file that computes multi-window tiling layouts,
+because it is correct and the feature will want it.
+
+### What was deleted
+
+From `gui/desktop/src/lib.rs`: `add_window`, `take_window_id`, `take_z`,
+`compact_z_order`, `remove_window`, `focus_window`, `minimize_window`,
+`maximize_window`, `restore_window`, `toggle_maximize`, `move_window`,
+`resize_window`, `snap_window`, `snap_window_to_zone`, `unsnap_window`,
+`is_snapped`; the `WindowGeometry` struct and `ManagedWindow::frame_rect`; the
+`x`/`y`/`width`/`height`/`restore_geometry` fields of `ManagedWindow`; the
+`next_z`, `next_window_id` and `snap` fields of `DesktopShell`, with
+`snap_area`, `sync_snap_area` and the three rounding helpers that existed only
+to serve them; and `Hit::WindowContent(WindowId)`.
+
+`Hit::WindowContent` is the clearest illustration of the whole problem. It named
+the case "the pointer is over a window rather than over the shell's own chrome",
+and a live session could **never produce it**: `WindowInfo`, the compositor's
+description of a window, carries no geometry at all, so every window's rectangle
+in the shell was zero-by-zero, and a zero rectangle contains no point. The
+variant was reachable only from tests that had called `add_window` — the door no
+live session uses — to give a window a rectangle by hand.
+
+### Why deletion rather than repair
+
+The alternative was to make the shell's copy authoritative: have
+`apply_window_list` *merge* into the existing list instead of replacing it, so
+that a shell-side edit survived the next snapshot. That is the wrong direction
+on two counts.
+
+- **It re-creates the second answer.** Two parties would then hold an opinion
+  about where a window is, and they would disagree the moment either moved one.
+  The compositor's opinion is the one that reaches the screen, so the shell's
+  can only ever be stale — see §504, which settled the same question for
+  snapping specifically.
+- **The compositor already implements all of it,** with its own tests:
+  `snap_window` (`gui/compositor/src/lib.rs:4390`) and the properties
+  `the_two_snapped_halves_tile_the_display_with_no_seam`,
+  `restoring_a_snapped_window_returns_it_to_where_it_was`,
+  `a_window_is_never_snapped_and_maximized_at_once`,
+  `a_non_resizable_window_refuses_to_be_snapped`,
+  `a_snapped_client_is_told_its_new_size`. Repairing the shell's copy would have
+  produced a second implementation of a solved problem, in the process that
+  cannot see the display bounds.
+
+What replaced it is nothing at all: a click or a keystroke that wants a window
+changed already returns a `WindowRequest` (§505), and the shell finds out what
+happened from the next list. `z_order` is no longer a counter the shell bumps —
+it is the window's index in the list the compositor sent, which that list emits
+bottom-to-top, so the shell's stacking order *is* the compositor's and cannot
+drift from it.
+
+Virtual desktops stayed, because they are genuinely shell-local: the compositor
+has no notion of them, so there is no second answer to conflict with. The one
+thing this required was that a new window list must not reset a window's
+desktop — pinned by
+`a_window_list_does_not_move_a_window_back_off_its_desktop`.
+
+### Why `snap.rs` was kept with no caller
+
+`gui/desktop/src/snap.rs` is 2293 lines that compute seven multi-window tiling
+layouts (`SnapLayoutPreset`), the gap between tiles and the policy for dropping
+it when a tile would be too small, the snap history, and the overlay and picker
+render trees. Deleting the shell's snap *methods* left it with no caller at all.
+
+- **For deleting it:** dead code is a liability; a reader seeing green tests
+  concludes the feature works, and it is not reachable by any user.
+- **For keeping it:** it is correct, and its own test module pins every property
+  the deleted shell-level tests were pinning, so nothing was lost by deleting
+  those. The feature is wanted — it is the shell's answer to Windows'
+  FancyZones — and the gap-drop policy in particular is the kind of small
+  judgement that is annoying to re-derive. Re-writing it later from scratch
+  would be strictly worse than keeping it.
+
+Kept, on the grounds that the cost of the liability is a stale-code smell and
+the cost of deletion is losing work that will be wanted verbatim. The smell is
+mitigated by naming it in three places rather than leaving it to be discovered:
+the crate doc's "What this crate does not do yet" section, the module's own
+docs, and `known-issues.md` `TD-C-ZONE-SNAPPING-HAS-NO-PATH-TO-A-WINDOW`, which
+records the actual missing piece — the shell-to-compositor protocol has no verb
+for "zone 3 of a three-column layout", and `ShellControlAction`'s one-byte-per-
+action encoding is a deliberate constraint that adding one has to reckon with.
+
+**Revisit if:** zone tiling is still unreachable when someone next touches
+`gui/remote`'s control encoding. At that point either wire it up or delete it —
+the one outcome to avoid is a third year of tested, unreachable geometry.

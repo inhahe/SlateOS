@@ -1,7 +1,9 @@
 //! Slate OS Desktop Shell
 //!
 //! Window manager and desktop environment providing:
-//! - Window management (move, resize, minimize, maximize, close)
+//! - Window *control*: asking the compositor to minimize, maximize, tile, raise
+//!   or close a window. Not placing one — where a window sits is decided by the
+//!   compositor, and the shell is never told.
 //! - Taskbar with running application list
 //! - System tray (clock, notifications, quick settings)
 //! - Start menu / application launcher
@@ -40,12 +42,12 @@
 //!   about *how* a program starts belongs to the process server, not to the
 //!   window manager. See `known-issues.md`
 //!   `TD-SHELL-HAS-NOWHERE-TO-SEND-A-LAUNCH`.
-//! - **The old private window manager is still here.**
-//!   [`DesktopShell::add_window`] and the geometry methods around it
-//!   ([`snap_window`](DesktopShell::snap_window),
-//!   [`toggle_maximize`](DesktopShell::toggle_maximize)) predate
-//!   `apply_window_list`, and are now used only by the demo and by tests, which
-//!   have no compositor to be told by. They should go.
+//! - **Zone tiling has no path to a window.** [`snap`] computes the rectangles
+//!   for six multi-window layouts and is thoroughly tested, but nothing calls
+//!   it: the compositor knows only the two-half `SnapLeft`/`SnapRight` edges, and
+//!   the shell-to-compositor protocol has no verb for "put this window in zone 3
+//!   of a three-column layout". See `known-issues.md`
+//!   `TD-C-ZONE-SNAPPING-HAS-NO-PATH-TO-A-WINDOW`.
 //! - **Virtual desktops are a taskbar filter and nothing more.** Switching
 //!   desktop changes which windows the shell *lists*, but the compositor has no
 //!   notion of desktops and nothing unmaps the windows of the one being left, so
@@ -362,15 +364,20 @@ impl TextRole {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct WindowId(pub u64);
 
-/// Window state tracked by the window manager.
+/// One window, as much of it as the shell is entitled to know.
+///
+/// Everything here comes from the compositor's window list except
+/// [`desktop`](Self::desktop) and [`icon_id`](Self::icon_id), which are
+/// shell-local and have no counterpart there. There is deliberately **no
+/// geometry**: the shell does not place windows, so a position and size kept
+/// here could only ever be a second, staler answer to a question the
+/// compositor already answers — and was, until the fields were deleted. What
+/// the shell draws about a window is a taskbar button and a switcher row,
+/// neither of which is anywhere near the window itself.
 #[derive(Clone, Debug)]
 pub struct ManagedWindow {
     pub id: WindowId,
     pub title: String,
-    pub x: i32,
-    pub y: i32,
-    pub width: u32,
-    pub height: u32,
     pub state: WindowState,
     pub desktop: u32,
     /// Whether this window has focus.
@@ -381,43 +388,13 @@ pub struct ManagedWindow {
     pub pid: u32,
     /// Icon ID (index into icon registry).
     pub icon_id: u32,
-    /// Z-order (higher = on top).
+    /// Where in the stack the window sits: higher is nearer the front.
+    ///
+    /// Not a counter the shell keeps. It is the window's index in the list the
+    /// compositor last sent, which that list emits bottom-to-top — so the
+    /// shell's stacking order *is* the compositor's, and cannot drift from it
+    /// between one list and the next.
     pub z_order: u32,
-    /// Where the window sat before it was maximized.
-    ///
-    /// Maximizing overwrites the window's geometry, so un-maximizing has
-    /// nothing to go back to unless the old geometry was kept: without this a
-    /// "restore" leaves the window exactly where maximizing put it, which looks
-    /// like the button doing nothing.
-    pub restored: Option<WindowGeometry>,
-}
-
-/// A window's position and size, in screen pixels.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct WindowGeometry {
-    pub x: i32,
-    pub y: i32,
-    pub width: u32,
-    pub height: u32,
-}
-
-impl ManagedWindow {
-    /// The window's outer rectangle, title bar included.
-    ///
-    /// Comes from the compositor in physical pixels and is not the shell's to
-    /// scale. *Where* a window is, the shell may know — the taskbar and the
-    /// hit test both need it. *What its frame looks like* it may not: the
-    /// compositor owns the decorations, and drew them twice until the shell's
-    /// copy was deleted.
-    #[must_use]
-    pub fn frame_rect(&self) -> Rect {
-        Rect::new(
-            self.x as f32,
-            self.y as f32,
-            self.width as f32,
-            self.height as f32,
-        )
-    }
 }
 
 /// Window state.
@@ -467,26 +444,26 @@ pub enum Hit {
     /// and must **not** dismiss it. A point off the popup is not this variant
     /// at all, which is how the two are told apart.
     CalendarControl(calendar::CalendarHit),
-    /// A window, anywhere on it.
+    /// Not the shell's: a window, or the bare desktop behind them all.
     ///
-    /// Not subdivided into title bar and content, because the parts of a
-    /// window that are not the client's — the title bar, its buttons, the
-    /// resize borders — are the compositor's, and it hit-tests them itself
-    /// before this shell is told the pointer moved at all. A press that
-    /// reaches here landed on the client.
-    WindowContent(WindowId),
-    /// Bare desktop.
+    /// One variant for both because the shell cannot tell them apart and does
+    /// not need to. It knows no window's rectangle — `WindowInfo` carries none,
+    /// because placing windows is the compositor's job — and there used to be a
+    /// `WindowContent(WindowId)` variant that a live session could never
+    /// produce: every window's geometry was zero, so it matched nothing. The
+    /// compositor routes a press to the topmost window containing it and only
+    /// offers the shell what landed on the shell.
     Desktop,
 }
 
 impl Hit {
     /// Whether the shell owns this pixel.
     ///
-    /// Only the client's own content and the bare desktop are not the shell's;
-    /// everything the shell draws it also consumes clicks on.
+    /// Everything the shell draws it also consumes clicks on; anything else is
+    /// [`Hit::Desktop`] and belongs to whatever is underneath.
     #[must_use]
     pub fn is_shell_chrome(self) -> bool {
-        !matches!(self, Self::WindowContent(_) | Self::Desktop)
+        !matches!(self, Self::Desktop)
     }
 }
 
@@ -691,10 +668,6 @@ pub struct DesktopShell {
     /// the next thing that re-derives it. Go through
     /// [`set_appearance`](Self::set_appearance).
     pub theme: DesktopTheme,
-    /// Next Z-order value.
-    next_z: u32,
-    /// Next window ID (for local tracking; compositor assigns real IDs).
-    next_window_id: u64,
     /// What the user chose in the Date & Time panel.
     ///
     /// Held whole, for the same reason [`appearance`](Self::appearance) is:
@@ -720,26 +693,6 @@ pub struct DesktopShell {
     /// not a place to keep them — the reminder path and any future agenda
     /// surface read the same store.
     pub events: calendar::EventStore,
-    /// The shell's **one** snap implementation.
-    ///
-    /// `snap.rs` used to be dead code — `mod snap;` was its only reference —
-    /// while the shell computed snapped geometry itself, in integers, with no
-    /// gap and only halves. Two answers to one question, of which the user
-    /// could see the less capable one. Every snapped rectangle now comes from
-    /// here; see `known-issues.md`
-    /// `C-TWO-SNAP-IMPLEMENTATIONS-WITH-DIFFERENT-GAP-POLICIES` and
-    /// `design-decisions.md` §469.
-    ///
-    /// Its work area is **not** kept in sync by notification.
-    /// [`screen_width`](Self::screen_width), `taskbar_height` and `appearance`
-    /// are all public fields that anything may assign, and `work_area()`
-    /// derives from all three, so an "update on change" scheme would be one
-    /// forgotten call site away from tiling a screen size that no longer
-    /// exists. [`sync_snap_area`](Self::sync_snap_area) re-seeds it at the top
-    /// of every operation that reads geometry instead — cheap (a layout is at
-    /// most eight rectangles) and impossible to forget in a way that compiles
-    /// but is wrong.
-    pub snap: snap::SnapManager,
 }
 
 /// Desktop visual theme — every colour the shell paints with.
@@ -930,52 +883,9 @@ fn taskbar_alpha(settings: &AppearanceSettings) -> u8 {
     }
 }
 
-/// Round a snap module coordinate to the integer geometry windows carry.
-///
-/// `as` on a float is a *saturating* cast in Rust — out-of-range values clamp
-/// to the bound and NaN becomes 0 — so this cannot wrap a 4000-pixel screen
-/// into a negative coordinate the way the equivalent C would. Rounding rather
-/// than truncating matters at the seam: a zone starting at `x = 966.5` next to
-/// one ending there must not both truncate to 966 and leave a column drawn
-/// twice.
-fn round_to_i32(v: f32) -> i32 {
-    v.round() as i32
-}
-
-/// As [`round_to_i32`], for a width or height. Negative rounds to 0.
-fn round_to_u32(v: f32) -> u32 {
-    v.round().max(0.0) as u32
-}
-
-/// Convert a snap zone's floating-point rectangle to the integer geometry a
-/// window carries, by rounding its **edges** rather than its origin and its
-/// extent independently.
-///
-/// Rounding the two separately is what the obvious `(round(x), round(w))`
-/// does, and it is wrong exactly where it matters. On a 1921-pixel screen the
-/// right half sits at `x = 963.5` with `width = 957.5`; rounded separately
-/// that is 964 wide 958, an edge at **1922** — one column past the screen the
-/// zone was supposed to tile. Rounding the edges gives `964..1921`, flush,
-/// because the right edge is rounded as the coordinate it actually is. The
-/// same argument applies to two adjacent zones: their shared edge is one
-/// number, so rounding it once makes them meet by construction instead of by
-/// arithmetic luck.
-fn round_rect(x: f32, y: f32, width: f32, height: f32) -> (i32, i32, u32, u32) {
-    let x0 = round_to_i32(x);
-    let y0 = round_to_i32(y);
-    let x1 = round_to_i32(x + width);
-    let y1 = round_to_i32(y + height);
-    (
-        x0,
-        y0,
-        u32::try_from(x1.saturating_sub(x0)).unwrap_or(0),
-        u32::try_from(y1.saturating_sub(y0)).unwrap_or(0),
-    )
-}
-
 impl DesktopShell {
     pub fn new(screen_width: u32, screen_height: u32) -> Self {
-        let mut shell = Self {
+        Self {
             windows: BTreeMap::new(),
             focused_window: None,
             current_desktop: 0,
@@ -992,36 +902,9 @@ impl DesktopShell {
             alt_tab_index: 0,
             appearance: AppearanceSettings::default(),
             theme: DesktopTheme::default(),
-            next_z: 1,
-            next_window_id: 1,
             datetime: datetime_settings::DateTimeSettings::default(),
             calendar: calendar::CalendarView::new(calendar::CalendarConfig::default()),
             events: calendar::EventStore::new(),
-            // Placeholder: the real area needs `taskbar_rect()`, which needs
-            // the appearance scaling that is only set two fields up. Seeded
-            // immediately below rather than left to the first snap, so that a
-            // caller reading `shell.snap.layout()` before ever snapping gets
-            // the screen it is actually on.
-            snap: snap::SnapManager::new(snap::WorkArea::whole_screen(0.0, 0.0)),
-        };
-        shell.sync_snap_area();
-        shell
-    }
-
-    /// The work area as the snap module wants it.
-    fn snap_area(&self) -> snap::WorkArea {
-        let (x, y, width, height) = self.work_area();
-        snap::WorkArea::new(x as f32, y as f32, width as f32, height as f32)
-    }
-
-    /// Re-seed the snap manager's work area from the shell's current geometry.
-    ///
-    /// Called at the top of every snap operation. See the field's doc for why
-    /// this is pull-on-use rather than push-on-change.
-    fn sync_snap_area(&mut self) {
-        let area = self.snap_area();
-        if self.snap.work_area() != area {
-            self.snap.set_work_area(area);
         }
     }
 
@@ -1465,16 +1348,10 @@ impl DesktopShell {
             return Hit::TaskbarPanel;
         }
 
-        // `visible_windows` is sorted bottom-to-top, and the topmost window is
-        // the one that receives the click. The frame is not subdivided: the
-        // decorations on it are the compositor's, and it consumes a press on
-        // one of them before this shell hears about it.
-        for window in self.visible_windows().into_iter().rev() {
-            if window.frame_rect().contains(x, y) {
-                return Hit::WindowContent(window.id);
-            }
-        }
-
+        // Anything that is not one of the shell's own surfaces is somebody
+        // else's. Which window — or none — is not asked here: the compositor
+        // has already decided that, and a press it hands to the shell is one it
+        // decided landed on the shell.
         Hit::Desktop
     }
 
@@ -1644,10 +1521,10 @@ impl DesktopShell {
                     None => ShellAction::Consumed,
                 }
             }
-            Hit::WindowContent(id) => {
-                self.focus_window(id);
-                ShellAction::Pass
-            }
+            // Not the shell's pixel, so not the shell's press. It used to focus
+            // the window it thought was there, which was both a guess — the
+            // shell holds no window rectangles — and a change to a list the
+            // next one from the compositor would overwrite.
             Hit::Desktop => ShellAction::Pass,
         }
     }
@@ -1670,101 +1547,19 @@ impl DesktopShell {
         ShellAction::Pass
     }
 
-    /// Maximize a window, or restore it if it already is.
-    pub fn toggle_maximize(&mut self, id: WindowId) {
-        let maximized = self
-            .windows
-            .get(&id)
-            .is_some_and(|w| w.state == WindowState::Maximized);
-        if maximized {
-            self.restore_window(id);
-        } else {
-            self.maximize_window(id);
-        }
-    }
-
     // ======================================================================
     // Window management
+    //
+    // What is left of it. The shell used to keep its own window list and its
+    // own answers about that list: `add_window` handed out ids, `focus_window`
+    // bumped a z counter, `maximize_window` computed a rectangle, `snap_window`
+    // computed two. None of it survived contact with a live session, because
+    // `apply_window_list` below *replaces* the list rather than merging into
+    // it — so every one of those edits was overwritten by the compositor's
+    // next snapshot, unread. They are gone; what remains is the door the
+    // compositor's answers come in through, and the shell-local facts
+    // (which virtual desktop, which icon) that nothing else holds a copy of.
     // ======================================================================
-
-    /// The next window id, and never the same one twice.
-    ///
-    /// A repeated id would not merely confuse a caller: `windows` is keyed by
-    /// it, so inserting the second window with a repeated id silently *evicts*
-    /// the first. A `u64` bumped once per window cannot run out — at a billion
-    /// windows a second it would take some six centuries — so this saturates
-    /// rather than refusing, and says so instead of leaving the reader to work
-    /// out whether the addition can wrap.
-    fn take_window_id(&mut self) -> WindowId {
-        let id = WindowId(self.next_window_id);
-        self.next_window_id = self.next_window_id.saturating_add(1);
-        id
-    }
-
-    /// The next z-order, putting its holder above every existing window.
-    ///
-    /// Unlike a window id, this counter really can run out: it is bumped on
-    /// every *focus change*, not every window, and it is only a `u32`. So
-    /// rather than saturate — which would freeze the stacking order the moment
-    /// it topped out, with every later window tied for topmost — it renumbers
-    /// the existing windows and carries on. A z-order is only ever compared
-    /// against another z-order, so renumbering is invisible from outside.
-    fn take_z(&mut self) -> u32 {
-        if self.next_z == u32::MAX {
-            self.compact_z_order();
-        }
-        let z = self.next_z;
-        self.next_z = self.next_z.saturating_add(1);
-        z
-    }
-
-    /// Renumbers every window's z-order to `0..n`, preserving their order.
-    fn compact_z_order(&mut self) {
-        let mut ids: Vec<WindowId> = self.windows.keys().copied().collect();
-        ids.sort_by_key(|id| self.windows.get(id).map_or(0, |w| w.z_order));
-        self.next_z = 0;
-        for id in ids {
-            if let Some(w) = self.windows.get_mut(&id) {
-                w.z_order = self.next_z;
-                self.next_z = self.next_z.saturating_add(1);
-            }
-        }
-    }
-
-    /// Register a new window.
-    pub fn add_window(
-        &mut self,
-        title: &str,
-        x: i32,
-        y: i32,
-        width: u32,
-        height: u32,
-        pid: u32,
-    ) -> WindowId {
-        let id = self.take_window_id();
-        let z_order = self.take_z();
-
-        let window = ManagedWindow {
-            id,
-            title: title.to_string(),
-            x,
-            y,
-            width,
-            height,
-            state: WindowState::Normal,
-            desktop: self.current_desktop,
-            focused: false,
-            visible: true,
-            pid,
-            icon_id: 0,
-            z_order,
-            restored: None,
-        };
-
-        self.windows.insert(id, window);
-        self.focus_window(id);
-        id
-    }
 
     /// Replace what the shell believes about the desktop's windows with what
     /// the compositor just said.
@@ -1773,9 +1568,9 @@ impl DesktopShell {
     /// what they are labelled, which one is lit — comes from here, because the
     /// compositor is the only thing that knows: a window can appear, be
     /// retitled, be minimised by its own program or vanish without the shell
-    /// being involved at all. [`add_window`](Self::add_window) and its
-    /// neighbours remain for the demo and the tests, which have no compositor
-    /// to be told by; a live shell calls this and nothing else.
+    /// being involved at all. It is also the *only* door: there is no longer an
+    /// `add_window` beside it, because a second way in meant a second answer,
+    /// and the shell's own was always the one that lost.
     ///
     /// # What is deliberately dropped
     ///
@@ -1784,16 +1579,6 @@ impl DesktopShell {
     /// the wallpaper and its own start menu would be mostly buttons for itself.
     /// `Layer` is the field that tells them apart, and this is the only place
     /// that reads it.
-    ///
-    /// **Geometry.** A projected window's rectangle is left at zero, and that is
-    /// not a placeholder: `WindowInfo` carries no geometry because the shell
-    /// does not place windows — the compositor does — so there is nothing
-    /// truthful to put there. The one thing that would read it is
-    /// [`Hit::WindowContent`], which a live session never reaches: the
-    /// compositor routes a press to the topmost window containing it, so a
-    /// click on another program's window is delivered to that program and never
-    /// offered to the shell. A zero rectangle matches nothing, which is exactly
-    /// the right answer to a question that is never asked.
     ///
     /// # What is kept
     ///
@@ -1823,10 +1608,6 @@ impl DesktopShell {
                 ManagedWindow {
                     id,
                     title: info.title.clone(),
-                    x: previous.map_or(0, |w| w.x),
-                    y: previous.map_or(0, |w| w.y),
-                    width: previous.map_or(0, |w| w.width),
-                    height: previous.map_or(0, |w| w.height),
                     state: if info.minimized {
                         WindowState::Minimized
                     } else if info.maximized {
@@ -1849,18 +1630,8 @@ impl DesktopShell {
                     pid: u32::try_from(info.pid).unwrap_or(u32::MAX),
                     icon_id: previous.map_or(0, |w| w.icon_id),
                     z_order: u32::try_from(index).unwrap_or(u32::MAX),
-                    restored: previous.and_then(|w| w.restored),
                 },
             );
-        }
-
-        // Snap history is keyed by window id and nothing else prunes it, so a
-        // window that has gone would leave an entry behind for the lifetime of
-        // the session — one per snapped-then-closed window.
-        for id in self.windows.keys() {
-            if !kept.contains_key(id) {
-                self.snap.history.remove(id.0);
-            }
         }
 
         self.windows = kept;
@@ -1868,241 +1639,6 @@ impl DesktopShell {
         // authority on focus too, and "no window is focused" is a state it can
         // genuinely be in — every window minimised, or the desktop empty.
         self.focused_window = focused;
-    }
-
-    /// Remove a window.
-    pub fn remove_window(&mut self, id: WindowId) {
-        // Window ids are handed out by a counter that never repeats within a
-        // session, so a stale entry would not be *mis*-applied to a later
-        // window — but it would still accumulate for the lifetime of the shell,
-        // one per snapped-then-closed window, which is a leak whatever it is
-        // called.
-        self.snap.history.remove(id.0);
-        self.windows.remove(&id);
-        if self.focused_window == Some(id) {
-            // Focus the topmost remaining window
-            self.focused_window = self.visible_windows().last().map(|w| w.id);
-            if let Some(fid) = self.focused_window
-                && let Some(w) = self.windows.get_mut(&fid)
-            {
-                w.focused = true;
-            }
-        }
-    }
-
-    /// Focus a window (bring to front).
-    pub fn focus_window(&mut self, id: WindowId) {
-        // Unfocus previous
-        if let Some(prev) = self.focused_window
-            && let Some(w) = self.windows.get_mut(&prev)
-        {
-            w.focused = false;
-        }
-
-        let z_order = self.take_z();
-        if let Some(w) = self.windows.get_mut(&id) {
-            w.focused = true;
-            w.z_order = z_order;
-            // Restore if minimized
-            if w.state == WindowState::Minimized {
-                w.state = WindowState::Normal;
-                w.visible = true;
-            }
-        }
-
-        self.focused_window = Some(id);
-    }
-
-    /// Minimize a window to the taskbar.
-    pub fn minimize_window(&mut self, id: WindowId) {
-        if let Some(w) = self.windows.get_mut(&id) {
-            w.state = WindowState::Minimized;
-            w.visible = false;
-            w.focused = false;
-        }
-        if self.focused_window == Some(id) {
-            self.focused_window = None;
-            // Focus next visible window
-            if let Some(next) = self.visible_windows().last() {
-                let next_id = next.id;
-                self.focus_window(next_id);
-            }
-        }
-    }
-
-    /// Maximize a window to fill the work area.
-    ///
-    /// Remembers where the window was, so that restoring can put it back. Only
-    /// the first maximize records it: maximizing an already-maximized window
-    /// would otherwise record the maximized geometry as the one to return to.
-    pub fn maximize_window(&mut self, id: WindowId) {
-        let (wx, wy, ww, wh) = self.work_area();
-        if let Some(w) = self.windows.get_mut(&id) {
-            if w.state != WindowState::Maximized {
-                w.restored = Some(WindowGeometry {
-                    x: w.x,
-                    y: w.y,
-                    width: w.width,
-                    height: w.height,
-                });
-            }
-            w.state = WindowState::Maximized;
-            w.x = wx;
-            w.y = wy;
-            w.width = ww;
-            w.height = wh;
-            w.visible = true;
-        }
-    }
-
-    /// Restore a window to normal state, back where it was before it was
-    /// maximized if that is known.
-    pub fn restore_window(&mut self, id: WindowId) {
-        if let Some(w) = self.windows.get_mut(&id) {
-            w.state = WindowState::Normal;
-            w.visible = true;
-            if let Some(geometry) = w.restored.take() {
-                w.x = geometry.x;
-                w.y = geometry.y;
-                w.width = geometry.width;
-                w.height = geometry.height;
-            }
-        }
-    }
-
-    /// Move a window.
-    ///
-    /// A move by any route — drag, keyboard, a program placing its own window
-    /// — ends the window's tenancy of a snap zone. It is no longer in the zone
-    /// it was put in, so keeping the entry would leave
-    /// [`unsnap_window`](Self::unsnap_window) able to yank a window the user
-    /// has since placed by hand back to a position it left minutes ago.
-    /// [`snap_window_to_zone`](Self::snap_window_to_zone) sets the position
-    /// directly rather than going through here, so this does not undo the snap
-    /// it is part of.
-    pub fn move_window(&mut self, id: WindowId, x: i32, y: i32) {
-        self.snap.history.remove(id.0);
-        if let Some(w) = self.windows.get_mut(&id) {
-            w.x = x;
-            w.y = y;
-            if w.state == WindowState::Maximized {
-                w.state = WindowState::Normal;
-                // The user has just placed the window themselves; the geometry
-                // it had before it was maximized is no longer where it should
-                // spring back to.
-                w.restored = None;
-            }
-        }
-    }
-
-    /// Resize a window.
-    ///
-    /// Ends a snap for the same reason [`move_window`](Self::move_window)
-    /// does: a resized window no longer fills the zone it was snapped to.
-    pub fn resize_window(&mut self, id: WindowId, width: u32, height: u32) {
-        self.snap.history.remove(id.0);
-        if let Some(w) = self.windows.get_mut(&id) {
-            w.width = width;
-            w.height = height;
-            if w.state == WindowState::Maximized {
-                w.state = WindowState::Normal;
-                w.restored = None;
-            }
-        }
-    }
-
-    /// Snap window to left/right half of screen.
-    ///
-    /// A thin naming over [`snap_window_to_zone`](Self::snap_window_to_zone):
-    /// the two halves are zones 0 and 1 of the `TwoEqualHalves` preset. The
-    /// shell used to compute the two rectangles itself, which is what made
-    /// `snap.rs` dead code and let the two disagree about whether snapped
-    /// windows touch.
-    pub fn snap_window(&mut self, id: WindowId, left: bool) {
-        let zone = if left { 0 } else { 1 };
-        self.snap_window_to_zone(id, snap::SnapLayoutPreset::TwoEqualHalves, zone);
-    }
-
-    /// Snap a window into one zone of a layout preset.
-    ///
-    /// Returns `false` if the window or the zone does not exist, in which case
-    /// nothing is changed — including the layout, which is only adopted once
-    /// the target is known to be real.
-    ///
-    /// The window's pre-snap geometry is recorded so that
-    /// [`unsnap_window`](Self::unsnap_window) can put it back. That is separate
-    /// from [`restored`](ManagedWindow::restored), which is the *maximize*
-    /// memory and is deliberately cleared here: a snap is the user placing the
-    /// window, so a later un-maximize must not yank it somewhere else. The two
-    /// memories answer different questions and a window can be in both states'
-    /// history without ambiguity.
-    pub fn snap_window_to_zone(
-        &mut self,
-        id: WindowId,
-        preset: snap::SnapLayoutPreset,
-        zone: snap::ZoneId,
-    ) -> bool {
-        self.sync_snap_area();
-        let Some(w) = self.windows.get(&id) else {
-            return false;
-        };
-        let before = snap::SavedGeometry {
-            x: w.x as f32,
-            y: w.y as f32,
-            width: w.width as f32,
-            height: w.height as f32,
-        };
-
-        let previous = self.snap.active_preset();
-        self.snap.set_layout(preset);
-        // Recorded *before* the snap, because `SnapManager::snap_window` fills
-        // in a zero-geometry placeholder for a window it has not seen — which
-        // would restore to a 0x0 window at the origin.
-        self.snap.history.record(id.0, zone, before);
-        let Some((x, y, width, height)) = self.snap.snap_window(id.0, zone) else {
-            // No such zone in this preset. Undo both the layout switch and the
-            // history entry, so a bad zone id is not observable at all.
-            self.snap.history.remove(id.0);
-            self.snap.set_layout(previous);
-            return false;
-        };
-
-        let Some(w) = self.windows.get_mut(&id) else {
-            return false;
-        };
-        let (wx, wy, ww, wh) = round_rect(x, y, width, height);
-        w.x = wx;
-        w.y = wy;
-        w.width = ww;
-        w.height = wh;
-        w.state = WindowState::Normal;
-        // Snapping is the user placing the window, same as moving it.
-        w.restored = None;
-        true
-    }
-
-    /// Put a snapped window back where it was before it was snapped.
-    ///
-    /// Returns `false` if the window is not snapped, which is also what makes
-    /// this safe to call unconditionally from a drag handler.
-    pub fn unsnap_window(&mut self, id: WindowId) -> bool {
-        let Some(geometry) = self.snap.history.restore(id.0) else {
-            return false;
-        };
-        let Some(w) = self.windows.get_mut(&id) else {
-            return false;
-        };
-        w.x = round_to_i32(geometry.x);
-        w.y = round_to_i32(geometry.y);
-        w.width = round_to_u32(geometry.width);
-        w.height = round_to_u32(geometry.height);
-        w.state = WindowState::Normal;
-        true
-    }
-
-    /// Whether a window is currently occupying a snap zone.
-    pub fn is_snapped(&self, id: WindowId) -> bool {
-        self.snap.history.snapped_zone(id.0).is_some()
     }
 
     /// Get visible windows on current desktop, sorted by Z-order.
@@ -3348,17 +2884,24 @@ mod theme_tests {
     }
 }
 
-/// Tests for the window manager itself — window lifecycle, stacking, snapping,
-/// virtual desktops and Alt+Tab.
+/// Tests for what the shell still decides about windows: which virtual desktop
+/// they are on, which one the switcher lands on, and what a keyboard shortcut
+/// asks the compositor for.
 ///
-/// Until now `main.rs` was covered only by `theme_tests`, so none of this had
-/// any: the code that decides which window is on top, which desktop it lives
-/// on and where a snapped window's edges fall was checked by nothing but the
-/// demo `main`. Each test below pins one rule the rest of the shell relies on,
-/// and several of them exist because rewriting the counters and the desktop
-/// arithmetic turned up a case that used to be wrong — the one-pixel gap
-/// between snapped halves, the underflow on a shell with no desktops, and the
-/// z-order counter running out.
+/// Shorter than it was, deliberately. This module used to test a *private
+/// window manager*: `add_window` minting ids, `focus_window` bumping a z
+/// counter, `maximize_window` and `snap_window` computing rectangles. All of it
+/// worked in isolation and none of it was reachable, because a live shell
+/// learns what exists from [`DesktopShell::apply_window_list`], which
+/// **replaces** its window list — so every edit those methods made was
+/// overwritten, unread, by the compositor's next snapshot. The code is gone,
+/// and with it the tests that pinned it; the same behaviour is pinned in
+/// `compositor`, where it is what actually runs.
+///
+/// Everything below therefore reaches the shell the way a live session does:
+/// through a window list. The helpers at the top build one, and standing in for
+/// "the compositor did as it was asked" is another list, which is exactly how a
+/// real session finds out.
 #[cfg(test)]
 mod window_manager_tests {
     // A test module's job is to fail loudly the instant the code under test is
@@ -3373,24 +2916,102 @@ mod window_manager_tests {
     )]
 
     use super::{
-        DesktopShell, Key, KeyEvent, Modifiers, ShellControlAction, TextRole, WindowId,
-        WindowRequest, WindowState, text,
+        DesktopShell, Key, KeyEvent, ManagedWindow, Modifiers, ShellControlAction, TextRole,
+        WindowId, WindowInfo, WindowRequest, WindowState, text,
     };
 
     fn shell() -> DesktopShell {
         DesktopShell::new(1920, 1080)
     }
 
-    fn open(shell: &mut DesktopShell, title: &str) -> WindowId {
-        shell.add_window(title, 100, 100, 400, 300, 1)
+    /// One window turned back into the description it arrived as.
+    fn info(window: &ManagedWindow) -> WindowInfo {
+        let mut info = WindowInfo::new(window.id.0, u64::from(window.pid), window.title.clone());
+        info.minimized = window.state == WindowState::Minimized;
+        info.maximized = window.state == WindowState::Maximized;
+        info.focused = window.focused;
+        info
     }
 
-    /// A window's rectangle, for tests that assert one operation left it alone.
-    /// `ManagedWindow` is neither `Copy` nor `PartialEq` — it carries a title
-    /// and an icon — so the comparison has to name the fields that matter.
-    fn geometry(shell: &DesktopShell, id: WindowId) -> (i32, i32, u32, u32) {
-        let w = shell.windows.get(&id).unwrap();
-        (w.x, w.y, w.width, w.height)
+    /// What the shell currently believes, in the compositor's own order, ready
+    /// to be handed back with one thing changed.
+    ///
+    /// Every helper below builds on this rather than calling a method on the
+    /// shell — there is no longer a method to call, and a live session never
+    /// had one. The list is the only thing that moves the shell's idea of the
+    /// desktop.
+    fn as_list(shell: &DesktopShell) -> Vec<WindowInfo> {
+        let mut windows: Vec<&ManagedWindow> = shell.windows.values().collect();
+        // The compositor emits bottom-to-top, which is where `z_order` came
+        // from in the first place.
+        windows.sort_by_key(|window| window.z_order);
+        windows.into_iter().map(info).collect()
+    }
+
+    /// A window opens: one more entry, on top and holding focus, which is what
+    /// a newly-mapped window is.
+    ///
+    /// The id is the compositor's to choose; this stands in for it by taking
+    /// the next one this shell has not seen. Ids must not repeat — `windows` is
+    /// keyed by them, so a repeat would silently merge two windows.
+    fn open(shell: &mut DesktopShell, title: &str) -> WindowId {
+        let id = WindowId(
+            shell
+                .windows
+                .keys()
+                .map(|id| id.0)
+                .max()
+                .map_or(1, |top| top + 1),
+        );
+        let mut list = as_list(shell);
+        for other in &mut list {
+            other.focused = false;
+        }
+        let mut fresh = WindowInfo::new(id.0, 1, title);
+        fresh.focused = true;
+        list.push(fresh);
+        shell.apply_window_list(&list);
+        id
+    }
+
+    /// The compositor closed a window, and focused whatever was under it.
+    fn close(shell: &mut DesktopShell, id: WindowId) {
+        let mut list: Vec<WindowInfo> = as_list(shell)
+            .into_iter()
+            .filter(|info| info.id != id.0)
+            .collect();
+        if let Some(top) = list.last_mut() {
+            top.focused = true;
+        }
+        shell.apply_window_list(&list);
+    }
+
+    /// The compositor raised a window to the front and gave it the keyboard —
+    /// what it does when it grants an `Activate`.
+    fn raise(shell: &mut DesktopShell, id: WindowId) {
+        let mut list = as_list(shell);
+        let Some(at) = list.iter().position(|info| info.id == id.0) else {
+            panic!("no window {id:?} to raise");
+        };
+        let mut window = list.remove(at);
+        window.focused = true;
+        window.minimized = false;
+        for other in &mut list {
+            other.focused = false;
+        }
+        list.push(window);
+        shell.apply_window_list(&list);
+    }
+
+    /// The compositor maximized a window.
+    fn maximize(shell: &mut DesktopShell, id: WindowId) {
+        let mut list = as_list(shell);
+        for info in &mut list {
+            if info.id == id.0 {
+                info.maximized = true;
+            }
+        }
+        shell.apply_window_list(&list);
     }
 
     fn press(key: Key, modifiers: Modifiers) -> KeyEvent {
@@ -3426,24 +3047,8 @@ mod window_manager_tests {
     }
 
     // ==================================================================
-    // Identity and stacking
+    // Stacking, which is the compositor's order and nothing else
     // ==================================================================
-
-    /// Two windows must never share an id: the id is the key everything else
-    /// looks a window up by, so a repeat would silently merge two windows.
-    #[test]
-    fn every_window_gets_an_id_of_its_own() {
-        let mut shell = shell();
-        let ids: Vec<WindowId> = (0..200)
-            .map(|i| open(&mut shell, &format!("w{i}")))
-            .collect();
-
-        let mut distinct = ids.clone();
-        distinct.sort_unstable();
-        distinct.dedup();
-        assert_eq!(distinct.len(), ids.len());
-        assert_eq!(shell.windows.len(), ids.len());
-    }
 
     #[test]
     fn a_new_window_opens_above_the_existing_ones_and_takes_focus() {
@@ -3456,346 +3061,24 @@ mod window_manager_tests {
         assert_eq!(shell.visible_windows().last().map(|w| w.id), Some(second));
     }
 
+    /// The shell's stacking *is* the list's order. It used to be a counter the
+    /// shell bumped on every focus change — a second answer to a question the
+    /// compositor had already answered, and the one that lost every time the
+    /// two disagreed.
     #[test]
-    fn focusing_a_window_raises_it_above_every_other() {
+    fn the_stacking_order_is_the_one_the_list_arrived_in() {
         let mut shell = shell();
         let bottom = open(&mut shell, "bottom");
         let middle = open(&mut shell, "middle");
         let top = open(&mut shell, "top");
 
-        shell.focus_window(bottom);
+        raise(&mut shell, bottom);
 
         let raised = z_of(&shell, bottom);
         assert!(raised > z_of(&shell, middle));
         assert!(raised > z_of(&shell, top));
         assert_eq!(shell.visible_windows().last().map(|w| w.id), Some(bottom));
         assert!(!shell.windows.get(&middle).unwrap().focused);
-    }
-
-    /// The z counter is bumped on every focus change, so a long-running session
-    /// can genuinely exhaust it. Saturating would freeze the stacking order and
-    /// wrapping would invert it; renumbering keeps it working, which is what
-    /// this checks.
-    #[test]
-    fn the_stacking_order_survives_the_z_counter_running_out() {
-        let mut shell = shell();
-        let bottom = open(&mut shell, "bottom");
-        let middle = open(&mut shell, "middle");
-        let top = open(&mut shell, "top");
-
-        shell.next_z = u32::MAX;
-        let raised = open(&mut shell, "raised");
-
-        assert!(shell.next_z < u32::MAX, "the counter must have room again");
-        let order: Vec<WindowId> = shell.visible_windows().iter().map(|w| w.id).collect();
-        assert_eq!(order, vec![bottom, middle, top, raised]);
-
-        // And it must keep working afterwards.
-        shell.focus_window(middle);
-        assert_eq!(shell.visible_windows().last().map(|w| w.id), Some(middle));
-    }
-
-    // ==================================================================
-    // Closing and minimizing
-    // ==================================================================
-
-    #[test]
-    fn closing_the_focused_window_focuses_the_one_below_it() {
-        let mut shell = shell();
-        let below = open(&mut shell, "below");
-        let focused = open(&mut shell, "focused");
-
-        shell.remove_window(focused);
-
-        assert_eq!(shell.focused_window, Some(below));
-        assert!(shell.windows.get(&below).unwrap().focused);
-    }
-
-    #[test]
-    fn closing_the_last_window_leaves_nothing_focused() {
-        let mut shell = shell();
-        let only = open(&mut shell, "only");
-
-        shell.remove_window(only);
-
-        assert_eq!(shell.focused_window, None);
-        assert!(shell.windows.is_empty());
-    }
-
-    #[test]
-    fn a_minimized_window_comes_back_when_it_is_focused() {
-        let mut shell = shell();
-        let id = open(&mut shell, "app");
-
-        shell.minimize_window(id);
-        assert!(!shell.windows.get(&id).unwrap().visible);
-        assert!(shell.visible_windows().is_empty());
-
-        shell.focus_window(id);
-        let window = shell.windows.get(&id).unwrap();
-        assert!(window.visible);
-        assert_eq!(window.state, WindowState::Normal);
-        assert_eq!(shell.focused_window, Some(id));
-    }
-
-    // ==================================================================
-    // Snapping
-    // ==================================================================
-
-    /// Both halves used to be `width / 2` computed in the shell, which left a
-    /// one-pixel strip of desktop down the middle of any odd-width screen and
-    /// no deliberate gap at all. They now come from `snap.rs`, whose zones are
-    /// separated by [`crate::snap::ZONE_GAP`] — so the property is no longer "the
-    /// halves meet" but "they are exactly one gap apart, and with that gap they
-    /// span the work area precisely".
-    ///
-    /// The widths swept are not decoration. `snap.rs` subtracts the gap before
-    /// halving, so below 18 pixels the subtraction would produce a *negative*
-    /// half and place the right zone outside the area it is tiling; the gap is
-    /// therefore dropped under that threshold, and 17/18 pin the boundary. 1921
-    /// pins the rounding rule: the right half lands on `x = 963.5, width =
-    /// 957.5`, which rounds to an edge at 1922 unless the edges are rounded
-    /// rather than the origin and extent separately.
-    #[test]
-    fn the_two_snapped_halves_span_the_work_area_with_one_gap_between_them() {
-        let gap = crate::round_to_i32(crate::snap::ZONE_GAP);
-
-        for screen_width in [1920_u32, 1921, 2560, 19, 18, 17, 3, 2, 1, 0] {
-            let mut shell = DesktopShell::new(screen_width, 1080);
-            let left = open(&mut shell, "left");
-            let right = open(&mut shell, "right");
-
-            shell.snap_window(left, true);
-            shell.snap_window(right, false);
-
-            let (wx, wy, ww, wh) = shell.work_area();
-            let l = shell.windows.get(&left).unwrap();
-            let r = shell.windows.get(&right).unwrap();
-            let l_right_edge = l.x + i32::try_from(l.width).unwrap();
-            let r_right_edge = r.x + i32::try_from(r.width).unwrap();
-
-            // The gap is affordable exactly when it leaves each half no
-            // narrower than the gap itself.
-            let expected_gap = if screen_width >= 3 * u32::try_from(gap).unwrap() {
-                gap
-            } else {
-                0
-            };
-
-            assert_eq!(
-                l.x, wx,
-                "the left half starts at the work area, width={screen_width}"
-            );
-            assert_eq!(
-                r.x - l_right_edge,
-                expected_gap,
-                "the halves must be one gap apart, width={screen_width}"
-            );
-            assert_eq!(
-                r_right_edge,
-                wx + i32::try_from(ww).unwrap(),
-                "the right half must end flush with the work area, width={screen_width}"
-            );
-            assert!(
-                l.width.abs_diff(r.width) <= 1,
-                "the halves must be equal up to rounding, width={screen_width}: \
-                 {} vs {}",
-                l.width,
-                r.width
-            );
-            for w in [l, r] {
-                assert_eq!(w.y, wy, "width={screen_width}");
-                assert_eq!(w.height, wh, "width={screen_width}");
-                assert_eq!(w.state, WindowState::Normal);
-            }
-        }
-    }
-
-    /// `work_area()` is derived from three fields the shell publishes as
-    /// mutable — screen size, taskbar height, appearance — so a snap has to
-    /// re-read it rather than trust a copy taken when the shell was built.
-    /// Without that, changing resolution or moving the taskbar would tile a
-    /// screen that no longer exists, and nothing would say so.
-    #[test]
-    fn snapping_follows_the_screen_and_the_taskbar_after_they_change() {
-        let mut shell = shell();
-        let id = open(&mut shell, "app");
-
-        shell.screen_width = 1280;
-        shell.screen_height = 800;
-        shell.taskbar_height = 96;
-        shell.snap_window(id, false);
-
-        let (wx, wy, ww, wh) = shell.work_area();
-        let w = shell.windows.get(&id).unwrap();
-        assert_eq!(
-            w.x + i32::try_from(w.width).unwrap(),
-            wx + i32::try_from(ww).unwrap(),
-            "the right half must end at the new screen's right edge"
-        );
-        assert_eq!(w.y, wy);
-        assert_eq!(w.height, wh, "and stop above the taller taskbar");
-    }
-
-    /// Unsnapping puts the window back exactly where it was, not merely
-    /// somewhere unsnapped.
-    #[test]
-    fn unsnapping_restores_the_geometry_the_window_had_before() {
-        let mut shell = shell();
-        let id = open(&mut shell, "app");
-        shell.move_window(id, 137, 249);
-        shell.resize_window(id, 640, 480);
-        let before = geometry(&shell, id);
-
-        assert!(!shell.is_snapped(id));
-        shell.snap_window(id, true);
-        assert!(shell.is_snapped(id));
-        assert_ne!(shell.windows.get(&id).unwrap().width, before.2);
-
-        assert!(shell.unsnap_window(id));
-        assert_eq!(geometry(&shell, id), before);
-        assert!(
-            !shell.is_snapped(id),
-            "and the window must no longer claim a zone"
-        );
-    }
-
-    /// Unsnapping a window that was never snapped is a no-op, which is what
-    /// makes it safe to call unconditionally from a drag handler.
-    #[test]
-    fn unsnapping_an_unsnapped_window_changes_nothing() {
-        let mut shell = shell();
-        let id = open(&mut shell, "app");
-        let before = geometry(&shell, id);
-
-        assert!(!shell.unsnap_window(id));
-        assert_eq!(geometry(&shell, id), before);
-    }
-
-    /// A window the user has since moved or resized is no longer in its zone,
-    /// so it must stop answering to "unsnap" — otherwise a later unsnap would
-    /// teleport a window the user had just placed by hand.
-    #[test]
-    fn moving_or_resizing_a_snapped_window_ends_the_snap() {
-        for (label, act) in [
-            (
-                "move",
-                (|s: &mut DesktopShell, id| s.move_window(id, 10, 10))
-                    as fn(&mut DesktopShell, WindowId),
-            ),
-            ("resize", |s: &mut DesktopShell, id| {
-                s.resize_window(id, 300, 200);
-            }),
-        ] {
-            let mut shell = shell();
-            let id = open(&mut shell, "app");
-            shell.snap_window(id, true);
-            assert!(shell.is_snapped(id), "{label}: precondition");
-
-            act(&mut shell, id);
-
-            assert!(!shell.is_snapped(id), "{label} must end the snap");
-            assert!(!shell.unsnap_window(id), "{label}: nothing left to restore");
-        }
-    }
-
-    /// Closing a snapped window must not leave its saved geometry behind: the
-    /// history is keyed by window id, and ids are not reused within a session,
-    /// so every snapped-then-closed window would leak one entry forever.
-    #[test]
-    fn closing_a_snapped_window_forgets_its_saved_geometry() {
-        let mut shell = shell();
-        let id = open(&mut shell, "app");
-        shell.snap_window(id, true);
-        assert!(!shell.snap.history.is_empty());
-
-        shell.remove_window(id);
-
-        assert!(shell.snap.history.is_empty());
-        assert!(!shell.is_snapped(id));
-    }
-
-    /// A zone id that the preset does not have must leave the shell exactly as
-    /// it found it — including the active layout, which is otherwise switched
-    /// before the zone is known to exist.
-    #[test]
-    fn snapping_to_a_zone_that_does_not_exist_changes_nothing() {
-        let mut shell = shell();
-        let id = open(&mut shell, "app");
-        let before = geometry(&shell, id);
-        let layout = shell.snap.active_preset();
-        // The preset asked for is deliberately *not* the one already in force.
-        // Asking for a bad zone of the current layout leaves the failed layout
-        // switch invisible — which is exactly what the first version of this
-        // test did, and it passed with the undo deleted.
-        let other = crate::snap::SnapLayoutPreset::SixGrid;
-        assert_ne!(layout, other, "precondition: the switch must be observable");
-
-        assert!(!shell.snap_window_to_zone(id, other, 99));
-
-        assert_eq!(geometry(&shell, id), before);
-        assert_eq!(
-            shell.snap.active_preset(),
-            layout,
-            "a rejected snap must not leave the layout switched"
-        );
-        assert!(!shell.is_snapped(id));
-    }
-
-    /// The zones of a preset are the shell's to use, not just `snap.rs`'s: a
-    /// quadrant snap must land in the quadrant the module says it does.
-    #[test]
-    fn snapping_to_a_quadrant_lands_in_that_quadrant() {
-        let mut shell = shell();
-        let (wx, wy, ww, wh) = shell.work_area();
-        let mid_x = wx + i32::try_from(ww).unwrap() / 2;
-        let mid_y = wy + i32::try_from(wh).unwrap() / 2;
-
-        for (zone, right, bottom) in [
-            (0, false, false),
-            (1, true, false),
-            (2, false, true),
-            (3, true, true),
-        ] {
-            let id = open(&mut shell, "app");
-            assert!(shell.snap_window_to_zone(
-                id,
-                crate::snap::SnapLayoutPreset::FourQuadrants,
-                zone
-            ));
-
-            let w = shell.windows.get(&id).unwrap();
-            assert_eq!(
-                w.x > mid_x - 1,
-                right,
-                "zone {zone} horizontal half: x={}",
-                w.x
-            );
-            assert_eq!(
-                w.y > mid_y - 1,
-                bottom,
-                "zone {zone} vertical half: y={}",
-                w.y
-            );
-            assert!(
-                i32::try_from(w.width).unwrap() < i32::try_from(ww).unwrap(),
-                "zone {zone} must be a quadrant, not the whole width"
-            );
-        }
-    }
-
-    /// Snapping is the user placing the window, so a later "restore" must not
-    /// yank it back to wherever it was before it was maximized.
-    #[test]
-    fn snapping_forgets_the_pre_maximize_geometry() {
-        let mut shell = shell();
-        let id = open(&mut shell, "app");
-
-        shell.maximize_window(id);
-        assert!(shell.windows.get(&id).unwrap().restored.is_some());
-
-        shell.snap_window(id, true);
-        assert!(shell.windows.get(&id).unwrap().restored.is_none());
     }
 
     // ==================================================================
@@ -3808,7 +3091,11 @@ mod window_manager_tests {
         let last = shell.num_desktops - 1;
 
         assert_eq!(shell.previous_desktop(), None);
-        assert!(shell.handle_hotkey(&press(Key::Left, ctrl_super())).consumed);
+        assert!(
+            shell
+                .handle_hotkey(&press(Key::Left, ctrl_super()))
+                .consumed
+        );
         assert_eq!(shell.current_desktop, 0);
 
         for expected in 1..=last {
@@ -3838,7 +3125,11 @@ mod window_manager_tests {
 
         assert_eq!(shell.previous_desktop(), None);
         assert_eq!(shell.next_desktop(), None);
-        assert!(shell.handle_hotkey(&press(Key::Left, ctrl_super())).consumed);
+        assert!(
+            shell
+                .handle_hotkey(&press(Key::Left, ctrl_super()))
+                .consumed
+        );
         assert!(
             shell
                 .handle_hotkey(&press(Key::Right, ctrl_super()))
@@ -3876,6 +3167,27 @@ mod window_manager_tests {
         );
     }
 
+    /// Which desktop a window is on is shell-local — the compositor has no
+    /// notion of desktops — so it is the one thing about a window that a new
+    /// window list must *not* reset.
+    #[test]
+    fn a_window_list_does_not_move_a_window_back_off_its_desktop() {
+        let mut shell = shell();
+        let id = open(&mut shell, "app");
+        shell.move_window_to_desktop(id, 1);
+
+        // The compositor says nothing has changed, which is true of everything
+        // it knows about.
+        let list = as_list(&shell);
+        shell.apply_window_list(&list);
+
+        assert_eq!(shell.windows.get(&id).unwrap().desktop, 1);
+        assert!(
+            shell.visible_windows().is_empty(),
+            "and it is still not on the desktop being shown"
+        );
+    }
+
     #[test]
     fn a_window_cannot_be_moved_to_a_desktop_that_does_not_exist() {
         let mut shell = shell();
@@ -3910,7 +3222,7 @@ mod window_manager_tests {
         // *asks* for the window to be raised; nothing about the shell's own
         // focus has moved at the point of the assertion above, which is the
         // whole difference between this and what it used to do.
-        shell.focus_window(first);
+        raise(&mut shell, first);
 
         shell.start_alt_tab();
         assert_eq!(
@@ -3956,8 +3268,8 @@ mod window_manager_tests {
         shell.start_alt_tab();
         shell.next_alt_tab();
 
-        shell.remove_window(ids[1]);
-        shell.remove_window(ids[2]);
+        close(&mut shell, ids[1]);
+        close(&mut shell, ids[2]);
 
         shell.next_alt_tab();
         assert!(shell.alt_tab_index < shell.visible_windows().len());
@@ -4135,7 +3447,7 @@ mod window_manager_tests {
         shell.next_alt_tab();
 
         for id in &ids[1..] {
-            shell.remove_window(*id);
+            close(&mut shell, *id);
         }
 
         shell.prev_alt_tab();
@@ -4217,14 +3529,17 @@ mod window_manager_tests {
         let id = open(&mut shell, "app");
 
         assert_eq!(
-            shell.handle_hotkey(&press(Key::Down, super_only())).requests,
+            shell
+                .handle_hotkey(&press(Key::Down, super_only()))
+                .requests,
             vec![WindowRequest::new(id, ShellControlAction::Minimize)],
         );
 
-        // Standing in for the compositor having maximized it.
-        shell.windows.get_mut(&id).unwrap().state = WindowState::Maximized;
+        maximize(&mut shell, id);
         assert_eq!(
-            shell.handle_hotkey(&press(Key::Down, super_only())).requests,
+            shell
+                .handle_hotkey(&press(Key::Down, super_only()))
+                .requests,
             vec![WindowRequest::new(id, ShellControlAction::Restore)],
         );
     }

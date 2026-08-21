@@ -348,6 +348,35 @@ only one tree to prune and no question of whose it is. **That is the sharpest
 argument for A that has been made in this entry, and it came from a measurement
 rather than from reasoning.**
 
+### 2026-08-21 — the operator asked "why not b *and* c?"
+
+Recorded here because it was answered in conversation and would otherwise exist
+only in a transcript, and because the question exposes a defect in how this entry
+was written rather than a gap in the reasoning.
+
+**The answer is: you can have both, and you already do.** The four options were
+laid out as a table, which reads as a menu you pick *one* row from — but only A
+and B are mutually exclusive. C is not an alternative to either; it is a guard
+that sits in front of whichever of them you choose:
+
+| | A — one shared `target/` | B — separate + pruning |
+|---|---|---|
+| **without C** | disk can still reach 0 via a hand-run `cargo build` | same, plus the recurring pruning chore |
+| **with C** (shipped) | harness refuses below 20 GiB and names the tree to prune | harness refuses below 20 GiB and names the tree to prune |
+
+C was implemented unilaterally on 2026-08-15 precisely *because* it composes with
+everything: it frees no space and changes no workflow, it only converts a
+corrupting failure into an honest refusal. So **B+C is what is running today**,
+and has been since that date. Choosing A would leave C exactly as it is.
+
+**What this changes about the question:** nothing about the tradeoff — but the
+framing was misleading, which is what invited the question. The status line
+already said "C is done; the question is now only A vs B," while the option table
+went on presenting all four as peers. The live choice is one row: **share one
+build directory, or keep three and keep pruning.** C stays either way, and D is
+orthogonal too — it asks *where* the output lives, not *how many copies* there
+are, so it composes with A and B just as C does.
+
 ## Q48 — [B] Finishing §312 will make "set the system clock", "listen on port 80" and "raise your own resource limit" permanently impossible. Give each of them a real kernel object to hang off, or leave them denied? — Status: **ANSWERED 2026-08-21 by the operator — b**
 
 > **ANSWERED 2026-08-21 (relayed by lane A).** On 2026-08-21 the

@@ -378,7 +378,7 @@ impl User {
 
     /// Format as a single-line summary for list-users output.
     fn format_list_line(&self) -> String {
-        format!("{:<8} {:<16} {}", self.uid, self.name, self.state,)
+        format!("{:<8} {:<16} {}", self.uid, self.name, self.state)
     }
 
     /// Format detailed properties for show-user output.
@@ -770,7 +770,14 @@ impl Daemon {
     /// Allocate a new unique session ID.
     fn allocate_session_id(&mut self) -> String {
         let id = self.next_session_id;
-        self.next_session_id = if id >= MAX_SESSION_ID { 1 } else { id + 1 };
+        // `saturating_add` rather than `+`: the `>=` arm already makes overflow
+        // unreachable, but saying so in the operator means the guard and the
+        // increment cannot drift apart later.
+        self.next_session_id = if id >= MAX_SESSION_ID {
+            1
+        } else {
+            id.saturating_add(1)
+        };
         id.to_string()
     }
 
@@ -1046,7 +1053,10 @@ impl Daemon {
     fn remove_inhibitors_by_pid(&mut self, pid: u32) -> usize {
         let before = self.inhibitors.len();
         self.inhibitors.retain(|i| i.pid != pid);
-        before - self.inhibitors.len()
+        // `retain` only ever removes, so the difference cannot go negative;
+        // `saturating_sub` states that rather than relying on the reader
+        // knowing it.
+        before.saturating_sub(self.inhibitors.len())
     }
 
     /// Check whether a given action is inhibited.
@@ -1959,18 +1969,19 @@ fn run_main() -> i32 {
     let args: Vec<String> = env::args().collect();
     let personality = detect_personality(&args);
 
-    // Strip the subcommand if present to pass remaining args.
-    let sub_args: Vec<String> = if args.len() > 1
-        && matches!(
-            args.get(1).map(|s| s.as_str()),
-            Some("ctl" | "loginctl" | "daemon")
-        ) {
-        args[2..].to_vec()
-    } else if args.len() > 1 {
-        args[1..].to_vec()
+    // Strip argv[0], and the subcommand too when there is one. Expressed as a
+    // skip count rather than a slice range so the empty-argv case needs no
+    // separate arm: `skip` on a short iterator yields nothing, where `args[1..]`
+    // would have to be guarded.
+    let skip = if matches!(
+        args.get(1).map(String::as_str),
+        Some("ctl" | "loginctl" | "daemon")
+    ) {
+        2
     } else {
-        Vec::new()
+        1
     };
+    let sub_args: Vec<String> = args.iter().skip(skip).cloned().collect();
 
     match personality {
         "loginctl" => run_loginctl(&sub_args),
@@ -1992,7 +2003,17 @@ pub extern "C" fn main(_argc: i32, _argv: *const *const u8) -> i32 {
 // Tests
 // ============================================================================
 
+// Panicking on bad data is what a test is *for*: an `unwrap` that fires is a
+// failure report, not a crash in someone's session. CLAUDE.md scopes the four
+// defensive lints to non-test code for exactly this reason.
 #[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects
+)]
 mod tests {
     use super::*;
 

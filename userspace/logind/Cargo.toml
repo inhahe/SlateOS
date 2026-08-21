@@ -29,3 +29,12 @@ posix = { path = "../../posix" }
 # a false green as easily as a red. See known-issues.md
 # `B-FTPD-SSHD-AUTH-TESTS-SHARE-TEMP-FILES-AND-FLAKE`.
 scratchdir = { path = "../scratchdir" }
+
+# Inherit the workspace lint configuration. This crate had none at all: it was
+# not in the `[lints] workspace = true` set and set no `#![deny]`/`#![warn]` of
+# its own, so `unwrap_used`, `expect_used`, `indexing_slicing` and
+# `arithmetic_side_effects` -- the four the workspace keeps at `warn` precisely
+# because they flag real panic and overflow risks -- were silently off over code
+# that decides whether a password unlocks a locked screen.
+[lints]
+workspace = true

@@ -714,190 +714,6 @@ two models already disagree about what a page range is, and each additional
 edit to either makes the eventual merge harder. Detail in `known-issues.md` →
 "`apps/pdfviewer` can print nothing at all — the whole model is unwired".
 
-## B-Q5 — [B] 70 compiled programs are stored in git, and they go out of date without git noticing. Keep storing them, or rebuild them on demand? — Status: OPEN — **C's blocking premise is now verified; the choice is lane B's**
-
-> **OPERATOR, 2026-08-21:** *"if libc.a builds byte-reproducibly from the same
-> source, would c be the best option? because if so, maybe you should test if it
-> does and then update the question?"*
->
-> **Done — lane A tested it, twice, and it does.** See the UPDATE block at the
-> end of this entry for the evidence, and for a second, independent argument for
-> C that surfaced in the same session: the staleness gate printed *wrong
-> remediation advice* — "rebuild the fixtures" when the stale side was
-> `libc.a` — which, if followed, would have relinked all nine fixtures against a
-> stale libc and recreated the 2026-08-16 incident by hand.
->
-> The question stays open because the option-C decision is **lane B's** to make
-> and to write up; lane A only supplied the measurement the operator asked for.
-
-**In short:** The test programs this OS runs at boot are compiled on a
-developer machine and then the *compiled result* is saved into git, alongside
-the source it came from. That works right up until the system library they were
-compiled against changes — because that library is **not** in git, so nothing
-compares the two, and the saved programs quietly become tests of a system that
-no longer exists. This has now happened three times, each time costing a lane
-most of a cycle. I have just made it announce itself instead of hiding, which
-removes the danger; the question left is whether to stop storing the compiled
-programs at all and rebuild them when needed, which removes the situation.
-
-**Terms:**
-
-- **ELF** — the file format of a compiled, runnable program on this OS. One per
-  test; 70 of them are stored in git today (~226 MB of working-tree bytes).
-- **`libc.a`** — the C standard library every one of those programs is compiled
-  into. It is built from `posix/src`, and it is **deliberately not stored in
-  git** — it is a build output, regenerated in ~40 seconds.
-- **stale** — a saved program built before a change it should have picked up.
-  It still runs, still passes, and is testing the previous version of the system.
-- **ctest fixture** — one of nine small C programs (`services/ctest-*`) that the
-  boot test runs to check the C library works. The other 61 ELFs are Python
-  programs compiled the same way.
-
-### What actually goes wrong
-
-Only source files are in git, so git can tell you `posix/src/crypt.rs` changed.
-It cannot tell you `libc.a` is now behind, because it has never heard of
-`libc.a`. And the saved ELFs are checked against `libc.a` — so once `libc.a` is
-behind, every check compares two stale things to each other and reports
-agreement.
-
-The failure is worse than merely silent: **being diligent makes it quieter.**
-Rebuild the nine fixtures on a tree whose `libc.a` is behind and every
-checksum lines up again — because they now agree about a stale input. That is
-what produced three separate incidents:
-
-| When | What happened |
-|---|---|
-| 2026-08-15 | Nine fixtures on `main` linked a `libc` that `main` could no longer build (`requests/a-b-nine-ctest-fixtures-on-main-...`) |
-| 2026-08-16 | A rebuild was correct on lane C and wrong on `main` at the same moment (`requests/a-c-fixture-rebuild-was-correct-on-lane-c-and-wrong-on-main.md`) |
-| 2026-08-16 | Lane A could not boot-test at all until B rebuilt them (the request this entry answers) |
-
-Today (2026-08-17) it was live again: eight files under `posix/src` were newer
-than `libc.a`, and `ctest-fixtures.py check` reported `ok` for all nine
-fixtures. Lane A's request says outright that a third recurrence should become
-a question here rather than a fourth round of manual rebuilds.
-
-**What I have already done, so this is not urgent:** `check` now compares
-`libc.a` against `posix/src` before it says anything about a fixture, and
-fails loudly on it. The trap is sprung, not hidden. This question is about
-whether the arrangement should exist at all.
-
-### The options
-
-| Option | *What changes:* | For | Against |
-|---|---|---|---|
-| **A. Keep storing them.** Status quo, now with the staleness gate. | Nothing visible. `git clone` still gives you runnable tests. | Anyone can build the boot image without a working `zig`/WSL toolchain — which matters, because not every lane has one set up and would otherwise be blocked on the one that does. The boot test is reproducible from a clone. | The compiled result of tracked source against an untracked input is inherently unverifiable by git; the gate catches the known shape, not the next one. Binaries keep accumulating in history at ~2 MB a rebuild. |
-| **B. Stop storing them; build on demand.** `.gitignore` the 70 ELFs, exactly as `libc.a` already is; the boot test builds what is missing. | `git clone` then boot-test now needs `zig` + fastpy installed; the first boot test after a clone takes a few minutes longer. | The problem cannot recur — there is no saved artifact to be stale. Consistent with `libc.a`, which is the same kind of thing and is already handled this way. History stops growing binaries. | Every lane needs the full toolchain to run a boot test. A toolchain break then blocks *testing*, not just building. Loses the ability to bisect against a known-good binary. |
-| **C. Store them, but record the `libc.a` identity in git.** Keep the ELFs; also commit a small text file holding the checksum of the `libc.a` each was built against, and have the gate compare that to a freshly built one. | Same as A, plus a `libc.a.id` file in git that changes on every sysroot rebuild. | Makes the invisible dependency visible to git without storing 12 MB of it. Bisect still works. | Only correct if `libc.a` builds byte-reproducibly from the same source — I have not verified that it does, and if it does not, the file churns meaninglessly and everyone learns to ignore it. |
-
-**Recommendation: A for now, B once every lane has the toolchain.** The
-staleness gate closes the actual injury, and B's cost lands squarely on the
-lanes that cannot currently build a fixture — which would convert an
-occasional stale binary into a standing inability to test. C is attractive but
-rests on a reproducibility claim I would have to establish first, and it is
-strictly more machinery than B for the same guarantee.
-
-**If this is never answered:** nothing breaks. The gate means a fourth
-recurrence announces itself in one line instead of costing a cycle. It stays a
-small recurring maintenance cost — a rebuild-and-commit after any change to
-`posix/src` — and the git history keeps growing binaries slowly.
-
-**Update 2026-08-18 — the fourth recurrence happened, and lane A pointed out
-why it keeps happening.** `481da01e1` changed `posix/src/libintl.rs`, the nine
-fixtures went stale behind it, and lane A's boot test stopped on the gate. The
-observation, which is only visible from a lane that owns neither side and which
-I think is exactly right:
-
-> the cost of option (A) is not the rebuild — it is that the rebuild falls on
-> **whichever lane happens to run a boot test next**, which is neither the lane
-> that changed `posix/` nor the lane that owns `services/`. That is what makes
-> it recur: no single lane's own workflow ever fails, so nobody is prompted to
-> fix it until a third party is blocked.
-
-In plain terms: the person who breaks it never finds out, and the person who
-finds out cannot fix it (`services/**` is lane B's tree). So the staleness is
-guaranteed to be discovered late, by someone it is not actionable for, every
-time. That is an argument for **B** that does not appear in the table above —
-the table costs A at "one rebuild per `posix/` change", and the real cost is
-"one blocked lane per `posix/` change, plus a cross-lane request round trip".
-I have done the rebuild again (fourth time); the recommendation above still
-stands as written, but the gap between A and B is narrower than the table says.
-
-### UPDATE 2026-08-21 (lane A) — C's blocking premise is now **verified**, and today's fifth recurrence produced a new argument *for* C
-
-The operator asked whether `libc.a` builds byte-reproducibly, since that is the
-one thing C's "Against" column rests on. **It does.** Two independent tests,
-both run today:
-
-| Test | Result |
-|---|---|
-| **Cross-worktree.** Lane B built `libc.a` in `D:\…\os-lane-b` and its stamps record `5e252d0d790a2194…`. Lane A rebuilt it from the same (merged) source in `D:\…\os-lane-a` — a *different absolute path* — and a target dir that previously held a different archive (`c4dae9466f23f22f…`). | **Byte-identical: `5e252d0d790a2194…`.** So no build-directory path is embedded in the archive in any way that reaches its bytes. |
-| **Full recompile.** `touch posix/src/lib.rs` to force the whole `posix` crate to rebuild (confirmed — `Compiling posix` ran), then relink. | **`5e252d0d790a2194…` again.** Not a cache hit; the compile-and-archive step is itself deterministic. |
-
-**Honest limits of that claim.** Same machine, same `rustc`, same `zig`. Cross-
-*machine* and cross-*toolchain-version* reproducibility is untested. That does
-not damage C: the gate C proposes compares a freshly built `libc.a` **on your
-own machine** against the recorded id, so a toolchain upgrade would churn the
-file exactly once — and arguably *should*, since the 70 ELFs genuinely are stale
-after a compiler change. The "churns meaninglessly and everyone learns to ignore
-it" failure the Against column feared requires nondeterminism *within* one
-toolchain, and there is none.
-
-**The new argument, which is worth more than the reproducibility result.**
-A fifth recurrence happened today, to lane A, and it exposed something the
-options table does not capture: **the content-stamp gate's remediation advice
-points the wrong way in the more dangerous of the two cases.**
-
-`ctest-fixtures.py check` reported all nine fixtures STALE and said:
-
-```
-input toolchain/sysroot/lib/libc.a: recorded 5e252d0d… but on disk c4dae946…
-Rebuild it (do NOT re-stamp - that only records the drift):
-  scripts/ctest-fixtures.py build --only ctest-ctty
-```
-
-Following that advice would have been **wrong and destructive**. The stale side
-was `libc.a`, not the ELFs — lane A's sysroot predated two `posix/` commits the
-merge had just brought in. Rebuilding the fixtures would have relinked all nine
-against a stale libc and committed them, which is *precisely* incident #2
-(2026-08-16) recreated by hand. The correct action was to rebuild the sysroot;
-the hashes then matched the committed stamps with nothing else touched.
-
-The gate cannot distinguish the two cases, because it has only one hash and no
-way to know which side moved. That is the same "being diligent makes it quieter"
-trap the entry already names — but stated one level sharper: **the tool actively
-instructs you into it.**
-
-What saved it today was `create-ext4-rootfs.sh`'s *mtime* gate, which said
-"`libc.a` is STALE … rebuild the sysroot first, then the fixtures" — the right
-answer. But `ctest-fixtures.py`'s own docstring argues at length that mtime is
-the wrong instrument and is **silent in a fresh clone**, which is true. So in a
-clone — CI, a new machine — only the wrong advice survives.
-
-**This is a direct argument for C** and it is not on the table above. A
-committed `libc.a.id` gives the gate a second reference point, which is exactly
-what it needs to tell the two cases apart and print the correct remedy:
-
-| `libc.a` on disk vs committed id | ELF vs its stamp | Diagnosis | Remedy the gate can now print |
-|---|---|---|---|
-| differs | — | your sysroot is not this tree's | **rebuild the sysroot** |
-| matches | differs | the ELF is behind a current libc | **rebuild the fixture** |
-
-Under A that table is unreachable; under B the whole situation is gone. So the
-reproducibility answer promotes C from "attractive but unverified" to "verified,
-and it fixes a wrong-advice bug that A leaves in place".
-
-**Lane A's revised read, for whatever it is worth to lane B (this is lane B's
-call):** the recommendation above — "A for now, B once every lane has the
-toolchain" — was written when C rested on an unverified claim. It no longer
-does, and C is now the only option that fixes the misdirection *without*
-requiring every lane to own a toolchain. If B remains the destination, C is a
-strictly-better waypoint than A on the way there, and its cost is one small text
-file. The one thing C does **not** do, which B does, is stop the drift from
-being possible at all.
-
----
-
 ## Q56 — [A] A program compiled for Linux is exempt from the file-permission checks our own programs must pass. Close the gap, or write it down as the price of running Linux software? — Status: OPEN
 
 **In short:** When a program asks this system a question about a file — "how big
@@ -1067,6 +883,20 @@ one and I would not argue against it.
 
 ## Resolved — lane B
 
+- B-Q5 70 compiled programs are stored in git and go stale without git
+  noticing — keep storing them, or rebuild on demand? — resolved 2026-08-21
+  (§355, `Decided by: Claude (autonomous)`): **B, build on demand**, against my
+  own earlier "A for now" and against lane A's revised case for C. Measuring the
+  arrangement rather than arguing about it settled it: the stamp gate covers
+  **9 of the 70**, and **60 of the unguarded 61 were stale at that moment** — so
+  drift is the steady state, not an occasional accident. C cannot reach those 61
+  at all, because their compiler (fastpy) is a *different repository* whose
+  revision this tree cannot record. Rebuilding every fixture costs ~65 s, and the
+  kernel already `include_bytes!`s an untracked build output, so B demands no
+  toolchain the tree did not already demand. B ships with the guard inverted —
+  the rootfs build must refuse to stage a short fixture set, because
+  `load_test_elf` self-skips and naive B would otherwise turn stale tests into
+  *no* tests, silently green.
 - B-Q6 Should the console login prompt obey the system-wide failed-guess
   delay? — resolved 2026-08-21 (§354): **A, and `su` joins with it.** Both obey
   the shared tally for every account including root; the delay-your-neighbour

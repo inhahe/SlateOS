@@ -514,24 +514,30 @@ BENCH_CRITICAL_PATHS=(
 # report_bench_coverage_rot() below: a rule citing a benchmark the suite no
 # longer produces is precisely the false assurance this map exists to remove.
 BENCH_COVERAGE=(
-    # -- mm: 5 of 47 files -------------------------------------------------
+    # -- mm: 4 of 47 files -------------------------------------------------
     "kernel/src/mm/frame.rs|page_alloc_free page_alloc_zeroed_free page_alloc_zeroed_pool"
-    "kernel/src/mm/frame_owner.rs|page_alloc_free page_alloc_zeroed_free"
     "kernel/src/mm/heap.rs|heap_alloc_free_64 heap_raw_alloc_free_512 heap_raw_alloc_free_4096"
     "kernel/src/mm/compress.rs|compress_zero_page compress_repeating"
     "kernel/src/mm/page_table.rs|page_fault"
     # NOT covered, and deliberately absent: mm/fault.rs (page_fault reproduces
     # the sequence rather than taking a fault), mm/user.rs (nothing in bench.rs
     # calls copy_to_user/copy_from_user), mm/cow.rs, mm/swap.rs, mm/vma.rs, ...
+    # mm/frame_owner.rs is absent for a subtler reason: bench.rs does A/B its
+    # tagging overhead, but through `timed()`/`ab_interleaved()`, which print
+    # and record nothing.  An unrecorded measurement cannot detect a
+    # regression, so it is not coverage.
 
-    # -- sched: 5 of 18 files ----------------------------------------------
+    # -- sched: 4 of 18 files ----------------------------------------------
     "kernel/src/sched/mod.rs|context_switch"
     "kernel/src/sched/context.rs|context_switch"
-    "kernel/src/sched/task.rs|context_switch"
     "kernel/src/sched/backend.rs|context_switch pick_next sched_pick_next"
-    "kernel/src/sched/priority_rr.rs|pick_next sched_pick_next sched_pick_next_d1 sched_pick_next_d8 sched_pick_next_d64 sched_pick_next_d256"
+    "kernel/src/sched/priority_rr.rs|context_switch pick_next sched_pick_next sched_pick_next_d1 sched_pick_next_d8 sched_pick_next_d64 sched_pick_next_d256"
+    # priority_rr.rs earns `context_switch` as well as its own pick_next
+    # numbers: PerCpuScheduler::pick_next_local lives there and is on the
+    # yield path, dispatching through backend::SchedulerBackend.
     # sched/eevdf.rs is opt-in (BACKEND_EEVDF); the default boot runs
-    # PriorityRoundRobin, so no recorded number describes it.
+    # PriorityRoundRobin, so no recorded number describes it.  sched/task.rs is
+    # absent: the switch reads its types, but the timed work is elsewhere.
 
     # -- ipc: 10 of 22 files -----------------------------------------------
     "kernel/src/ipc/channel.rs|ipc_channel ipc_channel_sync ipc_channel_roundtrip_64k"
@@ -544,21 +550,26 @@ BENCH_COVERAGE=(
     "kernel/src/ipc/completion.rs|cp_try_wait_empty cp_notify_wait_rt"
     "kernel/src/ipc/io_ring.rs|io_ring_nop"
     "kernel/src/ipc/namespace.rs|vfs_stat_breakdown_ns"
+    # namespace.rs's rule is thin and knowingly so: vfs_stat_breakdown_ns times
+    # namespace::resolve_path, which on the NS_FEATURES_ACTIVE fast path is an
+    # atomic load and a return.  It would catch that fast path regressing and
+    # nothing else.
 
-    # -- syscall: 3 of 9 files ---------------------------------------------
+    # -- syscall: 2 of 9 files ---------------------------------------------
     "kernel/src/syscall/dispatch.rs|syscall_dispatch"
-    "kernel/src/syscall/number.rs|syscall_dispatch"
     "kernel/src/syscall/handlers.rs|syscall_dispatch"
+    # syscall/number.rs is absent: SYS_TASK_ID is a compile-time constant, so
+    # no instruction from that file is inside the measured window.
 
     # -- fs: 3 of 467 files ------------------------------------------------
     "kernel/src/fs/vfs.rs|vfs_read_256 vfs_write_256 vfs_readdir vfs_stat_root vfs_stat_3comp vfs_stat_deep vfs_throughput_16k_read vfs_throughput_16k_write vfs_stat_breakdown_full vfs_stat_breakdown_prologue vfs_stat_breakdown_resolve vfs_stat_breakdown_resolved"
-    "kernel/src/fs/path.rs|vfs_stat_breakdown_resolve vfs_stat_breakdown_ns"
+    "kernel/src/fs/path.rs|vfs_stat_breakdown_prologue vfs_stat_breakdown_resolve"
     "kernel/src/fs/compress.rs|http_gzip_1KiB http_gzip_8KiB http_build_response_gzip_1KiB"
     # fs/ext4, fs/zfs, fs/btrfs, fs/f2fs, fs/ntfs and the other ~460 files have
     # no benchmark at all -- see known-issues.md, "The bench gate names fs/zfs
     # as perf-critical, but no benchmark can see it".
 
-    # -- net: 10 of 49 files -----------------------------------------------
+    # -- net: 9 of 49 files ------------------------------------------------
     "kernel/src/net/arp.rs|net_arp_lookup net_ns_arp_lookup"
     "kernel/src/net/ethernet.rs|net_ethernet_parse"
     "kernel/src/net/ipv4.rs|net_ipv4_parse"
@@ -566,13 +577,18 @@ BENCH_COVERAGE=(
     "kernel/src/net/tcp.rs|net_tcp_conn_lookup"
     "kernel/src/net/firewall.rs|firewall_check"
     "kernel/src/net/veth.rs|net_veth_send net_veth_recv net_veth_roundtrip"
-    "kernel/src/net/interface.rs|net_veth_send net_veth_recv net_veth_roundtrip"
     "kernel/src/net/dashboard.rs|dashboard_api_health dashboard_api_metrics dashboard_api_status"
     "kernel/src/net/httpd.rs|http_parse_request http_build_response_1KiB http_build_response_gzip_1KiB http_mime_type http_percent_decode http_etag_4KiB http_gzip_1KiB http_gzip_8KiB"
     # net/dns.rs is NOT here: dns_build_query measures bench.rs's copy.  Nor is
     # net/http.rs, which the old annotation named -- the http_* benchmarks all
     # call crate::net::httpd.  tcp.rs is listed only for the connection-table
-    # scan; its checksum is measured through a bench-local duplicate.
+    # scan; its checksum is measured through a bench-local duplicate.  Nor is
+    # net/interface.rs, which four benchmarks name but only to construct an
+    # Ipv4Addr *outside* the timed closure -- appearing in a benchmark's source
+    # is not the same as being inside its measurement.
+    # net_ns_arp_lookup is credited to arp.rs and not to netns.rs: the
+    # namespace is created and destroyed either side of the closure, which
+    # times arp::ns_lookup alone.
 
     # -- single files ------------------------------------------------------
     "kernel/src/crypto.rs|crypto_sha256_64B crypto_sha256_1KiB crypto_sha512_64B crypto_hmac_sha256 crypto_chacha20_1KiB crypto_poly1305_1KiB crypto_aead_1KiB crypto_ed25519_sign crypto_ed25519_verify crypto_x25519 crypto_crc32_4KiB crypto_crc32c_4KiB"

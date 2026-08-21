@@ -24569,6 +24569,30 @@ given a negative control — a bogus `crypto_sha256_DELETED` spliced into the ma
 — and reported it; against the real map it is silent, which means all 86 cited
 names were confirmed present in the last recorded run.
 
+**The first draft of the map contained six of the same over-claims it exists to
+remove**, which is the strongest available argument for both the rot check and
+the pessimistic default. Auditing it entry by entry against `bench.rs` found
+that `mm/frame_owner.rs` is A/B-tested only through `timed()`/`ab_interleaved()`
+and recorded nowhere (an unrecorded measurement cannot detect a regression, so
+it is not coverage); `syscall/number.rs` contributes a compile-time constant and
+therefore no instruction inside the window; `net/interface.rs` is named by four
+benchmarks but only to construct an `Ipv4Addr` *outside* the timed closure;
+`sched/task.rs` supplies types the switch reads while the timed work happens
+elsewhere; `fs/path.rs` was credited to `vfs_stat_breakdown_ns`, which times an
+atomic load on the namespace fast path, rather than to `_prologue`/`_resolve`,
+which actually run `validate_path`/`normalize_path` over its types; and
+`sched/priority_rr.rs` was *under*-claimed, missing `context_switch` even though
+`PerCpuScheduler::pick_next_local` lives there and sits on the yield path.
+
+Five of those six were over-claims, made in the course of writing a fix *for*
+over-claiming, by someone who had just spent an hour cataloguing the harm it
+does. That is not carelessness so much as the nature of the mistake: "this
+benchmark mentions this file" is a much easier question than "this benchmark
+would notice this file getting slower", and the first is constantly mistaken for
+the second. A map maintained by hand will keep drifting toward the easy
+question, which is why the rot check is mandatory rather than nice-to-have, and
+why the default has to fail loudly.
+
 **The demonstration that prompted it.** Earlier the same day the gate named
 `kernel/src/mm/user.rs`, the `--bench` cycle it asked for was duly run, and all
 86 benchmarks completed without once calling `copy_to_user` or `copy_from_user`.

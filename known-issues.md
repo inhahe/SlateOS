@@ -46369,3 +46369,27 @@ renamed to admit they are microbenchmarks of `bench.rs`. Pointing them at the
 real code is the correct fix — the reason given for duplicating
 (`tcp_checksum_bench`: "to avoid depending on tcp module internals") is a reason
 to widen the module's public surface, not a reason to measure something else.
+
+**`[A]` 2026-08-20 (follow-up) — the map's own first draft over-claimed six
+times.** Auditing `BENCH_COVERAGE` entry by entry against `bench.rs` before
+trusting it removed `mm/frame_owner.rs` (A/B-tested only via
+`timed()`/`ab_interleaved()`, recorded nowhere — an unrecorded measurement
+cannot detect a regression), `syscall/number.rs` (a compile-time constant),
+`net/interface.rs` (named by four benchmarks, but only to build an `Ipv4Addr`
+outside the timed closure) and `sched/task.rs`; re-pointed `fs/path.rs` from
+`vfs_stat_breakdown_ns` (an atomic load on the namespace fast path) to
+`_prologue`/`_resolve`, which really do run `validate_path`/`normalize_path`
+over its types; and added the missing `context_switch` to
+`sched/priority_rr.rs`, where `PerCpuScheduler::pick_next_local` lives. Corrected
+totals: mm 4 of 47, sched 4 of 18, syscall 2 of 9, net 9 of 49.
+
+Five of the six were over-claims, committed while writing the fix for
+over-claiming. The lesson is in design-decisions §250: "this benchmark mentions
+this file" is an easy question, "this benchmark would notice this file getting
+slower" is the real one, and the first is habitually mistaken for the second.
+Treat `report_bench_coverage_rot()` as load-bearing, and when adding a rule,
+check that the call is inside the `run(...)` closure and that the benchmark is
+`score`d or `track`ed rather than `run_diagnostic`'d.
+
+Validated on a real boot: PASSED, streak 34, with the rot check running silently
+on the live `finish_pass` path under `set -euo pipefail`.

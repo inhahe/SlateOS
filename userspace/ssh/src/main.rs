@@ -19,11 +19,29 @@
 //! Implements a subset of SSH-2 (RFC 4253, 4252, 4254):
 //! - Version exchange (SSH-2.0-SlateOS_1.0)
 //! - Key exchange: diffie-hellman-group14-sha256
-//! - Host key: ssh-rsa (fingerprint display + known_hosts)
+//! - Host key: ssh-ed25519 (RFC 8032, via `posix::ed25519`)
 //! - Encryption: AES-128-CTR
 //! - MAC: HMAC-SHA256
 //! - User auth: password method
 //! - Channel: session with PTY and shell/exec
+//!
+//! # What the host key check actually proves
+//!
+//! Two separate things have to be true before the connection is trustworthy,
+//! and they are checked in this order:
+//!
+//! 1. **The server holds the private half of the key it presented.** It proves
+//!    this by signing the exchange hash H, which covers both version strings,
+//!    both KEXINIT payloads, the host key itself and both Diffie-Hellman public
+//!    values. `verify_host_key_signature` checks that signature.
+//! 2. **That key is the one we expect for this host.** `verify_host_key`
+//!    compares it against `~/.ssh/known_hosts`.
+//!
+//! Step 2 without step 1 is worthless: a host key is *public*, so anyone who
+//! can intercept the connection can replay it, and known_hosts would then
+//! happily confirm the attacker's copy as the right key. This client used to
+//! do exactly that — it discarded the signature blob unread — which meant the
+//! entire known_hosts mechanism, fingerprint prompt included, was decorative.
 //!
 //! # Exit status
 //!
@@ -1217,21 +1235,40 @@ const HEX_CHARS: [char; 16] = [
     '0', '1', '2', '3', '4', '5', '6', '7', '8', '9', 'a', 'b', 'c', 'd', 'e', 'f',
 ];
 
-/// Generate a pseudo-random private exponent for DH.
+/// Generate the Diffie-Hellman private exponent `x`.
 ///
-/// In a real implementation this would use a CSPRNG. Here we derive
-/// entropy from the address of a stack variable and some counters —
-/// sufficient to demonstrate the protocol flow.
-fn generate_dh_private() -> BigUint {
-    // Gather some entropy from stack address + loop counter.
-    let mut seed = [0u8; 32];
-    let stack_var: u64 = 0xDEAD_BEEF_CAFE_1234; // constant stand-in
-    let time_ish: u64 = 0x1234_5678_9ABC_DEF0; // constant stand-in
-    seed[..8].copy_from_slice(&stack_var.to_le_bytes());
-    seed[8..16].copy_from_slice(&time_ish.to_le_bytes());
-    // Hash to spread entropy.
-    let h = sha256(&seed);
-    BigUint::from_bytes_be(&h)
+/// # What this replaces
+///
+/// The previous version hashed two hard-coded 64-bit constants and called the
+/// result entropy. It was not merely weak — it was *constant*: every
+/// connection made by every copy of this binary used the same `x`, so the
+/// shared secret, and therefore the session keys, were recoverable by anyone
+/// who had the binary. The comment said "sufficient to demonstrate the
+/// protocol flow", and the flow it demonstrated was an encrypted channel that
+/// decrypts to a passive observer.
+///
+/// The bytes now come from `posix::random`, which reaches the kernel CSPRNG
+/// and *fails* rather than substituting anything when it cannot.
+///
+/// # Errors
+///
+/// Returns an error if the kernel cannot supply random bytes. There is no
+/// fallback on purpose: a caller handed an error can refuse to connect, a
+/// caller handed predictable bytes cannot know to.
+fn generate_dh_private() -> Result<BigUint, SshError> {
+    // 256 bits, matching the ~128-bit security the group14 prime provides.
+    let mut bytes = [0u8; 32];
+    posix::random::fill(&mut bytes).map_err(|e| {
+        SshError::ProtocolError(format!(
+            "cannot generate a Diffie-Hellman private key: CSPRNG errno {e}"
+        ))
+    })?;
+    // Top bit set so the exponent is a full 256 bits rather than however many
+    // the leading zero bytes leave; bottom bit set so it is odd. This is what
+    // OpenSSH's BN_rand(..., BN_RAND_TOP_ONE, BN_RAND_BOTTOM_ODD) produces.
+    bytes[0] |= 0x80;
+    bytes[31] |= 1;
+    Ok(BigUint::from_bytes_be(&bytes))
 }
 
 // ============================================================================
@@ -1302,6 +1339,74 @@ fn derive_key(k: &[u8], h: &[u8; 32], id: u8, session_id: &[u8; 32], needed: usi
 
     result.truncate(needed);
     result
+}
+
+// ============================================================================
+// Host key signature verification
+// ============================================================================
+
+/// Check the server's signature over the exchange hash (RFC 4253 section 8).
+///
+/// # What this is for
+///
+/// The exchange hash `H` covers both version strings, both KEXINIT payloads,
+/// the host key blob and both Diffie-Hellman public values. A signature over
+/// it is the server's statement that it holds the private half of the key it
+/// advertised *and* that it saw the same handshake we did. Without this check
+/// the Diffie-Hellman exchange is unauthenticated, which means it is secure
+/// against a passive eavesdropper and useless against anyone who can sit in
+/// the path — and someone in the path is the threat the whole exchange exists
+/// to address.
+///
+/// `known_hosts` cannot substitute for it. `known_hosts` says "the key is the
+/// one I saw last time"; only the signature says "the party I am talking to
+/// actually holds it". An unverified key blob can be copied from the real
+/// server by anyone who has ever connected to it.
+///
+/// # Errors
+///
+/// [`SshError::ProtocolError`] if either blob is truncated or its length
+/// prefixes do not describe it; [`SshError::HostKeyMismatch`] if the algorithm
+/// is one we cannot check, if the key and signature disagree about which
+/// algorithm that is, or if the signature does not verify.
+fn verify_host_key_signature(
+    key_blob: &[u8],
+    exchange_hash: &[u8; 32],
+    sig_blob: &[u8],
+) -> Result<(), SshError> {
+    let (key_algorithm, key_off) = read_ssh_string(key_blob, 0)?;
+    let (sig_algorithm, sig_off) = read_ssh_string(sig_blob, 0)?;
+
+    // The two must agree, or a server could advertise an Ed25519 key and sign
+    // with something else -- an algorithm-confusion attack whose whole premise
+    // is that one side picks the label and the other picks the verifier.
+    if key_algorithm != sig_algorithm {
+        return Err(SshError::HostKeyMismatch(format!(
+            "server signed with {} but advertised a {} key",
+            String::from_utf8_lossy(sig_algorithm),
+            String::from_utf8_lossy(key_algorithm),
+        )));
+    }
+
+    if key_algorithm != b"ssh-ed25519" {
+        // Refusing is the only safe answer. Continuing would mean accepting a
+        // signature we did not check, which is the bug this function fixes.
+        return Err(SshError::HostKeyMismatch(format!(
+            "cannot verify a {} host key; only ssh-ed25519 is implemented",
+            String::from_utf8_lossy(key_algorithm),
+        )));
+    }
+
+    let (public, _) = read_ssh_string(key_blob, key_off)?;
+    let (signature, _) = read_ssh_string(sig_blob, sig_off)?;
+
+    if posix::ed25519::verify_slices(public, exchange_hash, signature) {
+        Ok(())
+    } else {
+        Err(SshError::HostKeyMismatch(
+            "the server's signature over the exchange hash did not verify".into(),
+        ))
+    }
 }
 
 // ============================================================================
@@ -1770,7 +1875,7 @@ impl SshSession {
         self.verbose("beginning key exchange");
 
         // Build and send our KEXINIT.
-        let client_kexinit_payload = self.build_kexinit();
+        let client_kexinit_payload = self.build_kexinit()?;
         self.client_kexinit = client_kexinit_payload.clone();
         self.send_packet(&client_kexinit_payload)?;
         self.verbose("sent KEXINIT");
@@ -1793,16 +1898,30 @@ impl SshSession {
     }
 
     /// Build a KEXINIT payload advertising our supported algorithms.
-    fn build_kexinit(&self) -> Vec<u8> {
+    ///
+    /// # Errors
+    ///
+    /// Fails if the kernel CSPRNG cannot supply the cookie.
+    fn build_kexinit(&self) -> Result<Vec<u8>, SshError> {
         let mut payload = Vec::new();
         payload.push(msg::SSH_MSG_KEXINIT);
 
-        // 16 bytes of cookie (zero for simplicity).
-        payload.extend_from_slice(&[0u8; 16]);
+        // The cookie (RFC 4253 section 7.1) must be random: it is what stops
+        // either side from choosing the exchange hash, since I_C and I_S both
+        // feed into it. Sixteen zero bytes "for simplicity" gave that power to
+        // the server alone.
+        let mut cookie = [0u8; 16];
+        posix::random::fill(&mut cookie).map_err(|e| {
+            SshError::ProtocolError(format!("cannot generate the KEXINIT cookie: errno {e}"))
+        })?;
+        payload.extend_from_slice(&cookie);
 
-        // Algorithm name-lists. We offer a small set we actually support.
+        // Algorithm name-lists. We offer only what we can actually verify:
+        // advertising ssh-rsa would invite a server to send an RSA host key
+        // that `verify_host_key_signature` would then have to refuse, turning
+        // a working connection into a confusing failure.
         let kex = "diffie-hellman-group14-sha256,diffie-hellman-group14-sha1";
-        let host_key = "ssh-rsa,rsa-sha2-256";
+        let host_key = "ssh-ed25519";
         let enc = "aes128-ctr";
         let mac = "hmac-sha2-256";
         let comp = "none";
@@ -1833,7 +1952,7 @@ impl SshSession {
         // reserved (u32)
         payload.extend_from_slice(&0u32.to_be_bytes());
 
-        payload
+        Ok(payload)
     }
 
     /// Perform Diffie-Hellman group14 key exchange.
@@ -1843,7 +1962,7 @@ impl SshSession {
         let generator = BigUint::from_bytes_be(&[DH_G]);
 
         // Generate private exponent x and compute e = g^x mod p.
-        let x = generate_dh_private();
+        let x = generate_dh_private()?;
         self.verbose("generated DH private key");
 
         let e = generator.mod_pow(&x, &p);
@@ -1888,11 +2007,21 @@ impl SshSession {
         let fingerprint = host_key_fingerprint(&k_s);
         self.verbose(&format!("host key fingerprint: {fingerprint}"));
 
-        // Verify host key against known_hosts.
-        self.verify_host_key(&k_s, key_type, &fingerprint)?;
+        // RFC 4253 section 8: reject f outside [2, p-2]. f = 0 or f = 1 would
+        // pin the shared secret to a value the server chose, and f = p-1 has
+        // order 2, so K would be one of two values. A server doing this is
+        // arranging for the session keys to be guessable.
+        let f = BigUint::from_bytes_be(&f_bytes);
+        let p_minus_1 = p.sub(&BigUint::one());
+        if f.cmp_unsigned(&BigUint::one()) != std::cmp::Ordering::Greater
+            || f.cmp_unsigned(&p_minus_1) != std::cmp::Ordering::Less
+        {
+            return Err(SshError::ProtocolError(
+                "server DH value out of range (RFC 4253 section 8)".into(),
+            ));
+        }
 
         // Compute shared secret K = f^x mod p.
-        let f = BigUint::from_bytes_be(&f_bytes);
         let k_big = f.mod_pow(&x, &p);
         let k_bytes = k_big.to_bytes_be();
         self.verbose("computed shared secret");
@@ -1910,15 +2039,29 @@ impl SshSession {
         });
         self.verbose(&format!("exchange hash: {}", bytes_to_hex(&h)));
 
+        // Prove the server holds the private half of the key it just sent,
+        // *before* asking the user anything about that key.
+        //
+        // Order matters and it used to be wrong twice over. The signature was
+        // not checked at all, and the known_hosts prompt ran before the
+        // exchange hash even existed -- so the user was asked to trust a key
+        // that nothing had shown the server could use. Any machine that
+        // answers on port 22 could name itself with someone else's public key
+        // and be permanently added to known_hosts under it, which converts
+        // known_hosts from a defence into a way of installing an attacker's
+        // key as trusted.
+        verify_host_key_signature(&k_s, &h, &sig_blob)?;
+        self.verbose("host key signature verified");
+
+        // Only now is it meaningful to ask whether this is the *right* key.
+        // The signature proves the server owns the key; known_hosts decides
+        // whether that key is the one we expect.
+        self.verify_host_key(&k_s, key_type, &fingerprint)?;
+
         // The first exchange hash is used as the session ID.
         if self.session_id == [0u8; 32] {
             self.session_id = h;
         }
-
-        // We skip signature verification in this simplified implementation.
-        // In a production client, we would verify the host key signature here.
-        self.verbose("(signature verification skipped in simplified implementation)");
-        let _ = sig_blob; // Acknowledge we received it.
 
         // Send and receive NEWKEYS.
         let newkeys_payload = [msg::SSH_MSG_NEWKEYS];
@@ -2910,5 +3053,238 @@ mod tests {
         assert_eq!(want_reply, 0);
         let (status, _) = read_u32(&payload, off).expect("status");
         assert_eq!(status, 3);
+    }
+
+    // ========================================================================
+    // Host key signature verification (RFC 4253 section 8)
+    //
+    // These tests are the reason the check exists. Each one is a thing a
+    // machine in the network path can do, and each one used to succeed,
+    // because the client read the signature blob and threw it away.
+    // ========================================================================
+
+    /// A host key on the wire: `string algorithm`, `string public`.
+    fn key_blob(algorithm: &[u8], public: &[u8]) -> Vec<u8> {
+        let mut blob = Vec::new();
+        blob.extend_from_slice(&ssh_string(algorithm));
+        blob.extend_from_slice(&ssh_string(public));
+        blob
+    }
+
+    /// A signature on the wire: `string algorithm`, `string signature`.
+    fn sig_blob(algorithm: &[u8], signature: &[u8]) -> Vec<u8> {
+        let mut blob = Vec::new();
+        blob.extend_from_slice(&ssh_string(algorithm));
+        blob.extend_from_slice(&ssh_string(signature));
+        blob
+    }
+
+    /// Everything a server needs to answer a key exchange, from one seed.
+    struct Server {
+        seed: [u8; 32],
+        public: [u8; 32],
+    }
+
+    impl Server {
+        fn new(fill: u8) -> Self {
+            let seed = [fill; 32];
+            let public = posix::ed25519::public_key(&seed);
+            Self { seed, public }
+        }
+
+        fn key_blob(&self) -> Vec<u8> {
+            key_blob(b"ssh-ed25519", &self.public)
+        }
+
+        fn sign(&self, exchange_hash: &[u8; 32]) -> Vec<u8> {
+            sig_blob(
+                b"ssh-ed25519",
+                &posix::ed25519::sign(&self.seed, exchange_hash),
+            )
+        }
+    }
+
+    #[test]
+    fn a_genuine_server_signature_is_accepted() {
+        let server = Server::new(0x11);
+        let h = [0x42u8; 32];
+        verify_host_key_signature(&server.key_blob(), &h, &server.sign(&h))
+            .expect("the real server's own signature must verify");
+    }
+
+    /// The attack the check exists to stop. A machine in the path copies the
+    /// real server's host key blob — it is public, it goes over the wire in
+    /// the clear — and completes its own Diffie-Hellman exchange with the
+    /// client. It cannot produce the matching signature, because it does not
+    /// have the private half. Before this check, `known_hosts` would then
+    /// confirm the copied key as the expected one and the client would
+    /// proceed, having authenticated nobody.
+    #[test]
+    fn replaying_the_real_host_key_without_the_private_half_is_rejected() {
+        let real = Server::new(0x11);
+        let attacker = Server::new(0x22);
+        let h = [0x42u8; 32];
+
+        // The attacker presents the real key and signs with its own.
+        let err = verify_host_key_signature(&real.key_blob(), &h, &attacker.sign(&h))
+            .expect_err("a signature by the wrong key must not verify");
+        assert!(matches!(err, SshError::HostKeyMismatch(_)), "{err:?}");
+    }
+
+    /// A signature is only evidence about the handshake it covers. Since `H`
+    /// commits to both Diffie-Hellman public values, a recording of yesterday's
+    /// session cannot be replayed into today's.
+    #[test]
+    fn a_signature_over_a_different_exchange_hash_is_rejected() {
+        let server = Server::new(0x11);
+        let recorded = server.sign(&[0x01u8; 32]);
+        let this_session = [0x02u8; 32];
+
+        let err = verify_host_key_signature(&server.key_blob(), &this_session, &recorded)
+            .expect_err("a signature from another exchange must not verify");
+        assert!(matches!(err, SshError::HostKeyMismatch(_)), "{err:?}");
+    }
+
+    /// One side must not get to pick the label while the other picks the
+    /// verifier. If the blobs disagree about the algorithm, the disagreement
+    /// itself is the answer.
+    #[test]
+    fn algorithm_confusion_between_key_and_signature_is_rejected() {
+        let server = Server::new(0x11);
+        let h = [0x42u8; 32];
+        let mislabelled = sig_blob(b"ssh-rsa", &posix::ed25519::sign(&server.seed, &h));
+
+        let err = verify_host_key_signature(&server.key_blob(), &h, &mislabelled)
+            .expect_err("mismatched algorithm names must be refused");
+        match err {
+            SshError::HostKeyMismatch(m) => {
+                assert!(m.contains("ssh-rsa"), "{m}");
+                assert!(m.contains("ssh-ed25519"), "{m}");
+            }
+            other => panic!("expected a host key mismatch, got {other:?}"),
+        }
+    }
+
+    /// "We cannot check this one" must resolve to *no*. Resolving it to yes is
+    /// the same bug in a smaller box: a server that wants to skip
+    /// authentication would simply advertise an algorithm we do not implement.
+    #[test]
+    fn an_algorithm_we_cannot_verify_is_refused_not_waved_through() {
+        let h = [0x42u8; 32];
+        let rsa_key = key_blob(b"ssh-rsa", &[0xAAu8; 256]);
+        let rsa_sig = sig_blob(b"ssh-rsa", &[0xBBu8; 256]);
+
+        let err = verify_host_key_signature(&rsa_key, &h, &rsa_sig)
+            .expect_err("an unimplemented algorithm must be an error, not an acceptance");
+        match err {
+            SshError::HostKeyMismatch(m) => assert!(m.contains("ssh-ed25519"), "{m}"),
+            other => panic!("expected a host key mismatch, got {other:?}"),
+        }
+    }
+
+    /// A single flipped bit is a forgery like any other.
+    #[test]
+    fn a_tampered_signature_is_rejected() {
+        let server = Server::new(0x11);
+        let h = [0x42u8; 32];
+        let mut blob = server.sign(&h);
+        let last = blob.len() - 1;
+        blob[last] ^= 0x01;
+
+        assert!(verify_host_key_signature(&server.key_blob(), &h, &blob).is_err());
+    }
+
+    /// Malformed input must produce an error and not, say, an early `Ok` from
+    /// a short-circuiting parse.
+    #[test]
+    fn truncated_blobs_are_errors_not_acceptances() {
+        let server = Server::new(0x11);
+        let h = [0x42u8; 32];
+        let good_key = server.key_blob();
+        let good_sig = server.sign(&h);
+
+        for cut in 1..good_sig.len() {
+            let err = verify_host_key_signature(&good_key, &h, &good_sig[..cut])
+                .expect_err("a truncated signature blob must never verify");
+            assert!(matches!(
+                err,
+                SshError::ProtocolError(_) | SshError::HostKeyMismatch(_)
+            ));
+        }
+        for cut in 1..good_key.len() {
+            let err = verify_host_key_signature(&good_key[..cut], &h, &good_sig)
+                .expect_err("a truncated key blob must never verify");
+            assert!(matches!(
+                err,
+                SshError::ProtocolError(_) | SshError::HostKeyMismatch(_)
+            ));
+        }
+    }
+
+    /// An ed25519 public key is exactly 32 bytes and a signature exactly 64.
+    /// A blob of the right shape but the wrong size must be refused rather
+    /// than reaching the verifier with a slice it cannot interpret.
+    #[test]
+    fn a_wrongly_sized_key_or_signature_is_rejected() {
+        let server = Server::new(0x11);
+        let h = [0x42u8; 32];
+
+        let short_key = key_blob(b"ssh-ed25519", &server.public[..31]);
+        assert!(verify_host_key_signature(&short_key, &h, &server.sign(&h)).is_err());
+
+        let short_sig = sig_blob(b"ssh-ed25519", &[0u8; 63]);
+        assert!(verify_host_key_signature(&server.key_blob(), &h, &short_sig).is_err());
+    }
+
+    // ========================================================================
+    // Randomness
+    // ========================================================================
+
+    /// The private exponent used to be `sha256(two compile-time constants)` —
+    /// not merely weak but *constant*, identical in every connection made by
+    /// every copy of this binary, which makes every session key derivable by
+    /// anyone holding the same binary.
+    #[test]
+    fn the_dh_private_exponent_is_not_a_constant() {
+        let a = generate_dh_private().expect("CSPRNG");
+        let b = generate_dh_private().expect("CSPRNG");
+        assert_ne!(a.to_bytes_be(), b.to_bytes_be());
+    }
+
+    /// A 256-bit exponent with the top bit set: full length, and odd so it
+    /// cannot share the small factor 2 with the group order.
+    #[test]
+    fn the_dh_private_exponent_has_the_expected_shape() {
+        let x = generate_dh_private().expect("CSPRNG").to_bytes_be();
+        assert_eq!(x.len(), 32, "expected a full 256-bit exponent");
+        assert!(x[0] & 0x80 != 0, "top bit must be set");
+        assert!(x[31] & 1 == 1, "exponent must be odd");
+    }
+
+    /// The KEXINIT cookie is half of what stops either side alone from
+    /// choosing the exchange hash: both `I_C` and `I_S` feed into `H`. Sixteen
+    /// zero bytes handed that power to the server.
+    #[test]
+    fn the_kexinit_cookie_is_random() {
+        let s = test_session();
+        let a = s.build_kexinit().expect("CSPRNG");
+        let b = s.build_kexinit().expect("CSPRNG");
+        assert_eq!(a[0], msg::SSH_MSG_KEXINIT);
+        assert_ne!(a[1..17], [0u8; 16], "the cookie must not be zeros");
+        assert_ne!(a[1..17], b[1..17], "the cookie must differ per connection");
+        // Everything after the cookie is a fixed algorithm advertisement.
+        assert_eq!(a[17..], b[17..]);
+    }
+
+    /// We must not advertise an algorithm we would then have to refuse: that
+    /// turns a connection that could have worked into a confusing failure.
+    #[test]
+    fn we_only_offer_host_key_algorithms_we_can_verify() {
+        let s = test_session();
+        let payload = s.build_kexinit().expect("CSPRNG");
+        // byte + 16-byte cookie, then kex_algorithms, then host key algorithms.
+        let (_kex, off) = read_ssh_string(&payload, 17).expect("kex list");
+        let (host_key, _) = read_ssh_string(&payload, off).expect("host key list");
+        assert_eq!(host_key, b"ssh-ed25519");
     }
 }

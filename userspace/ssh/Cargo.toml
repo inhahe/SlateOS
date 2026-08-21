@@ -7,5 +7,11 @@ description = "SlateOS SSH-2 client"
 # `sha2` for the key exchange, HMAC and host-key fingerprints. This crate
 # carried its own SHA-256; in a protocol client that is a private protocol,
 # since every one of those digests has to agree with the far end.
+#
+# `posix` for `ed25519` (verifying the server's host key signature) and
+# `random` (the Diffie-Hellman private exponent). Both were placeholders: the
+# signature was not checked at all, and the exponent was two hard-coded
+# constants hashed together -- one secret shared by every copy of the binary.
 [dependencies]
 sha2 = { path = "../../sha2" }
+posix = { path = "../../posix" }

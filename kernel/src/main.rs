@@ -5725,6 +5725,13 @@ extern "C" fn kernel_main() -> ! {
     // TIOCGWINSZ can report live dimensions).
     tty::self_test();
 
+    // Pseudo-terminal self-test.  Runs after `tty::self_test` because it
+    // creates real terminal devices through the same table and drives the
+    // line discipline end-to-end over them; a failure here means the
+    // discipline works for the console but not for a device with no keyboard
+    // driver behind it, which is precisely what a pty is.
+    tty::pty::self_test();
+
     // Terminal session multiplexer init + self-test.
     termsession::init();
     if let Err(e) = termsession::self_test() {

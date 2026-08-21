@@ -1,10 +1,9 @@
-//! Terminal (TTY) line-discipline and `termios` state for the system console.
+//! Terminal (TTY) line discipline and `termios` state, for N terminal devices.
 //!
-//! This module implements the kernel side of the Linux terminal ABI for the
-//! single system console: the `termios` structure that `TCGETS`/`TCSETS`
-//! exchange with userspace, the `winsize` structure that `TIOCGWINSZ` reports,
-//! and the canonical/raw line-discipline policy that the console `read(2)` path
-//! consults.
+//! This module implements the kernel side of the Linux terminal ABI: the
+//! `termios` structure that `TCGETS`/`TCSETS` exchange with userspace, the
+//! `winsize` structure that `TIOCGWINSZ` reports, and the canonical/raw
+//! line-discipline policy that a terminal `read(2)` consults.
 //!
 //! ## Why a kernel TTY at all
 //!
@@ -12,30 +11,63 @@
 //! keystroke and `ioctl(fd, TCGETS, …)` returned `ENOTTY` — so `isatty(3)`
 //! answered "no" and interactive programs (a shell, anything using readline or
 //! `tcgetattr`/`tcsetattr`) could neither detect the terminal nor configure it.
-//! A real interactive console *is* a terminal, so the console now answers the
+//! A real interactive console *is* a terminal, so the console answers the
 //! terminal-control ioctls and exposes a line discipline.
 //!
-//! ## Single shared console termios
+//! ## Devices
+//!
+//! A **terminal device** is a [`TtyId`] plus the state in `TtyDevice`:
+//! `termios`, `winsize`, and the leftover bytes of a canonical line that
+//! overflowed a reader's buffer.  [`CONSOLE`] (id 0) is the physical keyboard
+//! and screen; every other id is the slave end of a pseudo-terminal created by
+//! [`pty::create`].
+//!
+//! What makes a device a device is only where its bytes come from and where
+//! its echo goes — [`Backend`].  Everything else in this file is shared by
+//! every terminal, and was already device-independent before ptys existed:
+//! [`feed`] is the pure line editor, `canonical_read`/`raw_read` are the
+//! `VMIN`/`VTIME` and `ICANON` policy, and `Termios`/`WinSize` are wire
+//! formats.  Generalising the console to N devices was therefore a matter of
+//! moving three globals into a table and routing four keyboard calls through
+//! [`Backend`] — not of writing a second line discipline, which is exactly the
+//! outcome to want: a pty whose `^C` handling differs from the console's is a
+//! pty that will surprise somebody.
+//!
+//! ## One `termios` per device, shared by both ends
 //!
 //! Linux keeps one `termios` per tty device, shared by every file descriptor
-//! open on that tty (so a `tcsetattr` by the shell is observed by its
-//! children).  We have exactly one console device, so the termios state is a
-//! single global guarded by a [`Mutex`].  All `Console`-kind Linux fds resolve
-//! to it.
+//! open on that tty, so a `tcsetattr` by the shell is observed by its
+//! children.  For a pty that sharing crosses an address space: the shell holds
+//! the slave and clears `ECHO` for a password prompt, and the terminal
+//! emulator holding the master must stop echoing *immediately*.  That shared
+//! word is the reason a pty has to be a kernel object at all — a libc-only pty
+//! built from two socketpair ends has nowhere to put it.
+//!
+//! ## Locking order
+//!
+//! `DEVICES` (this module) is taken **before** `pty::PTYS`, and neither is ever
+//! held across a `sched` call.  Both are dropped before a park or a wake, in
+//! the `waiters` module's documented idiom, so a terminal read that blocks
+//! cannot hold the table another task needs in order to unblock it.
 //!
 //! ## What lives here vs. the syscall layer
 //!
 //! This module owns the *data* (the termios/winsize structs, their byte
-//! serialisation, the default "sane terminal" settings, and the global state).
-//! The Linux syscall translator (`kernel/src/syscall/linux.rs`) owns the
-//! *plumbing*: routing `TCGETS`/`TCSETS`/`TIOCGWINSZ` for `Console` fds here and
-//! consulting [`is_canonical`]/[`echo_enabled`] from the console read path.
+//! serialisation, the default "sane terminal" settings, the device table) and
+//! the *policy* (the line discipline).  The Linux syscall translator
+//! (`kernel/src/syscall/linux.rs`) owns the *plumbing*: routing
+//! `TCGETS`/`TCSETS`/`TIOCGWINSZ` to the right device and delivering the
+//! signals this module decides are due.
 
 // The canonical line-discipline read path and several c_cc control characters
 // are wired incrementally; not every accessor has an in-tree caller yet.
 #![allow(dead_code)]
 
+use alloc::boxed::Box;
+use alloc::collections::BTreeMap;
 use spin::Mutex;
+
+pub mod pty;
 
 /// Number of control characters in the Linux *kernel* `struct termios`
 /// (`NCCS`).  Note: the glibc *user* `struct termios` has a larger array plus
@@ -248,6 +280,18 @@ impl Termios {
         self.c_lflag & lflag::ECHO != 0
     }
 
+    /// `true` when a `\n` sent to this terminal must go out as CRLF.
+    ///
+    /// That is `OPOST` (do output processing at all) *and* `ONLCR` (the
+    /// specific rule), which is the default pair — a terminal emulator's cursor
+    /// stays in the right-hand column without it. Both the output path and the
+    /// echo path ask this, and asking it in one place is what keeps them
+    /// agreeing about what a line break looks like.
+    #[must_use]
+    pub const fn opost_nl_is_crlf(&self) -> bool {
+        self.c_oflag & oflag::OPOST != 0 && self.c_oflag & oflag::ONLCR != 0
+    }
+
     /// The `VMIN` control value (minimum bytes for a non-canonical read).
     #[must_use]
     pub fn vmin(&self) -> u8 {
@@ -314,55 +358,179 @@ impl WinSize {
     }
 }
 
-/// The single shared console terminal settings (Linux keeps one `termios` per
-/// tty device, shared by all fds open on it).
-static CONSOLE_TERMIOS: Mutex<Termios> = Mutex::new(Termios::sane_default());
+// ---------------------------------------------------------------------------
+// The device table
+// ---------------------------------------------------------------------------
 
-/// The console's stored window size.  `TIOCSWINSZ` updates this; `TIOCGWINSZ`
-/// reports the live console dimensions folded with any explicit override.
-static CONSOLE_WINSIZE: Mutex<WinSize> = Mutex::new(WinSize {
-    ws_row: 0,
-    ws_col: 0,
-    ws_xpixel: 0,
-    ws_ypixel: 0,
-});
+/// Identifies a terminal device.  `0` is the console; higher ids are
+/// pseudo-terminal slaves, allocated by [`pty::create`].
+pub type TtyId = u32;
 
-/// Get a copy of the console termios (for `TCGETS`).
-#[must_use]
-pub fn get_termios() -> Termios {
-    *CONSOLE_TERMIOS.lock()
-}
+/// The physical keyboard-and-screen terminal.
+pub const CONSOLE: TtyId = 0;
 
-/// Replace the console termios (for `TCSETS`/`TCSETSW`/`TCSETSF`).
+/// Where a terminal device's line discipline gets raw input bytes, and where
+/// its echo goes.
 ///
-/// Keeps the keyboard driver's echo in sync with the new `ECHO` bit so that a
-/// program clearing `ECHO` (e.g. a password prompt) stops the driver echoing
-/// immediately, and one setting it restores echo.
-pub fn set_termios(new: Termios) {
-    *CONSOLE_TERMIOS.lock() = new;
-    crate::keyboard::set_echo(new.echo_enabled());
+/// This enum *is* the difference between one terminal and another. Everything
+/// else — the editor, the `VMIN`/`VTIME` matrix, `ISIG` classification, the
+/// termios wire format — is shared, which is deliberate: a pty whose `^C`
+/// behaved differently from the console's would be a pty that surprises
+/// people, and two copies of a line discipline drift.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Backend {
+    /// Device 0: bytes come from the keyboard ring buffer (filled by the PS/2
+    /// IRQ and the USB HID poll) and echo is performed by the keyboard driver,
+    /// which is kept in sync with the `ECHO` bit.
+    Console,
+    /// A pseudo-terminal: bytes come from what the master end wrote (that end
+    /// is "the keyboard"), and echo is written back to the master (that end is
+    /// also "the screen").
+    Pty,
 }
 
-/// `true` when the console is in canonical (line-buffered) input mode.
-#[must_use]
-pub fn is_canonical() -> bool {
-    CONSOLE_TERMIOS.lock().is_canonical()
-}
-
-/// `true` when the console echoes input characters.
-#[must_use]
-pub fn echo_enabled() -> bool {
-    CONSOLE_TERMIOS.lock().echo_enabled()
-}
-
-/// Current console window size for `TIOCGWINSZ`.
+/// One terminal device's state.
 ///
-/// If userspace set an explicit size via `TIOCSWINSZ`, that is returned;
-/// otherwise the live console character dimensions are reported.
+/// Boxed in the table because `LineBuf` and `PendingLine` each embed a
+/// `MAX_CANON` (4 KiB) array, and a `BTreeMap` moves its values when it
+/// rebalances.
+struct TtyDevice {
+    backend: Backend,
+    /// Shared by every fd open on this terminal, and — for a pty — by both
+    /// ends. See the module docs on why that sharing is the point.
+    termios: Termios,
+    winsize: WinSize,
+    /// The canonical line currently being edited.
+    ///
+    /// This belongs to the *device*, not to the reader's stack frame, for two
+    /// reasons. A read cut short by a signal must be restartable without
+    /// throwing away what the user already typed — Linux keeps the editing
+    /// buffer in the tty for exactly this. And two processes reading the same
+    /// terminal are editing one line between them, not one line each.
+    line: LineBuf,
+    /// Bytes from a completed canonical line that did not fit in the reader's
+    /// buffer, held for the next `read(2)`.
+    pending: PendingLine,
+}
+
+impl TtyDevice {
+    fn new(backend: Backend) -> Self {
+        Self {
+            backend,
+            termios: Termios::sane_default(),
+            winsize: WinSize {
+                ws_row: 0,
+                ws_col: 0,
+                ws_xpixel: 0,
+                ws_ypixel: 0,
+            },
+            line: LineBuf::new(),
+            pending: PendingLine::new(),
+        }
+    }
+}
+
+/// Every terminal device in the system.
+///
+/// Device [`CONSOLE`] is materialised on first access rather than at boot, so
+/// that this table needs no initialisation call and cannot be consulted before
+/// it exists. Every other entry is created by [`pty::create`] and removed when
+/// both of that pty's ends are closed.
+///
+/// Locking order: taken before `pty::PTYS`, and never held across a park or a
+/// wake (see the module docs).
+static DEVICES: Mutex<BTreeMap<TtyId, Box<TtyDevice>>> = Mutex::new(BTreeMap::new());
+
+/// Run `f` against device `id`, materialising the console if it is missing.
+///
+/// Returns `None` for a *pty* id with no device — a pty that was destroyed, or
+/// never existed. The console is never absent, so `None` unambiguously means
+/// "that pty is gone", which is what a caller must distinguish in order to
+/// answer `EIO` rather than silently operating on a fresh default terminal.
+fn with_device<R>(id: TtyId, f: impl FnOnce(&mut TtyDevice) -> R) -> Option<R> {
+    let mut table = DEVICES.lock();
+    if id == CONSOLE {
+        return Some(f(table
+            .entry(CONSOLE)
+            .or_insert_with(|| Box::new(TtyDevice::new(Backend::Console)))));
+    }
+    table.get_mut(&id).map(|d| f(d))
+}
+
+/// Create the device record for a new pty slave. Called only by [`pty::create`].
+pub(crate) fn create_device(id: TtyId) {
+    DEVICES
+        .lock()
+        .insert(id, Box::new(TtyDevice::new(Backend::Pty)));
+}
+
+/// Drop a pty's device record. Called only when both pty ends are closed.
+///
+/// Refuses to remove the console: id 0 has no owner that could close it, and a
+/// removed console would be silently recreated with default settings by the
+/// next [`with_device`] call, discarding a `tcsetattr` nobody asked to undo.
+pub(crate) fn destroy_device(id: TtyId) {
+    if id != CONSOLE {
+        DEVICES.lock().remove(&id);
+    }
+}
+
+/// Whether `id` names a live terminal device.
 #[must_use]
-pub fn get_winsize() -> WinSize {
-    let stored = *CONSOLE_WINSIZE.lock();
-    if stored.ws_row != 0 || stored.ws_col != 0 {
+pub fn exists(id: TtyId) -> bool {
+    id == CONSOLE || DEVICES.lock().contains_key(&id)
+}
+
+/// Get a copy of a terminal's termios (for `TCGETS`).
+///
+/// Returns the sane default for a device that does not exist, because every
+/// caller is a `TCGETS` that has already validated its handle; a vanished pty
+/// races with `close`, and reporting a plausible terminal is better than
+/// panicking in a getter.
+#[must_use]
+pub fn get_termios(id: TtyId) -> Termios {
+    with_device(id, |d| d.termios).unwrap_or_else(Termios::sane_default)
+}
+
+/// Replace a terminal's termios (for `TCSETS`/`TCSETSW`/`TCSETSF`).
+///
+/// For the console this keeps the keyboard driver's echo in sync with the new
+/// `ECHO` bit, so a program clearing `ECHO` (e.g. a password prompt) stops the
+/// driver echoing immediately and one setting it restores echo. A pty's echo
+/// is performed by the discipline itself, which reads the bit directly.
+pub fn set_termios(id: TtyId, new: Termios) {
+    let backend = with_device(id, |d| {
+        d.termios = new;
+        d.backend
+    });
+    if backend == Some(Backend::Console) {
+        crate::keyboard::set_echo(new.echo_enabled());
+    }
+}
+
+/// `true` when a terminal is in canonical (line-buffered) input mode.
+#[must_use]
+pub fn is_canonical(id: TtyId) -> bool {
+    get_termios(id).is_canonical()
+}
+
+/// `true` when a terminal echoes input characters.
+#[must_use]
+pub fn echo_enabled(id: TtyId) -> bool {
+    get_termios(id).echo_enabled()
+}
+
+/// Current window size for `TIOCGWINSZ`.
+///
+/// If userspace set an explicit size via `TIOCSWINSZ`, that is returned. The
+/// console otherwise reports its live character dimensions; a pty otherwise
+/// reports zeroes, which is what Linux does for a pty nobody has sized and is
+/// how a program detects "size unknown".
+#[must_use]
+pub fn get_winsize(id: TtyId) -> WinSize {
+    let (stored, backend) = with_device(id, |d| (d.winsize, d.backend))
+        .unwrap_or((WinSize::default(), Backend::Pty));
+    if stored.ws_row != 0 || stored.ws_col != 0 || backend != Backend::Console {
         return stored;
     }
     let (cols, rows) = crate::console::dimensions();
@@ -374,9 +542,19 @@ pub fn get_winsize() -> WinSize {
     }
 }
 
-/// Store an explicit console window size (for `TIOCSWINSZ`).
-pub fn set_winsize(ws: WinSize) {
-    *CONSOLE_WINSIZE.lock() = ws;
+/// Store an explicit window size (for `TIOCSWINSZ`).
+///
+/// Returns `true` if the stored size actually changed. A resize is what
+/// `SIGWINCH` reports, and a `TIOCSWINSZ` that sets the same size again is not
+/// a resize — signalling it would wake every full-screen program on the
+/// terminal to redraw an unchanged screen.
+pub fn set_winsize(id: TtyId, ws: WinSize) -> bool {
+    with_device(id, |d| {
+        let changed = d.winsize != ws;
+        d.winsize = ws;
+        changed
+    })
+    .unwrap_or(false)
 }
 
 // ---------------------------------------------------------------------------
@@ -429,6 +607,15 @@ impl LineBuf {
         }
     }
 
+    /// The last byte in the line, if any.
+    ///
+    /// `VERASE` needs this *before* popping, because how many columns the
+    /// erased character occupied on screen depends on what it was (a control
+    /// byte echoed as `^X` takes two).
+    fn last(&self) -> Option<u8> {
+        self.buf.get(self.len.checked_sub(1)?).copied()
+    }
+
     /// Remove the last byte (erase); `false` if the line is empty.
     fn pop(&mut self) -> bool {
         if self.len > 0 {
@@ -448,13 +635,95 @@ impl LineBuf {
     }
 }
 
+/// What the line discipline should echo in response to one input byte.
+///
+/// Echo is *decided* here and *performed* by the backend, which keeps [`feed`]
+/// pure and testable while still putting the policy in one place. It has to be
+/// the discipline's business rather than the driver's, because a pty has no
+/// driver: echo on a pty is the kernel writing the byte back to the master,
+/// which is the entirety of what a terminal emulator displays when you type.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Echo {
+    /// Emit nothing.
+    None,
+    /// Emit this byte verbatim.
+    Byte(u8),
+    /// Emit `^X` for a control byte (`ECHOCTL`), where `X` is the byte + 0x40.
+    Ctrl(u8),
+    /// Rub out `n` characters, each as backspace-space-backspace (`ECHOE`,
+    /// and `ECHOKE` for a whole-line kill). `n == 0` emits nothing.
+    Erase(usize),
+    /// Emit a newline (the `\n` of a completed line, `ECHONL`, or `ECHOK`'s
+    /// "start a fresh line" rendering of a line kill).
+    Newline,
+}
+
+/// Whether `ch` is rendered as a two-column `^X` when `ECHOCTL` is set.
+///
+/// This is Linux's rule (`n_tty.c`'s `echo_char`): the C0 controls *and* `DEL`
+/// qualify, but `\t` is exempt (it is echoed literally so it still reaches the
+/// next tab stop) and so is `\n` (echoed raw as a line break, never as `^J`).
+const fn is_ctrl_echo(ch: u8) -> bool {
+    (ch < 0x20 || ch == 0x7f) && ch != b'\t' && ch != b'\n'
+}
+
+/// How `ch` should be echoed given the current `ECHO`/`ECHOCTL` settings.
+///
+/// Shared by the canonical editor ([`feed`]) and the raw path ([`raw_read`]) so
+/// that the two cannot disagree about how a byte appears on screen.
+fn render_echo(ch: u8, t: &Termios) -> Echo {
+    if t.c_lflag & lflag::ECHO == 0 {
+        Echo::None
+    } else if is_ctrl_echo(ch) && (t.c_lflag & lflag::ECHOCTL != 0) {
+        Echo::Ctrl(ch)
+    } else {
+        Echo::Byte(ch)
+    }
+}
+
+/// How wide `ch` is on screen once echoed, so an erase can rub out the right
+/// number of columns.
+///
+/// A control byte echoed as `^X` under `ECHOCTL` occupies two columns; `\t`
+/// would occupy up to eight, which this deliberately does not model — see the
+/// note in [`feed`].
+///
+/// Deliberately independent of the `ECHO` bit: this answers "how wide is it",
+/// not "is it shown", and the callers already gate on `ECHO` themselves.
+fn echo_width(ch: u8, t: &Termios) -> usize {
+    if is_ctrl_echo(ch) && (t.c_lflag & lflag::ECHOCTL != 0) {
+        2
+    } else {
+        1
+    }
+}
+
+/// [`feed`], discarding the echo half of the answer.
+///
+/// Assertion helper only. Most line-editing checks care what a byte did to
+/// the *buffer*, and threading a `_` through every one of them buries the
+/// fact being asserted; echo rendering has its own dedicated assertions
+/// instead, so a change to it fails a test about echo rather than thirty
+/// tests about line editing.
+fn step(line: &mut LineBuf, raw: u8, t: &Termios) -> LineStep {
+    feed(line, raw, t).0
+}
+
 /// Feed one raw input byte to the canonical line editor.
 ///
-/// This is the *pure* core of the line discipline — no I/O, no echo — so it is
-/// exercised directly by the boot self-test.  Echo is handled by the keyboard
-/// driver (synced to the `ECHO` termios bit); this function only maintains the
-/// line buffer and decides when a read should complete.
-fn feed(line: &mut LineBuf, raw: u8, t: &Termios) -> LineStep {
+/// This is the *pure* core of the line discipline — no I/O — so it is
+/// exercised directly by the boot self-test.  It maintains the line buffer,
+/// decides when a read should complete, and returns what should be echoed;
+/// performing that echo is the caller's job (the keyboard driver for the
+/// console, a write to the master end for a pty).
+///
+/// **Not modelled:** the column width of a literal tab. `ECHOE` rubs out one
+/// column per erased character (two for a `^X`-echoed control byte), which is
+/// wrong for a `\t` that expanded to a tab stop. Linux tracks the real column
+/// to get this right. Doing so needs the discipline to know the cursor
+/// position, which for a pty it cannot know at all — the emulator on the far
+/// end owns the screen. Recorded in `todo.txt`.
+fn feed(line: &mut LineBuf, raw: u8, t: &Termios) -> (LineStep, Echo) {
     // Input translation: ICRNL maps a received CR to NL (the common case so
     // that the Enter key — which the keyboard delivers as '\n' already, but a
     // serial line would deliver as '\r' — terminates a canonical line).
@@ -471,56 +740,95 @@ fn feed(line: &mut LineBuf, raw: u8, t: &Termios) -> LineStep {
     let vquit = g(cc::VQUIT, 28);
     let vsusp = g(cc::VSUSP, 26);
 
+    let echo_on = t.c_lflag & lflag::ECHO != 0;
+
+    // How an accepted byte is rendered: `^X` for a control byte under ECHOCTL,
+    // otherwise verbatim. Used for ordinary bytes and for the signal
+    // characters, which Linux echoes too (that is why `^C` appears on screen).
+    let render = |c: u8| -> Echo { render_echo(c, t) };
+
     if t.c_lflag & lflag::ISIG != 0 {
         // POSIX: a signal character flushes the input queue (here, the
         // in-progress canonical line) UNLESS NOFLSH is set, in which case the
         // buffered input is preserved and only the signal is generated.
         let flush = t.c_lflag & lflag::NOFLSH == 0;
-        if ch == vintr {
+        let mut signal = |sig: u8| -> (LineStep, Echo) {
             if flush {
                 line.clear();
             }
-            return LineStep::Signal(2); // SIGINT
+            (LineStep::Signal(sig), render(ch))
+        };
+        if ch == vintr {
+            return signal(2); // SIGINT
         }
         if ch == vquit {
-            if flush {
-                line.clear();
-            }
-            return LineStep::Signal(3); // SIGQUIT
+            return signal(3); // SIGQUIT
         }
         if ch == vsusp {
             // ^Z: stop the foreground job. SIGTSTP's default action stops the
             // process; SIGCONT (e.g. shell `fg`/`bg`) resumes it. The
             // in-progress line is flushed unless NOFLSH is set.
-            if flush {
-                line.clear();
-            }
-            return LineStep::Signal(20); // SIGTSTP
+            return signal(20); // SIGTSTP
         }
     }
 
     if ch == veof {
         // ^D: submit the line so far (without the EOF byte).  An empty buffer
-        // becomes a zero-length read (end of file).
-        return LineStep::Eof;
+        // becomes a zero-length read (end of file).  Not echoed: the point of
+        // ^D is that it is invisible punctuation, and Linux suppresses it.
+        return (LineStep::Eof, Echo::None);
     }
     if ch == verase {
-        line.pop();
-        return LineStep::Pending;
+        // Erase echoes only if something was actually erased — rubbing out a
+        // character that is not there would eat the prompt.
+        let last = line.last();
+        let erased = line.pop();
+        let echo = match (erased, last) {
+            (true, Some(c)) if echo_on && (t.c_lflag & lflag::ECHOE != 0) => {
+                Echo::Erase(echo_width(c, t))
+            }
+            _ => Echo::None,
+        };
+        return (LineStep::Pending, echo);
     }
     if ch == vkill {
+        // ECHOKE rubs the whole line out in place; ECHOK (the older, weaker
+        // behaviour) just starts a fresh line. ECHOKE wins when both are set,
+        // matching Linux.
+        let width: usize = line
+            .as_slice()
+            .iter()
+            .map(|c| echo_width(*c, t))
+            .fold(0usize, |a, b| a.saturating_add(b));
         line.clear();
-        return LineStep::Pending;
+        let echo = if !echo_on {
+            Echo::None
+        } else if t.c_lflag & lflag::ECHOKE != 0 {
+            Echo::Erase(width)
+        } else if t.c_lflag & lflag::ECHOK != 0 {
+            Echo::Newline
+        } else {
+            Echo::None
+        };
+        return (LineStep::Pending, echo);
     }
     if ch == b'\n' {
         // The newline is part of the canonical line returned to the reader.
+        // ECHONL echoes it even with ECHO off — that is the bit's whole
+        // purpose, so a password prompt still moves to the next line.
         let _ = line.push(b'\n');
-        return LineStep::Line;
+        let echo = if echo_on || (t.c_lflag & lflag::ECHONL != 0) {
+            Echo::Newline
+        } else {
+            Echo::None
+        };
+        return (LineStep::Line, echo);
     }
 
     // Ordinary byte: append (silently dropped if the line is full).
-    let _ = line.push(ch);
-    LineStep::Pending
+    let pushed = line.push(ch);
+    let echo = if pushed { render(ch) } else { Echo::None };
+    (LineStep::Pending, echo)
 }
 
 /// Bytes from a completed canonical line that did not fit in the reader's
@@ -569,34 +877,158 @@ impl PendingLine {
     }
 }
 
-/// Leftover bytes of a canonical line that overflowed a small reader buffer.
-static PENDING: Mutex<PendingLine> = Mutex::new(PendingLine::new());
-
-/// Read the console's foreground process-group ID — the group that owns the
+/// Read a terminal's foreground process-group ID — the group that owns that
 /// terminal for the purpose of job control.  A `^C`/`^\`/`^Z` under `ISIG`
 /// delivers `SIGINT`/`SIGQUIT`/`SIGTSTP` to this group (see
 /// [`ConsoleRead::Signal`]).
 ///
-/// `0` means "no foreground group" — either no session holds the console
-/// (the kernel-startup / no-shell state) or the holder has released it — in
-/// which case a generated terminal signal has no group to target and is
-/// dropped.  This mirrors Linux's `tty->pgrp`, which an interactive shell
-/// installs via `tcsetpgrp(3)` for each job it foregrounds.
+/// `0` means "no foreground group" — either no session holds this terminal
+/// (the kernel-startup / no-shell state, or a pty nobody has `TIOCSCTTY`'d)
+/// or the holder has released it — in which case a generated terminal signal
+/// has no group to target and is dropped.  This mirrors Linux's `tty->pgrp`,
+/// which an interactive shell installs via `tcsetpgrp(3)` for each job it
+/// foregrounds.
 ///
 /// This module deliberately keeps **no storage** of its own for it.  It used
 /// to own a `FOREGROUND_PGID` atomic, which made the foreground group two
 /// unrelated values: the Linux shim's `TIOCSPGRP` wrote here, libc's
 /// `tcsetpgrp` wrote to a userspace static, and neither could see the other
 /// — so the group that received `^C` and the group userspace believed was in
-/// the foreground could disagree indefinitely.  The single copy now lives
-/// with the session that holds the terminal, in `proc::pcb`, and this is a
-/// derived read of it.
+/// the foreground could disagree indefinitely.  The single copy lives with
+/// the session that holds the terminal, in `proc::pcb`, and this is a derived
+/// read of it.  With ptys that argument gets stronger rather than weaker: the
+/// master end and the slave's shell are different processes in different
+/// sessions, so a device-local copy would be wrong in one of them by
+/// construction.
 #[must_use]
-pub fn foreground_pgid() -> u64 {
-    crate::proc::pcb::ctty_console_fg_pgrp().unwrap_or(0)
+pub fn foreground_pgid(id: TtyId) -> u64 {
+    crate::proc::pcb::ctty_fg_pgrp(id).unwrap_or(0)
 }
 
-/// Outcome of a console [`console_read`].
+// ---------------------------------------------------------------------------
+// Backend I/O — the only device-specific part of the discipline
+// ---------------------------------------------------------------------------
+
+/// One byte from a terminal's input side, or why there was not one.
+///
+/// A plain `Option<u8>` cannot carry the distinction that matters most here:
+/// "nothing yet" (retry), "nothing ever" (hangup — deliver a short count and
+/// then EOF) and "stop and handle a signal" (restart the syscall) demand three
+/// different answers from the reader, and conflating any two of them produces a
+/// hang or a spurious EOF.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Input {
+    /// An input byte.
+    Byte(u8),
+    /// Nothing is available right now (a poll came up empty, or a `VTIME`
+    /// deadline expired). More may arrive later.
+    Empty,
+    /// End of input: a pty whose last master handle has been closed. Nothing
+    /// more will ever arrive.
+    Hangup,
+    /// The wait was cut short by a deliverable signal; the syscall must be
+    /// restarted (or aborted with `EINTR`) rather than resumed here.
+    Interrupted,
+}
+
+/// Block until an input byte is available for `id`.
+///
+/// The console never reports [`Input::Hangup`] — a program cannot unplug the
+/// keyboard — and never reports [`Input::Interrupted`] either, because
+/// `keyboard::read_char` is an uninterruptible HLT-spin with no waiter set to
+/// register against. That is a pre-existing console limitation (a task blocked
+/// reading the console cannot be killed until a key is pressed), tracked in
+/// `known-issues.md`; it is not one this refactor introduces, and the pty path
+/// deliberately does better.
+fn backend_read_char(id: TtyId, backend: Backend) -> Input {
+    match backend {
+        Backend::Console => Input::Byte(crate::keyboard::read_char()),
+        Backend::Pty => pty::slave_read_input_blocking(id),
+    }
+}
+
+/// Take an input byte for `id` if one is ready, without blocking.
+fn backend_try_read_char(id: TtyId, backend: Backend) -> Input {
+    match backend {
+        Backend::Console => crate::keyboard::try_read_char().map_or(Input::Empty, Input::Byte),
+        Backend::Pty => pty::slave_try_read_input(id),
+    }
+}
+
+/// Block until an input byte is available for `id` or the monotonic clock
+/// reaches `deadline_ns`.
+fn backend_read_char_timeout(id: TtyId, backend: Backend, deadline_ns: u64) -> Input {
+    match backend {
+        Backend::Console => crate::keyboard::read_char_timeout(deadline_ns)
+            .map_or(Input::Empty, Input::Byte),
+        Backend::Pty => pty::slave_read_input_timeout(id, deadline_ns),
+    }
+}
+
+/// Echo `bytes` back to whoever is "typing" on `id`.
+///
+/// The console's echo is done by the keyboard driver as a side effect of
+/// reading (it owns the cursor), so this is a no-op there and the `ECHO` bit
+/// is instead pushed into the driver by [`set_termios`] and [`read`]. A pty
+/// has no driver to delegate to: echo is the discipline writing the byte to
+/// the master, which is the whole of what a terminal emulator sees when you
+/// type.
+fn backend_echo(id: TtyId, backend: Backend, bytes: &[u8]) {
+    if backend == Backend::Pty {
+        pty::master_push_output(id, bytes);
+    }
+}
+
+/// The letter shown after `^` when a control byte is echoed under `ECHOCTL`.
+///
+/// Linux (`n_tty.c`) uses `c ^ 0x40`, not `c + 0x40`. The XOR is what makes
+/// the mapping run in both directions: it turns 0x03 into `'C'` *and* `DEL`
+/// (0x7f) into `'?'`, whereas addition would carry 0x7f past the ASCII range
+/// and print garbage where every terminal shows `^?`.
+const fn caret_letter(ch: u8) -> u8 {
+    ch ^ 0x40
+}
+
+/// Perform the echo the line discipline decided on.
+///
+/// Splitting "decide" ([`feed`] / [`render_echo`]) from "perform" (here) is what
+/// lets the discipline stay pure and unit-testable while still driving a device
+/// that has no driver to delegate echo to.
+///
+/// Two Linux details are reproduced deliberately (`n_tty.c`,
+/// `__process_echoes`):
+///
+/// * An ordinary echoed byte goes through output post-processing when `OPOST`
+///   is set, which is why a newline echoes as CRLF under `ONLCR` — without it
+///   the emulator's cursor would stay in the right-hand column.
+/// * The `^X` rendering of a control byte and the backspace-space-backspace of
+///   an erase do **not**; they are written raw, because they are the
+///   discipline's own screen drawing rather than the user's data.
+fn echo_step(id: TtyId, backend: Backend, t: &Termios, echo: Echo) {
+    // The console echoes inside the keyboard driver as a side effect of
+    // reading — it owns the cursor — so echoing again here would double every
+    // keystroke. `read`/`set_termios` push the ECHO bit down to the driver
+    // instead.
+    if backend == Backend::Console {
+        return;
+    }
+    let newline: &[u8] = if t.opost_nl_is_crlf() { b"\r\n" } else { b"\n" };
+    match echo {
+        Echo::None => {}
+        // A literal `\n` byte takes the newline path so ONLCR applies to it
+        // whether it arrived as a completed line or as raw-mode input.
+        Echo::Newline | Echo::Byte(b'\n') => backend_echo(id, backend, newline),
+        Echo::Byte(c) => backend_echo(id, backend, &[c]),
+        Echo::Ctrl(c) => backend_echo(id, backend, &[b'^', caret_letter(c)]),
+        Echo::Erase(n) => {
+            for _ in 0..n {
+                backend_echo(id, backend, b"\x08 \x08");
+            }
+        }
+    }
+}
+
+/// Outcome of a terminal [`read`].
 ///
 /// A normal read yields [`ConsoleRead::Data`] with the number of bytes written
 /// to the caller's buffer (`0` means end-of-file on a `^D` at an empty line, or
@@ -614,6 +1046,12 @@ pub enum ConsoleRead {
     /// it to the foreground process group.  No bytes were written to the
     /// caller's buffer.
     Signal(u8),
+    /// A signal already pending for the *reader* cut the wait short.  No bytes
+    /// were written and nothing needs delivering — the syscall layer just
+    /// returns the restart sentinel so the signal checkpoint runs.  Any line
+    /// typed so far is still in the device's editor and will be there when the
+    /// read restarts.
+    Interrupted,
 }
 
 /// Read from the console into `out` per the current line discipline.
@@ -633,28 +1071,40 @@ pub enum ConsoleRead {
 ///
 /// Returns a [`ConsoleRead`]: either the number of bytes written to `out`, or a
 /// [`ConsoleRead::Signal`] when a `^C`/`^\`/`^Z` interrupted a canonical read.
-pub fn console_read(out: &mut [u8]) -> ConsoleRead {
+pub fn read(id: TtyId, out: &mut [u8]) -> ConsoleRead {
     if out.is_empty() {
         return ConsoleRead::Data(0);
     }
-    let t = get_termios();
+    // Take the termios, the backend, and any leftover bytes in one pass, then
+    // drop the device table: everything below can block, and holding the table
+    // across a park would deadlock against the writer that unblocks us.
+    let Some((t, backend, leftover)) = with_device(id, |d| {
+        let leftover = if d.pending.has_data() {
+            Some(d.pending.drain_into(out))
+        } else {
+            None
+        };
+        (d.termios, d.backend, leftover)
+    }) else {
+        // The pty was destroyed. A read on a terminal that no longer exists is
+        // end of file, not an error: the reader's own handle is still valid,
+        // and EOF is what every caller of a vanished terminal must do anyway.
+        return ConsoleRead::Data(0);
+    };
+    if let Some(n) = leftover {
+        return ConsoleRead::Data(n);
+    }
 
     // The Linux read path is authoritative for console echo: keep the keyboard
     // driver's echo in sync with this terminal's ECHO bit.
-    crate::keyboard::set_echo(t.echo_enabled());
-
-    // Serve any leftover bytes from a previously-overflowed line first.
-    {
-        let mut p = PENDING.lock();
-        if p.has_data() {
-            return ConsoleRead::Data(p.drain_into(out));
-        }
+    if backend == Backend::Console {
+        crate::keyboard::set_echo(t.echo_enabled());
     }
 
     if t.is_canonical() {
-        canonical_read(&t, out)
+        canonical_read(id, backend, &t, out)
     } else {
-        raw_read(&t, out)
+        raw_read(id, backend, &t, out)
     }
 }
 
@@ -665,32 +1115,56 @@ pub fn console_read(out: &mut [u8]) -> ConsoleRead {
 /// discarded by [`feed`] (unless `NOFLSH` is set), and this function delivers
 /// no partial data either way (matching Linux: an interrupted canonical read
 /// returns `-EINTR`, not the editing buffer).
-fn canonical_read(t: &Termios, out: &mut [u8]) -> ConsoleRead {
-    let mut line = LineBuf::new();
+fn canonical_read(id: TtyId, backend: Backend, t: &Termios, out: &mut [u8]) -> ConsoleRead {
     loop {
-        let raw = crate::keyboard::read_char();
-        match feed(&mut line, raw, t) {
+        // Blocking input is taken with no lock held: the writer that unblocks
+        // us has to take the device table to do it.
+        let raw = match backend_read_char(id, backend) {
+            Input::Byte(b) => b,
+            // End of input — a pty whose master end has been closed. Deliver
+            // whatever has been typed so far (an unterminated final line,
+            // exactly as Linux delivers on hangup); the buffer is now empty, so
+            // the next call naturally returns 0.
+            Input::Hangup | Input::Empty => return deliver_line(id, out),
+            // Leave the edited line in the device — that is the whole reason it
+            // lives there — so a restarted read resumes mid-line.
+            Input::Interrupted => return ConsoleRead::Interrupted,
+        };
+        let Some((step, echo)) = with_device(id, |d| feed(&mut d.line, raw, t)) else {
+            // The pty was destroyed while we were blocked. EOF, not an error.
+            return ConsoleRead::Data(0);
+        };
+        echo_step(id, backend, t, echo);
+        match step {
             LineStep::Pending => {}
-            LineStep::Line => break,
-            LineStep::Eof => {
-                if line.len == 0 {
-                    return ConsoleRead::Data(0); // EOF
-                }
-                break;
-            }
+            // Both terminators submit the buffer; the difference is only that
+            // `feed` left the `\n` in it for `Line` and not for `Eof`, so an
+            // empty `Eof` line delivers zero bytes — which *is* end of file.
+            LineStep::Line | LineStep::Eof => return deliver_line(id, out),
             // A signal char (^C/^\) flushed the in-progress line: abandon the
             // read and let the syscall layer deliver the signal to the
             // foreground process group, returning EINTR/ERESTARTSYS to us.
             LineStep::Signal(sig) => return ConsoleRead::Signal(sig),
         }
     }
-    let mut p = PENDING.lock();
-    p.fill(line.as_slice());
-    ConsoleRead::Data(p.drain_into(out))
+}
+
+/// Move the finished editor line into the device's pending buffer and drain as
+/// much of it as fits in `out`.
+///
+/// The two-step exists so that a reader whose buffer is smaller than the line
+/// gets the remainder on its next call rather than losing it.
+fn deliver_line(id: TtyId, out: &mut [u8]) -> ConsoleRead {
+    with_device(id, |d| {
+        d.pending.fill(d.line.as_slice());
+        d.line.clear();
+        d.pending.drain_into(out)
+    })
+    .map_or(ConsoleRead::Data(0), ConsoleRead::Data)
 }
 
 /// Non-canonical (raw) read honouring both `VMIN` and `VTIME` (see
-/// [`console_read`]).
+/// [`read`]).
 ///
 /// The four `(VMIN, VTIME)` combinations follow POSIX (`termios(3)` "Canonical
 /// and noncanonical mode"):
@@ -716,7 +1190,7 @@ fn canonical_read(t: &Termios, out: &mut [u8]) -> ConsoleRead {
 /// the keyboard — so there is no buffered input for `NOFLSH` to preserve here.
 /// Programs that want the signal characters delivered as literal data (most
 /// full-screen apps) clear `ISIG`, in which case no signal is generated.
-fn raw_read(t: &Termios, out: &mut [u8]) -> ConsoleRead {
+fn raw_read(id: TtyId, backend: Backend, t: &Termios, out: &mut [u8]) -> ConsoleRead {
     let cap = out.len();
     if cap == 0 {
         return ConsoleRead::Data(0);
@@ -746,90 +1220,91 @@ fn raw_read(t: &Termios, out: &mut [u8]) -> ConsoleRead {
         }
     };
 
-    // Store one byte at the current cursor, advancing it.
-    let mut store = |slot_n: usize, c: u8| {
-        if let Some(slot) = out.get_mut(slot_n) {
-            *slot = c;
-        }
-    };
+    // Accept one byte: a signal character aborts the read (echoed first, as
+    // Linux's `n_tty_receive_signal_char` does — that is why `^C` still appears
+    // even in raw mode); anything else is stored and echoed.
+    //
+    // A macro rather than a closure because it both borrows `out` mutably and
+    // returns from `raw_read`, which no closure can do.
+    macro_rules! accept {
+        ($c:expr) => {{
+            let c: u8 = $c;
+            echo_step(id, backend, t, render_echo(c, t));
+            if let Some(s) = sig_for(c) {
+                return ConsoleRead::Signal(s);
+            }
+            if let Some(slot) = out.get_mut(n) {
+                *slot = c;
+            }
+            n = n.saturating_add(1);
+        }};
+    }
 
     match (vmin == 0, vtime_ns == 0) {
         // MIN=0, TIME=0: pure poll.
         (true, true) => {
             while n < cap {
-                match crate::keyboard::try_read_char() {
-                    Some(c) => {
-                        if let Some(s) = sig_for(c) {
-                            return ConsoleRead::Signal(s);
-                        }
-                        store(n, c);
-                        n = n.saturating_add(1);
-                    }
-                    None => break,
+                match backend_try_read_char(id, backend) {
+                    Input::Byte(c) => accept!(c),
+                    // A poll never blocks, so it cannot be interrupted; every
+                    // other answer means "return what we have".
+                    Input::Empty | Input::Hangup | Input::Interrupted => break,
                 }
             }
         }
         // MIN=0, TIME>0: bounded read timeout on the first byte.
         (true, false) => {
             let deadline = crate::hrtimer::now_ns().saturating_add(vtime_ns);
-            if let Some(c) = crate::keyboard::read_char_timeout(deadline) {
-                if let Some(s) = sig_for(c) {
-                    return ConsoleRead::Signal(s);
-                }
-                store(n, c);
-                n = n.saturating_add(1);
-                // Drain any bytes already buffered alongside the first.
-                while n < cap {
-                    match crate::keyboard::try_read_char() {
-                        Some(c) => {
-                            if let Some(s) = sig_for(c) {
-                                return ConsoleRead::Signal(s);
-                            }
-                            store(n, c);
-                            n = n.saturating_add(1);
+            match backend_read_char_timeout(id, backend, deadline) {
+                Input::Byte(c) => {
+                    accept!(c);
+                    // Drain any bytes already buffered alongside the first.
+                    while n < cap {
+                        match backend_try_read_char(id, backend) {
+                            Input::Byte(c) => accept!(c),
+                            Input::Empty | Input::Hangup | Input::Interrupted => break,
                         }
-                        None => break,
                     }
                 }
+                // Nothing has been consumed yet, so a signal can be reported
+                // without losing input.
+                Input::Interrupted => return ConsoleRead::Interrupted,
+                // Timeout or hangup: MIN=0 means a zero-byte return is legal.
+                Input::Empty | Input::Hangup => {}
             }
         }
         // MIN>0, TIME=0: block for VMIN bytes, then drain ready extras.
         (false, true) => {
             while n < cap {
-                let next = if n >= vmin {
-                    match crate::keyboard::try_read_char() {
-                        Some(c) => c,
-                        None => break,
-                    }
+                let got = if n >= vmin {
+                    backend_try_read_char(id, backend)
                 } else {
-                    crate::keyboard::read_char()
+                    backend_read_char(id, backend)
                 };
-                if let Some(s) = sig_for(next) {
-                    return ConsoleRead::Signal(s);
+                match got {
+                    Input::Byte(c) => accept!(c),
+                    Input::Interrupted if n == 0 => return ConsoleRead::Interrupted,
+                    // Hangup is not a timeout, and a signal after some bytes
+                    // have already been consumed must not discard them: both
+                    // deliver the short count and let the next call decide.
+                    Input::Empty | Input::Hangup | Input::Interrupted => break,
                 }
-                store(n, next);
-                n = n.saturating_add(1);
             }
         }
         // MIN>0, TIME>0: block for the first byte, then inter-byte timer.
         (false, false) => {
-            let first = crate::keyboard::read_char();
-            if let Some(s) = sig_for(first) {
-                return ConsoleRead::Signal(s);
+            match backend_read_char(id, backend) {
+                Input::Byte(c) => accept!(c),
+                Input::Interrupted => return ConsoleRead::Interrupted,
+                Input::Empty | Input::Hangup => return ConsoleRead::Data(0),
             }
-            store(n, first);
-            n = n.saturating_add(1);
             while n < cap && n < vmin {
                 let deadline = crate::hrtimer::now_ns().saturating_add(vtime_ns);
-                match crate::keyboard::read_char_timeout(deadline) {
-                    Some(c) => {
-                        if let Some(s) = sig_for(c) {
-                            return ConsoleRead::Signal(s);
-                        }
-                        store(n, c);
-                        n = n.saturating_add(1);
-                    }
-                    None => break, // inter-byte timer expired
+                match backend_read_char_timeout(id, backend, deadline) {
+                    Input::Byte(c) => accept!(c),
+                    // Inter-byte timer expired, hangup, or a signal: all end
+                    // the read with what has been collected.
+                    Input::Empty | Input::Hangup | Input::Interrupted => break,
                 }
             }
         }
@@ -890,7 +1365,7 @@ pub fn self_test() {
         ws_ypixel: 0,
     };
     assert_eq!(WinSize::from_bytes(&w.to_bytes()), w, "winsize round-trip");
-    let live = get_winsize();
+    let live = get_winsize(CONSOLE);
     assert!(
         live.ws_row != 0 && live.ws_col != 0,
         "TIOCGWINSZ should report a live console size"
@@ -907,48 +1382,48 @@ pub fn self_test() {
 
         // "hi\n" → a complete line of exactly "hi\n".
         let mut line = LineBuf::new();
-        assert_eq!(feed(&mut line, b'h', &t), LineStep::Pending);
-        assert_eq!(feed(&mut line, b'i', &t), LineStep::Pending);
-        assert_eq!(feed(&mut line, b'\n', &t), LineStep::Line);
+        assert_eq!(step(&mut line, b'h', &t), LineStep::Pending);
+        assert_eq!(step(&mut line, b'i', &t), LineStep::Pending);
+        assert_eq!(step(&mut line, b'\n', &t), LineStep::Line);
         assert_eq!(line.as_slice(), b"hi\n", "canonical line content");
 
         // VERASE (DEL) erases the last byte: "ax\x7fb\n" → "ab\n".
         let mut e = LineBuf::new();
-        let _ = feed(&mut e, b'a', &t);
-        let _ = feed(&mut e, b'x', &t);
-        assert_eq!(feed(&mut e, 127, &t), LineStep::Pending); // erase 'x'
-        let _ = feed(&mut e, b'b', &t);
-        assert_eq!(feed(&mut e, b'\n', &t), LineStep::Line);
+        let _ = step(&mut e, b'a', &t);
+        let _ = step(&mut e, b'x', &t);
+        assert_eq!(step(&mut e, 127, &t), LineStep::Pending); // erase 'x'
+        let _ = step(&mut e, b'b', &t);
+        assert_eq!(step(&mut e, b'\n', &t), LineStep::Line);
         assert_eq!(e.as_slice(), b"ab\n", "VERASE erases prior byte");
 
         // VKILL (^U) clears the whole line.
         let mut k = LineBuf::new();
-        let _ = feed(&mut k, b'j', &t);
-        let _ = feed(&mut k, b'u', &t);
-        assert_eq!(feed(&mut k, 21, &t), LineStep::Pending); // ^U
+        let _ = step(&mut k, b'j', &t);
+        let _ = step(&mut k, b'u', &t);
+        assert_eq!(step(&mut k, 21, &t), LineStep::Pending); // ^U
         assert_eq!(k.as_slice(), b"", "VKILL clears the line");
 
         // VEOF (^D) on an empty line signals end-of-file.
         let mut eof = LineBuf::new();
-        assert_eq!(feed(&mut eof, 4, &t), LineStep::Eof);
+        assert_eq!(step(&mut eof, 4, &t), LineStep::Eof);
         assert_eq!(eof.len, 0, "VEOF on empty line ⇒ EOF");
 
         // VINTR (^C) under ISIG flushes the line and reports SIGINT.
         let mut sig = LineBuf::new();
-        let _ = feed(&mut sig, b'z', &t);
-        assert_eq!(feed(&mut sig, 3, &t), LineStep::Signal(2));
+        let _ = step(&mut sig, b'z', &t);
+        assert_eq!(step(&mut sig, 3, &t), LineStep::Signal(2));
         assert_eq!(sig.as_slice(), b"", "VINTR flushes the line");
 
         // VQUIT (^\) under ISIG flushes the line and reports SIGQUIT.
         let mut q = LineBuf::new();
-        let _ = feed(&mut q, b'q', &t);
-        assert_eq!(feed(&mut q, 28, &t), LineStep::Signal(3));
+        let _ = step(&mut q, b'q', &t);
+        assert_eq!(step(&mut q, 28, &t), LineStep::Signal(3));
         assert_eq!(q.as_slice(), b"", "VQUIT flushes the line");
 
         // VSUSP (^Z) under ISIG flushes the line and reports SIGTSTP.
         let mut z = LineBuf::new();
-        let _ = feed(&mut z, b's', &t);
-        assert_eq!(feed(&mut z, 26, &t), LineStep::Signal(20));
+        let _ = step(&mut z, b's', &t);
+        assert_eq!(step(&mut z, 26, &t), LineStep::Signal(20));
         assert_eq!(z.as_slice(), b"", "VSUSP flushes the line");
 
         // With NOFLSH set, a signal char generates the signal but preserves
@@ -956,25 +1431,77 @@ pub fn self_test() {
         let mut noflsh = Termios::sane_default();
         noflsh.c_lflag |= lflag::NOFLSH;
         let mut nf = LineBuf::new();
-        let _ = feed(&mut nf, b'a', &noflsh);
-        let _ = feed(&mut nf, b'b', &noflsh);
-        assert_eq!(feed(&mut nf, 3, &noflsh), LineStep::Signal(2)); // ^C
+        let _ = step(&mut nf, b'a', &noflsh);
+        let _ = step(&mut nf, b'b', &noflsh);
+        assert_eq!(step(&mut nf, 3, &noflsh), LineStep::Signal(2)); // ^C
         assert_eq!(nf.as_slice(), b"ab", "NOFLSH preserves the line on ^C");
         // ...and the preserved line still completes normally afterwards.
-        assert_eq!(feed(&mut nf, b'\n', &noflsh), LineStep::Line);
+        assert_eq!(step(&mut nf, b'\n', &noflsh), LineStep::Line);
         assert_eq!(nf.as_slice(), b"ab\n", "NOFLSH line completes after signal");
 
         // With ISIG cleared, a ^C is just an ordinary byte in the line.
         let mut noisig = Termios::sane_default();
         noisig.c_lflag &= !lflag::ISIG;
         let mut n = LineBuf::new();
-        assert_eq!(feed(&mut n, 3, &noisig), LineStep::Pending);
-        assert_eq!(feed(&mut n, b'\n', &noisig), LineStep::Line);
+        assert_eq!(step(&mut n, 3, &noisig), LineStep::Pending);
+        assert_eq!(step(&mut n, b'\n', &noisig), LineStep::Line);
         assert_eq!(n.as_slice(), &[3u8, b'\n'], "ISIG off ⇒ ^C is literal");
 
         crate::serial_println!(
             "[tty]   line discipline (canon/erase/kill/eof/intr/quit/susp/noflsh): OK"
         );
+    }
+
+    // Echo rendering.  `feed` only *decides* what appears on screen; the
+    // backend performs it.  These assertions pin the decision, because a pty
+    // has no keyboard driver to fall back on — whatever `feed` returns here is
+    // literally what the terminal emulator on the master end will draw.
+    {
+        let t = Termios::sane_default();
+
+        // A printable byte echoes as itself; a newline is its own case so
+        // ONLCR can turn it into CRLF at the backend.
+        let mut l = LineBuf::new();
+        assert_eq!(feed(&mut l, b'a', &t).1, Echo::Byte(b'a'), "printable echo");
+        assert_eq!(feed(&mut l, b'\n', &t).1, Echo::Newline, "newline echo");
+
+        // ECHOCTL renders a control byte as `^X`, and the caret letter comes
+        // from `caret_letter` — the XOR mapping, so DEL shows as `^?` rather
+        // than as the out-of-range byte an addition would produce.
+        let mut c = LineBuf::new();
+        assert_eq!(feed(&mut c, 1, &t).1, Echo::Ctrl(1), "^A renders as Ctrl");
+        assert_eq!(caret_letter(1), b'A', "caret letter for ^A");
+        assert_eq!(caret_letter(3), b'C', "caret letter for ^C");
+        assert_eq!(caret_letter(127), b'?', "caret letter for DEL is '?'");
+
+        // A tab is exempt from ECHOCTL: it must be echoed literally or it
+        // would never reach the next tab stop.
+        let mut tab = LineBuf::new();
+        assert_eq!(feed(&mut tab, b'\t', &t).1, Echo::Byte(b'\t'), "tab echo");
+
+        // ECHOE rubs out the erased character, two columns for a `^X`.
+        let mut e = LineBuf::new();
+        let _ = step(&mut e, b'a', &t);
+        assert_eq!(feed(&mut e, 127, &t).1, Echo::Erase(1), "erase a plain byte");
+        // ^A is only *stored* (rather than generating a signal) with ISIG
+        // cleared, which is the configuration that lets us erase it.
+        let mut ctrl = Termios::sane_default();
+        ctrl.c_lflag &= !lflag::ISIG;
+        let mut e2 = LineBuf::new();
+        let _ = step(&mut e2, 1, &ctrl);
+        assert_eq!(
+            feed(&mut e2, 127, &ctrl).1,
+            Echo::Erase(2),
+            "erasing a ^X-echoed byte rubs out two columns"
+        );
+
+        // Clearing ECHO silences everything the editor would have drawn.
+        let mut off = Termios::sane_default();
+        off.c_lflag &= !lflag::ECHO;
+        let mut q = LineBuf::new();
+        assert_eq!(feed(&mut q, b'a', &off).1, Echo::None, "ECHO off ⇒ silent");
+
+        crate::serial_println!("[tty]   echo rendering (printable/^X/tab/erase/off): OK");
     }
 
     // PendingLine: a line longer than the reader buffer is delivered in pieces.
@@ -999,8 +1526,8 @@ pub fn self_test() {
     // own, the two would drift and `^C` would go to the wrong job.
     {
         assert_eq!(
-            foreground_pgid(),
-            crate::proc::pcb::ctty_console_fg_pgrp().unwrap_or(0),
+            foreground_pgid(CONSOLE),
+            crate::proc::pcb::ctty_fg_pgrp(CONSOLE).unwrap_or(0),
             "console foreground pgrp must be a derived read of the ctty table"
         );
         crate::serial_println!("[tty]   foreground pgrp is session-owned: OK");
@@ -1067,8 +1594,8 @@ mod tests {
 
         // Default (NOFLSH clear): ^C generates SIGINT and flushes the line.
         let mut a = LineBuf::new();
-        let _ = feed(&mut a, b'x', &t);
-        assert_eq!(feed(&mut a, 3, &t), LineStep::Signal(2));
+        let _ = step(&mut a, b'x', &t);
+        assert_eq!(step(&mut a, 3, &t), LineStep::Signal(2));
         assert_eq!(a.as_slice(), b"");
 
         // NOFLSH set: ^C generates SIGINT but preserves the line, which then
@@ -1076,11 +1603,11 @@ mod tests {
         let mut nf = Termios::sane_default();
         nf.c_lflag |= lflag::NOFLSH;
         let mut b = LineBuf::new();
-        let _ = feed(&mut b, b'a', &nf);
-        let _ = feed(&mut b, b'b', &nf);
-        assert_eq!(feed(&mut b, 3, &nf), LineStep::Signal(2));
+        let _ = step(&mut b, b'a', &nf);
+        let _ = step(&mut b, b'b', &nf);
+        assert_eq!(step(&mut b, 3, &nf), LineStep::Signal(2));
         assert_eq!(b.as_slice(), b"ab");
-        assert_eq!(feed(&mut b, b'\n', &nf), LineStep::Line);
+        assert_eq!(step(&mut b, b'\n', &nf), LineStep::Line);
         assert_eq!(b.as_slice(), b"ab\n");
     }
 }

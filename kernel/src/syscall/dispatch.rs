@@ -1254,7 +1254,13 @@ fn test_dispatch_termios_syscalls() -> KernelResult<()> {
         Err(KernelError::InternalError)
     }
 
-    let saved = tty::get_termios();
+    // Explicitly the console: this test runs during boot from a kernel task,
+    // which has no controlling terminal, so it is also the device the syscalls
+    // under test resolve to (`handlers::current_tty` falls back to `CONSOLE`).
+    // Naming it here rather than relying on that fallback keeps the assertions
+    // meaningful if the fallback ever changes.
+    let dev = tty::CONSOLE;
+    let saved = tty::get_termios(dev);
 
     // (1) A null pointer is InvalidArgument, not a fault or a silent success.
     //     This also proves both numbers are registered: an unregistered
@@ -1283,14 +1289,14 @@ fn test_dispatch_termios_syscalls() -> KernelResult<()> {
     //     what libc used to drop on the floor.
     let mut raw = saved;
     raw.c_lflag &= !(tty::lflag::ICANON | tty::lflag::ECHO);
-    tty::set_termios(raw);
-    let read_back = tty::get_termios();
+    tty::set_termios(dev, raw);
+    let read_back = tty::get_termios(dev);
     if read_back.c_lflag & tty::lflag::ICANON != 0 {
-        tty::set_termios(saved);
+        tty::set_termios(dev, saved);
         return fail("ICANON survived a raw-mode set");
     }
     if read_back.c_lflag & tty::lflag::ECHO != 0 {
-        tty::set_termios(saved);
+        tty::set_termios(dev, saved);
         return fail("ECHO survived a raw-mode set");
     }
 
@@ -1299,16 +1305,16 @@ fn test_dispatch_termios_syscalls() -> KernelResult<()> {
     //     `termios_to_wire`/`termios_from_wire`.
     let wire = raw.to_bytes();
     if wire.len() != tty::TERMIOS_BYTES {
-        tty::set_termios(saved);
+        tty::set_termios(dev, saved);
         return fail("termios wire size is not TERMIOS_BYTES");
     }
     if tty::Termios::from_bytes(&wire) != raw {
-        tty::set_termios(saved);
+        tty::set_termios(dev, saved);
         return fail("termios did not survive a to_bytes/from_bytes round trip");
     }
 
-    tty::set_termios(saved);
-    if tty::get_termios() != saved {
+    tty::set_termios(dev, saved);
+    if tty::get_termios(dev) != saved {
         return fail("failed to restore the original termios");
     }
 
@@ -1361,7 +1367,7 @@ fn test_dispatch_tty_job_control() -> KernelResult<()> {
     if pcb::set_running(shell).is_err() {
         return fail("could not start the shell process", &[shell]);
     }
-    if pcb::ctty_acquire(shell).is_err() {
+    if pcb::ctty_acquire(shell, crate::tty::CONSOLE).is_err() {
         return fail("the shell could not claim the console", &[shell]);
     }
     let job = match pcb::fork_create(shell, 0, alloc::vec::Vec::new(), alloc::vec::Vec::new()) {

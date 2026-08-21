@@ -4686,22 +4686,53 @@ pub fn sys_tty_set_pgrp(args: &SyscallArgs) -> SyscallResult {
     }
 }
 
-/// `SYS_TTY_ACQUIRE_CTTY` — claim the console as the caller's session's
+/// Which terminal device a terminal syscall from `pid` acts on.
+///
+/// These syscalls take no fd yet, so "the terminal" can only mean the caller's
+/// session's controlling terminal — which is what `tcgetattr(0, …)` means in
+/// practice anyway, since a program's stdin is its controlling terminal in
+/// every case that matters.  A process with no controlling terminal (a daemon,
+/// or anything before the first `TIOCSCTTY`) gets the console, which is both
+/// the pre-pty behaviour and the only terminal it could possibly have meant.
+///
+/// Once the `SYS_TTY_*` family takes a handle, the handle wins and this becomes
+/// the fallback for the handle-less legacy forms.
+pub fn caller_tty(pid: crate::proc::pcb::ProcessId) -> crate::tty::TtyId {
+    crate::proc::pcb::ctty_tty_of(pid).unwrap_or(crate::tty::CONSOLE)
+}
+
+/// The terminal the *current* task acts on, or the console if it has no
+/// process (a kernel task) or no controlling terminal.
+fn current_tty() -> crate::tty::TtyId {
+    caller_process_or_err().map_or(crate::tty::CONSOLE, caller_tty)
+}
+
+/// `SYS_TTY_ACQUIRE_CTTY` — claim a terminal as the caller's session's
 /// controlling terminal (`ioctl(fd, TIOCSCTTY)`).
 ///
-/// Takes no arguments.  Delegates the POSIX rules — session leader only,
-/// console must be free — to [`pcb::ctty_acquire`].
+/// `arg0` is the terminal id to claim; `0` ([`crate::tty::CONSOLE`]) is the
+/// console, which is what every existing caller passes.  Delegates the POSIX
+/// rules — session leader only, terminal must be free — to
+/// [`pcb::ctty_acquire`].
 ///
-/// Returns 0, `PermissionDenied`, or `NoSuchProcess`.
+/// Returns 0, `PermissionDenied`, `NoSuchProcess`, or `NotSupported` when
+/// `arg0` names no live terminal.
 ///
 /// [`pcb::ctty_acquire`]: crate::proc::pcb::ctty_acquire
 pub fn sys_tty_acquire_ctty(args: &SyscallArgs) -> SyscallResult {
-    let _ = args;
     let pid = match caller_process_or_err() {
         Ok(pid) => pid,
         Err(e) => return SyscallResult::err(e),
     };
-    match crate::proc::pcb::ctty_acquire(pid) {
+    let Ok(tty) = u32::try_from(args.arg0) else {
+        return SyscallResult::err(KernelError::InvalidArgument);
+    };
+    // Claiming a terminal that does not exist is ENOTTY, not a silent success
+    // that would leave the session pointing at a dead id.
+    if !crate::tty::exists(tty) {
+        return SyscallResult::err(KernelError::NotSupported);
+    }
+    match crate::proc::pcb::ctty_acquire(pid, tty) {
         Ok(()) => SyscallResult::ok(0),
         Err(e) => SyscallResult::err(e),
     }
@@ -4781,7 +4812,7 @@ pub fn sys_tty_get_termios(args: &SyscallArgs) -> SyscallResult {
     if args.arg0 == 0 {
         return SyscallResult::err(KernelError::InvalidArgument);
     }
-    let bytes = crate::tty::get_termios().to_bytes();
+    let bytes = crate::tty::get_termios(current_tty()).to_bytes();
     // SAFETY: `bytes` is a live kernel array of exactly TERMIOS_BYTES bytes;
     // copy_to_user validates the destination is writable user memory and
     // performs the SMAP dance.
@@ -4845,7 +4876,7 @@ pub fn tty_set_termios_from_user(arg: u64) -> TtyCtlOutcome {
     {
         return TtyCtlOutcome::Fail(e);
     }
-    crate::tty::set_termios(crate::tty::Termios::from_bytes(&bytes));
+    crate::tty::set_termios(current_tty(), crate::tty::Termios::from_bytes(&bytes));
     TtyCtlOutcome::Done
 }
 
@@ -5106,10 +5137,19 @@ pub fn tty_read_into_user(buf: u64, cap: u64) -> TtyReadOutcome {
 
     let mut kbuf = [0u8; crate::tty::MAX_CANON];
     let dst = kbuf.get_mut(..want).unwrap_or(&mut []);
-    let n = match crate::tty::console_read(dst) {
+    let tty = current_tty();
+    let n = match crate::tty::read(tty, dst) {
         crate::tty::ConsoleRead::Data(n) => n,
         crate::tty::ConsoleRead::Signal(sig) => {
-            return TtyReadOutcome::Restart(deliver_console_signal(sig));
+            return TtyReadOutcome::Restart(deliver_console_signal(tty, sig));
+        }
+        // A signal is already pending for *us*: there is nothing to deliver,
+        // just let the checkpoint run.  Anything typed so far is still in the
+        // terminal's editor, so a transparent restart resumes mid-line.
+        crate::tty::ConsoleRead::Interrupted => {
+            return TtyReadOutcome::Restart(super::linux::restart::restart_result(
+                super::linux::restart::ERESTARTSYS,
+            ));
         }
     };
     if n == 0 {
@@ -5124,8 +5164,42 @@ pub fn tty_read_into_user(buf: u64, cap: u64) -> TtyReadOutcome {
     }
 }
 
+/// Send `sig` to every member of `tty`'s foreground process group.
+///
+/// Split out from [`deliver_console_signal`] because not every terminal-
+/// generated signal interrupts a syscall: `SIGWINCH` from `TIOCSWINSZ` is
+/// delivered by a *writer* that has nothing to restart, while `^C` is
+/// delivered by the reader it aborts.  Sharing the loop keeps the
+/// "no foreground group ⇒ no signal" rule and the `SI_KERNEL` origin in one
+/// place instead of two.
+///
+/// A `pgid` of 0 means no foreground group is installed, which is not an
+/// error: Linux likewise generates no signal for a tty with no `tty->pgrp`.
+pub fn signal_foreground_group(tty: crate::tty::TtyId, sig: u8) {
+    use crate::proc::pcb;
+    use crate::proc::signal::si_code::SI_KERNEL;
+
+    let pgid = crate::tty::foreground_pgid(tty);
+    if pgid == 0 {
+        return;
+    }
+    for target in pcb::pids_in_group(pgid) {
+        let send_args = SyscallArgs {
+            arg0: target,
+            arg1: u64::from(sig),
+            arg2: 0,
+            arg3: 0,
+            arg4: 0,
+            arg5: 0,
+        };
+        // Best-effort: a member that exited between the membership snapshot
+        // and delivery just fails its own send; the rest still receive it.
+        let _ = sys_signal_send_with_info(&send_args, SI_KERNEL, 0);
+    }
+}
+
 /// Deliver a terminal-generated signal (`SIGINT`/`SIGQUIT`/`SIGTSTP` from
-/// `^C`/`^\`/`^Z`) to the console's foreground process group, then return
+/// `^C`/`^\`/`^Z`) to `tty`'s foreground process group, then return
 /// the `ERESTARTSYS` restart sentinel for the interrupted reader.
 ///
 /// Mirrors Linux's `n_tty.c` calling `kill_pgrp(tty->pgrp, sig, …)`: the line
@@ -5133,32 +5207,14 @@ pub fn tty_read_into_user(buf: u64, cap: u64) -> TtyReadOutcome {
 /// surrounding layer.  The signal carries an `SI_KERNEL` siginfo (kernel
 /// origin, no sender pid), matching a tty-generated signal.
 ///
-/// If no foreground group is installed (`foreground_pgid() == 0` — e.g.
+/// If no foreground group is installed (`foreground_pgid(tty) == 0` — e.g.
 /// before any interactive shell ran `tcsetpgrp`), there is no group to
 /// signal, so the `^C` simply restarts the read (Linux likewise generates no
 /// signal when the tty has no foreground pgrp).  Either way we return
 /// `ERESTARTSYS`: with a deliverable signal the checkpoint runs the default
 /// action / handler; with none it transparently restarts the blocking read.
-pub fn deliver_console_signal(sig: u8) -> SyscallResult {
-    use crate::proc::pcb;
-    use crate::proc::signal::si_code::SI_KERNEL;
-
-    let pgid = crate::tty::foreground_pgid();
-    if pgid != 0 {
-        for target in pcb::pids_in_group(pgid) {
-            let send_args = SyscallArgs {
-                arg0: target,
-                arg1: u64::from(sig),
-                arg2: 0,
-                arg3: 0,
-                arg4: 0,
-                arg5: 0,
-            };
-            // Best-effort: a member that exited between the membership snapshot
-            // and delivery just fails its own send; the rest still receive it.
-            let _ = sys_signal_send_with_info(&send_args, SI_KERNEL, 0);
-        }
-    }
+pub fn deliver_console_signal(tty: crate::tty::TtyId, sig: u8) -> SyscallResult {
+    signal_foreground_group(tty, sig);
     // The restart machinery lives in the Linux shim's module but is not
     // Linux-specific: `entry.rs` runs `resolve_syscall_restart` over *both*
     // ABIs' results, so a sentinel from a native handler is resolved the same
@@ -7191,7 +7247,7 @@ pub fn sys_console_write(args: &SyscallArgs) -> SyscallResult {
         return SyscallResult::ok(0);
     }
 
-    if crate::tty::get_termios().c_lflag & crate::tty::lflag::TOSTOP != 0 {
+    if crate::tty::get_termios(current_tty()).c_lflag & crate::tty::lflag::TOSTOP != 0 {
         match tty_job_control_check(crate::proc::signal::SIGTTOU) {
             TtyCtlOutcome::Done => {}
             TtyCtlOutcome::Restart(r) => return r,

@@ -54621,3 +54621,33 @@ Two things lane B may want to come back to me about, both noted in the request:
     yet. `PeerCred`/`set_side_cred` are public and not channel-specific in shape
     so it can be backed by the same record rather than a parallel one; file the
     request when porting needs it.
+
+## Line-discipline erase does not model the column width of a tab (lane A, 2026-08-21)
+
+Referenced by the doc comment on `feed` in `kernel/src/tty/mod.rs`.
+
+`ECHOE` rubs out an erased character by writing backspace-space-backspace once
+per column it occupied. `echo_width` answers "how many columns" with 1 for an
+ordinary byte and 2 for a control byte rendered as `^X`. A literal `\t` gets 1,
+which is wrong: a tab advanced the cursor to the next multiple-of-8 column, so
+erasing it should rub out between 1 and 8 columns. Backspacing over a tab
+therefore leaves stray blanks on screen. Cosmetic only — the *line buffer* is
+always correct, so the bytes the program receives are unaffected.
+
+Linux gets this right by tracking the real cursor column in the line discipline
+(`n_tty.c`'s `ldata->canon_column` / `eraser()`), recomputing the tab stop when
+it rubs one out.
+
+Why it is deferred rather than copied: for a **pty** the discipline cannot know
+the cursor column at all. The emulator on the master end owns the screen, and it
+may have applied its own wrapping, its own tab stops, or a `\r` from the program
+itself between the keystroke and the erase. Linux's tracking is an approximation
+that happens to be right for the common case; adopting it means adopting an
+approximation, which is a decision worth making deliberately rather than by
+default.
+
+The fix, when taken: give `LineBuf` a column counter advanced by the same
+`echo_width` rule plus a tab-stop rule (`col = (col | 7) + 1`), reset it on
+`\n`/`\r`, and have the `VERASE`/`VKILL` arms compute the rub-out width as the
+column delta rather than as a per-byte sum. Note this also fixes `VKILL`'s
+`ECHOKE` width, which sums the same per-byte widths and is wrong in the same way.

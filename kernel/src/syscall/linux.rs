@@ -4177,7 +4177,7 @@ fn dispatch_eventfd_read(entry: FdEntry, buf: u64, cap: u64) -> SyscallResult {
 ///
 /// In canonical mode this blocks until a full line is available and returns up
 /// to `cap` bytes of it; in raw mode it honours `VMIN`.  A `^D` on an empty
-/// canonical line returns `0` (end of file).  See [`crate::tty::console_read`].
+/// canonical line returns `0` (end of file).  See [`crate::tty::read`].
 /// A background caller is stopped with `SIGTTIN` (or gets `EIO`) before any
 /// of that — see `handlers::tty_job_control_check`.
 fn dispatch_console_read(buf: u64, cap: u64) -> SyscallResult {
@@ -8683,7 +8683,7 @@ pub mod ioctl_cmd {
     pub const TIOCNOTTY: u32 = 0x5422;
 }
 
-/// Handle the terminal-control ioctls on a console (tty) fd.
+/// Handle the terminal-control ioctls on a terminal (tty) fd.
 ///
 /// The caller (`sys_ioctl`) has already verified the fd is a `Console`-kind
 /// handle.  `arg` is the userspace pointer to the `struct termios`
@@ -8691,23 +8691,34 @@ pub mod ioctl_cmd {
 /// `TCSETSW`/`TCSETSF` behave as `TCSETS` because we have no kernel-side
 /// output/input queue to drain or flush yet.
 ///
-/// `pid` is the calling process.  The job-control requests
-/// (`TIOCGPGRP`/`TIOCSPGRP`/`TIOCSCTTY`/`TIOCNOTTY`) need it because the
-/// foreground process group and the controlling terminal are per-*session*
-/// state in `pcb`, not properties of the console device: the answer depends
-/// on who is asking.
+/// `pid` is the calling process, and it decides *both* halves of the answer:
+///
+/// - The job-control requests (`TIOCGPGRP`/`TIOCSPGRP`/`TIOCSCTTY`/
+///   `TIOCNOTTY`) need it because the foreground process group and the
+///   controlling terminal are per-*session* state in `pcb`, not properties of
+///   a device: the answer depends on who is asking.
+/// - The device requests (`TCGETS`/`TCSETS*`/`TIOC*WINSZ`) need it because
+///   there is now more than one terminal.  They act on the caller's
+///   controlling terminal via [`super::handlers::caller_tty`], so a shell
+///   running under a pty configures its own pty and not the console's shared
+///   line discipline.
 fn console_terminal_ioctl(
     pid: crate::proc::pcb::ProcessId,
     request: u32,
     arg: u64,
 ) -> SyscallResult {
     use crate::tty;
+    // Every request below that names a *device* acts on the caller's
+    // controlling terminal, not on the console: once a shell runs under a pty
+    // its `TCGETS` must see the pty's termios, or it would configure the
+    // console's line discipline and read back settings it never made.
+    let tty_id = super::handlers::caller_tty(pid);
     match request {
         ioctl_cmd::TCGETS => {
             if arg == 0 {
                 return linux_err(errno::EFAULT);
             }
-            let bytes = tty::get_termios().to_bytes();
+            let bytes = tty::get_termios(tty_id).to_bytes();
             // SAFETY: copy_to_user validates the user range is mapped and
             // writable and does the STAC/CLAC SMAP dance; `bytes` is a live
             // kernel buffer of exactly `bytes.len()` bytes.
@@ -8732,7 +8743,7 @@ fn console_terminal_ioctl(
             if arg == 0 {
                 return linux_err(errno::EFAULT);
             }
-            let bytes = tty::get_winsize().to_bytes();
+            let bytes = tty::get_winsize(tty_id).to_bytes();
             // SAFETY: see TCGETS above; `bytes` is a live 8-byte kernel buffer.
             match unsafe { crate::mm::user::copy_to_user(bytes.as_ptr(), arg, bytes.len()) } {
                 Ok(()) => SyscallResult::ok(0),
@@ -8750,7 +8761,21 @@ fn console_terminal_ioctl(
             {
                 return linux_err(linux_errno_for(e));
             }
-            tty::set_winsize(tty::WinSize::from_bytes(&bytes));
+            // A resize — and only a real resize — raises `SIGWINCH` for the
+            // foreground group, which is how a full-screen program learns to
+            // redraw.  `set_winsize` reports whether the size actually changed
+            // precisely so that a `TIOCSWINSZ` re-setting the same dimensions
+            // (which shells do on every prompt) does not wake every editor on
+            // the terminal to redraw an unchanged screen.  This is the reason
+            // a terminal emulator on the master end can resize its slave at
+            // all: without the signal, resizing is invisible to the program.
+            if tty::set_winsize(tty_id, tty::WinSize::from_bytes(&bytes)) {
+                #[allow(clippy::cast_possible_truncation)]
+                super::handlers::signal_foreground_group(
+                    tty_id,
+                    crate::proc::signal::SIGWINCH as u8,
+                );
+            }
             SyscallResult::ok(0)
         }
         ioctl_cmd::TIOCGPGRP => {
@@ -8808,7 +8833,14 @@ fn console_terminal_ioctl(
                 super::handlers::TtyCtlOutcome::Fail(e) => linux_err(linux_errno_for(e)),
             }
         }
-        ioctl_cmd::TIOCSCTTY => match crate::proc::pcb::ctty_acquire(pid) {
+        // `tty_id` here is "the terminal this fd names", which we can only
+        // approximate as the caller's current one until fds carry a tty id
+        // (the `SYS_PTY_*` family adds that).  For a session leader with no
+        // controlling terminal — the only caller for which `TIOCSCTTY` does
+        // anything — that approximation is `CONSOLE`, which is exactly the
+        // device the only kind of fd routed here refers to.  A pty slave fd
+        // will name its own device and this becomes non-circular.
+        ioctl_cmd::TIOCSCTTY => match crate::proc::pcb::ctty_acquire(pid, tty_id) {
             Ok(()) => SyscallResult::ok(0),
             Err(e) => linux_err(linux_errno_for(e)),
         },

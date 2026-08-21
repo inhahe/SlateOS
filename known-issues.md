@@ -49965,3 +49965,53 @@ a *quieter* test run rather than a broken one. When a build step degrades
 gracefully on a missing input, the input needs a home that outlives a reboot —
 graceful degradation plus a volatile cache is a coverage leak with no alarm on
 it.
+
+---
+
+## `BUG-CONSOLE-READ-UNINTERRUPTIBLE` — open (lane A)
+
+**Found:** 2026-08-21, while generalising `kernel/src/tty` from one console into
+N terminal devices (`requests/b-a-pty-devices-need-the-line-discipline-that-the-console-already-has.md`).
+
+**What it is.** A process blocked reading the *console* cannot be interrupted by
+a signal. It parks inside `keyboard::read_char()`, which is a `HLT`-spin waiting
+for a scancode and has no signal check in it, so `SIGINT`, `SIGTERM` — anything
+short of `SIGKILL`'s scheduler-level teardown — does not wake it. The process
+resumes only when somebody presses a key.
+
+**Where.** `kernel/src/keyboard.rs` `read_char()`, reached from
+`kernel/src/tty/mod.rs` `backend_read_char()`'s `Backend::Console` arm. The doc
+comment there points at this entry.
+
+**Why it did not matter before, and does now.** With one terminal it was
+invisible: the only process that could be blocked on the console was the
+foreground job, and a `^C` typed at the console *is* a keypress, so the same
+event that generated the signal also woke the read. The generalisation makes the
+gap visible by contrast — the pty backend
+(`pty::slave_read_input_blocking`) parks through
+`ipc::waiters::park_interruptible` and *is* interruptible, so the same
+`tty::read` call is interruptible on one device and not on another. A process
+signalled from elsewhere (another terminal, a `kill` from a script) while
+blocked on the console still hangs until a key is pressed.
+
+**Reproduce.** Have a process block on `SYS_TTY_READ` against the console; from
+a second context send it `SIGTERM`. It stays blocked. Press any key: it wakes
+and the signal is then delivered at the syscall-return checkpoint.
+
+**The proper fix.** Give the keyboard the same waiter/park structure the pty
+backend has: a `WaiterSet` of tasks blocked on the scancode queue, `park_interruptible`
+instead of the `HLT` spin, and a wake from the IRQ 1 handler. Then
+`backend_read_char` can return `Input::Interrupted` for the console exactly as it
+already does for a pty, and `canonical_read`/`raw_read` need no change at all —
+the four-state `Input` return was widened for precisely this. The keyboard is
+lane A's, so no cross-lane request is needed.
+
+**Why it is not fixed in the same change.** The pty work is already a large
+refactor of the shared discipline, and the keyboard rework touches the IRQ path,
+which wants its own boot test rather than being folded into one that is already
+proving the discipline. Scoped as the immediate follow-up.
+
+**Severity.** Real but narrow: today's only console reader is the interactive
+shell, whose signals arrive from keypresses. It becomes a genuine hang the
+moment a second terminal exists and something on it kills a job on the console —
+which is the state the pty work creates.

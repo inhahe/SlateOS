@@ -7830,7 +7830,7 @@ pub fn self_test_cctty() -> KernelResult<()> {
     // The console must be free for the fixture to claim it. Nothing in the
     // boot sequence acquires one, but say so rather than let a stray holder
     // turn into an unexplained EPERM at check 21.
-    if let Some(holder) = pcb::ctty_console_fg_pgrp() {
+    if let Some(holder) = pcb::ctty_fg_pgrp(crate::tty::CONSOLE) {
         serial_println!(
             "[spawn]   FAIL: ctest-ctty — the console is already claimed (foreground group {}) \
              before the fixture starts, so its TIOCSCTTY would fail with EPERM. Some earlier \
@@ -7865,13 +7865,13 @@ pub fn self_test_cctty() -> KernelResult<()> {
     let exit_code = pcb::exit_code(result.pid);
     // Sampled *before* destroy: the fixture deliberately exits still holding
     // the console, so this is what the session-exit release has to clean up.
-    let held_at_exit = pcb::ctty_console_fg_pgrp();
+    let held_at_exit = pcb::ctty_fg_pgrp(crate::tty::CONSOLE);
 
     thread::on_thread_exit(result.task_id);
     pcb::destroy(result.pid);
 
     // And after: destroying the session's last process must release it.
-    let held_after_destroy = pcb::ctty_console_fg_pgrp();
+    let held_after_destroy = pcb::ctty_fg_pgrp(crate::tty::CONSOLE);
 
     if !became_zombie || state != Some(pcb::ProcessState::Zombie) {
         serial_println!(

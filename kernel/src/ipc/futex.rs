@@ -44,6 +44,7 @@
 //!
 //! Lock ordering: `FUTEX_TABLE` → `SCHED` (wake calls `sched::wake()`).
 
+use super::waiters::{current_user_pid, deliverable_signal_pending};
 use crate::error::{KernelError, KernelResult};
 use crate::mm::user::read_user_value;
 use crate::sched::{self, task::TaskId};
@@ -81,15 +82,6 @@ fn current_addr_space() -> u64 {
     crate::proc::pcb::get_pml4(pid).unwrap_or(0)
 }
 
-/// The owning user process id of the current task, or `0` for a kernel task.
-///
-/// Signal interruptibility only applies to user processes: kernel tasks (boot
-/// self-tests, kworker-style threads) have no signal state, so a `0` here means
-/// "park uninterruptibly, exactly as before".
-fn current_user_pid() -> u64 {
-    let task_id = sched::current_task_id();
-    crate::proc::thread::owner_process(task_id).unwrap_or(0)
-}
 
 /// Remove this task's lingering futex waiter from whatever bucket holds it,
 /// scoped to `addr_space`, and report whether one was found.
@@ -167,11 +159,6 @@ fn remove_all_self_waiters(task: u64) -> usize {
     removed
 }
 
-/// `true` if a deliverable (unblocked) signal is pending for `pid`.
-fn deliverable_signal_pending(pid: u64) -> bool {
-    let deliverable = !crate::proc::signal::blocked(pid);
-    crate::proc::signal::has_pending_in_mask(pid, deliverable)
-}
 
 // ---------------------------------------------------------------------------
 // Waiter and hash table

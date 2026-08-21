@@ -47899,3 +47899,237 @@ restated more than three times was worth generalising; three rounds now say yes,
 and the discriminator that makes such an audit tractable is question 2 above —
 **start from objects displayed on more than one surface**, not from functions
 that look alike.
+
+---
+
+## Thirteen programs each decided for themselves what a date is, and one of them was wrong by a fortnight (lane C)
+
+**Found:** 2026-08-21 · **Status:** FIXED · **Lane:** C
+**Commits:** `60eec1ba2`, `12cc4ce18`, and the migration commits that follow
+**Design decision:** §491
+
+Round 4 of the `apps/**` / `gui/**` sweep. Round 3 swept *durations* (a length
+of time) and deliberately left *instants* (a point in time) alone. This is that
+problem, and it turned out to hold the two worst individual bugs the sweep has
+found.
+
+### The same object, eight surfaces
+
+A file's modification time, a backup run, a restore point — all one kind of
+thing, "when did this happen". For the instant 2026-08-18 16:30:45 UTC:
+
+| Program | Rendered |
+|---|---|
+| `apps/explorer` | `2026-08-18 16:30` |
+| `apps/archivemanager` | `2026-08-18 16:30` |
+| `apps/taskscheduler` | `2026-08-18 16:30` |
+| `apps/rssreader` | `2026-08-18 16:30` |
+| `apps/backup` | `2026-08-18 16:30:45` |
+| `apps/undelete` | **`2026-09-04 16:30`** |
+| `apps/systemrestore` | **`D20683`** |
+| `gui/desktop/backup_settings` | **`Day 20683 16:30`** |
+
+### The individual bugs
+
+| Where | Bug | Effect |
+|---|---|---|
+| `apps/undelete:3571` | year computed as `days / 365`, month as `remaining / 30` | **14 days wrong in 2026, growing ~5 days/year.** A file deleted 18 Aug listed as deleted 4 Sep. The deletion date is the column a user reads to tell two recoverable copies apart. |
+| `apps/systemrestore:4249` | rendered `D{days_since_epoch}` | A restore point — the most consequence-laden thing in the system to pick by date — labelled `D20683`. |
+| `gui/desktop/backup_settings:376` | rendered `Day {days} HH:MM` | The settings page and the backup application showed a user their backup history and disagreed about what a backup's date is. |
+| `gui/desktop/main.rs` taskbar clock | `secs % 86_400`, no zone | **Five hours wrong out of the box** (shipped default zone `America/New_York`). `show_seconds`, `show_day_of_week` and `show_date` are each documented as applying "in the taskbar clock" and reached nothing. `calendar::ClockDisplay` — a complete, tested taskbar clock — had **no callers in the tree** (same defect as §469's two snap implementations). |
+| `gui/desktop/datetime_settings.rs` | timezone picker had 20 entries, none named UTC | The zone the shell falls back to when the configured one is unresolvable was one the user could not deliberately select. |
+| `apps/taskscheduler:2561` | decomposed the instant **twice** — `decompose_timestamp` for the time, `days_to_ymd(ts / 86400)` for the date | Two halves of one string derived by two routes with nothing making them agree. The shape a timezone would have broken first. |
+| `apps/screenrecorder:709` | held the timestamp as `(u16, u8, u8, u8, u8, u8)` | Month 13 at hour 25 was representable, and the formatter printed whatever it was given. |
+| `apps/indexer:1812` | relative-time ladder stopped at days | An index untouched for two years read `730 days ago`. |
+| all thirteen | no timezone applied | Every one was UTC, and none of them recorded that as a decision. |
+
+### Why the tests did not catch it
+
+Every one had a passing test. See §491's table — the assertions were
+`!is_empty()`, `contains('-')`, `starts_with("2023-")`, and in two cases an
+exactly-correct assertion that the day counter was a day counter. **They were
+not weak tests; they were right about the wrong thing.** All six now assert a
+rendered value, and `guitk::datetime` carries a regression test that runs the
+old `days / 365` arithmetic beside the new for three instants and asserts they
+differ.
+
+### The fix
+
+`guitk::datetime` (`DateTime` + nine renderings), with the zone a **required
+argument that is never defaulted**, so a program with no zone to offer writes
+`Tz::utc()` — which `rg` can find, and which `secs % 86_400` could not be
+distinguished from. `tzrules` is re-exported through `guitk` so a caller can
+name the type without its crate growing a dependency.
+
+### Still open
+
+- **`apps/backup` keeps its own `days_to_ymd`.** It is a headless CLI archiver
+  that deliberately does not link `guitk`, and the right home for the inverse of
+  `days_from_civil` is `tzrules`, which has no public one. Tracked by
+  `requests/c-b-year-of-day-computes-the-month-and-day-and-throws-them-away.md`;
+  the function's doc comment says "when that lands, delete this function".
+- **No per-process zone plumbing exists** (`TD-NO-SYSTEM-DEFAULT-ZONE-WITHOUT-TZ`),
+  so every migrated application still renders UTC — but now says so. The list of
+  surfaces still to fix is `rg 'Tz::utc' apps/ gui/`.
+- **`show_date` and `show_day_of_week` still do not reach the taskbar.**
+  `ClockDisplay::format_date` emits weekday and date together with no way to ask
+  for one, so honouring the two flags independently needs an API change. The
+  zone and `show_seconds` do reach it now.
+
+### Related
+
+Round 4 followed round 3's closing advice — *start from objects displayed on
+more than one surface, not from functions that look alike* — and that is
+precisely what surfaced the undelete bug: it was found by asking "who else
+renders a file's mtime", not by noticing that its code looked odd. Its code did
+not look odd. It looked like the other four.
+
+---
+
+### TD-CRON-MATCHES-UTC-FIELDS. A task scheduled for 03:00 runs at 03:00 UTC, wherever the user is (lane C, 2026-08-21)
+
+**In short:** The task scheduler lets you say "run this every day at 3 a.m."
+It then runs it at 3 a.m. *UTC* — which in New York is 11 p.m. the previous
+evening, and in Berlin is 4 or 5 a.m. depending on the season. Nothing in the
+program tells the user this. It is not a rounding error; it is the schedule
+being off by whole hours, and by a different number of hours in summer than in
+winter.
+
+**Where:** `apps/taskscheduler/src/main.rs`, `decompose_timestamp` — it builds
+a `guitk::datetime::DateTime` with an explicit `Tz::utc()` and hands the
+resulting minute/hour/day/month/weekday to `CronExpr::matches`.
+
+**Why it is still UTC.** Two reasons, and only the first is about plumbing:
+
+1. There is no per-process zone to read
+   (`TD-NO-SYSTEM-DEFAULT-ZONE-WITHOUT-TZ`). Every lane-C program that renders
+   an instant is in the same position and says so with an explicit
+   `Tz::utc()`.
+2. Cron under a zone that observes DST has real semantics to settle, and they
+   are not obvious. A daily 02:30 task on the spring-forward day has no 02:30
+   to run at; on the fall-back day it has two. Every implementation picks a
+   rule and they do not agree — Vixie cron runs the skipped job once at the
+   moment the clock jumps and runs a repeated job only once; systemd timers
+   with `Persistent=` behave differently again. Picking one silently, in the
+   commit that merely stops the file having two calendars in it, would be
+   inventing user-visible policy in a cleanup.
+
+**The proper fix,** in order:
+
+1. `calculate_next_run` takes a `&Tz` (four production call sites, seven test
+   ones), and the scheduler holds the zone rather than assuming one.
+2. Settle the DST rule and write it down. Recommended default: match Vixie —
+   a wall-clock time skipped by a forward jump fires once at the jump, and a
+   wall-clock time repeated by a backward jump fires once. That is what a user
+   who has used cron before will expect. This is the part that wants an
+   operator decision, and it should be promoted to `open-questions.md` at the
+   point where step 1 is otherwise ready, not before.
+3. Interval schedules (`Hourly`, `EveryNMinutes`) must *not* be zone-adjusted:
+   "every 15 minutes" is a span, not a wall-clock time, and stays elapsed-time
+   arithmetic. Only the `Cron` and `Daily`/`Weekly`/`Monthly` arms are
+   wall-clock.
+
+**If never fixed:** schedules keep firing at the wrong hour for every user not
+in UTC, and shift by an hour twice a year for users who observe DST. It does
+not get worse with time, and it is not a data-loss risk — but it makes the
+`Daily` frequency effectively useless for its most common purpose (an
+overnight job).
+
+**Related:** `design-decisions.md` §491 (the zone is an argument that is never
+defaulted), `TD-NO-SYSTEM-DEFAULT-ZONE-WITHOUT-TZ`.
+
+---
+
+### TD-C-DEAD-CODE-IS-ALLOWED-WHOLESALE. 120 lane-C files switch off the warning that finds orphaned code, and one of them was hiding a dead calendar (lane C, 2026-08-21)
+
+**In short:** Rust warns you when a function exists that nothing calls. 120
+files in lane C's tree begin with a line that turns that warning off for the
+whole file. So when the round-4 migration made several private helpers
+unreachable, the compiler said nothing about most of them. The one crate that
+*had not* switched the warning off reported its orphan immediately, which is
+how the pattern was noticed at all.
+
+**Where:** `#![allow(dead_code)]` at the top of 120 files under `apps/`,
+`gui/`, `net*/` and `pkg/` (148 files carry an `allow(dead_code)` in some
+form). Enumerate with:
+
+```
+grep -rn '^#!\[allow(dead_code' apps/ gui/ net/ pkg/ --include=*.rs
+```
+
+**How it bit.** Round 4 moved nine programs' timestamp rendering onto
+`guitk::datetime`. That orphaned three private calendars:
+
+| Crate | Orphaned | Did the compiler say so? |
+|---|---|---|
+| `apps/archivemanager` | `days_to_ymd` | **Yes** — no file-level allow. Deleted the same minute. |
+| `apps/rssreader` | `days_to_ymd` | No — `#![allow(dead_code)]` at line 24. Found by hand. |
+| `apps/taskscheduler` | `days_to_ymd` | No — its last caller was inside the same file, so it was still live until `decompose_timestamp` was rewritten. |
+
+A dead private calendar is not merely clutter. It is a second answer sitting
+in the file, correct-looking and untested against anything, waiting to be
+picked up by the next person who needs a date here — which is the exact
+failure round 4 exists to undo.
+
+**Why the allows are there.** Almost all of them are original-authorship
+convenience: an app was written with a full set of helpers before the UI that
+calls them existed, and the allow silenced the noise. That reason expires once
+the app is written; the line does not.
+
+**The proper fix:** delete the file-level allow from each crate and either use
+or delete what falls out. This is per-crate work with no shared blast radius —
+each file can be done independently and gated on that crate's own tests — so
+it is a good background task rather than one large change. Where a helper is
+genuinely a deliberate public-shaped API that nothing yet calls, narrow the
+allow to that item with a comment naming the caller it is waiting for, rather
+than leaving it file-wide.
+
+**If never fixed:** the tree keeps accumulating unreferenced code that no
+tooling reports, and every future consolidation like round 4 has to find its
+own orphans by hand.
+
+---
+
+### TD-C-ROUND-4-CRATES-CARRY-316-PRE-EXISTING-CLIPPY-WARNINGS (lane C, 2026-08-21)
+
+**In short:** `CLAUDE.md` says a crate must be clippy-clean. Six of the
+applications touched in round 4 are not, and were not before round 4 either —
+between them they emit 316 warnings, none of which the migration introduced.
+Recording the count so that the next person to open one of these files knows
+the mess predates them and roughly how big it is.
+
+**Where and how many** (`cargo clippy --target x86_64-pc-windows-gnu`, all
+targets, 2026-08-21):
+
+| Crate | Warnings |
+|---|---|
+| `apps/systemrestore` | 129 |
+| `apps/archivemanager` | 77 |
+| `apps/taskscheduler` | 56 |
+| `apps/explorer` | 34 |
+| `apps/rssreader` | 11 |
+| `apps/screenrecorder` | 9 |
+
+Overwhelmingly `clippy::arithmetic_side_effects` and
+`clippy::indexing_slicing` — the two defensive lints `CLAUDE.md` asks for by
+name. Both are the same shape of finding: a subtraction or an index that is
+fine for the values the program actually produces, and that nothing stops from
+receiving a value it is not fine for.
+
+**Verified not introduced by round 4:** the warning sites in the two files the
+migration edited most (`apps/explorer/src/columns.rs` at 462, 463, 1201, 1423,
+1455, 1475; `apps/screenrecorder/src/main.rs` at 161, 167, 172, 3780, 3814,
+4070, 4121, 4122, 4139) are all far from the edit sites (columns.rs ~1506,
+screenrecorder ~709–790), and the migrated crates build and test with zero
+warnings.
+
+**The proper fix:** one crate at a time, replacing bare arithmetic with
+`checked_*`/`saturating_*` and bare indexing with `.get()`, and suppressing
+individually only where the invariant is real and can be written down. Not
+folded into round 4 because it is a different kind of work — round 4 removes
+duplicate answers, this removes unproven assumptions — and mixing them would
+make both diffs unreviewable.
+
+**If never fixed:** the lints stay noisy enough that a genuinely new warning
+in one of these crates is invisible, which is the failure mode that matters
+more than any individual warning.

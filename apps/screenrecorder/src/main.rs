@@ -705,8 +705,15 @@ pub struct HistoryEntry {
     /// Capture resolution.
     pub width: u32,
     pub height: u32,
-    /// Timestamp: (year, month, day, hour, minute, second).
-    pub timestamp: (u16, u8, u8, u8, u8, u8),
+    /// When the recording was made.
+    ///
+    /// Was a `(u16, u8, u8, u8, u8, u8)` tuple, which is six integers that
+    /// happen to be adjacent: nothing stopped it holding month 13 or hour 25,
+    /// and `timestamp_display` printed whatever it was given. A
+    /// [`guitk::datetime::DateTime`] is a date plus a seconds-into-the-day
+    /// count, so the invalid states are not representable and the rendering
+    /// is the same one the rest of the tree uses for an instant.
+    pub timestamp: guitk::datetime::DateTime,
     /// Whether this entry is currently selected in the UI.
     pub selected: bool,
 }
@@ -734,12 +741,23 @@ impl HistoryEntry {
             fps,
             width,
             height,
-            timestamp: (2026, 1, 1, 0, 0, 0),
+            timestamp: guitk::datetime::DateTime::from_parts(
+                guitk::date::Date::from_ymd(2026, 1, 1),
+                0,
+                0,
+                0,
+            ),
             selected: false,
         }
     }
 
     /// Set the timestamp.
+    ///
+    /// Out-of-range parts are clamped rather than rejected, which is
+    /// [`guitk::date::Date::from_ymd`]'s contract and the right one here: the
+    /// parts come off a recording's on-disk metadata, and a history list that
+    /// has to draw *something* is better off drawing December than refusing
+    /// to list the recording at all.
     pub fn with_timestamp(
         mut self,
         year: u16,
@@ -749,7 +767,12 @@ impl HistoryEntry {
         min: u8,
         sec: u8,
     ) -> Self {
-        self.timestamp = (year, month, day, hour, min, sec);
+        self.timestamp = guitk::datetime::DateTime::from_parts(
+            guitk::date::Date::from_ymd(i32::from(year), u32::from(month), u32::from(day)),
+            u32::from(hour),
+            u32::from(min),
+            u32::from(sec),
+        );
         self
     }
 
@@ -769,12 +792,12 @@ impl HistoryEntry {
     }
 
     /// Formatted timestamp string.
+    ///
+    /// Seconds included, because two recordings started in the same minute
+    /// are a thing that happens and the list has to tell them apart. That is
+    /// the same reason the backup application stamps its runs to the second.
     pub fn timestamp_display(&self) -> String {
-        let (y, mo, d, h, mi, s) = self.timestamp;
-        format!(
-            "{:04}-{:02}-{:02} {:02}:{:02}:{:02}",
-            y, mo, d, h, mi, s
-        )
+        self.timestamp.stamp_secs()
     }
 }
 

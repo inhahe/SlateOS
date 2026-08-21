@@ -28,6 +28,7 @@ pub mod color;
 pub mod colorpicker;
 pub mod context_ext;
 pub mod date;
+pub mod datetime;
 pub mod daywindow;
 pub mod dialog;
 pub mod disabled;
@@ -91,6 +92,12 @@ pub use textfmt::{bytes, csv, duration, escape, fold, kv};
 // site can say `guitk::textfind::matches(…)` without its crate growing a
 // second path entry for a crate `guitk` already links.
 pub use textfind;
+
+// Re-exported because every function in `datetime` takes a `Tz`, and a caller
+// that cannot name the type cannot call them. Making thirteen applications
+// each add a path dependency on `tzrules` to render a timestamp is exactly the
+// friction that got them hand-rolling `secs % 86400` in the first place.
+pub use tzrules;
 
 pub use color::Color;
 pub use event::{Event, KeyEvent, MouseButton, MouseEvent};

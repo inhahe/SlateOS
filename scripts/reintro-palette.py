@@ -67,6 +67,7 @@ BACKUP = "gui/desktop/src/backup_settings.rs"
 NET_SET = "gui/desktop/src/network_settings.rs"
 STARTUP = "gui/desktop/src/startup_settings.rs"
 DTS = "gui/desktop/src/datetime_settings.rs"
+TPAD = "gui/desktop/src/touchpad.rs"
 
 # (name, file, [(old, new), ...], [packages], [tests expected to fail])
 DEFECTS = [
@@ -2620,6 +2621,560 @@ DEFECTS = [
           "            font_size: 12.0,\n            color: Color::from_hex(0xA6ADC8),")],
         ["desktop"],
         ["every_colour_the_panel_draws_comes_from_its_palette"],
+    ),
+    # ---- touchpad.rs (module 19 of 49) -------------------------------------
+    (
+        "AAAAAAAAAAA: the touchpad panel's backdrop keeps Mocha's base",
+        TPAD,
+        [
+            ('            color: p.base,',
+             '            color: Color::from_hex(0x1E1E2E),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_panel_draws_comes_from_its_palette',
+            'the_panels_own_surfaces_come_from_the_palette',
+        ],
+    ),
+    (
+        "BBBBBBBBBBB: the panel's title bar keeps Mocha's mantle",
+        TPAD,
+        [
+            ('            color: p.mantle,',
+             '            color: Color::from_hex(0x181825),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_panel_draws_comes_from_its_palette',
+            'the_panels_own_surfaces_come_from_the_palette',
+        ],
+    ),
+    (
+        "CCCCCCCCCCC: the panel title keeps Mocha's text",
+        TPAD,
+        [
+            ('            text: "Touchpad & Gestures".to_string(),\n            font_size: 16.0,\n            color: p.text,',
+             '            text: "Touchpad & Gestures".to_string(),\n            font_size: 16.0,\n            color: Color::from_hex(0xCDD6F4),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_panel_draws_comes_from_its_palette',
+        ],
+    ),
+    (
+        "DDDDDDDDDDD: the attached device's name keeps Mocha's subtext0",
+        TPAD,
+        [
+            ('                text: dev.name.clone(),\n                font_size: 12.0,\n                color: p.subtext0,',
+             '                text: dev.name.clone(),\n                font_size: 12.0,\n                color: Color::from_hex(0xA6ADC8),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_panel_draws_comes_from_its_palette',
+        ],
+    ),
+    (
+        "EEEEEEEEEEE: an unselected section pill keeps Mocha's surface0",
+        TPAD,
+        [
+            ('color: if active { p.accent } else { p.surface0 },',
+             'color: if active { p.accent } else { Color::from_hex(0x313244) },'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_panel_draws_comes_from_its_palette',
+            'the_panels_own_surfaces_come_from_the_palette',
+        ],
+    ),
+    (
+        "FFFFFFFFFFF: an unselected section label keeps Mocha's text",
+        TPAD,
+        [
+            ('color: if active { p.on_accent() } else { p.text },',
+             'color: if active { p.on_accent() } else { Color::from_hex(0xCDD6F4) },'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_panel_draws_comes_from_its_palette',
+            'the_selected_sections_label_is_legible_on_the_pill_beneath_it',
+        ],
+    ),
+    (
+        "GGGGGGGGGGG: the status line keeps Mocha's text",
+        TPAD,
+        [
+            ('            text: format!("Status: {}", status),\n            font_size: 12.0,\n            color: p.text,',
+             '            text: format!("Status: {}", status),\n            font_size: 12.0,\n            color: Color::from_hex(0xCDD6F4),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_panel_draws_comes_from_its_palette',
+        ],
+    ),
+    (
+        "HHHHHHHHHHH: the gesture section's heading keeps Mocha's text",
+        TPAD,
+        [
+            ('            text: "Multi-finger gestures".to_string(),\n            font_size: 13.0,\n            color: p.text,',
+             '            text: "Multi-finger gestures".to_string(),\n            font_size: 13.0,\n            color: Color::from_hex(0xCDD6F4),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_panel_draws_comes_from_its_palette',
+        ],
+    ),
+    (
+        "IIIIIIIIIII: the gesture table's Fingers heading keeps Mocha's subtext0",
+        TPAD,
+        [
+            ('            text: "Fingers".to_string(),\n            font_size: 10.0,\n            color: p.subtext0,',
+             '            text: "Fingers".to_string(),\n            font_size: 10.0,\n            color: Color::from_hex(0xA6ADC8),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_panel_draws_comes_from_its_palette',
+        ],
+    ),
+    (
+        "JJJJJJJJJJJ: the rule under the gesture table's headings keeps Mocha's surface1",
+        TPAD,
+        [
+            ('            x2: x + 400.0,\n            y2: cy,\n            color: p.surface1,',
+             '            x2: x + 400.0,\n            y2: cy,\n            color: Color::from_hex(0x45475A),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_panel_draws_comes_from_its_palette',
+            'the_panels_own_surfaces_come_from_the_palette',
+        ],
+    ),
+    (
+        "KKKKKKKKKKK: the cursor behind the selected gesture row keeps Mocha's surface0",
+        TPAD,
+        [
+            ('                    width: 420.0,\n                    height: 22.0,\n                    color: p.surface0,',
+             '                    width: 420.0,\n                    height: 22.0,\n                    color: Color::from_hex(0x313244),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_panel_draws_comes_from_its_palette',
+            'the_panels_own_surfaces_come_from_the_palette',
+        ],
+    ),
+    (
+        "LLLLLLLLLLL: the gesture-count line keeps Mocha's subtext0",
+        TPAD,
+        [
+            ('            text: counter,\n            font_size: 10.0,\n            color: p.subtext0,',
+             '            text: counter,\n            font_size: 10.0,\n            color: Color::from_hex(0xA6ADC8),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_panel_draws_comes_from_its_palette',
+        ],
+    ),
+    (
+        "MMMMMMMMMMM: the typing-delay readout keeps Mocha's text",
+        TPAD,
+        [
+            ('            text: format!("Typing delay: {} ms", mgr.config.typing_disable_delay_ms),\n            font_size: 12.0,\n            color: p.text,',
+             '            text: format!("Typing delay: {} ms", mgr.config.typing_disable_delay_ms),\n            font_size: 12.0,\n            color: Color::from_hex(0xCDD6F4),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_panel_draws_comes_from_its_palette',
+        ],
+    ),
+    (
+        "NNNNNNNNNNN: a toggle's label keeps Mocha's text",
+        TPAD,
+        [
+            ('            color: p.text,\n            font_weight: FontWeightHint::Regular,\n            max_width: None,\n            overflow: TextOverflow::Clip,\n        });\n        // Toggle track.',
+             '            color: Color::from_hex(0xCDD6F4),\n            font_weight: FontWeightHint::Regular,\n            max_width: None,\n            overflow: TextOverflow::Clip,\n        });\n        // Toggle track.'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_panel_draws_comes_from_its_palette',
+        ],
+    ),
+    (
+        "OOOOOOOOOOO: a toggle's knob keeps Mocha's text",
+        TPAD,
+        [
+            ('            width: 14.0,\n            height: 14.0,\n            color: p.text,',
+             '            width: 14.0,\n            height: 14.0,\n            color: Color::from_hex(0xCDD6F4),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_panel_draws_comes_from_its_palette',
+        ],
+    ),
+    (
+        "PPPPPPPPPPP: a toggle's off arm keeps Mocha's surface2",
+        TPAD,
+        [
+            ('color: if value { p.accent } else { p.surface2 },',
+             'color: if value { p.accent } else { Color::from_hex(0x585B70) },'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_panel_draws_comes_from_its_palette',
+            'the_panels_own_surfaces_come_from_the_palette',
+        ],
+    ),
+    (
+        "QQQQQQQQQQQ: a slider's label keeps Mocha's text",
+        TPAD,
+        [
+            ('            color: p.text,\n            font_weight: FontWeightHint::Regular,\n            max_width: None,\n            overflow: TextOverflow::Clip,\n        });\n        // Slider track.',
+             '            color: Color::from_hex(0xCDD6F4),\n            font_weight: FontWeightHint::Regular,\n            max_width: None,\n            overflow: TextOverflow::Clip,\n        });\n        // Slider track.'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_panel_draws_comes_from_its_palette',
+        ],
+    ),
+    (
+        "RRRRRRRRRRR: a slider's track keeps Mocha's surface1",
+        TPAD,
+        [
+            ('            width: track_w,\n            height: 4.0,\n            color: p.surface1,',
+             '            width: track_w,\n            height: 4.0,\n            color: Color::from_hex(0x45475A),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_panel_draws_comes_from_its_palette',
+            'the_panels_own_surfaces_come_from_the_palette',
+        ],
+    ),
+    (
+        "SSSSSSSSSSS: a slider's value readout keeps Mocha's subtext0",
+        TPAD,
+        [
+            ('            text: format!("{:.1}", value),\n            font_size: 11.0,\n            color: p.subtext0,',
+             '            text: format!("{:.1}", value),\n            font_size: 11.0,\n            color: Color::from_hex(0xA6ADC8),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_panel_draws_comes_from_its_palette',
+        ],
+    ),
+    (
+        "TTTTTTTTTTT: a choice control's label keeps Mocha's text",
+        TPAD,
+        [
+            ('            color: p.text,\n            font_weight: FontWeightHint::Regular,\n            max_width: None,\n            overflow: TextOverflow::Clip,\n        });\n        cmds.push(RenderCommand::FillRect {\n            x: x + 250.0,\n            y,\n            width: 200.0,',
+             '            color: Color::from_hex(0xCDD6F4),\n            font_weight: FontWeightHint::Regular,\n            max_width: None,\n            overflow: TextOverflow::Clip,\n        });\n        cmds.push(RenderCommand::FillRect {\n            x: x + 250.0,\n            y,\n            width: 200.0,'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_panel_draws_comes_from_its_palette',
+        ],
+    ),
+    (
+        "UUUUUUUUUUU: a choice control's well keeps Mocha's surface0",
+        TPAD,
+        [
+            ('            width: 200.0,\n            height: 22.0,\n            color: p.surface0,',
+             '            width: 200.0,\n            height: 22.0,\n            color: Color::from_hex(0x313244),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_panel_draws_comes_from_its_palette',
+            'the_panels_own_surfaces_come_from_the_palette',
+        ],
+    ),
+    (
+        "VVVVVVVVVVV: the selected section's pill keeps its hardcoded blue",
+        TPAD,
+        [
+            ('color: if active { p.accent } else { p.surface0 },',
+             'color: if active { Color::from_hex(0x89B4FA) } else { p.surface0 },'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_panel_draws_comes_from_its_palette',
+            'every_control_that_offers_something_follows_the_accent',
+        ],
+    ),
+    (
+        "WWWWWWWWWWW: the selected section's pill is drawn like an unselected one",
+        TPAD,
+        [
+            ('color: if active { p.accent } else { p.surface0 },',
+             'color: p.surface0,'),
+        ],
+        ["desktop"],
+        [
+            'every_control_that_offers_something_follows_the_accent',
+        ],
+    ),
+    (
+        "XXXXXXXXXXX: a slider's filled portion keeps its hardcoded blue",
+        TPAD,
+        [
+            ('                height: 4.0,\n                color: p.accent,',
+             '                height: 4.0,\n                color: Color::from_hex(0x89B4FA),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_panel_draws_comes_from_its_palette',
+            'every_control_that_offers_something_follows_the_accent',
+        ],
+    ),
+    (
+        "YYYYYYYYYYY: a slider's filled portion is the same surface as its track",
+        TPAD,
+        [
+            ('                height: 4.0,\n                color: p.accent,',
+             '                height: 4.0,\n                color: p.surface1,'),
+        ],
+        ["desktop"],
+        [
+            'every_control_that_offers_something_follows_the_accent',
+        ],
+    ),
+    (
+        "ZZZZZZZZZZZ: a slider's knob keeps its hardcoded blue",
+        TPAD,
+        [
+            ('            width: 12.0,\n            height: 12.0,\n            color: p.accent,',
+             '            width: 12.0,\n            height: 12.0,\n            color: Color::from_hex(0x89B4FA),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_panel_draws_comes_from_its_palette',
+            'every_control_that_offers_something_follows_the_accent',
+        ],
+    ),
+    (
+        "AAAAAAAAAAAA: a slider's knob follows the body text instead of the accent",
+        TPAD,
+        [
+            ('            width: 12.0,\n            height: 12.0,\n            color: p.accent,',
+             '            width: 12.0,\n            height: 12.0,\n            color: p.text,'),
+        ],
+        ["desktop"],
+        [
+            'every_control_that_offers_something_follows_the_accent',
+        ],
+    ),
+    (
+        "BBBBBBBBBBBB: a toggle's on arm keeps its hardcoded green",
+        TPAD,
+        [
+            ('color: if value { p.accent } else { p.surface2 },',
+             'color: if value { Color::from_hex(0xA6E3A1) } else { p.surface2 },'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_panel_draws_comes_from_its_palette',
+            'every_control_that_offers_something_follows_the_accent',
+        ],
+    ),
+    (
+        "CCCCCCCCCCCC: a toggle's on arm becomes the palette's green rather than the accent",
+        TPAD,
+        [
+            ('color: if value { p.accent } else { p.surface2 },',
+             'color: if value { p.green } else { p.surface2 },'),
+        ],
+        ["desktop"],
+        [
+            'every_control_that_offers_something_follows_the_accent',
+        ],
+    ),
+    (
+        "DDDDDDDDDDDD: the selected section's label is a fixed near-black again",
+        TPAD,
+        [
+            ('color: if active { p.on_accent() } else { p.text },',
+             'color: if active { Color::from_hex(0x1E1E2E) } else { p.text },'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_panel_draws_comes_from_its_palette',
+            'the_selected_sections_label_is_legible_on_the_pill_beneath_it',
+        ],
+    ),
+    (
+        "EEEEEEEEEEEE: the selected section's label is painted with the accent it sits on",
+        TPAD,
+        [
+            ('color: if active { p.on_accent() } else { p.text },',
+             'color: if active { p.accent } else { p.text },'),
+        ],
+        ["desktop"],
+        [
+            'the_selected_sections_label_is_legible_on_the_pill_beneath_it',
+            'nothing_else_moves_when_the_accent_does',
+        ],
+    ),
+    (
+        "FFFFFFFFFFFF: a disabled touchpad is reported in the desktop's accent",
+        TPAD,
+        [
+            ('("Disabled", p.red)\n    } else if',
+             '("Disabled", p.accent)\n    } else if'),
+        ],
+        ["desktop"],
+        [
+            'no_touchpad_state_follows_the_accent',
+            'the_status_light_reports_the_state_it_is_in',
+        ],
+    ),
+    (
+        "GGGGGGGGGGGG: a paused touchpad is reported in the desktop's accent",
+        TPAD,
+        [
+            ('("Paused (typing)", p.yellow)\n    } else {',
+             '("Paused (typing)", p.accent)\n    } else {'),
+        ],
+        ["desktop"],
+        [
+            'no_touchpad_state_follows_the_accent',
+            'the_status_light_reports_the_state_it_is_in',
+        ],
+    ),
+    (
+        'HHHHHHHHHHHH: paused and active are the same rung of the status ladder',
+        TPAD,
+        [
+            ('("Paused (typing)", p.yellow)\n    } else {',
+             '("Paused (typing)", p.green)\n    } else {'),
+        ],
+        ["desktop"],
+        [
+            'every_touchpad_state_stays_distinct_under_every_accent',
+            'the_status_light_reports_the_state_it_is_in',
+        ],
+    ),
+    (
+        "IIIIIIIIIIII: a disabled touchpad keeps Mocha's red",
+        TPAD,
+        [
+            ('("Disabled", p.red)\n    } else if',
+             '("Disabled", Color::from_hex(0xF38BA8))\n    } else if'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_panel_draws_comes_from_its_palette',
+            'the_status_light_reports_the_state_it_is_in',
+        ],
+    ),
+    (
+        "JJJJJJJJJJJJ: an active touchpad keeps Mocha's green",
+        TPAD,
+        [
+            ('("Active", p.green)\n    }\n}',
+             '("Active", Color::from_hex(0xA6E3A1))\n    }\n}'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_panel_draws_comes_from_its_palette',
+            'the_status_light_reports_the_state_it_is_in',
+        ],
+    ),
+    (
+        "KKKKKKKKKKKK: the reset button follows the desktop's accent",
+        TPAD,
+        [
+            ('            width: 120.0,\n            height: 28.0,\n            color: p.red,',
+             '            width: 120.0,\n            height: 28.0,\n            color: p.accent,'),
+        ],
+        ["desktop"],
+        [
+            'the_reset_button_does_not_follow_the_accent',
+            'nothing_else_moves_when_the_accent_does',
+        ],
+    ),
+    (
+        "LLLLLLLLLLLL: the reset button keeps Mocha's red",
+        TPAD,
+        [
+            ('            width: 120.0,\n            height: 28.0,\n            color: p.red,',
+             '            width: 120.0,\n            height: 28.0,\n            color: Color::from_hex(0xF38BA8),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_panel_draws_comes_from_its_palette',
+            'the_reset_button_does_not_follow_the_accent',
+        ],
+    ),
+    (
+        "MMMMMMMMMMMM: the reset button's label is a fixed near-black again",
+        TPAD,
+        [
+            ('            color: readable_on(p.red),',
+             '            color: p.base,'),
+        ],
+        ["desktop"],
+        [
+            'the_reset_buttons_label_can_be_read_on_the_button',
+        ],
+    ),
+    (
+        "NNNNNNNNNNNN: the gesture table's finger count is lavender again",
+        TPAD,
+        [
+            ('                text: format!("{}", g.fingers),\n                font_size: 12.0,\n                color: p.text,',
+             '                text: format!("{}", g.fingers),\n                font_size: 12.0,\n                color: p.lavender,'),
+        ],
+        ["desktop"],
+        [
+            'a_reported_value_is_the_panels_body_text',
+        ],
+    ),
+    (
+        "OOOOOOOOOOOO: the gesture table's action column follows the accent",
+        TPAD,
+        [
+            ('                text: g.action.label(),\n                font_size: 12.0,\n                color: p.text,',
+             '                text: g.action.label(),\n                font_size: 12.0,\n                color: p.accent,'),
+        ],
+        ["desktop"],
+        [
+            'a_reported_value_is_the_panels_body_text',
+            'nothing_else_moves_when_the_accent_does',
+        ],
+    ),
+    (
+        "PPPPPPPPPPPP: a choice control's current value follows the accent",
+        TPAD,
+        [
+            ('            text: value.to_string(),\n            font_size: 11.0,\n            color: p.text,',
+             '            text: value.to_string(),\n            font_size: 11.0,\n            color: p.accent,'),
+        ],
+        ["desktop"],
+        [
+            'a_reported_value_is_the_panels_body_text',
+            'nothing_else_moves_when_the_accent_does',
+        ],
+    ),
+    (
+        "QQQQQQQQQQQQ: the gesture table's direction column keeps Mocha's text",
+        TPAD,
+        [
+            ('                text: dir_str.to_string(),\n                font_size: 12.0,\n                color: p.text,',
+             '                text: dir_str.to_string(),\n                font_size: 12.0,\n                color: Color::from_hex(0xCDD6F4),'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_panel_draws_comes_from_its_palette',
+            'a_reported_value_is_the_panels_body_text',
+        ],
+    ),
+    (
+        'RRRRRRRRRRRR: a slider at its floor draws a rectangle that covers no pixels',
+        TPAD,
+        [
+            ('        if fill_w > 0.0 {',
+             '        if fill_w >= 0.0 {'),
+        ],
+        ["desktop"],
+        [
+            'the_panel_draws_nothing_that_is_immediately_erased',
+        ],
     ),
 ]
 

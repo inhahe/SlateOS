@@ -1464,10 +1464,8 @@ extern "C" fn kernel_main() -> ! {
                 if let Err(e) = fs::fat::self_test() {
                     serial_println!("WARNING: FAT self-test failed: {:?}", e);
                 }
-                // io_ring file handle test (requires mounted /tmp).
-                if let Err(e) = ipc::io_ring::self_test_fh() {
-                    serial_println!("WARNING: io_ring file handle self-test failed: {:?}", e);
-                }
+                // (io_ring's file-handle self-test is NOT here either — it needs
+                // /tmp, not a FAT root.  See the unconditional block below.)
                 // Buffer cache self-test (validates caching, write-back, LRU).
                 if let Err(e) = fs::cache::self_test() {
                     serial_println!("WARNING: Buffer cache self-test failed: {:?}", e);
@@ -1542,6 +1540,19 @@ extern "C" fn kernel_main() -> ! {
                     "WARNING: Buffer cache flush after ext4 self-test failed: {:?}",
                     e
                 );
+            }
+            // io_ring's file-handle path: registering a file handle with a ring
+            // and driving read/write SQEs through it.
+            //
+            // This was inside `if fat_ok` too, and had never run in CI for the
+            // same reason.  What it actually needs is `/tmp`, which is memfs and
+            // is mounted unconditionally on every boot path — nothing about it
+            // touches the FAT root.  It also already decides for itself: with no
+            // filesystem to work with it prints "SKIPPED (no FS)" and returns
+            // Ok, which is the tell that the outer gate was never load-bearing
+            // for it.
+            if let Err(e) = ipc::io_ring::self_test_fh() {
+                serial_println!("WARNING: io_ring file handle self-test failed: {:?}", e);
             }
             // Path predicates: subtree matching and the `confine_under` jail
             // guard.  Pure (constants only, no disk), so it runs on every boot

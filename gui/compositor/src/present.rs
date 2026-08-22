@@ -53,6 +53,40 @@
 
 use crate::InputEvent;
 
+/// One monitor a [`Present`] is driving.
+///
+/// The scanout's side of the desktop arrangement, reported so that
+/// [`Server::run_with`](crate::Server::run_with) can keep the compositor's side
+/// in step with it when a monitor is plugged in or unplugged. It is deliberately
+/// four numbers and not a display: what a monitor is *called*, what it is scaled
+/// by and whether it is primary are the compositor's business, and a scanout
+/// that offered opinions on them would be a second place those facts live.
+///
+/// **There is no position in it, on purpose.** The two layouts agree by
+/// construction rather than by protocol — both lay monitors out left-to-right in
+/// enumeration order and neither re-flows the survivors when one leaves
+/// (design-decisions.md §515, §516) — so a scanout sending coordinates would be
+/// sending the compositor a number it is about to derive identically anyway,
+/// and the first time the two disagreed the bug would be silent on both sides.
+/// Withholding it means there is one rule, applied twice, instead of two rules
+/// that have to be kept in step.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct MonitorInfo {
+    /// Stable identity of this monitor, unique among the ones a given display is
+    /// driving and unchanged for as long as it stays plugged in.
+    ///
+    /// On DRM this is the **connector id** — the socket on the card rather than
+    /// a position in a list — for the reason §515 gives: a position means two
+    /// different things once a head can die, and an id means one.
+    pub id: u32,
+    /// Width in pixels of the mode it is running.
+    pub width: u32,
+    /// Height in pixels of the mode it is running.
+    pub height: u32,
+    /// Refresh rate in Hz, or a nominal 60 where the display cannot say.
+    pub refresh_hz: u32,
+}
+
 /// Somewhere to put a frame, and somewhere input comes from.
 ///
 /// Implementors are expected to be cheap to call at the display's refresh rate:
@@ -87,6 +121,38 @@ pub trait Present {
     /// returns `true` until the machine does.
     fn is_open(&self) -> bool {
         true
+    }
+
+    /// The monitors this display is driving right now, or `None` if it is not
+    /// the sort of display that has monitors.
+    ///
+    /// This is the *detect* half of monitor hotplug. The compositor keeps its
+    /// own arrangement — that is what places windows and answers "which screen
+    /// is this on?" — and it has no way to learn that a monitor arrived or left,
+    /// because the only thing holding a connector is the scanout. Asking here
+    /// once a tick, and reconciling the two by id, is what makes plugging a
+    /// second screen in do something.
+    ///
+    /// **Polled rather than pushed**, and returning the whole set rather than a
+    /// list of changes, because that makes the answer idempotent: asking twice
+    /// gives the same reply, a reconciliation that was skipped or that failed is
+    /// simply retried on the next tick, and there is no queue of changes to get
+    /// out of step with the thing it describes. The cost is a short `Vec` per
+    /// tick, which an implementation is free to build from a cache it refreshes
+    /// far less often than it is asked.
+    ///
+    /// `None` and `Some(vec![])` are different answers and neither means "no
+    /// monitors". `None` is *no opinion* — a headless server, a host window,
+    /// anything with no connectors to enumerate — and the caller must leave the
+    /// arrangement alone. An empty list means the display has lost every monitor
+    /// it had, which is not an arrangement any compositor can adopt; such a
+    /// display is expected to answer `false` to [`Self::is_open`] and be shut
+    /// down rather than reconciled to nothing.
+    ///
+    /// Takes `&mut self` because the honest implementation of it re-probes
+    /// hardware.
+    fn monitors(&mut self) -> Option<Vec<MonitorInfo>> {
+        None
     }
 }
 
@@ -136,6 +202,16 @@ pub struct Recording {
     /// count of frames would never be reached on an idle desktop and the test
     /// would hang instead of failing.
     pub close_after: Option<u64>,
+    /// What [`Present::monitors`] answers, if this recorder is standing in for a
+    /// display that has monitors at all.
+    ///
+    /// `None` — the default — is a recorder with no opinion, which is what every
+    /// test that predates hotplug wants: it leaves the compositor's display
+    /// arrangement exactly as the test built it. Set it to make a monitor arrive
+    /// or leave in the middle of a real
+    /// [`Server::run_with`](crate::Server::run_with) loop, which is otherwise
+    /// only reachable with a graphics card.
+    pub monitors: Option<Vec<MonitorInfo>>,
 }
 
 impl Recording {
@@ -149,6 +225,7 @@ impl Recording {
             ticks: 0,
             open: true,
             close_after: None,
+            monitors: None,
         }
     }
 
@@ -213,6 +290,10 @@ impl Present for Recording {
 
     fn is_open(&self) -> bool {
         self.open && self.close_after.is_none_or(|limit| self.ticks < limit)
+    }
+
+    fn monitors(&mut self) -> Option<Vec<MonitorInfo>> {
+        self.monitors.clone()
     }
 }
 

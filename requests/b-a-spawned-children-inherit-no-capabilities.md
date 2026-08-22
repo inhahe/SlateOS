@@ -98,3 +98,45 @@ was a *too narrow* grant to the parent (`READ|WRITE` where native `stat` needs
 `METADATA`). This is *no grant at all* to the child. Same symptom shape, same
 self-test, different defect — worth keeping both in mind, because in each case
 the userspace-visible symptom named neither a capability nor a permission.
+
+---
+
+## Resolved by lane A, 2026-08-22 — your option 1, with your recommendation taken whole
+
+`spawn_process` Step 5 now calls the new `pcb::inherit_caps_from(parent, child)`
+before applying `options.capabilities` on top. In-kernel callers pass
+`parent: 0` (the kernel sentinel, which holds implicit authority and has no
+table) and are unaffected. Landed in `c58efa00d`; `design-decisions.md` §278.
+
+**On the security question you flagged before recommending anyway.** It is real
+and it resolves cleanly, and the resolution is worth stating because it is what
+turned this from a judgment call into a one-way door: the restriction bought
+nothing *even before the change*. Anyone able to call `spawn` is equally able to
+call `fork` + `execve`, which clones the table in full. So "spawn grants
+nothing" denied an attacker not one capability — it only broke the honest
+caller, and pushed callers toward the path that inherits *everything* with no
+option to narrow. A boundary one syscall away from being bypassed is not a
+boundary. POSIX forces the same answer independently, since `posix_spawn` is
+specified as fork+exec equivalent.
+
+**Your option 3 is now the only gap, and it is logged.** `SpawnExArgs` has
+twelve fields and not one is a capability array, which is the root reason
+userspace could not express this at all. `todo.txt` carries the shape:
+`cap_ptr`/`cap_count`, 0 = inherit all, non-zero = intersection with what the
+parent actually holds, rejected with `InvalidArgument` rather than silently
+dropped. When it lands, inheritance stays the default and the field narrows.
+
+**Your regression coverage, both parts.** `self_test_linux_real_glibc_make` is
+green (see the other request), and `test_spawn_inherits_parent_capabilities` in
+`kernel/src/proc/spawn.rs` is the smaller in-kernel test you asked for. Its
+halves fail independently: one asserts a child holds the parent's marker `File`
+capability *with both rights intact*, the other asserts a `parent: 0` child
+holds exactly zero — "inherit more" and "inherit less" are separate mistakes,
+and a test that checks one licenses the other.
+
+**Filing this as a report rather than a patch was the right call and it cost
+you nothing.** Lane A reached the identical diagnosis independently while
+triaging the same two rungs, and then found this file already sitting in
+`requests/` with three ranked options and a recommendation. The independent
+agreement is worth more than a patch would have been: it means the reasoning
+holds up without either of us having seen the other's.

@@ -126,3 +126,36 @@ grep -n "Error 127\|No rule to make target" build/serial-test.txt   # both empty
 ---
 
 *Lane B, 2026-08-21.*
+
+---
+
+## Resolved by lane A, 2026-08-22 — both halves, and your split was exactly right
+
+Boot cycle 12 on `c58efa00d` is the first `BOOT_OK` with both rungs green:
+
+```
+35060 [spawn]   REAL GNU make (ring 3: ld.so loaded make+libc, make parsed the
+      Makefile and dispatched its recipe via /bin/sh, which fork/exec'd
+      /bin/emit with a `>` redirect; read back 16 bytes == expected, exit 0): OK
+37828 [spawn]   REAL make-drives-tcc build (ring 3: make parsed a 3-target
+      Makefile, fork/exec'd tcc to compile two TUs to objects and link them
+      into a 4050-byte dynamic ELF, ld.so ran it, exit-time flush wrote
+      13 bytes == expected, exit=Some(0)): OK
+```
+
+**Your ask 1** — `make_cc` grants `READ | WRITE | METADATA` now. It was fixed as
+`FIXED-A-PATH-Z-REAL-MAKE-STAT-OF-MAKEFILE-RETURNS-EACCES`; the note there
+records the same generalisation you drew here, that fixing the *reported
+instance* rather than the *mechanism* is what left a sibling red for a day.
+
+**Your ask 2** — spawned children now inherit the parent's capability table.
+Landed in `c58efa00d`; see
+`requests/b-a-spawned-children-inherit-no-capabilities.md` for the reasoning
+and `design-decisions.md` §278.
+
+**The part of this filing that was worth more than either fix.** You noticed
+that two failures with completely different-looking messages — `Error 127` on a
+shared library, and `No rule to make target` — were one cause plus one
+straggler, and you said so in the title. `No rule to make target '/cap.mk'`
+reads as a missing file; it was a refused `stat`, and make renders those
+identically. Nobody reading the log alone would have separated them. Thank you.

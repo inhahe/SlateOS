@@ -50859,6 +50859,41 @@ file, and the double-click speed is whatever the compositor's constant says.
 Worse than an absent setting, because an absent one cannot be misread as tried
 and rejected.
 
+### Update 2026-08-22 — FIXED. All four pieces are in.
+
+| | What landed |
+|---|---|
+| **(a)** | `gui/inputsettings` — the model, the YAML format, load/save, the clamps. It also became the **single owner of the double-click numbers**: `MIN_DOUBLE_CLICK_MS`, `MAX_DOUBLE_CLICK_MS` and `DEFAULT_DOUBLE_CLICK_MS` are `pub` there, and the compositor's private copies were deleted. |
+| **(b)** | `RequestBody::ReloadInput`, tag `0x14`, no payload — a second verb, as this entry recommended. `oswindow` exposes it as `EventLoop::input_changed`. |
+| **(c)** | A Mouse page in `apps/settings`, between Sound and Notifications, with the double-click slider. It saves `input.yaml` and notifies (b). |
+| **(d)** | `Compositor::reload_input` re-reads the file and applies the double-click window. |
+
+Rationale for the three judgement calls — who owns the range, why `ReloadInput`
+is its own verb rather than a payload or a shared one, and why the page shows
+one control — is `design-decisions.md` §524.
+
+**One correction to this entry's own "Where" table:** it said the two clamp
+ranges "were deliberately made to match". They did match, but nothing enforced
+it — three processes each held a private copy and any one could have moved
+without a single test failing. That is now impossible by construction rather
+than by care: `SliderId::DoubleClickMs::range()`, `MouseConfig::set_double_click_ms`
+and `Compositor::set_double_click_ms` all read the same three constants.
+
+**Still deferred, unchanged:** pointer speed, acceleration, button mapping,
+scroll direction and cursor size. The compositor reads them and drops them on
+purpose — it has no local input source to apply them to
+(`TD-COMPOSITOR-HAS-NO-LOCAL-INPUT`) — and the Mouse page deliberately draws no
+control for them, because a control that saves a value nothing applies is the
+same defect this entry was filed about. Each gets its slider in the commit that
+gives it a consumer.
+
+**Verification.** 21 reintroduction proofs across the four pieces —
+`scripts/reintro-mouse-page.py` (11) and `scripts/reintro-reload-input.py` (10)
+— each reintroducing one defect and confirming the suite goes red and names it
+back, restoring by byte snapshot verified with SHA-256. Workspace gate green
+(46,443 passed) apart from lane B's `posix`, filed separately as
+`B-POSIX-HSEARCH-TESTS-RACE-ONE-GLOBAL-TABLE-AND-SEGFAULT`.
+
 ## B-SSHD-EXEC-REPLIED-WITH-THE-COMMAND-INSTEAD-OF-RUNNING-IT — 2026-08-21 — FIXED
 
 **In short:** `ssh host 'cat /etc/passwd'` used to come back with the text
@@ -55326,6 +55361,67 @@ turned up the `ftpd` half of
 `B-POLKIT-FAILLOCK-TEST-RACES-ITS-OWN-ONE-SECOND-DELAY`. Two consecutive full
 runs failed on *different* subsets of the three, which is what identified all of
 them as load-sensitive races rather than regressions.
+
+## B-POSIX-HSEARCH-TESTS-RACE-ONE-GLOBAL-TABLE-AND-SEGFAULT (found by lane C, 2026-08-22 — lane B's crate)
+
+**In short:** Seven tests in `posix/src/search.rs` all drive one process-wide
+hash table at the same time, on different threads. One test frees the table
+while another is reading it, so the reader dereferences freed memory and the
+whole test process dies. Because it dies rather than failing, all 20,500 test
+results in that binary are lost, not just the one.
+
+**Where.** `posix/src/search.rs:370` — `static mut HTAB: HashTable`. `hcreate`
+(`:465`) allocates `HTAB.buckets`, `hdestroy` (`:495`) frees it and nulls the
+pointer, `hsearch` (`:513`) checks it for null and then dereferences it at
+`:520`. Those last two are not one atomic step. The seven concurrent tests are
+`test_hcreate_basic` (`:1042`), `test_hdestroy_no_table` (`:1053`),
+`test_hsearch_no_table` (`:1059`), `test_hsearch_enter_and_find` (`:1071`),
+`test_hsearch_find_nonexistent` (`:1104`), `test_hsearch_enter_multiple`
+(`:1121`) and `test_hsearch_enter_duplicate_returns_existing` (`:1159`).
+
+**Observed:**
+
+```
+error: test failed, to rerun pass `-p posix --lib`
+Caused by:
+  process didn't exit successfully: ...\deps\posix-9b221ba97ec3f918.exe
+  (exit code: 0xc0000005, STATUS_ACCESS_VIOLATION)
+```
+
+The last test to print before the process died was `search::tests::test_fnv1a_empty`.
+
+**Why this matters more than its sibling above.** A panicking test costs one
+result; a segfault costs the whole binary. `cargo test` reports the crate as
+failed and can say nothing about the other 20,499 tests, so a green-looking
+workspace run and a crashed one are equally uninformative about `posix`.
+
+**Ruled out.** Not the truncated-artifact phantom described under *"A full disk
+does not fail the build — it corrupts it silently"*: D: had 218 GB free and the
+binary had been relinked the same day. Three isolated reruns of `-p posix --lib`
+gave one `test_tdestroy_calls_free_fn` failure and two clean passes, which is
+the signature of a load-sensitive race.
+
+**Fix.** A `static HTAB_LOCK: Mutex<()>` in the test module, held for the whole
+body of each of the seven tests — taken before `hcreate` and held past
+`hdestroy`, so no test can observe a half-built or half-freed table. Use
+`lock().unwrap_or_else(PoisonError::into_inner)` so one panicking test does not
+cascade into six poisoned-lock failures.
+
+Note this is deliberately the *opposite* prescription from
+`B-TWO-POSIX-TDESTROY-TESTS-SHARE-ONE-COUNTER` directly above, and the
+difference is the point: those counters are *incidentally* shared and should
+simply stop being shared, whereas `HTAB` is *deliberately* shared because the
+POSIX `hsearch` API it implements genuinely has one table per process. You
+cannot give each test its own, so the only thing left to fix is the concurrency.
+
+**Also worth doing in the same pass.** `WALK_COUNT` (`:867`) has the same shape
+and exposure as `DESTROY_COUNT` — `test_twalk_multiple` (`:900`) resets and
+reads it, and any sibling `twalk` test that does the same will race it. It has
+not been seen to fail yet.
+
+**Filed to the owning lane** as item 4 of
+`requests/c-b-three-flaky-tests-fail-the-workspace-gate.md`. Lane C has not
+touched the file.
 
 ## TD-C-A-ZONE-BUILD-FAILS-UNLESS-YOU-KNOW-TO-SAY-NIGHTLY (lane C, 2026-08-22)
 

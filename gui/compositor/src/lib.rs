@@ -142,22 +142,14 @@ const TITLE_BUTTON_SIZE: u32 = 20;
 /// Spacing between title bar buttons.
 const TITLE_BUTTON_SPACING: u32 = 4;
 
-/// How close together two title-bar clicks must be to be one double-click.
-///
-/// The same 400 ms the mouse settings panel offers as its default, so that
-/// wiring the user's choice through later changes nothing for a user who never
-/// touched it.
-const DEFAULT_DOUBLE_CLICK_MS: u64 = 400;
-
-/// The narrowest and widest double-click intervals that can be set.
-///
-/// The same range the mouse settings panel offers, so a value from there cannot
-/// arrive out of range. The floor is what stops a caller passing zero from
-/// making a double-click impossible to perform; the ceiling stops two unrelated
-/// clicks a second apart from being read as one gesture.
-const MIN_DOUBLE_CLICK_MS: u32 = 100;
-/// See [`MIN_DOUBLE_CLICK_MS`].
-const MAX_DOUBLE_CLICK_MS: u32 = 2000;
+// The double-click window's default and its permitted range are taken from
+// `inputsettings`, which is the crate that owns the file the value is read
+// from, rather than restated here. They were restated here until 2026-08-22,
+// and the copies did agree — but nothing anywhere would have failed if one of
+// them had moved, and the whole point of the reload path added alongside this
+// is that the number the user chose in Settings, the number the file clamps to,
+// and the number this compares two timestamps against are one number.
+use inputsettings::{DEFAULT_DOUBLE_CLICK_MS, MAX_DOUBLE_CLICK_MS, MIN_DOUBLE_CLICK_MS};
 
 /// Default window opacity (fully opaque).
 const DEFAULT_OPACITY: f32 = 1.0;
@@ -2775,6 +2767,13 @@ pub enum CompositorRequest {
     /// notification rather than a setter, and [`Compositor::reload_appearance`]
     /// for what it does.
     ReloadAppearance,
+    /// Re-read the user's `input.yaml` and adopt whatever it now says.
+    ///
+    /// Carries no settings, for the reason given on
+    /// [`guiremote::control::RequestBody::ReloadInput`]; see
+    /// [`Compositor::reload_input`] for what it does and what it deliberately
+    /// leaves alone.
+    ReloadInput,
     /// Begin a remote draw-command stream session (returns a stream id).
     StreamStart,
     /// Capture the current scene for a stream session as an encoded wire frame.
@@ -4386,10 +4385,10 @@ pub struct Compositor {
     /// How close together two title-bar clicks must be to count as one
     /// double-click.
     ///
-    /// Matches the default of the mouse settings panel
-    /// (`desktop::mouse_settings`). Nothing wires the user's choice through to
-    /// here yet — see `known-issues.md`
-    /// `TD-C-THE-MOUSE-SETTINGS-PANEL-REACHES-NOTHING`.
+    /// Starts at the same default as the mouse settings panel
+    /// (`inputsettings::MouseConfig`), and is replaced by the user's own choice
+    /// when [`reload_input`](Compositor::reload_input) reads `input.yaml` — at
+    /// startup and whenever a `ReloadInput` request arrives.
     double_click_interval: Duration,
     /// Rendering engine instance.
     render_engine: RenderEngine,
@@ -4469,7 +4468,7 @@ impl Compositor {
             drag: None,
             drag_preview: None,
             last_title_press: None,
-            double_click_interval: Duration::from_millis(DEFAULT_DOUBLE_CLICK_MS),
+            double_click_interval: Duration::from_millis(u64::from(DEFAULT_DOUBLE_CLICK_MS)),
             render_engine: RenderEngine::new(),
             theme: DecorationTheme::default(),
             // The defaults, not the user's file: a constructor that read
@@ -4527,6 +4526,21 @@ impl Compositor {
         ));
     }
 
+    /// The double-click window currently in force, in milliseconds.
+    ///
+    /// Reported rather than left to the private field so that a caller — and a
+    /// test — can see what a reload actually adopted. The value came through
+    /// [`set_double_click_ms`](Self::set_double_click_ms), so it is always
+    /// within the supported range.
+    #[must_use]
+    pub fn double_click_ms(&self) -> u32 {
+        // The interval is only ever set from a `u32` count of milliseconds
+        // clamped to at most `MAX_DOUBLE_CLICK_MS`, so the conversion back
+        // cannot fail; the saturating form avoids a panic path for a case the
+        // constructor and the one setter between them make unreachable.
+        u32::try_from(self.double_click_interval.as_millis()).unwrap_or(u32::MAX)
+    }
+
     /// Re-read the user's `appearance.yaml` and adopt whatever it now says.
     ///
     /// This is the only place in the library that touches the filesystem, and
@@ -4542,6 +4556,33 @@ impl Compositor {
     /// case, not a failure to report.
     pub fn reload_appearance(&mut self) {
         self.set_appearance(appearance::AppearanceFile::load().settings);
+    }
+
+    /// Re-read the user's `input.yaml` and adopt whatever it now says.
+    ///
+    /// The counterpart of [`reload_appearance`](Self::reload_appearance), with
+    /// the same asymmetry against the constructor and for the same reason, and
+    /// pointed somewhere harmless in tests by the same
+    /// `inputsettings::config::testing::with_scratch_config`.
+    ///
+    /// **What it applies, and what it does not.** Today the compositor is the
+    /// consumer of exactly one of these settings — the double-click window —
+    /// because that is the only one it is the consumer of at all: pointer speed
+    /// and acceleration are applied where raw device deltas arrive, and the
+    /// compositor has no local input source yet (`known-issues.md`
+    /// `TD-COMPOSITOR-HAS-NO-LOCAL-INPUT`); scroll mode and cursor size are
+    /// read by the toolkit and the cursor renderer. Storing a value here that
+    /// nothing acts on would be worse than ignoring it: a getter reporting it
+    /// would say a preference was in force while the pointer still behaved the
+    /// old way. So this reads the whole file — the model has one owner, and
+    /// parsing only part of it is how two readers start to disagree — and
+    /// applies the part that has somewhere to go.
+    ///
+    /// Unlike an appearance reload this never repaints: no pixel on the screen
+    /// depends on how long a double click may take.
+    pub fn reload_input(&mut self) {
+        let settings = inputsettings::InputFile::load().settings;
+        self.set_double_click_ms(settings.mouse.double_click_ms);
     }
 
     /// The appearance preferences currently in force.
@@ -7304,6 +7345,14 @@ impl Compositor {
                 // told the compositor has re-read the file, which is true
                 // either way, and a reply that differed would leak the state of
                 // the user's settings to anyone allowed to ask for a reload.
+                CompositorResponse::Ok
+            }
+            CompositorRequest::ReloadInput => {
+                self.reload_input();
+                // `Ok` whether or not anything changed, on the same terms as
+                // the appearance reload above: a reply that differed would let
+                // anyone allowed to ask for a reload read back the user's
+                // settings from the shape of the answer.
                 CompositorResponse::Ok
             }
             CompositorRequest::ShellControl { window_id, action } => {
@@ -13874,6 +13923,129 @@ mod tests {
                 );
             }
         });
+    }
+
+    /// Write an `input.yaml` into the scratch configuration directory.
+    ///
+    /// Through `inputsettings` rather than as a YAML literal, for the same
+    /// reason as `save_user_appearance` above: the key spellings belong to that
+    /// crate, and a literal here would be a second copy of them.
+    fn save_user_input(settings: inputsettings::InputSettings) {
+        let mut file = inputsettings::InputFile::new();
+        file.settings = settings;
+        file.save().expect("write scratch input.yaml");
+    }
+
+    #[test]
+    fn an_input_reload_adopts_the_double_click_speed_from_the_users_file() {
+        // The gap this closes is not that the value was read at the wrong time
+        // — it is that nothing read it at all. The mouse settings panel had a
+        // double-click control with clamps and a renderer and no file behind
+        // it, and the compositor had a hard-coded 400 ms. See `known-issues.md`
+        // `TD-C-THE-MOUSE-SETTINGS-PANEL-REACHES-NOTHING`.
+        inputsettings::config::testing::with_scratch_config("compositor-reload-input", |_root| {
+            let mut comp = Compositor::new(DECOR_W, DECOR_H, 60).expect("compositor");
+            assert_eq!(
+                comp.double_click_ms(),
+                400,
+                "the constructor should start from the defaults, not the disk"
+            );
+
+            let mut settings = inputsettings::InputSettings::default();
+            settings.mouse.set_double_click_ms(900);
+            save_user_input(settings);
+            comp.reload_input();
+
+            assert_eq!(
+                comp.double_click_ms(),
+                900,
+                "the double-click speed written to the file did not reach the compositor"
+            );
+        });
+    }
+
+    #[test]
+    fn an_input_reload_never_repaints() {
+        // No pixel depends on how long a double click may take, so a reload
+        // that any client can send at any rate must not be able to hold the
+        // compositor at a full-screen redraw — the same argument as
+        // `a_reload_that_finds_nothing_changed_costs_nothing`, except that here
+        // it holds even when the value *did* change.
+        inputsettings::config::testing::with_scratch_config(
+            "compositor-reload-input-quiet",
+            |_root| {
+                let mut comp = Compositor::new(DECOR_W, DECOR_H, 2_000_000).expect("compositor");
+                comp.create_window("Framed".to_string(), 160, 120, 1);
+                assert!(comp.compose_frame(), "the first frame draws the new window");
+
+                let mut settings = inputsettings::InputSettings::default();
+                settings.mouse.set_double_click_ms(1500);
+                save_user_input(settings);
+
+                for _ in 0..3 {
+                    comp.reload_input();
+                    assert!(
+                        !comp.compose_frame(),
+                        "an input reload forced a repaint of a screen it cannot change"
+                    );
+                }
+                assert_eq!(comp.double_click_ms(), 1500);
+            },
+        );
+    }
+
+    #[test]
+    fn an_input_reload_with_no_file_leaves_the_defaults_in_force() {
+        // A fresh install, where the user has never opened the Mouse page.
+        // Reading a missing file must not reset the interval to zero — which
+        // would make a double click impossible to perform — nor fail.
+        inputsettings::config::testing::with_scratch_config(
+            "compositor-reload-input-missing",
+            |_root| {
+                let mut comp = Compositor::new(DECOR_W, DECOR_H, 60).expect("compositor");
+                comp.set_double_click_ms(250);
+                comp.reload_input();
+                assert_eq!(
+                    comp.double_click_ms(),
+                    400,
+                    "a missing input.yaml should read as the defaults, not as nothing"
+                );
+            },
+        );
+    }
+
+    #[test]
+    fn a_hand_edited_input_file_cannot_make_a_double_click_impossible() {
+        // The file is user-editable and the compositor is not the only thing
+        // that will ever write it. A zero here would mean no two clicks are
+        // ever close enough together, i.e. a title bar that cannot be
+        // double-clicked at all — so it is clamped on the way in.
+        //
+        // What this proves, exactly: that *something* on the path from the file
+        // to the interval refuses the zero. It cannot say which, and it is
+        // worth being precise rather than claiming more than it shows — there
+        // are two clamps here, `InputSettings::read_from` and then
+        // `set_double_click_ms`, and the first alone is enough to make this
+        // assertion hold. Deleting the compositor's own clamp leaves this test
+        // green; what catches that is
+        // `the_double_click_interval_is_clamped_to_a_performable_range`, which
+        // calls the setter directly. The pair is deliberate — the second clamp
+        // is what defends the reload path if the value ever arrives from
+        // somewhere that has not been through `inputsettings` — so both tests
+        // have to exist, and neither should be read as covering the other.
+        inputsettings::config::testing::with_scratch_config(
+            "compositor-reload-input-absurd",
+            |root| {
+                let path =
+                    inputsettings::config::testing::scratch_path(root, inputsettings::CONFIG_NAME);
+                std::fs::create_dir_all(path.parent().expect("parent")).expect("mkdir");
+                std::fs::write(&path, "buttons:\n  double_click_ms: 0\n").expect("write");
+
+                let mut comp = Compositor::new(DECOR_W, DECOR_H, 60).expect("compositor");
+                comp.reload_input();
+                assert_eq!(comp.double_click_ms(), MIN_DOUBLE_CLICK_MS);
+            },
+        );
     }
 
     // ---- drag a window to an edge and let go ------------------------------

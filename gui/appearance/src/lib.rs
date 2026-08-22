@@ -19,7 +19,14 @@
 //! processes writing one file must agree not only on what the keys mean but
 //! on which file it is and how it is replaced.
 
-pub mod config;
+/// Where settings files live and how they are replaced.
+///
+/// This was `appearance::config` before it was a crate of its own, and it is
+/// re-exported under the old name because the path is used across the shell,
+/// the compositor and the Settings application, and none of those call sites
+/// were wrong. See `settingsfile`'s own documentation for why it moved: it is
+/// not about appearance, and `inputsettings` needs it without needing colours.
+pub use settingsfile as config;
 
 use guitk::color::Color;
 use yamldoc::Document;
@@ -95,38 +102,10 @@ pub const LIGHT_SAPPHIRE: Color = Color::from_hex(0x187788);
 // Configuration-file spellings
 // ============================================================================
 
-/// Give an enum a spelling in the configuration file.
-///
-/// These names are deliberately **not** [`label`](ThemeMode::label). A label is
-/// what the user reads on screen — "Extra Large (96px)", "Accent Color" — and
-/// it changes when the wording is improved or the size preset is retuned. A
-/// config spelling is part of the file format: change it and every existing
-/// user's saved choice silently reverts to the default the next time the
-/// desktop starts. Keeping them separate means the UI text is free to move.
-macro_rules! yaml_enum {
-    ($ty:ty { $($variant:ident => $name:literal),+ $(,)? }) => {
-        impl $ty {
-            /// This value's spelling in the configuration file.
-            pub fn yaml_name(self) -> &'static str {
-                match self {
-                    $(Self::$variant => $name,)+
-                }
-            }
-
-            /// The value a configuration file spelling names.
-            ///
-            /// `None` for a spelling this build does not know, which is how a
-            /// file written by a newer desktop degrades to the default rather
-            /// than refusing to load.
-            pub fn from_yaml_name(name: &str) -> Option<Self> {
-                match name {
-                    $($name => Some(Self::$variant),)+
-                    _ => None,
-                }
-            }
-        }
-    };
-}
+// The macro lives in `settingsfile` rather than here: `inputsettings` needs the
+// same thing, and a macro copied between two settings crates is two file
+// formats waiting to disagree about how a name is spelled.
+use settingsfile::yaml_enum;
 
 // ============================================================================
 // Theme mode

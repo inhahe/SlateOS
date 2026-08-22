@@ -1,0 +1,20 @@
+[package]
+name = "inputsettings"
+version = "0.1.0"
+edition = "2024"
+description = "SlateOS mouse and keyboard settings — the shared model behind how the pointer behaves"
+
+[dependencies]
+# Format-preserving YAML. A settings file a user has commented has to come back
+# with the comments intact. See yamldoc/src/lib.rs.
+yamldoc = { path = "../../yamldoc" }
+
+# Where the file lives, how it is replaced atomically, and the `yaml_enum!`
+# macro that gives an enum its spelling in the file. Deliberately *not* the
+# `appearance` crate, even though that is where this facility started: nothing
+# here has a colour in it, and depending on the appearance model would drag the
+# widget toolkit into a crate the compositor reads on every reload.
+settingsfile = { path = "../settingsfile" }
+
+[lints]
+workspace = true

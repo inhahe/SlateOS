@@ -26,6 +26,7 @@ use guitk::scroll_window;
 use guitk::style::{CornerRadii, Edges};
 use guitk::text;
 use guitk::wheel;
+use inputsettings::{InputFile, MAX_DOUBLE_CLICK_MS, MIN_DOUBLE_CLICK_MS};
 use oswindow::{EventLoop, EventResponse, WindowBuilder};
 
 // ============================================================================
@@ -172,9 +173,14 @@ impl SettingsCategory {
 
     fn pages(self) -> &'static [SettingsPage] {
         match self {
+            // Mouse sits between the other two pieces of hardware and the two
+            // pages of policy, rather than at the end: Display, Sound and Mouse
+            // are the screen, the speakers and the pointer, and Notifications
+            // and Power are rules about how the machine behaves.
             Self::System => &[
                 SettingsPage::Display,
                 SettingsPage::Sound,
+                SettingsPage::Mouse,
                 SettingsPage::Notifications,
                 SettingsPage::Power,
             ],
@@ -219,6 +225,7 @@ pub enum SettingsPage {
     // System
     Display,
     Sound,
+    Mouse,
     Notifications,
     Power,
     // Network
@@ -258,6 +265,7 @@ impl SettingsPage {
         match self {
             Self::Display => "Display",
             Self::Sound => "Sound",
+            Self::Mouse => "Mouse",
             Self::Notifications => "Notifications",
             Self::Power => "Power",
             Self::NetworkStatus => "Status",
@@ -672,6 +680,23 @@ pub struct SettingsState {
     /// up with a Settings window whose controls do nothing.
     appearance_dirty: bool,
 
+    // Input — the mouse and keyboard model, carried whole and for the same
+    // reason the appearance model is: the Mouse page edits one field of it
+    // today, and writing back only that field would erase whatever the
+    // desktop's own mouse panel had set.
+    pub input: InputFile,
+
+    /// Set when `input.yaml` was just rewritten; drained by the event loop.
+    ///
+    /// The exact counterpart of [`appearance_dirty`](Self::appearance_dirty),
+    /// down to the same guarantee: the setting is saved and will be in force at
+    /// the next login whether or not anybody drains this. A separate flag
+    /// rather than one shared "something changed" bit, because the two
+    /// notifications are two different requests to the compositor — telling it
+    /// to re-read its colours when the user moved a double-click slider would
+    /// repaint the whole desktop for nothing.
+    input_dirty: bool,
+
     // Network
     pub adapters: Vec<NetworkAdapter>,
     pub selected_adapter: usize,
@@ -926,6 +951,39 @@ impl SettingsState {
         core::mem::take(&mut self.appearance_dirty)
     }
 
+    /// Read the user's saved input settings over the defaults.
+    ///
+    /// Separate from [`new`](Self::new) for the same reason
+    /// [`load_appearance`](Self::load_appearance) is: a constructor that read
+    /// `$HOME` would make every test's result depend on the machine.
+    pub fn load_input(&mut self) {
+        self.input = InputFile::load();
+    }
+
+    /// Write the input settings back to `input.yaml`.
+    ///
+    /// A failed write is reported to stderr and otherwise dropped, and the flag
+    /// is set either way — both for the reasons given in full on
+    /// [`save_appearance`](Self::save_appearance). What the compositor is being
+    /// told is "read the file again", and that stays the right thing to say
+    /// after a write that did not finish.
+    fn save_input(&mut self) {
+        if let Err(err) = self.input.save() {
+            eprintln!("settings: could not save input.yaml: {err}");
+        }
+        self.input_dirty = true;
+    }
+
+    /// Whether `input.yaml` has been rewritten since this was last asked,
+    /// clearing the flag.
+    ///
+    /// The event loop calls this after each event and, if it is true, tells the
+    /// compositor to re-read the file — which is what makes a new double-click
+    /// speed apply to the windows already open rather than at the next login.
+    pub fn take_input_change(&mut self) -> bool {
+        core::mem::take(&mut self.input_dirty)
+    }
+
     /// Create a new settings state with sensible defaults.
     pub fn new() -> Self {
         Self {
@@ -1002,6 +1060,11 @@ impl SettingsState {
 
             // Nothing has been written yet, so there is nothing to notify.
             appearance_dirty: false,
+            input_dirty: false,
+
+            // Defaults rather than a read of `input.yaml`, on the same terms as
+            // `appearance` below; `load_input()` does the I/O, from `main`.
+            input: InputFile::new(),
 
             // Personalization defaults, not a read of the configuration
             // file: a constructor that touched $HOME would make every test's
@@ -1885,6 +1948,9 @@ enum SliderId {
     TextSize,
     DeferFeatureDays,
     DeferQualityDays,
+    /// How long the pointer has between two clicks for them to be one
+    /// double click, in milliseconds.
+    DoubleClickMs,
 }
 
 impl SliderId {
@@ -1895,7 +1961,7 @@ impl SliderId {
     /// `app_volumes` instead. Exists so a test can walk the rest and check each
     /// one is draggable, the way [`DropdownId::ALL`] does for dropdowns.
     #[cfg(test)]
-    const FIXED: [Self; 7] = [
+    const FIXED: [Self; 8] = [
         Self::NightLightTemperature,
         Self::OutputVolume,
         Self::InputVolume,
@@ -1903,6 +1969,7 @@ impl SliderId {
         Self::TextSize,
         Self::DeferFeatureDays,
         Self::DeferQualityDays,
+        Self::DoubleClickMs,
     ];
 
     /// The lowest and highest value this slider can hold, in the units the
@@ -1912,6 +1979,12 @@ impl SliderId {
     /// Written here once so that the position the handle is drawn at and the
     /// value a drag produces are exact inverses; `test_every_slider_round_trips`
     /// holds them to it.
+    ///
+    /// The double-click ends are the model's own published bounds rather than
+    /// numbers chosen for the slider. A track whose ends were wider than the
+    /// setter's clamp would have a dead zone at each end — the handle would
+    /// move and the value would not — and a track narrower than the clamp would
+    /// hide settings the file can hold.
     fn range(self) -> (f32, f32) {
         match self {
             Self::NightLightTemperature | Self::NarratorRate => (0.0, 1.0),
@@ -1919,6 +1992,8 @@ impl SliderId {
             Self::TextSize => (50.0, 250.0),
             Self::DeferFeatureDays => (0.0, 365.0),
             Self::DeferQualityDays => (0.0, 30.0),
+            #[allow(clippy::cast_precision_loss)]
+            Self::DoubleClickMs => (MIN_DOUBLE_CLICK_MS as f32, MAX_DOUBLE_CLICK_MS as f32),
         }
     }
 
@@ -1936,6 +2011,10 @@ impl SliderId {
                 Some(format!("{whole}%"))
             }
             Self::DeferFeatureDays | Self::DeferQualityDays => Some(format!("{whole} days")),
+            // In milliseconds, the unit the setting is actually stored and
+            // applied in, rather than as a "speed" the user would have to guess
+            // the direction of. The ends are labelled Fast and Slow by the page.
+            Self::DoubleClickMs => Some(format!("{whole} ms")),
         }
     }
 }
@@ -2594,6 +2673,7 @@ impl SettingsState {
         match self.current_page {
             SettingsPage::Display => self.build_display_page(sink),
             SettingsPage::Sound => self.build_sound_page(sink),
+            SettingsPage::Mouse => self.build_mouse_page(sink),
             SettingsPage::Themes => self.build_themes_page(sink),
             SettingsPage::Colors => self.build_colors_page(sink),
             SettingsPage::NetworkStatus => self.build_network_page(sink),
@@ -2819,6 +2899,48 @@ impl SettingsState {
                 },
             );
         }
+    }
+
+    // --- Mouse page ---
+
+    /// The Mouse page: the double-click window, and deliberately nothing else.
+    ///
+    /// `input.yaml` holds fifteen mouse fields and three keyboard ones, and
+    /// this page offers one of them. That is not an unfinished page — it is the
+    /// page refusing to repeat the defect it was written to fix. Pointer speed,
+    /// acceleration, button mapping and scroll mode all have to be applied
+    /// where raw device deltas arrive, and nothing reads them there yet
+    /// (`known-issues.md` `TD-COMPOSITOR-HAS-NO-LOCAL-INPUT`); cursor size and
+    /// scroll mode belong to the toolkit. A slider drawn for any of those would
+    /// save a value to a file, look as though it had worked, and change
+    /// nothing — which is precisely what
+    /// `TD-C-THE-MOUSE-SETTINGS-PANEL-REACHES-NOTHING` was filed about. Each
+    /// gets its control here when it gets a consumer, and not before.
+    fn build_mouse_page<S: PageSink>(&self, s: &mut S) {
+        s.section("Double-Click");
+        s.note(
+            "How long you have between two clicks for them to count as one double click.",
+            28.0,
+        );
+
+        self.slider(s, "Double-click interval", SliderId::DoubleClickMs);
+        // Which end is which, on the boundary between this row and the next.
+        // The readout beside the handle is in milliseconds — the unit the
+        // setting is stored and applied in — and these say which direction that
+        // number runs, so the control does not depend on the user knowing
+        // whether a bigger number means a faster or a slower double click.
+        s.draw(|tree, x, y| {
+            let cx = x + CONTROL_COLUMN_DX;
+            tree.text(cx, y - 8.0, "Fast", COL_SUBTEXT0, 11.0);
+            tree.text(
+                cx + SLIDER_WIDTH - 26.0,
+                y - 8.0,
+                "Slow",
+                COL_SUBTEXT0,
+                11.0,
+            );
+        });
+        s.advance(8.0);
     }
 
     // --- Themes page ---
@@ -3955,17 +4077,28 @@ impl SettingsState {
 
     /// Handle an input event, returning whether it was consumed.
     ///
-    /// Any appearance setting the event changed is written back before this
-    /// returns. The check is a whole-struct comparison rather than a flag each
-    /// control sets, for the same reason the desktop's panel compares rather
-    /// than lists: a flag is one more thing a new control can forget, and the
+    /// Any setting the event changed is written back before this returns —
+    /// appearance to `appearance.yaml`, mouse and keyboard to `input.yaml`.
+    ///
+    /// The check is a whole-struct comparison rather than a flag each control
+    /// sets, for the same reason the desktop's panel compares rather than
+    /// lists: a flag is one more thing a new control can forget, and the
     /// symptom — a setting that works until you close the window — is one of
     /// the harder ones to notice.
+    ///
+    /// The two files are compared and saved independently. Saving both when
+    /// either changed would rewrite a file the user did not touch on every
+    /// click, and — because each save schedules a notification — would have the
+    /// compositor re-read its colours every time a slider moved.
     pub fn handle_event(&mut self, event: &Event) -> EventResult {
-        let before = self.appearance.settings.clone();
+        let appearance_before = self.appearance.settings.clone();
+        let input_before = self.input.settings.clone();
         let result = self.dispatch_event(event);
-        if self.appearance.settings != before {
+        if self.appearance.settings != appearance_before {
             self.save_appearance();
+        }
+        if self.input.settings != input_before {
+            self.save_input();
         }
         result
     }
@@ -4288,6 +4421,10 @@ impl SettingsState {
             SliderId::TextSize => f32::from(self.text_size_percent),
             SliderId::DeferFeatureDays => f32::from(self.defer_feature_days),
             SliderId::DeferQualityDays => f32::from(self.defer_quality_days),
+            // Exact: the value is at most `MAX_DOUBLE_CLICK_MS`, far inside the
+            // integers an `f32` represents without rounding.
+            #[allow(clippy::cast_precision_loss)]
+            SliderId::DoubleClickMs => self.input.settings.mouse.double_click_ms as f32,
         })
     }
 
@@ -4328,6 +4465,15 @@ impl SettingsState {
             SliderId::TextSize => self.text_size_percent = round_u16(value),
             SliderId::DeferFeatureDays => self.defer_feature_days = round_u16(value),
             SliderId::DeferQualityDays => self.defer_quality_days = round_u16(value),
+            // Through the model's setter, not by assignment: the clamp belongs
+            // to whoever owns the file, and this way a track that ever grew
+            // wider than the permitted range cannot store a value the
+            // compositor would then have to refuse.
+            SliderId::DoubleClickMs => self
+                .input
+                .settings
+                .mouse
+                .set_double_click_ms(u32::from(round_u16(value))),
         }
     }
 
@@ -4552,6 +4698,11 @@ impl SettingsState {
 /// that appears to work and does not, which is worse than one that plainly does
 /// nothing. The notification carries no settings: see
 /// [`EventLoop::appearance_changed`].
+///
+/// The same holds for the Mouse page and `input.yaml`, through
+/// [`EventLoop::input_changed`] — the compositor is what decides whether two
+/// title-bar clicks are one double click, so a new interval that only this
+/// process knew about would be a slider that moved and changed nothing.
 fn run<T: oswindow::ConnectionTransport>(
     events: &mut EventLoop<T>,
     window: u64,
@@ -4578,6 +4729,17 @@ fn run<T: oswindow::ConnectionTransport>(
         // notification to an early return.
         if state.take_appearance_change()
             && let Err(e) = events.appearance_changed()
+        {
+            failure = Some(e);
+            return EventResponse::Exit;
+        }
+        // The input settings separately, and with its own request: a
+        // double-click change must not repaint the desktop, and a colour change
+        // must not have the compositor re-read the pointer configuration. Both
+        // are drained on every event, so an event that somehow changed both
+        // files sends both notifications rather than losing one.
+        if state.take_input_change()
+            && let Err(e) = events.input_changed()
         {
             failure = Some(e);
             return EventResponse::Exit;
@@ -4637,6 +4799,9 @@ fn main() {
     // The Personalization pages open on what the user actually has, which is
     // the same file the desktop shell paints from.
     state.load_appearance();
+    // And the Mouse page on the double-click window actually in force, which is
+    // the same file the compositor times two clicks against.
+    state.load_input();
 
     // Settings names `oswindow` and never TCP — see `design-decisions.md` §460
     // — so the day the transport becomes a SlateOS channel, none of this
@@ -4710,6 +4875,11 @@ fn main() {
 mod tests {
     use super::*;
     use appearance::AppearanceSettings;
+    // One function, reached through either settings crate — both re-export the
+    // same `settingsfile`. Named through `inputsettings` here because the tests
+    // that need it are the ones that write `input.yaml`.
+    use inputsettings::config::testing::{scratch_path, with_scratch_config};
+    use inputsettings::{InputSettings, MouseConfig};
 
     // ---- Measured widths ----
 
@@ -4787,22 +4957,45 @@ mod tests {
         assert_eq!(state.current_page, SettingsPage::NetworkStatus);
     }
 
+    /// Tab visits every page of every category, in the order the tabs are drawn
+    /// in, and wraps back to the first.
+    ///
+    /// Driven from `pages()` rather than from a written-out list of page names.
+    /// The version this replaced named Display, Sound and Notifications as
+    /// literals, so inserting the Mouse page between the second and third broke
+    /// a test that had found nothing wrong — a test that has to be edited every
+    /// time a page is added is a test that will eventually be edited without
+    /// being read.
     #[test]
     fn test_page_tab_cycle() {
-        let mut state = SettingsState::new();
-        assert_eq!(state.current_page, SettingsPage::Display);
-
         let tab = Event::Key(KeyEvent {
             key: Key::Tab,
             pressed: true,
             modifiers: Modifiers::NONE,
             text: None,
         });
-        state.handle_event(&tab);
-        assert_eq!(state.current_page, SettingsPage::Sound);
 
-        state.handle_event(&tab);
-        assert_eq!(state.current_page, SettingsPage::Notifications);
+        for &category in SettingsCategory::ALL {
+            let mut state = SettingsState::new();
+            state.current_category = category;
+            state.current_page = category.default_page();
+
+            let pages = category.pages();
+            assert_eq!(
+                state.current_page, pages[0],
+                "{category:?} opens on a page other than its first tab"
+            );
+
+            // One press per page: the last of them must land back on the first,
+            // so a user pressing Tab is never stranded on the final tab.
+            for expected in pages.iter().skip(1).chain(pages.first()) {
+                state.handle_event(&tab);
+                assert_eq!(
+                    state.current_page, *expected,
+                    "Tab in {category:?} did not reach {expected:?}"
+                );
+            }
+        }
     }
 
     #[test]
@@ -5962,29 +6155,36 @@ mod tests {
         // Both ends, because a mapping that is off by its offset still moves
         // the handle — it just never reaches one extreme. Text Size is the case
         // that would slip past a from-zero check: its range starts at 50.
-        for id in SliderId::FIXED {
-            let mut state =
-                state_showing(RowHit::Slider(id)).unwrap_or_else(|| panic!("{id:?} is not drawn"));
-            let (_, cy) = center_of(&state, RowHit::Slider(id)).expect("just found it");
-            let (track_x, _) = state
-                .anchor_at(AnchorId::Slider(id))
-                .expect("a drawn slider has a track");
-            let (lo, hi) = id.range();
+        //
+        // Under a scratch configuration directory because `drag` goes through
+        // `handle_event`, which saves: one of these sliders is backed by
+        // `input.yaml`, and a sweep over every slider must not rewrite the
+        // developer's own settings as a side effect of checking arithmetic.
+        with_scratch_config("settings-slider-ends", |_root| {
+            for id in SliderId::FIXED {
+                let mut state = state_showing(RowHit::Slider(id))
+                    .unwrap_or_else(|| panic!("{id:?} is not drawn"));
+                let (_, cy) = center_of(&state, RowHit::Slider(id)).expect("just found it");
+                let (track_x, _) = state
+                    .anchor_at(AnchorId::Slider(id))
+                    .expect("a drawn slider has a track");
+                let (lo, hi) = id.range();
 
-            drag(&mut state, track_x, cy, track_x + SLIDER_WIDTH);
-            assert_eq!(
-                state.slider_raw(id),
-                Some(hi),
-                "{id:?} dragged to the right end did not reach its maximum"
-            );
+                drag(&mut state, track_x, cy, track_x + SLIDER_WIDTH);
+                assert_eq!(
+                    state.slider_raw(id),
+                    Some(hi),
+                    "{id:?} dragged to the right end did not reach its maximum"
+                );
 
-            drag(&mut state, track_x + SLIDER_WIDTH, cy, track_x);
-            assert_eq!(
-                state.slider_raw(id),
-                Some(lo),
-                "{id:?} dragged to the left end did not reach its minimum"
-            );
-        }
+                drag(&mut state, track_x + SLIDER_WIDTH, cy, track_x);
+                assert_eq!(
+                    state.slider_raw(id),
+                    Some(lo),
+                    "{id:?} dragged to the left end did not reach its minimum"
+                );
+            }
+        });
     }
 
     #[test]
@@ -6043,33 +6243,38 @@ mod tests {
         // The fraction the page draws at and the value a drag produces are one
         // mapping read in each direction. If they ever part, the handle sits
         // somewhere other than under the pointer that placed it.
-        for id in SliderId::FIXED {
-            let mut state =
-                state_showing(RowHit::Slider(id)).unwrap_or_else(|| panic!("{id:?} is not drawn"));
-            let (_, cy) = center_of(&state, RowHit::Slider(id)).expect("just found it");
-            let (track_x, _) = state.anchor_at(AnchorId::Slider(id)).expect("has a track");
+        // Under a scratch configuration directory for the same reason
+        // `test_dragging_a_slider_to_each_end_reaches_its_limits` is.
+        with_scratch_config("settings-slider-handles", |_root| {
+            for id in SliderId::FIXED {
+                let mut state = state_showing(RowHit::Slider(id))
+                    .unwrap_or_else(|| panic!("{id:?} is not drawn"));
+                let (_, cy) = center_of(&state, RowHit::Slider(id)).expect("just found it");
+                let (track_x, _) = state.anchor_at(AnchorId::Slider(id)).expect("has a track");
 
-            for tenth in 0_u8..=10 {
-                let wanted = f32::from(tenth) / 10.0;
-                drag(
-                    &mut state,
-                    track_x,
-                    cy,
-                    SLIDER_WIDTH.mul_add(wanted, track_x),
-                );
-                let drawn = state
-                    .slider_fraction(id)
-                    .unwrap_or_else(|| panic!("{id:?} has no value"));
-                // Rounding to a whole percent or a whole day moves the handle by
-                // at most half a step, which is what this tolerance allows for.
-                let (lo, hi) = id.range();
-                let step = 1.0 / (hi - lo);
-                assert!(
-                    (drawn - wanted).abs() <= step / 2.0 + 0.001,
-                    "{id:?} dragged to {wanted} draws its handle at {drawn}"
-                );
+                for tenth in 0_u8..=10 {
+                    let wanted = f32::from(tenth) / 10.0;
+                    drag(
+                        &mut state,
+                        track_x,
+                        cy,
+                        SLIDER_WIDTH.mul_add(wanted, track_x),
+                    );
+                    let drawn = state
+                        .slider_fraction(id)
+                        .unwrap_or_else(|| panic!("{id:?} has no value"));
+                    // Rounding to a whole percent or a whole day moves the
+                    // handle by at most half a step, which is what this
+                    // tolerance allows for.
+                    let (lo, hi) = id.range();
+                    let step = 1.0 / (hi - lo);
+                    assert!(
+                        (drawn - wanted).abs() <= step / 2.0 + 0.001,
+                        "{id:?} dragged to {wanted} draws its handle at {drawn}"
+                    );
+                }
             }
-        }
+        });
     }
 
     #[test]
@@ -6357,6 +6562,172 @@ mod tests {
                 AppearanceSettings::read_from(&appearance::config::load(appearance::CONFIG_NAME));
             assert_eq!(saved.accent_color, AccentColor::Teal);
         });
+    }
+
+    // ---- The Mouse page --------------------------------------------------
+    //
+    // The panel this page replaces edited a `MouseConfig` that nothing read and
+    // nothing saved: the double-click slider moved, the number beside it
+    // changed, and the value was gone at the next login and had never reached
+    // the compositor at any point in between. See known-issues.md
+    // `TD-C-THE-MOUSE-SETTINGS-PANEL-REACHES-NOTHING`. What follows checks the
+    // three joints of the replacement — the control moves the model, the model
+    // reaches the file, and the file is the one the compositor reads.
+
+    /// The Mouse page offers the double-click window and nothing else.
+    ///
+    /// Asserted as an exact set rather than as "contains the slider". The
+    /// defect being fixed here was controls that save a value nothing applies,
+    /// so a control appearing on this page without a consumer is the *same*
+    /// bug, and a test that only checked for the presence of the one live
+    /// control could not see it. When pointer speed gains somewhere to be
+    /// applied, this list grows by one in the same commit that wires it.
+    #[test]
+    fn the_mouse_page_offers_only_settings_that_reach_something() {
+        let state = fully_expanded(SettingsPage::Mouse);
+        let bands: Vec<RowHit> = hit_bands(&state)
+            .into_iter()
+            .map(|(what, _)| what)
+            .collect();
+        assert_eq!(bands, vec![RowHit::Slider(SliderId::DoubleClickMs)]);
+    }
+
+    /// The track's ends are the values the model will actually store.
+    ///
+    /// A track wider than the setter's clamp would have a dead zone at each end
+    /// — the handle moving while the number stayed put — and a narrower one
+    /// would hide settings the file can hold. Both ends are checked through the
+    /// model rather than against the constants, so this fails if the setter and
+    /// the slider ever stop agreeing regardless of which one moved.
+    #[test]
+    fn the_double_click_track_spans_exactly_what_the_model_will_store() {
+        let (lo, hi) = SliderId::DoubleClickMs.range();
+        let mut mouse = MouseConfig::default();
+
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        let (lo_ms, hi_ms) = (lo as u32, hi as u32);
+        mouse.set_double_click_ms(lo_ms);
+        assert_eq!(mouse.double_click_ms, lo_ms, "the left end is refused");
+        mouse.set_double_click_ms(hi_ms);
+        assert_eq!(mouse.double_click_ms, hi_ms, "the right end is refused");
+
+        // And nothing outside the track is reachable through it: a value one
+        // step beyond either end comes back at the end.
+        mouse.set_double_click_ms(lo_ms.saturating_sub(1));
+        assert_eq!(mouse.double_click_ms, lo_ms);
+        mouse.set_double_click_ms(hi_ms.saturating_add(1));
+        assert_eq!(mouse.double_click_ms, hi_ms);
+    }
+
+    /// Dragging the slider moves the double-click window, and the readout says
+    /// what was stored.
+    #[test]
+    fn dragging_the_double_click_slider_sets_the_interval_it_shows() {
+        with_scratch_config("settings-double-click-drag", |_root| {
+            let id = SliderId::DoubleClickMs;
+            let mut state = fully_expanded(SettingsPage::Mouse);
+            let (_, cy) = center_of(&state, RowHit::Slider(id)).expect("the page draws the band");
+            let (track_x, _) = state.anchor_at(AnchorId::Slider(id)).expect("has a track");
+
+            drag(&mut state, track_x, cy, track_x);
+            assert_eq!(
+                state.input.settings.mouse.double_click_ms,
+                MIN_DOUBLE_CLICK_MS
+            );
+            assert_eq!(id.readout(state.slider_raw(id).unwrap()).as_deref(), {
+                assert_eq!(MIN_DOUBLE_CLICK_MS, 100);
+                Some("100 ms")
+            });
+
+            drag(&mut state, track_x, cy, track_x + SLIDER_WIDTH);
+            assert_eq!(
+                state.input.settings.mouse.double_click_ms,
+                MAX_DOUBLE_CLICK_MS
+            );
+            assert_eq!(id.readout(state.slider_raw(id).unwrap()).as_deref(), {
+                assert_eq!(MAX_DOUBLE_CLICK_MS, 2000);
+                Some("2000 ms")
+            });
+        });
+    }
+
+    /// The end-to-end claim: what a drag on this page writes is what the
+    /// compositor reads.
+    ///
+    /// Read back through `InputSettings::read_from` over a fresh load of the
+    /// file — the same two calls `Compositor::reload_input` makes — rather than
+    /// by asking this process's own copy of the model, which would agree with
+    /// itself whether or not anything was written.
+    #[test]
+    fn a_drag_on_the_mouse_page_reaches_the_file_the_compositor_reads() {
+        with_scratch_config("settings-double-click-file", |root| {
+            let id = SliderId::DoubleClickMs;
+            let mut state = fully_expanded(SettingsPage::Mouse);
+            let (_, cy) = center_of(&state, RowHit::Slider(id)).expect("the page draws the band");
+            let (track_x, _) = state.anchor_at(AnchorId::Slider(id)).expect("has a track");
+
+            drag(&mut state, track_x, cy, track_x);
+
+            let path = scratch_path(root, inputsettings::CONFIG_NAME);
+            assert!(path.is_file(), "the drag should have written {path:?}");
+
+            let saved =
+                InputSettings::read_from(&inputsettings::config::load(inputsettings::CONFIG_NAME));
+            assert_eq!(saved.mouse.double_click_ms, MIN_DOUBLE_CLICK_MS);
+        });
+    }
+
+    /// The two settings files are saved independently.
+    ///
+    /// A single "something changed" flag would rewrite `input.yaml` every time
+    /// a colour moved and `appearance.yaml` every time a slider did — and,
+    /// because each save schedules a notification, would have the compositor
+    /// repaint the whole desktop whenever the double-click window was adjusted.
+    #[test]
+    fn each_file_is_written_only_by_a_change_to_its_own_settings() {
+        with_scratch_config("settings-files-independent", |root| {
+            let appearance_path = scratch_path(root, appearance::CONFIG_NAME);
+            let input_path = scratch_path(root, inputsettings::CONFIG_NAME);
+
+            // A change on the Mouse page.
+            let id = SliderId::DoubleClickMs;
+            let mut state = fully_expanded(SettingsPage::Mouse);
+            let (_, cy) = center_of(&state, RowHit::Slider(id)).expect("the page draws the band");
+            let (track_x, _) = state.anchor_at(AnchorId::Slider(id)).expect("has a track");
+            drag(&mut state, track_x, cy, track_x);
+
+            assert!(input_path.is_file(), "the mouse change wrote its own file");
+            assert!(
+                !appearance_path.is_file(),
+                "a double-click change rewrote {appearance_path:?}"
+            );
+
+            // And the converse, from a fresh state so the first change cannot
+            // be what triggers the second file's write.
+            let mut state = SettingsState::new();
+            state.current_page = SettingsPage::Themes;
+            let at = center_of(&state, RowHit::Select(SelectId::ThemeMode, 1))
+                .expect("the Themes page draws its cards");
+            state.handle_event(&Event::Mouse(MouseEvent {
+                x: at.0,
+                y: at.1,
+                kind: MouseEventKind::Press(MouseButton::Left),
+            }));
+            assert_eq!(state.appearance.settings.theme_mode, ThemeMode::Light);
+            assert!(appearance_path.is_file(), "the theme change wrote its file");
+        });
+    }
+
+    /// An event that changes neither file writes neither.
+    #[test]
+    fn test_an_input_change_is_what_triggers_an_input_save() {
+        let mut state = SettingsState::new();
+        let before = state.input.settings.clone();
+        state.dispatch_event(&Event::Resize {
+            width: 1200,
+            height: 800,
+        });
+        assert_eq!(state.input.settings, before);
     }
 
     #[test]
@@ -6999,7 +7370,8 @@ mod loop_tests {
 
     use super::tests::center_of;
     use super::{
-        EventResult, RowHit, SelectId, SettingsPage, SettingsState, ThemeMode, run, split_args,
+        EventResult, RowHit, SelectId, SettingsPage, SettingsState, SliderId, ThemeMode, run,
+        split_args,
     };
 
     /// A left click at a point, as the compositor would deliver it.
@@ -7334,6 +7706,129 @@ mod loop_tests {
             assert!(
                 !state.take_appearance_change(),
                 "and asking again reports nothing, so one change is one notification"
+            );
+        });
+    }
+
+    // ---- The Mouse page's notification ------------------------------------
+    //
+    // The compositor is what compares two title-bar clicks against the
+    // double-click window, and it holds that window in memory. Without the
+    // notification a user would drag the slider, see the number change, and
+    // find that windows already on screen kept the old interval until the next
+    // login — a setting that appears to work and does not.
+
+    /// A press on the double-click slider, and the state it lands on.
+    fn double_click_control() -> (SettingsState, (f32, f32)) {
+        control_on(SettingsPage::Mouse, RowHit::Slider(SliderId::DoubleClickMs))
+    }
+
+    #[test]
+    fn a_double_click_change_asks_the_compositor_to_re_read_the_input_file() {
+        with_scratch_config("settings_loop_input_reload", |_root| {
+            let (mut events, desktop) = testing::desktop();
+            let window = WindowBuilder::new("Settings", 1200, 800)
+                .build(&mut events)
+                .unwrap();
+
+            let (mut state, at) = double_click_control();
+            let before = state.input.settings.mouse.double_click_ms;
+
+            {
+                let mut desk = desktop.borrow_mut();
+                desk.script
+                    .push_back(vec![InputEvent::new(window, click_at(at.0, at.1))]);
+                desk.script
+                    .push_back(vec![InputEvent::new(window, Event::CloseRequested)]);
+            }
+
+            run(&mut events, window, &mut state).unwrap();
+
+            assert_ne!(
+                state.input.settings.mouse.double_click_ms, before,
+                "the press should have moved the handle to where it landed"
+            );
+            let asked = desktop.borrow_mut().asked();
+            assert_eq!(
+                asked.iter().filter(|r| **r == "ReloadInput").count(),
+                1,
+                "the compositor times double clicks from this file: {asked:?}"
+            );
+            // And specifically *not* the appearance verb. Routing the change
+            // there would repaint every window on the screen to adopt a number
+            // that no pixel depends on.
+            assert!(
+                !asked.contains(&"ReloadAppearance"),
+                "nothing in the appearance file changed: {asked:?}"
+            );
+        });
+    }
+
+    #[test]
+    fn an_appearance_change_asks_for_no_input_reload() {
+        with_scratch_config("settings_loop_no_input_reload", |_root| {
+            let (mut events, desktop) = testing::desktop();
+            let window = WindowBuilder::new("Settings", 1200, 800)
+                .build(&mut events)
+                .unwrap();
+
+            let (mut state, at) =
+                control_on(SettingsPage::Themes, RowHit::Select(SelectId::ThemeMode, 1));
+
+            {
+                let mut desk = desktop.borrow_mut();
+                desk.script
+                    .push_back(vec![InputEvent::new(window, click_at(at.0, at.1))]);
+                desk.script
+                    .push_back(vec![InputEvent::new(window, Event::CloseRequested)]);
+            }
+
+            run(&mut events, window, &mut state).unwrap();
+
+            assert_eq!(state.appearance.settings.theme_mode, ThemeMode::Light);
+            let asked = desktop.borrow_mut().asked();
+            assert!(
+                asked.contains(&"ReloadAppearance"),
+                "the theme change is announced: {asked:?}"
+            );
+            assert!(
+                !asked.contains(&"ReloadInput"),
+                "a colour change must not have the compositor re-read the \
+                 pointer configuration: {asked:?}"
+            );
+        });
+    }
+
+    #[test]
+    fn taking_the_input_change_clears_it() {
+        with_scratch_config("settings_loop_input_take", |_root| {
+            let (mut state, at) = double_click_control();
+            assert!(!state.take_input_change(), "nothing has been written yet");
+            state.handle_event(&click_at(at.0, at.1));
+            assert!(state.take_input_change(), "the file was rewritten");
+            assert!(
+                !state.take_input_change(),
+                "and asking again reports nothing, so one change is one notification"
+            );
+        });
+    }
+
+    #[test]
+    fn a_double_click_change_is_saved_whether_or_not_anyone_drains_the_flag() {
+        with_scratch_config("settings_loop_input_undrained", |_root| {
+            // No event loop at all. The setting must still be written, so that
+            // a compositor started afterwards picks it up from the file even
+            // though it was never told to look.
+            let (mut state, at) = double_click_control();
+            let result = state.handle_event(&click_at(at.0, at.1));
+            assert_eq!(result, EventResult::Consumed);
+            let chosen = state.input.settings.mouse.double_click_ms;
+
+            let mut reloaded = SettingsState::new();
+            reloaded.load_input();
+            assert_eq!(
+                reloaded.input.settings.mouse.double_click_ms, chosen,
+                "the change reached the file, not just this copy of the model"
             );
         });
     }

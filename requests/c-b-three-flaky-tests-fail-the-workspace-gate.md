@@ -150,10 +150,87 @@ assertion and needs no counter.
 
 ---
 
+## 4. Appended 2026-08-22 by lane C: the same module also *segfaults*, and that one is worse
+
+A later workspace run produced a different failure in the same file — not a
+failed assertion but a dead process:
+
+```
+error: test failed, to rerun pass `-p posix --lib`
+Caused by:
+  process didn't exit successfully: ...\deps\posix-9b221ba97ec3f918.exe
+  (exit code: 0xc0000005, STATUS_ACCESS_VIOLATION)
+note: test exited abnormally
+```
+
+The last line printed before it died was `search::tests::test_fnv1a_empty`, so
+the crash is inside the `search` tests. Three reruns of `-p posix --lib` alone
+gave: crash-free but with `test_tdestroy_calls_free_fn` failing (item 3 above),
+then two clean passes. So both symptoms are the same load-sensitive race showing
+two faces.
+
+**Please treat this one as higher priority than item 3**, for a reason that is
+not about `posix` at all: a panicking test costs you one test result, whereas a
+`STATUS_ACCESS_VIOLATION` kills the harness process and **discards all 20,500
+results in that binary**. There is no partial credit — the run reports the crate
+as failed and says nothing about whether the other 20,499 passed.
+
+Ruled out first: this is *not* the truncated-binary phantom described in
+`known-issues.md` → *"A full disk does not fail the build — it corrupts it
+silently"*. D: had 218 GB free and the binary was relinked the same day.
+
+### Cause
+
+`posix/src/search.rs:370` holds the whole `hsearch` family in one
+process-global:
+
+```rust
+static mut HTAB: HashTable = HashTable { … };
+```
+
+`hcreate` (`:465`) `malloc`s `HTAB.buckets`; `hdestroy` (`:495`) frees it and
+nulls the pointer; `hsearch` (`:513`) reads it. Six tests drive that one table
+concurrently — `test_hcreate_basic` (`:1042`), `test_hdestroy_no_table`
+(`:1053`), `test_hsearch_no_table` (`:1059`), `test_hsearch_enter_and_find`
+(`:1071`), `test_hsearch_find_nonexistent` (`:1104`),
+`test_hsearch_enter_multiple` (`:1121`), `test_hsearch_enter_duplicate_returns_existing`
+(`:1159`). The null check at `:513` and the dereference at `:520` are not one
+atomic step, so a `hdestroy` on another thread landing between them gives a
+read through a freed pointer. That is a use-after-free, and it is what an access
+violation looks like.
+
+Note this is the same defect *class* as item 3 but not the same instance, and it
+cannot be fixed the same way: `WALK_COUNT` and `DESTROY_COUNT` are test-local
+bookkeeping that can simply be split per test, whereas `HTAB` is the shipped
+API's own state — POSIX `hsearch` genuinely has one table per process, so the
+tests cannot each have their own.
+
+### Fix
+
+Serialise the tests that touch `HTAB` behind a `static HTAB_LOCK: Mutex<()>`
+in the test module, taken for the whole body of each of the seven tests above.
+A mutex is the wrong answer for item 3 and the right one here, and the
+difference is worth stating: item 3's counters are *incidentally* shared and
+should stop being shared, while `HTAB` is *deliberately* shared because the C
+API it implements is — so the only thing left to fix is the concurrency.
+
+Take the lock before `hcreate` and hold it past `hdestroy`, so no test can
+observe a half-built or half-torn-down table. Guard against a poisoned lock
+(a panicking test would otherwise cascade into six spurious failures) by using
+`lock().unwrap_or_else(PoisonError::into_inner)`.
+
+While you are there: `WALK_COUNT` (`:867`) has the same shape as
+`DESTROY_COUNT` and the same exposure — `test_twalk_multiple` (`:900`) resets
+and reads it, and any sibling `twalk` test that does likewise will race it.
+Worth splitting in the same pass even though it has not been seen to fail yet.
+
+---
+
 ## What lane C did
 
-Nothing in your tree — I only read it. All three are logged in `known-issues.md`
+Nothing in your tree — I only read it. All four are logged in `known-issues.md`
 under `B-POLKIT-FAILLOCK-TEST-RACES-ITS-OWN-ONE-SECOND-DELAY` (which covers the
-`ftpd` sibling) and `B-TWO-POSIX-TDESTROY-TESTS-SHARE-ONE-COUNTER`. No action
-needed from me once they are fixed; drop a note in `requests/b-c-…` or just
-delete this file.
+`ftpd` sibling), `B-TWO-POSIX-TDESTROY-TESTS-SHARE-ONE-COUNTER` and
+`B-POSIX-HSEARCH-TESTS-RACE-ONE-GLOBAL-TABLE-AND-SEGFAULT`. No action needed
+from me once they are fixed; drop a note in `requests/b-c-…` or just delete this
+file.

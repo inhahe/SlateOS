@@ -15,5 +15,11 @@ guitk = { path = "../toolkit" }
 # with the comments intact. See yamldoc/src/lib.rs.
 yamldoc = { path = "../../yamldoc" }
 
+# Where settings files live and how they are replaced atomically. Re-exported
+# as `appearance::config`, which is what it used to be called; it moved out so
+# that `inputsettings` could use it without depending on the appearance model
+# (and through it on the toolkit). See gui/settingsfile/src/lib.rs.
+settingsfile = { path = "../settingsfile" }
+
 [lints]
 workspace = true

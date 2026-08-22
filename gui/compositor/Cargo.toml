@@ -10,8 +10,13 @@ description = "SlateOS Compositor — display server with window compositing and
 # how round the user asked their corners to be and whether they want shadows;
 # reading the same definitions the Settings panel writes is what stops the
 # display server and the settings UI disagreeing about what "Rounded" means.
-# No cycle: `appearance` depends only on `guitk` and `yamldoc`.
+# No cycle: `appearance` depends only on `guitk`, `settingsfile` and `yamldoc`.
 appearance = { path = "../appearance" }
+
+# The user's input settings, on the same terms. The compositor decides whether
+# two title-bar clicks are one double click, so it is the process that has to
+# know how long the user asked to be given between them.
+inputsettings = { path = "../inputsettings" }
 guitk = { path = "../toolkit" }
 guiremote = { path = "../remote" }
 osfont = { path = "../font" }

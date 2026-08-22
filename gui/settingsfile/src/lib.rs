@@ -1,10 +1,25 @@
-//! Where the desktop shell's configuration lives, and how it gets there.
+//! Where a user's configuration lives, and how it gets there.
 //!
-//! Every `*_settings.rs` panel in this crate edits state that has to outlive
-//! the session, and none of them had anywhere to put it. This module is the
-//! one place that answers "which file?" and "how do I write it without losing
-//! the user's copy if the power goes out mid-save?", so that twenty settings
+//! Every settings panel in the desktop edits state that has to outlive the
+//! session, and none of them had anywhere to put it. This crate is the one
+//! place that answers "which file?" and "how do I write it without losing the
+//! user's copy if the power goes out mid-save?", so that twenty settings
 //! panels do not answer it twenty different ways.
+//!
+//! # Why this is a crate and not a module of `appearance`
+//!
+//! It began as `appearance::config`, because appearance settings were the
+//! first thing here that needed saving. Nothing in it is about appearance:
+//! `appearance.yaml` and `input.yaml` are stored by the same rules, and so
+//! will every settings group added after them. Leaving it where it started
+//! would have meant the *input* settings model depending on the *appearance*
+//! model — and through it on the widget toolkit, for a `Color` type it never
+//! names — purely to learn where `$XDG_CONFIG_HOME` is. A settings group that
+//! carries no colours should not compile a widget library to find its own
+//! file.
+//!
+//! `appearance` re-exports this crate as `appearance::config`, so the original
+//! path still resolves and no caller had to change.
 //!
 //! # Layout
 //!
@@ -33,6 +48,57 @@ use std::io;
 use std::path::PathBuf;
 
 use yamldoc::Document;
+
+/// Give an enum a spelling in the configuration file.
+///
+/// These names are deliberately **not** the enum's `label`. A label is what the
+/// user reads on screen — "Extra Large (96px)", "Flat (no acceleration)" — and
+/// it changes when the wording is improved or a preset is retuned. A config
+/// spelling is part of the file format: change it and every existing user's
+/// saved choice silently reverts to the default the next time the desktop
+/// starts. Keeping them separate means the UI text is free to move.
+///
+/// It lives here rather than in one settings crate because the second settings
+/// crate wanted it too, and a macro copied between two crates is two file
+/// formats waiting to disagree about whether a name is `right_handed` or
+/// `right-handed`.
+///
+/// ```
+/// # use settingsfile::yaml_enum;
+/// #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// enum Hand { Left, Right }
+/// yaml_enum!(Hand { Left => "left", Right => "right" });
+/// assert_eq!(Hand::Left.yaml_name(), "left");
+/// assert_eq!(Hand::from_yaml_name("right"), Some(Hand::Right));
+/// assert_eq!(Hand::from_yaml_name("sideways"), None);
+/// ```
+#[macro_export]
+macro_rules! yaml_enum {
+    ($ty:ty { $($variant:ident => $name:literal),+ $(,)? }) => {
+        impl $ty {
+            /// This value's spelling in the configuration file.
+            #[must_use]
+            pub fn yaml_name(self) -> &'static str {
+                match self {
+                    $(Self::$variant => $name,)+
+                }
+            }
+
+            /// The value a configuration file spelling names.
+            ///
+            /// `None` for a spelling this build does not know, which is how a
+            /// file written by a newer desktop degrades to the default rather
+            /// than refusing to load.
+            #[must_use]
+            pub fn from_yaml_name(name: &str) -> Option<Self> {
+                match name {
+                    $($name => Some(Self::$variant),)+
+                    _ => None,
+                }
+            }
+        }
+    };
+}
 
 /// The directory holding this user's SlateOS configuration.
 ///

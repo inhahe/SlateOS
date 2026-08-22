@@ -830,6 +830,27 @@ impl<T: Transport> EventLoop<T> {
         self.conn.confirm(RequestBody::ReloadAppearance)
     }
 
+    /// Tell the compositor the user's input settings have changed on disk.
+    ///
+    /// The counterpart of [`appearance_changed`](Self::appearance_changed), on
+    /// exactly the same terms and for exactly the same reasons — a
+    /// notification rather than a setter, so that a client cannot swap the
+    /// user's mouse buttons or stretch the double-click window by asking. For
+    /// Settings to call after it has written `input.yaml`, so that the next
+    /// double click uses the new window rather than the one from last login.
+    ///
+    /// It is a separate call from `appearance_changed` because they are
+    /// separate files: a colour change has no business re-reading the pointer
+    /// configuration, and a double-click change has no business repainting the
+    /// screen.
+    ///
+    /// # Errors
+    ///
+    /// As [`Connection::confirm`].
+    pub fn input_changed(&mut self) -> Result<(), Error<T>> {
+        self.conn.confirm(RequestBody::ReloadInput)
+    }
+
     /// Every window on the desktop, bottom-to-top, as of the last update.
     ///
     /// Empty until the first list arrives — which, for a client that never
@@ -1513,6 +1534,7 @@ pub mod testing {
                 RequestBody::GetDisplayInfo => "GetDisplayInfo",
                 RequestBody::SubscribeWindowList { .. } => "SubscribeWindowList",
                 RequestBody::ReloadAppearance => "ReloadAppearance",
+                RequestBody::ReloadInput => "ReloadInput",
                 RequestBody::ShellControl { .. } => "ShellControl",
                 RequestBody::ReserveEdge { .. } => "ReserveEdge",
                 RequestBody::SwitchWorkspace { .. } => "SwitchWorkspace",
@@ -2141,6 +2163,36 @@ mod tests {
         // does not, and which is not incidental: the application that has cause
         // to send it is a settings dialog, and requiring it to have opened a
         // window first would be requiring it for no reason the protocol has.
+        assert_eq!(events.window_count(), 0);
+    }
+
+    #[test]
+    fn telling_the_compositor_the_input_settings_changed_is_its_own_request() {
+        // Both halves matter. That `input_changed` reaches the wire at all is
+        // the same claim as for appearance: a Settings application that writes
+        // `input.yaml` and tells nobody leaves the pointer behaving the old way
+        // until the next login, and a local no-op would look identical.
+        let (mut events, server) = wired();
+        events.input_changed().unwrap();
+        assert!(
+            server
+                .borrow()
+                .seen
+                .iter()
+                .any(|r| matches!(r.body, RequestBody::ReloadInput)),
+            "input_changed should have asked the compositor to re-read input.yaml"
+        );
+        // And that it is *not* the appearance request wearing a different name:
+        // routing it there would make every double-click change repaint the
+        // whole desktop and every colour change re-read the mouse.
+        assert!(
+            !server
+                .borrow()
+                .seen
+                .iter()
+                .any(|r| matches!(r.body, RequestBody::ReloadAppearance)),
+            "input_changed must not send ReloadAppearance"
+        );
         assert_eq!(events.window_count(), 0);
     }
 

@@ -54322,7 +54322,48 @@ in sort order. `split-diff.sh` had no case that reached it yet; it was fixed
 anyway rather than left as a trap.
 
 
-## BUG-SPAWNED-CHILDREN-INHERIT-NO-CAPABILITIES — a ring-3 process cannot spawn a child that can open a file (lane B found; lane A owns the fix)
+## [FIXED 2026-08-22] BUG-SPAWNED-CHILDREN-INHERIT-NO-CAPABILITIES — a ring-3 process cannot spawn a child that can open a file (lane B found; fixed by lane A)
+
+**FIXED 2026-08-22 by lane A.** Option 1, as lane B recommended: `spawn_process`
+Step 5 now calls the new `pcb::inherit_caps_from(parent, child)`, which clones
+the parent's valid capability entries into the child before applying
+`options.capabilities` on top. In-kernel callers pass `parent: 0` and are
+unaffected — PID 0 is the kernel sentinel, holds implicit authority and has no
+table, so it grants nothing.
+
+**On the security question you flagged.** It is real but it resolves cleanly,
+and the argument is worth recording because it is what made this a one-way door
+rather than a judgment call: the restriction bought nothing even before the
+change. Any process that can call `spawn` can equally call `fork` + `execve`,
+which clones the table in full. So "spawn grants nothing" denied an attacker not
+one capability; it only broke the honest caller, and pushed callers toward the
+path that inherits *everything* with no option to narrow. A boundary one syscall
+away from being bypassed is not a boundary.
+
+**Option 3 is still wanted and is now the only gap.** A spawned child gets the
+parent's entire table with no way to hand over a subset, which is exactly how
+you would want to drop authority before running untrusted code. That needs an
+ABI field on `SpawnExArgs` to name the subset to keep — `SpawnExArgs` has twelve
+fields and not one is a capability array, which is the root reason userspace
+could not express this in the first place. Logged in `todo.txt`; when it lands,
+inheritance stays the default (POSIX requires `posix_spawn` to be fork-
+equivalent) and the field narrows rather than replaces.
+
+**Tests.** `test_spawn_inherits_parent_capabilities` in `kernel/src/proc/spawn.rs`
+is the small in-kernel test you asked for. Its two halves fail independently:
+half 1 grants a marker `File` capability to a stand-in parent, spawns a child,
+and asserts the child holds it *with both rights intact* (a capability narrowed
+to no rights would still be present and still fail every gate that reads it);
+half 2 asserts a kernel-spawned process (`parent: 0`) holds exactly zero, since
+"inherit more" and "inherit less" are independent mistakes and a test that
+checks one direction licenses the other. The integration proof is the rung that
+found it — `real make` and `make-drives-tcc` in the boot test.
+
+Reasoning recorded in design-decisions.md §278. Thanks for filing this as a
+report with the three options laid out rather than patching it — the
+discriminator table (which creation path, which result) is what made the cause
+findable, and the recommendation was right.
+
 
 **In short:** When a program already running on SlateOS starts another program,
 the new program is given *no permission to open any file at all*. It can be

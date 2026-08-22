@@ -2248,6 +2248,87 @@ pub fn insert_caps(
     Ok(new_handles)
 }
 
+/// Copy `parent`'s capability table into `child`, the way [`fork_create`] does.
+///
+/// `fork_create` clones `cap_table` wholesale, so a forked child holds exactly
+/// what its parent held.  A process created by `spawn_process` instead gets a
+/// fresh, **empty** `CapTable` from [`create`] and then only whatever
+/// `SpawnOptions::capabilities` names — which is nothing at all when the spawn
+/// came from userspace, because neither `SYS_PROCESS_SPAWN` nor
+/// `SYS_PROCESS_SPAWN_EX` has a field in which a caller could name any.  This
+/// closes that gap so the two ways of creating a process agree.
+///
+/// # Why cloning is not a widening of authority
+///
+/// The capability model forbids *ambient* authority — authority you get by
+/// being yourself rather than by holding a token.  This is not that: the child
+/// receives copies of tokens its parent demonstrably held, and can receive
+/// nothing its parent did not have.  It is the same delegation `fork` already
+/// performs, and any process able to call spawn is equally able to call
+/// `fork` + `execve`, so refusing to inherit here restricts nothing an attacker
+/// could not trivially route around — it only breaks the honest caller.
+///
+/// It also has to work this way for POSIX: `posix_spawn` is specified as
+/// equivalent to `fork` + `exec`, and lane B's libc implements it on top of
+/// `SYS_PROCESS_SPAWN_EX`.  A child that cannot open a file is not equivalent
+/// to a forked one.
+///
+/// # What this deliberately does not do
+///
+/// It does not let the parent hand over a *subset*.  Narrowing on spawn is a
+/// real want (it is how you drop authority before running untrusted code), but
+/// it needs an ABI field to say which subset, and inventing one is a separate
+/// change across two lanes.  Until then the honest default is "same as fork",
+/// not "nothing" — see design-decisions.md §278 and the `todo.txt` note.
+///
+/// Returns the number of capabilities copied.  A `parent` that does not exist
+/// (including PID 0, the kernel sentinel, which holds implicit authority and
+/// has no table) copies nothing and is not an error: a kernel-spawned process
+/// is granted its capabilities explicitly by its caller.
+pub fn inherit_caps_from(parent: ProcessId, child: ProcessId) -> usize {
+    if parent == 0 || parent == child {
+        return 0;
+    }
+
+    // Snapshot under the lock, then re-take it to insert.  Taking a single
+    // `get_mut` for both sides is impossible (two mutable borrows of one map),
+    // and holding the lock across a clone of the parent's entries is
+    // unnecessary: the child is still in `Creating` and is not running, so
+    // nothing can observe a partially-populated table, and a capability the
+    // parent revokes in the gap is one the child was entitled to at the instant
+    // spawn was called.  That is the same point-in-time semantics `fork` has.
+    let entries = {
+        let table = PROCESS_TABLE.lock();
+        match table.get(&parent) {
+            Some(p) => p.cap_table.valid_entries(),
+            None => return 0,
+        }
+    };
+    if entries.is_empty() {
+        return 0;
+    }
+
+    let mut table = PROCESS_TABLE.lock();
+    let Some(proc) = table.get_mut(&child) else {
+        return 0;
+    };
+    let mut copied = 0usize;
+    for entry in &entries {
+        // A full table drops the remainder rather than failing the spawn: a
+        // child with most of its parent's authority is strictly better than a
+        // process that could not start, and `insert_caps` above already
+        // established that precedent for capability transfer over IPC.
+        if proc
+            .cap_table
+            .insert(entry.resource_type, entry.resource_id, entry.rights)
+            .is_ok()
+        {
+            copied = copied.saturating_add(1);
+        }
+    }
+    copied
+}
+
 // ---------------------------------------------------------------------------
 // Per-process current working directory
 // ---------------------------------------------------------------------------

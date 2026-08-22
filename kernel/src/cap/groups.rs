@@ -658,6 +658,7 @@ pub fn self_test() -> KernelResult<()> {
 
     test_builtins_exist()?;
     test_admin_grants_every_resource_type()?;
+    test_resource_type_from_raw()?;
     test_create_remove()?;
     test_member_management()?;
     test_access_check()?;
@@ -761,6 +762,76 @@ fn test_admin_grants_every_resource_type() -> KernelResult<()> {
     serial_println!(
         "[cap/groups]   admin grants all {} resource types: OK",
         ResourceType::LAST
+    );
+    Ok(())
+}
+
+/// [`ResourceType::from_raw`] maps every live discriminant, and nothing else.
+///
+/// `from_raw` is a `match` on a `u16`, so the compiler cannot check it for
+/// exhaustiveness the way it checks `discriminant`. This is the substitute, and
+/// it is not decoration: the hand-written table `from_raw` replaced (in
+/// `sys_cap_request`) had silently stopped at 15 while the enum grew to 30, so
+/// half the resource types could not be named by userspace at all. Nothing
+/// caught it because nothing looked. Now something looks, every boot.
+///
+/// Driven off `1..=ResourceType::LAST` rather than a second list, so it cannot
+/// drift the same way the thing it is testing did. Adding a variant means
+/// bumping `LAST` (step 1 of `discriminant`'s checklist, which two other tests
+/// already enforce), and the moment `LAST` moves this test goes red until
+/// `from_raw` learns the new value.
+fn test_resource_type_from_raw() -> KernelResult<()> {
+    for d in 1..=ResourceType::LAST {
+        let Some(ty) = ResourceType::from_raw(d) else {
+            serial_println!(
+                "[cap/groups]   FAIL: ResourceType::from_raw({}) is None, but LAST is {} — \
+                 see ResourceType::discriminant's checklist, step 5",
+                d,
+                ResourceType::LAST
+            );
+            return Err(KernelError::InternalError);
+        };
+        // Round-trip, not merely non-None: a copy-paste that mapped 24 to
+        // `Drm` would pass a presence check and hand out the wrong authority,
+        // which is worse than rejecting the value.
+        if ty.discriminant() != d {
+            serial_println!(
+                "[cap/groups]   FAIL: from_raw({}) round-trips to {} — the table is misaligned",
+                d,
+                ty.discriminant()
+            );
+            return Err(KernelError::InternalError);
+        }
+    }
+
+    // 0 is not a type: `Channel` starts at 1 precisely so that a zeroed struct
+    // does not name a capability.
+    if ResourceType::from_raw(0).is_some() {
+        serial_println!("[cap/groups]   FAIL: from_raw(0) accepted — zero must name no type");
+        return Err(KernelError::InternalError);
+    }
+    // And the table must not run *past* LAST either, which is the failure that
+    // would let a caller name a variant the rest of the kernel does not know
+    // exists. `LAST + 1` cannot overflow: LAST is 30.
+    let past = ResourceType::LAST.saturating_add(1);
+    if ResourceType::from_raw(past).is_some() {
+        serial_println!(
+            "[cap/groups]   FAIL: from_raw({}) accepted, but LAST is {} — bump LAST or drop \
+             the arm",
+            past,
+            ResourceType::LAST
+        );
+        return Err(KernelError::InternalError);
+    }
+    if ResourceType::from_raw(u16::MAX).is_some() {
+        serial_println!("[cap/groups]   FAIL: from_raw(u16::MAX) accepted");
+        return Err(KernelError::InternalError);
+    }
+
+    serial_println!(
+        "[cap/groups]   from_raw maps 1..={} and rejects 0/{}/65535: OK",
+        ResourceType::LAST,
+        past
     );
     Ok(())
 }

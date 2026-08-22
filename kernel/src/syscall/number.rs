@@ -2715,6 +2715,56 @@ pub const SYS_RLIMIT_GET: u64 = 557;
 /// user memory.  Chosen number 558.
 pub const SYS_RLIMIT_SET: u64 = 558;
 
+/// Spawn a new process, naming how much of the caller's authority it gets.
+///
+/// `arg0`: pointer to a `SpawnEx2Args` struct in user memory.
+///
+/// Everything [`SYS_PROCESS_SPAWN_EX`] takes, plus a leading `struct_size` and
+/// a three-field capability policy (`cap_mode`, `cap_ptr`, `cap_count`).
+///
+/// # Why this is a separate number and not more fields on 517
+///
+/// `SpawnExArgs` has no length and no version, and the kernel reads
+/// `size_of::<SpawnExArgs>()` bytes from the pointer.  Appending fields would
+/// make it read 16 bytes past every existing caller's struct and interpret the
+/// garbage as a user pointer.  Nor can the size ride in `arg1`, the way Linux's
+/// `clone3` does it: `syscall1` sets only `rdi`, so `arg1` holds whatever the
+/// caller's `rsi` happened to contain — there is no value that reliably means
+/// "legacy".  Extending 517 in place would be a flag day across three lanes.
+/// `design.txt` mandates versioned syscall tables for precisely this.
+///
+/// `struct_size` is present so that a *third* number is never needed: a shorter
+/// struct is zero-filled (every field's zero is its old behaviour), a longer one
+/// is accepted only if its unknown tail is entirely zero, and rejected with
+/// `InvalidArgument` otherwise — a caller asking for a field this kernel does
+/// not implement must hear "no", not have it quietly ignored.
+///
+/// # Capability policy
+///
+/// * `cap_mode = 0` (`SPAWN_CAP_MODE_INHERIT_ALL`) — the child inherits the
+///   caller's whole capability table, as `fork` does and as 517 does. Zero is
+///   this value so a zero-filled struct behaves like version 1.
+/// * `cap_mode = 1` (`SPAWN_CAP_MODE_SUBSET`) — the child gets exactly the
+///   `cap_count` entries at `cap_ptr` and nothing else. Each is a
+///   `CapEntryInfo` (the same 24-byte struct `SYS_CAP_QUERY` writes out, so a
+///   caller can enumerate, filter, and pass the remainder back unmodified).
+///   `cap_count = 0` is legal and means the child gets **no** capabilities.
+///
+/// A requested capability the caller does not hold — or holds with narrower
+/// rights than it asked to delegate — fails the whole spawn with
+/// `PermissionDenied`.  It is not dropped: dropping it would start a process
+/// that looks fine and dies later, somewhere else, for a reason that does not
+/// name the spawn.  That is exactly how
+/// `BUG-SPAWNED-CHILDREN-INHERIT-NO-CAPABILITIES` presented, and it cost two
+/// rounds of diagnosis across two lanes.
+///
+/// Rights may be *narrowed* (hold `READ | WRITE`, delegate `READ`) but never
+/// widened, which is what makes this delegation rather than a grant.
+///
+/// Returns: process ID on success, negative error on failure.  Chosen number
+/// 559.  See design-decisions.md §279.
+pub const SYS_PROCESS_SPAWN_EX2: u64 = 559;
+
 // ---------------------------------------------------------------------------
 // Filesystem syscalls (600–799)
 // ---------------------------------------------------------------------------

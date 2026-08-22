@@ -669,8 +669,15 @@ Known-issues (open, kernel-owned):
   suite scored `SELFTEST_FAIL` and had to be read rather than trusted. Cycle 12
   is the first `BOOT_OK` with both green — real GNU make dispatching a recipe
   through `/bin/sh`, and make driving `tcc` to compile two TUs and link a
-  dynamic ELF that `ld.so` then ran. Remaining gap: spawn still cannot hand
-  over a *subset* (needs an ABI field; logged in `todo.txt`).
+  dynamic ELF that `ld.so` then ran. The remaining gap — spawn could not hand
+  over a *subset*, only all-or-nothing — was closed the same day by
+  **`SYS_PROCESS_SPAWN_EX2` (559)**: a new number rather than new fields on
+  `SpawnExArgs`, because that struct has no length and no version and the
+  `clone3` size-in-a-register trick is unavailable (`posix::syscall1` sets only
+  `rax`/`rdi`, so `arg1` is the caller's stale `rsi`). `SpawnEx2Args` leads with
+  its own `struct_size`, so a third number will never be needed; an unheld or
+  widening request fails the whole spawn with `PermissionDenied` rather than
+  being silently trimmed. See `design-decisions.md` 279.
 - ~~`B-KASAN-INSTRUMENTED-BOOT-WEDGES-MID-PRINT-ON-A-PAGE-FAULT`~~ — **NOT A
   KERNEL BUG, closed 2026-08-19.** The "wedge" was never real: the instrumented
   boot was healthy and simply slower than the harness budget. Three instrumented

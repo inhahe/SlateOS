@@ -14,7 +14,6 @@
 # which records *why*, not here, which records only *that*.
 
 userspace/coreutils/examples/extfloat-probe.rs:argv-as-string
-userspace/coreutils/src/bin/basename.rs:argv-as-string
 userspace/coreutils/src/bin/cal.rs:argv-as-string
 userspace/coreutils/src/bin/chmod.rs:argv-as-string
 userspace/coreutils/src/bin/chown.rs:argv-as-string
@@ -22,7 +21,6 @@ userspace/coreutils/src/bin/cmp.rs:argv-as-string
 userspace/coreutils/src/bin/dd.rs:argv-as-string
 userspace/coreutils/src/bin/df.rs:argv-as-string
 userspace/coreutils/src/bin/diff.rs:argv-as-string
-userspace/coreutils/src/bin/dirname.rs:argv-as-string
 userspace/coreutils/src/bin/du.rs:argv-as-string
 userspace/coreutils/src/bin/echo.rs:argv-as-string
 userspace/coreutils/src/bin/ed.rs:argv-as-string

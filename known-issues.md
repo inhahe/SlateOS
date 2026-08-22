@@ -54829,3 +54829,56 @@ the moment they ran. A test that cannot fail never ran them.
 **Severity.** Test-only; no production defect. But five of the eight tests in the
 module were unrunnable, including the only coverage of a path that contained a
 fatal deadlock.
+
+### TD-A-REAP-WINDOW-BETWEEN-SET-CURRENT-AND-SWITCH. `set_current_task` retires a dying task from the reaper's exclusion set while it is still running on its own kernel stack — SMP-only, latent 2026-08-22
+
+**What it is.** `reap_dead_tasks` (`sched/mod.rs:4667`) frees a `Dead` task's
+kernel stack, and it correctly refuses to reap any task that is *current* on
+any CPU — it builds `active_ids` from `CURRENT_TASK_IDS` across all online
+CPUs, with a comment explaining that reaping a task another CPU is running is
+a use-after-free. That exclusion is right, but it stops covering the task one
+step too early.
+
+In `schedule_inner` the sequence is:
+
+```
+set_current_task(cpu, next_id);   // <-- the outgoing task leaves active_ids HERE
+… write_cr3 …
+… wrmsr FS_BASE / GS_BASE …
+switch_context(old_ctx_ptr, new_ctx_ptr);   // <-- and only HERE does it leave its stack
+```
+
+Every instruction between those two lines executes **on the outgoing task's
+kernel stack**, and `switch_context` itself pushes the outgoing register set
+onto it. But from `set_current_task` onward the outgoing task is no longer in
+any CPU's `CURRENT_TASK_IDS` slot, so a concurrent `reap_dead_tasks` on
+another CPU sees a `Dead` task that nobody is running and frees the stack out
+from under it.
+
+**Why it is latent today.** The boot test runs uniprocessor (`cpu0` only, no
+APs brought up), so no second CPU exists to run the reaper concurrently. Every
+current `reap_dead_tasks` caller is a self-test or a bench harness on the boot
+CPU. The window is real but unreachable until SMP is exercised, which is
+exactly the kind of bug that surfaces the first time someone turns APs on and
+then gets blamed on the AP bring-up.
+
+**Same class as `B-FORKEXEC-BOOT-HANG`** (fixed 2026-08-22): a resource is
+published as reclaimable at a point that precedes its genuine last use. There
+it was the process PML4 versus the dying thread's CR3; here it is the kernel
+stack versus the outgoing task's `switch_context`. Both come from treating a
+bookkeeping update as if it were the moment the hardware stopped depending on
+the object.
+
+**Proper fix** — Linux's `finish_task_switch` / `put_task_struct` shape: hand
+the outgoing task off to the *incoming* one rather than declaring it free.
+Concretely, add a per-CPU `PREV_TASK_ID` slot; `schedule_inner` writes the
+outgoing id into it just before `switch_context`, and the first thing the
+incoming task does after the switch returns is clear it. `reap_dead_tasks`
+then excludes the union of `CURRENT_TASK_IDS` and `PREV_TASK_ID` across all
+CPUs. That closes the window structurally — there is no instant at which a
+task is off both lists while a CPU is still on its stack — instead of relying
+on the reaper being called from the right places.
+
+**Do not "fix" it by having the reaper skip recently-dead tasks on a timer.**
+That converts a correctness bug into a probabilistic one and makes the failure
+rarer and harder to attribute, which is strictly worse.

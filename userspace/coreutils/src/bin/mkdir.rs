@@ -77,6 +77,7 @@
 //! tree is private to `chmod.rs`, so `-m` waits for that to be lifted into a
 //! shared module rather than getting a second, subtly different copy here.
 
+use coreutils::errmsg::strerror;
 use coreutils::getopt::{self, Program, Takes};
 use coreutils::quote::quote_os;
 use std::ffi::OsString;
@@ -344,9 +345,16 @@ fn make_all<W: Write>(flags: &MkdirFlags, dirs: &[OsString], err: &mut W) -> boo
             // `quote_os`, not `quoteaf_os`: curly marks. Module docs, defect 2 —
             // this one message is the exception among its neighbours, and the
             // table there is the evidence.
+            //
+            // `strerror`, not `{e}`: why it failed has to read the same
+            // wherever it is printed. See [`coreutils::errmsg`] — on a Windows
+            // *host* `{e}` says `The system cannot find the file specified.
+            // (os error 2)`, which is neither POSIX's wording nor what this
+            // utility prints on the target it ships on.
+            let why = strerror(&e);
             let _ = writeln!(
                 err,
-                "mkdir: cannot create directory {}: {e}",
+                "mkdir: cannot create directory {}: {why}",
                 quote_os(dir)
             );
             ok = false;

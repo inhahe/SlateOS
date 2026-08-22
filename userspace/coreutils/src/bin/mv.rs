@@ -74,6 +74,7 @@
 //! doing it wrong loses data quietly. It reports that it is not implemented
 //! rather than attempting a partial job. Logged in `known-issues.md`.
 
+use coreutils::errmsg::strerror;
 use coreutils::getopt::{self, Program, Takes};
 use coreutils::quote::quoteaf_os;
 use std::ffi::OsString;
@@ -386,7 +387,13 @@ fn move_one<W: Write>(src: &OsString, dest: &Path, dest_is_dir: bool, err: &mut 
     let metadata = match fs::symlink_metadata(src_path) {
         Ok(m) => m,
         Err(e) => {
-            let _ = writeln!(err, "mv: cannot stat {}: {e}", quoteaf_os(src));
+            // `strerror`, not `{e}`: why it failed has to read the same wherever
+            // it is printed. See [`coreutils::errmsg`] — on a Windows *host*
+            // `{e}` says `The system cannot find the file specified. (os error
+            // 2)`, which is neither POSIX's wording nor what this utility prints
+            // on the target it ships on.
+            let why = strerror(&e);
+            let _ = writeln!(err, "mv: cannot stat {}: {why}", quoteaf_os(src));
             return false;
         }
     };
@@ -408,9 +415,10 @@ fn move_one<W: Write>(src: &OsString, dest: &Path, dest_is_dir: bool, err: &mut 
         Ok(()) => return true,
         Err(e) if is_cross_device(&e) => {}
         Err(e) => {
+            let why = strerror(&e);
             let _ = writeln!(
                 err,
-                "mv: cannot move {} to {}: {e}",
+                "mv: cannot move {} to {}: {why}",
                 quoteaf_os(src),
                 quoteaf_os(&target)
             );
@@ -419,9 +427,10 @@ fn move_one<W: Write>(src: &OsString, dest: &Path, dest_is_dir: bool, err: &mut 
     }
 
     if let Err(e) = copy_across_devices(src_path, &target, &metadata) {
+        let why = strerror(&e);
         let _ = writeln!(
             err,
-            "mv: cannot move {} to {}: {e}",
+            "mv: cannot move {} to {}: {why}",
             quoteaf_os(src),
             quoteaf_os(&target)
         );

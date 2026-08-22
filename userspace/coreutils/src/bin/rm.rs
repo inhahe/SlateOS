@@ -48,6 +48,7 @@
 //! this `rm` has **no root failsafe at all**, where GNU's refuses `rm -rf /`
 //! by default. Logged in `known-issues.md`.
 
+use coreutils::errmsg::strerror;
 use coreutils::getopt::{self, Program, Takes};
 use coreutils::quote::quoteaf_os;
 use std::ffi::OsString;
@@ -348,22 +349,25 @@ fn remove_one<W: Write>(flags: &RmFlags, arg: &OsString, err: &mut W) -> bool {
     // — including nothing.
     let metadata = match fs::symlink_metadata(path) {
         Ok(m) => m,
-        Err(e) if e.kind() == io::ErrorKind::NotFound => {
-            if flags.force {
-                return true;
-            }
-            let _ = writeln!(
-                err,
-                "rm: cannot remove {}: No such file or directory",
-                quoteaf_os(arg)
-            );
-            return false;
-        }
+        // `-f` ignores a file that is *not there*. It is matched on `ErrorKind`
+        // rather than on the message, so the two are independent: the branch
+        // decides whether to be quiet, `strerror` decides the wording.
+        Err(e) if e.kind() == io::ErrorKind::NotFound && flags.force => return true,
         Err(e) => {
-            // Reported even under `-f`. `-f` ignores a file that is *not there*;
-            // a file that is there and could not be examined is a real failure,
-            // and swallowing it tells a script the file is gone when it is not.
-            let _ = writeln!(err, "rm: cannot remove {}: {e}", quoteaf_os(arg));
+            // Reported even under `-f` unless it was the case above: `-f`
+            // ignores a file that is not there; a file that *is* there and could
+            // not be examined is a real failure, and swallowing it tells a
+            // script the file is gone when it is not.
+            //
+            // `strerror`, not `{e}`: why it failed has to read the same wherever
+            // it is printed. See [`coreutils::errmsg`] — on a Windows *host*
+            // `{e}` says `The system cannot find the file specified. (os error
+            // 2)`, which is neither POSIX's wording nor what this utility prints
+            // on the target it ships on. It used to be spelled out by hand for
+            // this one errno, which fixed the common case and left every other
+            // one reading in the host's words.
+            let why = strerror(&e);
+            let _ = writeln!(err, "rm: cannot remove {}: {why}", quoteaf_os(arg));
             return false;
         }
     };
@@ -388,7 +392,8 @@ fn remove_one<W: Write>(flags: &RmFlags, arg: &OsString, err: &mut W) -> bool {
         // is the outcome asked for, so it is not a failure.
         Err(e) if flags.force && e.kind() == io::ErrorKind::NotFound => true,
         Err(e) => {
-            let _ = writeln!(err, "rm: cannot remove {}: {e}", quoteaf_os(arg));
+            let why = strerror(&e);
+            let _ = writeln!(err, "rm: cannot remove {}: {why}", quoteaf_os(arg));
             false
         }
     }

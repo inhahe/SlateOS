@@ -72,6 +72,7 @@
 //! choose whether a symlink or its target is copied. Every one of those, ignored,
 //! produces a destination that looks right and is not.
 
+use coreutils::errmsg::strerror;
 use coreutils::getopt::{self, Program, Takes};
 use coreutils::quote::quoteaf_os;
 use std::ffi::OsString;
@@ -418,7 +419,13 @@ fn copy_one<W: Write>(
     let metadata = match metadata {
         Ok(m) => m,
         Err(e) => {
-            let _ = writeln!(err, "cp: cannot stat {}: {e}", quoteaf_os(src));
+            // `strerror`, not `{e}`: why it failed has to read the same wherever
+            // it is printed. See [`coreutils::errmsg`] — on a Windows *host*
+            // `{e}` says `The system cannot find the file specified. (os error
+            // 2)`, which is neither POSIX's wording nor what this utility prints
+            // on the target it ships on.
+            let why = strerror(&e);
+            let _ = writeln!(err, "cp: cannot stat {}: {why}", quoteaf_os(src));
             return false;
         }
     };
@@ -441,9 +448,10 @@ fn copy_one<W: Write>(
         return match clone_symlink(src_path, &target) {
             Ok(()) => true,
             Err(e) => {
+                let why = strerror(&e);
                 let _ = writeln!(
                     err,
-                    "cp: cannot create symbolic link {}: {e}",
+                    "cp: cannot create symbolic link {}: {why}",
                     quoteaf_os(&target)
                 );
                 false
@@ -455,9 +463,10 @@ fn copy_one<W: Write>(
         return match fs::copy(src_path, &target) {
             Ok(_) => true,
             Err(e) => {
+                let why = strerror(&e);
                 let _ = writeln!(
                     err,
-                    "cp: cannot copy {} to {}: {e}",
+                    "cp: cannot copy {} to {}: {why}",
                     quoteaf_os(src),
                     quoteaf_os(&target)
                 );
@@ -560,9 +569,10 @@ fn resolve_as_far_as_exists(path: &Path) -> Option<PathBuf> {
 /// the others — module docs, bug 6.
 fn copy_tree<W: Write>(src: &Path, dest: &Path, err: &mut W) -> bool {
     if let Err(e) = fs::create_dir_all(dest) {
+        let why = strerror(&e);
         let _ = writeln!(
             err,
-            "cp: cannot create directory {}: {e}",
+            "cp: cannot create directory {}: {why}",
             quoteaf_os(dest)
         );
         return false;
@@ -571,7 +581,8 @@ fn copy_tree<W: Write>(src: &Path, dest: &Path, err: &mut W) -> bool {
     let entries = match fs::read_dir(src) {
         Ok(e) => e,
         Err(e) => {
-            let _ = writeln!(err, "cp: cannot read directory {}: {e}", quoteaf_os(src));
+            let why = strerror(&e);
+            let _ = writeln!(err, "cp: cannot read directory {}: {why}", quoteaf_os(src));
             return false;
         }
     };
@@ -581,7 +592,8 @@ fn copy_tree<W: Write>(src: &Path, dest: &Path, err: &mut W) -> bool {
         let entry = match entry {
             Ok(e) => e,
             Err(e) => {
-                let _ = writeln!(err, "cp: cannot read directory {}: {e}", quoteaf_os(src));
+                let why = strerror(&e);
+                let _ = writeln!(err, "cp: cannot read directory {}: {why}", quoteaf_os(src));
                 ok = false;
                 continue;
             }
@@ -594,7 +606,8 @@ fn copy_tree<W: Write>(src: &Path, dest: &Path, err: &mut W) -> bool {
         let kind = match entry.file_type() {
             Ok(k) => k,
             Err(e) => {
-                let _ = writeln!(err, "cp: cannot stat {}: {e}", quoteaf_os(&from));
+                let why = strerror(&e);
+                let _ = writeln!(err, "cp: cannot stat {}: {why}", quoteaf_os(&from));
                 ok = false;
                 continue;
             }
@@ -612,9 +625,10 @@ fn copy_tree<W: Write>(src: &Path, dest: &Path, err: &mut W) -> bool {
         };
 
         if let Err(e) = outcome {
+            let why = strerror(&e);
             let _ = writeln!(
                 err,
-                "cp: cannot copy {} to {}: {e}",
+                "cp: cannot copy {} to {}: {why}",
                 quoteaf_os(&from),
                 quoteaf_os(&to)
             );
@@ -627,9 +641,10 @@ fn copy_tree<W: Write>(src: &Path, dest: &Path, err: &mut W) -> bool {
     // Module docs, bug 3 — without this a 0700 source becomes a 0755 copy and
     // everything under it is published.
     if let Err(e) = carry_over_mode(src, dest) {
+        let why = strerror(&e);
         let _ = writeln!(
             err,
-            "cp: cannot set permissions on {}: {e}",
+            "cp: cannot set permissions on {}: {why}",
             quoteaf_os(dest)
         );
         ok = false;

@@ -68,6 +68,7 @@
 //! pointed-at directory instead of replacing the link — a link in a place the
 //! user never named, with no message.
 
+use coreutils::errmsg::strerror;
 use coreutils::getopt::{self, Program, Takes};
 use coreutils::quote::quoteaf_os;
 use std::ffi::OsString;
@@ -367,7 +368,13 @@ fn link_all<W: Write>(flags: &LnFlags, paths: &[OsString], err: &mut W) -> bool 
                     return false;
                 }
                 Err(e) => {
-                    let _ = writeln!(err, "ln: target {}: {e}", quoteaf_os(dir));
+                    // `strerror`, not `{e}`: why it failed has to read the same
+                    // wherever it is printed. See [`coreutils::errmsg`] — on a
+                    // Windows *host* `{e}` says `The system cannot find the file
+                    // specified. (os error 2)`, which is neither POSIX's wording
+                    // nor what this utility prints on the target it ships on.
+                    let why = strerror(&e);
+                    let _ = writeln!(err, "ln: target {}: {why}", quoteaf_os(dir));
                     return false;
                 }
             }
@@ -426,7 +433,8 @@ fn link_one<W: Write>(flags: &LnFlags, target: &OsString, link: &Path, err: &mut
         // succeeds. Asking `metadata` would follow the link and refuse a
         // command GNU accepts.
         if let Err(e) = fs::symlink_metadata(target_path) {
-            let _ = writeln!(err, "ln: failed to access {}: {e}", quoteaf_os(target));
+            let why = strerror(&e);
+            let _ = writeln!(err, "ln: failed to access {}: {why}", quoteaf_os(target));
             return false;
         }
     }
@@ -441,9 +449,10 @@ fn link_one<W: Write>(flags: &LnFlags, target: &OsString, link: &Path, err: &mut
         let kind = if flags.symbolic { "symbolic" } else { "hard" };
         // Names go through `quoteaf_os`, not between two literal `'` — module
         // docs, defect 2. GNU names only the link here, not the target.
+        let why = strerror(&e);
         let _ = writeln!(
             err,
-            "ln: failed to create {kind} link {}: {e}",
+            "ln: failed to create {kind} link {}: {why}",
             quoteaf_os(link)
         );
         return false;

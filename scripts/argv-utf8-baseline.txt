@@ -43,7 +43,6 @@ userspace/coreutils/src/bin/ps.rs:argv-as-string
 userspace/coreutils/src/bin/readlink.rs:argv-as-string
 userspace/coreutils/src/bin/realpath.rs:argv-as-string
 userspace/coreutils/src/bin/renice.rs:argv-as-string
-userspace/coreutils/src/bin/rmdir.rs:argv-as-string
 userspace/coreutils/src/bin/sed.rs:argv-as-string
 userspace/coreutils/src/bin/sh.rs:argv-as-string
 userspace/coreutils/src/bin/sh.rs:env-as-string

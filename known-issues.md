@@ -50335,7 +50335,7 @@ commands that carry the colour in question, and assert the two renders agree.
 Candidates: anything drawn on the wallpaper, on a video surface, on a
 thumbnail, or on any other content the palette does not own.
 
-**Part 2 progress. 10 of 49 modules converted.**
+**Part 2 progress. 11 of 49 modules converted.**
 
 - [x] `security_dialog.rs` — 29 constants, done 2026-08-22. The method above
   survived contact: the sweep lives in `gui/desktop/src/palette_check.rs` as
@@ -50683,6 +50683,47 @@ thumbnail, or on any other content the palette does not own.
     zero-reclaimable branch — which is worth knowing in advance: *when a branch
     is an absence, adding data to the fixture cannot reach it, only a second
     fixture can.*
+- [x] `power_settings.rs` — 13 constants, done 2026-08-22. Harness defects
+  YYY/ZZZ/AAAA/BBBB/CCCC/DDDD/EEEE/FFFF/GGGG, all nine caught by exactly the
+  tests named. (The labels ran out of three-letter combinations and widen to
+  four; `main()` compares the whole prefix, so nothing collides.)
+  - **The first module whose colours are almost entirely *measurements*, and
+    the first with a ladder.** Two sites follow the accent — the active tab's
+    label and the selected power plan's label, both "which of these am I on".
+    Everything else reads the battery: `BatteryHealth::color` is
+    green/yellow/peach/red, and the charge bar is a second ladder in a `match`
+    on the percentage (`0..=10` red, `11..=20` peach, `21..=50` yellow, else
+    green). Neither is the accent's, for a reason stronger than taste: **a
+    ladder whose rungs can collide is not a ladder.** Green, yellow, peach and
+    red are four of the fourteen selectable accents, so a rung that followed
+    the accent would collapse onto a fixed one for four of them, and the panel
+    would stop answering the question it was drawn to answer. This is the
+    stacked-bar distinctness argument from `storage_settings.rs` applied to an
+    *ordered* row rather than an unordered one — and ordering makes it worse,
+    not better, because a collapsed rung does not merely look ambiguous, it
+    reads as a different measurement.
+  - **Defect EEEE is the FFF/NNN/WWW shape a fourth time, and the cleanest
+    instance so far.** It freezes only the plan list; the tab label above it
+    goes on moving with the accent, so an `assert_ne!` over the union of this
+    panel's two accent sites passes with the bug in. Four modules in a row now.
+    **n accent sites ⇒ n negative assertions** is settled.
+  - **The charge ladder has no function to test, so the test reads it off the
+    render.** Unlike `BatteryHealth::color`, it is an inline `match` inside
+    `render_battery_summary` with no name of its own, so
+    `charge_bar_colors(cmds, track_width)` recovers it by matching the 6pt-tall
+    `FillRect` that is *narrower than its track*. That filter is why the ladder
+    tests stop at 80%: at 100% the fill is exactly as wide as the track and
+    becomes indistinguishable from it. Worth generalising — **a colour chosen
+    by a `match` with no named function still needs a per-site extractor**, and
+    the extractor's discriminator (here, width) constrains which states the test
+    can walk.
+  - **`ChargeState::NotPresent` is walked as its own sweep case, not as one
+    more charge level.** It is the panel's absence branch twice over: it skips
+    the whole battery summary bar, and it replaces the battery tab's entire
+    body with a single `overlay0` caption. Defect ZZZ (that caption keeping its
+    own grey) is reachable through no other state — the same lesson
+    `storage_settings.rs` learned about empty fixtures, arriving here as an
+    enum arm rather than as an empty `Vec`.
 
 **Trigger:** this is not blocked on anything. It is sequenced after the shell
 event loop (`TD-C-THE-SHELL-CAN-DRAW-ITSELF-AND-NOBODY-CAN-ASK-IT-TO`) only

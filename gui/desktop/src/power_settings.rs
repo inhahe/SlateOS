@@ -4,28 +4,36 @@
 //! lid-close behaviour, and power-button actions. Provides a battery
 //! health overview with charge history and estimated remaining time.
 
+use appearance::Palette;
 use guitk::color::Color;
 use guitk::ratio;
 use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::style::CornerRadii;
 
 // ============================================================================
-// Catppuccin Mocha palette
+// Colour
 // ============================================================================
-
-const BASE: Color = Color::from_hex(0x1E1E2E);
-const MANTLE: Color = Color::from_hex(0x181825);
-const SURFACE0: Color = Color::from_hex(0x313244);
-const SURFACE1: Color = Color::from_hex(0x45475A);
-const TEXT: Color = Color::from_hex(0xCDD6F4);
-const SUBTEXT0: Color = Color::from_hex(0xA6ADC8);
-const BLUE: Color = Color::from_hex(0x89B4FA);
-const GREEN: Color = Color::from_hex(0xA6E3A1);
-const RED: Color = Color::from_hex(0xF38BA8);
-const YELLOW: Color = Color::from_hex(0xF9E2AF);
-const PEACH: Color = Color::from_hex(0xFAB387);
-const LAVENDER: Color = Color::from_hex(0xB4BEFE);
-const OVERLAY0: Color = Color::from_hex(0x6C7086);
+//
+// Every colour comes out of the resolved [`Palette`] this panel is handed, so
+// the shell repaints together when the mode or the accent changes. Two
+// judgements the source does not show:
+//
+// 1. **Two sites follow the accent, and both are "which of these am I on":**
+//    the active tab's label, and the label of the selected power plan. Both
+//    are radio groups — exactly one member is chosen and the chosen one is
+//    *you are here*. Held per-site by
+//    `the_power_panels_own_colours_do_not_follow_the_accent`.
+//
+// 2. **Everything else this panel colours is a measurement, and measurements
+//    are not the accent's.** Both the charge bar (red under 10%, peach to
+//    20%, yellow to 50%, green above) and [`BatteryHealth::color`] are
+//    *ladders*: green-to-red is the reading itself, not decoration, and a
+//    ladder whose rungs can collide stops being a ladder. Held by
+//    `the_battery_ladders_stay_distinct_in_both_modes`.
+//
+// The green "on" toggles are kept exactly as they were drawn before the
+// conversion; making a toggle's on-state follow the accent is a redesign, not
+// a conversion, and is noted as such in `known-issues.md`.
 
 // ============================================================================
 // Power plan
@@ -151,12 +159,16 @@ impl BatteryHealth {
         }
     }
 
-    pub fn color(self) -> Color {
+    /// The rung this health estimate sits on.
+    ///
+    /// A ladder, not a palette choice: see judgement 2 in the module's colour
+    /// notes for why it does not follow the accent.
+    pub fn color(self, p: &Palette) -> Color {
         match self {
-            Self::Good => GREEN,
-            Self::Fair => YELLOW,
-            Self::Poor => PEACH,
-            Self::Critical => RED,
+            Self::Good => p.green,
+            Self::Fair => p.yellow,
+            Self::Poor => p.peach,
+            Self::Critical => p.red,
         }
     }
 }
@@ -461,7 +473,7 @@ impl PowerSettingsUI {
     // Rendering
     // ------------------------------------------------------------------
 
-    pub fn render(&self, x: f32, y: f32, width: f32) -> Vec<RenderCommand> {
+    pub fn render(&self, p: &Palette, x: f32, y: f32, width: f32) -> Vec<RenderCommand> {
         let mut cmds = Vec::new();
         let pad = 16.0_f32;
         let inner = width - 2.0 * pad;
@@ -473,7 +485,7 @@ impl PowerSettingsUI {
             y,
             width,
             height: 900.0,
-            color: BASE,
+            color: p.base,
             corner_radii: CornerRadii::all(8.0),
         });
 
@@ -484,7 +496,7 @@ impl PowerSettingsUI {
             y: cy,
             text: "Power & Battery Settings".into(),
             font_size: 20.0,
-            color: TEXT,
+            color: p.text,
             font_weight: FontWeightHint::Bold,
             max_width: Some(inner),
             overflow: TextOverflow::Ellipsis,
@@ -493,7 +505,7 @@ impl PowerSettingsUI {
 
         // Quick battery status bar
         if self.battery.state != ChargeState::NotPresent {
-            cy = self.render_battery_summary(&mut cmds, x + pad, cy, inner);
+            cy = self.render_battery_summary(p, &mut cmds, x + pad, cy, inner);
             cy += 8.0;
         }
 
@@ -507,7 +519,7 @@ impl PowerSettingsUI {
                 y: cy,
                 width: tab_w - 2.0,
                 height: 30.0,
-                color: if active { SURFACE0 } else { MANTLE },
+                color: if active { p.surface0 } else { p.mantle },
                 corner_radii: CornerRadii::all(6.0),
             });
             cmds.push(RenderCommand::Text {
@@ -515,7 +527,7 @@ impl PowerSettingsUI {
                 y: cy + 8.0,
                 text: (*label).into(),
                 font_size: 12.0,
-                color: if active { BLUE } else { SUBTEXT0 },
+                color: if active { p.accent } else { p.subtext0 },
                 font_weight: if active {
                     FontWeightHint::Bold
                 } else {
@@ -528,10 +540,10 @@ impl PowerSettingsUI {
         cy += 38.0;
 
         match self.active_tab {
-            0 => self.render_plans_tab(&mut cmds, x + pad, cy, inner),
-            1 => self.render_timeouts_tab(&mut cmds, x + pad, cy, inner),
-            2 => self.render_battery_tab(&mut cmds, x + pad, cy, inner),
-            3 => self.render_advanced_tab(&mut cmds, x + pad, cy, inner),
+            0 => self.render_plans_tab(p, &mut cmds, x + pad, cy, inner),
+            1 => self.render_timeouts_tab(p, &mut cmds, x + pad, cy, inner),
+            2 => self.render_battery_tab(p, &mut cmds, x + pad, cy, inner),
+            3 => self.render_advanced_tab(p, &mut cmds, x + pad, cy, inner),
             _ => {}
         }
 
@@ -540,6 +552,7 @@ impl PowerSettingsUI {
 
     fn render_battery_summary(
         &self,
+        p: &Palette,
         cmds: &mut Vec<RenderCommand>,
         x: f32,
         y: f32,
@@ -551,16 +564,16 @@ impl PowerSettingsUI {
             y,
             width,
             height: 40.0,
-            color: MANTLE,
+            color: p.mantle,
             corner_radii: CornerRadii::all(6.0),
         });
 
         // Charge bar
         let charge_color = match self.battery.charge_pct {
-            0..=10 => RED,
-            11..=20 => PEACH,
-            21..=50 => YELLOW,
-            _ => GREEN,
+            0..=10 => p.red,
+            11..=20 => p.peach,
+            21..=50 => p.yellow,
+            _ => p.green,
         };
         let bar_w = (width - 16.0) * self.battery.charge_pct as f32 / 100.0;
         cmds.push(RenderCommand::FillRect {
@@ -576,7 +589,7 @@ impl PowerSettingsUI {
             y: y + 28.0,
             width: width - 16.0,
             height: 6.0,
-            color: SURFACE1,
+            color: p.surface1,
             corner_radii: CornerRadii::all(3.0),
         });
         // Redraw fill on top (stacking order)
@@ -601,7 +614,7 @@ impl PowerSettingsUI {
             y: y + 8.0,
             text: status_text,
             font_size: 13.0,
-            color: TEXT,
+            color: p.text,
             font_weight: FontWeightHint::Regular,
             max_width: Some(width - 24.0),
             overflow: TextOverflow::Ellipsis,
@@ -610,7 +623,14 @@ impl PowerSettingsUI {
         y + 44.0
     }
 
-    fn render_plans_tab(&self, cmds: &mut Vec<RenderCommand>, x: f32, mut y: f32, width: f32) {
+    fn render_plans_tab(
+        &self,
+        p: &Palette,
+        cmds: &mut Vec<RenderCommand>,
+        x: f32,
+        mut y: f32,
+        width: f32,
+    ) {
         for plan in PowerPlan::ALL {
             let active = self.config.plan == plan;
             cmds.push(RenderCommand::FillRect {
@@ -618,7 +638,7 @@ impl PowerSettingsUI {
                 y,
                 width,
                 height: 56.0,
-                color: if active { SURFACE0 } else { MANTLE },
+                color: if active { p.surface0 } else { p.mantle },
                 corner_radii: CornerRadii::all(6.0),
             });
             let indicator = if active { "● " } else { "○ " };
@@ -627,7 +647,7 @@ impl PowerSettingsUI {
                 y: y + 8.0,
                 text: format!("{}{}", indicator, plan.label()),
                 font_size: 14.0,
-                color: if active { BLUE } else { TEXT },
+                color: if active { p.accent } else { p.text },
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(width - 24.0),
                 overflow: TextOverflow::Ellipsis,
@@ -637,7 +657,7 @@ impl PowerSettingsUI {
                 y: y + 30.0,
                 text: plan.description().into(),
                 font_size: 11.0,
-                color: SUBTEXT0,
+                color: p.subtext0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(width - 44.0),
                 overflow: TextOverflow::Ellipsis,
@@ -646,7 +666,14 @@ impl PowerSettingsUI {
         }
     }
 
-    fn render_timeouts_tab(&self, cmds: &mut Vec<RenderCommand>, x: f32, mut y: f32, width: f32) {
+    fn render_timeouts_tab(
+        &self,
+        p: &Palette,
+        cmds: &mut Vec<RenderCommand>,
+        x: f32,
+        mut y: f32,
+        width: f32,
+    ) {
         let rows: &[(&str, u32, u32)] = &[
             (
                 "Screen off",
@@ -671,7 +698,7 @@ impl PowerSettingsUI {
             y,
             text: "On Battery".into(),
             font_size: 12.0,
-            color: LAVENDER,
+            color: p.lavender,
             font_weight: FontWeightHint::Bold,
             max_width: Some(width * 0.25),
             overflow: TextOverflow::Ellipsis,
@@ -681,7 +708,7 @@ impl PowerSettingsUI {
             y,
             text: "On AC".into(),
             font_size: 12.0,
-            color: LAVENDER,
+            color: p.lavender,
             font_weight: FontWeightHint::Bold,
             max_width: Some(width * 0.25),
             overflow: TextOverflow::Ellipsis,
@@ -694,7 +721,7 @@ impl PowerSettingsUI {
                 y,
                 width,
                 height: 28.0,
-                color: MANTLE,
+                color: p.mantle,
                 corner_radii: CornerRadii::all(4.0),
             });
             cmds.push(RenderCommand::Text {
@@ -702,7 +729,7 @@ impl PowerSettingsUI {
                 y: y + 6.0,
                 text: (*label).into(),
                 font_size: 13.0,
-                color: TEXT,
+                color: p.text,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(width * 0.35),
                 overflow: TextOverflow::Ellipsis,
@@ -722,7 +749,7 @@ impl PowerSettingsUI {
                 y: y + 6.0,
                 text: batt_str,
                 font_size: 13.0,
-                color: SUBTEXT0,
+                color: p.subtext0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(width * 0.25),
                 overflow: TextOverflow::Ellipsis,
@@ -732,7 +759,7 @@ impl PowerSettingsUI {
                 y: y + 6.0,
                 text: ac_str,
                 font_size: 13.0,
-                color: SUBTEXT0,
+                color: p.subtext0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(width * 0.25),
                 overflow: TextOverflow::Ellipsis,
@@ -747,7 +774,7 @@ impl PowerSettingsUI {
             y,
             text: "Button & Lid Actions".into(),
             font_size: 14.0,
-            color: LAVENDER,
+            color: p.lavender,
             font_weight: FontWeightHint::Bold,
             max_width: Some(width),
             overflow: TextOverflow::Ellipsis,
@@ -761,19 +788,26 @@ impl PowerSettingsUI {
             ("Sleep button", self.config.sleep_button.label()),
         ];
         for (label, value) in actions {
-            Self::render_kv(cmds, x, y, width, label, value);
+            Self::render_kv(p, cmds, x, y, width, label, value);
             y += 24.0;
         }
     }
 
-    fn render_battery_tab(&self, cmds: &mut Vec<RenderCommand>, x: f32, mut y: f32, width: f32) {
+    fn render_battery_tab(
+        &self,
+        p: &Palette,
+        cmds: &mut Vec<RenderCommand>,
+        x: f32,
+        mut y: f32,
+        width: f32,
+    ) {
         if self.battery.state == ChargeState::NotPresent {
             cmds.push(RenderCommand::Text {
                 x,
                 y,
                 text: "No battery detected — running on AC power.".into(),
                 font_size: 13.0,
-                color: OVERLAY0,
+                color: p.overlay0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(width),
                 overflow: TextOverflow::Ellipsis,
@@ -783,11 +817,20 @@ impl PowerSettingsUI {
 
         let b = &self.battery;
 
-        Self::render_kv(cmds, x, y, width, "Charge", &format!("{}%", b.charge_pct));
+        Self::render_kv(
+            p,
+            cmds,
+            x,
+            y,
+            width,
+            "Charge",
+            &format!("{}%", b.charge_pct),
+        );
         y += 24.0;
-        Self::render_kv(cmds, x, y, width, "Status", b.state.label());
+        Self::render_kv(p, cmds, x, y, width, "Status", b.state.label());
         y += 24.0;
         Self::render_kv(
+            p,
             cmds,
             x,
             y,
@@ -797,6 +840,7 @@ impl PowerSettingsUI {
         );
         y += 24.0;
         Self::render_kv(
+            p,
             cmds,
             x,
             y,
@@ -806,6 +850,7 @@ impl PowerSettingsUI {
         );
         y += 24.0;
         Self::render_kv(
+            p,
             cmds,
             x,
             y,
@@ -815,6 +860,7 @@ impl PowerSettingsUI {
         );
         y += 24.0;
         Self::render_kv(
+            p,
             cmds,
             x,
             y,
@@ -824,6 +870,7 @@ impl PowerSettingsUI {
         );
         y += 24.0;
         Self::render_kv(
+            p,
             cmds,
             x,
             y,
@@ -833,6 +880,7 @@ impl PowerSettingsUI {
         );
         y += 24.0;
         Self::render_kv(
+            p,
             cmds,
             x,
             y,
@@ -841,7 +889,15 @@ impl PowerSettingsUI {
             &format!("{} mW", b.drain_mw),
         );
         y += 24.0;
-        Self::render_kv(cmds, x, y, width, "Temperature", &b.temperature_formatted());
+        Self::render_kv(
+            p,
+            cmds,
+            x,
+            y,
+            width,
+            "Temperature",
+            &b.temperature_formatted(),
+        );
         y += 32.0;
 
         // Battery thresholds
@@ -850,13 +906,14 @@ impl PowerSettingsUI {
             y,
             text: "Battery Thresholds".into(),
             font_size: 14.0,
-            color: LAVENDER,
+            color: p.lavender,
             font_weight: FontWeightHint::Bold,
             max_width: Some(width),
             overflow: TextOverflow::Ellipsis,
         });
         y += 24.0;
         Self::render_kv(
+            p,
             cmds,
             x,
             y,
@@ -866,6 +923,7 @@ impl PowerSettingsUI {
         );
         y += 24.0;
         Self::render_kv(
+            p,
             cmds,
             x,
             y,
@@ -875,6 +933,7 @@ impl PowerSettingsUI {
         );
         y += 24.0;
         Self::render_kv(
+            p,
             cmds,
             x,
             y,
@@ -889,7 +948,7 @@ impl PowerSettingsUI {
         } else {
             "Off"
         };
-        Self::render_kv(cmds, x, y, width, "Auto battery saver", saver_label);
+        Self::render_kv(p, cmds, x, y, width, "Auto battery saver", saver_label);
 
         // Charge history mini-graph
         if !self.charge_history.is_empty() {
@@ -897,7 +956,14 @@ impl PowerSettingsUI {
         }
     }
 
-    fn render_advanced_tab(&self, cmds: &mut Vec<RenderCommand>, x: f32, mut y: f32, width: f32) {
+    fn render_advanced_tab(
+        &self,
+        p: &Palette,
+        cmds: &mut Vec<RenderCommand>,
+        x: f32,
+        mut y: f32,
+        width: f32,
+    ) {
         let rows: &[(&str, bool)] = &[
             ("Adaptive brightness", self.config.adaptive_brightness),
             ("USB selective suspend", self.config.usb_selective_suspend),
@@ -907,12 +973,13 @@ impl PowerSettingsUI {
         ];
 
         for (label, on) in rows {
-            Self::render_toggle(cmds, x, y, width, label, *on);
+            Self::render_toggle(p, cmds, x, y, width, label, *on);
             y += 28.0;
         }
 
         y += 8.0;
         Self::render_kv(
+            p,
             cmds,
             x,
             y,
@@ -922,6 +989,7 @@ impl PowerSettingsUI {
         );
         y += 24.0;
         Self::render_kv(
+            p,
             cmds,
             x,
             y,
@@ -935,13 +1003,21 @@ impl PowerSettingsUI {
     // Shared rendering helpers
     // ------------------------------------------------------------------
 
-    fn render_kv(cmds: &mut Vec<RenderCommand>, x: f32, y: f32, width: f32, key: &str, val: &str) {
+    fn render_kv(
+        p: &Palette,
+        cmds: &mut Vec<RenderCommand>,
+        x: f32,
+        y: f32,
+        width: f32,
+        key: &str,
+        val: &str,
+    ) {
         cmds.push(RenderCommand::Text {
             x: x + 8.0,
             y,
             text: key.into(),
             font_size: 13.0,
-            color: SUBTEXT0,
+            color: p.subtext0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(width * 0.5),
             overflow: TextOverflow::Ellipsis,
@@ -951,7 +1027,7 @@ impl PowerSettingsUI {
             y,
             text: val.into(),
             font_size: 13.0,
-            color: TEXT,
+            color: p.text,
             font_weight: FontWeightHint::Regular,
             max_width: Some(width * 0.4),
             overflow: TextOverflow::Ellipsis,
@@ -959,6 +1035,7 @@ impl PowerSettingsUI {
     }
 
     fn render_toggle(
+        p: &Palette,
         cmds: &mut Vec<RenderCommand>,
         x: f32,
         y: f32,
@@ -971,13 +1048,13 @@ impl PowerSettingsUI {
             y,
             text: label.into(),
             font_size: 13.0,
-            color: SUBTEXT0,
+            color: p.subtext0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(width * 0.65),
             overflow: TextOverflow::Ellipsis,
         });
         let tx = x + width - 48.0;
-        let bg = if on { GREEN } else { SURFACE1 };
+        let bg = if on { p.green } else { p.surface1 };
         cmds.push(RenderCommand::FillRect {
             x: tx,
             y,
@@ -992,7 +1069,7 @@ impl PowerSettingsUI {
             y: y + 2.0,
             width: 16.0,
             height: 16.0,
-            color: TEXT,
+            color: p.text,
             corner_radii: CornerRadii::all(8.0),
         });
     }
@@ -1039,6 +1116,11 @@ mod tests {
     )]
 
     use super::*;
+    use crate::palette_check::assert_drawn_from;
+
+    fn test_palette() -> Palette {
+        Palette::for_mode(false)
+    }
 
     #[test]
     fn default_power_config() {
@@ -1177,7 +1259,7 @@ mod tests {
             BatteryHealth::Critical,
         ] {
             assert!(!h.label().is_empty());
-            let _ = h.color();
+            let _ = h.color(&test_palette());
         }
     }
 
@@ -1244,7 +1326,7 @@ mod tests {
     #[test]
     fn ui_render_produces_commands() {
         let ui = PowerSettingsUI::new();
-        let cmds = ui.render(0.0, 0.0, 500.0);
+        let cmds = ui.render(&test_palette(), 0.0, 0.0, 500.0);
         assert!(!cmds.is_empty());
     }
 
@@ -1253,7 +1335,7 @@ mod tests {
         let mut ui = PowerSettingsUI::new();
         for i in 0..4 {
             ui.set_active_tab(i);
-            let cmds = ui.render(0.0, 0.0, 500.0);
+            let cmds = ui.render(&test_palette(), 0.0, 0.0, 500.0);
             assert!(!cmds.is_empty());
         }
     }
@@ -1266,7 +1348,7 @@ mod tests {
         b.remaining_mins = Some(120);
         let mut ui = PowerSettingsUI::with_battery(b);
         ui.set_active_tab(2);
-        let cmds = ui.render(0.0, 0.0, 500.0);
+        let cmds = ui.render(&test_palette(), 0.0, 0.0, 500.0);
         let has_charge = cmds
             .iter()
             .any(|c| matches!(c, RenderCommand::Text { text, .. } if text.contains("35%")));
@@ -1301,7 +1383,7 @@ mod tests {
     fn battery_no_battery_tab() {
         let mut ui = PowerSettingsUI::new();
         ui.set_active_tab(2);
-        let cmds = ui.render(0.0, 0.0, 500.0);
+        let cmds = ui.render(&test_palette(), 0.0, 0.0, 500.0);
         let has_no_battery = cmds
             .iter()
             .any(|c| matches!(c, RenderCommand::Text { text, .. } if text.contains("No battery")));
@@ -1314,5 +1396,281 @@ mod tests {
         b.design_capacity_mwh = 40000;
         b.full_charge_capacity_mwh = 50000;
         assert_eq!(b.health_pct(), 100);
+    }
+
+    // --- Palette conversion --------------------------------------------------
+
+    /// A battery wound to a given charge and health.
+    ///
+    /// `charge` is what selects the rung of the charge-bar ladder, so the sweep
+    /// walks one value inside each of its four bands.
+    fn wound_battery(charge: u32, health: BatteryHealth, state: ChargeState) -> BatteryInfo {
+        let mut b = BatteryInfo::new_ac_only();
+        b.charge_pct = charge;
+        b.state = state;
+        b.health = health;
+        b.remaining_mins = Some(93);
+        b.design_capacity_mwh = 50_000;
+        b.full_charge_capacity_mwh = 44_000;
+        b.drain_mw = 8_500;
+        b.cycle_count = 312;
+        b.temperature_dc = Some(348);
+        b
+    }
+
+    /// The sweep: in light mode a colour this panel still holds privately is a
+    /// Mocha value the Latte palette does not contain, and it names itself.
+    ///
+    /// `NotPresent` is walked as its own case rather than as one more charge
+    /// level, because it is the panel's *absence* branch twice over: it skips
+    /// the whole battery summary bar at the top, and the battery tab replaces
+    /// its entire body with one `overlay0` caption. A fixture that always had a
+    /// battery would render neither.
+    #[test]
+    fn every_colour_the_panel_draws_comes_from_its_palette() {
+        for light in [false, true] {
+            let p = Palette::for_mode(light);
+            for (charge, health) in [
+                (5_u32, BatteryHealth::Critical),
+                (15, BatteryHealth::Poor),
+                (35, BatteryHealth::Fair),
+                (80, BatteryHealth::Good),
+                (100, BatteryHealth::Good),
+            ] {
+                for state in [
+                    ChargeState::Discharging,
+                    ChargeState::Charging,
+                    ChargeState::Full,
+                    ChargeState::NotPresent,
+                ] {
+                    for plan in PowerPlan::ALL {
+                        for tab in 0..4 {
+                            let mut ui =
+                                PowerSettingsUI::with_battery(wound_battery(charge, health, state));
+                            ui.config_mut().plan = plan;
+                            // A zero timeout prints "Never" instead of a number;
+                            // walk both spellings of the row.
+                            ui.config_mut().screen_off_battery_min =
+                                if tab % 2 == 0 { 0 } else { 10 };
+                            ui.config_mut().sleep_ac_min = if tab % 2 == 0 { 30 } else { 0 };
+                            ui.config_mut().adaptive_brightness = tab % 2 == 0;
+                            ui.config_mut().wake_on_lan = tab % 2 == 1;
+                            ui.set_active_tab(tab);
+                            for width in [320.0_f32, 500.0, 900.0] {
+                                let cmds = ui.render(&p, 0.0, 0.0, width);
+                                assert_drawn_from(&p, &cmds, &[], "power settings");
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// The active tab's label — bold, 12pt, one of the four tab names.
+    fn active_tab_label_colors(cmds: &[RenderCommand]) -> Vec<Color> {
+        cmds.iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text {
+                    text,
+                    color,
+                    font_size: 12.0,
+                    font_weight: FontWeightHint::Bold,
+                    ..
+                } if PowerSettingsUI::TAB_LABELS.contains(&text.as_str()) => Some(*color),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The selected power plan's label — the only 14pt row starting with `●`.
+    fn selected_plan_label_colors(cmds: &[RenderCommand]) -> Vec<Color> {
+        cmds.iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text {
+                    text,
+                    color,
+                    font_size: 14.0,
+                    ..
+                } if text.starts_with('\u{25cf}') => Some(*color),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The charge bar's fill — 6pt tall, and narrower than the track it sits on.
+    fn charge_bar_colors(cmds: &[RenderCommand], track_width: f32) -> Vec<Color> {
+        cmds.iter()
+            .filter_map(|c| match c {
+                RenderCommand::FillRect {
+                    width,
+                    height: 6.0,
+                    color,
+                    ..
+                } if *width < track_width => Some(*color),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Neither ladder on this panel is the accent's to repaint.
+    ///
+    /// The membership sweep cannot see this: a role belongs to both palettes,
+    /// so writing `p.accent` where `p.green` belongs still draws a legal light
+    /// colour in a light render. Only varying the accent separates them.
+    ///
+    /// **One `assert_ne!` per accent site.** An `assert_ne!` over the *union*
+    /// of the accent sites proves only that at least one of them moved, so a
+    /// site that still follows the accent hides one that has stopped — the
+    /// mistake harness defect FFF caught in `bluetooth.rs` and NNN caught again
+    /// in `update_settings.rs`. This panel has two accent sites: the active
+    /// tab's label and the selected plan's label.
+    #[test]
+    fn the_power_panels_own_colours_do_not_follow_the_accent() {
+        let mut blue = Palette::for_mode(false);
+        blue.accent = appearance::BLUE;
+        let mut mauve = Palette::for_mode(false);
+        mauve.accent = appearance::MAUVE;
+
+        // The negative half. Tab 0 draws both accent sites at once: the tab bar
+        // is always on screen and the plan list is that tab's body.
+        let mut ui = PowerSettingsUI::with_battery(wound_battery(
+            35,
+            BatteryHealth::Fair,
+            ChargeState::Discharging,
+        ));
+        ui.set_active_tab(0);
+        let under_blue = ui.render(&blue, 0.0, 0.0, 500.0);
+        let under_mauve = ui.render(&mauve, 0.0, 0.0, 500.0);
+
+        let tab_blue = active_tab_label_colors(&under_blue);
+        assert!(
+            !tab_blue.is_empty(),
+            "the active tab's label should have been drawn"
+        );
+        assert_ne!(
+            tab_blue,
+            active_tab_label_colors(&under_mauve),
+            "the active tab's label did not move with the accent, so the rest \
+             of this test would pass on a panel that ignored the accent"
+        );
+
+        let plan_blue = selected_plan_label_colors(&under_blue);
+        assert!(
+            !plan_blue.is_empty(),
+            "the selected power plan should have been drawn"
+        );
+        assert_ne!(
+            plan_blue,
+            selected_plan_label_colors(&under_mauve),
+            "the selected power plan's label did not move with the accent"
+        );
+
+        // The positive half: the two ladders read the battery, and a reading is
+        // not repainted because the user likes mauve.
+        for charge in [5_u32, 15, 35, 80] {
+            for health in [
+                BatteryHealth::Good,
+                BatteryHealth::Fair,
+                BatteryHealth::Poor,
+                BatteryHealth::Critical,
+            ] {
+                let hb = health.color(&blue);
+                let hm = health.color(&mauve);
+                assert!(
+                    hb.r == hm.r && hb.g == hm.g && hb.b == hm.b,
+                    "{health:?} moved with the accent; battery health is a \
+                     measurement, and green-to-red is the reading itself"
+                );
+
+                let ui = PowerSettingsUI::with_battery(wound_battery(
+                    charge,
+                    health,
+                    ChargeState::Discharging,
+                ));
+                let a = ui.render(&blue, 0.0, 0.0, 500.0);
+                let b = ui.render(&mauve, 0.0, 0.0, 500.0);
+                let track = 500.0 - 32.0 - 16.0;
+                let bars = charge_bar_colors(&a, track);
+                assert!(
+                    !bars.is_empty(),
+                    "the charge bar should have been drawn at {charge}%"
+                );
+                assert_eq!(
+                    bars,
+                    charge_bar_colors(&b, track),
+                    "the charge bar moved with the accent at {charge}%"
+                );
+            }
+        }
+    }
+
+    /// Both battery ladders have to stay legible under every accent.
+    ///
+    /// A ladder whose rungs can collide is not a ladder: if "Poor" and
+    /// "Critical" render alike, the panel has stopped answering the question it
+    /// was drawn to answer. Green, yellow, peach and red are four of the
+    /// fourteen accents a user can pick, so a rung that followed the accent
+    /// would collide with a fixed one for four of them.
+    #[test]
+    fn the_battery_ladders_stay_distinct_in_both_modes() {
+        for light in [false, true] {
+            for accent in [
+                appearance::BLUE,
+                appearance::GREEN,
+                appearance::PEACH,
+                appearance::MAUVE,
+            ] {
+                let mut p = Palette::for_mode(light);
+                p.accent = accent;
+
+                let mut seen: Vec<(BatteryHealth, Color)> = Vec::new();
+                for health in [
+                    BatteryHealth::Good,
+                    BatteryHealth::Fair,
+                    BatteryHealth::Poor,
+                    BatteryHealth::Critical,
+                ] {
+                    let c = health.color(&p);
+                    if let Some((other, _)) = seen
+                        .iter()
+                        .find(|(_, s)| s.r == c.r && s.g == c.g && s.b == c.b)
+                    {
+                        panic!(
+                            "battery health {health:?} looks exactly like \
+                             {other:?} (light={light})"
+                        );
+                    }
+                    seen.push((health, c));
+                }
+
+                // The charge bar's four bands, read back off the render rather
+                // than off a function -- the ladder lives in a `match` on the
+                // percentage and has no name of its own.
+                let track = 500.0 - 32.0 - 16.0;
+                let mut rungs: Vec<(u32, Color)> = Vec::new();
+                for charge in [5_u32, 15, 35, 80] {
+                    let ui = PowerSettingsUI::with_battery(wound_battery(
+                        charge,
+                        BatteryHealth::Good,
+                        ChargeState::Discharging,
+                    ));
+                    let cmds = ui.render(&p, 0.0, 0.0, 500.0);
+                    let bars = charge_bar_colors(&cmds, track);
+                    let c = *bars.first().expect("the charge bar should have been drawn");
+                    if let Some((other, _)) = rungs
+                        .iter()
+                        .find(|(_, s)| s.r == c.r && s.g == c.g && s.b == c.b)
+                    {
+                        panic!(
+                            "a battery at {charge}% is drawn exactly like one \
+                             at {other}% (light={light}), so the charge bar \
+                             cannot report how full the battery is"
+                        );
+                    }
+                    rungs.push((charge, c));
+                }
+            }
+        }
     }
 }

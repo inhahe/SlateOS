@@ -59,6 +59,7 @@ ACCT = "gui/desktop/src/user_accounts.rs"
 BT = "gui/desktop/src/bluetooth.rs"
 UPD = "gui/desktop/src/update_settings.rs"
 STOR = "gui/desktop/src/storage_settings.rs"
+POW = "gui/desktop/src/power_settings.rs"
 
 # (name, file, [(old, new), ...], [packages], [tests expected to fail])
 DEFECTS = [
@@ -808,6 +809,112 @@ DEFECTS = [
         [("            Self::Downloads => p.yellow,", "            Self::Downloads => p.peach,")],
         ["desktop"],
         ["the_ten_storage_categories_stay_distinct_in_both_modes"],
+    ),
+    # --- power_settings.rs (module 11) ---------------------------------------
+    # The labels have run out of three-letter combinations, so they widen to
+    # four. `main()` compares the whole prefix, not its first character, so
+    # "AAAA" and "A" are distinct selectors and nothing collides.
+    (
+        "YYY: the power panel keeps its own background",
+        POW,
+        [(
+            "            height: 900.0,\n            color: p.base,",
+            "            height: 900.0,\n            color: Color::from_hex(0x1E1E2E),",
+        )],
+        ["desktop"],
+        ["every_colour_the_panel_draws_comes_from_its_palette"],
+    ),
+    # Reachable only through the ChargeState::NotPresent arm of the sweep: with
+    # a battery present the summary bar is drawn and the battery tab has a body,
+    # so this caption is never emitted. It is the reason NotPresent is walked as
+    # its own case rather than as one more charge level.
+    (
+        "ZZZ: the no-battery caption keeps its own grey",
+        POW,
+        [("                color: p.overlay0,", "                color: Color::from_hex(0x6C7086),")],
+        ["desktop"],
+        ["every_colour_the_panel_draws_comes_from_its_palette"],
+    ),
+    (
+        "AAAA: the charge bar's track keeps its own grey",
+        POW,
+        [(
+            "            height: 6.0,\n            color: p.surface1,",
+            "            height: 6.0,\n            color: Color::from_hex(0x45475A),",
+        )],
+        ["desktop"],
+        ["every_colour_the_panel_draws_comes_from_its_palette"],
+    ),
+    (
+        "BBBB: the key column of every settings row keeps its own grey",
+        POW,
+        [(
+            "            color: p.subtext0,\n            font_weight: FontWeightHint::Regular,\n"
+            "            max_width: Some(width * 0.65),",
+            "            color: Color::from_hex(0xA6ADC8),\n"
+            "            font_weight: FontWeightHint::Regular,\n"
+            "            max_width: Some(width * 0.65),",
+        )],
+        ["desktop"],
+        ["every_colour_the_panel_draws_comes_from_its_palette"],
+    ),
+    # A wrong *role* rather than a leftover constant: peach is in both palettes,
+    # so the sweep is blind to it. Only varying the accent, and only checking
+    # that the rungs stay apart, can see it.
+    (
+        "CCCC: a battery in Poor health is repainted the user's accent",
+        POW,
+        [("            Self::Poor => p.peach,", "            Self::Poor => p.accent,")],
+        ["desktop"],
+        [
+            "the_power_panels_own_colours_do_not_follow_the_accent",
+            "the_battery_ladders_stay_distinct_in_both_modes",
+        ],
+    ),
+    (
+        "DDDD: the active tab's label stops following the accent",
+        POW,
+        [(
+            "                color: if active { p.accent } else { p.subtext0 },",
+            "                color: if active { p.blue } else { p.subtext0 },",
+        )],
+        ["desktop"],
+        ["the_power_panels_own_colours_do_not_follow_the_accent"],
+    ),
+    # The FFF/NNN/WWW shape a fourth time, and the cleanest instance of it yet:
+    # the tab label above still moves with the accent, so an assert_ne! over the
+    # union of this panel's two accent sites would pass with the plan list
+    # frozen. Only one assertion per site sees it.
+    (
+        "EEEE: the selected plan's label stops following the accent",
+        POW,
+        [(
+            "                color: if active { p.accent } else { p.text },",
+            "                color: if active { p.blue } else { p.text },",
+        )],
+        ["desktop"],
+        ["the_power_panels_own_colours_do_not_follow_the_accent"],
+    ),
+    (
+        "FFFF: the charge bar's middle band is repainted the user's accent",
+        POW,
+        [("            21..=50 => p.yellow,", "            21..=50 => p.accent,")],
+        ["desktop"],
+        [
+            "the_power_panels_own_colours_do_not_follow_the_accent",
+            "the_battery_ladders_stay_distinct_in_both_modes",
+        ],
+    ),
+    # Neither an accent bug nor a leftover constant: two rungs of the ladder
+    # given the same legal role. The bar still draws a colour from the palette
+    # and still ignores the accent -- it has simply stopped reporting anything,
+    # because a battery at 15% now looks exactly like one at 80%.
+    (
+        "GGGG: two rungs of the charge ladder collapse onto one colour",
+        POW,
+        [("            11..=20 => p.peach,", "            11..=20 => p.green,")],
+        ["desktop"],
+        ["the_battery_ladders_stay_distinct_in_both_modes"],
     ),
 ]
 

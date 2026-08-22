@@ -50335,7 +50335,7 @@ commands that carry the colour in question, and assert the two renders agree.
 Candidates: anything drawn on the wallpaper, on a video surface, on a
 thumbnail, or on any other content the palette does not own.
 
-**Part 2 progress. 14 of 49 modules converted.**
+**Part 2 progress. 15 of 49 modules converted.**
 
 - [x] `security_dialog.rs` — 29 constants, done 2026-08-22. The method above
   survived contact: the sweep lives in `gui/desktop/src/palette_check.rs` as
@@ -50861,6 +50861,91 @@ thumbnail, or on any other content the palette does not own.
     active tab is the one accent site, its fill is chosen by a boolean, so the
     test walks all three tabs as the active one rather than trusting whichever
     the fixture happened to open on.
+- [x] `backup_settings.rs` — 14 constants, done 2026-08-22. Harness defects
+  OOOOO–IIIIII (twenty-one), the largest set so far because this module has
+  the most accent sites of any converted yet: **nine**.
+  - **Nine accent sites, and the per-site rule finally earns its keep on a
+    pair that is genuinely indistinguishable.** The schedule tab draws six
+    switches — one "enable automatic backups" master and five retention
+    switches — and they are *the same 40x20 pill at the same x*, so nothing
+    about a rendered command says which of the two source sites emitted it.
+    They are two separate `if` expressions, though, and freezing either one
+    alone still leaves the six-pill vector different between two accents. The
+    first draft of the test asserted over all six and would have passed with
+    the retention loop frozen; defects VVVVV and WWWWW are that exact pair,
+    each freezing one site while the other keeps moving. The split is by draw
+    order — the master is first, its row being the top of the tab — which is
+    the only handle available and is worth stating out loud in the test, since
+    it is not obvious and not enforced by anything.
+  - **An `assert_ne!` on a foreground derived from its own background is a bug
+    in the test, not a check.** The three primary buttons ("Backup now",
+    "+ Add source", "+ Add rule") label themselves `p.on_accent()`, i.e.
+    `readable_on(accent)`. Every accent on offer is pale enough that all
+    fourteen resolve to the *same* near-black, so correct code draws the same
+    label under any two accents and the assertion fails on a green tree —
+    which is what it did on the first run. What separates `p.on_accent()` from
+    a frozen `p.crust` is the **mode**, not the accent, so the labels moved to
+    a separate test asserting equality with `readable_on` across both modes
+    (defects FFFFFF/GGGGGG). This is the same hole recorded under `run_dialog`
+    seen from the other side: there it made the sweep blind, here it makes a
+    negative assertion unsatisfiable. Rule: **never `assert_ne!` across accents
+    on anything that is `readable_on(accent)`.**
+  - **The blue-state trap, fourth appearance.** `BackupStatus::InProgress =>
+    BLUE` sits in a five-way match beside green/yellow/red/grey. It reads like
+    an obvious `p.accent` — a running backup is "active", and blue *is* the
+    default accent, so the mistake is invisible on a fresh install. It is a
+    category: on a Blue desktop the accent version looks identical, and on a
+    Green one a running backup becomes indistinguishable from a succeeded one.
+    Defect SSSSS is caught twice over, by the distinctness ladder and by the
+    frozen-union equality.
+  - **An alpha wash whose RGB is a role.** A disabled exclusion rule's row was
+    `Color::rgba(49, 50, 68, 128)` — Mocha `surface0` at half alpha, written
+    as a literal because no constant existed for "surface0 but faded". It
+    became `Color::rgba(p.surface0.r, p.surface0.g, p.surface0.b, 128)`. The
+    membership sweep compares on RGB only and so needs no `derived` entry for
+    it, but grep for bare `Color::rgba` in every module: a wash is a copy of
+    the palette that does not look like one.
+  - **An extractor keyed on bare geometry is a guess, and only a defect can
+    check the guess.** `radio_dots` matched every 8x8 fill, which is the
+    frequency radio's dot — *and* the history tab's status badge. Nothing in
+    the rendered command says which site emitted an 8x8 square. The damage was
+    not a false positive but a false *negative*: the same pattern is subtracted
+    in `colors_apart_from_the_controls`, so the status badges were quietly
+    removed from the frozen-union check on every tab, and a run's outcome could
+    have started following the accent with no test objecting. Defect SSSSS
+    caught the module's own `.color()` table but was recorded as `[MISSING]`
+    against the union check — which is the only reason the hole was found. The
+    fix qualifies both patterns by x (dot at 40, badge at 32, both tabs inset
+    by the same `cx = x + 24`). **This is the second geometric collision in
+    this one module** (the six switch pills were the first), so treat it as
+    routine, not bad luck: after writing an extractor, grep the module for the
+    shape it matches and confirm the count, and write at least one defect that
+    only the *other* widget can trigger.
+  - **Membership cannot check the two surfaces the panel is made of.**
+    `assert_drawn_from` has to allow `0x11111B` and `0xEFF1F5` at any alpha,
+    since those are the only two answers `readable_on` gives and any correctly
+    converted foreground is one of them. But `0x11111B` is also Mocha's
+    `crust` — so reverting the content well to the literal produces a render
+    the sweep is *obliged* to accept. Defect PPPPP was the first `*** NO TEST
+    FAILED ***` in the whole part-2 conversion, and it is structural rather
+    than an oversight. The answer is to stop asking about membership for these
+    two: `the_panels_own_surfaces_come_from_the_palette` names the role and
+    asserts equality with `p.base`/`p.crust` in both modes, which is strictly
+    stronger and also fails in *dark* mode, where a membership check never
+    could. Every module with a background and a recessed well needs this test;
+    the `run_dialog` note above described the same hole but only worked around
+    it by reading the code, which is what let it survive twelve more modules.
+  - **`pathlib.write_text` silently converted the file to CRLF**, which broke
+    every `\n`-containing harness pattern with `PATTERN NOT FOUND` while the
+    Rust still compiled and every test still passed — a failure that looks
+    exactly like a stale pattern. Any script that rewrites a source file in
+    place must use `write_bytes`, or pass `newline=""`. Both this module and
+    `scripts/reintro-palette.py` had to be normalised back to LF.
+  - **The active tab's label is the accent itself, not `on_accent`.** Unlike
+    the last two modules the tab strip has no fill behind the active tab —
+    the label alone carries the state, so it is `p.accent` directly and *does*
+    move between accents (defect TTTTT). Two adjacent modules, two different
+    correct answers; the shape of the widget decides, not the word "tab".
 
 **Trigger:** this is not blocked on anything. It is sequenced after the shell
 event loop (`TD-C-THE-SHELL-CAN-DRAW-ITSELF-AND-NOBODY-CAN-ASK-IT-TO`) only

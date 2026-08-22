@@ -63,6 +63,7 @@ POW = "gui/desktop/src/power_settings.rs"
 NET = "gui/desktop/src/network_indicator.rs"
 CLIP = "gui/desktop/src/clipboard_viewer.rs"
 NOTIF = "gui/desktop/src/notification_settings.rs"
+BACKUP = "gui/desktop/src/backup_settings.rs"
 
 # (name, file, [(old, new), ...], [packages], [tests expected to fail])
 DEFECTS = [
@@ -1304,6 +1305,237 @@ DEFECTS = [
         )],
         ["desktop"],
         ["the_panel_draws_nothing_that_is_immediately_erased"],
+    ),
+    (
+        "OOOOO: the panel's own background is left as a Mocha literal",
+        BACKUP,
+        [(
+            "            width,\n            height,\n            color: p.base,",
+            "            width,\n            height,\n            color: Color::from_hex(0x1E1E2E),",
+        )],
+        ["desktop"],
+        ["every_colour_the_panel_draws_comes_from_its_palette"],
+    ),
+    (
+        # The membership sweep cannot catch this one and never will: 0x11111B
+        # is Mocha's crust *and* one of the two answers readable_on gives, so
+        # assert_drawn_from is obliged to allow it. That is what makes this
+        # defect worth keeping — it is the proof that the equality test below
+        # is load-bearing rather than a restatement of the sweep.
+        "PPPPP: the content well behind every tab keeps its old crust literal",
+        BACKUP,
+        [(
+            "            height: content_h,\n            color: p.crust,",
+            "            height: content_h,\n            color: Color::from_hex(0x11111B),",
+        )],
+        ["desktop"],
+        ["the_panels_own_surfaces_come_from_the_palette"],
+    ),
+    (
+        "QQQQQ: an exclusion rule's description keeps its old grey (only drawn "
+        "on the exclusions tab)",
+        BACKUP,
+        [(
+            "                text: rule.description.clone(),\n                font_size: 10.0,\n                color: p.subtext0,",
+            "                text: rule.description.clone(),\n                font_size: 10.0,\n                color: Color::from_hex(0xA6ADC8),",
+        )],
+        ["desktop"],
+        ["every_colour_the_panel_draws_comes_from_its_palette"],
+    ),
+    (
+        "RRRRR: a finished run's file/size/duration line keeps its old grey "
+        "(only drawn when the history has entries)",
+        BACKUP,
+        [(
+            "                    font_size: 11.0,\n                    color: p.subtext0,\n                    font_weight: FontWeightHint::Regular,\n                    max_width: Some(width - 40.0),",
+            "                    font_size: 11.0,\n                    color: Color::from_hex(0xA6ADC8),\n                    font_weight: FontWeightHint::Regular,\n                    max_width: Some(width - 40.0),",
+        )],
+        ["desktop"],
+        ["every_colour_the_panel_draws_comes_from_its_palette"],
+    ),
+    (
+        "SSSSS: a running backup is repainted the user's accent — the "
+        "blue-state trap, since blue is also the default accent",
+        BACKUP,
+        [("            Self::InProgress => p.blue,", "            Self::InProgress => p.accent,")],
+        ["desktop"],
+        [
+            "the_backup_outcomes_stay_distinct_under_every_accent",
+            "every_control_that_offers_something_follows_the_accent",
+        ],
+    ),
+    (
+        "TTTTT: the active tab's label is frozen to blue, so it stops tracking "
+        "the accent",
+        BACKUP,
+        [(
+            "                color: if is_active { p.accent } else { p.subtext0 },",
+            "                color: if is_active { p.blue } else { p.subtext0 },",
+        )],
+        ["desktop"],
+        ["every_control_that_offers_something_follows_the_accent"],
+    ),
+    (
+        "UUUUU: the \"Backup now\" button is frozen to blue",
+        BACKUP,
+        [(
+            "            width: 120.0,\n            height: 36.0,\n            color: p.accent,",
+            "            width: 120.0,\n            height: 36.0,\n            color: p.blue,",
+        )],
+        ["desktop"],
+        ["every_control_that_offers_something_follows_the_accent"],
+    ),
+    (
+        "VVVVV: the automatic-backup master switch is frozen to blue (the five "
+        "retention switches below it still move, so a single assertion over "
+        "all six pills would not notice)",
+        BACKUP,
+        [(
+            "        let toggle_bg = if self.settings.enabled {\n            p.accent\n        } else {\n            p.surface2\n        };",
+            "        let toggle_bg = if self.settings.enabled {\n            p.blue\n        } else {\n            p.surface2\n        };",
+        )],
+        ["desktop"],
+        ["every_control_that_offers_something_follows_the_accent"],
+    ),
+    (
+        "WWWWW: the five retention switches are frozen to blue (the master "
+        "switch above them still moves — the mirror image of VVVVV)",
+        BACKUP,
+        [(
+            "            let toggle_color = if *enabled { p.accent } else { p.surface2 };",
+            "            let toggle_color = if *enabled { p.blue } else { p.surface2 };",
+        )],
+        ["desktop"],
+        ["every_control_that_offers_something_follows_the_accent"],
+    ),
+    (
+        "XXXXX: the chosen frequency's radio ring is frozen to blue",
+        BACKUP,
+        [(
+            "                color: if is_active { p.accent } else { p.surface2 },\n                corner_radii: CornerRadii::all(8.0),\n                line_width: 2.0,",
+            "                color: if is_active { p.blue } else { p.surface2 },\n                corner_radii: CornerRadii::all(8.0),\n                line_width: 2.0,",
+        )],
+        ["desktop"],
+        ["every_control_that_offers_something_follows_the_accent"],
+    ),
+    (
+        "YYYYY: the chosen frequency's dot is frozen to blue (its ring still "
+        "moves)",
+        BACKUP,
+        [(
+            "                    width: 8.0,\n                    height: 8.0,\n                    color: p.accent,",
+            "                    width: 8.0,\n                    height: 8.0,\n                    color: p.blue,",
+        )],
+        ["desktop"],
+        ["every_control_that_offers_something_follows_the_accent"],
+    ),
+    (
+        "ZZZZZ: the \"+ Add source\" button is frozen to blue",
+        BACKUP,
+        [(
+            "            width: 100.0,\n            height: 24.0,\n            color: p.accent,",
+            "            width: 100.0,\n            height: 24.0,\n            color: p.blue,",
+        )],
+        ["desktop"],
+        ["every_control_that_offers_something_follows_the_accent"],
+    ),
+    (
+        "AAAAAA: a source's checkbox outline is frozen to blue",
+        BACKUP,
+        [(
+            "                color: if source.enabled { p.accent } else { p.surface2 },",
+            "                color: if source.enabled { p.blue } else { p.surface2 },",
+        )],
+        ["desktop"],
+        ["every_control_that_offers_something_follows_the_accent"],
+    ),
+    (
+        "BBBBBB: a ticked source's tick is frozen to blue (its box still moves)",
+        BACKUP,
+        [(
+            "                    text: \"\\u{2713}\".to_string(),\n                    font_size: 12.0,\n                    color: p.accent,",
+            "                    text: \"\\u{2713}\".to_string(),\n                    font_size: 12.0,\n                    color: p.blue,",
+        )],
+        ["desktop"],
+        ["every_control_that_offers_something_follows_the_accent"],
+    ),
+    (
+        "CCCCCC: the \"+ Add rule\" button is frozen to blue",
+        BACKUP,
+        [(
+            "            width: 80.0,\n            height: 24.0,\n            color: p.accent,",
+            "            width: 80.0,\n            height: 24.0,\n            color: p.blue,",
+        )],
+        ["desktop"],
+        ["every_control_that_offers_something_follows_the_accent"],
+    ),
+    (
+        "DDDDDD: an exclusion rule's switch is frozen to blue",
+        BACKUP,
+        [(
+            "            let toggle_bg = if rule.enabled { p.accent } else { p.surface2 };",
+            "            let toggle_bg = if rule.enabled { p.blue } else { p.surface2 };",
+        )],
+        ["desktop"],
+        ["every_control_that_offers_something_follows_the_accent"],
+    ),
+    (
+        "EEEEEE: the two destructive remove crosses are repainted the user's "
+        "accent (listed twice because each edit replaces one occurrence, and "
+        "repainting one of an identical pair is not a mistake anyone makes)",
+        BACKUP,
+        [
+            (
+                "                text: \"\\u{2715}\".to_string(),\n                font_size: 12.0,\n                color: p.red,",
+                "                text: \"\\u{2715}\".to_string(),\n                font_size: 12.0,\n                color: p.accent,",
+            ),
+            (
+                "                text: \"\\u{2715}\".to_string(),\n                font_size: 12.0,\n                color: p.red,",
+                "                text: \"\\u{2715}\".to_string(),\n                font_size: 12.0,\n                color: p.accent,",
+            ),
+        ],
+        ["desktop"],
+        ["every_control_that_offers_something_follows_the_accent"],
+    ),
+    (
+        "FFFFFF: the \"Backup now\" label is fixed to crust instead of being "
+        "chosen for its own fill — right in dark mode, unreadable in light",
+        BACKUP,
+        [(
+            "            text: \"Backup now\".to_string(),\n            font_size: 13.0,\n            color: p.on_accent(),",
+            "            text: \"Backup now\".to_string(),\n            font_size: 13.0,\n            color: p.crust,",
+        )],
+        ["desktop"],
+        ["each_buttons_label_is_legible_on_it"],
+    ),
+    (
+        "GGGGGG: the \"+ Add rule\" label is fixed instead of chosen for its "
+        "own fill",
+        BACKUP,
+        [(
+            "            text: \"+ Add rule\".to_string(),\n            font_size: 11.0,\n            color: p.on_accent(),",
+            "            text: \"+ Add rule\".to_string(),\n            font_size: 11.0,\n            color: p.base,",
+        )],
+        ["desktop"],
+        ["each_buttons_label_is_legible_on_it"],
+    ),
+    (
+        "HHHHHH: a disabled exclusion rule's row is washed over the opaque row "
+        "beneath it at full alpha, erasing it",
+        BACKUP,
+        [(
+            "                Color::rgba(p.surface0.r, p.surface0.g, p.surface0.b, 128)\n            };\n\n            cmds.push(RenderCommand::FillRect {\n                x,\n                y: row_y,\n                width,\n                height: 44.0,",
+            "                Color::rgba(p.surface0.r, p.surface0.g, p.surface0.b, 128)\n            };\n\n            cmds.push(RenderCommand::FillRect {\n                x,\n                y: row_y,\n                width,\n                height: 0.0,",
+        )],
+        ["desktop"],
+        ["the_panel_draws_nothing_that_is_immediately_erased"],
+    ),
+    (
+        "IIIIII: a cancelled run and a running one collapse onto the same grey",
+        BACKUP,
+        [("            Self::Cancelled => p.overlay0,", "            Self::Cancelled => p.blue,")],
+        ["desktop"],
+        ["the_backup_outcomes_stay_distinct_under_every_accent"],
     ),
 ]
 

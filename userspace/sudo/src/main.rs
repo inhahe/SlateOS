@@ -3425,7 +3425,10 @@ mod tests {
         let mut auth = scratch_authenticator();
 
         let mut locked = auth_fixture();
-        locked.find_mut("alice").expect("alice exists").set_locked(true);
+        locked
+            .find_mut("alice")
+            .expect("alice exists")
+            .set_locked(true);
         for _ in 0..FREE_ATTEMPTS_HEADROOM {
             assert!(authenticate_against(&mut auth, &locked, "alice", "hunter2").is_err());
         }
@@ -3535,18 +3538,46 @@ mod tests {
     /// honoured here. `Authenticator::with_faillock` is what `login`, `su` and
     /// the greeter share on a real system; two authenticators pointed at one
     /// file stand in for two programs.
+    /// A clock that does not move, for the test below.
+    ///
+    /// It has to be a `fn()` because that is what `with_clock` takes, and it
+    /// can be a *constant* one — unlike authlib's own rate-limit tests, which
+    /// need a settable static because they check that a delay expires. This
+    /// test never advances time, so there is no cell for a concurrently
+    /// running test to write and nothing to serialise.
+    fn frozen_now() -> u64 {
+        1_000_000
+    }
+
     #[test]
     fn sudo_honours_a_delay_earned_at_another_prompt() {
-        let dir = std::env::temp_dir().join("sudo-faillock-share-test");
+        // A unique directory per process: two lanes routinely build at once,
+        // and a fixed path would have two concurrent runs of this binary
+        // deleting each other's faillock file mid-test.
+        let dir =
+            std::env::temp_dir().join(format!("sudo-faillock-share-test-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("a scratch directory under the temp dir");
         let faillock = dir.join("faillock");
         let missing = std::path::Path::new("/nonexistent/sudo-tests");
 
+        // Both halves read one frozen clock. Against the real one this test
+        // failed about one run in three, and correctly so: the tally is stamped
+        // in whole seconds, and the loop below stops at the *first* delay it
+        // earns, which is `1 << 0` — one second. What survives to the assertion
+        // is therefore not a second but whatever is left of the current one, so
+        // a ~0.1s test starting near a second boundary watches the delay expire
+        // before it can check for it. The production code was right; the
+        // question was time-dependent. Pinning the clock removes the dependency
+        // without weakening what is proved — that two authenticators over one
+        // faillock file share a tally. Reported by lane C in
+        // `requests/c-b-sudo-faillock-sharing-test-races-the-wall-clock.md`.
+
         // `login` (or `su`, or the greeter) burns through the allowance.
         {
-            let mut elsewhere =
-                authlib::Authenticator::with_stores(missing, missing).with_faillock(&faillock);
+            let mut elsewhere = authlib::Authenticator::with_stores(missing, missing)
+                .with_faillock(&faillock)
+                .with_clock(frozen_now);
             while elsewhere.rate_limited("alice").is_none() {
                 elsewhere.note_failure("alice");
             }
@@ -3554,8 +3585,9 @@ mod tests {
 
         // `sudo` starts fresh, reads the same file, and refuses.
         let db = auth_fixture();
-        let mut auth =
-            authlib::Authenticator::with_stores(missing, missing).with_faillock(&faillock);
+        let mut auth = authlib::Authenticator::with_stores(missing, missing)
+            .with_faillock(&faillock)
+            .with_clock(frozen_now);
         assert!(
             auth.rate_limited("alice").is_some(),
             "a delay earned at another prompt must be honoured here"
@@ -4731,7 +4763,10 @@ alice ALL = (root) /usr/bin/apt, NOPASSWD: /usr/bin/ls
         let extended = parse_sudoers("Defaults env_keep+=\"CUSTOM_VAR\"\n").unwrap();
         let keep = extended.env_keep_list();
         assert!(keep.contains(&"CUSTOM_VAR".to_string()));
-        assert!(keep.contains(&"TERM".to_string()), "`+=` keeps the built-ins");
+        assert!(
+            keep.contains(&"TERM".to_string()),
+            "`+=` keeps the built-ins"
+        );
     }
 
     #[test]
@@ -5181,7 +5216,10 @@ alice ALL = (root) /usr/bin/apt, NOPASSWD: /usr/bin/ls
 
     #[test]
     fn validate_malformed_command_list_is_an_error() {
-        for content in ["alice ALL = NOPASSWD:\n", "alice ALL = NOPASSWORD: /bin/ls\n"] {
+        for content in [
+            "alice ALL = NOPASSWD:\n",
+            "alice ALL = NOPASSWORD: /bin/ls\n",
+        ] {
             let errors = validate_sudoers(content, false);
             assert!(
                 errors.iter().any(|e| !e.is_warning),

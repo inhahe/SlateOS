@@ -50335,7 +50335,7 @@ commands that carry the colour in question, and assert the two renders agree.
 Candidates: anything drawn on the wallpaper, on a video surface, on a
 thumbnail, or on any other content the palette does not own.
 
-**Part 2 progress. 6 of 49 modules converted.**
+**Part 2 progress. 7 of 49 modules converted.**
 
 - [x] `security_dialog.rs` — 29 constants, done 2026-08-22. The method above
   survived contact: the sweep lives in `gui/desktop/src/palette_check.rs` as
@@ -50519,6 +50519,41 @@ thumbnail, or on any other content the palette does not own.
     `derived` declaration, for the reason recorded under `device_settings.rs`:
     the sweep compares roles on RGB alone. Defect RR replaces it with Mocha
     green's channels at the same alpha and the light sweep still names it.
+- [x] `user_accounts.rs` — 14 constants, done 2026-08-22. Harness defects
+  UU/VV/WW/XX/YY/ZZ.
+  - **A fourth shape, and the first that cannot be converted by substitution: a
+    `const [Color; N]` table.** `AVATAR_COLORS` was seven Mocha constants in an
+    array, indexed by a `u8` read straight off disk. A palette resolved at
+    runtime cannot live in a `const`, so the table became
+    `fn avatar_colors(p: &Palette) -> [Color; 7]`. Add tables to the survey
+    checklist: a whole-file grep for `Color::from_hex`/`Color::rgba` finds the
+    *definition* of such a table, but the thing that has to change is every
+    signature that reads it — here three public methods
+    (`AccountType::badge_color`, `Avatar::palette_color`,
+    `Avatar::background_color`) all gained a `&Palette`.
+  - **The avatar table settles the categorical question on a new ground:
+    distinctness.** The seven colours are identity — how you tell accounts
+    apart at a glance — so they are categorical for the same reason a risk
+    level is. But they carry an extra constraint no other categorical row has:
+    they must stay mutually *distinct*, which an accent-following member could
+    not guarantee, since it would collide with whichever of the seven the
+    accent happened to equal. `the_avatar_colours_stay_distinct_in_both_modes`
+    asserts it directly; defect XX proves the sweep sees the seventh slot at
+    all, which it only does because the fixture makes one account per slot.
+  - The blue-state trap for the third time: `AccountType::Standard` is blue,
+    blue is the default accent, and its two siblings (`Administrator` red,
+    `Guest` grey) are what settle it. Defect YY is that substitution and is
+    caught only by `a_users_identity_colours_do_not_follow_the_accent`; defect
+    ZZ freezes the active tab label on blue and is caught only by that test's
+    `assert_ne!` half — the second independent confirmation of the TT lesson.
+  - The "on" toggle stayed `p.green` rather than becoming `p.accent`, same
+    disposition and same reason as `notif_pane.rs` and `window_rules.rs`: the
+    shell disagrees with itself about which an on-switch uses, and a conversion
+    is not the place to settle it. Three modules now carry that note; when the
+    49 are done it is one small pass, not 49 judgement calls.
+  - Two `MOCHA_MANTLE` sites became `readable_on(...)` — the initials on the
+    avatar circle and the label on the account-type pill. Both sit *on* a
+    coloured fill whose hue is chosen by data, so neither is a palette role.
 
 **Trigger:** this is not blocked on anything. It is sequenced after the shell
 event loop (`TD-C-THE-SHELL-CAN-DRAW-ITSELF-AND-NOBODY-CAN-ASK-IT-TO`) only

@@ -52,7 +52,7 @@ DESK = "gui/desktop/src/lib.rs"
 SEC = "gui/desktop/src/security_dialog.rs"
 RUN = "gui/desktop/src/run_dialog.rs"
 ICON = "gui/desktop/src/icons.rs"
-NOTIF = "gui/desktop/src/notif_pane.rs"
+NOTIF_PANE = "gui/desktop/src/notif_pane.rs"
 DEV = "gui/desktop/src/device_settings.rs"
 RULES = "gui/desktop/src/window_rules.rs"
 ACCT = "gui/desktop/src/user_accounts.rs"
@@ -62,7 +62,7 @@ STOR = "gui/desktop/src/storage_settings.rs"
 POW = "gui/desktop/src/power_settings.rs"
 NET = "gui/desktop/src/network_indicator.rs"
 CLIP = "gui/desktop/src/clipboard_viewer.rs"
-NOTIF = "gui/desktop/src/notification_settings.rs"
+NOTIF_SET = "gui/desktop/src/notification_settings.rs"
 BACKUP = "gui/desktop/src/backup_settings.rs"
 
 # (name, file, [(old, new), ...], [packages], [tests expected to fail])
@@ -407,7 +407,7 @@ DEFECTS = [
         # The pane's own background, drawn on every frame it is open. The
         # cheapest possible miss, and the one a sweep must obviously catch.
         "GG: the notification pane keeps its own Mocha base",
-        NOTIF,
+        NOTIF_PANE,
         [("            height: screen_height,\n            color: p.base,",
           "            height: screen_height,\n"
           "            color: Color::from_hex(0x1E1E2E),")],
@@ -419,7 +419,7 @@ DEFECTS = [
         # `hovered` axis were dropped the sweep would still pass, and this
         # constant would ship.
         "HH: the dismiss button, which only exists on hover, keeps Mocha surface2",
-        NOTIF,
+        NOTIF_PANE,
         [("                height: DISMISS_BTN_SIZE,\n                color: p.surface2,",
           "                height: DISMISS_BTN_SIZE,\n"
           "                color: Color::from_hex(0x585B70),")],
@@ -429,7 +429,7 @@ DEFECTS = [
     (
         # Only drawn on the per-app settings page, behind the "Settings" link.
         "II: the per-app enabled pill, behind the settings view, keeps Mocha green",
-        NOTIF,
+        NOTIF_PANE,
         [("            let pill_bg = if app.enabled { p.green } else { p.surface2 };",
           "            let pill_bg = if app.enabled {\n"
           "                Color::from_hex(0xA6E3A1)\n"
@@ -443,7 +443,7 @@ DEFECTS = [
         # Only drawn when there is nothing to draw. A state matrix that only
         # ever renders a populated pane never reaches this line at all.
         "JJ: the empty-list caption, drawn only when there are no notifications",
-        NOTIF,
+        NOTIF_PANE,
         [('                text: "No notifications".to_string(),\n'
           "                color: p.overlay0,",
           '                text: "No notifications".to_string(),\n'
@@ -461,7 +461,7 @@ DEFECTS = [
         #
         # Expect this one to be caught by the accent test and NOT by the sweep.
         "KK: an urgent notification is painted in the accent instead of red",
-        NOTIF,
+        NOTIF_PANE,
         [("            Self::Urgent => p.red,", "            Self::Urgent => p.accent,")],
         ["desktop"],
         ["a_notification_priority_does_not_follow_the_accent"],
@@ -1183,7 +1183,7 @@ DEFECTS = [
     # ---- notification_settings.rs -------------------------------------------
     (
         "DDDDD: the notification panel's own background is left as a Mocha literal",
-        NOTIF,
+        NOTIF_SET,
         [(
             "            width,\n            height,\n            color: p.base,",
             "            width,\n            height,\n            color: Color::from_hex(0x1E1E2E),",
@@ -1194,7 +1194,7 @@ DEFECTS = [
     (
         "EEEEE: the \"no apps\" caption keeps its old grey (only drawn when the "
         "search matches nothing)",
-        NOTIF,
+        NOTIF_SET,
         [(
             '                text: "No registered apps".into(),\n'
             "                font_size: 13.0,\n"
@@ -1209,7 +1209,7 @@ DEFECTS = [
     (
         "FFFFF: the High rung of the priority scale keeps its old yellow (only "
         "drawn for a High notification, on the History tab)",
-        NOTIF,
+        NOTIF_SET,
         [(
             "            Self::High => p.yellow,",
             "            Self::High => Color::from_hex(0xF9E2AF),",
@@ -1220,7 +1220,7 @@ DEFECTS = [
     (
         "GGGGG: the history filter badge's caption keeps its old blue (only "
         "drawn while a per-app history filter is set)",
-        NOTIF,
+        NOTIF_SET,
         [(
             '                text: format!("Filtered: {}", filter_app),\n'
             "                font_size: 11.0,\n"
@@ -1234,7 +1234,7 @@ DEFECTS = [
     ),
     (
         "HHHHH: the active tab is frozen to blue, so it stops tracking the accent",
-        NOTIF,
+        NOTIF_SET,
         [(
             "                color: if active { p.accent } else { p.surface0 },",
             "                color: if active { p.blue } else { p.surface0 },",
@@ -1247,7 +1247,7 @@ DEFECTS = [
     ),
     (
         "IIIII: the active tab's label is fixed instead of chosen for its own fill",
-        NOTIF,
+        NOTIF_SET,
         [(
             "                color: if active { p.on_accent() } else { p.subtext0 },",
             "                color: if active { p.crust } else { p.subtext0 },",
@@ -1258,7 +1258,7 @@ DEFECTS = [
     (
         "JJJJJ: the ON/OFF badge's label is fixed, which is legible on Mocha's "
         "pale green by luck and not on Latte's deep green",
-        NOTIF,
+        NOTIF_SET,
         [(
             "                color: appearance::readable_on(badge_color),",
             "                color: p.crust,",
@@ -1269,7 +1269,7 @@ DEFECTS = [
     (
         "KKKKK: the Urgent stripe is repainted the user's accent, so a scale "
         "starts meaning selection",
-        NOTIF,
+        NOTIF_SET,
         [("            Self::Urgent => p.red,", "            Self::Urgent => p.accent,")],
         ["desktop"],
         [
@@ -1280,7 +1280,7 @@ DEFECTS = [
     (
         "LLLLL: the volume bar's fill is repainted the user's accent, so a "
         "measurement starts meaning selection",
-        NOTIF,
+        NOTIF_SET,
         [(
             "                width: fill_w,\n                height: 6.0,\n                color: p.blue,",
             "                width: fill_w,\n                height: 6.0,\n                color: p.accent,",
@@ -1291,14 +1291,14 @@ DEFECTS = [
     (
         "MMMMM: the volume bar's track is drawn even at full volume, where the "
         "fill covers it exactly",
-        NOTIF,
+        NOTIF_SET,
         [("        if fill_w < bar_w {", "        if fill_w <= bar_w {")],
         ["desktop"],
         ["the_panel_draws_nothing_that_is_immediately_erased"],
     ),
     (
         "NNNNN: the unread dot is emitted with zero height",
-        NOTIF,
+        NOTIF_SET,
         [(
             "                    width: 8.0,\n                    height: 8.0,\n                    color: p.blue,",
             "                    width: 8.0,\n                    height: 0.0,\n                    color: p.blue,",
@@ -1565,6 +1565,30 @@ def run_tests(pkg):
     return failed, out
 
 
+def check(snap):
+    """Report every defect whose pattern no longer matches, without building.
+
+    A defect that has silently stopped applying is worse than no defect at
+    all: the harness prints PATTERN NOT FOUND in the middle of a run that
+    takes an hour, and the line scrolls past. Worse, nothing forces that run
+    to happen — a rustfmt pass, a rename, or (as actually happened here) two
+    file constants given the same name will rot a defect that nobody looks at
+    again until the module it guards is next touched. This pass is seconds,
+    takes no toolchain, and answers the only question that rots.
+    """
+    bad = 0
+    for name, path, edits, _pkgs, _expect in DEFECTS:
+        text = snap[path].decode("utf-8")
+        for i, (old, new) in enumerate(edits):
+            if old not in text:
+                print(f"PATTERN NOT FOUND  {name}\n    edit {i} in {path}")
+                bad += 1
+                break
+            text = text.replace(old, new, 1)
+    print(f"\n{len(DEFECTS)} defects, {bad} stale")
+    return 1 if bad else 0
+
+
 def main():
     files = sorted({d[1] for d in DEFECTS})
     snap = {f: (ROOT / f).read_bytes() for f in files}
@@ -1573,6 +1597,9 @@ def main():
     for f in files:
         print(f"  {digest[f][:16]}  {f}")
     print()
+
+    if sys.argv[1:2] == ["--check"]:
+        sys.exit(check(snap))
 
     only = sys.argv[1:]
     verdicts = []

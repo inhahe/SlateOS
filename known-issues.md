@@ -50178,7 +50178,44 @@ the feature is not near enough to specify an interface against.
 program the user runs, silently and continuously. The desktop works; the
 privacy property a user would assume it has is simply absent.
 
-## TD-C-FORTY-NINE-SHELL-MODULES-CARRY-THEIR-OWN-COPY-OF-THE-PALETTE
+## TD-C-FORTY-NINE-SHELL-MODULES-CARRY-THEIR-OWN-COPY-OF-THE-PALETTE — PART 1 DONE 2026-08-22, PART 2 OPEN
+
+**Status, 2026-08-22.** Part 1 below is **done**: `appearance::Palette` exists,
+carries the light ladder as well as the dark one, and `DecorationColors` and
+`DesktopTheme` are rewritten to read roles out of it instead of repeating its
+values. Part 2 — threading `&Palette` through the 49 modules and deleting the
+549 constants — is **still open**, and is now unblocked in the sense the entry
+originally meant: the type it needed to thread exists.
+
+Three things worth carrying forward from doing part 1:
+
+- **The "33 distinct values" figure below was wrong**, and low. The survey that
+  part 1 started from counted **91 distinct constant names** across the 549
+  declarations, collapsing to **18 roles** (10 rungs of the surface/text ladder
+  plus 8 named hues) once composites and near-duplicates were resolved. The
+  original 33 appears to have counted values rather than names and to have
+  missed the modules that spell the same role differently.
+- **Two names carried genuinely conflicting values,** so part 2 cannot be a
+  blind substitution of role for name. `BASE` is opaque in 26 modules and
+  `rgba(30, 30, 46, 240)` in 2 — the translucent ones are panels, and become
+  `Palette::panel_bg()`. `SHADOW` is declared at three different alphas
+  (100/120/160) plus a separate `LABEL_SHADOW` at 180; the first three are one
+  role at 120 (`shadow()`), and `LABEL_SHADOW` stays separate as
+  `text_shadow()` because its job is legibility over an arbitrary wallpaper
+  rather than elevation over a known surface.
+- **Catppuccin's own Latte `subtext0` is not legible enough to ship.** It
+  measures 4.37:1 on the Latte base, under the 4.5:1 body-text floor, while
+  Mocha's counterpart is 7.37:1. `LIGHT_SUBTEXT0` is therefore `#686B80`, not
+  upstream's `#6C6F85` — see design-decisions §525.
+
+Part 1 is proved by `scripts/reintro-palette.py`, which reintroduces 19
+defects one at a time and confirms each is caught by the test that names it.
+That harness found a real latent defect while doing so (defect Q): the first
+version of `DecorationColors::from_settings` built its frame from
+`Palette::for_mode` and painted the accent on afterwards, so a frame was
+always assembled from a palette carrying the *default* accent. Fixed by
+`from_palette(&Palette)` being the single body, with the mode path and the
+settings path each passing the palette they mean.
 
 **In short:** The desktop has a settings page where the user picks light or
 dark mode, an accent colour, and how transparent panels should be. Almost
@@ -50218,7 +50255,7 @@ anything.
 
 **Proper fix, in two parts — the second is the easy one:**
 
-1. **`gui/appearance` cannot currently answer the question.** It resolves
+1. **[DONE 2026-08-22] `gui/appearance` cannot currently answer the question.** It resolves
    *accents* for both schemes (`color` / `color_light`) but the base, surface,
    overlay and text colours exist only as the hardcoded dark values. Nothing in
    the tree knows what a window background is in light mode. So the fix starts
@@ -50227,9 +50264,56 @@ anything.
    `TransparencyLevel` (Catppuccin Latte for light, Mocha for dark, which is
    what the existing constants already are). Until that type exists there is
    nothing to thread.
-2. Then thread `&Palette` through the render functions of the 49 modules and
-   delete the 549 constants. Mechanical, large, and safe: a module that no
-   longer declares a colour cannot disagree about one.
+2. **[OPEN]** Then thread `&Palette` through the render functions of the 49
+   modules and delete the 549 constants. Mechanical, large, and safe: a module
+   that no longer declares a colour cannot disagree about one. Read the three
+   findings at the top of this entry first — `BASE` and `SHADOW` each mean two
+   different things depending on the module, so this is not a blind rename.
+
+**Method for part 2, surveyed 2026-08-22.** Two things make it much smaller
+than the 549 figure suggests:
+
+- **No module's render function has a caller outside its own file.** Checked
+  across `gui/` and `apps/`: nothing references `security_dialog::`,
+  `login_screen::`, `print_manager::` and so on — these are state machines
+  built ahead of the shell binary that will drive them, and their `render()`s
+  are exercised only by their own `#[cfg(test)]` modules. So adding a
+  `p: &Palette` parameter is a *within-file* change, not a signature change
+  that ripples through the crate. Only `lib.rs` mentions `DesktopTheme` or
+  `Palette` at all today.
+- **The colour uses cluster in a handful of functions per module.**
+  `security_dialog.rs` is the worst file at 29 constants, and its 44 `theme::`
+  references sit in five functions — `render`, `render_shield_icon`,
+  `render_detail_row`, `render_button`, `render_checkbox` — plus
+  `RiskLevel::color`, which becomes `color(self, p: &Palette)`.
+
+**The verification, which is the part worth getting right.** Do not eyeball 549
+substitutions. Each converted module gets a sweep that renders its state
+*twice*, once per mode, and asserts that every colour the light render emits is
+drawn from the light palette: the set of `Palette` fields for that mode, their
+alpha variants, black at any alpha (scrims and shadows are an absence of light,
+§525 decision 3), and the two `readable_on` endpoints. A constant left behind is
+by definition a *Mocha* value, so it fails that membership check in light mode
+and names itself. This catches a missed replacement mechanically, which is the
+only way a change this size can be trusted.
+
+One wrinkle to encode rather than rediscover: `readable_on` returns `0x11111B`
+or `0xEFF1F5`, and `0x11111B` *is* Mocha `crust`. It has to be allowed in a
+light render — it is the deliberate dark extreme, not a leftover — which means
+the sweep cannot catch a stray literal `CRUST`. Everything else it catches.
+
+Mapping for the alias names, which recur across modules and are the only part
+that needs judgement rather than substitution:
+
+| Declared as | Becomes | Note |
+|---|---|---|
+| `SHIELD_BG`, `BUTTON_BG`, `DETAILS_BORDER` = `0x45475A`/`0x313244` | `p.surface0` / `p.surface1` | plain role aliases |
+| `BUTTON_HOVER` = `0x585B70` | `p.surface2` | |
+| `DETAILS_BG` = `0x181825` | `p.mantle` | |
+| `RISK_LOW`/`MEDIUM`/`HIGH`/`CRITICAL` | `p.green`/`p.yellow`/`p.peach`/`p.red` | categorical, must **not** follow the accent |
+| `SHADOW` = `rgba(0,0,0,160)` | `p.shadow()` | one value replaces the shell's three (100/120/160) |
+| `DIMMER` = `rgba(0,0,0,120)` | `p.scrim()` | 140; deliberately unified |
+| `ALLOW_TEXT`, `DENY_TEXT` = `0x1E1E2E` | `readable_on(p.green)`, `readable_on(p.red)` | **the one trap** — see item 2 below |
 
 Do **not** do part 2 without part 1 — threading a struct whose light variant
 does not exist yet just relocates the hardcoding into the struct's
@@ -50247,6 +50331,194 @@ defect observed from the settings end.
 picks Light gets a desktop that is light in five places and dark in every
 other, which reads as a broken theme rather than an unimplemented one — worse
 than having no setting at all.
+---
+
+### TD-C-THE-TOOLKIT-HOLDS-A-THIRD-COPY-OF-THE-PALETTE-AND-DISAGREES-WITH-ITSELF-ABOUT-IT — 2026-08-22 — OPEN
+
+**In short.** Widgets (buttons, text fields, scrollbars — the controls apps are
+built from) get their colours from `gui/toolkit`, which keeps its own
+hand-written table of the same Catppuccin values the shell was keeping 549
+copies of. That is a third copy, after the shell's and `gui/appearance`'s. It
+is not currently *wrong* on screen, but it is already drifting in the one way
+that matters: the comments in it name roles that do not match the values beside
+them, so the next person to edit it by role will pick the wrong hex.
+
+**Where:** `gui/toolkit/src/theme.rs` — `Theme::catppuccin_mocha` (~:190) and
+`Theme::catppuccin_latte` (:232). The Latte table is the clearer case:
+
+| Line | Value | Comment says | Latte actually calls it |
+|---|---|---|---|
+| :238 | `0xE6E9EF` | `Surface0` | `mantle` |
+| :239 | `0xDCE0E8` | `Surface1 (Crust)` | `crust` |
+| :258 | `0xBCC0CC` | `Surface2` | `surface1` |
+| :260 | `0xCCD0DA` | `Surface1` | `surface0` |
+| :262 | `0xE6E9EF` | `Surface0 (Mantle)` | `mantle` |
+
+Two comments (`:239`, `:262`) name *two* roles for one value, which is a
+comment author noticing the disagreement and recording both rather than
+resolving it. The ladder is shifted by one rung throughout, so "Surface1"
+means three different colours in this one function.
+
+**The concrete defect inside it:** `:243` `text_secondary: 0x6C6F85`. That is
+upstream Latte `subtext0`, and it measures **4.37:1** on `background`
+(`0xEFF1F5`) — under the 4.5:1 WCAG floor for body text, which is what
+secondary label text is. `gui/appearance` rejected exactly this value when the
+light palette was built and uses `0x686B80` (4.64:1) instead; see
+design-decisions §525. So the toolkit currently ships a light theme whose
+secondary text is measurably illegible, and the crate next door already knows
+the right answer.
+
+**Reproduce:** compute the WCAG contrast of `0x6C6F85` against `0xEFF1F5`
+(relative luminance, `(L1+0.05)/(L2+0.05)`) — 4.37. Or read `:238`–`:239`
+against Catppuccin Latte's published palette and note the roles named in the
+comments are not the roles the values are.
+
+**Why it shipped:** the toolkit predates `appearance::Palette` and could not
+have depended on it — and it still has a genuine reason to keep a type of its
+own, because `Theme` carries widget-level roles (`primary_hover`,
+`scrollbar_track`, `border_focus`) that are not palette roles and should not
+become them. What it does not need is its own *values*.
+
+**Proper fix:** keep `Theme` as the widget-role type, and derive both
+constructors from `appearance::Palette` — `catppuccin_latte()` becomes
+`Theme::from_palette(&Palette::for_mode(true))`, mapping each widget role onto
+a palette role once, the same shape `DesktopTheme::from_palette` now has. That
+deletes the hand-written hex, makes the ladder-off-by-one impossible to write,
+and makes the legibility fix propagate rather than needing to be applied twice.
+The dependency direction is right: `appearance` is below `toolkit` and already
+in its graph.
+
+**Trigger:** best done as part 2 of
+`TD-C-FORTY-NINE-SHELL-MODULES-CARRY-THEIR-OWN-COPY-OF-THE-PALETTE` or
+immediately after it, while the mapping is fresh. Not urgent on its own, with
+one exception: the `text_secondary` contrast is a shipped accessibility defect
+and can be fixed on its own in one line without waiting for the refactor.
+
+**If never fixed:** a user on the light theme reads secondary labels at 4.37:1,
+and the next edit to the toolkit's ladder lands one rung off because the
+comments say it should.
+---
+
+### TD-C-EVERY-APPLICATION-CARRIES-ITS-OWN-COPY-OF-THE-PALETTE-TOO — 2026-08-22 — OPEN
+
+**In short.** The same defect as
+`TD-C-FORTY-NINE-SHELL-MODULES-CARRY-THEIR-OWN-COPY-OF-THE-PALETTE`, four times
+larger, in `apps/` rather than the shell. **2,258** `const NAME: Color`
+declarations across **135 files** in **~90 applications**, all of them the dark
+theme written out by hand. So a user who picks Light gets a light shell (once
+that entry's part 2 lands) containing entirely dark applications — which is a
+worse-looking result than today, where at least everything is uniformly wrong.
+
+**Where:** `apps/**/src/*.rs`. 240 distinct names, and the top of the list is
+the same ladder the shell had: `BASE` 103, `BLUE` 103, `SURFACE0` 102,
+`SUBTEXT0` 102, `GREEN` 102, `PEACH` 101, `OVERLAY0`/`RED`/`YELLOW` 100 each,
+`MANTLE` 99, `SURFACE1` 97, `TEAL` 86, `LAVENDER` 82, `MAUVE` 81, `CRUST` 79.
+Worst single files: `apps/mahjong/src/main.rs` (28), `apps/checkers` (27),
+`apps/reversi` (27), `apps/gomoku` (26), `apps/sysinfo` (26).
+
+**Measured, so it can be re-measured:** match
+`^\s*(?:pub )?const ([A-Z0-9_]+)\s*:\s*Color\s*=\s*(.+?);\s*$` over
+`apps/**/*.rs`, excluding `target/`.
+
+**The copies mostly agree — but not entirely, and the exception is in the
+authority.** Grouping each name by value shows nearly every "disagreement" is
+one colour spelled two ways: `BASE` is `Color::from_hex(0x1E1E2E)` in 98 places
+and `Color::rgb(30, 30, 46)` in 4 (`apps/benchmark` spells the whole ladder in
+decimal). One name is a genuine special case rather than a disagreement —
+`apps/launcher/src/main.rs` has `BASE = Color::rgba(30, 30, 46, 240)`, a
+translucent panel, the identical case the shell had, resolving the same way to
+`Palette::panel_bg()`.
+
+And one is simply **wrong**: `SKY`. Catppuccin Mocha's Sky is `#89DCEB`, which
+is what `apps/calendar`, `apps/charmap`, `apps/diagram`, `apps/finance`,
+`apps/ircclient`, `apps/logviewer` and `gui/toolkit/src/theme.rs` all say. But
+`gui/appearance/src/lib.rs:61` — the crate that *owns* the answer — says
+`0x89DCFE`, and that value had already propagated into `apps/alarmclock`,
+`apps/emojipicker` and `apps/unitconverter`. It is a one-character
+transposition (`EB` → `FE`), and it means `AccentColor::Sky.color()` returns a
+colour Catppuccin does not contain, so a user who picks the Sky accent gets a
+slightly-off blue everywhere the setting actually reaches. In
+`apps/unitconverter` it was not merely declared but *drawn*: the
+`Category::DigitalStorage` label renders in it.
+
+**All four fixed 2026-08-22, and the fix was scoped by measurement rather than
+by grep-for-`SKY`.** The same independent transcription that found it was run
+over the whole lane: every `const NAME: Color = Color::from_hex(0x……)` whose
+name is a published Mocha role, compared against a hand-transcribed copy of the
+published palette. **1,566 such declarations across `apps/`, 389 across `gui/`;
+exactly one name mismatched, in exactly those three files.** So the duplication
+problem this entry describes is real, but the *divergence* problem turned out
+to be a single transposed byte pair — which is worth knowing before part 2,
+because it means the conversion can treat the existing constants as faithful
+copies and does not need a per-file value audit on top of the rename.
+
+`gui/appearance` is now protected against the recurrence by
+`every_dark_constant_is_the_published_catppuccin_mocha_value`, which pins all
+24 declared values against an independent transcription. It is the only test in
+that crate whose expected values do not come from the tree, and it is the only
+one that could have caught this — every other test compares one part of the
+tree against another, which by construction cannot see an error the whole tree
+shares. Proved by reintroduction (harness defect T).
+
+That the wrong copy is the *authority's* is this entry's point in miniature:
+2,258 duplicates agreeing with each other is not evidence that any of them is
+right, and the one place a mistake actually matters is the place that has no
+copy to be checked against.
+
+**Two things this changes about the shell entry's part 2, which is why it is
+filed now rather than when someone gets to it:**
+
+1. **`Palette` needs `teal` and `sky`.** [DONE 2026-08-22] It carried eight
+   named hues; the applications use `TEAL` 86 times and `SKY` 18, and neither
+   existed on the struct. Catppuccin defines 14 accents and `AccentColor`
+   already names all of them, so the shortfall was in `Palette`'s field list,
+   not in the model underneath it. Added immediately rather than when `apps/`
+   is converted, because every mode-flip and legibility sweep in that crate
+   iterates a hand-written list of the fields — so a hue added later has to be
+   threaded back through all of them, and a sweep that silently skips a field
+   is the precise failure those sweeps were written to detect. `roles()` is now
+   21 wide and `every_named_hue_agrees_with_the_accent_of_the_same_name` covers
+   ten hues.
+2. **The "text on a coloured button" constants are wrong in light mode and
+   will silently stay wrong.** `ALLOW_TEXT`, `DENY_TEXT` and
+   `BUTTON_PRIMARY_TEXT` in the shell — and their equivalents across the apps —
+   are all `0x1E1E2E`, i.e. the Mocha *base*, chosen because dark text reads on
+   a pale green button. Translating them to `p.base` is the obvious move and is
+   a bug: Latte's base is `#EFF1F5`, so a light-mode Allow button would be pale
+   text on a pale green fill. They must become `readable_on(p.green)` and
+   friends. This is the one place in the whole sweep where a mechanical
+   name-to-role substitution produces a *new* defect rather than preserving the
+   current one.
+
+**Why it shipped:** the applications were written against the shell's
+convention, which was to declare the palette locally, because there was nothing
+to declare it from — `gui/appearance` could not answer what a window background
+is in light mode until 2026-08-22. Each app copying the previous app's header
+block is the mechanism; `#[allow(dead_code)]` is not implicated here the way it
+was in `gui/desktop` (see `TD-C-DEAD-CODE-IS-ALLOWED-WHOLESALE`), because these
+constants are mostly used.
+
+**Proper fix:** the same as the shell's part 2 — take `&Palette` in the render
+path and delete the constants — but sequenced *after* it, and after the two
+changes above, because an application should be adopting a type the shell has
+already proved rather than the two of them converging on it separately. Some
+per-app colour is legitimate and must **not** be collapsed: a chessboard's
+light and dark squares, a card back, a syntax-highlighting scheme, and a
+resource graph's categorical series are the application's own decisions and
+merely happen to be drawn from Catppuccin today. The test to apply, per
+colour: *would a user who changed their accent expect this to move?* If no, it
+stays a constant — but it should then be named for what it is (`BOARD_DARK`,
+not `SURFACE1`), because a role name on a value that must not follow the theme
+is how the next person collapses it by mistake.
+
+**Trigger:** immediately after
+`TD-C-FORTY-NINE-SHELL-MODULES-CARRY-THEIR-OWN-COPY-OF-THE-PALETTE` part 2.
+Nothing else blocks it.
+
+**If never fixed:** the appearance settings reach the desktop and stop at the
+window edge. Every application stays dark on a light desktop, which reads as
+each application being broken rather than the theme being unimplemented — the
+same misdiagnosis the shell entry describes, multiplied by ninety.
 ---
 
 ### B-THE-NATIVE-LIBC-AND-THE-LINUX-ABI-DISAGREE-ABOUT-WHAT-EXISTS, AND LIBC'S DOC COMMENTS EXPLAIN IT WITH A REASON THAT STOPPED BEING TRUE — 2026-08-21 — OPEN

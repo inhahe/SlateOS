@@ -29,6 +29,7 @@
 pub use settingsfile as config;
 
 use guitk::color::Color;
+use guitk::theme::with_alpha;
 use yamldoc::Document;
 
 // ============================================================================
@@ -57,7 +58,15 @@ pub const MAUVE: Color = Color::from_hex(0xCBA6F7);
 pub const ROSEWATER: Color = Color::from_hex(0xF5E0DC);
 pub const FLAMINGO: Color = Color::from_hex(0xF2CDCD);
 pub const MAROON: Color = Color::from_hex(0xEBA0AC);
-pub const SKY: Color = Color::from_hex(0x89DCFE);
+// `0x89DCEB`, not `0x89DCFE`. This carried a transposed byte pair from the day
+// it was written, so `AccentColor::Sky.color()` returned a colour Catppuccin
+// does not contain — and, being the crate that owns the answer, it had already
+// propagated into `apps/alarmclock` and `apps/emojipicker`. Found by comparing
+// every dark constant here against the published Mocha palette; it was the
+// only mismatch, which is why a copy that agrees with 2,000 others is not
+// evidence of anything. See known-issues.md
+// TD-C-EVERY-APPLICATION-CARRIES-ITS-OWN-COPY-OF-THE-PALETTE-TOO.
+pub const SKY: Color = Color::from_hex(0x89DCEB);
 pub const SAPPHIRE: Color = Color::from_hex(0x74C7EC);
 
 // ============================================================================
@@ -97,6 +106,50 @@ pub const LIGHT_FLAMINGO: Color = Color::from_hex(0xA05757);
 pub const LIGHT_MAROON: Color = Color::from_hex(0xC33B47);
 pub const LIGHT_SKY: Color = Color::from_hex(0x0374A1);
 pub const LIGHT_SAPPHIRE: Color = Color::from_hex(0x187788);
+
+// ============================================================================
+// Catppuccin Latte surface ladder — the light mode's backgrounds and text
+// ============================================================================
+//
+// Role for role these are the counterparts of the Mocha constants above, and
+// they are ordered the same way: `crust` is the layer *behind* the window,
+// `base` is the window, `surface0`–`surface2` are things raised off it, and
+// `overlay0`, `subtext0`, `subtext1`, `text` are marks drawn on it in
+// increasing prominence. Only the direction reverses — in Mocha "raised" means
+// lighter, in Latte it means darker — which is precisely why a renderer must
+// name the role rather than the colour. Code that says `SURFACE1` keeps
+// working when the mode flips; code that says `0x45475A` does not.
+//
+// These are Catppuccin's published Latte values with one exception, marked
+// below. The values are also, individually, already in the tree: they are what
+// `DecorationColors::for_mode(true)` and `DesktopTheme::light()` were each
+// spelling out in hex. Naming them here is what lets those stop.
+
+pub const LIGHT_CRUST: Color = Color::from_hex(0xDCE0E8);
+pub const LIGHT_MANTLE: Color = Color::from_hex(0xE6E9EF);
+pub const LIGHT_BASE: Color = Color::from_hex(0xEFF1F5);
+pub const LIGHT_SURFACE0: Color = Color::from_hex(0xCCD0DA);
+pub const LIGHT_SURFACE1: Color = Color::from_hex(0xBCC0CC);
+pub const LIGHT_SURFACE2: Color = Color::from_hex(0xACB0BE);
+pub const LIGHT_OVERLAY0: Color = Color::from_hex(0x9CA0B0);
+
+/// Latte `subtext0`, darkened by the same rule as the light accents above.
+///
+/// Catppuccin's own value is `#6C6F85`, which measures 4.37:1 on the Latte
+/// base — under the 4.5:1 that body text needs, and this role *is* body text:
+/// it is the secondary line in every list row the shell draws. The Mocha
+/// counterpart is 7.37:1, so the shortfall belongs to the light palette alone
+/// and fixing it there costs nothing elsewhere.
+///
+/// Scaled to 96.5% of each channel, which holds the hue and reaches 4.64:1.
+/// The difference is not visible side by side; what it buys is that the
+/// contrast invariant in this crate's tests can be stated as a flat rule for
+/// both modes instead of carrying an exception, and an exception in a
+/// legibility floor is how the floor stops being one.
+pub const LIGHT_SUBTEXT0: Color = Color::from_hex(0x686B80);
+
+pub const LIGHT_SUBTEXT1: Color = Color::from_hex(0x5C5F77);
+pub const LIGHT_TEXT: Color = Color::from_hex(0x4C4F69);
 
 // ============================================================================
 // Configuration-file spellings
@@ -721,6 +774,347 @@ pub fn emphasized(color: Color) -> Color {
     color.lerp(toward, 0.25)
 }
 
+// ============================================================================
+// The resolved palette
+// ============================================================================
+
+/// Every colour the shell paints with, resolved for one set of choices.
+///
+/// **What this is for.** The desktop shell had 549 `const … : Color` of its
+/// own, spread over 49 modules, and every one of them was a Catppuccin Mocha
+/// value written out by hand. `TEXT` was declared 31 separate times;
+/// `0x89B4FA` appeared 47 times under four different names. None of them were
+/// *wrong* — they all agreed with what the dark theme happens to be — and that
+/// is exactly the problem: they agreed by coincidence, so the user's light/dark
+/// choice, accent and transparency level reached none of them. See
+/// known-issues.md `TD-C-FORTY-NINE-SHELL-MODULES-CARRY-THEIR-OWN-COPY-OF-THE-PALETTE`.
+///
+/// **Why a resolved struct rather than a lookup.** By the time a colour is in
+/// here the mode, the accent and the transparency level have all been folded
+/// in, so a render function does nothing but read a field. A renderer handed
+/// [`AppearanceSettings`] instead would re-derive the same colour at every
+/// frame and would be free to derive it slightly differently in each of the
+/// dozens of places it is drawn — which is the duplication above, relocated
+/// rather than removed. This is the same argument [`DecorationColors`] and
+/// `DesktopTheme` already make; this type is the one they are both built from.
+///
+/// **Roles, not colours.** The fields are named for what a colour *does* in a
+/// layout, not for what it looks like. The surface ladder runs
+/// [`crust`](Self::crust) (behind the window) → [`base`](Self::base) (the
+/// window) → [`surface0`](Self::surface0)…[`surface2`](Self::surface2) (things
+/// raised off it) → [`overlay0`](Self::overlay0),
+/// [`subtext0`](Self::subtext0), [`subtext1`](Self::subtext1),
+/// [`text`](Self::text) (marks on it, in increasing prominence). In dark mode
+/// "raised" means lighter and in light mode it means darker, so a caller that
+/// names the role keeps working across the flip and a caller that names a hex
+/// value does not.
+///
+/// **Why the named hues are still here, next to `accent`.** The shell uses
+/// `BLUE` for two unrelated jobs: as "the colour this desktop is themed
+/// around" — selection, focus, the start glyph — and as "the blue one" in a
+/// fixed set of category colours, next to green and peach in a resource graph
+/// legend. Collapsing both onto [`accent`](Self::accent) would give a user who
+/// picks Red a graph whose CPU line and temperature line are the same colour,
+/// which is not a theme, it is a lost distinction. So the two stay separate:
+/// [`accent`](Self::accent) follows the setting, and the named hues are a
+/// fixed categorical set that merely changes value between modes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Palette {
+    /// Behind the window — the desktop, and the recessed well of a text input.
+    pub crust: Color,
+    /// One step behind [`base`](Self::base) — a sidebar beside a content pane.
+    pub mantle: Color,
+    /// The window itself: the default background of any surface the shell owns.
+    pub base: Color,
+    /// Raised one step off [`base`](Self::base) — a card, a header row.
+    pub surface0: Color,
+    /// Raised two steps — a button at rest, a selected row.
+    pub surface1: Color,
+    /// Raised three steps — a hovered button, a scrollbar thumb.
+    pub surface2: Color,
+    /// The faintest legible mark: separators, disabled text, placeholder text.
+    ///
+    /// Deliberately *not* required to carry body text — it measures about
+    /// 3.4:1 on [`base`](Self::base) in dark mode and 2.3:1 in light. Anything
+    /// a user has to read is [`subtext0`](Self::subtext0) or brighter.
+    pub overlay0: Color,
+    /// Secondary text: the second line of a list row, a caption, a hint.
+    pub subtext0: Color,
+    /// Text that is secondary but load-bearing — a column heading.
+    pub subtext1: Color,
+    /// Primary text.
+    pub text: Color,
+    /// The blue of the categorical set. See the type's note on hues.
+    pub blue: Color,
+    /// Green — also "this succeeded", "this is allowed", "this is safe".
+    pub green: Color,
+    /// Red — also "this failed", "this is denied", "this is dangerous".
+    pub red: Color,
+    /// Yellow — also "this needs attention".
+    pub yellow: Color,
+    /// Peach — also the step between [`yellow`](Self::yellow) and
+    /// [`red`](Self::red) on a severity scale.
+    pub peach: Color,
+    /// Lavender.
+    pub lavender: Color,
+    /// Mauve.
+    pub mauve: Color,
+    /// Sapphire.
+    pub sapphire: Color,
+    /// Teal.
+    ///
+    /// Here because the applications need it, not because the shell does — 86
+    /// `const TEAL` declarations across `apps/`, against 0 in `gui/desktop`.
+    /// Added while the light ladder was being written rather than when
+    /// `apps/` is converted, because a hue added later has to be re-checked
+    /// against every mode-flip and legibility sweep in this module, and a
+    /// sweep that silently skips a field is the failure those sweeps exist to
+    /// catch. See known-issues.md
+    /// `TD-C-EVERY-APPLICATION-CARRIES-ITS-OWN-COPY-OF-THE-PALETTE-TOO`.
+    pub teal: Color,
+    /// Sky. Present for the same reason as [`teal`](Self::teal).
+    pub sky: Color,
+    /// The colour this desktop is themed around, as the user chose it.
+    ///
+    /// Already resolved for the mode and for a custom colour — this is
+    /// [`AppearanceSettings::effective_accent`], not the enum.
+    pub accent: Color,
+    /// How opaque a floating surface is: [`TransparencyLevel::panel_alpha`].
+    ///
+    /// Carried rather than applied to every field because most surfaces are
+    /// *not* floating. A list row inside a panel must stay opaque no matter
+    /// what the panel behind it does, or the desktop shows through the row and
+    /// not through its own container.
+    pub panel_alpha: u8,
+    /// Whether this is the light palette.
+    ///
+    /// Present so a caller with a genuinely mode-dependent decision — an icon
+    /// with a light and a dark artwork, say — can ask, instead of guessing
+    /// from the luma of a field it happens to have.
+    pub light: bool,
+}
+
+/// Fixed alphas for the washes derived from [`Palette::accent`].
+///
+/// One place, because the shell had six: a selection at 50, a marquee at 30, a
+/// snap zone at 50 and its highlight at 90, and two borders at 150 and 160 that
+/// meant the same thing and differed by a rounding nobody chose. Alpha is what
+/// distinguishes these from one another, so if it is written per module the
+/// modules are the definition and drift is silent.
+mod wash {
+    /// A hint the pointer is currently drawing — a rubber-band marquee.
+    pub const HINT: u8 = 30;
+    /// A committed selection, or a snap zone at rest.
+    pub const FILL: u8 = 50;
+    /// The one zone or item the pointer is over.
+    pub const HIGHLIGHT: u8 = 90;
+    /// The outline of a hint.
+    pub const HINT_EDGE: u8 = 120;
+    /// The outline of a selection or a highlighted zone.
+    pub const EDGE: u8 = 150;
+}
+
+impl Palette {
+    /// The palette for a mode, before any of the user's other choices apply.
+    ///
+    /// [`accent`](Self::accent) is the mode's blue, which is what the accent
+    /// setting defaults to; [`panel_alpha`](Self::panel_alpha) is opaque.
+    /// Callers that have an [`AppearanceSettings`] should use
+    /// [`from_settings`](Self::from_settings) instead — this exists for the
+    /// two places that legitimately have only a mode: a test asserting a
+    /// property of one palette, and a preview swatch.
+    #[must_use]
+    pub fn for_mode(light: bool) -> Self {
+        if light {
+            Self {
+                crust: LIGHT_CRUST,
+                mantle: LIGHT_MANTLE,
+                base: LIGHT_BASE,
+                surface0: LIGHT_SURFACE0,
+                surface1: LIGHT_SURFACE1,
+                surface2: LIGHT_SURFACE2,
+                overlay0: LIGHT_OVERLAY0,
+                subtext0: LIGHT_SUBTEXT0,
+                subtext1: LIGHT_SUBTEXT1,
+                text: LIGHT_TEXT,
+                blue: LIGHT_BLUE,
+                green: LIGHT_GREEN,
+                red: LIGHT_RED,
+                yellow: LIGHT_YELLOW,
+                peach: LIGHT_PEACH,
+                lavender: LIGHT_LAVENDER,
+                mauve: LIGHT_MAUVE,
+                sapphire: LIGHT_SAPPHIRE,
+                teal: LIGHT_TEAL,
+                sky: LIGHT_SKY,
+                accent: LIGHT_BLUE,
+                panel_alpha: 255,
+                light: true,
+            }
+        } else {
+            Self {
+                crust: CRUST,
+                mantle: MANTLE,
+                base: BASE,
+                surface0: SURFACE0,
+                surface1: SURFACE1,
+                surface2: SURFACE2,
+                overlay0: OVERLAY0,
+                subtext0: SUBTEXT0,
+                subtext1: SUBTEXT1,
+                text: TEXT,
+                blue: BLUE,
+                green: GREEN,
+                red: RED,
+                yellow: YELLOW,
+                peach: PEACH,
+                lavender: LAVENDER,
+                mauve: MAUVE,
+                sapphire: SAPPHIRE,
+                teal: TEAL,
+                sky: SKY,
+                accent: BLUE,
+                panel_alpha: 255,
+                light: false,
+            }
+        }
+    }
+
+    /// Resolve the whole palette from what the user chose.
+    #[must_use]
+    pub fn from_settings(settings: &AppearanceSettings) -> Self {
+        let mut palette = Self::for_mode(settings.theme_mode.is_light());
+        palette.accent = settings.effective_accent();
+        palette.panel_alpha = settings.transparency.panel_alpha();
+        palette
+    }
+
+    /// This palette's value for one of the accent presets.
+    ///
+    /// For the settings page, which draws all fourteen as swatches and must
+    /// draw them in the mode the user is currently in — otherwise the chosen
+    /// swatch is not the colour that appears when it is chosen. Agrees with
+    /// the named-hue fields by construction, which
+    /// `every_named_hue_agrees_with_the_accent_of_the_same_name` asserts.
+    #[must_use]
+    pub fn hue(&self, accent: AccentColor) -> Color {
+        if self.light {
+            accent.color_light()
+        } else {
+            accent.color()
+        }
+    }
+
+    /// Text that can be read on [`accent`](Self::accent).
+    ///
+    /// The accent is the one colour in the palette whose brightness the user
+    /// controls, so nothing drawn on it can have a fixed foreground.
+    #[must_use]
+    pub fn on_accent(&self) -> Color {
+        readable_on(self.accent)
+    }
+
+    /// A floating surface: a popup, a menu, the launcher.
+    ///
+    /// [`base`](Self::base) at [`panel_alpha`](Self::panel_alpha) — the only
+    /// place transparency is applied, because a panel is the only thing that
+    /// floats over something the user might want to keep seeing.
+    #[must_use]
+    pub fn panel_bg(&self) -> Color {
+        with_alpha(self.base, self.panel_alpha)
+    }
+
+    /// The hovered row of a floating surface.
+    ///
+    /// Translucent to the same degree as the panel it sits in. A hover
+    /// highlight that stayed opaque inside a translucent menu would read as a
+    /// solid tile skating over the wallpaper.
+    #[must_use]
+    pub fn panel_hover(&self) -> Color {
+        with_alpha(self.surface1, self.panel_alpha)
+    }
+
+    /// A dim layer over everything behind a modal.
+    ///
+    /// Black in both modes, for the same reason [`shadow`](Self::shadow) is:
+    /// a scrim is an absence of light rather than a colour, and its job is to
+    /// push the background back. The light palette makes that argument
+    /// necessary rather than merely tidy — the shell used to dim with its own
+    /// `base` at alpha, and Latte's base is `#EFF1F5`, so in light mode that
+    /// would have *lightened* the desktop and left the dialog with nothing to
+    /// stand out against.
+    #[must_use]
+    pub fn scrim(&self) -> Color {
+        Color::rgba(0, 0, 0, 140)
+    }
+
+    /// The drop shadow under a floating surface, at its strongest.
+    ///
+    /// One value, where the shell had three — 100, 120 and 160 in three
+    /// modules that all draw the same kind of popup. None of the three was
+    /// chosen against the others; they were each chosen alone. A renderer that
+    /// fades the shadow outward starts here and falls to nothing.
+    ///
+    /// Distinct from [`DecorationColors::shadow`], which is the shadow under a
+    /// *window* and is weaker: a window sits on the desktop, a popup sits on
+    /// top of a window, and the second wants more separation than the first.
+    #[must_use]
+    pub fn shadow(&self) -> Color {
+        Color::rgba(0, 0, 0, 120)
+    }
+
+    /// The hard shadow behind text drawn straight onto the wallpaper.
+    ///
+    /// Much stronger than [`shadow`](Self::shadow) and deliberately not
+    /// theme-dependent: a desktop icon's label lands on an arbitrary
+    /// photograph, so its legibility cannot come from the palette. This is the
+    /// one colour here that is not a design choice but a floor.
+    #[must_use]
+    pub fn text_shadow(&self) -> Color {
+        Color::rgba(0, 0, 0, 180)
+    }
+
+    /// The interior of a committed selection, or of a snap zone at rest.
+    #[must_use]
+    pub fn selection_fill(&self) -> Color {
+        with_alpha(self.accent, wash::FILL)
+    }
+
+    /// The outline of a selection or of a highlighted snap zone.
+    #[must_use]
+    pub fn selection_border(&self) -> Color {
+        with_alpha(self.accent, wash::EDGE)
+    }
+
+    /// The interior of something the pointer is still drawing — a marquee.
+    #[must_use]
+    pub fn hint_fill(&self) -> Color {
+        with_alpha(self.accent, wash::HINT)
+    }
+
+    /// The outline of a marquee.
+    #[must_use]
+    pub fn hint_border(&self) -> Color {
+        with_alpha(self.accent, wash::HINT_EDGE)
+    }
+
+    /// The one zone or item the pointer is currently over.
+    #[must_use]
+    pub fn highlight_fill(&self) -> Color {
+        with_alpha(self.accent, wash::HIGHLIGHT)
+    }
+
+    /// Where a drag would land if it were released now.
+    ///
+    /// Green rather than the accent, and that is not decoration: a drop target
+    /// and a selection are shown at the same moment during a drag, so they
+    /// have to differ by hue and not merely by alpha.
+    #[must_use]
+    pub fn drop_target(&self) -> Color {
+        with_alpha(self.green, 60)
+    }
+}
+
 /// Every colour used to draw a window's frame, and the emptiness behind it.
 ///
 /// This type exists because two processes draw the same frame. The compositor
@@ -778,45 +1172,58 @@ impl DecorationColors {
     /// Surface for surface the two modes are the same structure — base,
     /// surface0, surface1, surface2, crust — so that a setting applied on top
     /// lands on the same role in either one.
+    ///
+    /// Which is now said once rather than twice: the two arms below used to be
+    /// two hand-written tables of hex, and the sentence above was the only
+    /// thing asserting they lined up. Reading both from [`Palette::for_mode`]
+    /// makes the claim structural — a frame is `surface0` on `base` in either
+    /// mode because that is literally what is written, not because two lists
+    /// were kept in step.
     #[must_use]
     pub fn for_mode(light: bool) -> Self {
-        if light {
-            // Catppuccin Latte.
-            Self {
-                title_focused_bg: Color::from_hex(0xCCD0DA),
-                title_focused_fg: Color::from_hex(0x4C4F69),
-                title_unfocused_bg: Color::from_hex(0xEFF1F5),
-                title_unfocused_fg: Color::from_hex(0x6C6F85),
-                border_focused: Color::from_hex(0xACB0BE),
-                border_unfocused: Color::from_hex(0xBCC0CC),
-                close_button: Color::from_hex(0xD20F39),
-                maximize_button: Color::from_hex(0x40A02B),
-                minimize_button: Color::from_hex(0xDF8E1D),
-                shadow: SHADOW,
-                desktop_bg: Color::from_hex(0xDCE0E8),
-            }
-        } else {
-            // Catppuccin Mocha.
-            Self {
-                title_focused_bg: Color::from_hex(0x313244),
-                title_focused_fg: Color::from_hex(0xCDD6F4),
-                title_unfocused_bg: Color::from_hex(0x1E1E2E),
-                title_unfocused_fg: Color::from_hex(0xA6ADC8),
-                border_focused: Color::from_hex(0x585B70),
-                border_unfocused: Color::from_hex(0x45475A),
-                close_button: Color::from_hex(0xF38BA8),
-                maximize_button: Color::from_hex(0xA6E3A1),
-                minimize_button: Color::from_hex(0xF9E2AF),
-                shadow: SHADOW,
-                desktop_bg: Color::from_hex(0x11111B),
-            }
+        Self::from_palette(&Palette::for_mode(light))
+    }
+
+    /// Which role of `palette` each part of a frame is.
+    ///
+    /// The whole body of this type: everything else here either chooses a
+    /// palette to hand it or overrides one field afterwards. Taking a
+    /// `&Palette` rather than a mode is what lets [`from_settings`] apply the
+    /// user's accent to a frame at all — the alternative, and what this was
+    /// until the reintroduction proof for defect Q found it, is a frame built
+    /// from the *default* palette with the accent painted on afterwards, so
+    /// that any frame role which ever came to depend on the accent would
+    /// silently get blue.
+    ///
+    /// [`from_settings`]: Self::from_settings
+    #[must_use]
+    pub fn from_palette(p: &Palette) -> Self {
+        Self {
+            title_focused_bg: p.surface0,
+            title_focused_fg: p.text,
+            title_unfocused_bg: p.base,
+            title_unfocused_fg: p.subtext0,
+            border_focused: p.surface2,
+            border_unfocused: p.surface1,
+            // The three buttons are the palette's own red, green and yellow —
+            // stop, go, and the middling one — rather than a shape the user
+            // has to learn, and they keep those hues when the accent changes
+            // so that "close" never becomes whatever colour the desktop is
+            // themed around. Which is now a real restraint rather than a
+            // description: `p.accent` is in scope here and reading it would
+            // compile.
+            close_button: p.red,
+            maximize_button: p.green,
+            minimize_button: p.yellow,
+            shadow: SHADOW,
+            desktop_bg: p.crust,
         }
     }
 
     /// Resolve the frame colours from what the user chose.
     #[must_use]
     pub fn from_settings(settings: &AppearanceSettings) -> Self {
-        let mut colors = Self::for_mode(settings.theme_mode.is_light());
+        let mut colors = Self::from_palette(&Palette::from_settings(settings));
 
         if settings.accent_titlebars {
             let accent = settings.effective_accent();
@@ -1859,6 +2266,482 @@ mod tests {
                 base,
                 "{base:?} pressed looks exactly like {base:?} at rest"
             );
+        }
+    }
+
+    // ---- Palette ----
+
+    /// Perceived brightness, for the ordering assertions below.
+    fn luma(c: Color) -> f32 {
+        0.299 * f32::from(c.r) + 0.587 * f32::from(c.g) + 0.114 * f32::from(c.b)
+    }
+
+    #[test]
+    fn every_dark_constant_is_the_published_catppuccin_mocha_value() {
+        // Transcribed from the Catppuccin Mocha palette, independently of the
+        // constants under test — that independence *is* the test. Everything
+        // else in this module compares one part of the tree against another,
+        // which cannot see an error the whole tree shares.
+        //
+        // It found one. `SKY` was `0x89DCFE` for the life of the crate, a
+        // transposed byte pair, and had already been copied into two
+        // applications. Nothing could have caught it: 2,258 duplicate
+        // declarations across `apps/` all agree with each other, and the two
+        // that agreed with *this* file were the two that were wrong.
+        //
+        // Only the dark values are pinned. The `LIGHT_*` accents deliberately
+        // depart from published Latte — they are darkened to carry text, which
+        // is what `every_role_a_user_reads_is_legible_on_the_base_of_its_own_palette`
+        // asserts and what §525 records — so pinning them here would assert
+        // the opposite of the decision that produced them.
+        // `overlay1` and `overlay2` are published but not declared here, and
+        // are deliberately absent rather than listed: an entry pairing
+        // `Color::from_hex(0x7F849C)` with `0x7F849C` asserts a value against
+        // itself, which is the vacuous shape this whole file's tests are
+        // written to avoid. A constant this crate does not have is not a
+        // constant this test can check.
+        let published: [(&str, Color, u32); 24] = [
+            ("rosewater", ROSEWATER, 0xF5E0DC),
+            ("flamingo", FLAMINGO, 0xF2CDCD),
+            ("pink", PINK, 0xF5C2E7),
+            ("mauve", MAUVE, 0xCBA6F7),
+            ("red", RED, 0xF38BA8),
+            ("maroon", MAROON, 0xEBA0AC),
+            ("peach", PEACH, 0xFAB387),
+            ("yellow", YELLOW, 0xF9E2AF),
+            ("green", GREEN, 0xA6E3A1),
+            ("teal", TEAL, 0x94E2D5),
+            ("sky", SKY, 0x89DCEB),
+            ("sapphire", SAPPHIRE, 0x74C7EC),
+            ("blue", BLUE, 0x89B4FA),
+            ("lavender", LAVENDER, 0xB4BEFE),
+            ("text", TEXT, 0xCDD6F4),
+            ("subtext1", SUBTEXT1, 0xBAC2DE),
+            ("subtext0", SUBTEXT0, 0xA6ADC8),
+            ("overlay0", OVERLAY0, 0x6C7086),
+            ("surface2", SURFACE2, 0x585B70),
+            ("surface1", SURFACE1, 0x45475A),
+            ("surface0", SURFACE0, 0x313244),
+            ("base", BASE, 0x1E1E2E),
+            ("mantle", MANTLE, 0x181825),
+            ("crust", CRUST, 0x11111B),
+        ];
+        for (name, got, want) in published {
+            assert_eq!(
+                got,
+                Color::from_hex(want),
+                "{name} is not the published Mocha value 0x{want:06X}"
+            );
+        }
+    }
+
+    /// Every field of the palette, paired with its name, for the sweeps that
+    /// have to cover all of them rather than a sample.
+    ///
+    /// Written out rather than derived because the point of several of these
+    /// tests is that a field added later is *not* silently skipped, and a
+    /// macro or a reflection trick would skip it for exactly the same reason
+    /// the renderer would.
+    fn roles(p: &Palette) -> [(&'static str, Color); 21] {
+        [
+            ("crust", p.crust),
+            ("mantle", p.mantle),
+            ("base", p.base),
+            ("surface0", p.surface0),
+            ("surface1", p.surface1),
+            ("surface2", p.surface2),
+            ("overlay0", p.overlay0),
+            ("subtext0", p.subtext0),
+            ("subtext1", p.subtext1),
+            ("text", p.text),
+            ("blue", p.blue),
+            ("green", p.green),
+            ("red", p.red),
+            ("yellow", p.yellow),
+            ("peach", p.peach),
+            ("lavender", p.lavender),
+            ("mauve", p.mauve),
+            ("sapphire", p.sapphire),
+            ("teal", p.teal),
+            ("sky", p.sky),
+            ("accent", p.accent),
+        ]
+    }
+
+    #[test]
+    fn every_role_has_a_different_value_in_the_two_modes() {
+        // The failure this guards is specific and was the whole defect: a
+        // light palette assembled by copying the dark one and editing it, with
+        // one line left unedited. The symptom is a single element that stays
+        // dark in light mode — one unreadable label on an otherwise correct
+        // page — which is far harder to notice than a page that did not change
+        // at all.
+        let dark = roles(&Palette::for_mode(false));
+        let light = roles(&Palette::for_mode(true));
+        for ((name, d), (_, l)) in dark.into_iter().zip(light) {
+            assert_ne!(d, l, "{name} is the same colour in both modes");
+        }
+    }
+
+    #[test]
+    fn every_role_a_user_reads_is_legible_on_the_base_of_its_own_palette() {
+        // 4.5:1 is the WCAG AA floor for body text. This is the invariant that
+        // the whole light palette exists to satisfy and the reason its accents
+        // are darkened: Catppuccin's published Latte values are tuned for
+        // decoration and most of them measure between 2.3:1 and 2.8:1 here.
+        //
+        // `overlay0` is deliberately absent. It is the separator/placeholder
+        // role and is documented as not carrying text; asserting a floor it is
+        // not meant to meet would either fail or force it brighter than the
+        // hairlines it draws should be.
+        for light in [false, true] {
+            let p = Palette::for_mode(light);
+            for (name, c) in roles(&p) {
+                if matches!(
+                    name,
+                    "crust" | "mantle" | "base" | "surface0" | "surface1" | "surface2" | "overlay0"
+                ) {
+                    continue;
+                }
+                let ratio = contrast(c, p.base);
+                assert!(
+                    ratio >= 4.5,
+                    "{name} on base is {ratio:.2}:1 in {} mode, under the 4.5:1 body-text floor",
+                    if light { "light" } else { "dark" }
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_surface_ladder_climbs_away_from_the_base_in_both_modes() {
+        // The reason a caller may name a role and forget the mode. "Raised"
+        // is lighter in Mocha and darker in Latte, so no assertion about
+        // brightness can hold for both — but *distance from the base* rises
+        // monotonically in each, and that is what a caller is actually asking
+        // for when it reaches for surface1 over surface0.
+        for light in [false, true] {
+            let p = Palette::for_mode(light);
+            let ladder = [
+                ("surface0", p.surface0),
+                ("surface1", p.surface1),
+                ("surface2", p.surface2),
+                ("overlay0", p.overlay0),
+                ("subtext0", p.subtext0),
+                ("subtext1", p.subtext1),
+                ("text", p.text),
+            ];
+            for pair in ladder.windows(2) {
+                let [(lo, lo_c), (hi, hi_c)] = pair else {
+                    unreachable!("windows(2) yields pairs")
+                };
+                assert!(
+                    contrast(*hi_c, p.base) > contrast(*lo_c, p.base),
+                    "{hi} is no further from the base than {lo} in {} mode",
+                    if light { "light" } else { "dark" }
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_recessed_layers_are_darker_than_the_base_in_both_modes() {
+        // Not symmetrical with the ladder above, and that asymmetry is real:
+        // Latte's crust and mantle are *darker* than its base, exactly as
+        // Mocha's are. A recess reads as a recess because light falls into it
+        // less, which does not flip with the theme the way a raised surface
+        // does. A caller drawing the well of a text input can therefore rely
+        // on crust being the darker one either way.
+        for light in [false, true] {
+            let p = Palette::for_mode(light);
+            let mode = if light { "light" } else { "dark" };
+            assert!(
+                luma(p.crust) < luma(p.mantle),
+                "crust is not deeper than mantle in {mode} mode"
+            );
+            assert!(
+                luma(p.mantle) < luma(p.base),
+                "mantle is not deeper than base in {mode} mode"
+            );
+        }
+    }
+
+    #[test]
+    fn every_named_hue_agrees_with_the_accent_of_the_same_name() {
+        // The two ways to reach a hue must not become two answers. `hue()`
+        // exists for the settings page, which draws all fourteen swatches; the
+        // named fields exist for the shell and the applications, which use ten
+        // of them as categorical colours. A swatch that is not the colour it
+        // selects is
+        // the exact bug this crate was created to stop.
+        for light in [false, true] {
+            let p = Palette::for_mode(light);
+            let named = [
+                (AccentColor::Blue, p.blue),
+                (AccentColor::Green, p.green),
+                (AccentColor::Red, p.red),
+                (AccentColor::Yellow, p.yellow),
+                (AccentColor::Peach, p.peach),
+                (AccentColor::Lavender, p.lavender),
+                (AccentColor::Mauve, p.mauve),
+                (AccentColor::Sapphire, p.sapphire),
+                (AccentColor::Teal, p.teal),
+                (AccentColor::Sky, p.sky),
+            ];
+            for (accent, field) in named {
+                assert_eq!(
+                    p.hue(accent),
+                    field,
+                    "{accent:?} reads differently through hue() than through its field"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_accent_setting_moves_the_accent_and_leaves_the_categorical_hues_alone() {
+        // The distinction the type's documentation makes, asserted in both
+        // directions. If `accent` did not follow the setting the theme would
+        // be decorative again; if the named hues *did* follow it, a user who
+        // picked Red would get a resource graph whose CPU and temperature
+        // lines were the same colour.
+        //
+        // Swept over *both* modes, and that is not padding. This test read
+        // only the dark palette until the reintroduction harness put a
+        // hue-collapse behind `if settings.theme_mode.is_light()` and watched
+        // it go by (defect U). A light-mode-only defect is the more likely
+        // one, too: the light arm of `for_mode` is the newer code and the one
+        // a reader checks less.
+        //
+        // Note what is *not* provable here: writing the chosen accent into the
+        // field of the same name is invisible, because the two are equal by
+        // construction — that is what
+        // `every_named_hue_agrees_with_the_accent_of_the_same_name` asserts.
+        // The reachable defect is the accent landing on some *other* hue, so
+        // that is what the sweep below covers.
+        for light in [false, true] {
+            let mode = if light {
+                ThemeMode::Light
+            } else {
+                ThemeMode::Dark
+            };
+            let default = Palette::for_mode(light);
+            for accent in [AccentColor::Red, AccentColor::Green, AccentColor::Teal] {
+                let settings = AppearanceSettings {
+                    accent_color: accent,
+                    theme_mode: mode,
+                    ..AppearanceSettings::default()
+                };
+                let p = Palette::from_settings(&settings);
+                assert_eq!(
+                    p.accent,
+                    settings.effective_accent(),
+                    "{accent:?} did not reach the palette in {mode:?} mode"
+                );
+                for (name, got, want) in [
+                    ("blue", p.blue, default.blue),
+                    ("green", p.green, default.green),
+                    ("red", p.red, default.red),
+                    ("yellow", p.yellow, default.yellow),
+                    ("peach", p.peach, default.peach),
+                    ("lavender", p.lavender, default.lavender),
+                    ("mauve", p.mauve, default.mauve),
+                    ("sapphire", p.sapphire, default.sapphire),
+                    ("teal", p.teal, default.teal),
+                    ("sky", p.sky, default.sky),
+                ] {
+                    assert_eq!(
+                        got, want,
+                        "{accent:?} moved the {name} category in {mode:?} mode"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_custom_accent_reaches_the_palette_exactly_as_chosen() {
+        // `effective_accent` darkens a *preset* for light mode and deliberately
+        // does not darken a custom colour. The palette must not add a second
+        // opinion on top of that one.
+        let chosen = Color::from_hex(0x123456);
+        for mode in [ThemeMode::Dark, ThemeMode::Light] {
+            let settings = AppearanceSettings {
+                theme_mode: mode,
+                accent_color: AccentColor::Custom,
+                custom_accent: chosen,
+                ..AppearanceSettings::default()
+            };
+            assert_eq!(Palette::from_settings(&settings).accent, chosen);
+        }
+    }
+
+    #[test]
+    fn transparency_reaches_panels_and_nothing_behind_them() {
+        // Alpha belongs to the surface that floats, not to the palette. A list
+        // row inside a translucent menu must stay opaque, or the wallpaper
+        // shows through the row and not through its container — which looks
+        // like a rendering fault rather than a setting.
+        let settings = AppearanceSettings {
+            transparency: TransparencyLevel::Full,
+            ..AppearanceSettings::default()
+        };
+        let p = Palette::from_settings(&settings);
+        assert_eq!(p.panel_alpha, TransparencyLevel::Full.panel_alpha());
+        assert_eq!(p.panel_bg().a, p.panel_alpha);
+        assert_eq!(p.panel_hover().a, p.panel_alpha);
+        assert!(p.panel_alpha < 255, "the level under test is opaque");
+
+        for (name, c) in roles(&p) {
+            assert_eq!(c.a, 255, "{name} became translucent");
+        }
+
+        // And the off switch means off.
+        let opaque = AppearanceSettings {
+            transparency: TransparencyLevel::Off,
+            ..AppearanceSettings::default()
+        };
+        let p = Palette::from_settings(&opaque);
+        assert_eq!(p.panel_bg(), p.base);
+        assert_eq!(p.panel_hover(), p.surface1);
+    }
+
+    #[test]
+    fn the_accent_washes_are_the_accent_and_differ_only_in_how_much_shows() {
+        // Five overlays that were five hand-picked alphas in five modules.
+        // Their hue has to be the accent — a selection rectangle drawn in a
+        // fixed blue on a red-themed desktop is the defect this task is about,
+        // one layer down — and their strengths have to be ordered, because
+        // that ordering is the only thing distinguishing them.
+        let settings = AppearanceSettings {
+            accent_color: AccentColor::Mauve,
+            ..AppearanceSettings::default()
+        };
+        let p = Palette::from_settings(&settings);
+        let washes = [
+            ("hint_fill", p.hint_fill()),
+            ("selection_fill", p.selection_fill()),
+            ("highlight_fill", p.highlight_fill()),
+            ("hint_border", p.hint_border()),
+            ("selection_border", p.selection_border()),
+        ];
+        for (name, c) in washes {
+            assert_eq!(
+                (c.r, c.g, c.b),
+                (p.accent.r, p.accent.g, p.accent.b),
+                "{name} is not the accent"
+            );
+            assert!(c.a > 0 && c.a < 255, "{name} is not a wash at all");
+        }
+        for pair in washes.windows(2) {
+            let [(lo, lo_c), (hi, hi_c)] = pair else {
+                unreachable!("windows(2) yields pairs")
+            };
+            assert!(hi_c.a > lo_c.a, "{hi} is no stronger than {lo}");
+        }
+
+        // A drop target is shown at the same instant as a selection, so it has
+        // to differ by more than strength.
+        assert_ne!(
+            (p.drop_target().r, p.drop_target().g, p.drop_target().b),
+            (p.accent.r, p.accent.g, p.accent.b),
+            "a drop target is indistinguishable from a selection"
+        );
+    }
+
+    #[test]
+    fn the_scrim_and_the_shadows_darken_whichever_palette_they_fall_on() {
+        // The one place the light palette forced a change rather than a
+        // translation. The shell dimmed with its own `base` at alpha, which in
+        // Latte is `#EFF1F5` — so a "dim the desktop" layer would have
+        // *lightened* it and left the modal with nothing to stand against.
+        for light in [false, true] {
+            let p = Palette::for_mode(light);
+            let mode = if light { "light" } else { "dark" };
+            for (name, layer) in [
+                ("scrim", p.scrim()),
+                ("shadow", p.shadow()),
+                ("text_shadow", p.text_shadow()),
+            ] {
+                assert!(
+                    luma(layer.over(p.base)) < luma(p.base),
+                    "{name} does not darken the base in {mode} mode"
+                );
+                assert!(
+                    layer.a < 255,
+                    "{name} is opaque and would hide what it dims"
+                );
+            }
+            assert!(
+                p.text_shadow().a > p.shadow().a,
+                "a label's shadow must be stronger than a panel's — it lands on \
+                 an arbitrary wallpaper, not on a known surface"
+            );
+        }
+    }
+
+    #[test]
+    fn what_is_drawn_on_the_accent_is_chosen_for_the_accent() {
+        // The accent is the one colour whose brightness the user controls, so
+        // a fixed foreground on it is unreadable for some of the fourteen
+        // choices. Yellow needs dark text and maroon needs light.
+        for accent in AccentColor::presets() {
+            for mode in [ThemeMode::Dark, ThemeMode::Light] {
+                let settings = AppearanceSettings {
+                    theme_mode: mode,
+                    accent_color: *accent,
+                    ..AppearanceSettings::default()
+                };
+                let p = Palette::from_settings(&settings);
+                let ratio = contrast(p.on_accent(), p.accent);
+                assert!(
+                    ratio >= 4.5,
+                    "{accent:?} in {mode:?} mode carries text at only {ratio:.2}:1"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_window_frame_is_built_from_the_palette_of_its_own_mode() {
+        // `DecorationColors::for_mode` used to be two hand-written tables of
+        // hex whose correspondence was asserted only by a comment. This is
+        // that comment made checkable: a frame is surface0-on-base with a
+        // surface2 border in *either* mode, because it reads those roles
+        // rather than repeating their values.
+        for light in [false, true] {
+            let p = Palette::for_mode(light);
+            let f = DecorationColors::for_mode(light);
+            assert_eq!(f.title_focused_bg, p.surface0);
+            assert_eq!(f.title_focused_fg, p.text);
+            assert_eq!(f.title_unfocused_bg, p.base);
+            assert_eq!(f.title_unfocused_fg, p.subtext0);
+            assert_eq!(f.border_focused, p.surface2);
+            assert_eq!(f.border_unfocused, p.surface1);
+            assert_eq!(f.close_button, p.red);
+            assert_eq!(f.maximize_button, p.green);
+            assert_eq!(f.minimize_button, p.yellow);
+            assert_eq!(f.desktop_bg, p.crust);
+        }
+    }
+
+    #[test]
+    fn a_window_button_keeps_its_meaning_when_the_accent_changes() {
+        // Stop, go, and the middling one. These three are the palette's fixed
+        // hues and not the accent, so that "close" does not become whatever
+        // colour the desktop happens to be themed around — which on a red
+        // theme would make close, maximize and minimize identical.
+        let plain = DecorationColors::for_mode(false);
+        for accent in [AccentColor::Red, AccentColor::Green, AccentColor::Yellow] {
+            let settings = AppearanceSettings {
+                accent_color: accent,
+                accent_titlebars: true,
+                ..AppearanceSettings::default()
+            };
+            let f = DecorationColors::from_settings(&settings);
+            assert_eq!(f.close_button, plain.close_button, "{accent:?}");
+            assert_eq!(f.maximize_button, plain.maximize_button, "{accent:?}");
+            assert_eq!(f.minimize_button, plain.minimize_button, "{accent:?}");
         }
     }
 }

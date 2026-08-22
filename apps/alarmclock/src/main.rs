@@ -71,7 +71,10 @@ const FLAMINGO: Color = Color::from_hex(0xF2CDCD);
 #[allow(dead_code)]
 const SAPPHIRE: Color = Color::from_hex(0x74C7EC);
 #[allow(dead_code)]
-const SKY: Color = Color::from_hex(0x89DCFE);
+// `0x89DCEB`. Was `0x89DCFE` — a transposed byte pair copied from
+// `gui/appearance`. Unused here today, but a wrong constant behind
+// `#[allow(dead_code)]` is a wrong constant the next caller inherits.
+const SKY: Color = Color::from_hex(0x89DCEB);
 #[allow(dead_code)]
 const MAROON: Color = Color::from_hex(0xEBA0AC);
 #[allow(dead_code)]

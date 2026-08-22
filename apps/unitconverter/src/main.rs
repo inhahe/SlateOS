@@ -54,7 +54,12 @@ mod theme {
     pub const LAVENDER: Color = Color::from_hex(0xB4BEFE);
     pub const MAUVE: Color = Color::from_hex(0xCBA6F7);
     pub const TEAL: Color = Color::from_hex(0x94E2D5);
-    pub const SKY: Color = Color::from_hex(0x89DCFE);
+    // `0x89DCEB`. Was `0x89DCFE` — a transposed byte pair copied from
+    // `gui/appearance`, which had carried it since the constant was written.
+    // This is the one that was visible: `Category::DigitalStorage` renders in
+    // it. See known-issues.md
+    // TD-C-EVERY-APPLICATION-CARRIES-ITS-OWN-COPY-OF-THE-PALETTE-TOO.
+    pub const SKY: Color = Color::from_hex(0x89DCEB);
     pub const PINK: Color = Color::from_hex(0xF5C2E7);
     pub const FLAMINGO: Color = Color::from_hex(0xF2CDCD);
     pub const ROSEWATER: Color = Color::from_hex(0xF5E0DC);

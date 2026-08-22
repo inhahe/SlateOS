@@ -1,12 +1,19 @@
 #!/bin/sh
-# Two gates at the push boundary. Either one aborts the push.
+# Four gates at the push boundary. Any one of them aborts the push.
 #
 #   1. Refuse to publish the operator's private files (`todo2.txt`).
 #   2. Refuse to publish a command name that nothing can produce an executable
-#      for -- see the comment above that gate, near the bottom.
+#      for.
+#   3. Refuse to publish a mutable process-global that its own tests race.
+#   4. Refuse to publish a utility that panics on a legal (non-UTF-8) filename.
 #
-# They are unrelated, and each has its own bypass variable so silencing one
-# never silences the other.
+# Each has a full comment above it, further down; each has its own bypass
+# variable, so silencing one never silences another; and each is scoped to the
+# tree that can introduce it, so a lane that cannot cause a given defect never
+# pays for the check or is blocked by it.
+#
+# They are unrelated to each other on purpose. A single `ALLOW_EVERYTHING`
+# would be one variable away from turning the push boundary off entirely.
 #
 # Gate 1 — why this exists
 # ------------------------
@@ -281,6 +288,92 @@ reason, which is auditable, rather than to the baseline, which is not.
 
 To push anyway:
     ALLOW_RACED_GLOBAL=1 git push $remote_name ...
+
+EOF
+    exit 1
+fi
+
+# ---------------------------------------------------------------------------
+# Gate 4: refuse to publish a utility that dies on a legal filename.
+#
+# A path on this OS may hold every byte but `/` and NUL -- design.txt says so.
+# A utility that reads argv as `String` therefore does not merely mishandle
+# such a name, it *panics before its own first statement*: `std::env::args()`'s
+# iterator is a literal `unwrap` and is documented to panic. So `rm` on a file
+# holding byte 0x80 does not remove it, does not report an error, and runs no
+# code we wrote. 49 of 84 shipped utilities were like this when this gate
+# landed. See known-issues.md -> B-COREUTILS-PANIC-ON-A-NON-UTF-8-ARGUMENT.
+#
+# This is gated rather than merely fixed because the defect is invisible on the
+# development host -- Windows delivers argv as UTF-16, so a test cannot easily
+# produce a triggering argument, and `cargo test` never runs the binaries at
+# all, only their internal functions. `main` is the least-tested line in every
+# one of these files, so a convention would not hold and a ratchet will.
+#
+# Same shape as gates 2 and 3: the backlog lives in
+# scripts/argv-utf8-baseline.txt, this fails only on a finding that is *not* in
+# it, and it runs only when the push touches `userspace/`.
+#
+# Bypass: ALLOW_ARGV_UTF8=1 git push origin <branch>
+# ---------------------------------------------------------------------------
+
+if [ "${ALLOW_ARGV_UTF8:-0}" = "1" ]; then
+    echo "pre-push: ALLOW_ARGV_UTF8=1 set — argv-encoding check skipped." >&2
+    skip_argv=1
+else
+    skip_argv=$skip
+fi
+
+argv="${repo_root:-.}/scripts/argv-utf8.py"
+[ -f "$argv" ] || skip_argv=1
+touches userspace/ || skip_argv=1
+
+argv_failed=0
+if [ "$skip_argv" != "1" ]; then
+    # Check the checker before believing it, for the same reason as gate 3 --
+    # and more sharply here, because this defect cannot be reproduced on the
+    # development host at all. Nothing but --selftest stands between a broken
+    # regex and a permanently green gate.
+    if ! "$py" "$argv" --selftest; then
+        echo "pre-push: argv-utf8.py FAILED ITS OWN SELF-TEST — its --check result is not trustworthy." >&2
+        argv_failed=1
+    elif ! "$py" "$argv" --check; then
+        argv_failed=1
+    fi
+fi
+
+if [ "$argv_failed" = "1" ]; then
+    cat >&2 <<EOF
+
+pre-push: REFUSING to push — a utility above dies on a legal filename.
+
+It reads its command line (or the environment) as \`String\`. Rust's \`String\`
+cannot hold a byte sequence that is not UTF-8, and a path on this OS can, so
+the program panics before reaching its own first statement. A user sees a Rust
+backtrace instead of the tool, and an \`rm -r\` or a backup script stops
+half-done.
+
+Do NOT add a line to scripts/argv-utf8-baseline.txt to turn this green -- the
+baseline records the existing backlog and is only ever meant to shrink.
+
+The fix:
+
+  * \`std::env::args_os()\` instead of \`args()\`, and carry the \`OsString\`
+    through to where the argument is used. For a filename that means all the
+    way to the syscall -- \`Path::new(&os)\` takes an \`OsStr\` directly, so
+    usually nothing in between needs to change shape.
+  * Parse options with \`coreutils::getopt\`, which is byte-based. This is the
+    structural half: of the 35 bins that were already clean, 24 go through it;
+    of the 49 that were not, none did.
+  * For diagnostics use \`coreutils::quote::{quotef_os, quoteaf_os, quote_os}\`,
+    which take \`AsRef<OsStr>\` and escape what does not decode.
+
+If this is genuinely a false positive, add it to the IGNORE table in
+scripts/argv-utf8.py with the reason, which is auditable, rather than to the
+baseline, which is not.
+
+To push anyway:
+    ALLOW_ARGV_UTF8=1 git push $remote_name ...
 
 EOF
     exit 1

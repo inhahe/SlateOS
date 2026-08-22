@@ -57099,7 +57099,7 @@ to call, and it would get `localhost` with no indication anything was amiss.
 ## B-COREUTILS-PANIC-ON-A-NON-UTF-8-ARGUMENT (lane B, 2026-08-22) — OPEN
 
 **In short:** On this OS a filename may contain any byte except `/` and NUL —
-that is a deliberate design decision, written down in `design.txt`. But 50 of
+that is a deliberate design decision, written down in `design.txt`. But 49 of
 our 84 core utilities read their command line with a Rust function that
 *crashes* when an argument is not valid text. So `rm` on a file whose name
 contains such a byte does not delete it, does not report an error, and does
@@ -57122,11 +57122,12 @@ tree already has the pieces: `coreutils::quote::os_bytes`, `quotef_os`,
 **How to reproduce (needs QEMU — see below):** create a file whose name
 contains byte `0x80`, then `rm` it.
 
-**Scale, measured 2026-08-22 (`grep -l '^[^/]*env::args()' src/bin/*.rs`):**
-50 of 84 bins.
+**Scale, measured 2026-08-22 by `scripts/argv-utf8.py` (see the gate section
+below):** 49 of 84 bins, plus `examples/extfloat-probe.rs` — 51 findings across
+50 files, since `sh` carries two of them.
 
 ```
-basename bc cal chmod chown cmp cp dd df diff dirname du echo ed fetch
+basename cal chmod chown cmp cp dd df diff dirname du echo ed fetch
 find free grep id ln logger ls md5sum mkdir mkfifo more mv
 nice nohup patch ps readlink realpath renice rm rmdir sed sh sha256sum sleep
 stat strings tar tee time_cmd touch tty which xargs yes
@@ -57137,8 +57138,17 @@ day, which is why they are absent above. `stat`, `chmod`, `chown` and `tar`
 were rewritten this week for other reasons and use `os_bytes` internally but
 still *read* argv as `String`, so they remain on it.
 
-**The correlation is the whole argument for how to fix this.** Of the 34 bins
-that are already clean, **23 use `coreutils::getopt`**; of the 50 dirty ones,
+`bc` was on this list too, and is the reason the count moved from 50 to 49.
+The original figure came from `grep -l '^[^/]*env::args()' src/bin/*.rs`, which
+counts a *comment* as a hit whenever it is not the first thing on the line —
+and `bc` had already been converted, so its only surviving `env::args()` are
+the two comments explaining what `env::args_os()` replaced. The tool disagreed
+with the grep, and the tool was right, for exactly the reason its self-test
+rule 3 exists: a file being *fixed* is the likeliest place in the tree for the
+broken call to appear in prose.
+
+**The correlation is the whole argument for how to fix this.** Of the 35 bins
+that are already clean, **24 use `coreutils::getopt`**; of the 49 dirty ones,
 **none do** — not one. `getopt` is byte-based, so a bin that goes through it
 never had a reason to reach for `String` in the first place. That is a
 structural cause, not a coincidence, and it means finishing the `getopt`
@@ -57164,6 +57174,83 @@ those the panic happens on data the *user does not control and cannot see*: a
 single oddly-named file in a directory is enough to make `rm -r` abort
 part-way, and a backup or a cleanup script that dies half-done is worse than
 one that refuses to start.
+
+### A gate now exists, before any of the 50 are fixed (2026-08-22)
+
+`scripts/argv-utf8.py` is pre-push gate 4, with a 51-entry baseline recording
+exactly the backlog above. It is deliberately built *first*, because fixing 49
+`main`s fixes 49 instances and does nothing about the fiftieth — and the
+"why it survived" paragraph above is precisely an argument that a convention
+will not hold here. Nothing on the development host can produce a triggering
+argument, so the only thing standing between a reintroduction and silence is a
+machine that looks.
+
+Building it first also paid for itself immediately, before fixing anything: it
+is what caught `bc` being counted as broken when it had already been fixed —
+the grep behind the original figure could not tell a call from a comment about
+that call. A burn-down driven by that list would have spent a pass "fixing" a
+file that was already correct.
+
+It reports four spellings of the one defect — `env::args()`, `env::vars()`,
+`.into_string().unwrap()`, `.to_str().unwrap()` — keyed per file *and per
+rule*, so a file carrying two of them does not go green when the first is
+fixed. That is not hypothetical: `sh` is the 51st finding against the 50th
+file, because it reads both argv and the environment as `String`, and a
+baseline keyed on the path alone would have stopped watching it the moment
+argv was fixed. `env::var()` is deliberately absent: it returns `Err(NotUnicode)`
+rather than panicking, so it is a behaviour bug at worst and lumping it in
+would bury the one that crashes. Comments and string literals are excluded by
+importing `raced-globals.py`'s Rust lexer rather than copying it — a file being
+*fixed* is the single likeliest place for `env::args()` to appear in a comment
+about what it replaced, and that same tool once spent a whole pass reporting a
+global whose name occurred only in prose about it.
+
+**Scope is stated as a number, not left as a silence.** The gate covers
+`userspace/coreutils/` — 51 findings. The ~2750 single-file stub crates under
+`userspace/*/` are *not* gated (a 2750-line baseline is a baseline nobody
+reads) but they are counted and printed: **2746 findings in 2736 files**. The
+reasoning is the one this whole class of tooling rests on — a checker that
+quietly narrows its own scope reports a clean tree, and a clean report is the
+one outcome that must never be produced by accident. That survey prints on a
+bare run and under `--write-baseline`, and *not* under `--check`: it costs 30
+seconds against the gated tree's 2, and in a push hook it buys four lines
+nobody acts on. A gate slow enough to be resented is a gate that gets
+uninstalled, which is the same silence by a longer route.
+
+Two things were tried and removed, both worth recording because both looked
+right:
+
+- **A substring prefilter to skip lexing.** The natural literal for the first
+  rule is `env::args` — which is a substring of `env::args_os`, the fix. It
+  therefore admits every *converted* file too, and measured, it let 2857 of
+  2902 files through. A prefilter that cannot distinguish the defect from its
+  own remedy buys nothing, and its only possible error is the silent one.
+- **A raw-source (unlexed) prefilter**, which would have been tighter but is
+  not sound: blanking a comment can *create* a match — `env::args/*x*/()`
+  becomes `env::args      ()` — so it could invent findings as well as miss
+  them.
+
+`--selftest` pins seven rules, run before `--check` in the hook and on every
+invocation here. Six classify synthetic files; the seventh asserts the gated
+tree is really there and non-empty, because none of the other six would notice
+if `GATED` pointed at a renamed directory — the walk would return nothing,
+`--check` would find nothing new, and the gate would pass forever while looking
+at an empty set. Each rule was verified capable of failing by breaking what it
+guards and confirming that rule and no other went red. The gate itself was
+verified end to end by appending a `to_str().unwrap()` to a clean bin: `1 not
+in the baseline`, exit 1, with the fix hint printed; green again on removal.
+
+One design note that cost a debugging pass: findings are keyed
+`<path>:<rule>` and split on the last colon, so the first draft's rule names —
+`env::args` and `env::vars` — silently took a piece of the path with them and
+produced entries like `…/rm.rs:env::21 [args]`. Not a crash: a plausible-looking
+report plus a baseline that could never match. The names are now hyphenated and
+a module-level `assert` forbids a colon in a rule name, so the mistake cannot
+recur.
+
+**The backlog stands at 51 findings across 50 files** — this adds no fix, only
+the guarantee that the number cannot grow. The burn-down still starts with the
+file-touching bins listed above.
 
 ---
 

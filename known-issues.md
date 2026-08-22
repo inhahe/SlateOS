@@ -53198,8 +53198,13 @@ extrapolation: 27 of its utilities are already under differential harnesses
 (`scripts/*-diff.sh`), so a lint fix that changes behaviour is caught the same
 run rather than at the next boot test. Sequence it **after**
 `B-FORTY-TWO-BINARY-NAMES-ARE-BUILT-BY-TWO-PACKAGES` is resolved, not before:
-every utility moved in from a standalone crate arrives with its own warnings,
-and linting the crate twice is the avoidable half of the work.
+whichever way that goes, utilities move between crates, they arrive carrying
+their own warnings, and linting the same code twice is the avoidable half of
+the work. Note that if `open-questions.md` → B-Q7 is answered in favour of the
+standing §8 — standalone crates canonical, `coreutils/src/bin/*` retired — then
+this crate's 86 binaries do not need linting at all; they need porting into 45
+new crates that inherit the workspace lints by construction. That is a further
+reason not to start here until B-Q7 lands.
 
 **If never fixed:** no regression — the exposure is exactly what it has been
 since the crates were written. But the lints exist because this codebase has no
@@ -54509,8 +54514,9 @@ Cargo warns and then picks one. The warning is emitted only when both are asked
 for in a single invocation, so `cargo build -p coreutils` alone is silent — and
 then a later `cargo build --workspace` quietly replaces the file.
 
-**The full list** (42 names; every one is `coreutils` vs a standalone
-`userspace/<name>`):
+**The full list** as first filed (42 names; every one is `coreutils` vs a
+standalone `userspace/<name>`). `bc` is since resolved — one producer,
+`userspace/bc` — leaving **41**:
 
 ```
 awk bc cal chown cmp comm cut date dd df diff du env expand fold free head
@@ -54523,7 +54529,7 @@ strings tar tee tr tsort uname uniq uptime wc who xargs
 | | live copy | the other one |
 |---|---|---|
 | `tr`, `wc`, `uniq`, `nl`, `cut`, `head`, `join`, `sed`, `seq`, `split`, `tsort`, `expand`, `fold`, `comm`, `paste`, `awk`, `sort` | **`coreutils`** — rewritten Aug 2026 for GNU parity, each certified by its own `*-diff.sh` | standalone, frozen 2026-06-13, roughly half the size |
-| `bc` | **`userspace/bc`** — Aug 2026 rewrite on `bignum::Decimal`, 200/200 against GNU | `coreutils/src/bin/bc.rs`, June, the one that fails 105 cases |
+| `bc` | **`userspace/bc`** — Aug 2026 rewrite on `bignum::Decimal`, 200/200 against GNU | `coreutils/src/bin/bc.rs`, June, the one that fails 105 cases — **deleted 2026-08-22, this pair is done** |
 | `cal`, `date`, `dd`, `df`, `diff`, `du`, `env`, `free`, `hostname`, `kill`, `logger`, `patch`, `ps`, `stat`, `strings`, `tar`, `tee`, `uname`, `uptime`, `who`, `xargs`, `chown`, `cmp`, `sha256sum` | **standalone** — 1000–2800 lines each | `coreutils/src/bin/<n>.rs`, a 125–450 line stub |
 
 So resolving it means a per-utility decision, and in the third row it means
@@ -54536,14 +54542,32 @@ not the home). It is not a delete-41-directories change.
    `scripts/diff-subject.sh` builds the subject from a named package
    immediately before the comparison, and all 27 `*-diff.sh` harnesses use it.
    That removes the way this defect was actually hurting us.
-2. The direction of the fix is settled — **design-decisions.md §359**:
-   `coreutils` is the one home, but the surviving *code* is chosen per utility,
-   because for 24 of the 42 the standalone crate is the real implementation.
-3. **`bc` is consolidated** — the first of the 42, and the one that caused the
-   false bug report. `userspace/bc/src/main.rs` is now
-   `userspace/coreutils/src/bin/bc.rs`, replacing the June stub, and the
-   `userspace/bc` crate is gone. `calc-diff.sh` names `coreutils bc` and still
-   reports 200 passed, 0 differed. 41 to go.
+2. **`bc`'s two implementations are merged**, which was the substance of the
+   `bc` problem regardless of where the survivor lives: the August rewrite on
+   `bignum::Decimal` (200/200 against GNU) is the one that survives, and the
+   June implementation that fails 105 cases is gone. `calc-diff.sh` names the
+   package explicitly and still reports 200 passed, 0 differed.
+
+**Not settled — which package is the one home.** I wrote
+**design-decisions.md §359** saying `coreutils` is, and began implementing it,
+before finding that **§8 (2026-06-12) decides the opposite and is an *operator*
+decision**: standalone per-tool crates are canonical, `coreutils/src/bin/*`
+retires. §359 is therefore **suspended and unimplemented**, and the `bc` move
+into `coreutils` has been reverted so the tree matches §8 — `userspace/bc` is
+back, carrying the good August code.
+
+The reason this is a question rather than simply "obey §8" is that §8's
+deciding argument is false. It retires `coreutils` for being "a busybox-style
+multi-call binary that dispatches on `argv[0]`" — one file serving many tools,
+which forces one on-disk identity to hold the union of all their capabilities.
+`coreutils` is not that: 86 separate bin targets, no `argv[0]` dispatch, no
+`src/main.rs` anywhere in its history, and it already contains the shared
+library §8 proposed extracting as `coreutils-common` (which was never created —
+no part of §8 was ever carried out). The crates that *do* dispatch on `argv[0]`
+are standalone ones: `stat` (six tools), `sha256sum` (four), `chown` (two),
+`who` (two). Queued for the operator as **`open-questions.md` → B-Q7**, with
+the measurements and three options. Until it is answered, §8 governs and no
+further consolidation happens in either direction.
 
 **A tool for the remaining 41: `scripts/dup-bins-survey.py`.** It lists every
 colliding name with both sides' line counts and the set of command-line options

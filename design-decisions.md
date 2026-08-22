@@ -35392,6 +35392,13 @@ what it saved is not.
 
 **Date:** 2026-08-22
 **Decided by:** Claude (autonomous)
+**Status: SUSPENDED the same day it was written — do not implement. It
+contradicts §8, which is an *operator* decision, and only §8 gets to be
+overturned by the operator.** See the "Suspended" note at the end of this entry
+before acting on anything above it: the direction below is, I still believe,
+the right one, but choosing it is not mine to do. The question is queued as
+`open-questions.md` → **B-Q7**. Until that is answered, §8 governs: standalone
+per-tool crates are canonical.
 
 **In short:** Forty-two of our command names — `wc`, `sed`, `stat`, `bc`, `tar`
 and so on — are currently built by *two* different crates, each producing a file
@@ -35537,3 +35544,54 @@ Verification that the work is complete:
 ```sh
 cargo build --workspace --target x86_64-pc-windows-gnu 2>&1 | grep -c collision   # must be 0
 ```
+
+### Suspended, hours after it was written — I overturned an operator decision without knowing it
+
+Everything above is a `Claude (autonomous)` decision, and I had no standing to
+make it. **§8, from 2026-06-12, decides the same question the other way, and it
+is `Decided by: Operator`.** It says standalone per-tool crates are canonical,
+that a `coreutils-common` library should be extracted, and that
+`coreutils/src/bin/*` should be retired. I did not find it until after I had
+written this entry and merged the first utility (`bc`) into `coreutils`.
+
+I found it the roundabout way — chasing whether the `--json` mode in 23 of the
+standalone crates was a convention or an accident — which is the tell that the
+mistake was procedural, not intellectual. **The correct first step of "resolve
+the duplicated binaries" was to grep `design-decisions.md` for the word
+`coreutils`, and I did not.** Writing a new entry is not the same as checking
+that no entry already covers it, and the file is 35 000 lines precisely so that
+the question "has this been decided?" has an answer. §8 is not obscure — it has
+its own companion analysis file, `coreutils-canonical-answer.md`, sitting in the
+repository root.
+
+What makes this worth writing down rather than quietly reverting: **§8's
+deciding argument is factually wrong**, and I am the one who supplied it. It
+retires `coreutils` because it is "a busybox-style multi-call binary that
+dispatches on `argv[0]`", which would force one on-disk identity to hold the
+union of every bundled tool's capabilities. `coreutils` is not that and never
+was — 86 separate bin targets, no `argv[0]` dispatch, no `src/main.rs` in its
+history, and it already contains the shared library §8 proposed creating. The
+crates that *do* dispatch on `argv[0]` are on the standalone side
+(`stat` → six tools, `sha256sum` → four, `chown` → two, `who` → two). So the
+argument that decided §8 argues against §8's conclusion.
+
+That does **not** make it mine to reverse. A wrong premise under an operator
+decision is a reason to *tell the operator*, not to act as though the decision
+had been made differently — the whole value of the `Decided by:` field is that
+it marks which entries I may revisit. So:
+
+1. This entry stays, suspended and unimplemented, as the record of the
+   direction I would argue for.
+2. The premise error is queued as `open-questions.md` → **B-Q7**, with the
+   measurements, three options and a recommendation.
+3. The `bc` consolidation this entry describes is **reverted** — `userspace/bc`
+   restored (carrying the better August implementation, which was the one good
+   part of the exercise), `coreutils/src/bin/bc.rs` deleted, `calc-diff.sh`
+   repointed. The tree matches §8 while B-Q7 is open.
+4. `known-issues.md` → `B-FORTY-TWO-BINARY-NAMES-ARE-BUILT-BY-TWO-PACKAGES`
+   is corrected to say the *direction* is undecided pending B-Q7, since the
+   collision itself is real either way.
+
+The two traps recorded above (`git mv` is invisible to cargo; do not restructure
+a crate mid-harness-run) are independent of which way B-Q7 goes, and are the
+other part of this exercise worth keeping.

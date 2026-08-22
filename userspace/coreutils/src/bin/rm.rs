@@ -374,11 +374,7 @@ fn remove_one<W: Write>(flags: &RmFlags, arg: &OsString, err: &mut W) -> bool {
 
     let result = if metadata.is_dir() {
         if !flags.recursive {
-            let _ = writeln!(
-                err,
-                "rm: cannot remove {}: Is a directory",
-                quoteaf_os(arg)
-            );
+            let _ = writeln!(err, "rm: cannot remove {}: Is a directory", quoteaf_os(arg));
             return false;
         }
         fs::remove_dir_all(path)
@@ -616,7 +612,8 @@ mod tests {
     fn a_triple_dash_prefix_reaches_the_hyphen_named_option() {
         let e = fail(&["---p", "a"]);
         assert!(
-            e.sentence.contains("'---presume-input-tty' is not implemented"),
+            e.sentence
+                .contains("'---presume-input-tty' is not implemented"),
             "{:?}",
             e.sentence
         );

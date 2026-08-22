@@ -3403,9 +3403,7 @@ s
     fn a_non_utf8_argument_is_a_file_name_rather_than_a_panic() {
         use std::os::windows::ffi::OsStringExt;
         // "caf\u{D800}.bc" — a lone high surrogate in the middle of a name.
-        let arg = OsString::from_wide(&[
-            0x0063, 0x0061, 0x0066, 0xD800, 0x002E, 0x0062, 0x0063,
-        ]);
+        let arg = OsString::from_wide(&[0x0063, 0x0061, 0x0066, 0xD800, 0x002E, 0x0062, 0x0063]);
         assert!(
             arg.to_str().is_none(),
             "the fixture must be un-representable as String, or it tests nothing"

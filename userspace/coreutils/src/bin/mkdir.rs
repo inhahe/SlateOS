@@ -292,7 +292,9 @@ fn unimplemented_short(flag: u8) -> getopt::Error {
 }
 
 fn unimplemented_long(name: &str) -> getopt::Error {
-    MKDIR.usage_referring(format!("option '--{name}' is not implemented by this mkdir"))
+    MKDIR.usage_referring(format!(
+        "option '--{name}' is not implemented by this mkdir"
+    ))
 }
 
 #[cfg(unix)]
@@ -533,7 +535,11 @@ mod tests {
         // With a value attached, too: `--mode` takes one, so the value is
         // accepted by the parser and the refusal still has to come from the
         // name.
-        assert!(fail(&["--mode=700", "a"]).sentence.contains("not implemented"));
+        assert!(
+            fail(&["--mode=700", "a"])
+                .sentence
+                .contains("not implemented")
+        );
     }
 
     #[test]

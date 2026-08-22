@@ -760,8 +760,7 @@ mod tests {
         for typed in ["k", "r", "random-sort", "fo", "stable"] {
             let whole = format!("--{typed}");
             let plain = SORT.resolve_long(typed, whole.as_bytes(), SORT_LONGS);
-            let aliased =
-                SORT.resolve_long_aliased(typed, whole.as_bytes(), SORT_LONGS, &[]);
+            let aliased = SORT.resolve_long_aliased(typed, whole.as_bytes(), SORT_LONGS, &[]);
             match (plain, aliased) {
                 (Ok(a), Ok(b)) => assert_eq!(a.0, b.0, "{typed}"),
                 (Err(a), Err(b)) => assert_eq!(a.sentence, b.sentence, "{typed}"),

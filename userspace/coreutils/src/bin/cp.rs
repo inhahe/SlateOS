@@ -512,7 +512,9 @@ fn compute_target(src: &Path, dest: &Path, dest_is_dir: bool) -> Result<PathBuf,
     }
     match src.file_name() {
         Some(name) => Ok(dest.join(name)),
-        None => Err("the source path ends in '.', '..' or '/', so it names nothing to create there"),
+        None => {
+            Err("the source path ends in '.', '..' or '/', so it names nothing to create there")
+        }
     }
 }
 
@@ -524,7 +526,10 @@ fn compute_target(src: &Path, dest: &Path, dest_is_dir: bool) -> Result<PathBuf,
 /// recognisable as the same directory reached by a different spelling, which a
 /// textual comparison would miss.
 fn is_inside(target: &Path, root: &Path) -> bool {
-    match (resolve_as_far_as_exists(root), resolve_as_far_as_exists(target)) {
+    match (
+        resolve_as_far_as_exists(root),
+        resolve_as_far_as_exists(target),
+    ) {
         (Some(root), Some(target)) => target.starts_with(&root),
         // If neither can be resolved at all there is nothing useful to say, and
         // refusing a copy on the strength of a failed lookup would be worse than
@@ -837,7 +842,8 @@ mod tests {
             // It resolves, and is then refused for the separate reason that
             // this `cp` implements neither spelling.
             assert!(
-                e.sentence.contains(&format!("'{named}' is not implemented")),
+                e.sentence
+                    .contains(&format!("'{named}' is not implemented")),
                 "{typed}: {:?}",
                 e.sentence
             );
@@ -1247,7 +1253,10 @@ mod tests {
             link.file_type().is_symlink(),
             "the loop must arrive as a link, not as a copied subtree"
         );
-        assert_eq!(fs::read_link(dst.join("sub/loop")).unwrap(), Path::new(".."));
+        assert_eq!(
+            fs::read_link(dst.join("sub/loop")).unwrap(),
+            Path::new("..")
+        );
         let _ = fs::remove_dir_all(&dir);
     }
 

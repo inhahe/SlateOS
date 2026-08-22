@@ -317,7 +317,9 @@ fn unimplemented_short(flag: u8) -> getopt::Error {
 }
 
 fn unimplemented_long(name: &str) -> getopt::Error {
-    RMDIR.usage_referring(format!("option '--{name}' is not implemented by this rmdir"))
+    RMDIR.usage_referring(format!(
+        "option '--{name}' is not implemented by this rmdir"
+    ))
 }
 
 // --------------------------------------------------------------- removing ---

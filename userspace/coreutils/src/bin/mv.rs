@@ -938,7 +938,10 @@ mod tests {
         assert!(!ok, "the missing source must count against the status");
         assert!(err.contains("gone"), "{err}");
         assert!(sub.join("a").is_file(), "the first source must still move");
-        assert!(sub.join("c").is_file(), "and so must the one after the error");
+        assert!(
+            sub.join("c").is_file(),
+            "and so must the one after the error"
+        );
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -971,7 +974,12 @@ mod tests {
         let moved = dir.join("moved");
         let (ok, err) = mv(&[&link, &moved]);
         assert!(ok, "{err}");
-        assert!(fs::symlink_metadata(&moved).unwrap().file_type().is_symlink());
+        assert!(
+            fs::symlink_metadata(&moved)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
         assert!(fs::symlink_metadata(&link).is_err());
         let _ = fs::remove_dir_all(&dir);
     }

@@ -644,7 +644,16 @@ Known-issues (open, kernel-owned):
   showing plausible frames means the corruption is in the kernel interrupt
   frame (hunt the writer), garbage or the hijack value on the stack means
   glibc/TLS teardown (hunt the freed object). Full writeup in `known-issues.md`.
-- `B-FORKEXEC-BOOT-HANG` — intermittent hang at the glibc fork+exec self-test
+- ~~`B-FORKEXEC-BOOT-HANG`~~ — intermittent hang at the glibc fork+exec
+  self-test. **RESOLVED 2026-08-22.** Root cause was an exiting task leaving a
+  *freed* PML4 loaded in CR3, so a preemption in the window between "process
+  published as reapable" and "address space actually left" ran on page tables
+  that had already been handed back to the allocator — which is why the symptom
+  was silence rather than a fault (the tables mapping the fault handler were the
+  ones freed). Fixed in `0ecd5ff03` by `sched::detach_address_space`, pinned by
+  `proc::thread` test 11 (`test_exit_detaches_address_space`), and the WATCH was
+  cleared after cycles 8/9/10 (`ab3d42901`, `b215b83c1`, `1422972ad`) each
+  reached `BOOT_OK` with a green `REAL glibc forkexec`.
 - ~~`B-KASAN-INSTRUMENTED-BOOT-WEDGES-MID-PRINT-ON-A-PAGE-FAULT`~~ — **NOT A
   KERNEL BUG, closed 2026-08-19.** The "wedge" was never real: the instrumented
   boot was healthy and simply slower than the harness budget. Three instrumented

@@ -60496,16 +60496,16 @@ nothing ran.
 
 ### Where they are
 
-| File | dead `#[test]`s | has a `self_test()`? |
-|---|---|---|
-| `kernel/src/fs/ext4/vfs_impl.rs` | 13 | yes |
-| `kernel/src/fs/pathutil.rs` | 10 | **no** |
-| `kernel/src/net/frag.rs` | 7 | yes |
-| `kernel/src/net/httpd.rs` | 7 | yes |
-| `kernel/src/fs/ext4/driver.rs` | 6 | yes |
-| `kernel/src/tty/mod.rs` | 6 | yes |
-| `kernel/src/fs/ext4/balloc.rs` | 3 | yes |
-| `kernel/src/net/raw.rs` | 2 | **no** |
+| File | dead `#[test]`s | has a `self_test()`? | converted |
+|---|---|---|---|
+| `kernel/src/fs/ext4/vfs_impl.rs` | 13 | yes | |
+| `kernel/src/fs/pathutil.rs` | 10 | **no** | **yes** — 2026-08-22 |
+| `kernel/src/net/frag.rs` | 7 | yes | **yes** — 2026-08-22 |
+| `kernel/src/net/httpd.rs` | 7 | yes | |
+| `kernel/src/fs/ext4/driver.rs` | 6 | yes | |
+| `kernel/src/tty/mod.rs` | 6 | yes | |
+| `kernel/src/fs/ext4/balloc.rs` | 3 | yes | |
+| `kernel/src/net/raw.rs` | 2 | **no** | **yes** — 2026-08-22 |
 
 Six of the eight have a boot self-test, so the module is not wholly unchecked —
 but the self-test and the dead unit tests cover different things, and the dead
@@ -60532,6 +60532,33 @@ also fixes lane B's `raw.rs` report for free: boot self-tests run sequentially o
 one CPU, so the `CLAIMED`/`OWNER` interleaving they traced is impossible by
 construction rather than by a mutex.
 
+The conversion is not mechanical, and three constraints keep recurring:
+
+- **A boot self-test cannot `assert!`.** A failed assertion is a panic and a
+  panic during boot is a dead machine, not a failed test. Every check has to log
+  its specific failure and return `Err`.
+- **The kernel state is real.** Unit tests could assume an empty process table
+  or an idle global; a boot self-test cannot. `raw.rs`'s two hardcoded PID 4242
+  and relied on it being absent — now searched for and skipped if unavailable.
+  Anything writing a live global has to restore it on every exit path.
+- **Re-read each test against the current API.** They have never been
+  type-checked, so treat compilation as an open question per file.
+
+### Progress (19 of 54)
+
+| Date | Files | Result |
+|---|---|---|
+| 2026-08-22 | `pathutil.rs` (10), `raw.rs` (2) | boot PASS 1674s; both print `Self-test PASSED` |
+| 2026-08-22 | `frag.rs` (7) | found `A-FRAG-REJECTED-FRAGMENTS-STILL-CLAIM-A-REASSEMBLY-SLOT` |
+
+The `frag.rs` conversion is the argument for doing the rest. Its seven dead
+tests all drove the module-level `add_fragment`, i.e. the global reassembly
+table — a layer the module's existing `self_test()` deliberately avoids in order
+to stay hermetic. Porting them therefore meant reading a code path nothing
+covered, and a remotely-triggerable table-exhaustion DoS was sitting in it. The
+value here is not only "the tests run now"; it is that porting a test forces
+someone to read the path it covers.
+
 Two things to get right while converting:
 
 - **A boot self-test cannot `assert!`.** A failed assertion in the kernel is a
@@ -60553,3 +60580,141 @@ the consequence, because the tests do not run. Checking that before applying the
 suggested mutex is what turned up the larger problem. Reply in
 `requests/a-b-raced-globals-flags-tests-that-cannot-run.md`, which also suggests
 the checker skip crates whose test target is disabled.
+
+## `A-FRAG-REJECTED-FRAGMENTS-STILL-CLAIM-A-REASSEMBLY-SLOT` — found 2026-08-22 (lane A) — FIXED 2026-08-22
+
+**In short:** When a machine receives a large network message split into pieces
+("fragments"), the kernel holds the pieces in a small table until the last one
+arrives and it can glue them back together. That table has **eight** slots. A
+piece that the kernel *rejects as invalid* still takes a slot and never gives it
+back for 30 seconds — so **eight junk packets from anywhere on the network
+occupy the whole table**, and every real split-up message arriving during those
+30 seconds gets thrown away to make room. Roughly one junk packet every four
+seconds keeps it that way forever. The attacker needs no credentials, no
+handshake, and no connection: these are unsolicited packets. Fix is a few lines
+— free the slot when the fragment that created it was rejected.
+
+### Where
+
+`kernel/src/net/frag.rs`:
+
+| Item | Line | Note |
+|---|---|---|
+| `MAX_REASSEMBLY_ENTRIES` | 66 | `= 8` — the whole table |
+| `add_fragment` (IPv4) | 293 | claims the slot at 354-357 |
+| `FragEntry::add_fragment` | 155 | rejects at 157 / 164 |
+| `add_fragment_v6` | 638 | same shape, `ENTRIES_V6` |
+| `tick_expire` | 396 | the only thing that frees a stuck slot, after 30 s |
+
+### The sequence
+
+The module-level `add_fragment` marks the slot live **before** it knows whether
+the fragment is any good:
+
+```rust
+let now = crate::hrtimer::now_ns();
+entries[slot].active = true;          // <-- committed here
+entries[slot].key = key;
+entries[slot].created_ns = now;
+...
+let complete = entry.add_fragment(byte_offset, data, more_fragments);
+```
+
+and `FragEntry::add_fragment` returns `false` from the top on two paths, having
+touched nothing at all:
+
+```rust
+if data.is_empty() { return false; }                 // empty payload
+let end = byte_offset.saturating_add(data.len());
+if end > MAX_PAYLOAD_V4 { return false; }            // offset+len past 65535
+```
+
+Nothing undoes the `active = true`. The slot now holds a key, a timestamp, an
+empty buffer and an empty bitmap. It cannot complete — no data will ever match
+it unless the attacker chooses to send more — so it sits until `tick_expire`
+reaps it at the 30 s mark.
+
+Because the key includes the 16-bit `identification` field, the attacker gets
+65 536 distinct keys for free; eight of them fill the table. From then on the
+allocator's fallback path runs on every legitimate fragment:
+
+```
+[frag] Evicting reassembly entry (id=...) to make room
+```
+
+which discards a real, partially-reassembled datagram. IPv6 is identical
+(`FragKeyV6`, 32-bit ID, so 4 billion keys).
+
+### Why the existing tests do not catch it
+
+Two of the dead `#[test]`s point straight at these paths —
+`test_oversized_fragment_rejected` and `test_empty_fragment_ignored` — and both
+assert only `result.is_none()`, which is true. The leak is in state they never
+look at. They also never ran (`A-KERNEL-UNIT-TESTS-NEVER-RUN`), so even that
+much was hypothetical.
+
+The `self_test()` at line 765 misses it for a different and more interesting
+reason: it is documented as exercising `FragEntry`/`FragEntryV6` methods
+"directly without touching global state or the timer". That is a reasonable way
+to keep a boot self-test hermetic, but it means **the entire slot-allocation
+layer — the table, the keying, the eviction policy — has no coverage at all**.
+The bug lives exactly in the layer that was skipped.
+
+### Fix
+
+After the inner call, release a slot that holds nothing:
+
+```rust
+// A rejected fragment must not leave a live entry behind: the slot was
+// claimed before we knew the fragment was any good, and an entry with an
+// empty buffer can never complete.  Leaving it costs a reassembly slot for
+// the full timeout, which is a remote DoS at eight packets.
+if !complete && entry.buffer.is_empty() {
+    entry.clear();
+}
+```
+
+`entry.buffer.is_empty()` is an exact test for "contributed nothing": an
+accepted fragment has non-empty `data`, so `end >= 1` and the buffer is resized
+to at least 1 byte. It is therefore a no-op for an existing entry that is
+legitimately still waiting. Apply to both `add_fragment` and `add_fragment_v6`.
+
+Then give the allocation layer coverage, since that is the real gap — the seven
+dead `#[test]`s in this module all drive the module-level `add_fragment`, which
+is precisely the untested layer, so converting them is the fix for the coverage
+hole as well as the vehicle for a regression test on this bug.
+
+### Provenance
+
+Found while converting this module's dead `#[test]`s to boot self-tests under
+`A-KERNEL-UNIT-TESTS-NEVER-RUN`. Reading the two rejection tests closely enough
+to port them is what exposed the slot leak they were sitting next to.
+
+### Fixed 2026-08-22
+
+Both `add_fragment` and `add_fragment_v6` now release a slot whose entry
+contributed nothing:
+
+```rust
+if entry.buffer.is_empty() {
+    entry.clear();
+}
+```
+
+on the `else` (not-complete) arm. `buffer.is_empty()` is an exact test for
+"contributed nothing" — an accepted fragment has non-empty `data`, so `end >= 1`
+and the buffer is grown to at least one byte — which makes it a no-op for an
+entry legitimately still waiting for more fragments.
+
+The regression test drives the actual attack rather than asserting on internals:
+`test_table_rejected_fragments_free_their_slot` pushes `MAX_REASSEMBLY_ENTRIES`
+empty fragments with distinct ids, then the same number of oversized ones,
+checking the table is empty after each sweep, and finally sends a real datagram
+and requires it to reassemble. Before the fix that last step could only succeed
+by evicting something.
+
+Boot test: PASS, 1656 s, 11th consecutive clean boot, 6 WARNING / 3 FAIL
+baseline unchanged. The serial log shows `[frag] table: rejected fragments free
+their slot (8 empty + 8 oversized): OK` and **zero** occurrences of `[frag]
+Evicting reassembly entry`, which is the observable the fix is about — the
+sixteen junk fragments forced no eviction at all.

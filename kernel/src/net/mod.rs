@@ -380,6 +380,12 @@ pub fn self_test() -> KernelResult<()> {
     dns::self_test()?;
     dhcp::self_test()?;
     frag::self_test()?;
+    // Separate from `frag::self_test`, which exercises `FragEntry` methods
+    // directly and deliberately does not touch global state.  That kept it
+    // hermetic but left the eight-slot reassembly *table* — keying, allocation,
+    // eviction, release — with no coverage, which is where
+    // `A-FRAG-REJECTED-FRAGMENTS-STILL-CLAIM-A-REASSEMBLY-SLOT` was hiding.
+    frag::self_test_table()?;
     interface::self_test()?;
     tls::self_test()?;
     // Note: veth::self_test() runs separately after veth::init() in

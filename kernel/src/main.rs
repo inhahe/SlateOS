@@ -1514,6 +1514,19 @@ extern "C" fn kernel_main() -> ! {
             if let Err(e) = fs::ext4::self_test_pure() {
                 serial_println!("WARNING: ext4 pure self-test failed: {:?}", e);
             }
+            // Path predicates: subtree matching and the `confine_under` jail
+            // guard.  Pure (constants only, no disk), so it runs on every boot
+            // path.
+            //
+            // These checks existed as `#[cfg(test)]` unit tests that never ran:
+            // the kernel binary sets `test = false` and there is no lib target,
+            // so `cargo test -p kernel` builds nothing (known-issues.md
+            // A-KERNEL-UNIT-TESTS-NEVER-RUN).  `confine_under` is the "Zip Slip"
+            // guard every archive extractor depends on, so "looks tested" and
+            // "never executed" was a bad pair of properties for it to have.
+            if let Err(e) = fs::pathutil::self_test() {
+                serial_println!("WARNING: pathutil self-test failed: {:?}", e);
+            }
             // File handle self-test — exercises open/read/write/seek/dup/dir-handle and
             // O_EXCL exclusive-create semantics against the VFS root.  It self-guards
             // (skips if "/" is not writable), so it runs on a diskless memfs boot too;
@@ -5707,6 +5720,18 @@ extern "C" fn kernel_main() -> ! {
     // SSH server self-test (binary packet protocol, encryption, key derivation).
     if let Err(e) = net::ssh::self_test() {
         serial_println!("[WARN] SSH self-test failed: {:?}", e);
+    }
+
+    // Raw-NIC claim self-test: unclaimed reads clean, a non-owner's release is
+    // a no-op, and a claim held by a dead process self-heals.
+    //
+    // These checks were `#[cfg(test)]` unit tests that never ran: the kernel
+    // binary sets `test = false` and there is no lib target, so `cargo test -p
+    // kernel` builds nothing (known-issues.md A-KERNEL-UNIT-TESTS-NEVER-RUN).
+    // Runs here, before userspace exists, so no real claim can be outstanding —
+    // the test checks that anyway and skips rather than disturbing a live one.
+    if let Err(e) = net::raw::self_test() {
+        serial_println!("[WARN] Raw-NIC claim self-test failed: {:?}", e);
     }
 
     {

@@ -385,6 +385,21 @@ pub fn add_fragment(
             payload,
         })
     } else {
+        // A fragment that contributed nothing must not keep the slot it was
+        // given.  `FragEntry::add_fragment` rejects empty and oversized
+        // fragments from its first two lines, before touching any state — but
+        // the slot above was already marked `active` with this sender's key,
+        // and nothing else would release it until `tick_expire` reaps it 30 s
+        // later.  With only `MAX_REASSEMBLY_ENTRIES` slots and a 16-bit
+        // identification field in the key, that let eight unsolicited junk
+        // packets hold the whole table and evict every real reassembly in
+        // progress.  An empty buffer is an exact test for "contributed
+        // nothing": an accepted fragment has non-empty `data`, so it always
+        // grows the buffer to at least one byte, which makes this a no-op for
+        // an entry that is legitimately still waiting for more fragments.
+        if entry.buffer.is_empty() {
+            entry.clear();
+        }
         None
     }
 }
@@ -727,6 +742,12 @@ pub fn add_fragment_v6(
             payload,
         })
     } else {
+        // Same slot leak as the IPv4 path above, and cheaper to drive: the
+        // IPv6 key carries a 32-bit identification field, so the attacker has
+        // four billion distinct keys rather than 65 536.
+        if entry.buffer.is_empty() {
+            entry.clear();
+        }
         None
     }
 }
@@ -1180,125 +1201,254 @@ fn test_v6_parse_fragment_header() -> crate::error::KernelResult<()> {
 }
 
 // ---------------------------------------------------------------------------
-// Tests (#[cfg(test)] — only runs with `cargo test`, not in kernel)
+// Self-test: the reassembly *table*
 // ---------------------------------------------------------------------------
+//
+// Everything above this point tests `FragEntry`/`FragEntryV6` methods directly,
+// which keeps those checks hermetic but leaves the layer that owns the eight
+// global slots — keying, allocation, eviction, release — with no coverage at
+// all.  That is the layer
+// `A-FRAG-REJECTED-FRAGMENTS-STILL-CLAIM-A-REASSEMBLY-SLOT` was found in.
+//
+// These checks came from a `#[cfg(test)] mod tests` that never ran: the kernel
+// binary sets `test = false` and has no lib target, so `cargo test -p kernel`
+// builds nothing (`known-issues.md` → `A-KERNEL-UNIT-TESTS-NEVER-RUN`).  They
+// all drove the module-level `add_fragment`, so porting them is what closes the
+// coverage hole as well as what exposed the bug.
+//
+// Unlike a unit test these run against the *live* table, so they must leave it
+// as they found it — hence the occupancy checks at both ends.
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use alloc::vec;
+/// Test-only source/destination.  Link-local (RFC 3927) and never routed here,
+/// so these keys cannot collide with real traffic in flight during boot.
+const T_SRC: Ipv4Addr = Ipv4Addr([169, 254, 0, 1]);
+const T_DST: Ipv4Addr = Ipv4Addr([169, 254, 0, 2]);
 
-    fn make_src() -> Ipv4Addr {
-        Ipv4Addr([10, 0, 0, 1])
+/// Number of slots currently held.
+fn active_entries() -> usize {
+    ENTRIES.lock().iter().filter(|e| e.active).count()
+}
+
+/// Fail unless the table holds exactly `want` entries.
+fn expect_active(want: usize, when: &str) -> crate::error::KernelResult<()> {
+    let got = active_entries();
+    if got == want {
+        return Ok(());
+    }
+    crate::serial_println!("[frag]   FAIL: {when}: {got} active entries, expected {want}");
+    Err(crate::error::KernelError::InternalError)
+}
+
+/// Shorthand: push one IPv4 fragment through the global table.
+fn frag_in(
+    id: u16,
+    proto: u8,
+    offset_units: u16,
+    more: bool,
+    data: &[u8],
+) -> Option<ReassembledPacket> {
+    add_fragment(T_SRC, T_DST, id, proto, offset_units, more, data)
+}
+
+/// A lone fragment with MF=0 at offset 0 completes immediately, and the slot it
+/// used is handed straight back.
+fn test_table_single_unfragmented() -> crate::error::KernelResult<()> {
+    let data = [1u8; 100];
+    let Some(pkt) = frag_in(42, 17, 0, false, &data) else {
+        crate::serial_println!("[frag]   FAIL: table: lone unfragmented datagram did not complete");
+        return Err(crate::error::KernelError::InternalError);
+    };
+    if pkt.payload.len() != 100 || pkt.protocol != 17 {
+        crate::serial_println!(
+            "[frag]   FAIL: table: len={} proto={}, expected 100/17",
+            pkt.payload.len(),
+            pkt.protocol
+        );
+        return Err(crate::error::KernelError::InternalError);
+    }
+    expect_active(0, "after a completed datagram")?;
+    crate::serial_println!("[frag]   table: lone unfragmented datagram: OK");
+    Ok(())
+}
+
+/// Two fragments in order, then two out of order, then three with the middle
+/// arriving last.  Each checks that the bytes land at the offsets they claimed.
+fn test_table_reassembly_orders() -> crate::error::KernelResult<()> {
+    // In order: 16 bytes of 0xAA at offset 0, then 8 of 0xBB at offset unit 2.
+    if frag_in(100, 6, 0, true, &[0xAA; 16]).is_some() {
+        crate::serial_println!("[frag]   FAIL: table: completed on the first of two fragments");
+        return Err(crate::error::KernelError::InternalError);
+    }
+    expect_active(1, "with one datagram in progress")?;
+    let Some(pkt) = frag_in(100, 6, 2, false, &[0xBB; 8]) else {
+        crate::serial_println!("[frag]   FAIL: table: two ordered fragments did not complete");
+        return Err(crate::error::KernelError::InternalError);
+    };
+    if pkt.payload != [[0xAAu8; 16].as_slice(), [0xBBu8; 8].as_slice()].concat() {
+        crate::serial_println!("[frag]   FAIL: table: ordered payload mismatch");
+        return Err(crate::error::KernelError::InternalError);
     }
 
-    fn make_dst() -> Ipv4Addr {
-        Ipv4Addr([10, 0, 0, 2])
+    // Out of order: the *last* fragment arrives first.
+    if frag_in(200, 17, 2, false, &[0xCC; 8]).is_some() {
+        crate::serial_println!("[frag]   FAIL: table: completed on a lone trailing fragment");
+        return Err(crate::error::KernelError::InternalError);
+    }
+    let Some(pkt) = frag_in(200, 17, 0, true, &[0xDD; 16]) else {
+        crate::serial_println!("[frag]   FAIL: table: reversed fragments did not complete");
+        return Err(crate::error::KernelError::InternalError);
+    };
+    if pkt.payload != [[0xDDu8; 16].as_slice(), [0xCCu8; 8].as_slice()].concat() {
+        crate::serial_println!("[frag]   FAIL: table: reversed payload mismatch");
+        return Err(crate::error::KernelError::InternalError);
     }
 
-    #[test]
-    fn test_single_unfragmented() {
-        // A single fragment with MF=0 and offset=0 should complete
-        // immediately.
-        let data = vec![1u8; 100];
-        let result = add_fragment(make_src(), make_dst(), 42, 17, 0, false, &data);
-        assert!(result.is_some());
-        let pkt = result.unwrap();
-        assert_eq!(pkt.payload.len(), 100);
-        assert_eq!(pkt.protocol, 17);
+    // Three fragments with the middle one last — the case that needs the
+    // received-block bitmap rather than a running high-water mark.
+    if frag_in(300, 6, 0, true, &[1; 8]).is_some() || frag_in(300, 6, 2, false, &[3; 8]).is_some() {
+        crate::serial_println!("[frag]   FAIL: table: completed with a hole still open");
+        return Err(crate::error::KernelError::InternalError);
+    }
+    let Some(pkt) = frag_in(300, 6, 1, true, &[2; 8]) else {
+        crate::serial_println!("[frag]   FAIL: table: hole-filling fragment did not complete");
+        return Err(crate::error::KernelError::InternalError);
+    };
+    if pkt.payload != [[1u8; 8].as_slice(), [2u8; 8].as_slice(), [3u8; 8].as_slice()].concat() {
+        crate::serial_println!("[frag]   FAIL: table: three-fragment payload mismatch");
+        return Err(crate::error::KernelError::InternalError);
     }
 
-    #[test]
-    fn test_two_fragments() {
-        // Fragment 1: offset=0, MF=1, 16 bytes
-        let frag1 = vec![0xAAu8; 16];
-        let result = add_fragment(make_src(), make_dst(), 100, 6, 0, true, &frag1);
-        assert!(result.is_none());
+    expect_active(0, "after three completed datagrams")?;
+    crate::serial_println!("[frag]   table: ordered / reversed / hole-filled reassembly: OK");
+    Ok(())
+}
 
-        // Fragment 2: offset=2 (16 bytes / 8), MF=0, 8 bytes
-        let frag2 = vec![0xBBu8; 8];
-        let result = add_fragment(make_src(), make_dst(), 100, 6, 2, false, &frag2);
-        assert!(result.is_some());
-        let pkt = result.unwrap();
-        assert_eq!(pkt.payload.len(), 24);
-        assert_eq!(&pkt.payload[..16], &[0xAA; 16]);
-        assert_eq!(&pkt.payload[16..24], &[0xBB; 8]);
+/// Concurrent datagrams are told apart by their identification field.
+///
+/// This is the property the table exists for: without correct keying the two
+/// streams below would merge and each would see the other's bytes.
+fn test_table_ids_do_not_mix() -> crate::error::KernelResult<()> {
+    if frag_in(400, 17, 0, true, &[0xAA; 8]).is_some()
+        || frag_in(401, 17, 0, true, &[0xBB; 8]).is_some()
+    {
+        crate::serial_println!("[frag]   FAIL: table: interleaved openers completed early");
+        return Err(crate::error::KernelError::InternalError);
+    }
+    expect_active(2, "with two datagrams interleaved")?;
+
+    // Finish the second one first.
+    let Some(pkt) = frag_in(401, 17, 1, false, &[0xCC; 8]) else {
+        crate::serial_println!("[frag]   FAIL: table: id 401 did not complete");
+        return Err(crate::error::KernelError::InternalError);
+    };
+    if pkt.payload != [[0xBBu8; 8].as_slice(), [0xCCu8; 8].as_slice()].concat() {
+        crate::serial_println!("[frag]   FAIL: table: id 401 payload contaminated by id 400");
+        return Err(crate::error::KernelError::InternalError);
     }
 
-    #[test]
-    fn test_out_of_order_fragments() {
-        // Receive last fragment first.
-        let frag2 = vec![0xCCu8; 8];
-        let result = add_fragment(make_src(), make_dst(), 200, 17, 2, false, &frag2);
-        assert!(result.is_none());
-
-        // Now receive first fragment.
-        let frag1 = vec![0xDDu8; 16];
-        let result = add_fragment(make_src(), make_dst(), 200, 17, 0, true, &frag1);
-        assert!(result.is_some());
-        let pkt = result.unwrap();
-        assert_eq!(pkt.payload.len(), 24);
-        assert_eq!(&pkt.payload[..16], &[0xDD; 16]);
-        assert_eq!(&pkt.payload[16..24], &[0xCC; 8]);
+    // The first is untouched and still completes with its own bytes.
+    let Some(pkt) = frag_in(400, 17, 1, false, &[0xDD; 8]) else {
+        crate::serial_println!("[frag]   FAIL: table: id 400 lost when id 401 completed");
+        return Err(crate::error::KernelError::InternalError);
+    };
+    if pkt.payload != [[0xAAu8; 8].as_slice(), [0xDDu8; 8].as_slice()].concat() {
+        crate::serial_println!("[frag]   FAIL: table: id 400 payload contaminated by id 401");
+        return Err(crate::error::KernelError::InternalError);
     }
 
-    #[test]
-    fn test_three_fragments() {
-        let frag1 = vec![1u8; 8];
-        assert!(add_fragment(make_src(), make_dst(), 300, 6, 0, true, &frag1).is_none());
+    expect_active(0, "after both interleaved datagrams completed")?;
+    crate::serial_println!("[frag]   table: concurrent ids do not mix: OK");
+    Ok(())
+}
 
-        let frag3 = vec![3u8; 8];
-        assert!(add_fragment(make_src(), make_dst(), 300, 6, 2, false, &frag3).is_none());
+/// Regression for `A-FRAG-REJECTED-FRAGMENTS-STILL-CLAIM-A-REASSEMBLY-SLOT`.
+///
+/// A fragment the entry layer refuses — empty payload, or an offset that puts
+/// its end past the IPv4 maximum — used to keep the slot it had just been
+/// given, because the slot is marked `active` before the fragment is inspected.
+/// With only eight slots that made the whole table reachable from unsolicited
+/// packets, so this drives the attack (`MAX_REASSEMBLY_ENTRIES` junk fragments,
+/// each with a distinct id) and then shows a real datagram still reassembles —
+/// which it could not do if the junk had kept the table.
+fn test_table_rejected_fragments_free_their_slot() -> crate::error::KernelResult<()> {
+    expect_active(0, "before the rejected-fragment sweep")?;
 
-        let frag2 = vec![2u8; 8];
-        let result = add_fragment(make_src(), make_dst(), 300, 6, 1, true, &frag2);
-        assert!(result.is_some());
-        let pkt = result.unwrap();
-        assert_eq!(pkt.payload.len(), 24);
-        assert_eq!(&pkt.payload[0..8], &[1; 8]);
-        assert_eq!(&pkt.payload[8..16], &[2; 8]);
-        assert_eq!(&pkt.payload[16..24], &[3; 8]);
+    // Empty payloads: refused by `FragEntry::add_fragment`'s first line.
+    for i in 0..MAX_REASSEMBLY_ENTRIES {
+        let id = 600u16.saturating_add(u16::try_from(i).unwrap_or(0));
+        if frag_in(id, 17, 0, true, &[]).is_some() {
+            crate::serial_println!("[frag]   FAIL: an empty fragment completed a datagram");
+            return Err(crate::error::KernelError::InternalError);
+        }
+    }
+    expect_active(0, "after 8 empty fragments")?;
+
+    // Oversized: offset unit 8190 is byte 65520, and +100 bytes puts the end
+    // past MAX_PAYLOAD_V4, so the entry layer refuses it.
+    for i in 0..MAX_REASSEMBLY_ENTRIES {
+        let id = 700u16.saturating_add(u16::try_from(i).unwrap_or(0));
+        if frag_in(id, 17, 8190, false, &[0u8; 100]).is_some() {
+            crate::serial_println!("[frag]   FAIL: an oversized fragment completed a datagram");
+            return Err(crate::error::KernelError::InternalError);
+        }
+    }
+    expect_active(0, "after 8 oversized fragments")?;
+
+    // The point of the two sweeps above: a legitimate datagram still gets a
+    // slot.  Before the fix this needed an eviction, and logged one.
+    let Some(pkt) = frag_in(800, 6, 0, false, &[0x5A; 32]) else {
+        crate::serial_println!("[frag]   FAIL: a real datagram was locked out by junk fragments");
+        return Err(crate::error::KernelError::InternalError);
+    };
+    if pkt.payload.len() != 32 {
+        crate::serial_println!("[frag]   FAIL: post-junk datagram len {}", pkt.payload.len());
+        return Err(crate::error::KernelError::InternalError);
     }
 
-    #[test]
-    fn test_different_ids_dont_mix() {
-        // Two concurrent datagrams with different IDs.
-        let frag_a1 = vec![0xAAu8; 8];
-        assert!(add_fragment(make_src(), make_dst(), 400, 17, 0, true, &frag_a1).is_none());
+    expect_active(0, "after the rejected-fragment sweep")?;
+    crate::serial_println!(
+        "[frag]   table: rejected fragments free their slot ({} empty + {} oversized): OK",
+        MAX_REASSEMBLY_ENTRIES,
+        MAX_REASSEMBLY_ENTRIES
+    );
+    Ok(())
+}
 
-        let frag_b1 = vec![0xBBu8; 8];
-        assert!(add_fragment(make_src(), make_dst(), 401, 17, 0, true, &frag_b1).is_none());
+/// Boot self-test for the global reassembly table.
+///
+/// Skips itself if any reassembly is already in progress: these checks assert
+/// on the table's occupancy, so a real datagram in flight would both fail them
+/// spuriously and risk being evicted by them.
+///
+/// # Errors
+/// [`crate::error::KernelError::InternalError`] if any check fails; the
+/// specific failure is logged first.
+pub fn self_test_table() -> crate::error::KernelResult<()> {
+    crate::serial_println!("[frag] Running reassembly-table self-test...");
 
-        // Complete B.
-        let frag_b2 = vec![0xCCu8; 8];
-        let result = add_fragment(make_src(), make_dst(), 401, 17, 1, false, &frag_b2);
-        assert!(result.is_some());
-        let pkt = result.unwrap();
-        assert_eq!(&pkt.payload[..8], &[0xBB; 8]);
-        assert_eq!(&pkt.payload[8..16], &[0xCC; 8]);
-
-        // A is still pending.
-        let frag_a2 = vec![0xDDu8; 8];
-        let result = add_fragment(make_src(), make_dst(), 400, 17, 1, false, &frag_a2);
-        assert!(result.is_some());
-        let pkt = result.unwrap();
-        assert_eq!(&pkt.payload[..8], &[0xAA; 8]);
-        assert_eq!(&pkt.payload[8..16], &[0xDD; 8]);
+    if active_entries() != 0 {
+        crate::serial_println!("[frag]   SKIPPED: a reassembly is already in progress");
+        return Ok(());
     }
 
-    #[test]
-    fn test_oversized_fragment_rejected() {
-        // Fragment that would put data past MAX_PAYLOAD.
-        let data = vec![0u8; 100];
-        // offset = 8190 blocks * 8 = 65520 bytes, + 100 = 65620 > MAX_PAYLOAD
-        let result = add_fragment(make_src(), make_dst(), 500, 17, 8190, false, &data);
-        // Should not complete (fragment rejected).
-        assert!(result.is_none());
+    let result = test_table_single_unfragmented()
+        .and_then(|()| test_table_reassembly_orders())
+        .and_then(|()| test_table_ids_do_not_mix())
+        .and_then(|()| test_table_rejected_fragments_free_their_slot());
+
+    if result.is_err() {
+        // A check that failed part-way can leave slots held on keys no real
+        // peer will ever complete.  Releasing them costs nothing (this ran only
+        // because the table was empty) and stops a failed self-test from
+        // degrading reassembly for the next 30 seconds.
+        for entry in ENTRIES.lock().iter_mut() {
+            if entry.active && entry.key.src == T_SRC && entry.key.dst == T_DST {
+                entry.clear();
+            }
+        }
     }
 
-    #[test]
-    fn test_empty_fragment_ignored() {
-        let result = add_fragment(make_src(), make_dst(), 600, 17, 0, true, &[]);
-        assert!(result.is_none());
-    }
+    result?;
+    crate::serial_println!("[frag] Reassembly-table self-test PASSED (4 checks)");
+    Ok(())
 }

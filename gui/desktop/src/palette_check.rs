@@ -1,0 +1,247 @@
+//! The sweep that proves a module was actually converted off its own colours.
+//!
+//! Part 2 of `TD-C-FORTY-NINE-SHELL-MODULES-CARRY-THEIR-OWN-COPY-OF-THE-PALETTE`
+//! replaces 549 hand-written `const … : Color` across 49 modules with roles
+//! read out of a [`Palette`]. That is a large mechanical edit, and the way a
+//! large mechanical edit fails is that one substitution is missed — which is
+//! invisible, because a missed constant still *compiles* and still draws the
+//! colour it always drew.
+//!
+//! It is invisible to the eye and to every ordinary test, but it is not
+//! invisible to arithmetic. Every constant being deleted is a **Catppuccin
+//! Mocha** value. So render the module twice, once per mode, and check the
+//! *light* render: a leftover constant is a dark value, the light palette does
+//! not contain it, and it names itself. That is what [`assert_drawn_from`]
+//! does, and it is the reason the conversion can be trusted at all rather than
+//! reviewed 549 times.
+//!
+//! # What counts as "from the palette"
+//!
+//! A renderer does not only emit palette members verbatim; it emits them at an
+//! alpha, and it emits a few colours that are deliberately *not* themed. The
+//! allowed set is therefore:
+//!
+//! - any [`Palette::roles`] entry, **compared on RGB only** — `with_alpha` is
+//!   how a panel, a wash and a hover state are built, and re-listing each of
+//!   those as a separate legal value would allow anything;
+//! - **black at any alpha** — a scrim and a drop shadow are an absence of
+//!   light rather than a colour (§525 decision 3), which is why they do not
+//!   flip with the mode;
+//! - the two [`readable_on`] endpoints, `0x11111B` and `0xEFF1F5` — text
+//!   chosen for a coloured fill, which is a function of that fill's brightness
+//!   and not a role;
+//! - whatever the caller declares in `derived`.
+//!
+//! # The known hole, stated rather than discovered later
+//!
+//! `readable_on` answers `0x11111B`, and `0x11111B` *is* Mocha `crust`. It has
+//! to be allowed in a light render, because a light-mode Allow button is pale
+//! green and wants near-black text on it. The consequence is that this sweep
+//! cannot catch a stray literal `CRUST` left behind in a converted module.
+//! Every other role it catches. That hole is worth naming here because the
+//! alternative — dropping the endpoint from the allowed set — would fail every
+//! module that draws a coloured button, which is most of them.
+//!
+//! # Why `derived` is a parameter and not a blanket allowance
+//!
+//! [`emphasized`](appearance::emphasized) and `Color::lerp` produce colours
+//! that are genuinely in no palette. Allowing "anything near a role" to cover
+//! them would gut the check. Instead each module names its own derivations at
+//! the call site, so a colour that is not a role has to be *claimed* by
+//! someone — which turns the exception into documentation of what the module
+//! computes.
+
+use appearance::Palette;
+use guitk::color::Color;
+use guitk::render::RenderCommand;
+
+/// The two values [`appearance::readable_on`] can return.
+///
+/// Not read from that function because the point of the sweep is to compare
+/// against something the code under test did not produce.
+const READABLE_ON_ENDPOINTS: [u32; 2] = [0x0011_111B, 0x00EF_F1F5];
+
+/// Every colour `cmd` will put on the screen.
+///
+/// Commands that carry no colour — the clip, translate and font scopes, and
+/// [`RenderCommand::Image`] — contribute nothing, which is correct rather than
+/// a gap: an image's pixels are not the shell's to theme.
+fn colors_of(cmd: &RenderCommand) -> Vec<Color> {
+    match cmd {
+        RenderCommand::FillRect { color, .. }
+        | RenderCommand::StrokeRect { color, .. }
+        | RenderCommand::Text { color, .. }
+        | RenderCommand::Line { color, .. }
+        | RenderCommand::BoxShadow { color, .. } => vec![*color],
+        // The trailing `color` *and* every span: a syntax-highlighted run
+        // carries most of its colours in the spans, so checking only the
+        // fallback would check the one colour least likely to be wrong.
+        RenderCommand::RichText { color, spans, .. } => {
+            let mut v = vec![*color];
+            v.extend(spans.iter().map(|s| s.color));
+            v
+        }
+        RenderCommand::Image { .. }
+        | RenderCommand::PushClip { .. }
+        | RenderCommand::PopClip
+        | RenderCommand::PushTranslate { .. }
+        | RenderCommand::PopTranslate
+        | RenderCommand::PushFont { .. }
+        | RenderCommand::PopFont => Vec::new(),
+    }
+}
+
+/// Whether `c` is a colour `p` can account for.
+fn is_accounted_for(p: &Palette, c: Color, derived: &[Color]) -> bool {
+    // Black at any alpha: scrims and shadows.
+    if c.r == 0 && c.g == 0 && c.b == 0 {
+        return true;
+    }
+    let rgb = (u32::from(c.r) << 16) | (u32::from(c.g) << 8) | u32::from(c.b);
+    if READABLE_ON_ENDPOINTS.contains(&rgb) {
+        return true;
+    }
+    // RGB only: alpha is how a role becomes a panel, a wash or a hover.
+    if p.roles()
+        .iter()
+        .any(|(_, r)| r.r == c.r && r.g == c.g && r.b == c.b)
+    {
+        return true;
+    }
+    derived
+        .iter()
+        .any(|d| d.r == c.r && d.g == c.g && d.b == c.b)
+}
+
+/// Assert every colour in `cmds` is one `p` can account for.
+///
+/// `what` names the module in the failure message, and `derived` lists the
+/// colours the module computes rather than reads — see the module docs for why
+/// that is a parameter.
+///
+/// # Panics
+///
+/// When a command carries a colour that is neither a role of `p`, nor black,
+/// nor a [`readable_on`](appearance::readable_on) endpoint, nor listed in
+/// `derived`. The message gives the offending value, the command index and the
+/// mode, because "some colour is wrong somewhere in 300 commands" is not an
+/// actionable failure.
+pub fn assert_drawn_from(p: &Palette, cmds: &[RenderCommand], derived: &[Color], what: &str) {
+    let mode = if p.light { "light" } else { "dark" };
+    for (i, cmd) in cmds.iter().enumerate() {
+        for c in colors_of(cmd) {
+            assert!(
+                is_accounted_for(p, c, derived),
+                "{what}: command {i} in {mode} mode draws \
+                 #{:02X}{:02X}{:02X} (alpha {}), which is not a role of the \
+                 {mode} palette, not black, not a readable_on endpoint, and \
+                 not declared as derived. A colour constant was probably left \
+                 behind by the conversion — see known-issues.md \
+                 TD-C-FORTY-NINE-SHELL-MODULES-CARRY-THEIR-OWN-COPY-OF-THE-PALETTE.",
+                c.r,
+                c.g,
+                c.b,
+                c.a,
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The sweep's own proof: it must reject the thing it exists to find.
+    ///
+    /// A converted module handed the *light* palette but still drawing a Mocha
+    /// constant is the entire defect, so a helper that passed that case would
+    /// be worse than no helper — it would certify 49 modules as converted
+    /// without checking any of them.
+    #[test]
+    fn a_leftover_mocha_constant_fails_the_light_sweep() {
+        let light = Palette::for_mode(true);
+        let leftover = RenderCommand::FillRect {
+            x: 0.0,
+            y: 0.0,
+            width: 1.0,
+            height: 1.0,
+            // Mocha `base`, the single most-copied constant in the shell.
+            color: Color::from_hex(0x1E1E2E),
+            corner_radii: guitk::style::CornerRadii::all(0.0),
+        };
+        let result = std::panic::catch_unwind(|| {
+            assert_drawn_from(&light, std::slice::from_ref(&leftover), &[], "probe");
+        });
+        assert!(
+            result.is_err(),
+            "the sweep accepted Mocha base in a light render, so it would \
+             certify an unconverted module as converted"
+        );
+    }
+
+    /// And it must accept the palette it was given, or every module fails.
+    #[test]
+    fn every_role_at_every_alpha_passes_its_own_palette() {
+        for light in [false, true] {
+            let p = Palette::for_mode(light);
+            for (name, role) in p.roles() {
+                for alpha in [0_u8, 60, 140, 255] {
+                    let cmd = RenderCommand::FillRect {
+                        x: 0.0,
+                        y: 0.0,
+                        width: 1.0,
+                        height: 1.0,
+                        color: Color::rgba(role.r, role.g, role.b, alpha),
+                        corner_radii: guitk::style::CornerRadii::all(0.0),
+                    };
+                    assert_drawn_from(&p, std::slice::from_ref(&cmd), &[], name);
+                }
+            }
+        }
+    }
+
+    /// The scrim and the shadows, which are black in both modes on purpose.
+    #[test]
+    fn black_at_any_alpha_is_accounted_for_in_both_modes() {
+        for light in [false, true] {
+            let p = Palette::for_mode(light);
+            for c in [p.scrim(), p.shadow(), p.text_shadow()] {
+                assert!(
+                    is_accounted_for(&p, c, &[]),
+                    "the {} palette's own scrim/shadow was rejected",
+                    if light { "light" } else { "dark" }
+                );
+            }
+        }
+    }
+
+    /// A span's colour is checked, not just the run's fallback.
+    ///
+    /// `RichText` carries most of its colours in `spans`; a sweep that read
+    /// only `color` would pass a run whose every visible glyph was wrong.
+    #[test]
+    fn a_bad_span_colour_is_caught_even_when_the_fallback_is_fine() {
+        let light = Palette::for_mode(true);
+        let cmd = RenderCommand::RichText {
+            x: 0.0,
+            y: 0.0,
+            text: "hi".to_string(),
+            spans: vec![guitk::render::TextSpan {
+                end: 2,
+                color: Color::from_hex(0x1E1E2E),
+            }],
+            color: light.text,
+            font_size: 12.0,
+            font_weight: guitk::render::FontWeightHint::Regular,
+            max_width: None,
+            overflow: guitk::render::TextOverflow::Clip,
+        };
+        let result = std::panic::catch_unwind(|| {
+            assert_drawn_from(&light, std::slice::from_ref(&cmd), &[], "probe");
+        });
+        assert!(
+            result.is_err(),
+            "a leftover colour in a span went unchecked"
+        );
+    }
+}

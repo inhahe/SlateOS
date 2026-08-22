@@ -2,11 +2,14 @@
 """Prove the `Palette` tests are regression tests, one defect at a time.
 
 The third of these harnesses (after `reintro-mouse-page.py` and
-`reintro-reload-input.py`), covering part 1 of
-`TD-C-FORTY-NINE-SHELL-MODULES-CARRY-THEIR-OWN-COPY-OF-THE-PALETTE`: the
-resolved `Palette` type in `gui/appearance`, and the two consumers rewritten to
-read roles out of it instead of repeating its values — `DecorationColors` and
-`DesktopTheme`.
+`reintro-reload-input.py`), covering
+`TD-C-FORTY-NINE-SHELL-MODULES-CARRY-THEIR-OWN-COPY-OF-THE-PALETTE`. Part 1 is
+defects A–U: the resolved `Palette` type in `gui/appearance`, and the two
+consumers rewritten to read roles out of it instead of repeating its values —
+`DecorationColors` and `DesktopTheme`. Part 2 begins at defect V, and is a
+different question: not "is the palette right?" but "did the conversion of a
+module off its own colour constants actually finish?" Those defects put one
+constant back and check that the module's two-mode sweep names it.
 
 A palette is unusually easy to test *vacuously*. Almost any assertion about a
 colour is satisfiable by the colour that is already there, so a suite can look
@@ -46,6 +49,7 @@ TARGET = "x86_64-pc-windows-gnu"
 
 APP = "gui/appearance/src/lib.rs"
 DESK = "gui/desktop/src/lib.rs"
+SEC = "gui/desktop/src/security_dialog.rs"
 
 # (name, file, [(old, new), ...], [packages], [tests expected to fail])
 DEFECTS = [
@@ -233,6 +237,47 @@ DEFECTS = [
         [("            start_menu_bg: p.base,", "            start_menu_bg: p.mantle,")],
         ["desktop"],
         ["every_surface_of_the_theme_is_a_role_out_of_the_shared_palette"],
+    ),
+    # --- part 2: a module converted off its own constants ---
+    #
+    # V, W and X are all the *same* defect — one `const … : Color` that the
+    # conversion missed — placed at three different depths, because that is the
+    # only failure mode a 549-substitution mechanical edit actually has. What
+    # they measure is not whether the sweep can spot a wrong colour (its own
+    # unit test does that) but whether the *states the sweep renders* reach the
+    # line the constant was left on. A sweep that renders one dialog in one
+    # mode would catch V, miss W entirely, and miss X unless it happened to
+    # hover the right button.
+    (
+        "V: the critical risk hue is left as this module's own Mocha red",
+        SEC,
+        [("            Self::Critical => p.red,",
+          "            Self::Critical => guitk::Color::from_hex(0xF38BA8),")],
+        ["desktop"],
+        ["every_colour_the_dialog_draws_comes_from_its_palette"],
+    ),
+    (
+        # Behind the details disclosure, so only an expanded render sees it.
+        "W: the details panel keeps its own Mocha mantle",
+        SEC,
+        [("                height: panel_h,\n"
+          "                color: p.mantle,",
+          "                height: panel_h,\n"
+          "                color: guitk::Color::from_hex(0x181825),")],
+        ["desktop"],
+        ["every_colour_the_dialog_draws_comes_from_its_palette"],
+    ),
+    (
+        # Only drawn while the pointer is over Allow: a state the sweep has to
+        # set up deliberately, and the reason it iterates `hovers` at all.
+        "X: the hovered Allow button keeps its own Mocha green",
+        SEC,
+        [("        let allow_bg = if self.hovered_button == Some(ButtonId::Allow) {\n"
+          "            p.green",
+          "        let allow_bg = if self.hovered_button == Some(ButtonId::Allow) {\n"
+          "            guitk::Color::from_hex(0xA6E3A1)")],
+        ["desktop"],
+        ["every_colour_the_dialog_draws_comes_from_its_palette"],
     ),
 ]
 

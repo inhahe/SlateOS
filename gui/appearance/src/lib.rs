@@ -1005,6 +1005,50 @@ impl Palette {
         }
     }
 
+    /// Every field of this palette, paired with its name.
+    ///
+    /// Public rather than test-only because two different sweeps need it and
+    /// the alternative is two hand-written lists that must be kept in step —
+    /// which is the shape of the bug this whole crate exists to remove. The
+    /// second caller is the shell's conversion sweep, which asserts that a
+    /// module's render output is drawn from the palette it was handed and
+    /// nothing else; a colour constant left behind in a converted module is a
+    /// Mocha value, so it is absent from the *light* palette's roles and the
+    /// sweep names it. See known-issues.md
+    /// `TD-C-FORTY-NINE-SHELL-MODULES-CARRY-THEIR-OWN-COPY-OF-THE-PALETTE`.
+    ///
+    /// Written out by hand, and deliberately so: the point of the sweeps that
+    /// consume this is that a field added later is *not* silently skipped, and
+    /// a macro or a reflection trick would skip it for exactly the same reason
+    /// the renderer would. The array's length is part of the signature so that
+    /// adding a field without adding it here fails to compile.
+    #[must_use]
+    pub fn roles(&self) -> [(&'static str, Color); 21] {
+        [
+            ("crust", self.crust),
+            ("mantle", self.mantle),
+            ("base", self.base),
+            ("surface0", self.surface0),
+            ("surface1", self.surface1),
+            ("surface2", self.surface2),
+            ("overlay0", self.overlay0),
+            ("subtext0", self.subtext0),
+            ("subtext1", self.subtext1),
+            ("text", self.text),
+            ("red", self.red),
+            ("green", self.green),
+            ("yellow", self.yellow),
+            ("peach", self.peach),
+            ("blue", self.blue),
+            ("lavender", self.lavender),
+            ("mauve", self.mauve),
+            ("sapphire", self.sapphire),
+            ("teal", self.teal),
+            ("sky", self.sky),
+            ("accent", self.accent),
+        ]
+    }
+
     /// Text that can be read on [`accent`](Self::accent).
     ///
     /// The accent is the one colour in the palette whose brightness the user
@@ -2338,34 +2382,15 @@ mod tests {
     /// Every field of the palette, paired with its name, for the sweeps that
     /// have to cover all of them rather than a sample.
     ///
-    /// Written out rather than derived because the point of several of these
-    /// tests is that a field added later is *not* silently skipped, and a
-    /// macro or a reflection trick would skip it for exactly the same reason
-    /// the renderer would.
+    /// Delegates to [`Palette::roles`] rather than keeping a second list.
+    /// It was a second list until the shell's conversion sweep needed the
+    /// same enumeration from outside this crate — at which point two
+    /// hand-written lists of the same fields would have been exactly the
+    /// keep-them-in-step arrangement this crate exists to abolish, and the
+    /// one that would have gone stale is this one, because it is the copy
+    /// nothing outside the file can see.
     fn roles(p: &Palette) -> [(&'static str, Color); 21] {
-        [
-            ("crust", p.crust),
-            ("mantle", p.mantle),
-            ("base", p.base),
-            ("surface0", p.surface0),
-            ("surface1", p.surface1),
-            ("surface2", p.surface2),
-            ("overlay0", p.overlay0),
-            ("subtext0", p.subtext0),
-            ("subtext1", p.subtext1),
-            ("text", p.text),
-            ("blue", p.blue),
-            ("green", p.green),
-            ("red", p.red),
-            ("yellow", p.yellow),
-            ("peach", p.peach),
-            ("lavender", p.lavender),
-            ("mauve", p.mauve),
-            ("sapphire", p.sapphire),
-            ("teal", p.teal),
-            ("sky", p.sky),
-            ("accent", p.accent),
-        ]
+        p.roles()
     }
 
     #[test]

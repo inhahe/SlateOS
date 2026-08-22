@@ -107,6 +107,12 @@ pub mod notif_pane;
 pub mod notification_settings;
 pub mod osd;
 pub mod overview;
+/// The sweep that proves a module was converted off its own colour constants.
+///
+/// Test-only: it exists to check the other modules' render output, and a
+/// release build has nothing to check.
+#[cfg(test)]
+pub mod palette_check;
 pub mod power;
 pub mod power_settings;
 pub mod print_manager;

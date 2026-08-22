@@ -50319,6 +50319,30 @@ Do **not** do part 2 without part 1 — threading a struct whose light variant
 does not exist yet just relocates the hardcoding into the struct's
 constructor.
 
+**Part 2 progress. 1 of 49 modules converted.**
+
+- [x] `security_dialog.rs` — 29 constants, done 2026-08-22. The method above
+  survived contact: the sweep lives in `gui/desktop/src/palette_check.rs` as
+  `assert_drawn_from(&Palette, &[RenderCommand], derived, what)`, backed by a
+  new public `Palette::roles()` so the light-mode membership set is the palette
+  itself rather than a second hand-written list. Four self-tests prove the
+  sweep rejects what it exists to find, and harness defects V/W/X in
+  `scripts/reintro-palette.py` prove it end-to-end on this module.
+  - **The state matrix is the load-bearing part, not the assertion.** A
+    leftover constant is only caught if the sweep renders the state that draws
+    it. This module needed four risk levels × expanded/collapsed ×
+    remember on/off × 1-or-2 queued × five hover targets = 160 renders per
+    mode. Defect W hides behind the details disclosure and defect X behind a
+    hover, so a one-render sweep would have passed both. Budget the same care
+    per module: enumerate the branches of `render` that *select* a colour, not
+    the ones that move geometry.
+  - `derived` was empty here — the dialog computes no colours. Modules using
+    `emphasized` or `Color::lerp` will have to declare theirs.
+  - Three `CRUST` sites became `readable_on(risk.color(p))`,
+    `readable_on(color)` and `p.on_accent()`. These are exactly the sites the
+    sweep is blind to (see the `readable_on` wrinkle above), so they were
+    decided by reading rather than by test — the standing cost of that hole.
+
 **Trigger:** this is not blocked on anything. It is sequenced after the shell
 event loop (`TD-C-THE-SHELL-CAN-DRAW-ITSELF-AND-NOBODY-CAN-ASK-IT-TO`) only
 because a shell that cannot be driven cannot demonstrate a theme change

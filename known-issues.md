@@ -10500,6 +10500,104 @@ output lock cannot report itself. Note this does **not** by itself explain
 this hang's silence, because the diagnostics that went missing were
 `serial_println!`, and serial is independent of console.
 
+**[A] CORRECTION to the 2026-08-14c prune (2026-08-22).** That audit's
+conclusion — "a >400 s silent wedge cannot have been spinning on a
+`crate::sync::Mutex` or a `PreemptSpinMutex`" — rests entirely on the premise
+that the 30 s stall detector *does* fire. We now have direct evidence of it
+**not** firing: the `fs::encrypt` self-deadlock
+(`B-A-SELF-DEADLOCK-DETECTORS-ALL-MISSED-A-TEXTBOOK-SELF-DEADLOCK`) spun for
+~600 s on a `PreemptSpinMutex` and printed nothing at all. So the prune was
+unsound as written, and the two lock types were never actually excluded. The
+detector has since been given a self-test (`sync::self_test_stall`, which
+drives `spin_with_stall_threshold` at a ~10 ms threshold and asserts a report
+lands), so from the next green boot onward the premise is *checked* rather
+than assumed — but do not lean on the 2026-08-14c prune for reasoning about
+any hang that predates that self-test passing.
+
+**[A] ROOT CAUSE FOUND 2026-08-22 — a use-after-free of the process page
+tables. Fixed in `0ecd5ff03`.** Reproduced on boot cycle 6 with the same
+signature as 2026-07-15 (silence immediately after `[sched] Task N exiting`,
+900 s timeout, no panic, no stall report). The new narrowing that cracked it:
+
+1. **The harness's poll loop is bounded** — `for _ in 0..MAX_YIELDS` with
+   `MAX_YIELDS = 262_144` (`spawn.rs:22881`) — **and every path after the loop
+   prints**, including the loop-exhausted path. So the absence of output proves
+   the wedge is *not* in "waiting for the process to exit"; the loop had
+   already broken with `reaped = true`, and the wedge is in one of the six
+   post-loop steps (`pcb::state`, `pcb::exit_code`, `Vfs::read_file(CAPTURE)`,
+   `thread::on_thread_exit`, `pcb::destroy`, `Vfs::remove(CAPTURE)`).
+2. **`pcb::destroy` is the one that frees memory another CPU may be using.**
+   It calls `destroy_process_resources` → `destroy_user_address_space`, whose
+   `// SAFETY:` comment (`pcb.rs:6064`) asserts *"no threads are running in
+   this address space, and no CPU has this PML4 loaded in CR3"*. **Nothing in
+   the kernel established either half of that.**
+
+The race, in full:
+
+- The zombie transition lives *inside* `proc::thread::on_thread_exit`
+  (`thread.rs`), which runs **on the dying thread itself**. It prints
+  `"Process N has no threads left — now zombie"`, calls `sched::wake` on the
+  task parked in `wait4()`, and posts `SIGCHLD`. The reaper is released
+  **here** — but the dying thread still has work to do: return through
+  `on_thread_exit`, run `sched::task_exit()` (another `serial_println!`),
+  `notify_exit_hooks`, take `SCHED`, mark itself `Dead`, and only then
+  `schedule_inner` away.
+- That window is *milliseconds*, not microseconds: two serial lines at
+  115200 baud are ~8 ms of output, and the timer tick is 10 ms. A preemption
+  landing inside it is common, not exotic.
+- Preempted there, the dying task is still `Running` and still records
+  `Task::pml4_phys = <process PML4>`. The reaper runs, sees `Zombie`, calls
+  `pcb::destroy`, and the PML4 frame is freed.
+- When the scheduler switches the dying task back in to finish exiting,
+  `schedule_inner` (`sched/mod.rs`) does
+  `if old_pml4 != new_pml4 { write_cr3(new_pml4) }` — loading a **freed**
+  frame into CR3. If that frame has since been handed out and overwritten
+  (the harness allocates heavily right after: `Vfs::remove`, then the next
+  self-test), its kernel half is garbage and the machine cannot even report
+  the fault, because the tables that map the fault handler are the ones that
+  were freed.
+
+That accounts for every property of the symptom that made it hard: the
+silence (no working page tables ⇒ no diagnostic path), the absence of a stall
+report (nothing was spinning on a lock), the intermittency (it needs a tick
+in the window *and* the freed frame to be destructively reused before the
+switch-back), and why it clusters on the fork/exec test (it is the test whose
+harness reaps a process the instant it zombifies).
+
+**Fix:** `sched::detach_address_space(task_id)` — the analogue of Linux's
+`exit_mm()` → `switch_mm(&init_mm)`. It clears `Task::pml4_phys` (so no later
+switch-in can reload the frame) *and* writes CR3 to the kernel PML4 (so the
+current execution stops depending on it). Both halves are required; neither is
+sufficient alone. `proc::thread::on_thread_exit` calls it immediately after
+`on_thread_exit_hook` — the last step in the exit path that needs the thread's
+user memory — and therefore *before* anything can publish the process as
+reapable. `sched::task_exit` calls it again as an idempotent backstop for exit
+paths that never reach `on_thread_exit`.
+
+**Regression test:** `proc::thread` test 11
+(`test_exit_detaches_address_space`) pins the invariant `pcb::destroy`
+actually needs — *at the instant a process becomes `Zombie`, no task still
+names its PML4*. The victim is spawned suspended and never admitted, so the
+test is deterministic instead of depending on the narrow preemption window
+that made the original failure intermittent.
+
+**Status:** the fix is committed and the invariant is tested, but the *hang*
+is only provisionally closed — it is intermittent by nature, so it stays
+WATCH until several consecutive clean boots have run this test. If it recurs
+after `0ecd5ff03`, the remaining post-loop suspects from narrowing (1) above
+are `Vfs::read_file`/`Vfs::remove` on the capture file and the console-lock
+lead below; re-check those rather than re-deriving the page-table path.
+
+**Generalisable lesson.** A `// SAFETY:` comment that states a *whole-system*
+precondition — "no CPU has this loaded in CR3" — and is reached from a public
+function anyone may call is not a proof, it is an unenforced request. Two
+things would have caught this earlier: writing such preconditions as something
+the *callee* establishes (which is what `detach_address_space` now does)
+rather than something the caller is trusted to have arranged, and treating
+"the state that publishes an object as reclaimable" and "the last instant that
+object is in use" as one atomic step. Here they were separated by two serial
+prints.
+
 ### D-SHM-MAP-NOCAP. `SYS_SHM_MAP`/`SYS_SHM_SIZE`/`SYS_SHM_CLOSE` do not verify the caller owns the handle — RESOLVED 2026-07-14
 
 **RESOLVED 2026-07-14 (option (b) — IPC provider-PID + `shm::authorize` grant).**

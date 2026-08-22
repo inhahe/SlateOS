@@ -20381,6 +20381,111 @@ pub fn self_test_linux_fchmodat2() -> KernelResult<()> {
     Ok(())
 }
 
+/// Ring-3 regression test for the **`/dev/input/event0` evdev node** — the
+/// whole path a real input client walks, from userspace.
+///
+/// Two processes are spawned from [`elf::build_linux_evdev_test_elf`]:
+///
+/// 1. **Granted** `(InputDevice, class, READ)` — opens the node and issues the
+///    interrogation sequence libinput/evtest/SDL issue (`EVIOCGVERSION`,
+///    `EVIOCGID`, `EVIOCGNAME`, `EVIOCGBIT`, `EVIOCGKEY`, `EVIOCGUNIQ`), then
+///    a non-blocking `read`, a deliberately-too-small `read`, a grab/ungrab
+///    pair, `EVIOCSCLOCKID`, and a foreign-magic ioctl. Exit 0 means every one
+///    answered the way the Linux ABI says it must.
+/// 2. **Denied** — no capabilities at all; the `open` must fail with `EACCES`.
+///
+/// The second half is not a formality. Reading the keyboard is the authority
+/// to observe every keystroke typed into every application, so a gate that
+/// silently admits everyone is the most consequential possible failure here —
+/// and a test that only ever runs *with* the capability cannot tell a working
+/// gate from an absent one.
+///
+/// Exit sentinels (granted): `0xE1` open, `0xE2`/`0xE3` `EVIOCGVERSION`,
+/// `0xE4`/`0xE5` `EVIOCGID`, `0xE6`/`0xE7` `EVIOCGNAME`, `0xE8`/`0xE9`
+/// `EVIOCGBIT`, `0xEA` `EVIOCGKEY`, `0xEB` `EVIOCGUNIQ`, `0xEC` non-blocking
+/// `read`, `0xED` sub-record `read`, `0xEE`/`0xEF` grab/ungrab, `0xF0`
+/// `EVIOCSCLOCKID`, `0xF1` foreign-magic ioctl, `0xF2` `close`. Denied:
+/// `0x21` the open did not fail with `EACCES`.
+pub fn self_test_linux_evdev() -> KernelResult<()> {
+    const MAX_YIELDS: usize = 256;
+
+    serial_println!("[spawn] Running evdev input-device test (ring 3, /dev/input/event0)...");
+
+    // `run_one` spawns one of the two payloads and asserts a clean exit.
+    let run_one = |expect_denied: bool, label: &str| -> KernelResult<()> {
+        let exe_elf = elf::build_linux_evdev_test_elf(expect_denied);
+        let argv: &[&[u8]] = &[b"spawn-test-linux-evdev"];
+        let envp: &[&[u8]] = &[b"PATH=/bin"];
+        // The class grant (`resource_id == 0`) is what a compositor gets; the
+        // denied run gets nothing, which is the whole point of it.
+        let caps = [(ResourceType::InputDevice, 0u64, Rights::READ)];
+        let granted: &[(ResourceType, u64, Rights)] = if expect_denied { &[] } else { &caps };
+        let options = SpawnOptions {
+            name: "spawn-test-linux-evdev",
+            parent: 0,
+            priority: DEFAULT_PRIORITY,
+            capabilities: granted,
+            fd_map: &[],
+            argv,
+            envp,
+            exe_path: None,
+            cwd: None,
+            uid_gid: None,
+        };
+
+        let result = match spawn_process(&exe_elf, &options) {
+            Ok(r) => r,
+            Err(e) => {
+                serial_println!("[spawn]   FAIL: evdev ({}) spawn returned {:?}", label, e);
+                return Err(e);
+            }
+        };
+
+        for _ in 0..MAX_YIELDS {
+            crate::sched::yield_now();
+            if pcb::state(result.pid) == Some(pcb::ProcessState::Zombie) {
+                break;
+            }
+        }
+
+        let state = pcb::state(result.pid);
+        let exit_code = pcb::exit_code(result.pid);
+
+        thread::on_thread_exit(result.task_id);
+        pcb::destroy(result.pid);
+
+        if state != Some(pcb::ProcessState::Zombie) {
+            serial_println!(
+                "[spawn]   FAIL: evdev ({}) — process not a zombie after {} yields, got {:?}",
+                label,
+                MAX_YIELDS,
+                state
+            );
+            return Err(KernelError::InternalError);
+        }
+
+        if exit_code != Some(0) {
+            serial_println!(
+                "[spawn]   FAIL: evdev ({}) — expected exit 0, got {:?} (see \
+                 self_test_linux_evdev's doc comment for the sentinel map)",
+                label,
+                exit_code
+            );
+            return Err(KernelError::InternalError);
+        }
+        Ok(())
+    };
+
+    run_one(false, "granted")?;
+    run_one(true, "denied")?;
+
+    serial_println!(
+        "[spawn]   evdev input device (ring 3: EVIOCGVERSION/GID/GNAME/GBIT/GKEY/GUNIQ, \
+         non-blocking read, grab+ungrab, SCLOCKID, ENOTTY; and EACCES without the capability): OK"
+    );
+    Ok(())
+}
+
 /// Ring-3 regression test for the **virtio-gpu `DRM_IOCTL_VIRTGPU_GETPARAM`**
 /// render ioctl — the honest "no-3D" reporting landed for Q18
 /// (design-decisions §59).

@@ -92,6 +92,26 @@ struct Instance {
     client: EvdevClient,
     /// Reference count: `create` = 1, each `dup` +1, each `close` −1.
     refcount: u32,
+    /// This fd has been revoked with `EVIOCREVOKE`; every further operation on
+    /// it fails.  The instance stays in the table so the fd number remains
+    /// valid until the client closes it — revoking is not closing.
+    revoked: bool,
+}
+
+/// Which instance, if any, holds an exclusive grab (`EVIOCGRAB`) on each
+/// device.  Indexed by [`InputDevice::minor`]; 0 means ungrabbed.
+///
+/// A grab is a real security primitive, not a formality: a screen locker grabs
+/// the keyboard precisely so that no other client can read the password being
+/// typed into it.  Honouring the ioctl but still delivering events to everyone
+/// would be worse than refusing it outright, because the locker would believe
+/// it was protected.
+static GRAB_OWNER: [AtomicU64; 2] = [const { AtomicU64::new(0) }; 2];
+
+/// The grab slot for a device, or `None` if it has no slot (unreachable: every
+/// [`InputDevice`] minor is in range).
+fn grab_slot(device: InputDevice) -> Option<&'static AtomicU64> {
+    GRAB_OWNER.get(device.minor() as usize)
 }
 
 /// Global table of all live evdev client instances, keyed by ID.
@@ -121,6 +141,7 @@ pub fn create(device: InputDevice) -> EvdevHandle {
         Instance {
             client: EvdevClient::new(device),
             refcount: 1,
+            revoked: false,
         },
     );
     EvdevHandle(id)
@@ -159,6 +180,14 @@ pub fn close(handle: EvdevHandle) {
     if let Some(inst) = table.get_mut(&handle.id()) {
         inst.refcount = inst.refcount.saturating_sub(1);
         if inst.refcount == 0 {
+            // Release any exclusive grab *before* the instance disappears.
+            // A grab that outlived its owner would silence the device for
+            // every other client with no way left to lift it.
+            if let Some(slot) = grab_slot(inst.client.device()) {
+                // The exchange fails exactly when this instance was not the
+                // grab owner — the common case, and one needing no action.
+                let _ = slot.compare_exchange(handle.id(), 0, Ordering::AcqRel, Ordering::Relaxed);
+            }
             table.remove(&handle.id());
         }
     }
@@ -190,10 +219,35 @@ pub fn device(handle: EvdevHandle) -> Option<InputDevice> {
 /// its wake condition.
 #[must_use]
 pub fn readable(handle: EvdevHandle) -> bool {
-    EVDEV_TABLE
-        .lock()
-        .get(&handle.id())
-        .is_some_and(|i| i.client.readable())
+    let mut table = EVDEV_TABLE.lock();
+    let Some(inst) = table.get_mut(&handle.id()) else {
+        return false;
+    };
+    if inst.revoked {
+        return false;
+    }
+    if grabbed_out(inst, handle.id()) {
+        return false;
+    }
+    inst.client.readable()
+}
+
+/// Is this instance locked out by *another* fd's exclusive grab?
+///
+/// Also does the locking-out: an instance that cannot receive the events now
+/// in the ring must not receive them later either, so its cursor is skipped
+/// forward here.  Otherwise a screen locker's grab would merely *delay* the
+/// password reaching every other client rather than withhold it.
+fn grabbed_out(inst: &mut Instance, id: EvdevId) -> bool {
+    let Some(slot) = grab_slot(inst.client.device()) else {
+        return false;
+    };
+    let owner = slot.load(Ordering::Acquire);
+    if owner == 0 || owner == id {
+        return false;
+    }
+    inst.client.discard_pending();
+    true
 }
 
 /// Read whole `input_event` records into `buf`, returning the byte count.
@@ -207,12 +261,24 @@ pub fn readable(handle: EvdevHandle) -> bool {
 /// # Errors
 ///
 /// - [`KernelError::InvalidHandle`] if the instance is stale.
+/// - [`KernelError::NoSuchDevice`] if the fd was revoked with `EVIOCREVOKE`.
 /// - [`KernelError::InvalidArgument`] if `buf` cannot hold one whole event.
 pub fn read(handle: EvdevHandle, buf: &mut [u8]) -> KernelResult<usize> {
     let mut table = EVDEV_TABLE.lock();
     let inst = table
         .get_mut(&handle.id())
         .ok_or(KernelError::InvalidHandle)?;
+    if inst.revoked {
+        return Err(KernelError::NoSuchDevice);
+    }
+    if grabbed_out(inst, handle.id()) {
+        // A whole-buffer check still applies: a client with a bad buffer
+        // should learn that regardless of who holds the grab.
+        if buf.len() < crate::evdev::INPUT_EVENT_SIZE {
+            return Err(KernelError::InvalidArgument);
+        }
+        return Ok(0);
+    }
     inst.client.read_into(buf)
 }
 
@@ -226,6 +292,129 @@ pub fn drops(handle: EvdevHandle) -> Option<u64> {
         .lock()
         .get(&handle.id())
         .map(|i| i.client.drop_count())
+}
+
+// ---------------------------------------------------------------------------
+// Control — grab, revoke, clock selection (the `EVIOC*` ioctls)
+// ---------------------------------------------------------------------------
+
+/// Take an exclusive grab of this fd's device (`EVIOCGRAB` with a non-zero
+/// argument).
+///
+/// While a grab is held, every *other* open of the same device reads nothing
+/// and polls not-readable, and the events produced during the grab are never
+/// delivered to them — see [`grabbed_out`].  Re-grabbing with the same fd
+/// succeeds and changes nothing, matching Linux.
+///
+/// # Errors
+///
+/// - [`KernelError::InvalidHandle`] if the instance is stale.
+/// - [`KernelError::NoSuchDevice`] if the fd was revoked.
+/// - [`KernelError::DeviceBusy`] if another fd already holds the grab (`EBUSY`).
+pub fn grab(handle: EvdevHandle) -> KernelResult<()> {
+    let table = EVDEV_TABLE.lock();
+    let inst = table.get(&handle.id()).ok_or(KernelError::InvalidHandle)?;
+    if inst.revoked {
+        return Err(KernelError::NoSuchDevice);
+    }
+    let slot = grab_slot(inst.client.device()).ok_or(KernelError::InvalidArgument)?;
+    match slot.compare_exchange(0, handle.id(), Ordering::AcqRel, Ordering::Acquire) {
+        Ok(_) => Ok(()),
+        // Already ours: idempotent, as on Linux.
+        Err(owner) if owner == handle.id() => Ok(()),
+        Err(_) => Err(KernelError::DeviceBusy),
+    }
+}
+
+/// Release this fd's exclusive grab (`EVIOCGRAB` with a zero argument).
+///
+/// # Errors
+///
+/// - [`KernelError::InvalidHandle`] if the instance is stale.
+/// - [`KernelError::InvalidArgument`] if this fd does not hold the grab, which
+///   is Linux's `EINVAL` for ungrabbing something you never grabbed.
+pub fn ungrab(handle: EvdevHandle) -> KernelResult<()> {
+    let table = EVDEV_TABLE.lock();
+    let inst = table.get(&handle.id()).ok_or(KernelError::InvalidHandle)?;
+    let slot = grab_slot(inst.client.device()).ok_or(KernelError::InvalidArgument)?;
+    match slot.compare_exchange(handle.id(), 0, Ordering::AcqRel, Ordering::Acquire) {
+        Ok(_) => Ok(()),
+        Err(_) => Err(KernelError::InvalidArgument),
+    }
+}
+
+/// Does this fd currently hold the exclusive grab on its device?
+#[must_use]
+pub fn holds_grab(handle: EvdevHandle) -> bool {
+    let table = EVDEV_TABLE.lock();
+    table.get(&handle.id()).is_some_and(|inst| {
+        grab_slot(inst.client.device())
+            .is_some_and(|slot| slot.load(Ordering::Acquire) == handle.id())
+    })
+}
+
+/// Permanently revoke this fd (`EVIOCREVOKE`).
+///
+/// Every subsequent operation on it fails; only `close` still works.  This is
+/// how a session manager takes input away from a process it is switching away
+/// from without needing that process to cooperate — the alternative, killing
+/// it, loses its state.
+///
+/// Irreversible by design: a revoke that could be undone would be a lock with
+/// a key left in it.  Any grab this fd held is released, since the fd can no
+/// longer do anything with it.
+///
+/// # Errors
+///
+/// [`KernelError::InvalidHandle`] if the instance is stale.
+pub fn revoke(handle: EvdevHandle) -> KernelResult<()> {
+    let mut table = EVDEV_TABLE.lock();
+    let inst = table
+        .get_mut(&handle.id())
+        .ok_or(KernelError::InvalidHandle)?;
+    inst.revoked = true;
+    if let Some(slot) = grab_slot(inst.client.device()) {
+        // Fails when this fd was not the owner; nothing to release then.
+        let _ = slot.compare_exchange(handle.id(), 0, Ordering::AcqRel, Ordering::Relaxed);
+    }
+    Ok(())
+}
+
+/// Has this fd been revoked?
+#[must_use]
+pub fn is_revoked(handle: EvdevHandle) -> bool {
+    EVDEV_TABLE
+        .lock()
+        .get(&handle.id())
+        .is_some_and(|i| i.revoked)
+}
+
+/// Select the clock this fd's event timestamps are reported in
+/// (`EVIOCSCLOCKID`).
+///
+/// # Errors
+///
+/// - [`KernelError::InvalidHandle`] if the instance is stale.
+/// - [`KernelError::NoSuchDevice`] if the fd was revoked.
+/// - [`KernelError::InvalidArgument`] for an unsupported clock.
+pub fn set_clockid(handle: EvdevHandle, clockid: u32) -> KernelResult<()> {
+    let mut table = EVDEV_TABLE.lock();
+    let inst = table
+        .get_mut(&handle.id())
+        .ok_or(KernelError::InvalidHandle)?;
+    if inst.revoked {
+        return Err(KernelError::NoSuchDevice);
+    }
+    inst.client.set_clockid(clockid)
+}
+
+/// The clock this fd's timestamps are reported in, or `None` if stale.
+#[must_use]
+pub fn clockid(handle: EvdevHandle) -> Option<u32> {
+    EVDEV_TABLE
+        .lock()
+        .get(&handle.id())
+        .map(|i| i.client.clockid())
 }
 
 // ---------------------------------------------------------------------------
@@ -306,7 +495,87 @@ pub fn self_test() -> KernelResult<()> {
     );
     let nb = read(b, &mut buf)?;
     check!(nb == na, "second reader gets the same bytes");
+
+    // --- exclusive grab -----------------------------------------------------
+    check!(!holds_grab(a) && !holds_grab(b), "nobody grabs by default");
+    grab(a)?;
+    check!(holds_grab(a), "A now holds the grab");
+    check!(
+        grab(a).is_ok(),
+        "re-grabbing with the same fd is idempotent"
+    );
+    check!(
+        grab(b) == Err(KernelError::DeviceBusy),
+        "a second grabber is EBUSY"
+    );
+    check!(
+        ungrab(b) == Err(KernelError::InvalidArgument),
+        "ungrabbing a grab you never took is EINVAL"
+    );
+
+    // Events typed during the grab reach the owner and nobody else — and are
+    // not merely delayed for the others, which is the whole point.
+    crate::evdev::push_key(InputDevice::Keyboard, 30, 0x1E, true);
+    check!(readable(a), "the grab owner still reads");
+    check!(!readable(b), "a grabbed-out fd is not readable");
+    check!(read(b, &mut buf)? == 0, "and reads nothing");
+    check!(
+        read(a, &mut buf)? == 3 * crate::evdev::INPUT_EVENT_SIZE,
+        "the owner gets the whole keystroke"
+    );
+    ungrab(a)?;
+    check!(!holds_grab(a), "the grab is released");
+    // B learns its view is stale rather than receiving the withheld keystroke.
+    let n = read(b, &mut buf)?;
+    check!(n == crate::evdev::INPUT_EVENT_SIZE, "B gets one record");
+    check!(
+        buf.get(18..20) == Some(&crate::evdev::SYN_DROPPED.to_le_bytes()[..]),
+        "...and it is SYN_DROPPED, not the withheld keypress"
+    );
+
+    // A grab dies with its owner: otherwise the device would be silenced for
+    // everyone with no fd left that could lift it.
+    grab(a)?;
     close(a);
+    check!(!exists(a), "grab owner closed");
+    crate::evdev::push_key(InputDevice::Keyboard, 31, 0x1F, true);
+    check!(readable(b), "closing the grab owner frees the device");
+    while read(b, &mut buf)? > 0 {}
+
+    // --- clock selection ----------------------------------------------------
+    check!(
+        clockid(b) == Some(crate::evdev::CLOCK_REALTIME),
+        "realtime is the default clock"
+    );
+    set_clockid(b, crate::evdev::CLOCK_MONOTONIC)?;
+    check!(
+        clockid(b) == Some(crate::evdev::CLOCK_MONOTONIC),
+        "EVIOCSCLOCKID(MONOTONIC) sticks"
+    );
+    check!(
+        set_clockid(b, crate::evdev::CLOCK_BOOTTIME).is_ok(),
+        "boottime is accepted"
+    );
+    check!(
+        set_clockid(b, 99) == Err(KernelError::InvalidArgument),
+        "an unknown clock is EINVAL"
+    );
+
+    // --- revoke -------------------------------------------------------------
+    check!(!is_revoked(b), "not revoked to begin with");
+    revoke(b)?;
+    check!(is_revoked(b), "revoke sticks");
+    check!(!readable(b), "a revoked fd is never readable");
+    check!(
+        read(b, &mut buf) == Err(KernelError::NoSuchDevice),
+        "a revoked fd reads ENODEV"
+    );
+    check!(
+        grab(b) == Err(KernelError::NoSuchDevice),
+        "a revoked fd cannot grab"
+    );
+    check!(exists(b), "revoking is not closing: the instance survives");
+
     close(b);
     check!(!exists(a) && !exists(b), "both freed");
 

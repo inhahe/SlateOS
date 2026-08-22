@@ -161,6 +161,17 @@ static EVENT_COUNT: AtomicU32 = AtomicU32::new(0);
 /// button edge that depended on it would be lost or invented.
 static PREV_BUTTONS: AtomicU8 = AtomicU8::new(0);
 
+/// Which mouse buttons are held right now, as the PS/2 bitmask (bit 0 left,
+/// bit 1 right, bit 2 middle).
+///
+/// Backs `EVIOCGKEY` on `/dev/input/event1`, for the same reason the keyboard
+/// needs its own: a button already held when a client opens the device has no
+/// press event for the client to have seen.
+#[must_use]
+pub fn button_state() -> u8 {
+    PREV_BUTTONS.load(Ordering::Acquire)
+}
+
 // ---------------------------------------------------------------------------
 // Initialization
 // ---------------------------------------------------------------------------

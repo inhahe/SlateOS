@@ -324,6 +324,27 @@ fn note_key_transition(keycode: u16, pressed: bool) -> bool {
     }
 }
 
+/// Snapshot of which keycodes are currently held, one bit per Linux keycode
+/// (word `i` bit `b` is keycode `i * 64 + b`).
+///
+/// Backs `EVIOCGKEY` on `/dev/input/event0`. A client needs this because the
+/// event stream carries only *transitions*: a key already held when the client
+/// opened the device has no press event for it to have seen, so without an
+/// explicit query the client believes that key is up until it is released.
+///
+/// The four words are loaded independently, so a key that changes state during
+/// the snapshot may be reported either way. That is inherent — Linux has the
+/// same race — and harmless, because any transition missed here is immediately
+/// followed by an `EV_KEY` record on the stream that corrects it.
+#[must_use]
+pub fn key_down_bits() -> [u64; 4] {
+    let mut out = [0_u64; 4];
+    for (dst, src) in out.iter_mut().zip(KEY_DOWN_BITS.iter()) {
+        *dst = src.load(Ordering::Acquire);
+    }
+    out
+}
+
 /// Forget all held keys.
 ///
 /// Used when the keyboard is reinitialised: any key held across the reset has

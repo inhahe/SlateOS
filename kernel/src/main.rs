@@ -2986,6 +2986,16 @@ extern "C" fn kernel_main() -> ! {
         );
     }
 
+    // Ring-3 regression test for /dev/input/event0: the EVIOC* interrogation
+    // sequence a real input client issues, plus the capability gate that keeps
+    // every keystroke from being readable by anything that can name the path.
+    if let Err(e) = proc::spawn::self_test_linux_evdev() {
+        serial_println!(
+            "WARNING: evdev input device (ring 3) self-test failed: {:?}",
+            e
+        );
+    }
+
     // Ring-3 regression test for the virtio-gpu GETPARAM render ioctl on
     // /dev/dri/renderD128 (honest no-3D reporting; Q18/§59). Skips cleanly when
     // no DRM device is bound.

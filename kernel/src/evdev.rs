@@ -82,7 +82,10 @@ pub struct InputEvent {
 /// of this and never splits a record across two calls.
 pub const INPUT_EVENT_SIZE: usize = core::mem::size_of::<InputEvent>();
 
-const _: () = assert!(INPUT_EVENT_SIZE == 24, "input_event must be 24 bytes on x86-64");
+const _: () = assert!(
+    INPUT_EVENT_SIZE == 24,
+    "input_event must be 24 bytes on x86-64"
+);
 const _: () = assert!(core::mem::align_of::<InputEvent>() == 8);
 
 // Event types.
@@ -255,7 +258,10 @@ impl SourceRing {
         };
 
         ts.store(ts_ns, Ordering::Relaxed);
-        pk.store((u32::from(etype) << 16) | u32::from(code), Ordering::Relaxed);
+        pk.store(
+            (u32::from(etype) << 16) | u32::from(code),
+            Ordering::Relaxed,
+        );
         vl.store(value, Ordering::Relaxed);
 
         // Release: everything above must be visible to a consumer that sees
@@ -265,8 +271,9 @@ impl SourceRing {
     }
 
     /// Read slot `seq` without checking whether it is still valid; the caller
-    /// validates by re-reading `head`.
-    fn load_slot(&self, seq: u64) -> Option<InputEvent> {
+    /// validates by re-reading `head`. `clockid` selects the clock the stored
+    /// monotonic stamp is reported in.
+    fn load_slot(&self, seq: u64, clockid: u32) -> Option<InputEvent> {
         #[allow(clippy::cast_possible_truncation)]
         let idx = (seq & RING_MASK) as usize;
         let ts = self.ts_ns.get(idx)?.load(Ordering::Relaxed);
@@ -278,10 +285,7 @@ impl SourceRing {
         #[allow(clippy::cast_possible_truncation)]
         let code = (packed & 0xFFFF) as u16;
 
-        #[allow(clippy::cast_possible_wrap)]
-        let sec = (ts / 1_000_000_000) as i64;
-        #[allow(clippy::cast_possible_wrap)]
-        let usec = ((ts % 1_000_000_000) / 1_000) as i64;
+        let (sec, usec) = stamp(ts, clockid);
 
         Some(InputEvent {
             sec,
@@ -296,14 +300,55 @@ impl SourceRing {
 static KEYBOARD_RING: SourceRing = SourceRing::new();
 static MOUSE_RING: SourceRing = SourceRing::new();
 
-/// Current `CLOCK_REALTIME` in nanoseconds, or zero before timekeeping is up.
+/// Current `CLOCK_MONOTONIC` in nanoseconds — the clock events are *stored* in.
 ///
-/// `clock_realtime` is lock-free (two relaxed atomic loads plus a TSC read), so
-/// this is safe from interrupt context. A zero timestamp during early boot is
+/// Monotonic rather than realtime for two reasons. It is the clock libinput
+/// selects with `EVIOCSCLOCKID` and the only one whose deltas survive a
+/// wall-clock step, which is what an input timestamp is actually used for
+/// (double-click intervals, pointer velocity, key repeat). And in this kernel
+/// realtime is *derived* from monotonic — `realtime = boot_epoch + monotonic +
+/// adjustment` — so a stored monotonic stamp can be converted back to the
+/// realtime value the ISR would have computed, whereas storing realtime and
+/// converting the other way cannot recover it.
+///
+/// `clock_monotonic` is lock-free (a TSC read plus two relaxed loads), so this
+/// is safe from interrupt context. A zero timestamp during early boot is
 /// preferable to not recording the event at all; evdev clients treat the
 /// timestamp as advisory and none refuse a record for having one.
 fn now_ns() -> u64 {
-    crate::timekeeping::clock_realtime()
+    crate::timekeeping::clock_monotonic()
+}
+
+/// `CLOCK_REALTIME` — evdev's default timestamp clock.
+pub const CLOCK_REALTIME: u32 = 0;
+/// `CLOCK_MONOTONIC` — what libinput selects via `EVIOCSCLOCKID`.
+pub const CLOCK_MONOTONIC: u32 = 1;
+/// `CLOCK_BOOTTIME`. Accepted, and identical to [`CLOCK_MONOTONIC`] here
+/// because nothing suspends yet; the two diverge only across a suspend, and
+/// rejecting it would fail clients that ask for it as a first preference.
+pub const CLOCK_BOOTTIME: u32 = 7;
+
+/// Split a stored monotonic nanosecond stamp into the `(sec, usec)` pair a
+/// client reads, in the clock that client selected with `EVIOCSCLOCKID`.
+///
+/// The realtime conversion reads both clocks *now* rather than storing two
+/// stamps per ring slot. That reproduces exactly what the ISR would have
+/// computed unless the wall clock was stepped between capture and read — and
+/// in that case the fresh offset is the better answer anyway, since every
+/// other timestamp the client holds is about to use it too.
+fn stamp(mono_ns: u64, clockid: u32) -> (i64, i64) {
+    let ns = if clockid == CLOCK_REALTIME {
+        let now_mono = crate::timekeeping::clock_monotonic();
+        let now_real = crate::timekeeping::clock_realtime();
+        now_real.saturating_add(mono_ns).saturating_sub(now_mono)
+    } else {
+        mono_ns
+    };
+    #[allow(clippy::cast_possible_wrap)]
+    let sec = (ns / 1_000_000_000) as i64;
+    #[allow(clippy::cast_possible_wrap)]
+    let usec = ((ns % 1_000_000_000) / 1_000) as i64;
+    (sec, usec)
 }
 
 // ---------------------------------------------------------------------------
@@ -332,7 +377,11 @@ pub fn push_key(dev: InputDevice, keycode: u16, scancode: u16, pressed: bool) {
     ring.push(
         EV_KEY,
         keycode,
-        if pressed { KEY_VALUE_DOWN } else { KEY_VALUE_UP },
+        if pressed {
+            KEY_VALUE_DOWN
+        } else {
+            KEY_VALUE_UP
+        },
         ts,
     );
     ring.push(EV_SYN, SYN_REPORT, 0, ts);
@@ -414,6 +463,9 @@ pub struct EvdevClient {
     syn_dropped_pending: bool,
     /// Number of times this client has been lapped, for diagnostics.
     drops: u64,
+    /// Which clock this client's timestamps are reported in, as chosen with
+    /// `EVIOCSCLOCKID`. Defaults to [`CLOCK_REALTIME`], matching Linux.
+    clockid: u32,
 }
 
 impl EvdevClient {
@@ -430,6 +482,7 @@ impl EvdevClient {
             cursor: device.ring().head.load(Ordering::Acquire),
             syn_dropped_pending: false,
             drops: 0,
+            clockid: CLOCK_REALTIME,
         }
     }
 
@@ -437,6 +490,57 @@ impl EvdevClient {
     #[must_use]
     pub const fn device(&self) -> InputDevice {
         self.device
+    }
+
+    /// Select the clock this client's timestamps are reported in
+    /// (`EVIOCSCLOCKID`).
+    ///
+    /// Affects only records not yet read: an event already handed to the
+    /// client keeps whatever stamp it was given, exactly as on Linux, where
+    /// the clock is applied when a value is passed to the client rather than
+    /// when it is captured.
+    ///
+    /// # Errors
+    ///
+    /// `InvalidArgument` for a clock that is not one of [`CLOCK_REALTIME`],
+    /// [`CLOCK_MONOTONIC`] or [`CLOCK_BOOTTIME`].
+    pub fn set_clockid(&mut self, clockid: u32) -> KernelResult<()> {
+        match clockid {
+            CLOCK_REALTIME | CLOCK_MONOTONIC => self.clockid = clockid,
+            // Nothing suspends yet, so boottime and monotonic are the same
+            // clock; storing the canonical one keeps `stamp` to two cases.
+            CLOCK_BOOTTIME => self.clockid = CLOCK_MONOTONIC,
+            _ => return Err(KernelError::InvalidArgument),
+        }
+        Ok(())
+    }
+
+    /// The clock this client's timestamps are reported in.
+    #[must_use]
+    pub const fn clockid(&self) -> u32 {
+        self.clockid
+    }
+
+    /// Drop everything currently pending, recording that a gap occurred.
+    ///
+    /// Used when another fd holds an exclusive grab of the device: the whole
+    /// point of a grab is that other clients do not observe what is typed
+    /// during it (a screen locker grabs the keyboard so the password cannot be
+    /// read by anyone else), so those events must be skipped rather than
+    /// queued up and delivered when the grab lifts. The client still learns
+    /// that its view is stale, via the `SYN_DROPPED` this leaves owed.
+    ///
+    /// Contiguous gaps count once: a grab held across a hundred keystrokes is
+    /// one gap, not a hundred.
+    pub fn discard_pending(&mut self) {
+        let head = self.device.ring().head.load(Ordering::Acquire);
+        if self.cursor < head {
+            self.cursor = head;
+            if !self.syn_dropped_pending {
+                self.syn_dropped_pending = true;
+                self.drops = self.drops.saturating_add(1);
+            }
+        }
     }
 
     /// How many times this client has been lapped by the producer.
@@ -465,11 +569,7 @@ impl EvdevClient {
         // further real event, so the client learns of the gap in stream order.
         if self.syn_dropped_pending {
             self.syn_dropped_pending = false;
-            let ts = now_ns();
-            #[allow(clippy::cast_possible_wrap)]
-            let sec = (ts / 1_000_000_000) as i64;
-            #[allow(clippy::cast_possible_wrap)]
-            let usec = ((ts % 1_000_000_000) / 1_000) as i64;
+            let (sec, usec) = stamp(now_ns(), self.clockid);
             return Next::Event(InputEvent {
                 sec,
                 usec,
@@ -492,7 +592,7 @@ impl EvdevClient {
                 return Next::Empty;
             }
 
-            let Some(ev) = ring.load_slot(self.cursor) else {
+            let Some(ev) = ring.load_slot(self.cursor, self.clockid) else {
                 return Next::Empty;
             };
 
@@ -668,6 +768,363 @@ pub const fn set1_extended_to_keycode(code: u8) -> Option<u16> {
 }
 
 // ---------------------------------------------------------------------------
+// Device description — what the `EVIOC*` ioctls report
+// ---------------------------------------------------------------------------
+//
+// A client does not merely read from an input device; it first *interrogates*
+// it, and refuses to use one it cannot classify. libinput will not touch a node
+// whose `EVIOCGBIT` says nothing about what it can emit; SDL picks its joystick
+// vs. keyboard path from the same bits; `evtest` prints them. So the honest
+// answer matters: we advertise exactly the event types and codes the PS/2
+// drivers can actually produce, and nothing aspirational. A device that claims
+// `EV_LED` it cannot set, or `EV_ABS` it never emits, sends a client down a
+// code path that then waits forever for events that never come.
+
+/// Highest `KEY_*`/`BTN_*` code in the Linux input ABI.
+pub const KEY_MAX: u16 = 0x2ff;
+/// Bytes in a full key bitmap (`KEY_MAX + 1` bits, rounded up).
+pub const KEY_BYTES: usize = (KEY_MAX as usize + 8) / 8;
+/// Highest `EV_*` type code.
+pub const EV_MAX: u16 = 0x1f;
+/// Bytes in an event-type bitmap.
+pub const EV_BYTES: usize = (EV_MAX as usize + 8) / 8;
+/// Highest `REL_*` axis code.
+pub const REL_MAX: u16 = 0x0f;
+/// Bytes in a relative-axis bitmap.
+pub const REL_BYTES: usize = (REL_MAX as usize + 8) / 8;
+/// Highest `MSC_*` code.
+pub const MSC_MAX: u16 = 0x07;
+/// Bytes in a misc-event bitmap.
+pub const MSC_BYTES: usize = (MSC_MAX as usize + 8) / 8;
+/// Highest `INPUT_PROP_*` code.
+pub const INPUT_PROP_MAX: u16 = 0x1f;
+/// Bytes in a device-property bitmap.
+pub const INPUT_PROP_BYTES: usize = (INPUT_PROP_MAX as usize + 8) / 8;
+
+/// The evdev protocol version reported by `EVIOCGVERSION` (Linux's
+/// `EV_VERSION`). Clients compare against this to decide which ioctls exist.
+pub const EV_VERSION: u32 = 0x0001_0001;
+
+/// `BUS_I8042` — both devices hang off the PC's PS/2 controller, and saying so
+/// is what lets a client apply the quirks it keeps for that bus.
+pub const BUS_I8042: u16 = 0x11;
+
+/// Linux `struct input_id`, as returned by `EVIOCGID`. Eight bytes, four
+/// little-endian `u16`s.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[repr(C)]
+pub struct InputId {
+    /// `BUS_*` — how the device is attached.
+    pub bustype: u16,
+    /// Vendor ID; meaningless for a PS/2 device, which has no such register.
+    pub vendor: u16,
+    /// Product ID.
+    pub product: u16,
+    /// Device version.
+    pub version: u16,
+}
+
+const _: () = assert!(core::mem::size_of::<InputId>() == 8);
+
+/// Set one bit in a bitmap, ignoring a code past the end of the map.
+///
+/// Out-of-range is dropped rather than clamped: a clamp would set the *wrong*
+/// key's bit, which a client would believe.
+fn set_bit(map: &mut [u8], bit: u16) {
+    let idx = (bit / 8) as usize;
+    if let Some(b) = map.get_mut(idx) {
+        *b |= 1_u8 << (bit % 8);
+    }
+}
+
+/// Read one bit from a bitmap; out-of-range reads as clear.
+#[must_use]
+fn get_bit(map: &[u8], bit: u16) -> bool {
+    let idx = (bit / 8) as usize;
+    map.get(idx).is_some_and(|b| b & (1_u8 << (bit % 8)) != 0)
+}
+
+impl InputDevice {
+    /// The `EVIOCGID` identity.
+    ///
+    /// The vendor/product values mirror what Linux's own `atkbd` and `psmouse`
+    /// report for the same hardware, because a client with a quirk table keyed
+    /// on them should find the same entry here that it would on Linux.
+    #[must_use]
+    pub const fn input_id(self) -> InputId {
+        match self {
+            // atkbd: vendor 0x0001, product 0x0001 (AT keyboard).
+            Self::Keyboard => InputId {
+                bustype: BUS_I8042,
+                vendor: 0x0001,
+                product: 0x0001,
+                version: 0x0001,
+            },
+            // psmouse: vendor 0x0002, product 0x0001 (PSMOUSE_PS2).
+            Self::Mouse => InputId {
+                bustype: BUS_I8042,
+                vendor: 0x0002,
+                product: 0x0001,
+                version: 0x0000,
+            },
+        }
+    }
+
+    /// The `EVIOCGPHYS` physical-topology path.
+    ///
+    /// Same shape Linux uses, and for the same purpose: it is the only stable
+    /// name a device has across reboots, so a client that remembers per-device
+    /// settings keys on it rather than on the `eventN` number, which can move.
+    #[must_use]
+    pub const fn phys(self) -> &'static str {
+        match self {
+            Self::Keyboard => "isa0060/serio0/input0",
+            Self::Mouse => "isa0060/serio1/input0",
+        }
+    }
+
+    /// Which `EV_*` types this device can emit (`EVIOCGBIT(0)`).
+    #[must_use]
+    pub fn ev_bits(self) -> [u8; EV_BYTES] {
+        let mut map = [0u8; EV_BYTES];
+        set_bit(&mut map, EV_SYN);
+        set_bit(&mut map, EV_KEY);
+        match self {
+            // The keyboard reports the raw scancode alongside every keycode.
+            Self::Keyboard => set_bit(&mut map, EV_MSC),
+            Self::Mouse => set_bit(&mut map, EV_REL),
+        }
+        map
+    }
+
+    /// Which `KEY_*`/`BTN_*` codes this device can emit (`EVIOCGBIT(EV_KEY)`).
+    ///
+    /// Derived from the translation tables themselves rather than written out
+    /// again, so the advertised set cannot drift from the set that is actually
+    /// produced — the failure mode being a client that ignores a key because
+    /// the device said it did not have one.
+    #[must_use]
+    pub fn key_bits(self) -> [u8; KEY_BYTES] {
+        let mut map = [0u8; KEY_BYTES];
+        match self {
+            Self::Keyboard => {
+                let mut code: u16 = 0;
+                while code <= 0xFF {
+                    #[allow(clippy::cast_possible_truncation)]
+                    let c = code as u8;
+                    if let Some(kc) = set1_to_keycode(c) {
+                        set_bit(&mut map, kc);
+                    }
+                    if let Some(kc) = set1_extended_to_keycode(c) {
+                        set_bit(&mut map, kc);
+                    }
+                    code = code.saturating_add(1);
+                }
+            }
+            Self::Mouse => {
+                set_bit(&mut map, BTN_LEFT);
+                set_bit(&mut map, BTN_RIGHT);
+                set_bit(&mut map, BTN_MIDDLE);
+            }
+        }
+        map
+    }
+
+    /// Which `REL_*` axes this device can emit (`EVIOCGBIT(EV_REL)`).
+    ///
+    /// `REL_WHEEL` is advertised only when the wheel was actually detected at
+    /// probe time: a plain 3-byte PS/2 mouse has none, and claiming one would
+    /// make a client display scroll settings for a device that cannot scroll.
+    #[must_use]
+    pub fn rel_bits(self) -> [u8; REL_BYTES] {
+        let mut map = [0u8; REL_BYTES];
+        if self == Self::Mouse {
+            set_bit(&mut map, REL_X);
+            set_bit(&mut map, REL_Y);
+            if crate::mouse::has_scroll_wheel() {
+                set_bit(&mut map, REL_WHEEL);
+            }
+        }
+        map
+    }
+
+    /// Which `MSC_*` codes this device can emit (`EVIOCGBIT(EV_MSC)`).
+    #[must_use]
+    pub fn msc_bits(self) -> [u8; MSC_BYTES] {
+        let mut map = [0u8; MSC_BYTES];
+        if self == Self::Keyboard {
+            set_bit(&mut map, MSC_SCAN);
+        }
+        map
+    }
+
+    /// The bitmap for an arbitrary `EVIOCGBIT(etype)`, written into `out`.
+    ///
+    /// Returns how many bytes of `out` describe the device. A type this device
+    /// does not support yields an all-zero map of the natural length for that
+    /// type — which is what Linux does, and is the answer that lets a client
+    /// conclude "no codes" without special-casing an error.
+    pub fn bits_for(self, etype: u16, out: &mut [u8]) -> usize {
+        /// Copy `src` into `dst`, truncated to whichever is shorter.
+        fn fill(dst: &mut [u8], src: &[u8]) -> usize {
+            let n = dst.len().min(src.len());
+            match (dst.get_mut(..n), src.get(..n)) {
+                (Some(d), Some(s)) => {
+                    d.copy_from_slice(s);
+                    n
+                }
+                _ => 0,
+            }
+        }
+        match etype {
+            0 => fill(out, &self.ev_bits()),
+            EV_KEY => fill(out, &self.key_bits()),
+            EV_REL => fill(out, &self.rel_bits()),
+            EV_MSC => fill(out, &self.msc_bits()),
+            _ => {
+                // An unsupported type has no codes. Zero the caller's buffer
+                // so it reads "none" rather than whatever was on its stack.
+                let n = out.len().min(KEY_BYTES);
+                if let Some(d) = out.get_mut(..n) {
+                    d.fill(0);
+                }
+                n
+            }
+        }
+    }
+
+    /// Which keys/buttons are held **right now** (`EVIOCGKEY`).
+    ///
+    /// A client calls this immediately after opening, and again after every
+    /// `SYN_DROPPED`, because the event stream only carries *transitions*: a
+    /// key held down before the open has no press event to be seen, and
+    /// without this the client would think it was up until it is released.
+    #[must_use]
+    pub fn key_state_bits(self) -> [u8; KEY_BYTES] {
+        let mut map = [0u8; KEY_BYTES];
+        match self {
+            Self::Keyboard => {
+                let words = crate::keyboard::key_down_bits();
+                for (i, w) in words.iter().enumerate() {
+                    let mut bit = 0_u16;
+                    while bit < 64 {
+                        if w & (1_u64 << bit) != 0 {
+                            let base = u16::try_from(i.saturating_mul(64)).unwrap_or(u16::MAX);
+                            set_bit(&mut map, base.saturating_add(bit));
+                        }
+                        bit = bit.saturating_add(1);
+                    }
+                }
+            }
+            Self::Mouse => {
+                let b = crate::mouse::button_state();
+                for (mask, btn) in [
+                    (0b001_u8, BTN_LEFT),
+                    (0b010, BTN_RIGHT),
+                    (0b100, BTN_MIDDLE),
+                ] {
+                    if b & mask != 0 {
+                        set_bit(&mut map, btn);
+                    }
+                }
+            }
+        }
+        map
+    }
+}
+
+// ---------------------------------------------------------------------------
+// ioctl numbers
+// ---------------------------------------------------------------------------
+//
+// The `EVIOC*` requests are `_IOC`-encoded:
+//
+//     bits 30-31  direction (0 none, 1 write, 2 read)
+//     bits 16-29  size of the argument in bytes
+//     bits  8-15  type ("magic") — 'E' for evdev
+//     bits  0-7   number within that type
+//
+// Several of them (`EVIOCGNAME`, `EVIOCGBIT`, ...) are *parameterised by the
+// size field*: the client encodes its buffer length into the request itself.
+// That is why this is decoded rather than matched against a fixed constant.
+
+/// The ioctl "magic" byte shared by every `EVIOC*` request: `'E'`.
+pub const EVDEV_IOC_MAGIC: u32 = 0x45;
+
+/// Direction field of an `_IOC`-encoded request.
+#[must_use]
+pub const fn ioc_dir(request: u32) -> u32 {
+    request >> 30
+}
+/// Type ("magic") field of an `_IOC`-encoded request.
+#[must_use]
+pub const fn ioc_type(request: u32) -> u32 {
+    (request >> 8) & 0xFF
+}
+/// Number field of an `_IOC`-encoded request.
+#[must_use]
+pub const fn ioc_nr(request: u32) -> u32 {
+    request & 0xFF
+}
+/// Argument-size field of an `_IOC`-encoded request.
+#[must_use]
+pub const fn ioc_size(request: u32) -> u32 {
+    (request >> 16) & 0x3FFF
+}
+
+/// `_IOC_NONE`.
+pub const IOC_NONE: u32 = 0;
+/// `_IOC_WRITE` — userspace writes, the kernel reads.
+pub const IOC_WRITE: u32 = 1;
+/// `_IOC_READ` — the kernel writes, userspace reads.
+pub const IOC_READ: u32 = 2;
+
+/// `EVIOCGVERSION` — the evdev protocol version.
+pub const EVIOC_NR_GVERSION: u32 = 0x01;
+/// `EVIOCGID` — the [`InputId`] identity.
+pub const EVIOC_NR_GID: u32 = 0x02;
+/// `EVIOCGREP` / `EVIOCSREP` — autorepeat delay and period.
+pub const EVIOC_NR_REP: u32 = 0x03;
+/// `EVIOCGNAME` — the human-readable device name.
+pub const EVIOC_NR_GNAME: u32 = 0x06;
+/// `EVIOCGPHYS` — the physical-topology path.
+pub const EVIOC_NR_GPHYS: u32 = 0x07;
+/// `EVIOCGUNIQ` — the device's unique identifier, if it has one.
+pub const EVIOC_NR_GUNIQ: u32 = 0x08;
+/// `EVIOCGPROP` — the `INPUT_PROP_*` bitmap.
+pub const EVIOC_NR_GPROP: u32 = 0x09;
+/// `EVIOCGKEY` — which keys/buttons are held right now.
+pub const EVIOC_NR_GKEY: u32 = 0x18;
+/// `EVIOCGLED` — which LEDs are lit.
+pub const EVIOC_NR_GLED: u32 = 0x19;
+/// `EVIOCGSND` — which sounds are playing.
+pub const EVIOC_NR_GSND: u32 = 0x1A;
+/// `EVIOCGSW` — the state of the device's switches.
+pub const EVIOC_NR_GSW: u32 = 0x1B;
+/// Base of the `EVIOCGBIT(type, len)` range: `nr` is `0x20 + type`.
+pub const EVIOC_NR_GBIT_BASE: u32 = 0x20;
+/// Base of the `EVIOCGABS(axis)` range: `nr` is `0x40 + axis`.
+pub const EVIOC_NR_GABS_BASE: u32 = 0x40;
+/// Top of the `EVIOCGABS` range (`ABS_MAX` is 0x3f).
+pub const EVIOC_NR_GABS_TOP: u32 = 0x7F;
+/// `EVIOCGRAB` — take or release an exclusive grab.
+pub const EVIOC_NR_GRAB: u32 = 0x90;
+/// `EVIOCREVOKE` — permanently disable this fd.
+pub const EVIOC_NR_REVOKE: u32 = 0x91;
+/// `EVIOCSCLOCKID` — choose the clock timestamps are reported in.
+pub const EVIOC_NR_SCLOCKID: u32 = 0xA0;
+
+/// Encode an `EVIOC*` request the way userspace's `_IOC` macro does.
+///
+/// Exists so a caller — the ring-3 self-test, and any future in-kernel client
+/// — builds the same number a real client would, rather than a hand-computed
+/// constant that could drift from the decoders above.
+#[must_use]
+pub const fn ioc(dir: u32, nr: u32, size: u32) -> u32 {
+    ((dir & 0x3) << 30) | ((size & 0x3FFF) << 16) | (EVDEV_IOC_MAGIC << 8) | (nr & 0xFF)
+}
+
+// ---------------------------------------------------------------------------
 // Self-test
 // ---------------------------------------------------------------------------
 
@@ -728,7 +1185,10 @@ pub fn self_test() -> KernelResult<()> {
     check!(set1_to_keycode(0x57) == Some(87), "F11 -> KEY_F11(87)");
     check!(set1_to_keycode(0x58) == Some(88), "F12 -> KEY_F12(88)");
     check!(set1_to_keycode(0x00).is_none(), "0 is not a key");
-    check!(set1_to_keycode(0x59).is_none(), "0x59 is unassigned in set 1");
+    check!(
+        set1_to_keycode(0x59).is_none(),
+        "0x59 is unassigned in set 1"
+    );
 
     check!(
         set1_extended_to_keycode(0x48) == Some(103),
@@ -757,7 +1217,10 @@ pub fn self_test() -> KernelResult<()> {
     let mut c = EvdevClient::new(InputDevice::Keyboard);
     check!(!c.readable(), "a fresh client has nothing buffered");
     let mut buf = [0u8; INPUT_EVENT_SIZE * 8];
-    check!(c.read_into(&mut buf)? == 0, "a fresh client reads zero bytes");
+    check!(
+        c.read_into(&mut buf)? == 0,
+        "a fresh client reads zero bytes"
+    );
 
     push_key(InputDevice::Keyboard, 30, 0x1E, true);
     check!(c.readable(), "a keypress makes the client readable");
@@ -924,7 +1387,10 @@ pub fn self_test() -> KernelResult<()> {
     // make a keyboard client readable.
     let k = EvdevClient::new(InputDevice::Keyboard);
     push_mouse_packet(0b000, 0b100, 1, 1, 0);
-    check!(!k.readable(), "a mouse packet does not wake a keyboard client");
+    check!(
+        !k.readable(),
+        "a mouse packet does not wake a keyboard client"
+    );
 
     // --- device naming ------------------------------------------------------
     check!(
@@ -940,9 +1406,200 @@ pub fn self_test() -> KernelResult<()> {
         "there is no event2 yet"
     );
 
+    // --- ioctl-visible device description -----------------------------------
+    // A client refuses to use a node it cannot classify, so these bits decide
+    // whether the device works at all — not merely how it is labelled.
+    let kbd = InputDevice::Keyboard;
+    let mouse = InputDevice::Mouse;
+
+    let kev = kbd.ev_bits();
+    check!(get_bit(&kev, EV_KEY), "the keyboard advertises EV_KEY");
+    check!(get_bit(&kev, EV_SYN), "...and EV_SYN");
+    check!(get_bit(&kev, EV_MSC), "...and EV_MSC for the raw scancode");
+    check!(
+        !get_bit(&kev, EV_REL),
+        "...but not EV_REL: a keyboard has no axes"
+    );
+    let mev = mouse.ev_bits();
+    check!(get_bit(&mev, EV_REL), "the mouse advertises EV_REL");
+    check!(get_bit(&mev, EV_KEY), "...and EV_KEY for its buttons");
+    check!(
+        !get_bit(&mev, EV_MSC),
+        "...but not EV_MSC: it has no scancodes"
+    );
+
+    // The advertised key set must contain every code the tables can produce,
+    // because a client drops events for codes the device said it lacks.
+    let kkeys = kbd.key_bits();
+    check!(get_bit(&kkeys, 1), "KEY_ESC is advertised");
+    check!(get_bit(&kkeys, 30), "KEY_A is advertised");
+    check!(get_bit(&kkeys, 88), "KEY_F12 is advertised");
+    check!(
+        get_bit(&kkeys, 103),
+        "KEY_UP is advertised (extended table)"
+    );
+    check!(get_bit(&kkeys, 125), "KEY_LEFTMETA is advertised");
+    check!(
+        !get_bit(&kkeys, BTN_LEFT),
+        "the keyboard does not claim mouse buttons"
+    );
+    let mkeys = mouse.key_bits();
+    check!(get_bit(&mkeys, BTN_LEFT), "BTN_LEFT is advertised");
+    check!(get_bit(&mkeys, BTN_MIDDLE), "BTN_MIDDLE is advertised");
+    check!(!get_bit(&mkeys, 30), "the mouse does not claim KEY_A");
+
+    let mrel = mouse.rel_bits();
+    check!(get_bit(&mrel, REL_X) && get_bit(&mrel, REL_Y), "both axes");
+    check!(
+        get_bit(&mrel, REL_WHEEL) == crate::mouse::has_scroll_wheel(),
+        "REL_WHEEL is claimed exactly when a wheel was detected"
+    );
+    check!(
+        kbd.rel_bits().iter().all(|b| *b == 0),
+        "the keyboard has no relative axes at all"
+    );
+    check!(
+        get_bit(&kbd.msc_bits(), MSC_SCAN),
+        "the keyboard advertises MSC_SCAN"
+    );
+
+    // `bits_for` is what the ioctl actually calls; it must agree with the
+    // individual accessors and must truncate to the client's buffer.
+    let mut probe = [0u8; KEY_BYTES];
+    check!(
+        kbd.bits_for(EV_KEY, &mut probe) == KEY_BYTES && probe == kkeys,
+        "bits_for(EV_KEY) matches key_bits"
+    );
+    let mut short = [0xFFu8; 4];
+    check!(
+        kbd.bits_for(EV_KEY, &mut short) == 4,
+        "a short buffer gets a short answer, not an error"
+    );
+    check!(
+        short.get(..4) == kkeys.get(..4),
+        "...and it is the leading bytes, unshifted"
+    );
+    let mut unsup = [0xFFu8; 8];
+    let n = kbd.bits_for(0x15, &mut unsup);
+    check!(n == 8, "an unsupported type still reports a length");
+    check!(
+        unsup.iter().all(|b| *b == 0),
+        "...and zeroes the buffer rather than leaving the caller's stack in it"
+    );
+
+    check!(
+        kbd.input_id().bustype == BUS_I8042 && mouse.input_id().bustype == BUS_I8042,
+        "both devices report the PS/2 bus"
+    );
+    check!(
+        kbd.input_id() != mouse.input_id(),
+        "the two devices are distinguishable by EVIOCGID"
+    );
+    check!(
+        kbd.phys() != mouse.phys(),
+        "...and by their physical topology path"
+    );
+
+    // --- ioctl number encode/decode round-trip -------------------------------
+    // The encoder is what the ring-3 test builds requests with and the
+    // decoders are what the syscall layer takes them apart with; if they ever
+    // disagree, every ioctl silently becomes ENOTTY.
+    let gname = ioc(IOC_READ, EVIOC_NR_GNAME, 64);
+    check!(ioc_dir(gname) == IOC_READ, "direction round-trips");
+    check!(ioc_type(gname) == EVDEV_IOC_MAGIC, "magic round-trips");
+    check!(ioc_nr(gname) == EVIOC_NR_GNAME, "number round-trips");
+    check!(ioc_size(gname) == 64, "size round-trips");
+    // The known-good literals from Linux's <linux/input.h>, so a mistake in
+    // the encoder shows up as a mismatch with the real ABI rather than as a
+    // self-consistent invention.
+    check!(
+        ioc(IOC_READ, EVIOC_NR_GVERSION, 4) == 0x8004_4501,
+        "EVIOCGVERSION is 0x80044501"
+    );
+    check!(
+        ioc(IOC_READ, EVIOC_NR_GID, 8) == 0x8008_4502,
+        "EVIOCGID is 0x80084502"
+    );
+    check!(
+        ioc(IOC_WRITE, EVIOC_NR_GRAB, 4) == 0x4004_4590,
+        "EVIOCGRAB is 0x40044590"
+    );
+    check!(
+        ioc(IOC_WRITE, EVIOC_NR_SCLOCKID, 4) == 0x4004_45A0,
+        "EVIOCSCLOCKID is 0x400445a0"
+    );
+    // The EVIOCGBIT range must not collide with the EVIOCGABS range above it,
+    // or a client asking for an absolute axis would be handed a key bitmap.
+    check!(
+        EVIOC_NR_GBIT_BASE.saturating_add(u32::from(EV_MAX)) < EVIOC_NR_GABS_BASE,
+        "the GBIT range ends below the GABS range"
+    );
+
+    // --- clock selection ----------------------------------------------------
+    let mut mono = EvdevClient::new(InputDevice::Keyboard);
+    check!(mono.clockid() == CLOCK_REALTIME, "realtime is the default");
+    mono.set_clockid(CLOCK_MONOTONIC)?;
+    check!(mono.clockid() == CLOCK_MONOTONIC, "monotonic is selectable");
+    mono.set_clockid(CLOCK_BOOTTIME)?;
+    check!(
+        mono.clockid() == CLOCK_MONOTONIC,
+        "boottime is accepted and canonicalised to monotonic"
+    );
+    check!(mono.set_clockid(99).is_err(), "an unknown clock is refused");
+
+    // A monotonic stamp must be far below a realtime one — realtime counts
+    // from 1970, monotonic from boot — which is the check that would catch
+    // the clock being ignored and both reading the same source.
+    mono.set_clockid(CLOCK_MONOTONIC)?;
+    let mut real = EvdevClient::new(InputDevice::Keyboard);
+    push_key(InputDevice::Keyboard, 30, 0x1E, true);
+    check!(mono.read_into(&mut buf)? == 72, "monotonic client reads");
+    let m_sec = i64::from_le_bytes(
+        buf.get(0..8)
+            .and_then(|s| <[u8; 8]>::try_from(s).ok())
+            .unwrap_or([0; 8]),
+    );
+    check!(real.read_into(&mut buf)? == 72, "realtime client reads");
+    let r_sec = i64::from_le_bytes(
+        buf.get(0..8)
+            .and_then(|s| <[u8; 8]>::try_from(s).ok())
+            .unwrap_or([0; 8]),
+    );
+    // Only meaningful once the RTC has been read; before that realtime is 0
+    // and the two legitimately coincide.
+    if crate::timekeeping::clock_realtime() > 0 {
+        check!(
+            r_sec > m_sec,
+            "the same event stamps later on realtime than on monotonic"
+        );
+    }
+
+    // --- a grabbed-out reader is told, once ---------------------------------
+    let mut skipped = EvdevClient::new(InputDevice::Keyboard);
+    push_key(InputDevice::Keyboard, 30, 0x1E, true);
+    push_key(InputDevice::Keyboard, 30, 0x1E, false);
+    skipped.discard_pending();
+    check!(skipped.drop_count() == 1, "the gap is counted once");
+    push_key(InputDevice::Keyboard, 31, 0x1F, true);
+    skipped.discard_pending();
+    check!(
+        skipped.drop_count() == 1,
+        "a second contiguous gap is not counted again"
+    );
+    check!(
+        skipped.read_into(&mut buf)? == INPUT_EVENT_SIZE,
+        "exactly one record is owed"
+    );
+    check!(
+        buf.get(18..20) == Some(&SYN_DROPPED.to_le_bytes()[..]),
+        "...and it is SYN_DROPPED, not a withheld keypress"
+    );
+    check!(!skipped.readable(), "and then the client is caught up");
+
     crate::serial_println!(
         "[evdev] Self-test PASSED (24-byte records, keycode tables, \
-         per-client cursors, SYN_DROPPED on lap, packet grouping)"
+         per-client cursors, SYN_DROPPED on lap, packet grouping, \
+         capability bitmaps, clock selection)"
     );
     Ok(())
 }

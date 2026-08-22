@@ -9137,7 +9137,8 @@ fn sys_ioctl(args: &SyscallArgs) -> SyscallResult {
             // substream answers the `SNDRV_PCM_IOCTL_*` family ('A' magic);
             // an ALSA control device answers the `SNDRV_CTL_IOCTL_*` family
             // ('U' magic); a DRM card answers the `DRM_IOCTL_*` family
-            // ('d' magic); everything else is an unsupported request on this
+            // ('d' magic); an input device answers the `EVIOC*` family
+            // ('E' magic); everything else is an unsupported request on this
             // fd → ENOTTY.
             if let Some(entry) = pcb::linux_fd_lookup(pid, fd) {
                 match entry.kind {
@@ -9149,6 +9150,9 @@ fn sys_ioctl(args: &SyscallArgs) -> SyscallResult {
                     }
                     crate::proc::linux_fd::HandleKind::DrmCard => {
                         return drm_card_ioctl(&entry, request, args.arg2);
+                    }
+                    crate::proc::linux_fd::HandleKind::Evdev => {
+                        return evdev_ioctl(&entry, request, args.arg2);
                     }
                     _ => {}
                 }
@@ -9827,6 +9831,226 @@ fn alsa_control_ioctl_elem_write(argp: u64) -> SyscallResult {
         _ => return linux_err(errno::ENOENT),
     }
     SyscallResult::ok(0)
+}
+
+/// `ioctl(EVIOC*)` dispatch for a `/dev/input/eventN` fd.
+///
+/// A Linux input client does not just read from an input device — it
+/// *interrogates* it first, and refuses to use one it cannot classify.
+/// libinput will not touch a node whose `EVIOCGBIT` reports nothing; `evtest`
+/// prints the identity before showing a single event; SDL picks its device
+/// class from the same bits.  So a readable node with no ioctls is a node no
+/// real client will open, which is why these are here rather than left to the
+/// one compositor we happen to have written ourselves.
+///
+/// Implemented: `EVIOCGVERSION`, `EVIOCGID`, `EVIOCGNAME`, `EVIOCGPHYS`,
+/// `EVIOCGPROP`, `EVIOCGBIT(*)`, `EVIOCGKEY`, `EVIOCGLED`/`GSND`/`GSW`,
+/// `EVIOCGRAB`, `EVIOCREVOKE` and `EVIOCSCLOCKID`.
+///
+/// Deliberately *not* implemented, each with the error Linux itself gives for
+/// a device that lacks the feature — because a client tests for the feature by
+/// making the call, and a success it cannot act on is worse than a refusal:
+///
+/// | Request | Result | Why |
+/// |---|---|---|
+/// | `EVIOCGUNIQ` | `ENOENT` | a PS/2 device has no serial number to report |
+/// | `EVIOCGREP`/`SREP` | `ENOSYS` | we do not advertise `EV_REP`; hardware typematic is filtered out and software repeat belongs to the client |
+/// | `EVIOCGABS` | `EINVAL` | no absolute axes exist on either device |
+/// | `EVIOCGKEYCODE`/`SKEYCODE` | `ENOTTY` | the scancode→keycode tables are fixed |
+///
+/// Note the argument convention is not uniform, and matching Linux exactly
+/// matters: `EVIOCGRAB` and `EVIOCREVOKE` take the argument **by value**
+/// despite being encoded `_IOW(…, int)`, while `EVIOCSCLOCKID` really is a
+/// pointer to an `int`.
+fn evdev_ioctl(entry: &FdEntry, request: u32, argp: u64) -> SyscallResult {
+    use crate::evdev;
+    use crate::evdev_fd::{self, EvdevHandle};
+
+    let handle = EvdevHandle::from_raw(entry.raw_handle);
+    let Some(device) = evdev_fd::device(handle) else {
+        return linux_err(errno::EBADF);
+    };
+    // A revoked fd answers nothing: that is the entire point of revoking it.
+    if evdev_fd::is_revoked(handle) {
+        return linux_err(errno::ENODEV);
+    }
+    // Anything that is not an 'E'-magic request cannot be meant for this fd.
+    if evdev::ioc_type(request) != evdev::EVDEV_IOC_MAGIC {
+        return linux_err(errno::ENOTTY);
+    }
+
+    let nr = evdev::ioc_nr(request);
+    let dir = evdev::ioc_dir(request);
+    let size = usize::try_from(evdev::ioc_size(request)).unwrap_or(0);
+
+    // --- fixed-shape requests ----------------------------------------------
+    match (dir, nr) {
+        (evdev::IOC_READ, evdev::EVIOC_NR_GVERSION) => {
+            return match write_user_struct(argp, &evdev::EV_VERSION) {
+                Ok(()) => SyscallResult::ok(0),
+                Err(e) => linux_err(e),
+            };
+        }
+        (evdev::IOC_READ, evdev::EVIOC_NR_GID) => {
+            return match write_user_struct(argp, &device.input_id()) {
+                Ok(()) => SyscallResult::ok(0),
+                Err(e) => linux_err(e),
+            };
+        }
+        // Neither device advertises EV_REP, and Linux's own answer for that is
+        // ENOSYS rather than a zeroed pair — which is what lets a client tell
+        // "no repeat" from "repeat, disabled".
+        (_, evdev::EVIOC_NR_REP) => return linux_err(errno::ENOSYS),
+        (evdev::IOC_WRITE, evdev::EVIOC_NR_GRAB) => {
+            // The argument is used *by value*, not dereferenced, even though
+            // the request is encoded `_IOW('E', 0x90, int)`. That is not a
+            // Linux quirk we are copying for its own sake: every real client
+            // passes a literal — libinput issues `ioctl(fd, EVIOCGRAB,
+            // (void *)1)` — so reading an `int` through it would fault on
+            // address 1 and make every grab fail with EFAULT.
+            let res = if argp == 0 {
+                evdev_fd::ungrab(handle)
+            } else {
+                evdev_fd::grab(handle)
+            };
+            return match res {
+                Ok(()) => SyscallResult::ok(0),
+                Err(e) => linux_err(linux_errno_for(e)),
+            };
+        }
+        (evdev::IOC_WRITE, evdev::EVIOC_NR_REVOKE) => {
+            // Also by value, and Linux additionally *requires* the value to be
+            // zero: `EVIOCREVOKE` has no parameter, and a non-zero argument
+            // means the caller thinks it is passing one, so it is likelier a
+            // mistake than an intent to irreversibly revoke.
+            if argp != 0 {
+                return linux_err(errno::EINVAL);
+            }
+            return match evdev_fd::revoke(handle) {
+                Ok(()) => SyscallResult::ok(0),
+                Err(e) => linux_err(linux_errno_for(e)),
+            };
+        }
+        (evdev::IOC_WRITE, evdev::EVIOC_NR_SCLOCKID) => {
+            let clockid = match read_user_struct::<i32>(argp) {
+                Ok(v) => v,
+                Err(e) => return linux_err(e),
+            };
+            let Ok(clockid) = u32::try_from(clockid) else {
+                return linux_err(errno::EINVAL);
+            };
+            return match evdev_fd::set_clockid(handle, clockid) {
+                Ok(()) => SyscallResult::ok(0),
+                Err(e) => linux_err(linux_errno_for(e)),
+            };
+        }
+        _ => {}
+    }
+
+    // --- variable-length reads ----------------------------------------------
+    // Everything below encodes the client's buffer length in the request's
+    // size field and returns the number of bytes actually written.
+    if dir != evdev::IOC_READ {
+        return linux_err(errno::ENOTTY);
+    }
+    if size == 0 {
+        // A zero-length buffer transfers nothing; saying so beats an error,
+        // since a client that probes with zero is asking for the length and
+        // gets it from the return value.
+        return SyscallResult::ok(0);
+    }
+
+    match nr {
+        evdev::EVIOC_NR_GNAME => evdev_ioctl_copy_str(argp, size, device.name().as_bytes()),
+        evdev::EVIOC_NR_GPHYS => evdev_ioctl_copy_str(argp, size, device.phys().as_bytes()),
+        // No unique identifier exists for a PS/2 device. ENOENT is what Linux
+        // returns for the same case, and is how a client knows to fall back to
+        // EVIOCGPHYS for a stable name.
+        evdev::EVIOC_NR_GUNIQ => linux_err(errno::ENOENT),
+        // No INPUT_PROP_* applies: neither device is a pointing stick, a
+        // buttonpad, or anything else the property bits describe.
+        evdev::EVIOC_NR_GPROP => {
+            evdev_ioctl_copy_bitmap(argp, size.min(evdev::INPUT_PROP_BYTES), &[0u8; 0])
+        }
+        evdev::EVIOC_NR_GKEY => {
+            let bits = device.key_state_bits();
+            evdev_ioctl_copy_bitmap(argp, size.min(evdev::KEY_BYTES), &bits)
+        }
+        // No LEDs (the keyboard's are not driven yet), no sound generator, no
+        // switches. All three answer "none" rather than erroring, because a
+        // client asks unconditionally and treats an error as a broken device.
+        evdev::EVIOC_NR_GLED | evdev::EVIOC_NR_GSND | evdev::EVIOC_NR_GSW => {
+            evdev_ioctl_copy_bitmap(argp, size.min(evdev::KEY_BYTES), &[0u8; 0])
+        }
+        // EVIOCGABS(axis): no absolute axes, so no absinfo to report. Linux
+        // returns EINVAL when `dev->absinfo` is NULL, which is our case.
+        n if (evdev::EVIOC_NR_GABS_BASE..=evdev::EVIOC_NR_GABS_TOP).contains(&n) => {
+            linux_err(errno::EINVAL)
+        }
+        // EVIOCGBIT(type, len): the codes this device can emit for `type`.
+        n if (evdev::EVIOC_NR_GBIT_BASE..evdev::EVIOC_NR_GABS_BASE).contains(&n) => {
+            let etype = u16::try_from(n.saturating_sub(evdev::EVIOC_NR_GBIT_BASE)).unwrap_or(0);
+            let mut bits = [0u8; evdev::KEY_BYTES];
+            let want = size.min(evdev::KEY_BYTES);
+            let Some(dst) = bits.get_mut(..want) else {
+                return linux_err(errno::EINVAL);
+            };
+            let n_bytes = device.bits_for(etype, dst);
+            evdev_ioctl_copy_bitmap(argp, n_bytes, &bits)
+        }
+        _ => linux_err(errno::ENOTTY),
+    }
+}
+
+/// Copy a device string out for `EVIOCGNAME` / `EVIOCGPHYS`.
+///
+/// Copies `min(size, len+1)` bytes including the NUL terminator and returns
+/// that count, exactly as Linux's `str_to_user` does — a client sizes its
+/// buffer from the return value and expects the string to be terminated, so
+/// dropping the NUL on a tight buffer would hand it an unterminated string.
+fn evdev_ioctl_copy_str(argp: u64, size: usize, src: &[u8]) -> SyscallResult {
+    let mut out = [0u8; 128];
+    let want = src.len().saturating_add(1).min(size).min(out.len());
+    let Some(dst) = out.get_mut(..want) else {
+        return linux_err(errno::EINVAL);
+    };
+    // Leave the final byte as the NUL already in `out` when the string is
+    // truncated, so what userspace receives is always terminated.
+    let body = want.saturating_sub(1);
+    match (dst.get_mut(..body), src.get(..body)) {
+        (Some(d), Some(s)) => d.copy_from_slice(s),
+        _ => return linux_err(errno::EINVAL),
+    }
+    // SAFETY: `out` is a live 128-byte kernel buffer and `want <= out.len()`;
+    // `copy_to_user` validates the user destination range and handles SMAP.
+    if unsafe { crate::mm::user::copy_to_user(out.as_ptr(), argp, want) }.is_err() {
+        return linux_err(errno::EFAULT);
+    }
+    SyscallResult::ok(i64::try_from(want).unwrap_or(i64::MAX))
+}
+
+/// Copy `n` bytes of a capability/state bitmap out, zero-filling past the end
+/// of `src`, and return `n`.
+///
+/// The zero fill is what makes "this device has no LEDs" expressible: the
+/// client asked for a bitmap of a given length and must receive that length of
+/// cleared bits, not a short read it would misparse as a truncated map.
+fn evdev_ioctl_copy_bitmap(argp: u64, n: usize, src: &[u8]) -> SyscallResult {
+    let mut out = [0u8; crate::evdev::KEY_BYTES];
+    let n = n.min(out.len());
+    let copy = n.min(src.len());
+    match (out.get_mut(..copy), src.get(..copy)) {
+        (Some(d), Some(s)) => d.copy_from_slice(s),
+        _ => return linux_err(errno::EINVAL),
+    }
+    if n > 0 {
+        // SAFETY: `out` is a live `KEY_BYTES` kernel buffer and `n <=
+        // out.len()`; `copy_to_user` validates the user range and handles SMAP.
+        if unsafe { crate::mm::user::copy_to_user(out.as_ptr(), argp, n) }.is_err() {
+            return linux_err(errno::EFAULT);
+        }
+    }
+    SyscallResult::ok(i64::try_from(n).unwrap_or(i64::MAX))
 }
 
 /// `ioctl(DRM_IOCTL_*)` dispatch for a `/dev/dri/*` fd.
@@ -30182,7 +30406,14 @@ fn poll_revents_from_entry(
             // POLLOUT: write(2) is EINVAL (no force-feedback), so a client
             // that polled for writability would spin on a readiness it can
             // never use.
-            if crate::evdev_fd::readable(crate::evdev_fd::EvdevHandle::from_raw(entry.raw_handle)) {
+            let h = crate::evdev_fd::EvdevHandle::from_raw(entry.raw_handle);
+            if crate::evdev_fd::is_revoked(h) {
+                // A revoked fd will never produce another event.  Reporting it
+                // as merely not-ready would hang the client's event loop
+                // forever; POLLERR|POLLHUP is what tells it to close the fd,
+                // and is what Linux's `evdev_poll` returns for the same state.
+                poll_bits::POLLERR | poll_bits::POLLHUP
+            } else if crate::evdev_fd::readable(h) {
                 poll_bits::POLLIN | poll_bits::POLLRDNORM
             } else {
                 0

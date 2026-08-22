@@ -804,6 +804,18 @@ fn test_bitmap_find_free() -> KernelResult<()> {
         }
     }
 
+    // Starting *on* the free bit must return it rather than scanning past it.
+    // This is the boundary between the forward scan and the wrap-around below:
+    // an off-by-one in the start index shows up here and nowhere else, because
+    // every other start position reaches bit 16 from one side or the other.
+    match bitmap_find_free(&bitmap, 16, 32) {
+        Some(16) => {}
+        other => {
+            crate::serial_println!("[ext4-balloc]   FAIL: find_free from 16 = {:?}", other);
+            return Err(KernelError::InternalError);
+        }
+    }
+
     // Starting at 17 should wrap around and find bit 16.
     match bitmap_find_free(&bitmap, 17, 32) {
         Some(16) => {}
@@ -1025,74 +1037,15 @@ fn test_gd_increment_decrement() -> KernelResult<()> {
     Ok(())
 }
 
-// ---------------------------------------------------------------------------
-// Tests (std)
-// ---------------------------------------------------------------------------
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_bitmap_operations() {
-        let mut bitmap = vec![0u8; 16]; // 128 bits
-
-        // All bits should be free.
-        assert!(!bitmap_test(&bitmap, 0));
-        assert!(!bitmap_test(&bitmap, 7));
-        assert!(!bitmap_test(&bitmap, 127));
-
-        // Set bit 0.
-        bitmap_set(&mut bitmap, 0);
-        assert!(bitmap_test(&bitmap, 0));
-        assert!(!bitmap_test(&bitmap, 1));
-
-        // Set bit 7 (last bit of first byte).
-        bitmap_set(&mut bitmap, 7);
-        assert!(bitmap_test(&bitmap, 7));
-        assert_eq!(bitmap[0], 0b1000_0001);
-
-        // Set bit 8 (first bit of second byte).
-        bitmap_set(&mut bitmap, 8);
-        assert!(bitmap_test(&bitmap, 8));
-        assert_eq!(bitmap[1], 0b0000_0001);
-
-        // Clear bit 0.
-        bitmap_clear(&mut bitmap, 0);
-        assert!(!bitmap_test(&bitmap, 0));
-        assert_eq!(bitmap[0], 0b1000_0000);
-    }
-
-    #[test]
-    fn test_bitmap_find_free() {
-        let mut bitmap = vec![0xFFu8; 4]; // 32 bits, all set
-        bitmap[2] = 0xFE; // Bit 16 is free.
-
-        assert_eq!(bitmap_find_free(&bitmap, 0, 32), Some(16));
-        assert_eq!(bitmap_find_free(&bitmap, 16, 32), Some(16));
-        assert_eq!(bitmap_find_free(&bitmap, 17, 32), Some(16)); // Wraps around.
-
-        // All full.
-        let full = vec![0xFFu8; 4];
-        assert_eq!(bitmap_find_free(&full, 0, 32), None);
-    }
-
-    #[test]
-    fn test_bitmap_find_free_run() {
-        let mut bitmap = vec![0xFFu8; 4];
-        // Free bits 10, 11, 12 (3 contiguous).
-        bitmap[1] = 0b11111000 | 0b00000011; // bits 8-9 set, 10-12 free, 13-15 set
-        // Actually let me be more precise.
-        // Byte 1 covers bits 8-15.
-        // We want bits 10, 11, 12 free → byte 1 = 0b11100011 = 0xE3 (wrong)
-        // Bit layout: bit 8 = LSB of byte 1
-        // bits 8,9 set, 10,11,12 clear, 13,14,15 set
-        // byte 1 = (1<<0) | (1<<1) | (0<<2) | (0<<3) | (0<<4) | (1<<5) | (1<<6) | (1<<7)
-        //        = 0b1110_0011 = 0xE3
-        bitmap[1] = 0xE3;
-
-        assert_eq!(bitmap_find_free_run(&bitmap, 0, 32, 3), Some(10));
-        assert_eq!(bitmap_find_free_run(&bitmap, 0, 32, 4), None);
-        assert_eq!(bitmap_find_free_run(&bitmap, 0, 32, 1), Some(10));
-    }
-}
+// A `#[cfg(test)] mod tests` used to sit here with three tests —
+// `test_bitmap_operations`, `test_bitmap_find_free` and
+// `test_bitmap_find_free_run`.  It was deleted rather than ported: the kernel
+// binary sets `test = false` and has no lib target, so those tests had never
+// once compiled or run (`known-issues.md` →
+// `A-KERNEL-UNIT-TESTS-NEVER-RUN`), and every case in all three was already
+// checked by `self_test` above — which additionally covers an out-of-bounds
+// `bitmap_test`, something the deleted set never did.
+//
+// The one case that was *not* already covered, `bitmap_find_free` starting on
+// the free bit itself, was moved into `test_bitmap_find_free` instead of being
+// lost with the module.

@@ -60122,7 +60122,7 @@ provided it restores them:
    tolerated and not counted; the test fails if *no* function accepts a toggle.
 3. The claim table is empty before any driver initialises.
 
-## `A-KERNEL-UNIT-TESTS-NEVER-RUN` — open, found 2026-08-22 (lane A)
+## `A-KERNEL-UNIT-TESTS-NEVER-RUN` — found 2026-08-22 (lane A) — FIXED 2026-08-22
 
 **In short:** The kernel contains 54 blocks of code marked as automated tests,
 spread over 8 files. None of them has ever run. They are not merely skipped —
@@ -60156,25 +60156,24 @@ nothing ran.
 
 ### Where they are
 
-| File | dead `#[test]`s | has a `self_test()`? | converted |
+| File | dead `#[test]`s | had a `self_test()`? | outcome |
 |---|---|---|---|
-| `kernel/src/fs/ext4/vfs_impl.rs` | 13 | yes | |
-| `kernel/src/fs/pathutil.rs` | 10 | **no** | **yes** — 2026-08-22 |
-| `kernel/src/net/frag.rs` | 7 | yes | **yes** — 2026-08-22 |
-| `kernel/src/net/httpd.rs` | 7 | yes | |
-| `kernel/src/fs/ext4/driver.rs` | 6 | yes | |
-| `kernel/src/tty/mod.rs` | 6 | yes | |
-| `kernel/src/fs/ext4/balloc.rs` | 3 | yes | |
-| `kernel/src/net/raw.rs` | 2 | **no** | **yes** — 2026-08-22 |
+| `kernel/src/fs/ext4/vfs_impl.rs` | 13 | yes | deleted; 4 gaps ported |
+| `kernel/src/fs/pathutil.rs` | 10 | **no** | **converted** |
+| `kernel/src/net/frag.rs` | 7 | yes (hermetic only) | **converted** |
+| `kernel/src/net/httpd.rs` | 7 | yes | deleted; 3 gaps ported |
+| `kernel/src/fs/ext4/driver.rs` | 6 | yes | deleted; 1 gap ported |
+| `kernel/src/tty/mod.rs` | 6 | yes | deleted; fully redundant |
+| `kernel/src/fs/ext4/balloc.rs` | 3 | yes | deleted; 1 gap ported |
+| `kernel/src/net/raw.rs` | 2 | **no** | **converted** |
 
-Six of the eight have a boot self-test, so the module is not wholly unchecked —
-but the self-test and the dead unit tests cover different things, and the dead
-ones are the finer-grained half.
-
-`pathutil.rs` and `raw.rs` have **no** other coverage. `pathutil.rs` is the
+Six of the eight had a boot self-test, so those modules were not wholly
+unchecked — but in four of the six the existing self-test turned out to be a
+strict superset of the dead tests, and the two that had *no* other coverage
+(`pathutil.rs`, `raw.rs`) were the ones that mattered. `pathutil.rs` was the
 priority: path handling is a trust boundary (`CLAUDE.md` self-review items 7 and
 8 — bytes not UTF-8, resolve before crossing), it is reached by every `open`,
-and its ten tests have never once executed.
+and its ten tests had never once executed.
 
 ### Why "never compiled" is worse than "never run"
 
@@ -60204,16 +60203,37 @@ The conversion is not mechanical, and three constraints keep recurring:
 - **Re-read each test against the current API.** They have never been
   type-checked, so treat compilation as an open question per file.
 
-### Progress (25 of 54)
+### Resolution (54 of 54)
 
 | Date | Files | Result |
 |---|---|---|
 | 2026-08-22 | `pathutil.rs` (10), `raw.rs` (2) | converted; boot PASS 1674 s, both print `Self-test PASSED` |
 | 2026-08-22 | `frag.rs` (7) | converted; found `A-FRAG-REJECTED-FRAGMENTS-STILL-CLAIM-A-REASSEMBLY-SLOT` |
-| 2026-08-22 | `tty/mod.rs` (6) | **removed, not converted** — genuinely redundant |
+| 2026-08-22 | `tty/mod.rs` (6) | **deleted** — every case already covered by the live self-test |
+| 2026-08-22 | `ext4/balloc.rs` (3) | deleted; ported 1 gap (`find_free` starting *on* the free bit) |
+| 2026-08-22 | `ext4/driver.rs` (6) | deleted; ported 1 gap (block far beyond the requested range) |
+| 2026-08-22 | `httpd.rs` (7) | deleted; ported 3 gaps (non-numeric status line, rate-limit table init, 429 content type) |
+| 2026-08-22 | `ext4/vfs_impl.rs` (13) | deleted; ported 4 gaps (error *variant* on both split failures, SOCK/UNKNOWN and BLK/FIFO fallbacks, `..` file_type byte) |
 
-Remaining: `ext4/vfs_impl.rs` (13), `httpd.rs` (7), `ext4/driver.rs` (6),
-`ext4/balloc.rs` (3).
+`grep -rn '^#\[cfg(test)\]' kernel/src/` now returns nothing. The only remaining
+`#[test]` occurrences in the crate are inside doc comments that explain why the
+convention is boot self-tests.
+
+**19 of the 54 were worth keeping and 35 were not** — which is the useful
+finding, not the count. The five files whose dead tests were deleted were not
+under-tested; their live `self_test()` had simply outgrown the unit tests years
+earlier and nobody had removed the corpse. Two of those files
+(`httpd.rs`, `vfs_impl.rs`) had drifted so far they would no longer *compile*:
+both called functions with `&str` long after the signatures moved to byte-based
+`Path`/`&[u8]` so that non-UTF-8 filenames survive. That is the "never compiled
+is worse than never run" prediction above landing exactly as described.
+
+The nine ported gaps were all small and all real — the pattern in them is that a
+live self-test tends to check the cases someone was debugging at the time, and
+skip the boundary next to them: the free bit you are *standing on* rather than
+scanning toward, the block far past the window rather than one past it, the
+status line that is long enough but not numeric, the second of two nearly
+identical writers.
 
 The `frag.rs` conversion is the argument for doing the rest. Its seven dead
 tests all drove the module-level `add_fragment`, i.e. the global reassembly

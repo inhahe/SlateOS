@@ -5677,6 +5677,12 @@ fn test_block_copy_placement() -> KernelResult<()> {
         "unaligned b2",
     )?;
 
+    // Far past the requested range, not merely one block past it.  The two
+    // `None` cases above sit either side of the window, so an implementation
+    // that clamped instead of rejecting would still pass them; this one is
+    // beyond any clamp.
+    check(block_copy_placement(10, BS, 0, 4096), None, "far past")?;
+
     crate::serial_println!("[ext4-driver]   block_copy_placement (sparse holes): OK");
     Ok(())
 }
@@ -6172,74 +6178,11 @@ fn test_blank_inode() -> KernelResult<()> {
 // Unit tests (host `cargo test` only — not compiled into the kernel)
 // ---------------------------------------------------------------------------
 
-#[cfg(test)]
-mod placement_tests {
-    use super::block_copy_placement;
-
-    const BS: u64 = 4096;
-
-    /// A full-file read (offset 0, len = file_size) places each block at its
-    /// logical offset — the property that makes holes read as zeros.
-    #[test]
-    fn full_file_places_by_logical_offset() {
-        // Block 0 -> dest 0.
-        assert_eq!(block_copy_placement(0, BS, 0, 8192), Some((0, 0, 4096)));
-        // Block 1 -> dest 4096 (NOT appended after block 0).
-        assert_eq!(block_copy_placement(1, BS, 0, 8192), Some((4096, 0, 4096)));
-    }
-
-    /// The sparse-file regression: with a hole at logical block 1, block 2 must
-    /// still land at byte offset 8192, leaving [4096,8192) as the pre-zeroed
-    /// hole — never dragged left into the hole (the old append bug).
-    #[test]
-    fn hole_does_not_shift_following_blocks() {
-        let file_size = 12288usize; // 3 blocks
-        // Blocks 0 and 2 are allocated; block 1 is a hole (never placed).
-        let p0 = block_copy_placement(0, BS, 0, file_size).unwrap();
-        let p2 = block_copy_placement(2, BS, 0, file_size).unwrap();
-        assert_eq!(p0, (0, 0, 4096));
-        // Block 2 stays at its logical position 8192, not 4096.
-        assert_eq!(p2, (8192, 0, 4096));
-    }
-
-    /// The final block is clamped to the file's tail length.
-    #[test]
-    fn last_block_clamped_to_file_size() {
-        // file_size = 4096 + 100: block 1 contributes only 100 bytes.
-        assert_eq!(block_copy_placement(1, BS, 0, 4196), Some((4096, 0, 100)));
-    }
-
-    /// A page-aligned partial read (offset 8192, one page) maps the covering
-    /// blocks relative to the page start.
-    #[test]
-    fn partial_range_maps_relative_to_offset() {
-        // Reading [8192, 12288): block 2 -> dest 0 within the page buffer.
-        assert_eq!(block_copy_placement(2, BS, 8192, 4096), Some((0, 0, 4096)));
-        // Block 3 would be past the requested page -> None.
-        assert_eq!(block_copy_placement(3, BS, 8192, 4096), None);
-        // Block 1 is before the requested page -> None.
-        assert_eq!(block_copy_placement(1, BS, 8192, 4096), None);
-    }
-
-    /// A range that starts partway into a block copies from the right src.
-    #[test]
-    fn unaligned_range_start_sets_src_offset() {
-        // Reading [4196, 8292) (starts 100 bytes into block 1).
-        // Block 1: src_start=100, dest_start=0, n = 4096-100 = 3996.
-        assert_eq!(
-            block_copy_placement(1, BS, 4196, 4096),
-            Some((0, 100, 3996))
-        );
-        // Block 2: dest_start = 8192-4196 = 3996, src_start=0, clamped to 100.
-        assert_eq!(
-            block_copy_placement(2, BS, 4196, 4096),
-            Some((3996, 0, 100))
-        );
-    }
-
-    /// Blocks entirely outside the range yield None.
-    #[test]
-    fn out_of_range_blocks_are_none() {
-        assert_eq!(block_copy_placement(10, BS, 0, 4096), None);
-    }
-}
+// A `#[cfg(test)] mod placement_tests` used to sit here with six tests over
+// `block_copy_placement`.  It was deleted rather than ported: the kernel binary
+// sets `test = false` and has no lib target, so it had never compiled or run
+// (`known-issues.md` -> `A-KERNEL-UNIT-TESTS-NEVER-RUN`), and five of its six
+// cases were already checked verbatim by `test_block_copy_placement` above.
+//
+// The sixth, `out_of_range_blocks_are_none`, was moved there rather than lost:
+// it is the only case that probes a block far beyond the requested range.

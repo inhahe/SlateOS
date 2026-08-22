@@ -2075,6 +2075,11 @@ pub fn self_test() -> KernelResult<()> {
             // Test 27: extract_status with empty/malformed input.
             assert_eq!(extract_status(b""), 0);
             assert_eq!(extract_status(b"short"), 0);
+            // Long enough to reach the status field, but the field is not
+            // digits.  Both cases below get past a pure length check, so they
+            // are what distinguishes parsing the status from merely finding it.
+            assert_eq!(extract_status(b"HTTP/1.1"), 0);
+            assert_eq!(extract_status(b"HTTP/1.1 XX"), 0);
             serial_println!("[httpd]   extract_status malformed: OK");
 
             // Test 28: Access log ring buffer push and recent.
@@ -2143,6 +2148,28 @@ pub fn self_test() -> KernelResult<()> {
             assert!(resp_ar_str.contains("Accept-Ranges: bytes\r\n"));
             serial_println!("[httpd]   Accept-Ranges header: OK");
 
+            // Test 30a: the rate-limit table's initial state.
+            //
+            // `check_rate_limit` below only holds if every slot starts empty
+            // with a full bucket: a slot that began with `tokens == 0` would
+            // reject the very first request from whichever IP hashed to it,
+            // and a non-zero `ip` would make a stranger inherit a stranger's
+            // budget.  `init_rate_entries` is `const`, so this is checking the
+            // constructed array rather than the live one.
+            {
+                #[inline(never)]
+                fn case() {
+                    let entries = init_rate_entries();
+                    assert_eq!(entries.len(), RATE_LIMIT_SLOTS);
+                    for entry in &entries {
+                        assert_eq!(entry.ip, [0, 0, 0, 0], "fresh slot must have no owner");
+                        assert_eq!(entry.tokens, RATE_LIMIT_BURST, "fresh slot must be full");
+                    }
+                    serial_println!("[httpd]   Rate limit table init: OK");
+                }
+                case();
+            }
+
             // Test 31: Rate limiting — first requests should pass.
             {
                 #[inline(never)]
@@ -2182,6 +2209,10 @@ pub fn self_test() -> KernelResult<()> {
                     let resp_str = core::str::from_utf8(&resp).unwrap_or("");
                     assert!(resp_str.starts_with("HTTP/1.1 429 Too Many Requests\r\n"));
                     assert!(resp_str.contains("Retry-After: 1\r\n"));
+                    // The body is a human-readable page, so it must be typed as
+                    // one — a client shown `application/octet-stream` offers a
+                    // download instead of explaining why the request failed.
+                    assert!(resp_str.contains("text/html"));
                     serial_println!("[httpd]   429 response format: OK");
                 }
                 case();
@@ -2297,96 +2328,15 @@ pub fn self_test() -> KernelResult<()> {
     Ok(())
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_normalize_path() {
-        assert_eq!(normalize_path("/"), "/");
-        assert_eq!(normalize_path("/foo/../bar"), "/bar");
-        assert_eq!(normalize_path("/../../../etc/passwd"), "/etc/passwd");
-    }
-
-    #[test]
-    fn test_percent_decode() {
-        assert_eq!(percent_decode("/foo%20bar"), "/foo bar");
-        assert_eq!(percent_decode("%41%42%43"), "ABC");
-    }
-
-    #[test]
-    fn test_extract_status() {
-        assert_eq!(extract_status(b"HTTP/1.1 200 OK\r\n"), 200);
-        assert_eq!(extract_status(b"HTTP/1.1 404 Not Found\r\n"), 404);
-        assert_eq!(extract_status(b"HTTP/1.1 304 Not Modified\r\n"), 304);
-        assert_eq!(extract_status(b"HTTP/1.1 206 Partial Content\r\n"), 206);
-        assert_eq!(
-            extract_status(b"HTTP/1.1 416 Range Not Satisfiable\r\n"),
-            416
-        );
-        // Malformed / too short.
-        assert_eq!(extract_status(b""), 0);
-        assert_eq!(extract_status(b"HTTP/1.1"), 0);
-        assert_eq!(extract_status(b"HTTP/1.1 XX"), 0);
-    }
-
-    #[test]
-    fn test_access_log_ring_buffer() {
-        let mut log = AccessLog::new();
-        assert_eq!(log.recent(10).len(), 0);
-
-        log.push(AccessLogEntry {
-            method: String::from("GET"),
-            path: String::from("/index.html"),
-            status: 200,
-            body_size: 512,
-            duration_us: 0,
-        });
-        let entries = log.recent(10);
-        assert_eq!(entries.len(), 1);
-        assert_eq!(entries[0].status, 200);
-        assert_eq!(entries[0].path, "/index.html");
-    }
-
-    #[test]
-    fn test_access_log_wrap() {
-        let mut log = AccessLog::new();
-        for i in 0..ACCESS_LOG_SIZE + 10 {
-            log.push(AccessLogEntry {
-                method: String::from("GET"),
-                path: format!("/p{}", i),
-                status: 200,
-                body_size: 0,
-                duration_us: 0,
-            });
-        }
-        let entries = log.recent(ACCESS_LOG_SIZE);
-        assert_eq!(entries.len(), ACCESS_LOG_SIZE);
-        // First entry should be #10 (0..9 overwritten).
-        assert_eq!(entries[0].path, "/p10");
-        // Last should be ACCESS_LOG_SIZE + 9.
-        assert_eq!(
-            entries[ACCESS_LOG_SIZE - 1].path,
-            format!("/p{}", ACCESS_LOG_SIZE + 9)
-        );
-    }
-
-    #[test]
-    fn test_rate_limit_entries_init() {
-        let entries = init_rate_entries();
-        assert_eq!(entries.len(), RATE_LIMIT_SLOTS);
-        for entry in &entries {
-            assert_eq!(entry.ip, [0, 0, 0, 0]);
-            assert_eq!(entry.tokens, RATE_LIMIT_BURST);
-        }
-    }
-
-    #[test]
-    fn test_429_response() {
-        let resp = too_many_requests_response();
-        let s = core::str::from_utf8(&resp).unwrap_or("");
-        assert!(s.starts_with("HTTP/1.1 429 Too Many Requests\r\n"));
-        assert!(s.contains("Retry-After: 1\r\n"));
-        assert!(s.contains("text/html"));
-    }
-}
+// A `#[cfg(test)] mod tests` used to sit here with seven tests.  It was
+// deleted rather than ported: the kernel binary sets `test = false` and has no
+// lib target, so it had never compiled or run (`known-issues.md` ->
+// `A-KERNEL-UNIT-TESTS-NEVER-RUN`) — and it had drifted far enough that it no
+// longer *could* compile, calling `normalize_path("/")` with a `&str` years
+// after the signature moved to bytes so that non-UTF-8 paths survive.
+//
+// `self_test` above already covered all seven, in most cases with a strict
+// superset of the cases.  Three checks it did not have were moved there rather
+// than lost: a non-numeric status line in `extract_status`, the initial state
+// of the rate-limit table (`init_rate_entries`), and the 429 body's content
+// type.

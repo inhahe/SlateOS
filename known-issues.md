@@ -10365,7 +10365,7 @@ is the worst possible place to discover that your code can fault, and only a
 boot test finds it — this would have shipped clean under a "it compiles and
 clippy is quiet" standard.
 
-### B-FORKEXEC-BOOT-HANG. Intermittent silent boot hang at the glibc `fork()`+`execl()`+`waitpid()` self-test — WATCH (rare, non-fatal to a re-run) 2026-07-15
+### [RESOLVED 2026-08-22] B-FORKEXEC-BOOT-HANG. Intermittent silent boot hang at the glibc `fork()`+`execl()`+`waitpid()` self-test — a freed PML4 was still live in CR3; fixed in `0ecd5ff03`, WATCH cleared after three consecutive clean boots — 2026-07-15
 
 **Symptom (1 occurrence, 2026-07-15):** During
 `self_test_linux_real_glibc_forkexec` (`spawn-test-glibc-forkexec`,
@@ -10581,12 +10581,33 @@ names its PML4*. The victim is spawned suspended and never admitted, so the
 test is deterministic instead of depending on the narrow preemption window
 that made the original failure intermittent.
 
-**Status:** the fix is committed and the invariant is tested, but the *hang*
-is only provisionally closed — it is intermittent by nature, so it stays
-WATCH until several consecutive clean boots have run this test. If it recurs
-after `0ecd5ff03`, the remaining post-loop suspects from narrowing (1) above
-are `Vfs::read_file`/`Vfs::remove` on the capture file and the console-lock
-lead below; re-check those rather than re-deriving the page-table path.
+**Status (2026-08-22): RESOLVED — WATCH cleared.** The condition the WATCH was
+waiting on has been met: three consecutive boot cycles after `0ecd5ff03` each
+executed `self_test_linux_real_glibc_forkexec` to a green
+`REAL glibc forkexec` line and went on to reach `BOOT_OK`, with no silent stop
+and no timeout:
+
+| Cycle | Commit | Verdict | `REAL glibc forkexec` |
+|---|---|---|---|
+| 8 | `ab3d42901` | BOOT_OK | pass |
+| 9 | `b215b83c1` | BOOT_OK | pass |
+| 10 | `1422972ad` | BOOT_OK | pass |
+
+Three is the right number to stop at rather than an arbitrary one. The hang
+was never a coin flip on every boot — across the whole recorded history it
+appeared a handful of times in dozens of runs, so three clean runs alone would
+be weak evidence taken by themselves. What makes them sufficient here is that
+they are corroborating a *mechanism* that is independently pinned down: the
+page-table path was derived from the code and the log rather than guessed, and
+`proc::thread` test 11 (`test_exit_detaches_address_space`) now fails
+deterministically if the invariant regresses. The boots confirm the fix did
+not introduce a new intermittency; the unit test, not the boot count, is what
+keeps it fixed.
+
+**If it ever recurs**, do not re-derive the page-table path — that one is
+closed and regression-tested. The remaining post-loop suspects from narrowing
+(1) above are `Vfs::read_file`/`Vfs::remove` on the capture file and the
+console-lock lead below; start there.
 
 **Generalisable lesson.** A `// SAFETY:` comment that states a *whole-system*
 precondition — "no CPU has this loaded in CR3" — and is reached from a public

@@ -62655,3 +62655,71 @@ test rather than a paragraph.
 **Trigger:** the first of (a) a `dev`/`ino` pair reaching userspace through the
 SlateOS `stat` ABI, or (b) bind mounts appearing in the VFS. Neither exists as
 of 2026-08-22.
+
+## TD-B-THREE-UTILITIES-STILL-CARRY-THEIR-OWN-MODE-PARSER (lane B, 2026-08-22) — OPEN, prerequisite now met
+
+**In short:** "Mode" here means the thing you type after `chmod` — `755`, or
+`u+w`, or `a+rX,go-w`. Four places in the tree each wrote their own parser for
+it and disagreed. One shared parser now exists (`userspace/modechange`) and
+`chmod` uses it; `install`, `chown` and the shell still have their own copies,
+and `mkdir -m` and `mkfifo -m` still refuse to work at all. Until they are
+converted the original bug is only a quarter fixed — a script that sets a
+permission with one tool and reads it back with another can still get two
+answers.
+
+**Where it lives:**
+
+| Site | State |
+|---|---|
+| `userspace/coreutils/src/bin/chmod.rs` | **Done** — rewritten on `modechange`, 24,480 GNU rows agree. |
+| `userspace/coreutils/src/bin/stat.rs` | **Done** — `format_mode` now calls `modechange::permission_string`. |
+| `userspace/coreutils/src/bin/mkdir.rs` | `-m` refused as unimplemented. Was explicitly parked on this crate existing; the module doc says so. |
+| `userspace/coreutils/src/bin/mkfifo.rs` | Same. |
+| `userspace/install/src/main.rs` | Own parser. |
+| `userspace/chown/src/main.rs` | Own parser — `parse_symbolic_mode`, `apply_symbolic_mode`, `parse_mode` (lines ~565–800). |
+| `userspace/oils/src/interp.rs` | Own parser, for the `umask` builtin. |
+
+**What the previous entry got wrong, and it matters for whoever picks this up:**
+that entry called the prerequisite "lifting `chmod`'s parser into a shared
+`coreutils::mode` module". It became a **separate crate**, `userspace/modechange`,
+not a `coreutils` module, because three of the six remaining callers —
+`install`, `chown` and the shell — are their own crates and must not depend on
+`coreutils`; the shell especially, since `coreutils` is the set of programs the
+shell *runs*. See design-decisions §364. A `coreutils::mode` module would have
+reconciled `chmod` with `mkdir` and left the other four disagreeing, which is
+worse than it sounds: three of four agreeing makes the fourth look like a local
+bug rather than a missing abstraction.
+
+**Measured GNU behaviour for the two that are unimplemented**, so nobody has to
+re-measure (GNU coreutils 9.4, under WSL):
+
+- Both `mkdir -m` and `mkfifo -m` compile the mode against a **starting mode of
+  `0777`** — not `0755`, and not `0666` for the FIFO — then set the umask to
+  zero for the actual creation. So `mkdir -m 700 d` is `0700` under **every**
+  umask, which is the whole point of the option.
+- The umask still reaches clauses with no `who`, because that is `modechange`'s
+  rule rather than the caller's: `mkdir -m 'a=,+w'` is `0222` under umask 000,
+  `0200` under 022 **and** under 077, `0220` under 002.
+- `dir` differs, and `X` is what shows it: `mkdir -m 'a=,+X'` is `0111`,
+  `mkfifo -m 'a=,+X'` is `0000`. Note this also pins that `X` consults the mode
+  *as accumulated so far* — after `a=` there is no execute bit left, so on the
+  FIFO it does not fire.
+- With `-p`, only the **last** component gets the requested mode; the
+  intermediates get the ordinary `0777 & ~umask`. Measured: `umask 022; mkdir -p
+  -m 700 a/b/c` gives `a` 755, `a/b` 755, `a/b/c` 700.
+- `-m` on a directory that already exists does nothing, even with `-p`:
+  `mkdir a; chmod 700 a; mkdir -p -m 755 a` leaves it `0700`.
+
+**The three invalid-mode wordings are all different**, which is exactly the kind
+of thing the "measure the specific message, not the utility next door" rule
+above exists for:
+
+```text
+chmod:  chmod: invalid mode: ‘zzz’      (colon, curly)
+mkdir:  mkdir: invalid mode ‘zzz’       (no colon, curly)
+install: install: invalid mode ‘zzz’    (no colon, curly)
+mkfifo: mkfifo: invalid mode            (no colon, and the string is not quoted at all)
+```
+
+`mkfifo`'s is not a typo in this entry — GNU really does drop the operand from
+that one message.

@@ -50335,7 +50335,7 @@ commands that carry the colour in question, and assert the two renders agree.
 Candidates: anything drawn on the wallpaper, on a video surface, on a
 thumbnail, or on any other content the palette does not own.
 
-**Part 2 progress. 7 of 49 modules converted.**
+**Part 2 progress. 8 of 49 modules converted.**
 
 - [x] `security_dialog.rs` — 29 constants, done 2026-08-22. The method above
   survived contact: the sweep lives in `gui/desktop/src/palette_check.rs` as
@@ -50554,6 +50554,58 @@ thumbnail, or on any other content the palette does not own.
   - Two `MOCHA_MANTLE` sites became `readable_on(...)` — the initials on the
     avatar circle and the label on the account-type pill. Both sit *on* a
     coloured fill whose hue is chosen by data, so neither is a palette role.
+- [x] `bluetooth.rs` — 13 constants, done 2026-08-22. Harness defects
+  AAA/BBB/CCC/DDD/EEE/FFF/GGG.
+  - **The distinctness argument from `user_accounts.rs` generalises, and here
+    it is the *whole* reason a site refuses the accent.** The scan button has
+    two states — blue "Scan for devices", peach "Scanning..." — and peach is
+    one of the fourteen accents a user can pick. An accent-following idle state
+    would therefore render *identically* to the scanning state on a peach
+    desktop, deleting the only signal that a scan is running. That is not a
+    taste judgement about what the accent means; it is a collision, and it is
+    checkable: `the_scan_button_says_something_different_while_it_is_scanning`
+    renders under blue, peach and mauve accents in both modes and asserts the
+    two states differ. Defect GGG is exactly the substitution and is caught by
+    it. **Generalisation worth carrying to the remaining 41 modules: whenever a
+    two-state or n-state control would become "accent vs. fixed hue H", check
+    whether H is one of the fourteen accents; if it is, the accent is wrong
+    there regardless of how much the site otherwise reads like an accent site.**
+  - The two genuine accent sites are the power switch and the filled part of
+    each signal meter — "the interactive thing" and "how much of it there is",
+    which is `notif_pane.rs`'s stated doctrine. Both of their off/empty halves
+    are `p.surface1`, a neutral no accent resolves to, so neither can collide
+    the way the scan button would have.
+  - The blue-state trap for the fourth time: `ConnectionState::Paired` and
+    `PairedNotConnected` are blue, and their siblings (Connected green,
+    Connecting yellow, Disconnected `overlay0`) settle it as categorical.
+    Defect EEE moves `Connected` onto the accent and is caught only by
+    `a_devices_status_colours_do_not_follow_the_accent`; defect FFF freezes the
+    filled signal bars on blue and is caught only by that test's `assert_ne!`
+    half — the third independent confirmation of the TT lesson.
+  - **Defect FFF caught a hole in the negative half itself, and this refines
+    the TT rule rather than repeating it. `assert_ne!` on a *combined* vector of
+    accent sites is too weak: it proves only that *at least one* site moved, so
+    a still-moving site masks a frozen one.** The first draft here collected the
+    power switch and the signal bars into one `accent_site_colors` vector; FFF
+    froze the bars while the switch kept following the accent, and the harness
+    reported `*** NO TEST FAILED ***`. The fix is one `assert_ne!` per site, and
+    the rule for the remaining 41 modules is: **a module with n accent sites
+    needs n negative assertions, not one over their union.** This is exactly the
+    failure the reintroduction discipline exists to find — the test was written,
+    reviewed, green, and measuring less than it claimed; nothing but a
+    deliberately reintroduced bug would have said so.
+  - **The matrix had to cover a branch that returns early.** An unpowered
+    adapter draws four commands and `return`s, so every device colour in the
+    module is unreachable in that half of the state space; the sweep therefore
+    runs powered × discovering × `show_nearby` × four scroll offsets × three
+    panel heights, with one device per connection state, batteries straddling
+    both ladder thresholds, and signal strengths walking 0–4 bars. The "n more"
+    line (defect BBB) is only drawn by the short panels, and the empty signal
+    bar only by the weak-signal devices; a fixture with one healthy device
+    would have missed both.
+  - One `MOCHA_BASE` became `readable_on(p.lavender)` — the device-type glyph
+    on the lavender icon circle. Same shape as `user_accounts.rs`'s two: text
+    on a coloured fill, not a role.
 
 **Trigger:** this is not blocked on anything. It is sequenced after the shell
 event loop (`TD-C-THE-SHELL-CAN-DRAW-ITSELF-AND-NOBODY-CAN-ASK-IT-TO`) only

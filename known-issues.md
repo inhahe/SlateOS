@@ -55452,6 +55452,126 @@ the OS.
 
 ---
 
+## B-stat-HAS-NO-OPTIONS-AND-CANNOT-READ-A-CLOCK (lane B, 2026-08-22) — FIXED 2026-08-22
+
+**In short:** `stat` reports a file's size, owner, dates and so on. Almost
+nobody runs it to read the output; they run it inside a script to pull out one
+number, which is spelled `size=$(stat -c %s file)` — `-c` meaning "print just
+this". The shipped `stat` parsed **no options at all**. It treated `-c` and
+`%s` as two more file names, failed on both, and printed the whole
+human-readable paragraph for `file` — so `$size` came out as a paragraph. It
+also printed the string `0` instead of a date for any file dated 1970 or
+earlier, and could be made to spin for minutes on a single file with a
+far-future date.
+
+### There was no argument parser
+
+`userspace/coreutils/src/bin/stat.rs` was 343 lines with a `main` that read, in
+full:
+
+```rust
+for (i, path_str) in args.iter().enumerate() { … show_stat(path_str) … }
+```
+
+Every argument was a path. So of GNU's options, **all** of them were broken in
+the same way:
+
+| Invocation | What it did |
+|---|---|
+| `stat -c %s f` | Two errors on stderr, the full block for `f` on stdout, exit 1. A script capturing stdout gets the block. |
+| `stat -L link` | Reported a file named `-L` (error) and the *link*, never the target. |
+| `stat -t f` | Same; no terse output exists. |
+| `stat -f /` | Same; no filesystem mode exists. |
+| `stat -- -weird` | No `--`, so a file whose name starts with `-` was unreachable… by luck, reachable, since nothing was an option. |
+
+The standalone twin, `userspace/stat/src/main.rs` (2845 lines, also providing
+`touch`/`ln`/`readlink`), has had `-c`, `-L`, `-t` and `-f` all along. This is
+the same shape as the four finds before it: the shipped binary is a stripped
+reimplementation, and what got stripped was the part scripts use.
+
+### Time formatting was wrong at both ends and slow in the middle
+
+`format_timestamp` began:
+
+```rust
+if epoch_secs <= 0 { return "0".to_string(); }
+```
+
+so **the epoch itself printed as `0`**, not as `1970-01-01 00:00:00` — and a
+file restored from an archive with no recorded mtime gets exactly that stamp.
+Every legitimate pre-1970 date printed `0` too.
+
+It then counted forward one year at a time from 1970 to find the year. For a
+timestamp far in the future — `touch -d` will set one, and so will a corrupt
+inode — that is hundreds of billions of iterations, i.e. **`stat` hangs for
+minutes on one file**, at a cost to the attacker of one `touch`. Replaced with
+Howard Hinnant's `civil_from_days`, which is exact over the whole proleptic
+Gregorian range and runs in constant time. There is a test that the far-future
+case returns immediately; if it ever takes measurable time, the loop is back.
+
+Nanoseconds were not printed at all, so two files written a millisecond apart
+looked simultaneous — which defeats the most common reason to compare
+timestamps in the first place.
+
+### Six smaller defects, all in the same direction
+
+1. **Symbolic links did not show their target.** `stat link` printed
+   `File: link` and stopped. Where the link points is the single most useful
+   thing about it; GNU prints `File: 'link' -> '/etc'`. Fixed.
+2. **The name was never quoted**, although the file imported `quoteaf_os` and
+   used it *only in the error path*. A filename containing a newline produced
+   output that could not be parsed, which is the whole reason GNU quotes.
+3. **Device major/minor used the pre-2.6 encoding** (`rdev >> 8`, `rdev & 0xff`)
+   in the standalone's `%t`/`%T` — silently wrong for any minor above 255, which
+   on a modern system is most of them. The rewrite uses the current encoding
+   and tests minor 300 specifically.
+4. **`%N` hand-rolled its quoting** as `'{name}'` in the standalone, so a
+   filename containing an apostrophe emitted an unbalanced quote. Now routed
+   through the shared quoter.
+5. **`%F` had no `regular empty file`**, GNU's one special case and the one
+   scripts actually match on.
+6. **Nothing checked the write.** Output went through `println!`, which panics
+   on a broken pipe rather than exiting — `stat * | head -1` on a large
+   directory. Writes are now checked, `BrokenPipe` exits with the accumulated
+   status, and the final flush is checked too, which is the same rule
+   `B-tee-REPORTS-SUCCESS-AFTER-LOSING-THE-DATA` established.
+
+### What the rewrite adds
+
+`-c FORMAT`, `--format=`, `--printf=` (escapes interpreted, no trailing
+newline), `-L`, `-f` (via the posix crate's `statvfs`, the same call the
+standalone uses), `-t` with GNU's exact terse field orders, `--`, option
+permutation, and rejection of unknown options. Roughly 30 `%` specifiers plus
+printf-style widths.
+
+Two structural choices worth recording:
+
+* **The default human-readable block is itself a format string**, expanded by
+  the same code as `-c`. Six `println!`s were how the old version came to quote
+  names in its errors but not in its output; one code path cannot drift from
+  itself. The block is asserted character-for-character in a test.
+* **Everything below the syscalls is written over a plain `StatInfo`/`FsInfo`
+  struct, not `std::fs::Metadata`.** `Metadata`'s unix accessors are
+  `cfg(unix)`, the build host is Windows, and so anything written against them
+  is invisible to `cargo test --workspace`. That is precisely how a `stat` with
+  no argument parser survived this long. 35 tests now run on the host, covering
+  the parser, the calendar, the formatter and the default block; clippy clean on
+  `x86_64-pc-windows-gnu` and `x86_64-slateos`.
+
+**Not verified end-to-end** — `stat` is `cfg(unix)`-gated and needs QEMU. Same
+gap as `dd`, `tee`, `chown` and `chmod`; the fourth argument in three days for
+a filesystem-level harness that runs the shipped binaries inside the OS.
+
+**Still not implemented:** `%U`/`%G` print the numeric uid/gid rather than
+looking up names, because name lookup needs `/etc/users.yaml` (§353). Printing
+the number is right, just unfriendly; printing a guessed name would not be.
+
+**Six for six.** Every shipped `coreutils` bin read against its bigger
+standalone twin so far — `chmod`, `dd`, `tee`, `tar`, `chown`, `stat` — has had
+a silent-wrong-behaviour bug.
+
+---
+
 ## TD-C-COMPOSITOR-TILES-UNDER-THE-TASKBAR (lane C, 2026-08-21) — MOSTLY RESOLVED 2026-08-21, step 4 blocked
 
 **In short:** When you tile a window — drag it to the left edge, or press

@@ -113,7 +113,10 @@ const SIGTERM: i32 = 15;
 enum KillAction {
     /// `-l` / `-L` / `--list` / `--table`. With no operands, list every signal;
     /// with operands, translate each one between name and number.
-    List { operands: Vec<OsString>, table: bool },
+    List {
+        operands: Vec<OsString>,
+        table: bool,
+    },
     /// Send `signal` to each of `pids`. A negative PID is a process group and
     /// is passed through as written.
     Send { signal: i32, pids: Vec<OsString> },
@@ -687,7 +690,10 @@ mod tests {
 
     #[test]
     fn multiple_pids() {
-        assert_eq!(sent(&["-INT", "100", "200", "300"]).1, s(&["100", "200", "300"]));
+        assert_eq!(
+            sent(&["-INT", "100", "200", "300"]).1,
+            s(&["100", "200", "300"])
+        );
     }
 
     #[test]
@@ -701,7 +707,11 @@ mod tests {
 
     #[test]
     fn a_signal_with_no_pid_errors() {
-        assert!(parse_args(&s(&["-9"])).unwrap_err().contains("missing operand"));
+        assert!(
+            parse_args(&s(&["-9"]))
+                .unwrap_err()
+                .contains("missing operand")
+        );
     }
 
     #[test]

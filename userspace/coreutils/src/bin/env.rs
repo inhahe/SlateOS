@@ -437,7 +437,11 @@ fn main() {
         if let Some(dir) = &cfg.chdir
             && let Err(e) = env::set_current_dir(dir)
         {
-            eprintln!("env: cannot change directory to {}: {}", quote_os(dir), strerror(&e));
+            eprintln!(
+                "env: cannot change directory to {}: {}",
+                quote_os(dir),
+                strerror(&e)
+            );
             process::exit(EXIT_CANCELED);
         }
         process::exit(write_out(&render(&vars, &cfg.sep)));
@@ -601,7 +605,10 @@ mod tests {
 
     #[test]
     fn dash_c_takes_a_directory() {
-        assert_eq!(cfg(&["-C", "/tmp", "prog"]).chdir, Some(OsString::from("/tmp")));
+        assert_eq!(
+            cfg(&["-C", "/tmp", "prog"]).chdir,
+            Some(OsString::from("/tmp"))
+        );
         assert_eq!(cfg(&["-C/tmp", "prog"]).chdir, Some(OsString::from("/tmp")));
         assert_eq!(
             cfg(&["--chdir=/tmp", "prog"]).chdir,

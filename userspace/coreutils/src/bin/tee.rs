@@ -80,9 +80,7 @@ fn main() {
         };
         let chunk = buf.get(..n).unwrap_or(&[]);
 
-        if stdout_live
-            && let Err(e) = out.write_all(chunk)
-        {
+        if stdout_live && let Err(e) = out.write_all(chunk) {
             // A downstream reader that has gone away is an ordinary end to a
             // pipeline, not a failure of this program.
             if e.kind() == io::ErrorKind::BrokenPipe {

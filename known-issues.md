@@ -55800,6 +55800,157 @@ proper shape for it is recorded in `todo.txt`.
 
 ---
 
+## B-hostname-DOES-NOTHING-IN-EITHER-DIRECTION (lane B, 2026-08-22) — FIXED 2026-08-22
+
+**In short:** The `hostname` command did not work at all, in either direction,
+and said nothing about it. Asked for the machine's name it always answered
+`localhost`, whatever the machine was really called. Asked to *change* the
+name — `hostname newbox` — it changed nothing and exited reporting success.
+And because it had no notion of options, `hostname --help` did not print help:
+it tried to rename your machine to the literal string `--help`. Now rewritten:
+it reads and writes the same two files as the rest of the system, understands
+all nine standard options, and refuses names that are not legal host names.
+
+### Why it did nothing
+
+The old version (`userspace/coreutils/src/bin/hostname.rs`, 125 lines) called
+the C functions `gethostname()` and `sethostname()` from our POSIX layer. Those
+look like system calls, and on Linux they are. Ours are not. In
+`posix/src/unistd.rs` they are backed by:
+
+```rust
+process_global! {
+    /// Initialized to "localhost" — can be changed via `sethostname()`.
+    fn hostname_buf_ptr() -> [u8; HOST_NAME_MAX + 1] = { /* "localhost" */ };
+```
+
+and `process_global!` (`posix/src/perprocess.rs:82`) expands to `static mut
+STORAGE` — a plain variable **inside the calling program's own memory**.
+Nothing about it crosses a process boundary. So:
+
+| Command | What it did | What the machine saw |
+|---|---|---|
+| `hostname` | read that variable | printed `localhost`, always |
+| `hostname newbox` | wrote that variable, then exited | nothing changed, exit status 0 |
+
+The second row is the dangerous one. A first-boot or provisioning script that
+runs `hostname "$NAME"` and checks the exit status was told it succeeded. The
+machine kept whatever name it had, and the script had no way to find out.
+
+### It also disagreed with every other program
+
+The rest of the tree keeps the host name in two files —
+`/proc/sys/kernel/hostname` (the live value) and `/etc/hostname` (the value
+that survives a reboot). `dhcpcd` writes both when a DHCP lease supplies a
+name; `getty` shows the name in its login banner; `osh` fills `$HOSTNAME` from
+exactly this pair, in exactly this order; `sysctl` maps `kernel.hostname` onto
+the first; `hostnamectl`, `logger`, `snapper2` and `sudo` all read them. The
+`hostname` command was the only program in the system not using them — so it
+was also the only one that could not see a name `dhcpcd` had just set.
+
+### Everything else that was wrong
+
+| Defect | Consequence |
+|---|---|
+| **No option parsing whatsoever** | every option was read as a new host name. `-s`, `-f`, `-d`, `-i`, `-I`, `-F`, `-b`, `-V`, `--help` — all of them. `hostname -s` (the single most common use, "just the short name") tried to rename the machine to `-s`. |
+| **No validation** | `hostname ""`, `hostname "my box"`, `hostname $'a\nb'`, a 5000-byte name — all passed straight through. A newline is the worst: it makes the *second* line of `/etc/hostname` look like a separate valid name to anything that reads the file line-wise. |
+| **`String::from_utf8_lossy` on the result** | forbidden outright by CLAUDE.md rule 7 ("silent data corruption"). A name containing a stray byte printed as `a<?>b`, indistinguishable from a name that genuinely contained U+FFFD. |
+| **errno discarded** | one string, `failed to set hostname`, for every cause. "You are not root", "that name is too long" and "the file is read-only" were the same message. |
+| **Extra operands ignored** | `hostname foo bar` used `foo` and said nothing about `bar`. |
+| **`env::args()`** | panicked before any of the above on a non-UTF-8 argument (see the sweep entry below). |
+| **`println!`** | panics when stdout cannot be written, so `hostname \| head -1` could end in a Rust panic message rather than a broken pipe. |
+
+### The fix
+
+Rewritten to 700 lines, 7 tests → 35. Reads `/proc/sys/kernel/hostname` then
+`/etc/hostname`; writes both, replacing the persistent one by rename so a crash
+part-way leaves the old name rather than half of the new one (a truncated
+`/etc/hostname` is read at boot as a *different valid name*, which is worse
+than an unchanged one). Full option set including `-F`/`--file`, `-b`/`--boot`,
+and `--`, which the standalone twin lacks — without `--` there is no way to be
+sure an argument taken from a variable is treated as a name rather than an
+option.
+
+**Validation is done on bytes, and that is what also makes it panic-proof.**
+A non-UTF-8 argument contains a byte ≥ 0x80; that byte is not ASCII
+alphanumeric; so the *same* RFC 1123 rule that rejects a space in a host name
+rejects it — with a diagnostic naming the byte, not a crash. The byte-safety
+and the standards-compliance turned out to be one check, not two.
+
+**There is no `#[cfg]` in the new file at all**, and that is the headline
+lesson repeated from `kill` and `env`. The old version put its entire working
+body inside `#[cfg(target_os = "linux")]`, so `cargo test` on the Windows
+development host compiled *none* of it; its seven tests all exercised one
+4-line buffer-decoding helper, and passed. That is precisely why nobody
+noticed the program did nothing. The new implementation is file I/O and byte
+manipulation, which compiles and runs identically on the host — the paths
+merely do not exist there, which the code must handle anyway because they may
+not exist on the real system either.
+
+**Nine for nine.** Every shipped `coreutils` binary examined so far against a
+larger standalone twin has had a silent-wrong-behaviour bug. This is the most
+complete one: previous entries were tools that got some cases wrong, whereas
+this one had no working path in either direction while reporting success.
+
+---
+
+## B-POSIX-HOSTNAME-IS-PROCESS-LOCAL (lane B, 2026-08-22) — OPEN
+
+**In short:** `gethostname()` and `sethostname()` — the two C functions any
+program uses to ask or set what this machine is called — do not actually talk
+to the system. Each program that calls them gets its own private copy of the
+answer, starting at `localhost`, and setting it changes only that program's
+copy. Two programs running side by side can hold different opinions about the
+machine's name, and neither is the real one. This was found while fixing the
+`hostname` command (entry above), which is now file-based and no longer
+affected; but every *other* caller still is.
+
+**Where it lives:** `posix/src/unistd.rs` — `gethostname()` (line 1091),
+`sethostname()` (line 1735), and the `process_global!` block above them (line
+989). `process_global!` is defined at `posix/src/perprocess.rs:82` and expands
+to `static mut STORAGE` on the target, `thread_local!` on the host. It is a
+per-process variable by construction; there is no syscall behind it.
+
+**How to reproduce:** any program that calls `sethostname("x", 1)` and then
+`execve`s or exits, followed by any program calling `gethostname()` — the
+second sees `localhost`. Also: `uname()`'s `nodename` field is filled from the
+same storage (`copy_hostname`, line 1020), so `uname -n` has the same defect
+wherever it is served from the C function rather than from the files.
+
+**Why this is not simply "the utility's fault":** the functions are honest
+about their *arguments* — they match glibc's truncation rules, return
+`ENAMETOOLONG`, check `CAP_SYS_ADMIN` before anything else exactly as Linux's
+`sys_sethostname` does, and are well tested. Every observable detail is right
+except the one that matters: where the value lives. That is what made the
+defect survive — the code around it looks carefully done, because it is.
+
+**What the proper fix looks like.** Two options, and the choice needs care:
+
+1. **Back them with the files** — `gethostname()` reads
+   `/proc/sys/kernel/hostname` then `/etc/hostname`; `sethostname()` writes
+   both. Correct immediately and consistent with every other consumer, but it
+   puts filesystem I/O behind a function that callers reasonably assume is
+   cheap and non-blocking, and `posix` is `no_std` on the target so the read
+   has to go through its own VFS path rather than `std::fs`.
+2. **Back them with a kernel call** — the kernel already owns a host name at
+   `/sys/kernel/hostname` (`kernel/src/fs/sysfs.rs:76`, written by `kshell`).
+   A `uname`-style syscall would be the Linux-faithful shape and would keep the
+   functions cheap. This needs a kernel-side addition, which is **lane A**, so
+   it would go through `requests/`.
+
+Option 2 is the right end state and option 1 is a correct interim. Not decided
+yet — deliberately, because it is worth doing once. Until then, **anything in
+the tree that needs the real host name should read the two files**, which is
+what `dhcpcd`, `getty`, `osh`, `sysctl`, `logger`, `hostnamectl`, `snapper2`,
+`sudo` and now `hostname` all do.
+
+**If never fixed:** the C functions stay quietly wrong. Nothing in the tree
+depends on them today (the file-based route is universal), so nothing is
+currently broken by it — but they are the obvious thing for a ported C program
+to call, and it would get `localhost` with no indication anything was amiss.
+
+---
+
 ## B-COREUTILS-PANIC-ON-A-NON-UTF-8-ARGUMENT (lane B, 2026-08-22) — OPEN
 
 **In short:** On this OS a filename may contain any byte except `/` and NUL —
@@ -55827,27 +55978,33 @@ tree already has the pieces: `coreutils::quote::os_bytes`, `quotef_os`,
 contains byte `0x80`, then `rm` it.
 
 **Scale, measured 2026-08-22 (`grep -l '^[^/]*env::args()' src/bin/*.rs`):**
-52 of 84 bins.
+51 of 84 bins.
 
 ```
 basename bc cal chmod chown cmp cp dd df diff dirname du echo ed fetch
-find free grep hostname id ln logger ls md5sum mkdir mkfifo more mv
+find free grep id ln logger ls md5sum mkdir mkfifo more mv
 nice nohup patch ps readlink realpath renice rm rmdir sed sh sha256sum sleep
 stat strings tar tee time_cmd touch tty uname which xargs yes
 ```
 
-`env` and `kill` were on this list and were fixed the same day, which is why
-they are absent above. `stat`, `chmod`, `chown` and `tar` were rewritten this
-week for other reasons and use `os_bytes` internally but still *read* argv as
-`String`, so they remain on it.
+`env`, `kill` and `hostname` were on this list and were fixed the same day,
+which is why they are absent above. `stat`, `chmod`, `chown` and `tar` were
+rewritten this week for other reasons and use `os_bytes` internally but still
+*read* argv as `String`, so they remain on it.
 
-**The correlation is the whole argument for how to fix this.** Of the 32 bins
-that are already clean, **22 use `coreutils::getopt`**; of the 52 dirty ones,
+**The correlation is the whole argument for how to fix this.** Of the 33 bins
+that are already clean, **23 use `coreutils::getopt`**; of the 51 dirty ones,
 **none do** — not one. `getopt` is byte-based, so a bin that goes through it
 never had a reason to reach for `String` in the first place. That is a
 structural cause, not a coincidence, and it means finishing the `getopt`
-migration fixes the class, whereas patching 52 `main`s independently fixes 52
+migration fixes the class, whereas patching 51 `main`s independently fixes 51
 instances and leaves the next new bin free to reintroduce it.
+
+**`hostname` is worth copying as the pattern**, because its fix cost nothing
+extra: host names are ASCII by RFC 1123, so validating the argument *as bytes*
+rejects a non-UTF-8 byte under the same rule that rejects a space. Wherever a
+utility already validates its argument, doing that validation on bytes removes
+the panic for free — no separate UTF-8 handling is needed at all.
 
 **Why it survived:** the same reason as everything else in this audit. The
 development host is Windows, where argv arrives as UTF-16 and a test cannot

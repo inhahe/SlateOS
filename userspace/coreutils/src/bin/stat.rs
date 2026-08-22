@@ -315,7 +315,13 @@ const TERSE_FS: &str = "%n %i %l %t %s %S %b %f %a %c %d";
 /// an arbitrary byte string on this OS — forcing it through UTF-8 would corrupt
 /// exactly the names a user most needs `stat` to be honest about. `%N` is the
 /// quoted form and is safe to render as text by construction.
-fn apply_format(fmt: &str, escapes: &Escapes, st: &StatInfo, name: &[u8], link: Option<&[u8]>) -> Vec<u8> {
+fn apply_format(
+    fmt: &str,
+    escapes: &Escapes,
+    st: &StatInfo,
+    name: &[u8],
+    link: Option<&[u8]>,
+) -> Vec<u8> {
     let mut out: Vec<u8> = Vec::with_capacity(fmt.len().saturating_mul(2));
     let mut chars = fmt.chars();
 
@@ -840,7 +846,6 @@ mod imp {
             apply_fs_format(f, e, &fs_info, os_path.as_bytes())
         }))
     }
-
 }
 
 #[cfg(unix)]
@@ -987,7 +992,10 @@ mod tests {
             format_timestamp(951_782_400, 0),
             "2000-02-29 00:00:00.000000000 +0000"
         );
-        assert_eq!(format_timestamp(1, 0), "1970-01-01 00:00:01.000000000 +0000");
+        assert_eq!(
+            format_timestamp(1, 0),
+            "1970-01-01 00:00:01.000000000 +0000"
+        );
     }
 
     #[test]
@@ -1123,7 +1131,10 @@ mod tests {
         // A name with a quote in it is exactly what %N exists for, and what
         // hand-rolled `'{name}'` quoting gets wrong.
         let text = run("%N", &Escapes::Interpret, b"it's", None);
-        assert_ne!(text, "'it's'", "quoting must not produce an unbalanced quote");
+        assert_ne!(
+            text, "'it's'",
+            "quoting must not produce an unbalanced quote"
+        );
         assert!(text.contains("it"));
     }
 
@@ -1204,12 +1215,7 @@ mod tests {
             files: 100,
             ffree: 90,
         };
-        let out = apply_fs_format(
-            "%i %l %s %S %b %f %a %c %d",
-            &Escapes::Interpret,
-            &fs,
-            b"/",
-        );
+        let out = apply_fs_format("%i %l %s %S %b %f %a %c %d", &Escapes::Interpret, &fs, b"/");
         assert_eq!(
             String::from_utf8(out).unwrap(),
             "dead 255 4096 4096 1000 500 400 100 90"
@@ -1219,7 +1225,10 @@ mod tests {
     #[test]
     fn terse_formats_are_the_gnu_ones() {
         // Scripts parse these positionally, so the field order is an interface.
-        assert_eq!(TERSE_FILE, "%n %s %b %f %u %g %D %i %h %t %T %X %Y %Z %W %o");
+        assert_eq!(
+            TERSE_FILE,
+            "%n %s %b %f %u %g %D %i %h %t %T %X %Y %Z %W %o"
+        );
         assert_eq!(TERSE_FS, "%n %i %l %t %s %S %b %f %a %c %d");
     }
 }

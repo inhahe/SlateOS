@@ -407,7 +407,11 @@ mod tests {
 
     #[test]
     fn parse_size_garbage_is_an_error() {
-        assert!(parse_size("notanumber").unwrap_err().contains("invalid number"));
+        assert!(
+            parse_size("notanumber")
+                .unwrap_err()
+                .contains("invalid number")
+        );
     }
 
     #[test]
@@ -429,7 +433,10 @@ mod tests {
     #[test]
     fn parse_size_overflow_is_an_error() {
         let err = parse_size("99999999999999999999G").unwrap_err();
-        assert!(err.contains("invalid number") || err.contains("out of range"), "got: {err}");
+        assert!(
+            err.contains("invalid number") || err.contains("out of range"),
+            "got: {err}"
+        );
     }
 
     #[test]

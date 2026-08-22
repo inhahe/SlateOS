@@ -32476,9 +32476,70 @@ desktop's origin. Each monitor runs at the mode it came up in —
 `TD-COMPOSITOR-CANNOT-CHANGE-MODE`. Hotplug of a monitor *after* startup is not
 handled: heads are enumerated once in `DrmScanout::new`, so plugging a screen in
 does nothing until the display server restarts. That last one is new debt and is
-filed below as `TD-COMPOSITOR-IGNORES-MONITOR-HOTPLUG`.
+filed below as `TD-COMPOSITOR-IGNORES-MONITOR-HOTPLUG` — since resolved, on
+2026-08-21, by the polled re-probe in `design-decisions.md` §517.
 
-## TD-COMPOSITOR-IGNORES-MONITOR-HOTPLUG (lane C, 2026-08-21)
+## TD-COMPOSITOR-IGNORES-MONITOR-HOTPLUG (lane C, 2026-08-21) — RESOLVED 2026-08-21
+
+**Resolution.** Both halves and the seam between them are done, in four commits;
+`design-decisions.md` §517 records the reasoning and §516 the detach half.
+
+- `773455e29` — *the seam.* `Present::monitors() -> Option<Vec<MonitorInfo>>`
+  (default `None`, meaning "no opinion" — a headless recorder or a host window
+  has no connectors to enumerate) and `Server::reconcile_monitors`, called at the
+  top of `run_with`'s loop. It is a **poll of the whole set**, not a pushed
+  difference: asking twice gives the same answer, a tick that fails is retried a
+  second later, and the difference is computed against the arrangement actually
+  held rather than the one a sender assumed. Removals run before additions, so
+  peak surface is the smaller arrangement and a moved cable's CRTC is free before
+  the new head asks for it.
+- `382ae7a64` — *detect.* `DrmScanout::reprobe` re-reads `GETCONNECTOR` for every
+  connector and diffs against the head list, rate-limited to `PROBE_INTERVAL`
+  (1 s, `set_probe_interval` for tests) because a `count_modes == 0` probe makes
+  the kernel do real DDC traffic — tens of ms, far more than a frame.
+  `resize_to_heads` recomputes the framebuffer bounding box *without* moving any
+  head, unlike the pre-existing `lay_out_heads`, keeping §515/§516's "survivors
+  do not move" true on the scanout side too. This is also the one place that
+  *reaps*: a retired head is removed and its buffers released rather than left
+  `alive = false`, because a polled probe can retire a head every second for
+  hours and a head list that grows per plug event is a leak with a physical
+  trigger.
+- `842026285` — *the shared key.* `Compositor::rename_display` plus `main.rs`
+  naming every `Display` after its **connector id** instead of its enumeration
+  index, and passing each head's real refresh rate instead of a hardcoded
+  constant. This was the last item the original entry listed as outstanding, and
+  it is load-bearing: a first screen still called `0` is both a display no
+  connector claims and a connector no display claims, so reconciliation would
+  detach it and attach a duplicate once a second, for ever.
+
+Sixteen tests, every one proved a regression test by reintroducing the defect it
+names and confirming a deterministic failure that names it back, source restored
+byte-for-byte afterwards. Nineteen markers: `seamadoptsanyreply`,
+`seamemptyisarrangement`, `seamnoreconcile`, `seamsizeisidentity`,
+`seamreattachesknown`, `seamnewmonitorisprimary`; `probenever`,
+`probeeverytime`, `probereportsindex`, `probearrivesatorigin`, `probereflows`,
+`probekeepsdeparted`, `probeadoptsfirst`, `probekeepsdarkhead`,
+`probefailureisempty`; `renamenoop`, `renamedemotes`, `renamecollides`,
+`renamewrongdisplay`. One test had to be strengthened before it was honest —
+`an_empty_monitor_list_is_not_an_arrangement_to_adopt` used one display and
+passed with its guard deleted, because `detach_display` refuses the last monitor
+anyway; with two displays the guard is the only thing holding the desktop
+together. Compositor 465 green, clippy clean on `x86_64-pc-windows-gnu`
+(`--all-targets`) and `x86_64-unknown-linux-gnu` (`--bins`, the only build that
+compiles the Linux arm of `main.rs` at all), fmt clean.
+
+**What is deliberately still out of scope,** and filed elsewhere: a **mode
+change** under a live connector is ignored, because reconciliation compares ids
+and never sizes — detaching and re-attaching to resize would destroy that
+screen's window arrangement and move the monitor to the end of the row
+(`TD-COMPOSITOR-CANNOT-CHANGE-MODE`). **EDID is not read**, so a monitor is
+identified by the socket it is in and not by which monitor it is; swap two
+cables and each takes the other's place in the row. And **nothing is
+remembered**: unplug a monitor and plug it back in and it returns at the
+right-hand end rather than where it was. All three want an identity that
+outlives a cable, which is a larger design than this one.
+
+<details><summary>Original entry (describes pre-<code>773455e29</code> code)</summary>
 
 **In short:** plugging a second monitor in while the desktop is running does
 nothing — it stays dark until the display server is restarted. Unplugging one
@@ -32554,6 +32615,8 @@ wiring must fix: `main.rs` builds each `Display` with `id = <enumeration
 index>`, but `detach_display` names a display by id and the stable key on the
 scanout side is the **connector id** (§515), so the two have to be made the same
 number before a detach can name the right screen.
+
+</details>
 
 ## TD-COMPOSITOR-HAS-NO-LOCAL-INPUT (lane C, 2026-08-21)
 

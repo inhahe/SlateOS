@@ -986,11 +986,20 @@ fn report_violation(held_class: u16, acquired_class: u16, cpu: usize) {
         "[lockdep] WARNING: potential deadlock detected on CPU {}!",
         cpu
     );
+    // Print the lock addresses, not just the names. Most locks in the tree take
+    // `Mutex::new`'s default name of `"?"`, so a violation rendered by name
+    // alone reads `Holding lock "?" … acquiring lock "?"` — a report that
+    // cannot be acted on, because it does not say which two locks inverted.
+    // `dump_held_locks` reached the same conclusion for the same reason; this
+    // report was simply left behind. The address identifies the instance and
+    // resolves to its static offline against the kernel ELF.
     serial_println!(
-        "[lockdep]   Holding lock {:?} (class {}), acquiring lock {:?} (class {})",
+        "[lockdep]   Holding lock {:?} @ {:#x} (class {}), acquiring lock {:?} @ {:#x} (class {})",
         held_name,
+        class_addr(held_class),
         held_class,
         acq_name,
+        class_addr(acquired_class),
         acquired_class
     );
     serial_println!("[lockdep]   But the reverse order was observed previously.");
@@ -1016,11 +1025,12 @@ fn report_recursive(class_idx: u16, cpu: usize) {
     }
     let name = class_name(class_idx);
     serial_println!(
-        "[lockdep] *** SELF-DEADLOCK *** CPU {} is re-acquiring lock {:?} (class {}) \
+        "[lockdep] *** SELF-DEADLOCK *** CPU {} is re-acquiring lock {:?} @ {:#x} (class {}) \
          it already holds. This non-reentrant spinlock will now spin forever — the \
          acquire is a recursive self-deadlock (fix the call path).",
         cpu,
         name,
+        class_addr(class_idx),
         class_idx
     );
     dump_held_locks(cpu);
@@ -1054,6 +1064,31 @@ fn class_name(idx: u16) -> &'static str {
     let bytes =
         unsafe { core::slice::from_raw_parts((&raw const CLASSES[idx].name).cast::<u8>(), len) };
     core::str::from_utf8(bytes).unwrap_or("?")
+}
+
+/// Get the address of the lock instance a class was registered from, or 0.
+///
+/// The companion to [`class_name`], and the reason it exists is that the name
+/// is very often not an identifier: `sync::Mutex::new` gives every lock the
+/// default name `"?"`, so a report that prints names alone can produce
+/// `Holding lock "?" … acquiring lock "?"` — two locks that cannot be told
+/// apart from each other, from a third, or from the lock in any other report.
+/// The address is unique by construction, is the same value
+/// `sync::report_spin_stall` and [`dump_held_locks`] print, and resolves to the
+/// owning static offline against the kernel ELF's symbol table.
+///
+/// Returns 0 for an out-of-range index and for a slot that is reserved but not
+/// yet published, matching `class_name`'s "admit the unknown" policy. That
+/// readiness gate is the only thing this adds over [`class_id`], whose own
+/// callers are the address→class lookup paths and deliberately *do* want to see
+/// a reserved slot. The read itself is delegated rather than repeated, so the
+/// `unsafe` touching `CLASSES` stays confined to one function.
+fn class_addr(idx: u16) -> usize {
+    let idx = idx as usize;
+    if !class_is_ready(idx) {
+        return 0;
+    }
+    class_id(idx).unwrap_or(0)
 }
 
 // ---------------------------------------------------------------------------

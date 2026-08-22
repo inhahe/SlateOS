@@ -1482,11 +1482,8 @@ extern "C" fn kernel_main() -> ! {
                 }
                 // (ext4's own self-test is NOT here — it has nothing to do with the
                 // FAT root.  See the unconditional block below.)
-                // VFS-level self-test (symlinks, cross-mount resolution) — relies on
-                // the FAT root for cross-mount cases.
-                if let Err(e) = fs::vfs::self_test() {
-                    serial_println!("WARNING: VFS self-test failed: {:?}", e);
-                }
+                // (the VFS self-test is NOT here either — its cross-mount cases
+                // work off whatever "/" is.  See the unconditional block below.)
                 // Flush buffer cache to disk so data survives power loss / QEMU kill.
                 if let Err(e) = fs::cache::flush_all() {
                     serial_println!("WARNING: Buffer cache flush failed: {:?}", e);
@@ -1566,6 +1563,19 @@ extern "C" fn kernel_main() -> ! {
             // device-specific.
             if let Err(e) = fs::cache::self_test() {
                 serial_println!("WARNING: Buffer cache self-test failed: {:?}", e);
+            }
+            // VFS: path validation, normalisation, and symlink resolution both
+            // within a mount and across one.
+            //
+            // Fourth of the calls `if fat_ok` was skipping.  The comment on it
+            // said the cross-mount cases "rely on the FAT root", but what they
+            // actually do is create a symlink at "/" pointing into /tmp — which
+            // works off whatever "/" happens to be, and needs only that it be
+            // writable.  It already self-skips when nothing is mounted and
+            // branches on `has_tmp` for the symlink cases, so like the others it
+            // had been written to decide for itself all along.
+            if let Err(e) = fs::vfs::self_test() {
+                serial_println!("WARNING: VFS self-test failed: {:?}", e);
             }
             // Path predicates: subtree matching and the `confine_under` jail
             // guard.  Pure (constants only, no disk), so it runs on every boot

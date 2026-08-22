@@ -50335,7 +50335,7 @@ commands that carry the colour in question, and assert the two renders agree.
 Candidates: anything drawn on the wallpaper, on a video surface, on a
 thumbnail, or on any other content the palette does not own.
 
-**Part 2 progress. 8 of 49 modules converted.**
+**Part 2 progress. 15 of 49 modules converted.**
 
 - [x] `security_dialog.rs` — 29 constants, done 2026-08-22. The method above
   survived contact: the sweep lives in `gui/desktop/src/palette_check.rs` as
@@ -50606,6 +50606,346 @@ thumbnail, or on any other content the palette does not own.
   - One `MOCHA_BASE` became `readable_on(p.lavender)` — the device-type glyph
     on the lavender icon circle. Same shape as `user_accounts.rs`'s two: text
     on a coloured fill, not a role.
+- [x] `update_settings.rs` — 13 constants, done 2026-08-22. Harness defects
+  HHH/III/JJJ/KKK/LLL/MMM/NNN/OOO.
+  - **Defect NNN is the FFF lesson paying for itself one module later.** This
+    panel has *two* accent sites — the active tab's label and the chosen
+    schedule's label — and NNN freezes only the second. The tab label keeps
+    following the accent, so an `assert_ne!` over the union of both sites would
+    have passed and NNN would have gone unnoticed exactly as FFF did. Written
+    per-site from the start, it fails. The rule is now confirmed rather than
+    merely inferred: **n accent sites, n negative assertions.**
+  - **The widest categorical row so far — five hues in one `match`.**
+    `UpdateStatus::color` is green / blue / yellow / peach / red for up-to-date,
+    checking-or-downloading, available, pending-restart and error. Five *kinds
+    of fact about the machine*, and four of the five hues are among the fourteen
+    selectable accents, so the distinctness argument applies to the whole row at
+    once rather than to one member: `the_update_statuses_stay_distinct_in_both_modes`
+    walks four accents × both modes and asserts no two statuses collide. Defect
+    OOO gives "updates available" the same green as "up to date" and is caught
+    only by that test — a collision the membership sweep cannot see, because
+    green is a perfectly good palette role.
+  - **The empty branch of each tab is its own colour and needs its own fixture
+    flag.** All three tabs bail early with an `overlay0` "No updates available."
+    / "No update history." caption instead of drawing a list, so the sweep runs
+    `populated` both ways; a fixture that always had data would never render
+    those three captions at all. Same shape as `bluetooth.rs`'s unpowered
+    early `return`, and worth expecting in every settings panel: the
+    interesting colours are often on the path where there is nothing to show.
+  - `UpdateSchedule` is a radio group, not a categorical row: exactly one member
+    is chosen, and the chosen one is "you are here", so its label is `p.accent`
+    while the rest stay `p.text`. The tab bar is the same shape. That is the
+    distinction to carry forward — *which of these am I on* is the accent's,
+    *which kind of thing is this* is not, and both can be a blue `if active`
+    one-liner in the source.
+- [x] `storage_settings.rs` — 13 constants, done 2026-08-22. Harness defects
+  PPP/QQQ/RRR/SSS/TTT/UUU/VVV/WWW/XXX, all nine caught by exactly the tests
+  named.
+  - **A ten-member categorical row, and the first one where the distinctness
+    argument is not an analogy but the feature itself.** `StorageCategory::color`
+    paints a *stacked bar* and the legend beneath it: System blue, Apps
+    lavender, Documents green, Media peach, Downloads yellow, recycle bin red,
+    then four greys. Two members sharing a colour do not merely look similar —
+    their slices abut in the bar and **merge into one slice**, so the chart
+    silently reports a lie. Six of the ten are among the fourteen selectable
+    accents, so a member that followed the accent would collide for at least six
+    of the fourteen. `the_ten_storage_categories_stay_distinct_in_both_modes`
+    walks four accents × both modes; defect XXX (Downloads given Media's peach)
+    is caught by it and by nothing else, because peach is a perfectly good
+    palette role and the membership sweep cannot see it.
+  - **Defect WWW is the FFF/NNN shape a third time, and it is now a pattern
+    rather than a coincidence.** The two accent sites here are the active tab's
+    label and the six `Change` buttons; WWW freezes only the buttons, and the
+    tab label goes on moving. Every module converted so far that has had more
+    than one accent site has had a defect that only a per-site assertion can
+    see. Treat **n accent sites ⇒ n negative assertions** as mandatory, not as
+    a refinement.
+  - **A button label is the third thing the accent owns.** The rule so far was
+    *which of these am I on* → accent, *which kind of thing is this* →
+    categorical. `Change` is neither: it is a press-me affordance, with no
+    sibling to be distinguished from and no fact to report. It takes the accent,
+    for the same reason a link does — the accent is where the eye is told to go.
+    So the rule generalises to: **the accent marks position and invitation; it
+    never marks category or measurement.**
+  - **`is_low_space` is a measurement and stays red.** The warning banner and
+    the over-90% figure are the first *threshold* colour in this conversion, as
+    opposed to an enum arm. It is not a selection and not an invitation, so it
+    is not the accent's — a nearly-full disk is red the way a stop sign is red,
+    under every accent a user can pick. Held by the positive half of
+    `the_storage_panels_own_colours_do_not_follow_the_accent`.
+  - **Two *absences* needed their own fixture shapes.** The sweep runs three
+    fixtures, not one: no drives at all (the overview loop runs zero times and
+    the breakdown bails on `drives().get(selected) == None`), one drive carrying
+    all ten categories with each slice big enough to clear the `seg_w > 0.5`
+    guard, and one drive holding only System and Apps so nothing is reclaimable
+    and the green estimate line is skipped. The second and third are mutually
+    exclusive — a fixture with a recycle bin in it can never reach the
+    zero-reclaimable branch — which is worth knowing in advance: *when a branch
+    is an absence, adding data to the fixture cannot reach it, only a second
+    fixture can.*
+- [x] `power_settings.rs` — 13 constants, done 2026-08-22. Harness defects
+  YYY/ZZZ/AAAA/BBBB/CCCC/DDDD/EEEE/FFFF/GGGG, all nine caught by exactly the
+  tests named. (The labels ran out of three-letter combinations and widen to
+  four; `main()` compares the whole prefix, so nothing collides.)
+  - **The first module whose colours are almost entirely *measurements*, and
+    the first with a ladder.** Two sites follow the accent — the active tab's
+    label and the selected power plan's label, both "which of these am I on".
+    Everything else reads the battery: `BatteryHealth::color` is
+    green/yellow/peach/red, and the charge bar is a second ladder in a `match`
+    on the percentage (`0..=10` red, `11..=20` peach, `21..=50` yellow, else
+    green). Neither is the accent's, for a reason stronger than taste: **a
+    ladder whose rungs can collide is not a ladder.** Green, yellow, peach and
+    red are four of the fourteen selectable accents, so a rung that followed
+    the accent would collapse onto a fixed one for four of them, and the panel
+    would stop answering the question it was drawn to answer. This is the
+    stacked-bar distinctness argument from `storage_settings.rs` applied to an
+    *ordered* row rather than an unordered one — and ordering makes it worse,
+    not better, because a collapsed rung does not merely look ambiguous, it
+    reads as a different measurement.
+  - **Defect EEEE is the FFF/NNN/WWW shape a fourth time, and the cleanest
+    instance so far.** It freezes only the plan list; the tab label above it
+    goes on moving with the accent, so an `assert_ne!` over the union of this
+    panel's two accent sites passes with the bug in. Four modules in a row now.
+    **n accent sites ⇒ n negative assertions** is settled.
+  - **The charge ladder has no function to test, so the test reads it off the
+    render.** Unlike `BatteryHealth::color`, it is an inline `match` inside
+    `render_battery_summary` with no name of its own, so
+    `charge_bar_colors(cmds, track_width)` recovers it by matching the 6pt-tall
+    `FillRect` that is *narrower than its track*. That filter is why the ladder
+    tests stop at 80%: at 100% the fill is exactly as wide as the track and
+    becomes indistinguishable from it. Worth generalising — **a colour chosen
+    by a `match` with no named function still needs a per-site extractor**, and
+    the extractor's discriminator (here, width) constrains which states the test
+    can walk.
+  - **`ChargeState::NotPresent` is walked as its own sweep case, not as one
+    more charge level.** It is the panel's absence branch twice over: it skips
+    the whole battery summary bar, and it replaces the battery tab's entire
+    body with a single `overlay0` caption. Defect ZZZ (that caption keeping its
+    own grey) is reachable through no other state — the same lesson
+    `storage_settings.rs` learned about empty fixtures, arriving here as an
+    enum arm rather than as an empty `Vec`.
+  - **The conversion turned up a bug that has nothing to do with colour, and
+    the fix generalises past this module.** `render_battery_summary` pushed the
+    charge fill, then the bar's *opaque, full-width* track over it, then the
+    same fill again with the comment `// Redraw fill on top (stacking order)`.
+    The track covers the fill's rectangle exactly, so the first of those three
+    draws could not be seen by anyone: a third of the charge bar's draw calls
+    were pure blend cost. **A hidden draw is invisible in a screenshot too**,
+    which is precisely why it survived — there is no way to look at it. It now
+    draws the track only when the fill does not already cover it and the fill
+    only when it has width, guarded by
+    `the_panel_draws_nothing_that_is_immediately_erased`: no `FillRect` may be
+    contained outright by a later opaque one no more rounded at the corners,
+    and none may be empty. The containment rule is conservative on purpose —
+    partial overlap is how every panel on the desktop draws a border, so only
+    total coverage is reported. Writing the test found a **second** instance
+    the eye had missed: at 100% charge the *track* was the dead command rather
+    than the fill. Harness defects HHHH (the original three-push order) and
+    IIII (the zero-width fill an empty battery emits, which the coverage half
+    of the rule is blind to and the emptiness half catches).
+    - Worth lifting into `palette_check.rs` — or a sibling `draw_check.rs` —
+      once a second module wants it, since every converted module already
+      renders to a `Vec<RenderCommand>` the rule can be run over. Left local
+      for now: one instance is not yet a shared helper, and the rule's
+      conservatism may need adjusting against a panel that layers differently.
+- [x] `network_indicator.rs` — 13 constants, done 2026-08-22. Harness defects
+  JJJJ/KKKK/LLLL/MMMM/NNNN/OOOO/PPPP/QQQQ/RRRR/SSSS.
+  - **The harness earned its keep here: defect PPPP caught nothing on the
+    first run, and the test was wrong, not the defect.** PPPP repaints the
+    *airplane-mode-on* peach with the accent. The accent test's fixture came
+    from `NetworkState::wifi(…)`, which leaves airplane mode off — so the
+    render never emitted the peach at all, and the assertion compared the
+    off-state grey with itself and passed. Vacuously green, exactly the failure
+    mode this whole harness exists to detect. **Generalised rule: when a colour
+    is chosen by a boolean, the test needs the boolean, not just the render.**
+    The fix walks airplane × radio (four fixtures) rather than one, and defect
+    SSSS was added afterwards to prove the *radio-on* green the same way — each
+    on-colour needs its own state or it is silently compared with its own
+    opposite.
+  - **The blue-state trap, in its purest form yet.** `SignalStrength::color`
+    runs red → yellow → green → **blue**, and that blue rung reads exactly like
+    an obvious `p.accent`: it is blue, and blue is the default accent, so the
+    mistake looks correct on a fresh install. It is not the accent — it is the
+    top rung of a ladder, and on a Green desktop `Excellent => p.accent` would
+    collapse onto the `Good` green. Defect NNNN.
+  - **The strongest side-by-side distinctness case so far.** Unlike the battery
+    ladder (one reading on screen) or the storage bar (one chart), the flyout
+    lists *every* visible network with its own swatch, so two colliding rungs
+    put two differently-strong networks on screen looking identical, in one
+    glance, with nothing else to disambiguate them.
+  - **Only one site follows the accent** — the SSID of the network you are on,
+    which is the same "which of these am I on" role the selected power plan
+    takes. The five connection-type hues stay categorical; the note in
+    `the_five_kinds_of_link_stay_distinct_in_both_modes` records that this is a
+    *weaker* argument than the ladder's, since only one tray icon is on screen
+    at a time — it rests on a code the user has learnt rather than on a
+    comparison. `Wifi` is excluded from that row because it has no colour of
+    its own, delegating to the signal ladder.
+- [x] `clipboard_viewer.rs` — 13 constants, done 2026-08-22. Harness defects
+  TTTT/UUUU/VVVV/WWWW/XXXX/YYYY/ZZZZ/AAAAA/BBBBB/CCCCC.
+  - **The invisible-draw rule was lifted out of `power_settings.rs` into
+    `gui/desktop/src/draw_check.rs`**, as the note on that module said it
+    should be once a second module wanted it. The public entry point is
+    `assert_nothing_is_drawn_and_never_seen(&[RenderCommand], what)`; it keeps
+    the two halves of the rule (a fill covered outright by a *later* opaque
+    fill that is no more rounded at the corners; a fill of zero width or
+    height) and it now carries seven self-tests of its own, which the inline
+    copy never had — a translucent cover is not a cover, a cover drawn *first*
+    is a background, a rounder cover leaves the corners peeking out, and a
+    partial overlap is how every border on this desktop is drawn. `#[cfg(test)]
+    pub mod` in `lib.rs`, beside `palette_check`, for the same reason: a
+    release build has nothing to check.
+  - **A site whose *foreground* is derived from its own background.** The
+    active format-filter tab is the one accent site, and its label is
+    `p.on_accent()` — `readable_on(accent)` — not a fixed near-black. That
+    pairing needs its own test and it cannot be an `assert_ne!` between two
+    accents: every accent on offer is pale, so `readable_on` answers the same
+    near-black for all fourteen and a correct implementation would fail such an
+    assertion. What separates `p.on_accent()` from a hard-coded `p.base` is the
+    *mode* — Latte's `base` is near-white, illegible on a pale tab. So
+    `the_active_filter_tabs_label_is_legible_on_it` asserts the label *equals*
+    `readable_on` of the fill, in both modes, over five accents. Defect YYYY
+    (fix the label to `p.base`) is caught by that test and by nothing else.
+  - **The frozen half may be one assertion over a union; the negative half may
+    not.** `colors_apart_from_the_tabs` takes every colour outside the filter
+    strip as one vector and `assert_eq!`s it across two accents — an `assert_eq!`
+    over a union fails if *any* member moves, so it loses nothing, and it
+    covers sites nobody thought to name. The `assert_ne!` half stays per-site
+    (here, per-tab), for the reason FFF/NNN/WWW/EEEE established: a union
+    `assert_ne!` passes as soon as one member moves, so a frozen site hides
+    behind a moving one. Defects ZZZZ and AAAAA (the sensitive marker and
+    "Clear All" repainted with the accent) are both caught by the union
+    `assert_eq!`.
+  - **Two entry formats have no public constructor**, so the fixture reaches
+    into the private `history.entries` to set `RichText` and `Custom`. Without
+    them two of the five badge arms are never rendered and the badge ladder is
+    only three rungs wide in practice. Absences and unreachable-by-the-API
+    states have to be *constructed*, not waited for.
+  - **The badge row is the side-by-side distinctness case again**, one step
+    below the network scan list: every visible entry draws its badge at the
+    same moment, so two formats sharing a colour is a one-glance confusion.
+    `PlainText => p.blue` is the blue-state trap for the third time — blue is
+    the default accent, so `p.accent` there looks right until the user picks
+    Green and Text becomes Image (defect WWWW, caught by both the accent test
+    and the distinctness test).
+- [x] `notification_settings.rs` — 14 constants, done 2026-08-22. Harness
+  defects DDDDD–NNNNN (eleven).
+  - **A colour can be right by coincidence, and that is not the same as being
+    right.** The ON/OFF badge drew its label in `CRUST`. That happens to work in
+    both stock modes — Mocha's `crust` is near-black and Mocha's `green` is
+    pale; Latte's `crust` is near-white and Latte's `green` is deep — so the
+    two track each other by accident, and a reader of `p.crust` cannot tell
+    whether anyone checked. It became `appearance::readable_on(badge_color)`,
+    which is the question the badge is actually asking. Defect JJJJJ (put
+    `p.crust` back) fails only in the light render, which is exactly the shape
+    of a coincidence that holds in one mode and not the other. Expect more of
+    these: any near-black or near-white drawn on a role that flips lightness
+    between modes is one.
+  - **A wasted draw found by conversion, not by the eye.** The volume bar
+    pushed an opaque track and then the fill over it. At 100% the fill is the
+    same rectangle with the same corner radii, so the track is a rectangle
+    nobody can ever see — and the *rendered image is identical either way*, so
+    only the command list says so. The track is now pushed only when
+    `fill_w < bar_w`. This is the second module to find this class (the first
+    was `power_settings`'s charge bar) and the reason `draw_check.rs` exists;
+    the erase sweep here walks volume 0/45/100 because only the last one
+    coincides. Defect MMMMM (`<` → `<=`) proves the guard is load-bearing.
+  - **A measurement is not an invitation, and a scale is not a selection.** The
+    four-rung priority stripe (Low/Normal/High/Urgent) and the volume bar's
+    fill both stay frozen. An accented Urgent stripe would read as *selected*
+    beside its neighbours in the same list, and would collide outright with
+    whichever rung already carries that hue — defect KKKKK is caught both by
+    the frozen-union equality and by the distinctness ladder, because with a
+    Yellow accent Urgent becomes High.
+  - **Three tabs, three `assert_ne!`s.** Same shape as the clipboard popup: the
+    active tab is the one accent site, its fill is chosen by a boolean, so the
+    test walks all three tabs as the active one rather than trusting whichever
+    the fixture happened to open on.
+- [x] `backup_settings.rs` — 14 constants, done 2026-08-22. Harness defects
+  OOOOO–IIIIII (twenty-one), the largest set so far because this module has
+  the most accent sites of any converted yet: **nine**.
+  - **Nine accent sites, and the per-site rule finally earns its keep on a
+    pair that is genuinely indistinguishable.** The schedule tab draws six
+    switches — one "enable automatic backups" master and five retention
+    switches — and they are *the same 40x20 pill at the same x*, so nothing
+    about a rendered command says which of the two source sites emitted it.
+    They are two separate `if` expressions, though, and freezing either one
+    alone still leaves the six-pill vector different between two accents. The
+    first draft of the test asserted over all six and would have passed with
+    the retention loop frozen; defects VVVVV and WWWWW are that exact pair,
+    each freezing one site while the other keeps moving. The split is by draw
+    order — the master is first, its row being the top of the tab — which is
+    the only handle available and is worth stating out loud in the test, since
+    it is not obvious and not enforced by anything.
+  - **An `assert_ne!` on a foreground derived from its own background is a bug
+    in the test, not a check.** The three primary buttons ("Backup now",
+    "+ Add source", "+ Add rule") label themselves `p.on_accent()`, i.e.
+    `readable_on(accent)`. Every accent on offer is pale enough that all
+    fourteen resolve to the *same* near-black, so correct code draws the same
+    label under any two accents and the assertion fails on a green tree —
+    which is what it did on the first run. What separates `p.on_accent()` from
+    a frozen `p.crust` is the **mode**, not the accent, so the labels moved to
+    a separate test asserting equality with `readable_on` across both modes
+    (defects FFFFFF/GGGGGG). This is the same hole recorded under `run_dialog`
+    seen from the other side: there it made the sweep blind, here it makes a
+    negative assertion unsatisfiable. Rule: **never `assert_ne!` across accents
+    on anything that is `readable_on(accent)`.**
+  - **The blue-state trap, fourth appearance.** `BackupStatus::InProgress =>
+    BLUE` sits in a five-way match beside green/yellow/red/grey. It reads like
+    an obvious `p.accent` — a running backup is "active", and blue *is* the
+    default accent, so the mistake is invisible on a fresh install. It is a
+    category: on a Blue desktop the accent version looks identical, and on a
+    Green one a running backup becomes indistinguishable from a succeeded one.
+    Defect SSSSS is caught twice over, by the distinctness ladder and by the
+    frozen-union equality.
+  - **An alpha wash whose RGB is a role.** A disabled exclusion rule's row was
+    `Color::rgba(49, 50, 68, 128)` — Mocha `surface0` at half alpha, written
+    as a literal because no constant existed for "surface0 but faded". It
+    became `Color::rgba(p.surface0.r, p.surface0.g, p.surface0.b, 128)`. The
+    membership sweep compares on RGB only and so needs no `derived` entry for
+    it, but grep for bare `Color::rgba` in every module: a wash is a copy of
+    the palette that does not look like one.
+  - **An extractor keyed on bare geometry is a guess, and only a defect can
+    check the guess.** `radio_dots` matched every 8x8 fill, which is the
+    frequency radio's dot — *and* the history tab's status badge. Nothing in
+    the rendered command says which site emitted an 8x8 square. The damage was
+    not a false positive but a false *negative*: the same pattern is subtracted
+    in `colors_apart_from_the_controls`, so the status badges were quietly
+    removed from the frozen-union check on every tab, and a run's outcome could
+    have started following the accent with no test objecting. Defect SSSSS
+    caught the module's own `.color()` table but was recorded as `[MISSING]`
+    against the union check — which is the only reason the hole was found. The
+    fix qualifies both patterns by x (dot at 40, badge at 32, both tabs inset
+    by the same `cx = x + 24`). **This is the second geometric collision in
+    this one module** (the six switch pills were the first), so treat it as
+    routine, not bad luck: after writing an extractor, grep the module for the
+    shape it matches and confirm the count, and write at least one defect that
+    only the *other* widget can trigger.
+  - **Membership cannot check the two surfaces the panel is made of.**
+    `assert_drawn_from` has to allow `0x11111B` and `0xEFF1F5` at any alpha,
+    since those are the only two answers `readable_on` gives and any correctly
+    converted foreground is one of them. But `0x11111B` is also Mocha's
+    `crust` — so reverting the content well to the literal produces a render
+    the sweep is *obliged* to accept. Defect PPPPP was the first `*** NO TEST
+    FAILED ***` in the whole part-2 conversion, and it is structural rather
+    than an oversight. The answer is to stop asking about membership for these
+    two: `the_panels_own_surfaces_come_from_the_palette` names the role and
+    asserts equality with `p.base`/`p.crust` in both modes, which is strictly
+    stronger and also fails in *dark* mode, where a membership check never
+    could. Every module with a background and a recessed well needs this test;
+    the `run_dialog` note above described the same hole but only worked around
+    it by reading the code, which is what let it survive twelve more modules.
+  - **`pathlib.write_text` silently converted the file to CRLF**, which broke
+    every `\n`-containing harness pattern with `PATTERN NOT FOUND` while the
+    Rust still compiled and every test still passed — a failure that looks
+    exactly like a stale pattern. Any script that rewrites a source file in
+    place must use `write_bytes`, or pass `newline=""`. Both this module and
+    `scripts/reintro-palette.py` had to be normalised back to LF.
+  - **The active tab's label is the accent itself, not `on_accent`.** Unlike
+    the last two modules the tab strip has no fill behind the active tab —
+    the label alone carries the state, so it is `p.accent` directly and *does*
+    move between accents (defect TTTTT). Two adjacent modules, two different
+    correct answers; the shape of the widget decides, not the word "tab".
 
 **Trigger:** this is not blocked on anything. It is sequenced after the shell
 event loop (`TD-C-THE-SHELL-CAN-DRAW-ITSELF-AND-NOBODY-CAN-ASK-IT-TO`) only

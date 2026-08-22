@@ -4,28 +4,44 @@
 //! temporary file cleanup, and provides storage sense — automatic space
 //! reclamation policies.
 
+use appearance::Palette;
 use guitk::color::Color;
 use guitk::ratio;
 use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::style::CornerRadii;
 
 // ============================================================================
-// Catppuccin Mocha palette
+// Colour
 // ============================================================================
-
-const BASE: Color = Color::from_hex(0x1E1E2E);
-const MANTLE: Color = Color::from_hex(0x181825);
-const SURFACE0: Color = Color::from_hex(0x313244);
-const SURFACE1: Color = Color::from_hex(0x45475A);
-const TEXT: Color = Color::from_hex(0xCDD6F4);
-const SUBTEXT0: Color = Color::from_hex(0xA6ADC8);
-const BLUE: Color = Color::from_hex(0x89B4FA);
-const GREEN: Color = Color::from_hex(0xA6E3A1);
-const RED: Color = Color::from_hex(0xF38BA8);
-const YELLOW: Color = Color::from_hex(0xF9E2AF);
-const PEACH: Color = Color::from_hex(0xFAB387);
-const LAVENDER: Color = Color::from_hex(0xB4BEFE);
-const OVERLAY0: Color = Color::from_hex(0x6C7086);
+//
+// Every colour this panel draws comes out of the resolved [`Palette`] it is
+// handed, so the whole shell repaints together when the mode or the accent
+// changes. Three judgements are worth writing down, because the source does
+// not show them and the next reader would otherwise have to re-derive them:
+//
+// 1. **The ten storage categories are a categorical row, and none of them may
+//    follow the accent.** They are a stacked bar and its legend: their entire
+//    job is to be tellable apart from one another at a glance. A member that
+//    tracked the user's accent would collide with whichever sibling that
+//    accent happens to equal — `p.blue` for System, `p.lavender` for Apps and
+//    `p.red` for the recycle bin are all among the fourteen accent presets —
+//    and the bar would silently merge two slices into one. Held by
+//    `the_ten_storage_categories_stay_distinct_in_both_modes`.
+//
+// 2. **Two sites do follow the accent**, and both are "which of these am I
+//    on / what can I press" rather than "what kind of thing is this": the
+//    active tab's label, and the six `Change` buttons in the save-locations
+//    tab. Held by `the_storage_panels_own_colours_do_not_follow_the_accent`,
+//    which asserts each site separately — see that test's comment for why the
+//    union of them would not do.
+//
+// 3. **`is_low_space` is a measurement, not a selection.** The warning banner
+//    and the over-90% figure stay `p.red` under every accent, because a disk
+//    that is nearly full is red the way a stop sign is red.
+//
+// The green "enabled" toggles are kept exactly as they were drawn before the
+// conversion; making a toggle's "on" state follow the accent is a redesign,
+// not a conversion, and is noted as such in `known-issues.md`.
 
 // ============================================================================
 // Storage category
@@ -62,18 +78,22 @@ impl StorageCategory {
         }
     }
 
-    pub fn color(self) -> Color {
+    /// The slice colour this category gets in the usage bar and its legend.
+    ///
+    /// Categorical, and deliberately accent-free: see judgement 1 in the
+    /// module's colour notes.
+    pub fn color(self, p: &Palette) -> Color {
         match self {
-            Self::System => BLUE,
-            Self::Apps => LAVENDER,
-            Self::Documents => GREEN,
-            Self::Media => PEACH,
-            Self::Downloads => YELLOW,
-            Self::Trash => RED,
-            Self::Temporary => OVERLAY0,
-            Self::PackageCache => SUBTEXT0,
-            Self::Logs => SURFACE1,
-            Self::Other => SURFACE0,
+            Self::System => p.blue,
+            Self::Apps => p.lavender,
+            Self::Documents => p.green,
+            Self::Media => p.peach,
+            Self::Downloads => p.yellow,
+            Self::Trash => p.red,
+            Self::Temporary => p.overlay0,
+            Self::PackageCache => p.subtext0,
+            Self::Logs => p.surface1,
+            Self::Other => p.surface0,
         }
     }
 
@@ -488,7 +508,7 @@ impl StorageSettingsUI {
 
     const TAB_LABELS: [&'static str; 3] = ["Overview", "Storage Sense", "Save Locations"];
 
-    pub fn render(&self, x: f32, y: f32, width: f32) -> Vec<RenderCommand> {
+    pub fn render(&self, p: &Palette, x: f32, y: f32, width: f32) -> Vec<RenderCommand> {
         let mut cmds = Vec::new();
         let pad = 16.0_f32;
         let inner = width - 2.0 * pad;
@@ -500,7 +520,7 @@ impl StorageSettingsUI {
             y,
             width,
             height: 900.0,
-            color: BASE,
+            color: p.base,
             corner_radii: CornerRadii::all(8.0),
         });
 
@@ -511,7 +531,7 @@ impl StorageSettingsUI {
             y: cy,
             text: "Storage Settings".into(),
             font_size: 20.0,
-            color: TEXT,
+            color: p.text,
             font_weight: FontWeightHint::Bold,
             max_width: Some(inner),
             overflow: TextOverflow::Ellipsis,
@@ -525,7 +545,7 @@ impl StorageSettingsUI {
                 y: cy,
                 width: inner,
                 height: 28.0,
-                color: Color::rgba(RED.r, RED.g, RED.b, 40),
+                color: Color::rgba(p.red.r, p.red.g, p.red.b, 40),
                 corner_radii: CornerRadii::all(6.0),
             });
             cmds.push(RenderCommand::Text {
@@ -533,7 +553,7 @@ impl StorageSettingsUI {
                 y: cy + 6.0,
                 text: "⚠ Low disk space — consider running cleanup".into(),
                 font_size: 12.0,
-                color: RED,
+                color: p.red,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(inner - 20.0),
                 overflow: TextOverflow::Ellipsis,
@@ -551,7 +571,7 @@ impl StorageSettingsUI {
                 y: cy,
                 width: tab_w - 2.0,
                 height: 30.0,
-                color: if active { SURFACE0 } else { MANTLE },
+                color: if active { p.surface0 } else { p.mantle },
                 corner_radii: CornerRadii::all(6.0),
             });
             cmds.push(RenderCommand::Text {
@@ -559,7 +579,7 @@ impl StorageSettingsUI {
                 y: cy + 8.0,
                 text: (*label).into(),
                 font_size: 12.0,
-                color: if active { BLUE } else { SUBTEXT0 },
+                color: if active { p.accent } else { p.subtext0 },
                 font_weight: if active {
                     FontWeightHint::Bold
                 } else {
@@ -572,19 +592,26 @@ impl StorageSettingsUI {
         cy += 38.0;
 
         match self.active_tab {
-            0 => self.render_overview(&mut cmds, x + pad, cy, inner),
-            1 => self.render_sense_tab(&mut cmds, x + pad, cy, inner),
-            2 => self.render_locations_tab(&mut cmds, x + pad, cy, inner),
+            0 => self.render_overview(p, &mut cmds, x + pad, cy, inner),
+            1 => self.render_sense_tab(p, &mut cmds, x + pad, cy, inner),
+            2 => self.render_locations_tab(p, &mut cmds, x + pad, cy, inner),
             _ => {}
         }
 
         cmds
     }
 
-    fn render_overview(&self, cmds: &mut Vec<RenderCommand>, x: f32, mut y: f32, width: f32) {
+    fn render_overview(
+        &self,
+        p: &Palette,
+        cmds: &mut Vec<RenderCommand>,
+        x: f32,
+        mut y: f32,
+        width: f32,
+    ) {
         for (i, drive) in self.settings.drives().iter().enumerate() {
             let selected = i == self.selected_drive;
-            let bg = if selected { SURFACE0 } else { MANTLE };
+            let bg = if selected { p.surface0 } else { p.mantle };
 
             cmds.push(RenderCommand::FillRect {
                 x,
@@ -601,7 +628,7 @@ impl StorageSettingsUI {
                 y: y + 6.0,
                 text: format!("{} ({})", drive.label, drive.mount_point),
                 font_size: 14.0,
-                color: TEXT,
+                color: p.text,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(width * 0.55),
                 overflow: TextOverflow::Ellipsis,
@@ -618,7 +645,11 @@ impl StorageSettingsUI {
                     drive.used_pct()
                 ),
                 font_size: 12.0,
-                color: if drive.is_low_space() { RED } else { SUBTEXT0 },
+                color: if drive.is_low_space() {
+                    p.red
+                } else {
+                    p.subtext0
+                },
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(width * 0.38),
                 overflow: TextOverflow::Ellipsis,
@@ -631,7 +662,7 @@ impl StorageSettingsUI {
                 y: bar_y,
                 width: width - 24.0,
                 height: 12.0,
-                color: SURFACE1,
+                color: p.surface1,
                 corner_radii: CornerRadii::all(6.0),
             });
 
@@ -647,7 +678,7 @@ impl StorageSettingsUI {
                         y: bar_y,
                         width: seg_w,
                         height: 12.0,
-                        color: cat.category.color(),
+                        color: cat.category.color(p),
                         corner_radii: CornerRadii::ZERO,
                     });
                     bx += seg_w;
@@ -664,7 +695,7 @@ impl StorageSettingsUI {
                     if drive.removable { " (removable)" } else { "" }
                 ),
                 font_size: 10.0,
-                color: OVERLAY0,
+                color: p.overlay0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(width - 24.0),
                 overflow: TextOverflow::Ellipsis,
@@ -681,7 +712,7 @@ impl StorageSettingsUI {
                 y,
                 text: "Breakdown".into(),
                 font_size: 14.0,
-                color: LAVENDER,
+                color: p.lavender,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(width),
                 overflow: TextOverflow::Ellipsis,
@@ -695,7 +726,7 @@ impl StorageSettingsUI {
                     y: y + 2.0,
                     width: 12.0,
                     height: 12.0,
-                    color: cat.category.color(),
+                    color: cat.category.color(p),
                     corner_radii: CornerRadii::all(2.0),
                 });
                 cmds.push(RenderCommand::Text {
@@ -703,7 +734,7 @@ impl StorageSettingsUI {
                     y,
                     text: cat.category.label().into(),
                     font_size: 12.0,
-                    color: TEXT,
+                    color: p.text,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(width * 0.4),
                     overflow: TextOverflow::Ellipsis,
@@ -713,7 +744,7 @@ impl StorageSettingsUI {
                     y,
                     text: format!("{}  ({} items)", format_bytes(cat.bytes), cat.item_count),
                     font_size: 12.0,
-                    color: SUBTEXT0,
+                    color: p.subtext0,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(width * 0.5),
                     overflow: TextOverflow::Ellipsis,
@@ -730,7 +761,7 @@ impl StorageSettingsUI {
                     y,
                     text: format!("Estimated reclaimable: {}", format_bytes(reclaimable)),
                     font_size: 13.0,
-                    color: GREEN,
+                    color: p.green,
                     font_weight: FontWeightHint::Bold,
                     max_width: Some(width),
                     overflow: TextOverflow::Ellipsis,
@@ -739,17 +770,25 @@ impl StorageSettingsUI {
         }
     }
 
-    fn render_sense_tab(&self, cmds: &mut Vec<RenderCommand>, x: f32, mut y: f32, width: f32) {
+    fn render_sense_tab(
+        &self,
+        p: &Palette,
+        cmds: &mut Vec<RenderCommand>,
+        x: f32,
+        mut y: f32,
+        width: f32,
+    ) {
         let s = &self.settings.sense;
 
-        Self::render_toggle(cmds, x, y, width, "Storage Sense enabled", s.enabled);
+        Self::render_toggle(p, cmds, x, y, width, "Storage Sense enabled", s.enabled);
         y += 28.0;
 
-        Self::render_kv(cmds, x, y, width, "Run frequency", s.frequency.label());
+        Self::render_kv(p, cmds, x, y, width, "Run frequency", s.frequency.label());
         y += 24.0;
 
         if s.frequency == SenseFrequency::WhenLow {
             Self::render_kv(
+                p,
                 cmds,
                 x,
                 y,
@@ -766,7 +805,7 @@ impl StorageSettingsUI {
             y,
             text: "Auto-cleanup rules".into(),
             font_size: 14.0,
-            color: LAVENDER,
+            color: p.lavender,
             font_weight: FontWeightHint::Bold,
             max_width: Some(width),
             overflow: TextOverflow::Ellipsis,
@@ -774,6 +813,7 @@ impl StorageSettingsUI {
         y += 24.0;
 
         Self::render_kv(
+            p,
             cmds,
             x,
             y,
@@ -783,6 +823,7 @@ impl StorageSettingsUI {
         );
         y += 24.0;
         Self::render_kv(
+            p,
             cmds,
             x,
             y,
@@ -792,6 +833,7 @@ impl StorageSettingsUI {
         );
         y += 24.0;
         Self::render_kv(
+            p,
             cmds,
             x,
             y,
@@ -801,6 +843,7 @@ impl StorageSettingsUI {
         );
         y += 24.0;
         Self::render_toggle(
+            p,
             cmds,
             x,
             y,
@@ -809,10 +852,17 @@ impl StorageSettingsUI {
             s.clean_package_cache,
         );
         y += 28.0;
-        Self::render_toggle(cmds, x, y, width, "Clean old log files", s.clean_logs);
+        Self::render_toggle(p, cmds, x, y, width, "Clean old log files", s.clean_logs);
     }
 
-    fn render_locations_tab(&self, cmds: &mut Vec<RenderCommand>, x: f32, mut y: f32, width: f32) {
+    fn render_locations_tab(
+        &self,
+        p: &Palette,
+        cmds: &mut Vec<RenderCommand>,
+        x: f32,
+        mut y: f32,
+        width: f32,
+    ) {
         let locs = &self.settings.save_locations;
 
         let entries: &[(&str, &str)] = &[
@@ -830,7 +880,7 @@ impl StorageSettingsUI {
                 y,
                 width,
                 height: 36.0,
-                color: MANTLE,
+                color: p.mantle,
                 corner_radii: CornerRadii::all(4.0),
             });
             cmds.push(RenderCommand::Text {
@@ -838,7 +888,7 @@ impl StorageSettingsUI {
                 y: y + 4.0,
                 text: (*label).into(),
                 font_size: 13.0,
-                color: SUBTEXT0,
+                color: p.subtext0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(width * 0.3),
                 overflow: TextOverflow::Ellipsis,
@@ -848,7 +898,7 @@ impl StorageSettingsUI {
                 y: y + 4.0,
                 text: (*path).into(),
                 font_size: 13.0,
-                color: TEXT,
+                color: p.text,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(width * 0.6),
                 overflow: TextOverflow::Ellipsis,
@@ -859,7 +909,7 @@ impl StorageSettingsUI {
                 y: y + 6.0,
                 width: 56.0,
                 height: 22.0,
-                color: SURFACE0,
+                color: p.surface0,
                 corner_radii: CornerRadii::all(4.0),
             });
             cmds.push(RenderCommand::Text {
@@ -867,7 +917,7 @@ impl StorageSettingsUI {
                 y: y + 10.0,
                 text: "Change".into(),
                 font_size: 11.0,
-                color: BLUE,
+                color: p.accent,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(48.0),
                 overflow: TextOverflow::Ellipsis,
@@ -876,13 +926,21 @@ impl StorageSettingsUI {
         }
     }
 
-    fn render_kv(cmds: &mut Vec<RenderCommand>, x: f32, y: f32, width: f32, key: &str, val: &str) {
+    fn render_kv(
+        p: &Palette,
+        cmds: &mut Vec<RenderCommand>,
+        x: f32,
+        y: f32,
+        width: f32,
+        key: &str,
+        val: &str,
+    ) {
         cmds.push(RenderCommand::Text {
             x: x + 8.0,
             y,
             text: key.into(),
             font_size: 13.0,
-            color: SUBTEXT0,
+            color: p.subtext0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(width * 0.55),
             overflow: TextOverflow::Ellipsis,
@@ -892,7 +950,7 @@ impl StorageSettingsUI {
             y,
             text: val.into(),
             font_size: 13.0,
-            color: TEXT,
+            color: p.text,
             font_weight: FontWeightHint::Regular,
             max_width: Some(width * 0.4),
             overflow: TextOverflow::Ellipsis,
@@ -900,6 +958,7 @@ impl StorageSettingsUI {
     }
 
     fn render_toggle(
+        p: &Palette,
         cmds: &mut Vec<RenderCommand>,
         x: f32,
         y: f32,
@@ -912,13 +971,13 @@ impl StorageSettingsUI {
             y,
             text: label.into(),
             font_size: 13.0,
-            color: SUBTEXT0,
+            color: p.subtext0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(width * 0.65),
             overflow: TextOverflow::Ellipsis,
         });
         let tx = x + width - 48.0;
-        let bg = if on { GREEN } else { SURFACE1 };
+        let bg = if on { p.green } else { p.surface1 };
         cmds.push(RenderCommand::FillRect {
             x: tx,
             y,
@@ -933,7 +992,7 @@ impl StorageSettingsUI {
             y: y + 2.0,
             width: 16.0,
             height: 16.0,
-            color: TEXT,
+            color: p.text,
             corner_radii: CornerRadii::all(8.0),
         });
     }
@@ -963,12 +1022,18 @@ mod tests {
     )]
 
     use super::*;
+    use crate::palette_check::assert_drawn_from;
+
+    fn test_palette() -> Palette {
+        Palette::for_mode(false)
+    }
 
     #[test]
     fn storage_category_labels() {
+        let p = test_palette();
         for c in StorageCategory::ALL {
             assert!(!c.label().is_empty());
-            let _ = c.color();
+            let _ = c.color(&p);
         }
     }
 
@@ -1126,7 +1191,7 @@ mod tests {
     #[test]
     fn ui_render_produces_commands() {
         let ui = StorageSettingsUI::new();
-        let cmds = ui.render(0.0, 0.0, 500.0);
+        let cmds = ui.render(&test_palette(), 0.0, 0.0, 500.0);
         assert!(!cmds.is_empty());
     }
 
@@ -1135,7 +1200,7 @@ mod tests {
         let mut ui = StorageSettingsUI::new();
         for i in 0..3 {
             ui.set_active_tab(i);
-            let cmds = ui.render(0.0, 0.0, 500.0);
+            let cmds = ui.render(&test_palette(), 0.0, 0.0, 500.0);
             assert!(!cmds.is_empty());
         }
     }
@@ -1145,7 +1210,7 @@ mod tests {
         let mut s = StorageSettings::new();
         s.add_drive(DriveInfo::new("/", "Root", "ext4", 100_000, 95_000));
         let ui = StorageSettingsUI::with_settings(s);
-        let cmds = ui.render(0.0, 0.0, 500.0);
+        let cmds = ui.render(&test_palette(), 0.0, 0.0, 500.0);
         let has_warning = cmds
             .iter()
             .any(|c| matches!(c, RenderCommand::Text { text, .. } if text.contains("Low disk")));
@@ -1164,5 +1229,298 @@ mod tests {
         let mut ui = StorageSettingsUI::new();
         ui.settings_mut().sense_mut().enabled = false;
         assert!(!ui.settings().sense().enabled);
+    }
+
+    // --- Palette conversion --------------------------------------------------
+
+    /// Settings wound into a shape that reaches every colour branch.
+    ///
+    /// `fixture` selects between three shapes, because two of this panel's
+    /// branches are *absences* that a single well-stocked fixture never
+    /// reaches:
+    ///
+    /// - `0` — no drives at all. The overview loop runs zero times and the
+    ///   breakdown's `drives().get(selected)` is `None`, so the legend, the
+    ///   swatches and the reclaimable estimate are all skipped.
+    /// - `1` — one drive carrying **all ten** categories, each big enough that
+    ///   the `seg_w > 0.5` guard lets its slice draw, plus a removable second
+    ///   drive. This is the only shape that paints all ten category colours.
+    /// - `2` — a drive holding only System and Apps. Nothing is reclaimable,
+    ///   so the green estimate line is skipped — the branch a fixture with a
+    ///   recycle bin in it can never reach.
+    ///
+    /// `low` pushes the second drive past 90% so the red warning banner and
+    /// the red percentage column draw.
+    fn wound_settings(fixture: usize, low: bool) -> StorageSettings {
+        let mut s = StorageSettings::new();
+        if fixture == 0 {
+            return s;
+        }
+        let mut root = DriveInfo::new("/", "System", "ext4", 1_000_000_000_000, 400_000_000_000);
+        root.categories = if fixture == 1 {
+            StorageCategory::ALL
+                .iter()
+                .enumerate()
+                .map(|(i, c)| {
+                    UsageEntry::new(
+                        *c,
+                        40_000_000_000 + i as u64 * 1_000_000_000,
+                        100 + i as u64,
+                    )
+                })
+                .collect()
+        } else {
+            vec![
+                UsageEntry::new(StorageCategory::System, 200_000_000_000, 50_000),
+                UsageEntry::new(StorageCategory::Apps, 100_000_000_000, 2_000),
+            ]
+        };
+        s.add_drive(root);
+
+        let mut ext = DriveInfo::new(
+            "/mnt/usb",
+            "Backup",
+            "vfat",
+            100_000_000_000,
+            if low { 96_000_000_000 } else { 20_000_000_000 },
+        );
+        ext.removable = true;
+        s.add_drive(ext);
+        s
+    }
+
+    /// The sweep: in light mode a colour this panel still holds privately is a
+    /// Mocha value the Latte palette does not contain, and it names itself.
+    ///
+    /// See `palette_check` for why the light render is the one that can tell.
+    #[test]
+    fn every_colour_the_panel_draws_comes_from_its_palette() {
+        for light in [false, true] {
+            let p = Palette::for_mode(light);
+            for fixture in 0..3 {
+                for low in [false, true] {
+                    for toggles in [false, true] {
+                        for tab in 0..3 {
+                            for sel in 0..2 {
+                                let mut settings = wound_settings(fixture, low);
+                                {
+                                    let sense = settings.sense_mut();
+                                    sense.enabled = toggles;
+                                    sense.clean_package_cache = toggles;
+                                    sense.clean_logs = toggles;
+                                    // The "Trigger at" row only draws for WhenLow.
+                                    sense.frequency = if toggles {
+                                        SenseFrequency::WhenLow
+                                    } else {
+                                        SenseFrequency::Daily
+                                    };
+                                }
+                                let mut ui = StorageSettingsUI::with_settings(settings);
+                                ui.set_active_tab(tab);
+                                ui.select_drive(sel);
+                                for width in [320.0_f32, 500.0, 900.0] {
+                                    let cmds = ui.render(&p, 0.0, 0.0, width);
+                                    assert_drawn_from(&p, &cmds, &[], "storage settings");
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// The active tab's label — bold, 12pt, and one of the three tab names.
+    fn active_tab_label_colors(cmds: &[RenderCommand]) -> Vec<Color> {
+        cmds.iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text {
+                    text,
+                    color,
+                    font_size: 12.0,
+                    font_weight: FontWeightHint::Bold,
+                    ..
+                } if StorageSettingsUI::TAB_LABELS.contains(&text.as_str()) => Some(*color),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The six `Change` buttons in the save-locations tab.
+    fn change_button_colors(cmds: &[RenderCommand]) -> Vec<Color> {
+        cmds.iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, color, .. } if text == "Change" => Some(*color),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The breakdown legend's swatches — the only 12x12 fills the panel draws.
+    fn category_swatch_colors(cmds: &[RenderCommand]) -> Vec<Color> {
+        cmds.iter()
+            .filter_map(|c| match c {
+                RenderCommand::FillRect {
+                    width: 12.0,
+                    height: 12.0,
+                    color,
+                    ..
+                } => Some(*color),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The low-space warning caption and the over-90% usage column.
+    fn low_space_colors(cmds: &[RenderCommand]) -> Vec<Color> {
+        cmds.iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, color, .. }
+                    if text.contains("Low disk") || text.contains("(96%)") =>
+                {
+                    Some(*color)
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The "Estimated reclaimable" line.
+    fn reclaimable_colors(cmds: &[RenderCommand]) -> Vec<Color> {
+        cmds.iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, color, .. }
+                    if text.starts_with("Estimated reclaimable") =>
+                {
+                    Some(*color)
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// What a disk is *made of* is not the accent's to repaint.
+    ///
+    /// The sweep above cannot see this. A role is a member of both palettes, so
+    /// writing `p.accent` where `p.blue` belongs draws a perfectly legal light
+    /// colour in a light render; only varying the accent separates the two.
+    ///
+    /// **There is one `assert_ne!` per accent site, and that is not a stylistic
+    /// choice.** An `assert_ne!` over a *combined* vector of accent sites
+    /// proves only that *at least one* of them moved, so a site that still
+    /// follows the accent masks one that has stopped — which is exactly how
+    /// bluetooth.rs's first draft missed harness defect FFF, and how
+    /// update_settings.rs would have missed NNN. This panel has two accent
+    /// sites and therefore two negative assertions.
+    #[test]
+    fn the_storage_panels_own_colours_do_not_follow_the_accent() {
+        let mut blue = Palette::for_mode(false);
+        blue.accent = appearance::BLUE;
+        let mut mauve = Palette::for_mode(false);
+        mauve.accent = appearance::MAUVE;
+
+        // The negative half. Tab 2 draws both accent sites at once: the tab bar
+        // is always on screen, and the `Change` buttons live in that tab.
+        let mut ui = StorageSettingsUI::with_settings(wound_settings(1, true));
+        ui.set_active_tab(2);
+        let under_blue = ui.render(&blue, 0.0, 0.0, 500.0);
+        let under_mauve = ui.render(&mauve, 0.0, 0.0, 500.0);
+
+        let tab_blue = active_tab_label_colors(&under_blue);
+        assert!(
+            !tab_blue.is_empty(),
+            "the active tab's label should have been drawn"
+        );
+        assert_ne!(
+            tab_blue,
+            active_tab_label_colors(&under_mauve),
+            "the active tab's label did not move with the accent, so the rest \
+             of this test would pass on a panel that ignored the accent"
+        );
+
+        let change_blue = change_button_colors(&under_blue);
+        assert!(
+            !change_blue.is_empty(),
+            "the Change buttons should have been drawn"
+        );
+        assert_ne!(
+            change_blue,
+            change_button_colors(&under_mauve),
+            "the Change buttons did not move with the accent"
+        );
+
+        // The positive half: everything that says what a thing *is* rather than
+        // which one you are on has to be identical under both accents.
+        let mut saw_swatches = false;
+        for tab in 0..3 {
+            let mut ui = StorageSettingsUI::with_settings(wound_settings(1, true));
+            ui.set_active_tab(tab);
+            let a = ui.render(&blue, 0.0, 0.0, 500.0);
+            let b = ui.render(&mauve, 0.0, 0.0, 500.0);
+
+            let swatches = category_swatch_colors(&a);
+            saw_swatches |= !swatches.is_empty();
+            assert_eq!(
+                swatches,
+                category_swatch_colors(&b),
+                "a storage category's colour moved with the accent on tab \
+                 {tab}. Those say what a slice of the disk holds, and the \
+                 accent says nothing about whether bytes are photos or logs."
+            );
+            assert_eq!(
+                low_space_colors(&a),
+                low_space_colors(&b),
+                "the low-space warning moved with the accent on tab {tab}. A \
+                 nearly-full disk is red the way a stop sign is red."
+            );
+            assert_eq!(
+                reclaimable_colors(&a),
+                reclaimable_colors(&b),
+                "the reclaimable estimate moved with the accent on tab {tab}"
+            );
+        }
+        assert!(
+            saw_swatches,
+            "no legend swatch was drawn on any tab, so the category half of \
+             this test proved nothing"
+        );
+    }
+
+    /// The ten categories have to stay tellable apart under every accent.
+    ///
+    /// They are a stacked bar and its legend: two slices sharing a colour merge
+    /// into one and the chart lies. That is why none of them may be `p.accent`
+    /// — `p.blue` (System), `p.lavender` (Apps), `p.green` (Documents),
+    /// `p.peach` (Media), `p.yellow` (Downloads) and `p.red` (recycle bin) are
+    /// all among the fourteen accents a user can pick, so an accent-following
+    /// member would collide with a fixed one for at least six of them.
+    #[test]
+    fn the_ten_storage_categories_stay_distinct_in_both_modes() {
+        for light in [false, true] {
+            for accent in [
+                appearance::BLUE,
+                appearance::GREEN,
+                appearance::PEACH,
+                appearance::MAUVE,
+            ] {
+                let mut p = Palette::for_mode(light);
+                p.accent = accent;
+                let mut seen: Vec<(StorageCategory, Color)> = Vec::new();
+                for cat in StorageCategory::ALL {
+                    let c = cat.color(&p);
+                    if let Some((other, _)) = seen
+                        .iter()
+                        .find(|(_, s)| s.r == c.r && s.g == c.g && s.b == c.b)
+                    {
+                        panic!(
+                            "{cat:?} draws the same colour as {other:?} \
+                             (light={light}), so their slices merge in the \
+                             usage bar and the legend cannot be read"
+                        );
+                    }
+                    seen.push((cat, c));
+                }
+            }
+        }
     }
 }

@@ -109,29 +109,13 @@ fn format_mode(mode: u32) -> String {
         _ => '?',
     };
 
+    // The nine permission characters are gnulib's `strmode`, which lives in
+    // `modechange` because `chmod -v`, `ls -l` and this all need the same
+    // setuid/setgid/sticky overload rendered the same way. Only the leading
+    // file-type character is `stat`'s own.
     let mut s = String::with_capacity(10);
     s.push(file_type);
-
-    // Each triple is (read, write, execute-or-special). The execute slot is
-    // where setuid/setgid/sticky are shown, in the standard overload: the
-    // letter is lowercase when the execute bit is also set and uppercase when
-    // it is not, so both bits survive one character.
-    let triples = [
-        (0o400, 0o200, 0o100, mode & 0o4000 != 0, 's'),
-        (0o040, 0o020, 0o010, mode & 0o2000 != 0, 's'),
-        (0o004, 0o002, 0o001, mode & 0o1000 != 0, 't'),
-    ];
-    for (r, w, x, special, letter) in triples {
-        s.push(if mode & r != 0 { 'r' } else { '-' });
-        s.push(if mode & w != 0 { 'w' } else { '-' });
-        s.push(match (mode & x != 0, special) {
-            (true, false) => 'x',
-            (false, false) => '-',
-            (true, true) => letter,
-            (false, true) => letter.to_ascii_uppercase(),
-        });
-    }
-
+    s.push_str(&modechange::permission_string(mode));
     s
 }
 

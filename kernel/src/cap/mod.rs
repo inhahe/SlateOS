@@ -394,6 +394,9 @@ impl ResourceType {
     /// 4. Lane B's mirrored copy in `posix/src/sys_capability.rs`, which no
     ///    compiler here can see. File a request; do not assume they will
     ///    notice.
+    /// 5. [`Self::from_raw`], below — the inverse. It is a `match` on a `u16`,
+    ///    so the compiler cannot check it; `test_resource_type_from_raw` walks
+    ///    `1..=LAST` and turns the boot red instead.
     ///
     /// The single or-pattern arm is deliberate — per-variant arms would invite
     /// someone to give the new one a body and consider the matter closed.
@@ -431,6 +434,73 @@ impl ResourceType {
             | Self::ResourceLimit
             | Self::InputDevice => self as u16,
         }
+    }
+
+    /// The inverse of [`Self::discriminant`]: a wire value from userspace back
+    /// into a type, or `None` if it names no type.
+    ///
+    /// # Why this exists in `cap` rather than at each call site
+    ///
+    /// It did not, and the cost was already paid. `sys_cap_request` carried its
+    /// own copy of this table written out by hand, and that copy **stopped at
+    /// 15** — `Namespace`. Fifteen types have been added since, so a process
+    /// asking the human to grant it `Drm`, `NetRaw`, `Pty`, `InputDevice`,
+    /// `PrivilegedPort` or any of the other ten got `InvalidArgument`, as
+    /// though it had passed garbage. Nothing failed to compile, no test went
+    /// red, and the checklist on `discriminant` above could not mention a list
+    /// it did not know about.
+    ///
+    /// That is the tree's recurring lesson in its cheapest form: **when one
+    /// operation has two implementations, the invariant is that they agree, and
+    /// nothing in the type system checks it.** The same shape produced
+    /// `fork_create` vs `spawn_process` (capability cloning) and `symbolize.py`
+    /// vs `boot-test.sh` (address → symbol). One table, one place.
+    ///
+    /// # Why a `match` and not `transmute`
+    ///
+    /// `transmute` would accept `31` and produce a `ResourceType` that is not
+    /// any variant — instant UB, from a value userspace chooses. The match is
+    /// the validation, which is the entire job.
+    ///
+    /// The compiler cannot check a `match` on a `u16` for exhaustiveness, so
+    /// `groups::test_resource_type_from_raw` walks `1..=LAST` at boot and fails
+    /// if any discriminant is unmapped or fails to round-trip.
+    #[must_use]
+    pub const fn from_raw(raw: u16) -> Option<Self> {
+        let ty = match raw {
+            1 => Self::Channel,
+            2 => Self::Pipe,
+            3 => Self::SharedMemory,
+            4 => Self::EventFd,
+            5 => Self::CompletionPort,
+            6 => Self::Process,
+            7 => Self::Thread,
+            8 => Self::PortIo,
+            9 => Self::DeviceIrq,
+            10 => Self::File,
+            11 => Self::Socket,
+            12 => Self::Timer,
+            13 => Self::IoScheduler,
+            14 => Self::Service,
+            15 => Self::Namespace,
+            16 => Self::StreamSocket,
+            17 => Self::MemFd,
+            18 => Self::Epoll,
+            19 => Self::SignalFd,
+            20 => Self::Timerfd,
+            21 => Self::Inotify,
+            22 => Self::AlsaPcm,
+            23 => Self::Drm,
+            24 => Self::NetRaw,
+            25 => Self::NetSocket,
+            26 => Self::Pty,
+            27 => Self::SystemClock,
+            28 => Self::PrivilegedPort,
+            29 => Self::ResourceLimit,
+            30 => Self::InputDevice,
+            _ => return None,
+        };
+        Some(ty)
     }
 }
 

@@ -6178,23 +6178,20 @@ pub fn sys_cap_request(args: &SyscallArgs) -> SyscallResult {
     let reason_len = args.arg3 as usize;
 
     // Validate resource type.
-    let resource_type = match resource_type_raw {
-        1 => cap::ResourceType::Channel,
-        2 => cap::ResourceType::Pipe,
-        3 => cap::ResourceType::SharedMemory,
-        4 => cap::ResourceType::EventFd,
-        5 => cap::ResourceType::CompletionPort,
-        6 => cap::ResourceType::Process,
-        7 => cap::ResourceType::Thread,
-        8 => cap::ResourceType::PortIo,
-        9 => cap::ResourceType::DeviceIrq,
-        10 => cap::ResourceType::File,
-        11 => cap::ResourceType::Socket,
-        12 => cap::ResourceType::Timer,
-        13 => cap::ResourceType::IoScheduler,
-        14 => cap::ResourceType::Service,
-        15 => cap::ResourceType::Namespace,
-        _ => return SyscallResult::err(KernelError::InvalidArgument),
+    //
+    // This used to be the same table written out by hand, and it had stopped at
+    // 15 (`Namespace`) while the enum grew to 30. A process asking the human to
+    // grant it `Drm`, `NetRaw`, `Pty`, `InputDevice`, `PrivilegedPort` or any
+    // of the other ten got `InvalidArgument` — the answer reserved for garbage
+    // — and there was no way to tell from the outside that the type existed and
+    // the list simply had not been updated. Nothing failed to compile, because
+    // an unmaintained list compiles perfectly.
+    //
+    // `ResourceType::from_raw` is now the one table, and
+    // `cap::groups::test_resource_type_from_raw` walks `1..=LAST` at boot so it
+    // cannot fall behind the enum again.
+    let Some(resource_type) = cap::ResourceType::from_raw(resource_type_raw) else {
+        return SyscallResult::err(KernelError::InvalidArgument);
     };
 
     // Validate rights (must be non-zero).

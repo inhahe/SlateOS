@@ -1012,6 +1012,15 @@ pub struct FatFs {
     /// entry 1 on sync/unmount.  Also prevents redundant writes of the
     /// FSInfo sector when nothing has changed.
     modified: bool,
+    /// The clean-shutdown bit as it was found on disk, before this mount
+    /// cleared it.
+    ///
+    /// A read-write mount clears the bit immediately (see [`FatFs::mount`]) so
+    /// that a crash is detectable, which means re-reading it afterwards
+    /// reports what *we* just wrote rather than how the volume was left by its
+    /// previous user.  Anything that needs the latter — `fsck_fat` above all —
+    /// must consult this instead of calling `read_clean_shutdown_bit`.
+    mounted_clean: bool,
 }
 
 impl FatFs {
@@ -1019,7 +1028,26 @@ impl FatFs {
     ///
     /// Reads the boot sector, validates the BPB, auto-detects FAT16 or
     /// FAT32, and returns the filesystem instance.
+    ///
+    /// Marks the volume in use (clears the clean-shutdown bit) so that a crash
+    /// while mounted is detectable.  A caller that only wants to *inspect* the
+    /// volume must use [`FatFs::mount_for_check`] instead.
     pub fn mount(device_name: &str) -> KernelResult<Self> {
+        Self::mount_inner(device_name, true)
+    }
+
+    /// Mount a FAT filesystem without marking it in use.
+    ///
+    /// For read-only inspection — `fsck` and anything else that reports on a
+    /// volume rather than using it.  A checker that dirties the volume it just
+    /// certified as clean is worse than no checker: the next mount warns of
+    /// "possible data inconsistency" that the check itself caused, and the
+    /// warning is indistinguishable from a real one.
+    pub fn mount_for_check(device_name: &str) -> KernelResult<Self> {
+        Self::mount_inner(device_name, false)
+    }
+
+    fn mount_inner(device_name: &str, mark_in_use: bool) -> KernelResult<Self> {
         // Read the boot sector through the buffer cache.
         let mut boot_sector = [0u8; SECTOR_SIZE];
         super::cache::read_sector(device_name, 0, &mut boot_sector)?;
@@ -1096,11 +1124,23 @@ impl FatFs {
             free_clusters,
             next_free_hint,
             modified: false,
+            // Overwritten from the disk immediately below.  `true` is the
+            // conservative default for the case where the read fails: it means
+            // "nothing to report", so a volume whose FAT entry 1 could not be
+            // read does not get accused of an unclean shutdown it may not have
+            // had.
+            mounted_clean: true,
         };
 
         // Check the clean-shutdown bit in FAT entry 1.
         // If it's clear, the volume was not cleanly unmounted — warn.
+        //
+        // This must be read *before* the mark-in-use write below, and the
+        // answer remembered, because that write destroys it: after it, the bit
+        // reads back as whatever we just put there.  `fsck` needs the
+        // as-found value, so it lives on in `mounted_clean`.
         if let Ok(was_clean) = fs.read_clean_shutdown_bit() {
+            fs.mounted_clean = was_clean;
             if !was_clean {
                 crate::serial_println!(
                     "[fat] WARNING: {} was not cleanly unmounted — possible data inconsistency",
@@ -1111,7 +1151,13 @@ impl FatFs {
 
         // Mark the volume as dirty (clear the clean-shutdown bit) so
         // that a crash while mounted is detectable on next mount.
-        let _ = fs.set_clean_shutdown_bit(false);
+        //
+        // Skipped for an inspection-only mount: a checker that dirties the
+        // volume it is certifying leaves the next mount warning about damage
+        // the check itself caused.
+        if mark_in_use {
+            let _ = fs.set_clean_shutdown_bit(false);
+        }
 
         Ok(fs)
     }
@@ -6008,6 +6054,14 @@ pub fn format_self_test() -> KernelResult<()> {
 /// Formats a fresh RAM disk, then runs fsck in check-only and repair modes and
 /// asserts a freshly-formatted volume reports zero outstanding errors.  Uses
 /// scratch device/mount names that nothing else touches and always cleans up.
+///
+/// Also pins down that fsck does not dirty the volume it inspects: a
+/// check-only run must report the clean-shutdown bit as *set*, must leave it
+/// set (a second check-only run must agree), and a repair run that finds
+/// nothing wrong must hand the volume back clean too.  Until 2026-08-22 none
+/// of those three held — the check-only mount cleared the bit before Phase 1
+/// read it, so the phase could never report "clean" for any volume and every
+/// check left a healthy volume flagged as crashed.
 pub fn fsck_self_test() -> KernelResult<()> {
     use crate::serial_println;
 
@@ -6025,6 +6079,15 @@ pub fn fsck_self_test() -> KernelResult<()> {
         alloc::boxed::Box::new(crate::blkdev::RamBlockDevice::new(8192)),
     );
 
+    // Does a report say the volume was cleanly shut down?  Phase 1 emits
+    // exactly one of two fixed strings, so matching on the prefix is enough.
+    fn reported_clean(report: &FsckReport) -> bool {
+        report
+            .messages
+            .iter()
+            .any(|m| m.as_str() == "Clean-shutdown bit: set (clean)")
+    }
+
     // Run the whole check inside a closure so teardown happens on every path.
     let result = (|| -> KernelResult<()> {
         mkfs_fat(dev, Some("FSCKTEST"))?;
@@ -6038,7 +6101,26 @@ pub fn fsck_self_test() -> KernelResult<()> {
             );
             return Err(KernelError::InternalError);
         }
-        serial_println!("[fat]   fsck check-only on fresh volume: 0 errors OK");
+        // mkfs leaves the clean-shutdown bit set, and nothing has mounted the
+        // volume since, so the check must say so.  A "NOT set" here means the
+        // check is reading back a bit its own mount just cleared.
+        if !reported_clean(&check) {
+            serial_println!(
+                "[fat]   FAIL: check on a freshly-formatted volume did not report it clean"
+            );
+            return Err(KernelError::InternalError);
+        }
+        serial_println!("[fat]   fsck check-only on fresh volume: 0 errors, clean bit OK");
+
+        // ...and the check must not have dirtied it.  Running the identical
+        // check again is the sharpest form of that assertion: if inspecting
+        // the volume changes it, the second run disagrees with the first.
+        let recheck = fsck_fat(dev, false)?;
+        if !reported_clean(&recheck) {
+            serial_println!("[fat]   FAIL: check-only run left the volume flagged dirty");
+            return Err(KernelError::InternalError);
+        }
+        serial_println!("[fat]   fsck check-only is non-mutating: OK");
 
         // Repair mode: still clean, nothing to repair.
         let repaired = fsck_fat(dev, true)?;
@@ -6051,6 +6133,16 @@ pub fn fsck_self_test() -> KernelResult<()> {
             return Err(KernelError::InternalError);
         }
         serial_println!("[fat]   fsck repair on fresh volume: 0 outstanding OK");
+
+        // Repair genuinely marks the volume in use while it works, so this
+        // checks the other half of that: it puts the bit back on the way out
+        // even though it had nothing to repair.
+        let after_repair = fsck_fat(dev, false)?;
+        if !reported_clean(&after_repair) {
+            serial_println!("[fat]   FAIL: repair run left a healthy volume flagged dirty");
+            return Err(KernelError::InternalError);
+        }
+        serial_println!("[fat]   fsck repair hands back a clean volume: OK");
         Ok(())
     })();
 
@@ -6213,7 +6305,24 @@ pub fn fsck_fat(device: &str, repair: bool) -> KernelResult<FsckReport> {
     let mut report = FsckReport::default();
 
     // Mount a temporary FatFs to access the volume structure.
-    let mut fs = FatFs::mount(device)?;
+    //
+    // In check mode this must NOT mark the volume in use.  A plain `mount`
+    // clears the clean-shutdown bit as its last act, which would (a) make
+    // Phase 1 below read back our own write instead of how the volume was
+    // actually left, so it could never once report "clean", and (b) leave a
+    // perfectly healthy volume flagged dirty afterwards, so the next real
+    // mount warns of an inconsistency that fsck itself introduced —
+    // indistinguishable from a genuine one.
+    //
+    // Repair mode does mark the volume in use, and correctly so: it is about
+    // to write to the FAT, and a crash part-way through really does leave the
+    // volume in an unknown state that the next mount should be told about.
+    // The bit is restored at the end, once the filesystem is known consistent.
+    let mut fs = if repair {
+        FatFs::mount(device)?
+    } else {
+        FatFs::mount_for_check(device)?
+    };
 
     let type_str = match fs.bpb.fat_type {
         FatType::Fat16 => "FAT16",
@@ -6234,17 +6343,14 @@ pub fn fsck_fat(device: &str, repair: bool) -> KernelResult<FsckReport> {
     // -----------------------------------------------------------------------
     // Phase 1: Check clean-shutdown bit
     // -----------------------------------------------------------------------
-    match fs.read_clean_shutdown_bit() {
-        Ok(true) => {
-            report.warn("Clean-shutdown bit: set (clean)".to_string());
-        }
-        Ok(false) => {
-            report
-                .warn("Clean-shutdown bit: NOT set (volume was not cleanly unmounted)".to_string());
-        }
-        Err(e) => {
-            report.error(alloc::format!("Could not read clean-shutdown bit: {:?}", e));
-        }
+    // `mounted_clean` is the value the mount read off the disk *before* doing
+    // anything to it.  Re-reading the bit here would not answer the question
+    // this phase is asking — in repair mode the mount has already cleared it,
+    // so the answer would always be "not cleanly unmounted".
+    if fs.mounted_clean {
+        report.warn("Clean-shutdown bit: set (clean)".to_string());
+    } else {
+        report.warn("Clean-shutdown bit: NOT set (volume was not cleanly unmounted)".to_string());
     }
 
     // -----------------------------------------------------------------------
@@ -6616,19 +6722,30 @@ pub fn fsck_fat(device: &str, repair: bool) -> KernelResult<FsckReport> {
         u64::from(free_count) * u64::from(cluster_bytes) / 1024,
     ));
 
+    // Whether the volume is consistent as of now — either nothing was wrong,
+    // or everything that was wrong got fixed.
+    let consistent = report.errors == 0 || (repair && report.errors <= report.repaired);
+
     if repair {
         // Flush changes.
         super::cache::flush(device)?;
 
-        // Set the clean-shutdown bit since we just repaired everything.
-        if report.repaired > 0 {
+        // Restore the clean-shutdown bit that the repair mount cleared.
+        //
+        // The condition is "the volume is consistent now", not "we changed
+        // something": a repair run that found nothing to fix used to fall
+        // through here and leave the volume flagged dirty purely because it
+        // had been inspected.  When errors remain unrepaired the bit stays
+        // clear, which is the whole point of it — the next mount should know
+        // the volume is still suspect.
+        if consistent {
             let _ = fs.set_clean_shutdown_bit(true);
             let _ = super::cache::flush(device);
             report.warn("Clean-shutdown bit set after repair".to_string());
         }
     }
 
-    if report.errors == 0 || (repair && report.errors <= report.repaired) {
+    if consistent {
         report.warn("Filesystem clean.".to_string());
     } else {
         let unrepaired = report.errors.saturating_sub(report.repaired);

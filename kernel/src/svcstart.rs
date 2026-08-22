@@ -431,11 +431,23 @@ pub fn start_levels() -> Vec<Vec<(u32, String)>> {
 ///
 /// Returns the number of services started.
 pub fn boot_services() -> KernelResult<u32> {
+    // `init()` acquires STATE itself, so it must run with no guard held —
+    // calling it from inside the block below re-acquired a non-reentrant lock
+    // this task already held and wedged the CPU. The bound local makes the
+    // guard's release a visible statement rather than something inferred from
+    // temporary-lifetime rules, which is what got this wrong the first time.
+    //
+    // Not hypothetical: the normal path (`initproc`) calls `init()` before
+    // `boot_services()`, so `initialized` is already true and the branch is not
+    // taken — but the kernel shell's `boot` command calls `boot_services()`
+    // directly, and that is exactly the caller for which it is false.
+    let needs_init = !STATE.lock().initialized;
+    if needs_init {
+        init();
+    }
+
     {
         let mut state = STATE.lock();
-        if !state.initialized {
-            init();
-        }
         state.boot_start_ns = crate::hpet::elapsed_ns();
         state.phase = BootPhase::Resolving;
     }

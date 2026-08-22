@@ -54558,3 +54558,149 @@ convergence directly, which is the property the excusing comment gave up on.
 **Severity.** Real for any consumer: unbounded redundant I/O proportional to
 tree size on every sync, and `compare` could never report a tree as in sync.
 Nothing consumed dirsync at boot before this week.
+
+## B-A-SELF-DEADLOCK-DETECTORS-ALL-MISSED-A-TEXTBOOK-SELF-DEADLOCK (lane A, 2026-08-22) — FIXED 2026-08-22
+
+**In short:** When a thread asks for a lock it is already holding, it waits for
+itself forever. The kernel had three separate mechanisms meant to catch that,
+and when it finally happened for real, all three said nothing — the machine just
+froze for 20 minutes and the log never named a lock. The detectors were fine
+individually; each was simply switched off, too slow, or looking elsewhere.
+
+**Trigger.** `B-A-STAT-COUNTER-INCREMENTS-DEADLOCKED-ON-THEIR-OWN-LOCK`. Boot
+cycle 3 printed `[encrypt]   hmac-sha256: ok` and then nothing for 600 s.
+
+**Why each net missed it.**
+
+| Detector | Why it was silent |
+|---|---|
+| `lockdep::report_recursive` (`lockdep.rs:466`) | Precise and correct — but only `sync::Mutex` reports to lockdep. `PreemptSpinMutex` deliberately does not register (documented as the untracked sibling for leaf locks, design-decisions §70), and `fs/encrypt.rs:47` says `use crate::sync::PreemptSpinMutex as Mutex`. |
+| `sync::report_spin_stall` (`sync.rs:821`) | Does diagnose `owner == tid` as recursive, but only after `STALL_SECONDS` = 30. It never fired in that boot; the report budget (8) was untouched and no `SPINLOCK STALL` line ever appeared. Root cause of *that* silence is still open — see below. |
+| liveness watchdog | Fired correctly, three times. But it reports *that* the system is stuck, not *what* it is stuck on. |
+
+The load-bearing point: `PreemptSpinMutex` opted out of lockdep to skip lock
+*ordering* checks, which genuinely add nothing for a leaf lock. Recursion
+detection is not an ordering check, but it lived in the same code path, so
+opting out of one silently opted out of the other. The lock type chosen for
+being simple and safe was the one type with no recursion detection at all.
+
+**Fix.** New `sync::fail_if_recursive`, called at the top of *both* lock types'
+contended paths — i.e. only after `try_lock` has already failed, so an
+uncontended acquire is unaffected. If the recorded owner is the task now asking,
+the acquire provably cannot succeed (a task runs on one CPU at a time, and both
+lock types disable preemption for the whole hold, so the holder cannot be
+scheduled elsewhere to release it). It names the lock and panics, converting a
+20-minute silent freeze into an immediate located failure with a backtrace.
+
+It also gives the right answer for an ISR that takes a non-`irqsave` lock held
+by the task it interrupted: that does not change `CURRENT_TASK_IDS`, so
+`owner == current_task_id()` still holds and "this CPU already owns it" is still
+exactly true.
+
+Sound because all four lock constructors initialise `owner` to `OWNER_NONE`,
+both guards clear it on drop *before* the physical unlock, and per-CPU idle
+tasks get distinct ids (`register_ap_idle`), so no two live tasks share one.
+
+**Still open.** Why `report_spin_stall` did not fire after 30 s is not
+explained. The global budget was unconsumed (0 of 8 emitted that boot) and the
+`warned` flag is per-call, so neither rate-limit applies. Leading hypothesis is
+`bench::tsc_freq()` returning 0 at that point, which drops the check to the
+`STALL_FALLBACK_ITERS` = 5e9 iteration path — far more than 600 s of QEMU TCG.
+Not chased further because `fail_if_recursive` makes the 30 s path irrelevant
+for this bug class, but the stall detector is still the only net for the
+*other* classes it covers (convoys, leaked guards, cross-task wedges), so it
+being unreliable matters on its own. Worth a targeted experiment.
+
+**Severity.** The bug it failed to catch was fatal; the failure to catch it cost
+a 20-minute boot and gave no location. Every future instance of the same class —
+and 28 modules' worth of never-executed self-tests were queued behind it — would
+have cost the same.
+
+## B-A-TWO-LOCK-GUARDS-HELD-ACROSS-A-CALL-THAT-RETAKES-THEM (lane A, 2026-08-22) — FIXED 2026-08-22
+
+**In short:** Same fatal shape as the counter bug — a thread asking for a lock it
+already holds — but split across two functions, so no single line mentions the
+lock twice and no text search can see it. Found by a new script rather than by
+booting into them.
+
+**Found by** `scripts/check-recursive-locks.py`, added here. It parses each file,
+builds a same-file call graph, works out which locks each function may acquire
+transitively, and reports any guard bound to a named local that is still live
+when a call to a re-acquiring function runs. Two findings across 799 files.
+
+**Finding 1 — `ipc/service.rs`, `test_socket_activation`.** Held
+`SOCKET_ACTIVATIONS` across `unregister_socket_activation(name)`, which takes the
+same lock. Only on the *failure* paths, which is the worst possible placement:
+the test would hang the machine precisely when a check had failed, instead of
+printing which expectation was wrong. (`channel::close` was called under the
+same guard too — a different lock, so an ordering hazard rather than a
+self-deadlock.) Fixed by copying the two observed facts out under the lock and
+judging them after release.
+
+**Finding 2 — `svcstart.rs`, `boot_services`.** Held `STATE` and called `init()`,
+which takes `STATE`. Guarded by `if !state.initialized`, so the normal path never
+hit it — `initproc` calls `svcstart::init()` before `boot_services()`. But the
+kernel shell's `boot` command (`kshell.rs:45788`) calls `boot_services()`
+directly, and that is exactly the caller for which `initialized` is false. Fixed
+by hoisting the check into a bound local so the release is a visible statement
+rather than an inference about temporary lifetimes.
+
+**Limits of the checker.** Deliberately a within-file heuristic: it resolves
+calls only to functions defined in the same file and locks only via ALL-CAPS
+static receivers. That covers the module-private `static STATE: Mutex<_>` pattern
+this kernel uses everywhere, and needs no import or trait-dispatch resolution. It
+has false negatives by construction (a call into another module that reaches back
+is invisible). `try_lock()` is never reported — it returns `None` rather than
+spinning. Two reports over 799 files, both genuine, so the false-positive rate is
+low enough to be worth running.
+
+**Severity.** Finding 2 is a live hang reachable by typing `boot` at the kernel
+shell. Finding 1 is a test that converts a legible failure into a freeze.
+
+## B-A-FCOMPRESS-ROUND-TRIP-TESTS-DEMANDED-A-COMPRESSION-RATIO-THAT-IS-IMPOSSIBLE (lane A, 2026-08-22) — FIXED 2026-08-22
+
+**In short:** Five tests compressed a ~110-byte string and asserted the result
+came back compressed. It cannot: the compressed-file format spends 27 bytes on
+headers and checksums before a single byte of data, and the module correctly
+refuses to "compress" anything it would make bigger. The tests were demanding
+the bug.
+
+**Found by** wiring `fs::fcompress::self_test` into the boot path
+(`B-A-FORTY-ONE-SELF-TESTS-HAD-NEVER-RUN`). Boot cycle 4 panicked at
+`fcompress.rs:598`, "should have compressed".
+
+**Mechanism.** `compress_for_write` returns `None` when the compressed form is
+not smaller — that is the incompressible-skip path, and it is correct.
+`crate::fs::lz4::compress` emits the LZ4 **frame** format: 4 magic + 11
+descriptor + 4 block header + 4 end mark + 4 content checksum = 27 fixed bytes.
+A 113-byte mostly-English payload with three 10-byte runs cannot save that much,
+so the block is stored verbatim and the frame comes out ~140 bytes. `None` is
+arithmetic, not a bug. Gzip (18 fixed bytes) and zstd tests had the same shape.
+
+Notably the overhead *was* understood when this was written —
+`test_incompressible_skip` carries the comment "Small enough that LZ4 overhead
+makes compressed >= original" — the round-trip tests simply landed on the wrong
+side of the same threshold, and never ran to reveal it.
+
+**Fix.** A shared `compressible_sample()` returning 4 KiB of repeating text, used
+by the lz4/gzip/zstd round-trip tests, `test_rule_matching` and `test_stats`.
+That amortises any of the three headers and lets the tests assert what they exist
+to assert: that data survives compress → decompress unchanged *and* that it
+actually got smaller (a new assertion — `Some` is a promise that the stored form
+is smaller, and nothing checked it).
+
+`test_rule_matching` was changed for a second reason: it is about prefix and
+extension matching, but with a small payload its `is_some()` was also a bet on
+the gzip ratio, so a ratio regression would have failed a matching test.
+
+`test_incompressible_skip` accepted *either* answer, noting "The important thing
+is it doesn't panic" — so the skip path had no coverage at all. It now asserts
+`None` deterministically (32 distinct bytes cannot shrink, and 27 bytes of frame
+go on top) and asserts the skip counter incremented. That matters beyond
+tidiness: the skip path is where `note_skipped` lives, and the two inlined copies
+it replaced each took `STATE` twice in one statement and would have deadlocked
+the moment they ran. A test that cannot fail never ran them.
+
+**Severity.** Test-only; no production defect. But five of the eight tests in the
+module were unrunnable, including the only coverage of a path that contained a
+fatal deadlock.

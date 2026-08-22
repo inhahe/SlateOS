@@ -470,6 +470,13 @@ impl<T> Mutex<T> {
     #[cold]
     #[inline(never)]
     fn lock_contended(&self) -> spin::MutexGuard<'_, T> {
+        // Before spending 30 s finding out the slow way: if this task already
+        // holds the lock, no number of retries can help. See
+        // `fail_if_recursive`. (lockdep's `report_recursive` also covers this
+        // type, but only while lockdep is enabled and its class table has room;
+        // this check has neither dependency.)
+        fail_if_recursive(self.name, self.addr(), &self.owner);
+
         // Compute the stall threshold in TSC cycles once. If the TSC is not
         // yet calibrated (very early boot), `tsc_freq()` returns 0 and we
         // fall back to a raw iteration count.
@@ -840,6 +847,90 @@ fn report_spin_stall(name: &'static [u8], addr: usize, owner: &AtomicU64, iters:
     crate::lockdep::dump_held_locks(cpu);
 }
 
+/// Fail immediately on a *provable* self-deadlock, instead of discovering it
+/// 30 seconds later — or, as actually happened, not at all.
+///
+/// Called once at the top of both lock types' contended paths, i.e. only after
+/// `try_lock` has already failed, so an uncontended acquire never runs it.
+///
+/// If the recorded owner is the very task now asking for the lock, the acquire
+/// can never succeed. A task runs on one CPU at a time, and both lock types
+/// disable preemption for the whole hold, so the holder cannot be scheduled
+/// elsewhere to release it. Every iteration of the spin below is therefore
+/// known-futile before the first one runs.
+///
+/// This also gives the right answer for the interrupt case: an ISR that takes a
+/// non-`irqsave` lock held by the task it interrupted does not change
+/// `CURRENT_TASK_IDS`, so `owner == current_task_id()` still holds and the
+/// diagnosis "this CPU already owns it" is still exactly true.
+///
+/// ## Why this exists when three other detectors already did
+///
+/// `fs::encrypt` shipped `STATE.lock().x = STATE.lock().x.saturating_add(1)`,
+/// which takes a non-reentrant lock twice in one statement (the right-hand
+/// guard is a temporary that outlives the left-hand acquire). The first boot
+/// that ever called it froze for 20 minutes and printed **nothing** about a
+/// lock — only the liveness watchdog's generic "no forward progress". All three
+/// existing nets missed it:
+///
+/// - **lockdep's `report_recursive`** is precise and correct, but
+///   [`PreemptSpinMutex`] deliberately does not register with lockdep (it is
+///   documented as the no-tracking sibling for leaf locks), and `fs::encrypt`
+///   imports `PreemptSpinMutex as Mutex`. Ordering checks genuinely add nothing
+///   for a leaf lock — but *recursion* detection is not an ordering check, and
+///   opting out of one silently opted out of the other.
+/// - **[`report_spin_stall`]** does diagnose `owner == tid` as recursive, but
+///   only after [`STALL_SECONDS`], and it never fired in that boot.
+/// - The **liveness watchdog** fired, but it reports that the system is stuck,
+///   not what it is stuck on.
+///
+/// So the check that mattered ran only on the lock type that had opted out of
+/// it, behind a 30-second timer that did not go off. This one is unconditional,
+/// type-independent, and immediate.
+///
+/// ## Why it panics
+///
+/// The condition is proven, not heuristic, and it is not survivable: the
+/// alternative is spinning until the boot test's timeout with no indication of
+/// which lock was involved. A panic names the lock and yields a backtrace
+/// through the offending call path. The false-positive cases all require an
+/// already-broken kernel (a leaked guard, so the lock is permanently held and
+/// would wedge at the next acquire regardless).
+///
+/// Same limitation as [`report_spin_stall`]: it reports over serial, so a
+/// recursive acquire of the *serial* lock itself cannot announce itself. That
+/// case is no worse than today's silent hang.
+#[cold]
+#[inline(never)]
+fn fail_if_recursive(name: &'static [u8], addr: usize, owner: &AtomicU64) {
+    let owner_tid = owner.load(Ordering::Relaxed);
+    if owner_tid == OWNER_NONE {
+        return; // Held by nobody we know of — a convoy or a leaked guard.
+    }
+    if owner_tid != crate::sched::current_task_id() {
+        return; // Genuine contention with another task: spin, as before.
+    }
+
+    let cpu = crate::sched::current_cpu_id();
+    let display = core::str::from_utf8(name).unwrap_or("<non-utf8>");
+    crate::serial_println!(
+        "[sync] *** SELF-DEADLOCK *** lock '{}' @ {:#x} is already held by task {} on \
+         cpu {} — the same task that is now trying to acquire it. This acquire can \
+         never succeed. Common cause: two acquires in one statement, e.g. \
+         `X.lock().n = X.lock().n + 1`, where the right-hand guard is a temporary \
+         that lives until the end of the statement.",
+        display,
+        addr,
+        owner_tid,
+        cpu
+    );
+    crate::lockdep::dump_held_locks(cpu);
+    panic!(
+        "self-deadlock: task {} re-acquiring lock '{}' @ {:#x} that it already holds",
+        owner_tid, display, addr
+    );
+}
+
 /// Bounded-spin acquisition loop with stall detection, shared by the contended
 /// paths of both lock types.
 ///
@@ -856,6 +947,10 @@ fn spin_with_stall<G>(
     owner: &AtomicU64,
     mut try_acquire: impl FnMut() -> Option<G>,
 ) -> G {
+    // Before spending 30 s finding out the slow way: if this task already holds
+    // the lock, no number of retries can help. See `fail_if_recursive`.
+    fail_if_recursive(name, addr, owner);
+
     let threshold_cycles = crate::bench::tsc_freq().saturating_mul(STALL_SECONDS);
     let start_tsc = crate::bench::rdtsc();
     let mut iters: u64 = 0;

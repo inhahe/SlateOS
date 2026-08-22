@@ -726,6 +726,19 @@ mod tests {
                 None => Err(io::Error::from(io::ErrorKind::NotFound)),
             }
         }
+        /// `readlink` never asks — it canonicalises with [`Links::Follow`]
+        /// only, where existence is proved by `read_link`'s `EINVAL`. Answered
+        /// honestly anyway, because a fake that lied here would be a trap for
+        /// whoever next adds a flag to this file. Follows the link, as
+        /// `faccessat(…, F_OK)` does; the map above has no link cycle for the
+        /// recursion to fall into.
+        fn exists(&self, path: &[u8]) -> io::Result<()> {
+            match self.lookup(path) {
+                Some(None) => Ok(()),
+                Some(Some(target)) => self.exists(target),
+                None => Err(io::Error::from(io::ErrorKind::NotFound)),
+            }
+        }
     }
 
     /// Run `read_all` over the fake filesystem, returning

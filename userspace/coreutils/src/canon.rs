@@ -1,10 +1,10 @@
 //! Turning a name into *the* name: gnulib's `canonicalize_filename_mode`.
 //!
 //! `readlink -f`, `readlink -e`, `readlink -m` and every mode of `realpath` are
-//! one function with a three-valued parameter. This is that function. It takes
-//! a name, follows every symbolic link in it, resolves every `.` and `..`, and
-//! returns an absolute name with no link, no dot component and no repeated
-//! slash left in it.
+//! one function with a three-valued parameter and a flag. This is that
+//! function. It takes a name, follows every symbolic link in it — unless the
+//! flag says not to — resolves every `.` and `..`, and returns an absolute name
+//! with no dot component and no repeated slash left in it.
 //!
 //! # Why this is not `std::fs::canonicalize`
 //!
@@ -67,6 +67,19 @@
 //! not extend to tolerating a component that exists and is the wrong kind. See
 //! [`suffix_requires_dir_check`], which is where gnulib puts that rule.
 //!
+//! # The flag: `realpath -s`
+//!
+//! [`Links`] is gnulib's `CAN_NOLINKS`, and it is orthogonal to [`Mode`] — all
+//! six combinations are legal `realpath` invocations and all six differ. Under
+//! [`Links::Textual`] no component is ever read as a link, so `..` is
+//! arithmetic on the name the user typed rather than on where that name leads.
+//!
+//! It is **not** pure text manipulation, which is the assumption to be careful
+//! of: `realpath -s` still consults the filesystem about the last component,
+//! and the check it makes *follows* links even though `-s` has just declined
+//! to. See [`Links`] for the measured table, and [`accept`] for the one clause
+//! that changes.
+//!
 //! # There is no depth limit — only cycle detection
 //!
 //! A chain of 300 symbolic links resolves here, and under GNU, even though the
@@ -104,7 +117,7 @@
 //!
 //! # Why the filesystem is a trait
 //!
-//! [`Fs`] has three methods and [`RealFs`] implements them in eleven lines.
+//! [`Fs`] has four methods and [`RealFs`] implements them in a dozen lines.
 //! Everything else here — the component walk, the `..` arithmetic, the
 //! link splicing, the three-mode acceptance rule, the cycle detection — is
 //! ordinary byte manipulation that never touches a disk, and with the
@@ -123,9 +136,7 @@ use crate::quote::{os_bytes, os_from_bytes};
 
 /// How much of the name has to exist already.
 ///
-/// gnulib's `canonicalize_mode_t`, minus `CAN_NOLINKS` (which `realpath -s`
-/// wants and which is not a canonicalisation at all — it is pure text
-/// manipulation, so it lives in `realpath` itself).
+/// gnulib's `canonicalize_mode_t` minus its flag bit, which is [`Links`].
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Mode {
     /// `CAN_EXISTING` — `readlink -e`, `realpath -e`, and what
@@ -139,9 +150,42 @@ pub enum Mode {
     Missing,
 }
 
+/// Whether symbolic links are followed at all: gnulib's `CAN_NOLINKS` bit.
+///
+/// It is a second parameter rather than a fourth [`Mode`] because it is
+/// orthogonal to how much has to exist — `realpath -s -e` and `realpath -s -m`
+/// are both legal and both differ from `realpath -s`.
+///
+/// # `Textual` is *not* "pure text manipulation"
+///
+/// This is worth saying because it is the obvious assumption and it is wrong;
+/// an earlier version of this file said so in a comment. `realpath -s` still
+/// touches the filesystem, and can still fail:
+///
+/// | Name | `realpath -s` answers |
+/// |---|---|
+/// | `d/nodir/missing` | `…/d/nodir/missing` — nothing in the middle is checked |
+/// | `missing/` | `…/missing` — a trailing slash on a missing *last* component is tolerated |
+/// | `d/sub/real/` | fails `ENOTDIR` — `real` is a file, and the slash asserted it was not |
+/// | `d/sub/link/..` | fails `ENOTDIR` — `..` asserts the same thing |
+/// | `-e nosuch` | fails `ENOENT` |
+/// | `-e dangling` | fails `ENOENT` — the check **follows** the link, even here |
+///
+/// What actually changes is only the middle clause of [`accept`]; see there.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Links {
+    /// The default. `readlink(2)` every component and splice in its target.
+    Follow,
+    /// `CAN_NOLINKS` — `realpath -s`, `realpath --no-symlinks`, and the first
+    /// of `realpath -L`'s two passes. Components are never read as links, so
+    /// `..` is arithmetic on the name the user typed rather than on where that
+    /// name leads.
+    Textual,
+}
+
 /// The filesystem, as this algorithm sees it.
 ///
-/// Three operations, each a direct counterpart of the C call gnulib makes, so
+/// Four operations, each a direct counterpart of the C call gnulib makes, so
 /// that the errors this module branches on are the errors the C branches on.
 pub trait Fs {
     /// The working directory, as an absolute path. Called at most once, and
@@ -175,14 +219,39 @@ pub trait Fs {
     ///
     /// Upstream this is `faccessat(path + "/./", F_OK)`, whose whole purpose is
     /// to make the kernel produce the right `errno` for a name that is not a
-    /// directory. Only ever called on a path [`read_link`](Fs::read_link) has
-    /// just refused, so it never has a symbolic link at its end.
+    /// directory.
+    ///
+    /// **It follows symbolic links.** Under [`Links::Follow`] that is invisible,
+    /// because this is only reached on a path [`read_link`](Fs::read_link) has
+    /// just refused and so never has a link at its end. Under
+    /// [`Links::Textual`] it can, and the difference is measured:
+    /// `realpath -s dirlink/..`, where `dirlink` is a symbolic link to a
+    /// directory, succeeds — and answers the parent of the *link*, because only
+    /// this check follows it, not the `..`.
     ///
     /// # Errors
     ///
     /// [`io::ErrorKind::NotADirectory`] if it exists and is not a directory;
     /// otherwise whatever prevented it being examined.
     fn dir_check(&self, path: &[u8]) -> io::Result<()>;
+
+    /// gnulib's `file_accessible`: does `path` exist at all?
+    ///
+    /// Upstream this is `faccessat (AT_FDCWD, file, F_OK, AT_EACCESS)`, and it
+    /// is only ever reached under [`Links::Textual`], where `read_link` is
+    /// never called and so cannot answer the question as a side effect.
+    ///
+    /// **It follows symbolic links**, which is the one thing about it that is
+    /// easy to get wrong and is observable: measured, `realpath -s -e dangling`
+    /// on a link to a name that does not exist fails `ENOENT`, even though the
+    /// link itself is right there and `-s` has just declined to follow it. An
+    /// implementation built on `lstat` would print the link's name instead.
+    ///
+    /// # Errors
+    ///
+    /// Whatever prevented the name being examined — `ENOENT` for a name that is
+    /// not there, `ENOTDIR` for one whose parent is not a directory.
+    fn exists(&self, path: &[u8]) -> io::Result<()>;
 }
 
 /// The number of symbolic links expanded before cycle bookkeeping starts.
@@ -205,8 +274,22 @@ const MAX_EXPANSIONS: usize = 100_000;
 
 /// Canonicalise `name`: absolute, symlink-free, `.`- and `..`-free.
 ///
+/// [`canonicalize_with`] with [`Links::Follow`], which is what every caller but
+/// `realpath -s` and `realpath -L` wants.
+///
+/// # Errors
+///
+/// See [`canonicalize_with`].
+pub fn canonicalize<F: Fs + ?Sized>(fs: &F, name: &[u8], mode: Mode) -> io::Result<Vec<u8>> {
+    canonicalize_with(fs, name, mode, Links::Follow)
+}
+
+/// Canonicalise `name`: absolute, `.`- and `..`-free, and symlink-free unless
+/// `links` says otherwise.
+///
 /// This is gnulib's `canonicalize_filename_mode` over bytes. See the module
-/// documentation for the measured behaviour of each [`Mode`].
+/// documentation for the measured behaviour of each [`Mode`], and [`Links`] for
+/// what `CAN_NOLINKS` does and does not change.
 ///
 /// # Errors
 ///
@@ -215,7 +298,12 @@ const MAX_EXPANSIONS: usize = 100_000;
 /// error is the one the filesystem gave for the component that failed, which
 /// is what makes `-v` able to distinguish `No such file or directory` from
 /// `Not a directory`.
-pub fn canonicalize<F: Fs + ?Sized>(fs: &F, name: &[u8], mode: Mode) -> io::Result<Vec<u8>> {
+pub fn canonicalize_with<F: Fs + ?Sized>(
+    fs: &F,
+    name: &[u8],
+    mode: Mode,
+    links: Links,
+) -> io::Result<Vec<u8>> {
     if name.is_empty() {
         return Err(io::Error::from(io::ErrorKind::NotFound));
     }
@@ -246,7 +334,10 @@ pub fn canonicalize<F: Fs + ?Sized>(fs: &F, name: &[u8], mode: Mode) -> io::Resu
     let mut pending: Vec<u8> = name.to_vec();
     let mut at: usize = 0;
 
-    let mut links: usize = 0;
+    // gnulib's `num_links`, which counts expansions until the cycle bookkeeping
+    // takes over. Named as upstream names it so it cannot be confused with the
+    // `links` parameter, which decides whether any of this happens at all.
+    let mut num_links: usize = 0;
     let mut expansions: usize = 0;
     let mut seen: HashSet<(Vec<u8>, Vec<u8>)> = HashSet::new();
 
@@ -284,11 +375,19 @@ pub fn canonicalize<F: Fs + ?Sized>(fs: &F, name: &[u8], mode: Mode) -> io::Resu
         let parent = rname.clone();
         push_component(&mut rname, &comp);
 
+        // gnulib's `if (!logical) { … readlink … }`. Under `Textual` there is
+        // no link expansion and so no cycle to detect either: the walk cannot
+        // revisit a component, because the text it is walking never grows.
+        if links == Links::Textual {
+            accept(fs, &rname, &rest, mode, links, None)?;
+            continue;
+        }
+
         match fs.read_link(&rname) {
             Ok(target) => {
                 expansions = expansions.saturating_add(1);
-                if links < CYCLE_WATCH_AFTER {
-                    links = links.saturating_add(1);
+                if num_links < CYCLE_WATCH_AFTER {
+                    num_links = num_links.saturating_add(1);
                 } else if !seen.insert((parent, comp)) || expansions > MAX_EXPANSIONS {
                     if mode == Mode::Missing {
                         // Leave the link unresolved in the answer and carry on
@@ -315,7 +414,7 @@ pub fn canonicalize<F: Fs + ?Sized>(fs: &F, name: &[u8], mode: Mode) -> io::Resu
                 pending.extend_from_slice(&rest);
                 at = 0;
             }
-            Err(why) => accept(fs, &rname, &rest, mode, why)?,
+            Err(why) => accept(fs, &rname, &rest, mode, links, Some(why))?,
         }
     }
 
@@ -331,7 +430,9 @@ pub fn canonicalize<F: Fs + ?Sized>(fs: &F, name: &[u8], mode: Mode) -> io::Resu
 /// else if (! (can_exist == CAN_MISSING
 ///             || (suffix_requires_dir_check (end)
 ///                 ? dir_check (rname, dest)
-///                 : errno == EINVAL)
+///                 : !logical
+///                 ? errno == EINVAL
+///                 : *end || file_accessible (rname))
 ///             || (can_exist == CAN_ALL_BUT_LAST
 ///                 && errno == ENOENT
 ///                 && !end[strspn (end, SLASHES)])))
@@ -342,10 +443,17 @@ pub fn canonicalize<F: Fs + ?Sized>(fs: &F, name: &[u8], mode: Mode) -> io::Resu
 ///
 /// 1. [`Mode::Missing`] accepts unconditionally — nothing has to exist.
 /// 2. Otherwise the component must be shown to be *usable*. Which question
-///    that is depends on what follows it: if the suffix demands a directory
-///    (see [`suffix_requires_dir_check`]) then it must be one; if not, it is
-///    enough that `readlink` failed with `EINVAL`, which means the name exists
-///    and simply is not a link.
+///    that is depends on what follows it, and on whether links are being
+///    followed:
+///    - if the suffix demands a directory (see [`suffix_requires_dir_check`])
+///      then it must be one, whatever `links` says;
+///    - under [`Links::Follow`], it is enough that `readlink` failed with
+///      `EINVAL`, which means the name exists and simply is not a link;
+///    - under [`Links::Textual`] there was no `readlink` to fail, so existence
+///      has to be asked for outright — but only for the **last** component.
+///      `*end` in the C: anything followed by more name is waved through,
+///      which is why `realpath -s d/nodir/missing` succeeds where the
+///      link-following `realpath d/nodir/missing` says `ENOENT`.
 /// 3. [`Mode::AllButLast`] gets one extra chance: a missing component is fine
 ///    if nothing but slashes follows it.
 ///
@@ -355,6 +463,12 @@ pub fn canonicalize<F: Fs + ?Sized>(fs: &F, name: &[u8], mode: Mode) -> io::Resu
 /// It also feeds rule 3, which is why `readlink -f d/sub/missing/` succeeds —
 /// the directory check turned the tolerated `ENOENT` into… `ENOENT`.
 ///
+/// `why` is `readlink`'s failure, or `None` under [`Links::Textual`], where it
+/// was never called. Passing it as an `Option` rather than a synthetic error
+/// keeps the C's `errno` reading honest: with no `readlink` there is no
+/// `EINVAL` to compare against, and rule 3's `errno == ENOENT` reads whatever
+/// the *existence* check left behind instead.
+///
 /// # Errors
 ///
 /// The failure that none of the three rules excused.
@@ -363,13 +477,18 @@ fn accept<F: Fs + ?Sized>(
     rname: &[u8],
     rest: &[u8],
     mode: Mode,
-    why: io::Error,
+    links: Links,
+    why: Option<io::Error>,
 ) -> io::Result<()> {
     if mode == Mode::Missing {
         return Ok(());
     }
 
-    let mut err = why;
+    // Only ever read after being replaced, except on the `Links::Follow` path
+    // where `why` is always `Some`. `ENOENT` is the right stand-in for the one
+    // case that can reach rule 3 without it: `Textual`, last component, absent.
+    let mut err = why.unwrap_or_else(|| io::Error::from(io::ErrorKind::NotFound));
+
     let usable = if suffix_requires_dir_check(rest) {
         match fs.dir_check(rname) {
             Ok(()) => true,
@@ -378,8 +497,20 @@ fn accept<F: Fs + ?Sized>(
                 false
             }
         }
-    } else {
+    } else if links == Links::Follow {
         err.kind() == io::ErrorKind::InvalidInput
+    } else if !rest.is_empty() {
+        // `*end`: something follows this component, so the component itself is
+        // not examined at all.
+        true
+    } else {
+        match fs.exists(rname) {
+            Ok(()) => true,
+            Err(e) => {
+                err = e;
+                false
+            }
+        }
     };
     if usable {
         return Ok(());
@@ -513,6 +644,12 @@ impl Fs for RealFs {
             Err(io::Error::from(io::ErrorKind::NotADirectory))
         }
     }
+
+    fn exists(&self, path: &[u8]) -> io::Result<()> {
+        // `metadata`, not `symlink_metadata`: gnulib's `faccessat(…, F_OK)`
+        // follows the link, and `realpath -s -e dangling` is measured to fail.
+        std::fs::metadata(os_from_bytes(path)).map(|_| ())
+    }
 }
 
 #[cfg(test)]
@@ -611,6 +748,72 @@ mod tests {
                 .cloned()
                 .ok_or_else(|| io::Error::from(io::ErrorKind::NotFound))
         }
+
+        /// What the kernel does for `stat`: walk the name from the root,
+        /// following every symbolic link, the last component's included.
+        ///
+        /// [`lookup`](Self::lookup) is the `lstat` half of the double act and is
+        /// what [`Fs::read_link`] needs; this is the `stat` half, and is what
+        /// [`Fs::exists`] and [`Fs::dir_check`] need. Under [`Links::Textual`]
+        /// both of those are reached with a symbolic link at the end of the
+        /// path — the case the walk itself never produces — so a fake that
+        /// answered them from `lookup` would report a dangling link as present
+        /// and a link-to-a-directory as not a directory.
+        ///
+        /// Answers with the canonical path it arrived at as well as what is
+        /// there, because a link's target may itself contain links and `..`, and
+        /// the components after it have to be appended to where it *led* rather
+        /// than to the text of its target.
+        ///
+        /// Deliberately written out rather than delegated to [`canonicalize`]:
+        /// a test double that calls the code under test proves nothing.
+        fn resolve(&self, path: &[u8], depth: usize) -> io::Result<(Vec<u8>, Entry)> {
+            // Far above anything the fixture tree contains; only the two- and
+            // three-cycles reach it.
+            if depth > 40 {
+                return Err(crate::errmsg::filesystem_loop());
+            }
+            let mut here: Vec<u8> = if path.first() == Some(&b'/') {
+                b"/".to_vec()
+            } else {
+                self.here.to_vec()
+            };
+            let comps: Vec<&[u8]> = path
+                .split(|&c| c == b'/')
+                .filter(|c| !c.is_empty() && *c != b".")
+                .collect();
+            let mut what = Entry::Dir;
+            for (i, comp) in comps.iter().enumerate() {
+                if *comp == b".." {
+                    pop_component(&mut here);
+                    what = Entry::Dir;
+                    continue;
+                }
+                push_component(&mut here, comp);
+                what = self
+                    .entries
+                    .get(here.as_slice())
+                    .cloned()
+                    .ok_or_else(|| io::Error::from(io::ErrorKind::NotFound))?;
+                if let Entry::Link(target) = what {
+                    let next = if target.first() == Some(&b'/') {
+                        target.to_vec()
+                    } else {
+                        let mut from = here.clone();
+                        pop_component(&mut from);
+                        push_component(&mut from, target);
+                        from
+                    };
+                    // Continue from where the link led, not from its own name.
+                    (here, what) = self.resolve(&next, depth.saturating_add(1))?;
+                }
+                // Every component but the last is used as a directory.
+                if i.saturating_add(1) != comps.len() && !matches!(what, Entry::Dir) {
+                    return Err(io::Error::from(io::ErrorKind::NotADirectory));
+                }
+            }
+            Ok((here, what))
+        }
     }
 
     impl Fs for FakeFs {
@@ -627,10 +830,14 @@ mod tests {
         }
 
         fn dir_check(&self, path: &[u8]) -> io::Result<()> {
-            match self.lookup(path)? {
-                Entry::Dir => Ok(()),
+            match self.resolve(path, 0)? {
+                (_, Entry::Dir) => Ok(()),
                 _ => Err(io::Error::from(io::ErrorKind::NotADirectory)),
             }
+        }
+
+        fn exists(&self, path: &[u8]) -> io::Result<()> {
+            self.resolve(path, 0).map(|_| ())
         }
     }
 
@@ -644,7 +851,16 @@ mod tests {
     /// `errmsg::filesystem_loop`), so a kind-keyed table would have to spell it
     /// `!Other` and would then assert nothing at all.
     fn go(name: &str, mode: Mode) -> String {
-        match canonicalize(&FakeFs::new(), name.as_bytes(), mode) {
+        go_with(name, mode, Links::Follow)
+    }
+
+    /// [`go`], for the `realpath -s` half of the table.
+    fn go_s(name: &str, mode: Mode) -> String {
+        go_with(name, mode, Links::Textual)
+    }
+
+    fn go_with(name: &str, mode: Mode, links: Links) -> String {
+        match canonicalize_with(&FakeFs::new(), name.as_bytes(), mode, links) {
             Ok(p) => String::from_utf8_lossy(&p).into_owned(),
             Err(e) => format!("!{}", crate::errmsg::strerror(&e)),
         }
@@ -724,6 +940,157 @@ mod tests {
         }
     }
 
+    /// The same tree, asked with `realpath -s` — every row measured from GNU
+    /// coreutils 9.4 on a real copy of [`FakeFs`]'s tree.
+    ///
+    /// The table is the point of [`Links::Textual`]: it is *not* text
+    /// manipulation, and the rows that prove it are the ones that still fail.
+    /// Four groups are worth naming, because each one refutes a plausible
+    /// shortcut implementation:
+    ///
+    /// - `d/dangling -e` fails `ENOENT`. The existence check follows the link
+    ///   that `-s` has just declined to follow, so an `lstat` would wrongly
+    ///   succeed.
+    /// - `plainfile/x` fails `ENOTDIR` even though nothing examines
+    ///   `plainfile` itself — the check on the *last* component resolves the
+    ///   whole path, and trips over the file in the middle of it.
+    /// - `a`, a symbolic-link cycle, fails `ELOOP` in the default mode. The
+    ///   "last component need not exist" excuse is `ENOENT`-only.
+    /// - `d/toplink/..` fails `ENOTDIR` while `d/absdir/..` succeeds and
+    ///   answers `/home/u/d`: `..` is textual, but the directory check that
+    ///   guards it is not.
+    #[test]
+    fn every_measured_row_of_the_gnu_minus_s_table() {
+        const ENOENT: &str = "!No such file or directory";
+        const ENOTDIR: &str = "!Not a directory";
+        const ELOOP: &str = "!Too many levels of symbolic links";
+        // (name, -s, -s -e, -s -m)
+        let rows: &[(&str, &str, &str, &str)] = &[
+            (
+                "d/sub/link",
+                "/home/u/d/sub/link",
+                "/home/u/d/sub/link",
+                "/home/u/d/sub/link",
+            ),
+            (
+                "d/sub/missing",
+                "/home/u/d/sub/missing",
+                ENOENT,
+                "/home/u/d/sub/missing",
+            ),
+            (
+                "d/sub/missing/",
+                "/home/u/d/sub/missing",
+                ENOENT,
+                "/home/u/d/sub/missing",
+            ),
+            ("d/sub/real/", ENOTDIR, ENOTDIR, "/home/u/d/sub/real"),
+            ("d/sub/real/..", ENOTDIR, ENOTDIR, "/home/u/d/sub"),
+            ("d/sub/real/../real", ENOTDIR, ENOTDIR, "/home/u/d/sub/real"),
+            ("plainfile/x", ENOTDIR, ENOTDIR, "/home/u/plainfile/x"),
+            (
+                "d/nodir/missing",
+                "/home/u/d/nodir/missing",
+                ENOENT,
+                "/home/u/d/nodir/missing",
+            ),
+            (
+                "d/dangling",
+                "/home/u/d/dangling",
+                ENOENT,
+                "/home/u/d/dangling",
+            ),
+            (
+                "d/dangling/",
+                "/home/u/d/dangling",
+                ENOENT,
+                "/home/u/d/dangling",
+            ),
+            ("d/dangling/..", ENOENT, ENOENT, "/home/u/d"),
+            (
+                "d/sub/dang2",
+                "/home/u/d/sub/dang2",
+                ENOENT,
+                "/home/u/d/sub/dang2",
+            ),
+            ("a", ELOOP, ELOOP, "/home/u/a"),
+            ("b", ELOOP, ELOOP, "/home/u/b"),
+            ("p", ELOOP, ELOOP, "/home/u/p"),
+            ("x/y/z", ELOOP, ELOOP, "/home/u/x/y/z"),
+            (
+                "d/absdir",
+                "/home/u/d/absdir",
+                "/home/u/d/absdir",
+                "/home/u/d/absdir",
+            ),
+            ("d/absdir/..", "/home/u/d", "/home/u/d", "/home/u/d"),
+            (
+                "d/absdir/sub/real",
+                "/home/u/d/absdir/sub/real",
+                "/home/u/d/absdir/sub/real",
+                "/home/u/d/absdir/sub/real",
+            ),
+            (
+                "d/absdir/sub/missing",
+                "/home/u/d/absdir/sub/missing",
+                ENOENT,
+                "/home/u/d/absdir/sub/missing",
+            ),
+            ("d/up", "/home/u/d/up", "/home/u/d/up", "/home/u/d/up"),
+            ("d/up/k", "/home/u/d/up/k", ENOENT, "/home/u/d/up/k"),
+            (
+                "d/toplink",
+                "/home/u/d/toplink",
+                "/home/u/d/toplink",
+                "/home/u/d/toplink",
+            ),
+            ("d/toplink/..", ENOTDIR, ENOTDIR, "/home/u/d"),
+            ("d/sub/link/..", ENOTDIR, ENOTDIR, "/home/u/d/sub"),
+            ("d/sub/link/", ENOTDIR, ENOTDIR, "/home/u/d/sub/link"),
+            ("missing", "/home/u/missing", ENOENT, "/home/u/missing"),
+            ("missing/", "/home/u/missing", ENOENT, "/home/u/missing"),
+            (".", "/home/u", "/home/u", "/home/u"),
+            ("./", "/home/u", "/home/u", "/home/u"),
+            ("/", "/", "/", "/"),
+            ("//", "/", "/", "/"),
+            ("", ENOENT, ENOENT, ENOENT),
+            (
+                "d/./sub/../sub/real",
+                "/home/u/d/sub/real",
+                "/home/u/d/sub/real",
+                "/home/u/d/sub/real",
+            ),
+        ];
+        for (name, s, e, m) in rows {
+            assert_eq!(&go_s(name, Mode::AllButLast), s, "realpath -s {name}");
+            assert_eq!(&go_s(name, Mode::Existing), e, "realpath -s -e {name}");
+            assert_eq!(&go_s(name, Mode::Missing), m, "realpath -s -m {name}");
+        }
+    }
+
+    /// The rows where `-s` and no `-s` disagree, side by side. This is the
+    /// difference `realpath -s` exists to make, and it is one flag apart.
+    #[test]
+    fn textual_and_follow_disagree_exactly_where_gnu_does() {
+        // A link is its own answer, rather than what it points at.
+        assert_eq!(go("d/sub/link", Mode::Existing), "/home/u/d/sub/real");
+        assert_eq!(go_s("d/sub/link", Mode::Existing), "/home/u/d/sub/link");
+        // `..` counts off the name, not off where the name leads.
+        assert_eq!(go("d/absdir/..", Mode::AllButLast), "/home/u");
+        assert_eq!(go_s("d/absdir/..", Mode::AllButLast), "/home/u/d");
+        // A cycle is only a cycle if you walk it — but the existence check on
+        // the last component walks it anyway, so `-s` still fails.
+        assert_eq!(go("a", Mode::Missing), "/home/u/a");
+        assert_eq!(go_s("a", Mode::Missing), "/home/u/a");
+        assert_eq!(
+            go_s("a", Mode::AllButLast),
+            "!Too many levels of symbolic links"
+        );
+        // A dangling link keeps its own name instead of naming its target.
+        assert_eq!(go("d/sub/dang2", Mode::AllButLast), "/home/u/d/sub/nothere");
+        assert_eq!(go_s("d/sub/dang2", Mode::AllButLast), "/home/u/d/sub/dang2");
+    }
+
     /// Where a cycle stops is decided by gnulib's literal `20`, and it is
     /// visible in the answer. All three of these were measured from GNU.
     #[test]
@@ -775,6 +1142,10 @@ mod tests {
             }
             fn dir_check(&self, _path: &[u8]) -> io::Result<()> {
                 Err(io::Error::from(io::ErrorKind::NotADirectory))
+            }
+            fn exists(&self, _path: &[u8]) -> io::Result<()> {
+                // Only `Links::Textual` asks, and this test never does.
+                unreachable!("exists is not reached under Links::Follow")
             }
         }
         let fs = Chain { depth: 300 };
@@ -854,6 +1225,9 @@ mod tests {
             fn dir_check(&self, _path: &[u8]) -> io::Result<()> {
                 Ok(())
             }
+            fn exists(&self, _path: &[u8]) -> io::Result<()> {
+                Ok(())
+            }
         }
         let got = canonicalize(&OneBadName, b"l", Mode::Existing).unwrap();
         assert_eq!(got, b"/\xff\xfe/\x80target");
@@ -899,6 +1273,9 @@ mod tests {
                 Err(io::Error::from(io::ErrorKind::InvalidInput))
             }
             fn dir_check(&self, _path: &[u8]) -> io::Result<()> {
+                Ok(())
+            }
+            fn exists(&self, _path: &[u8]) -> io::Result<()> {
                 Ok(())
             }
         }

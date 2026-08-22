@@ -50647,6 +50647,24 @@ healthy while being so. When adding a tripwire, check that its two inputs count
 the same events — and prefer to prove it by making the tripwire fire once on
 purpose rather than by reading the code.
 
+**The same asymmetry was latent in `ktimer`, and was fixed in the same pass
+(2026-08-21, lane A).** `ktimer::process_expirations` re-armed a periodic timer
+without touching `TIMERS_SCHEDULED` while `TIMERS_FIRED` counted every firing,
+so its self-test printed `scheduled=5, fired=8` — three wakeups apparently
+conjured from nowhere. Nothing was *false* there yet, because ktimer had no
+tripwire over those counters; the danger was that adding one later would have
+inherited a guard that could never fire, exactly as hrtimer's did. Re-arms are
+now counted, and the self-test carries the conservation check
+`scheduled >= fired + cancelled`, which the pre-fix numbers **would have
+failed** — that failure is the only evidence worth having that the guard can
+fire at all. Two details of that check are deliberate and are commented at the
+site: it is phrased as a **comparison, not a clamped subtraction** (a
+`saturating_sub` would have reproduced hrtimer's failure mode verbatim), and it
+samples `fired`/`cancelled` *before* `scheduled` — a firing increments
+`scheduled` (the re-arm) before `fired` (the workqueue submit), so reading the
+consequence first and the cause last makes a concurrent expiry on another CPU
+bias the check safe rather than manufacture a spurious failure.
+
 ### Not fixed, and deliberately so
 
 - **`IRQ 10` storming at ~500 kHz.** IRQ 10 is a shared level-triggered PCI

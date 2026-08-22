@@ -370,6 +370,19 @@ pub fn process_expirations() {
             // Periodic: advance deadline.  Don't free the slot.
             let new_deadline = now.saturating_add(interval);
             entry.deadline.store(new_deadline, Ordering::Release);
+            // A re-arm *is* an arming, and is counted as one — otherwise
+            // `TIMERS_FIRED` counts every firing of a periodic timer while
+            // `TIMERS_SCHEDULED` counts only its first arming, and the two
+            // stop being commensurable: boots printed `scheduled=5, fired=8`,
+            // which reads as three wakeups conjured from nowhere.  hrtimer had
+            // the identical asymmetry and there it was worse than misleading —
+            // it structurally disabled a `scheduled - fired - cancelled -
+            // pending` tripwire, since the `saturating_sub` chain floors at 0
+            // once `fired` outruns `scheduled` (see hrtimer.rs's re-arm site
+            // and Test 10).  ktimer has no such tripwire *today*; count the
+            // re-arm anyway, so that adding one later cannot inherit a
+            // guard that can never fire.
+            TIMERS_SCHEDULED.fetch_add(1, Ordering::Relaxed);
         } else {
             // One-shot: free the slot.
             entry.deadline.store(0, Ordering::Release);
@@ -506,10 +519,36 @@ pub fn self_test() {
     serial_println!("[ktimer]   Cancelled timer did not fire: OK");
 
     // --- 4. Stats ---
-    let stats_sched = scheduled_count();
+    //
+    // Read `fired`/`cancelled` **before** `scheduled`, and never the other way
+    // round.  A firing increments `TIMERS_SCHEDULED` (the re-arm) before it
+    // increments `TIMERS_FIRED` (the workqueue submit), so sampling the
+    // consequence first and the cause last makes a concurrent expiry on
+    // another CPU only ever bias the check *safe* — the reverse order would
+    // manufacture a spurious failure whenever a periodic timer fired between
+    // the two loads.
     let stats_fired = fired_count();
     let stats_cancel = cancelled_count();
+    let stats_sched = scheduled_count();
     assert!(stats_sched > 0);
+    // Conservation: every firing and every cancellation is preceded by exactly
+    // one arming, so armings can never be outnumbered by their own outcomes.
+    //
+    // This is a real tripwire and not decoration: until 2026-08-21 a periodic
+    // timer's re-arm was not counted as an arming, boots printed
+    // `scheduled=5, fired=8`, and *this assertion would have failed* — which is
+    // the only kind of evidence worth having that a guard can fire at all.
+    // hrtimer had the same asymmetry, and there it silently disabled a guard
+    // written specifically to catch a bug that had already happened once,
+    // because that one was phrased as a `saturating_sub` chain and so read 0
+    // on a healthy boot and on a broken one alike.  Phrase conservation checks
+    // as a comparison, never as a clamped subtraction.
+    let outcomes = stats_fired.saturating_add(stats_cancel);
+    assert!(
+        stats_sched >= outcomes,
+        "ktimer accounting: scheduled={stats_sched} but fired+cancelled={outcomes} — \
+         re-arms of periodic timers are not being counted as armings"
+    );
     serial_println!(
         "[ktimer]   Stats: scheduled={}, fired={}, cancelled={}",
         stats_sched,

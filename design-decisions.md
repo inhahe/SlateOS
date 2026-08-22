@@ -37142,3 +37142,101 @@ reader checks less is also the arm a test forgets, and both defaults point the
 same way — the dark arm is older, is what the tree already agreed with, and is
 what `Default` returns. Every unswept test in a two-mode type will be unswept
 on the same side.
+
+---
+
+## §361 — An unimplemented flag is refused when its absence changes the answer, and accepted as a no-op when it only omits an advisory
+
+**Date:** 2026-08-22
+**Decided by:** Claude (autonomous)
+**Where it bites:** `userspace/coreutils/src/bin/bc.rs` first; the rule is
+meant to apply to every utility in `userspace/coreutils/` that is missing a
+flag its GNU counterpart has.
+
+**In short:** Our `bc` does not implement three of GNU `bc`'s options. There
+are only two things a program can do with an option it does not implement:
+pretend it worked, or refuse to run. Pretending is friendlier and is what most
+half-finished tools do — but for some flags pretending means printing a
+confident wrong answer. The rule adopted here is to split the difference by
+asking one question per flag: *if we ignore this, does the number that comes
+out change?* If yes, refuse; if no, accept it and do nothing.
+
+**The three flags, and which side each falls on.** All measured against GNU bc
+1.07.1 through WSL:
+
+| Flag | What GNU does with it | Ignoring it | Chosen |
+|---|---|---|---|
+| `-s` / `--standard` | non-standard constructs become errors: `echo 'print 1,2' \| bc -s` prints `(standard_in) 1: Error: print statement` and computes **nothing** | runs a program POSIX bc rejects and prints `12` | **refuse** |
+| `-c` / `--compile` | emits dc code instead of evaluating | prints results where dc code was asked for | **refuse** |
+| `-w` / `--warn` | adds `(Warning) …` on stderr; still prints `12` | loses an advisory; every value identical | **accept, no-op** |
+
+**The alternatives considered.**
+
+*Accept all three silently.* The friendliest, and wrong for `-s` in the way
+this whole audit is about: a caller who wrote `bc -s script.bc` asked to be
+told when their script leaves POSIX, and would be told nothing, forever, with
+a `0` status. That is a silent wrong answer, which is the most expensive kind
+of defect in this tree.
+
+*Refuse all three.* Consistent and never misleading, but it breaks `bc -w`
+scripts that work perfectly today and would work identically under our bc.
+Refusing to run something we can run correctly is a real cost paid for
+nothing but tidiness.
+
+*The split, chosen.* The test is stated as a property of the *flag*, not of
+our mood, so it is applicable by the next person without re-litigating: does
+the flag's absence change a computed value or an exit status? `-s` and `-c`
+do; `-w` does not. The cost is that the two treatments look inconsistent from
+outside — `bc -w` runs and `bc -s` does not — which is why the reason is
+written into `refuse`'s doc comment at the point of decision rather than only
+here.
+
+**Why not just implement them.** `-s` and `-w` need every AST production
+tagged with whether POSIX bc has it, plus an off/warn/error mode threaded
+through `Parser` — real work, unrelated to the command-line bug that surfaced
+this, and tracked in `todo.txt` with the shape of the fix. `-c` needs a dc
+emitter and is arguably not worth having at all. Refusing loudly is the
+correct *interim*; it is not a decision to never implement them.
+
+**A note on scope.** This is deliberately narrower than "always fail on
+anything unimplemented". A flag that only affects diagnostics, formatting
+hints, or performance can be a no-op; a flag that gates what is accepted, what
+is emitted, or what is returned cannot. Where a flag is arguably both, refuse
+— the cost of a spurious refusal is a visible error message, and the cost of a
+spurious acceptance is a wrong answer nobody sees.
+
+---
+
+## §362 — A `bc` file operand does not end the run: standard input is read afterwards, in the same interpreter
+
+**Date:** 2026-08-22
+**Decided by:** Claude (autonomous)
+**Where it bites:** `userspace/coreutils/src/bin/bc.rs`, `main`.
+
+**In short:** When you run `bc script.bc`, does bc stop after the script, or
+does it then start reading what you type? Ours used to stop. GNU does not —
+it runs the script and then carries on reading, using the same variables and
+functions the script defined. Measured, not recalled:
+`printf '9+9\n' | bc a.bc` where `a.bc` holds `1+1` prints `2` and then `18`.
+Ours now matches.
+
+**Why this is a decision and not just a bug fix.** The two behaviours are both
+defensible, and the one we had is what a person would design from scratch:
+"you named a file, I ran it, we are done." GNU's is the one that makes
+`bc mylib.bc` a *useful* command — it loads a library of functions and hands
+you a calculator that knows them. Given the choice, matching the reference
+implementation wins, because the whole point of shipping something called `bc`
+is that scripts and habits carry over.
+
+**The cost, stated plainly.** `bc script.bc` from a terminal now leaves you at
+a prompt rather than returning to the shell. That surprises anyone who expects
+the old behaviour, and it is exactly what GNU does. A script that wants the
+old behaviour writes `bc script.bc </dev/null`, which is also what it would
+write on a GNU host.
+
+**Our one deviation, and why.** `-e EXPR` — which GNU bc does **not** have at
+all; `bc -e 2+2` upstream answers `invalid option -- 'e'` — does end the run.
+`bc -e '2+2'` dropping into an interactive session is nobody's behaviour, and
+since the flag is ours we are free to define it. So the rule is: standard
+input is read unless an explicit expression was given. Both halves are
+covered by tests in `bc.rs` that name the GNU command establishing them.

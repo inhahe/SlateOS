@@ -7,12 +7,17 @@
 //! Architecture: hand-written lexer -> recursive-descent parser -> AST ->
 //! tree-walk interpreter.  The numbers are `bignum::Decimal`, shared with `dc`.
 
+use coreutils::errmsg::strerror;
+use coreutils::getopt::{self, Program};
+use coreutils::quote::{quoteaf_os, quotef_os};
 use std::collections::HashMap;
 use std::env;
+use std::ffi::OsString;
 #[cfg(not(test))]
 use std::io::Write;
 use std::io::{self, BufRead};
 use std::process;
+use std::process::ExitCode;
 
 // -------------------------------------------------------------------------
 // The numbers live in the `bignum` crate
@@ -2066,96 +2071,329 @@ fn open_brace_depth(text: &str) -> i32 {
 }
 
 // -------------------------------------------------------------------------
+// The command line
+// -------------------------------------------------------------------------
+//
+// Every sentence and every exit status below was *measured* against GNU bc
+// 1.07.1 through WSL, not recalled -- and recall was wrong three times, in
+// ways that matter:
+//
+//   * `-e` and `-f` **do not exist** in GNU bc. `bc -e 2+2` answers
+//     `invalid option -- 'e'` and exits 1. Our `-e` is a SlateOS extension
+//     (it is Gavin Howard's bc that has one), and is marked as such in the
+//     usage text so nobody ports a script to a GNU host expecting it.
+//   * The long-option table is **alphabetical** and has eight entries, one of
+//     which (`--compile`) the usage text does not mention. Measured with
+//     `bc --=x`, whose empty prefix matches every entry and so prints the
+//     table in declaration order:
+//
+//         bc: option '--=x' is ambiguous; possibilities: '--compile'
+//         '--help' '--interactive' '--mathlib' '--quiet' '--standard'
+//         '--version' '--warn'
+//
+//   * A file that will not open is `File NAME is unavailable.` -- with **no**
+//     `bc: ` prefix, and it **stops the run**: `bc good.bc missing.bc
+//     good.bc` runs the first file, reports the second and never reaches the
+//     third, exiting 1. The previous code here printed a different sentence,
+//     kept going, and exited **0**.
+//
+// Two further behaviours were measured because no amount of reading the
+// manual settles them:
+//
+//   * A file operand does **not** end the run. `printf '9+9\n' | bc a.bc`
+//     prints a.bc's output and then evaluates standard input, in one
+//     interpreter, so a file may define functions a later session uses.
+//   * A bare `-` is **not** standard input; it is a file name that fails to
+//     open, and is reported exactly like any other. The comment that used to
+//     sit on the operand arm claiming otherwise was wrong.
+//
+// The one deliberate deviation is quoting: GNU prints the name bare, so a
+// file called `x⏎bc: /etc/shadow: Permission denied` forges a line bc never
+// wrote. Names go through `quoteaf_os` for the reason set out in
+// `coreutils::quote` -- the same deviation every other utility here makes.
+
+/// Exits 1 on a bad command line, measured with `bc --zzz-bogus; echo $?`.
+const BC: Program = Program::new("bc", 1);
+
+/// GNU's usage block, reduced to what this bc actually does, and printed on
+/// **stdout** even when it follows a diagnostic on stderr -- which is what
+/// GNU does, because `getopt_long` writes the sentence and the program's own
+/// `usage()` writes this.
+const USAGE: &str = "\
+usage: bc [options] [file ...]
+  -h  --help         print this usage and exit
+  -i  --interactive  force interactive mode
+  -l  --mathlib      use the predefined math routines
+  -q  --quiet        don't print initial banner
+  -w  --warn         warn about non-standard bc constructs (accepted, no-op)
+  -v  --version      print version information and exit
+  -e  --expression EXPR   evaluate EXPR (a SlateOS extension; GNU bc has none)";
+
+/// The long options **in GNU's declaration order**, which is observable
+/// because `getopt_long` lists an ambiguous prefix's candidates in it.
+/// Measured with `bc --=x`; `expression` is ours and is inserted where
+/// alphabetical order puts it, so the list still reads as GNU's does.
+///
+/// The two we refuse are listed rather than omitted, because the table is
+/// what decides whether an abbreviation is ambiguous: drop `--standard` and
+/// `--s` would silently resolve to `--standard`'s neighbour instead of being
+/// refused.
+const LONG_OPTIONS: &[(&str, Long)] = &[
+    ("compile", Long::Compile),
+    ("expression", Long::Expression),
+    ("help", Long::Help),
+    ("interactive", Long::Interactive),
+    ("mathlib", Long::Mathlib),
+    ("quiet", Long::Quiet),
+    ("standard", Long::Standard),
+    ("version", Long::Version),
+    ("warn", Long::Warn),
+];
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Long {
+    Compile,
+    Expression,
+    Help,
+    Interactive,
+    Mathlib,
+    Quiet,
+    Standard,
+    Version,
+    Warn,
+}
+
+/// One thing to evaluate, kept in command-line order.
+///
+/// Ordered rather than "expressions first, then files" because the
+/// interpreter is one piece of state: `bc -e 'define f(x){return x*2}'
+/// use.bc` and `bc use.bc -e '…'` are different programs, and the order the
+/// user typed is the only defensible reading of which one they meant.
+#[derive(Clone, PartialEq, Eq, Debug)]
+enum Input {
+    /// `-e EXPR`. Bytes, because an argument need not be UTF-8 and the
+    /// diagnostic for one that is not should name it rather than panic.
+    Expression(Vec<u8>),
+    File(OsString),
+}
+
+/// What the command line asked for.
+#[derive(PartialEq, Eq, Debug)]
+enum Request {
+    Run(Settings),
+    Help,
+    Version,
+}
+
+#[derive(Default, PartialEq, Eq, Debug)]
+struct Settings {
+    math_lib: bool,
+    quiet: bool,
+    /// `-i`: behave as if standard input were a terminal.
+    force_interactive: bool,
+    inputs: Vec<Input>,
+}
+
+impl Settings {
+    /// Whether standard input is read after the operands.
+    ///
+    /// GNU always reads it, because GNU has no `-e`. Ours stops after an
+    /// explicit expression, since `bc -e '2+2'` dropping into an interactive
+    /// session is nobody's behaviour -- but a plain `bc file.bc` continues to
+    /// standard input exactly as GNU's does.
+    fn reads_stdin(&self) -> bool {
+        !self
+            .inputs
+            .iter()
+            .any(|input| matches!(input, Input::Expression(_)))
+    }
+}
+
+/// A command line that cannot be run.
+#[derive(Debug)]
+enum Refusal {
+    Getopt(getopt::Error),
+    /// A flag GNU implements and we do not. Refused rather than ignored,
+    /// because its absence changes the answer -- see [`Refusal::report`].
+    Unimplemented(&'static str),
+}
+
+impl Refusal {
+    fn report(&self) -> ExitCode {
+        let status = match self {
+            Self::Getopt(e) => {
+                eprintln!("bc: {}", e.sentence);
+                // GNU prints the sentence on stderr and the usage block on
+                // stdout, from two different pieces of code. Reproduced
+                // rather than tidied: a script doing `bc -x 2>/dev/null`
+                // still sees the usage, as it does upstream.
+                println!("{USAGE}");
+                e.status
+            }
+            Self::Unimplemented(message) => {
+                eprintln!("bc: {message}");
+                println!("{USAGE}");
+                1
+            }
+        };
+        ExitCode::from(u8::try_from(status).unwrap_or(1))
+    }
+}
+
+/// A failure while evaluating, which ends the run the way GNU's does.
+///
+/// The variants carry the *name*, not a rendered sentence, so that the choice
+/// between `quoteaf_os` and `quotef_os` is made in one place by the shape of
+/// the sentence the name lands in — which is the rule `coreutils::quote`
+/// states and the rule a caller assembling its own string always gets wrong.
+#[derive(Debug)]
+enum Trouble {
+    /// GNU's `File %s is unavailable.`, quoted per this tree's policy.
+    Unavailable(OsString),
+    /// Ours alone: GNU's lexer is byte-oriented and ours needs `&str`, so a
+    /// source file that is not UTF-8 is refused instead of being silently
+    /// truncated at the first bad byte -- which is what the old `lines()`
+    /// loop did, exiting 0 with a partial answer. Tracked in
+    /// `known-issues.md` as a limitation to remove by making the lexer take
+    /// bytes.
+    FileNotUtf8(OsString),
+    /// The same, for an argument rather than a file: `bc -e $'\xe9'`.
+    ExpressionNotUtf8,
+    /// The same again, for the session on standard input.
+    StdinNotUtf8,
+    /// A read on standard input that failed for a reason other than EOF.
+    StdinRead(String),
+}
+
+impl Trouble {
+    fn report(&self) -> ExitCode {
+        match self {
+            // Mid-sentence, so the quotes are never elided: a bare name would
+            // blur into the words either side of it.
+            Self::Unavailable(name) => eprintln!("File {} is unavailable.", quoteaf_os(name)),
+            // Ends the clause, so it takes the bare form when it can, exactly
+            // as `wc: missing.txt: No such file or directory` does.
+            Self::FileNotUtf8(name) => eprintln!("bc: {}: not valid UTF-8", quotef_os(name)),
+            Self::ExpressionNotUtf8 => eprintln!("bc: -e expression: not valid UTF-8"),
+            Self::StdinNotUtf8 => eprintln!("bc: standard input: not valid UTF-8"),
+            Self::StdinRead(message) => eprintln!("bc: standard input: {message}"),
+        }
+        ExitCode::FAILURE
+    }
+}
+
+// -------------------------------------------------------------------------
 // Main entry point
 // -------------------------------------------------------------------------
 
-fn main() {
-    let mut math_lib = false;
-    let mut quiet = false;
-    let mut expr_to_eval: Option<String> = None;
-    let mut files: Vec<String> = Vec::new();
-
-    // Walked with an iterator rather than an index, because `-e` consumes the
-    // argument after it: an index-and-counter version has to bump the counter
-    // in two places and bound-check between them, and getting either wrong is
-    // a panic on a command line the user typed.
-    let mut args = env::args().skip(1);
-    while let Some(arg) = args.next() {
-        match arg.as_str() {
-            "-l" => math_lib = true,
-            "-q" => quiet = true,
-            "-e" => expr_to_eval = args.next(),
-            // Combined short flags: -lq and so on.
-            flag if flag.starts_with('-') && flag.len() > 1 => {
-                for ch in flag.chars().skip(1) {
-                    match ch {
-                        'l' => math_lib = true,
-                        'q' => quiet = true,
-                        _ => eprintln!("bc: unknown option: -{ch}"),
-                    }
-                }
-            }
-            // A bare "-" is the conventional name for standard input, and
-            // falls through to the file list where the reader handles it.
-            _ => files.push(arg),
+fn main() -> ExitCode {
+    // `args_os`, not `args`: `env::args()` panics on an argument that is not
+    // UTF-8, so `bc $'caf\xe9.bc'` aborted before the file name could even be
+    // reported. A path may hold every byte but `/` and NUL.
+    let args: Vec<OsString> = env::args_os().skip(1).collect();
+    let settings = match parse_args(&args) {
+        Err(refusal) => return refusal.report(),
+        Ok(Request::Help) => {
+            println!("{USAGE}");
+            return ExitCode::SUCCESS;
         }
-    }
-
-    let mut interp = Interpreter::new(math_lib);
-
-    // -e: evaluate expression and exit.
-    if let Some(expr_str) = expr_to_eval {
-        let mut parser = Parser::new(&expr_str);
-        let stmts = parser.parse_program();
-        interp.run(&stmts);
-        return;
-    }
-
-    // Process input files.
-    if !files.is_empty() {
-        for file in &files {
-            match std::fs::read_to_string(file) {
-                Ok(content) => {
-                    let mut parser = Parser::new(&content);
-                    let stmts = parser.parse_program();
-                    interp.run(&stmts);
-                }
-                Err(e) => {
-                    eprintln!("bc: cannot open '{}': {}", file, e);
-                }
-            }
+        Ok(Request::Version) => {
+            println!("bc (SlateOS coreutils) 0.1.0");
+            return ExitCode::SUCCESS;
         }
-        return;
-    }
+        Ok(Request::Run(settings)) => settings,
+    };
 
-    // Interactive/pipe mode.
-    let stdin = io::stdin();
+    let mut interp = Interpreter::new(settings.math_lib);
+
     // Whether input is a terminal, not whether the *environment* looks like
     // one. `TERM` is inherited by every child of a terminal session, pipes
     // included, so the previous probe said "interactive" for
     // `echo 1+1 | bc` -- and the banner went into the caller's captured
     // output, ahead of the answer. `$(echo 1+1 | bc)` is the single most
     // common way this program is used.
-    let is_tty = {
+    let stdin = io::stdin();
+    let interactive = settings.force_interactive || {
         use std::io::IsTerminal;
         stdin.is_terminal()
     };
 
-    if !quiet && is_tty {
-        println!("bc 1.0 (Slate OS)");
+    // Before the operands, as GNU's is: the banner introduces the session,
+    // and there is no session to introduce when `-e` ends the run.
+    if !settings.quiet && interactive && settings.reads_stdin() {
+        println!("bc (SlateOS coreutils) 0.1.0");
         println!("Type 'quit' to exit.");
     }
 
-    // Read all input, accumulating multi-line constructs.
+    for input in &settings.inputs {
+        // Stop at the first one that fails, which is GNU's behaviour and the
+        // only safe one: a later file that uses a function an unreadable
+        // earlier file was to have defined would otherwise compute a wrong
+        // answer rather than report the missing file.
+        if let Err(trouble) = eval_input(&mut interp, input) {
+            return trouble.report();
+        }
+    }
+
+    if settings.reads_stdin()
+        && let Err(trouble) = eval_stdin(&mut interp, &stdin)
+    {
+        return trouble.report();
+    }
+
+    ExitCode::SUCCESS
+}
+
+/// Run one `-e` expression or one file operand.
+fn eval_input(interp: &mut Interpreter, input: &Input) -> Result<(), Trouble> {
+    // The second element is what to blame if the bytes turn out not to be
+    // UTF-8, which for `-e` is the command line rather than any file.
+    let (text, blame) = match input {
+        Input::Expression(bytes) => (bytes.clone(), Trouble::ExpressionNotUtf8),
+        Input::File(path) => {
+            // `read`, not `read_to_string`: the latter reports an invalid byte
+            // as an *open* failure, so `bc data.bin` claimed the file could
+            // not be opened when it had been opened and read in full.
+            let bytes = std::fs::read(path).map_err(|_| Trouble::Unavailable(path.clone()))?;
+            (bytes, Trouble::FileNotUtf8(path.clone()))
+        }
+    };
+    let text = String::from_utf8(text).map_err(|_| blame)?;
+    let mut parser = Parser::new(&text);
+    let stmts = parser.parse_program();
+    interp.run(&stmts);
+    Ok(())
+}
+
+/// The interactive/pipe session: read until EOF, evaluating each construct as
+/// soon as its braces balance.
+fn eval_stdin(interp: &mut Interpreter, stdin: &io::Stdin) -> Result<(), Trouble> {
+    let mut handle = stdin.lock();
     let mut buffer = String::new();
 
-    for line_result in stdin.lock().lines() {
-        let line = match line_result {
-            Ok(l) => l,
-            Err(_) => break,
+    loop {
+        // Bytes, then one explicit UTF-8 check. `BufRead::lines()` yields
+        // `io::Result<String>` and the old loop answered a decoding failure
+        // with `break` -- so one stray byte in a piped script silently
+        // truncated the program and still exited 0.
+        let mut raw: Vec<u8> = Vec::new();
+        match handle.read_until(b'\n', &mut raw) {
+            Ok(0) => break,
+            Ok(_) => {}
+            // Reported, not swallowed. `break` here -- which is what the old
+            // loop did -- turns a failed read into a normal end of input, so
+            // a truncated program is evaluated and the run exits 0.
+            Err(e) => return Err(Trouble::StdinRead(strerror(&e))),
+        }
+        let Ok(line) = String::from_utf8(raw) else {
+            return Err(Trouble::StdinNotUtf8);
         };
-
-        buffer.push_str(&line);
+        // One `\n` and then one `\r`, which is exactly what `BufRead::lines()`
+        // strips. `trim_end_matches` would eat a run of them, so a line whose
+        // data genuinely ends in `\r\r` would come back shorter than it was.
+        let line = line.strip_suffix('\n').unwrap_or(&line);
+        let line = line.strip_suffix('\r').unwrap_or(line);
+        buffer.push_str(line);
         buffer.push('\n');
 
         // Once the braces balance, the construct is complete: parse and run it.
@@ -2173,6 +2411,181 @@ fn main() {
         let stmts = parser.parse_program();
         interp.run(&stmts);
     }
+    Ok(())
+}
+
+// -------------------------------------------------------------------- parsing
+
+fn parse_args(args: &[OsString]) -> Result<Request, Refusal> {
+    let mut settings = Settings::default();
+    let mut only_operands = false;
+    let mut at = 0usize;
+
+    while let Some(arg) = args.get(at) {
+        at = at.saturating_add(1);
+        if only_operands {
+            settings.inputs.push(Input::File(arg.clone()));
+            continue;
+        }
+        let bytes = arg_bytes(arg);
+
+        if bytes == b"--" {
+            only_operands = true;
+        } else if bytes == b"-" || bytes.first() != Some(&b'-') {
+            // A bare `-` is a file name, not standard input: GNU answers
+            // `bc -` with `File - is unavailable.` and exits 1.
+            settings.inputs.push(Input::File(arg.clone()));
+        } else if let Some(body) = bytes.strip_prefix(b"--") {
+            if let Some(request) = long_option(body, &bytes, args, &mut at, &mut settings)? {
+                return Ok(request);
+            }
+        } else if let Some(request) = short_options(&bytes, args, &mut at, &mut settings)? {
+            return Ok(request);
+        }
+    }
+
+    Ok(Request::Run(settings))
+}
+
+/// The two flags GNU implements and this bc does not.
+///
+/// They are refused rather than accepted-and-ignored because their absence
+/// **changes the answer**: `-s` makes non-standard constructs errors, so
+/// silently ignoring it runs a program POSIX bc would have rejected (measured:
+/// `echo 'print 1,2' | bc -s` prints `(standard_in) 1: Error: print statement`
+/// and computes nothing, while plain `bc` prints `12`), and `-c` emits dc code
+/// instead of results. `-w` is the counter-example and is accepted as a no-op
+/// -- ignoring it omits an advisory on stderr and leaves every computed value
+/// identical, so refusing `bc -w` would break working scripts to no purpose.
+///
+/// The rule, stated as a property of the flag rather than of this utility:
+/// **refuse when ignoring it would change a computed value or an exit status,
+/// accept when it would only omit an advisory.** See `design-decisions.md`
+/// §361; the work to implement them properly is in `todo.txt`.
+const NO_STANDARD: Refusal =
+    Refusal::Unimplemented("-s/--standard (reject non-standard constructs) is not implemented");
+const NO_COMPILE: Refusal =
+    Refusal::Unimplemented("-c/--compile (emit dc code) is not implemented");
+
+/// One `--name`, `--name=value` or `--name value` argument.
+fn long_option(
+    body: &[u8],
+    whole: &[u8],
+    args: &[OsString],
+    next: &mut usize,
+    settings: &mut Settings,
+) -> Result<Option<Request>, Refusal> {
+    // Split before resolving, so the *name* is what gets matched and the whole
+    // argument is what gets echoed back when it resolves to nothing.
+    let (typed, inline) = match body.iter().position(|&c| c == b'=') {
+        Some(at) => (
+            body.get(..at).unwrap_or_default(),
+            Some(body.get(at.saturating_add(1)..).unwrap_or_default()),
+        ),
+        None => (body, None),
+    };
+    // Every option name is ASCII, so a name that is not UTF-8 matches none of
+    // them and takes the unrecognised path, reported as the bytes typed.
+    let typed =
+        std::str::from_utf8(typed).map_err(|_| Refusal::Getopt(BC.unrecognized_option(whole)))?;
+    let (name, which) = BC
+        .resolve_long(typed, whole, LONG_OPTIONS)
+        .map_err(Refusal::Getopt)?;
+
+    match which {
+        Long::Standard => return Err(NO_STANDARD),
+        Long::Compile => return Err(NO_COMPILE),
+        _ => {}
+    }
+
+    if which == Long::Expression {
+        let value = match inline {
+            Some(value) => value.to_vec(),
+            None => {
+                let Some(separate) = args.get(*next) else {
+                    return Err(Refusal::Getopt(BC.long_missing_argument(name)));
+                };
+                *next = next.saturating_add(1);
+                arg_bytes(separate)
+            }
+        };
+        settings.inputs.push(Input::Expression(value));
+        return Ok(None);
+    }
+
+    if inline.is_some() {
+        return Err(Refusal::Getopt(BC.long_unwanted_argument(name)));
+    }
+    match which {
+        Long::Mathlib => settings.math_lib = true,
+        Long::Quiet => settings.quiet = true,
+        Long::Interactive => settings.force_interactive = true,
+        // Accepted and deliberately does nothing; see `refuse`.
+        Long::Warn => {}
+        Long::Help => return Ok(Some(Request::Help)),
+        Long::Version => return Ok(Some(Request::Version)),
+        Long::Compile | Long::Expression | Long::Standard => {}
+    }
+    Ok(None)
+}
+
+/// One `-abc` cluster.
+///
+/// Bytes, not `char`s: `-é` is two bytes, and iterating `char`s would report
+/// `invalid option -- 'é'`, an option nobody typed. The old loop did exactly
+/// that, and also *continued* past an unknown flag and exited 0.
+fn short_options(
+    bytes: &[u8],
+    args: &[OsString],
+    next: &mut usize,
+    settings: &mut Settings,
+) -> Result<Option<Request>, Refusal> {
+    let cluster = bytes.get(1..).unwrap_or_default();
+    let mut at = 0usize;
+    while let Some(&c) = cluster.get(at) {
+        match c {
+            b'l' => settings.math_lib = true,
+            b'q' => settings.quiet = true,
+            b'i' => settings.force_interactive = true,
+            b'w' => {}
+            b's' => return Err(NO_STANDARD),
+            b'c' => return Err(NO_COMPILE),
+            b'h' => return Ok(Some(Request::Help)),
+            b'v' => return Ok(Some(Request::Version)),
+            b'e' => {
+                // A *required* argument: the rest of the cluster if there is
+                // one, otherwise the whole of the next argument. `bc -e` with
+                // nothing after it used to become an interactive session,
+                // because the missing argument was an `Option` nobody checked.
+                let rest = cluster.get(at.saturating_add(1)..).unwrap_or_default();
+                let value = if rest.is_empty() {
+                    let Some(separate) = args.get(*next) else {
+                        return Err(Refusal::Getopt(BC.short_missing_argument(b'e')));
+                    };
+                    *next = next.saturating_add(1);
+                    arg_bytes(separate)
+                } else {
+                    rest.to_vec()
+                };
+                settings.inputs.push(Input::Expression(value));
+                return Ok(None);
+            }
+            _ => return Err(Refusal::Getopt(BC.invalid_option(c))),
+        }
+        at = at.saturating_add(1);
+    }
+    Ok(None)
+}
+
+#[cfg(unix)]
+fn arg_bytes(arg: &OsString) -> Vec<u8> {
+    use std::os::unix::ffi::OsStrExt;
+    arg.as_bytes().to_vec()
+}
+
+#[cfg(not(unix))]
+fn arg_bytes(arg: &OsString) -> Vec<u8> {
+    arg.to_string_lossy().into_owned().into_bytes()
 }
 
 // -------------------------------------------------------------------------
@@ -2727,5 +3140,252 @@ s
             .collect();
         assert_eq!(rejoined.len(), 302);
         assert!(rejoined.ends_with("069376"));
+    }
+
+    // ---------------------------------------------------------------------
+    // The command line
+    // ---------------------------------------------------------------------
+    //
+    // Every expectation below was measured against GNU bc 1.07.1 through WSL
+    // and is cited in the comment on the test that locks it in. The tests
+    // that assert a *sentence* are asserting glibc's, reached through
+    // `coreutils::getopt`, not a sentence invented here.
+
+    fn parse(argv: &[&str]) -> Result<Request, Refusal> {
+        let args: Vec<OsString> = argv.iter().map(OsString::from).collect();
+        parse_args(&args)
+    }
+
+    fn settings(argv: &[&str]) -> Settings {
+        match parse(argv) {
+            Ok(Request::Run(s)) => s,
+            other => panic!("expected a run, got {other:?}"),
+        }
+    }
+
+    fn refusal(argv: &[&str]) -> Refusal {
+        match parse(argv) {
+            Err(refusal) => refusal,
+            other => panic!("expected a refusal, got {other:?}"),
+        }
+    }
+
+    fn getopt_sentence(argv: &[&str]) -> String {
+        match refusal(argv) {
+            Refusal::Getopt(e) => e.sentence,
+            other => panic!("expected a getopt error, got {other:?}"),
+        }
+    }
+
+    fn file(name: &str) -> Input {
+        Input::File(OsString::from(name))
+    }
+
+    fn expr(text: &str) -> Input {
+        Input::Expression(text.as_bytes().to_vec())
+    }
+
+    #[test]
+    fn no_arguments_reads_standard_input() {
+        let s = settings(&[]);
+        assert_eq!(s, Settings::default());
+        assert!(s.reads_stdin());
+    }
+
+    #[test]
+    fn short_flags_cluster() {
+        let s = settings(&["-lq"]);
+        assert!(s.math_lib);
+        assert!(s.quiet);
+        assert_eq!(settings(&["-l", "-q"]), s);
+        assert_eq!(settings(&["--mathlib", "--quiet"]), s);
+    }
+
+    #[test]
+    fn interactive_is_forced_by_i_and_by_the_long_name() {
+        assert!(settings(&["-i"]).force_interactive);
+        assert!(settings(&["--interactive"]).force_interactive);
+        assert!(!settings(&[]).force_interactive);
+    }
+
+    #[test]
+    fn warn_is_accepted_and_does_nothing() {
+        // Measured: `-w` only adds an advisory on stderr -- `echo 'print 1,2'
+        // | bc -w` still prints `12` -- so ignoring it cannot change an
+        // answer, which is why it is the one unimplemented flag not refused.
+        assert_eq!(settings(&["-w"]), Settings::default());
+        assert_eq!(settings(&["--warn"]), Settings::default());
+    }
+
+    #[test]
+    fn standard_and_compile_are_refused_rather_than_ignored() {
+        // Both change the answer if ignored, so a bc that quietly accepted
+        // them would run a program POSIX bc rejects, or print results where
+        // dc code was asked for.
+        for argv in [
+            &["-s"][..],
+            &["--standard"][..],
+            &["-c"][..],
+            &["--compile"][..],
+        ] {
+            match refusal(argv) {
+                Refusal::Unimplemented(message) => assert!(
+                    message.contains("is not implemented"),
+                    "{argv:?} -> {message}"
+                ),
+                other => panic!("{argv:?} should be refused, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn operands_are_files_in_the_order_typed() {
+        let s = settings(&["a.bc", "b.bc"]);
+        assert_eq!(s.inputs, vec![file("a.bc"), file("b.bc")]);
+        assert!(s.reads_stdin(), "GNU reads stdin after the operands");
+    }
+
+    #[test]
+    fn a_bare_dash_is_a_file_name_and_not_standard_input() {
+        // Measured: `printf '3+3\n' | bc -` answers `File - is unavailable.`
+        // and exits 1. It never reads the pipe.
+        assert_eq!(settings(&["-"]).inputs, vec![file("-")]);
+    }
+
+    #[test]
+    fn double_dash_ends_the_options() {
+        assert_eq!(settings(&["--", "-l"]).inputs, vec![file("-l")]);
+        assert!(!settings(&["--", "-l"]).math_lib);
+    }
+
+    #[test]
+    fn expressions_and_files_keep_command_line_order() {
+        assert_eq!(
+            settings(&["-e", "1+1", "a.bc", "-e", "2+2"]).inputs,
+            vec![expr("1+1"), file("a.bc"), expr("2+2")]
+        );
+    }
+
+    #[test]
+    fn every_spelling_of_an_expression_argument_is_accepted() {
+        let want = vec![expr("1+1")];
+        assert_eq!(settings(&["-e", "1+1"]).inputs, want);
+        assert_eq!(settings(&["-e1+1"]).inputs, want);
+        assert_eq!(settings(&["--expression", "1+1"]).inputs, want);
+        assert_eq!(settings(&["--expression=1+1"]).inputs, want);
+    }
+
+    #[test]
+    fn an_expression_suppresses_the_standard_input_session() {
+        // Ours, not GNU's -- GNU has no `-e` at all. `bc -e '2+2'` dropping
+        // into an interactive session is nobody's behaviour.
+        assert!(!settings(&["-e", "2+2"]).reads_stdin());
+        assert!(!settings(&["a.bc", "-e", "2+2"]).reads_stdin());
+        assert!(settings(&["a.bc"]).reads_stdin());
+    }
+
+    #[test]
+    fn a_missing_expression_argument_is_an_error_not_a_session() {
+        // The old parser wrote `args.next()` into an `Option` nobody checked,
+        // so `bc -e` silently became an interactive bc.
+        assert_eq!(
+            getopt_sentence(&["-e"]),
+            "option requires an argument -- 'e'"
+        );
+        assert_eq!(
+            getopt_sentence(&["--expression"]),
+            "option '--expression' requires an argument"
+        );
+    }
+
+    #[test]
+    fn an_unknown_short_option_stops_the_run() {
+        // Measured: `bc -Z` prints `bc: invalid option -- 'Z'` on stderr, the
+        // usage block on stdout, and exits 1. The old parser printed
+        // `bc: unknown option: -Z`, carried on, and exited 0.
+        assert_eq!(getopt_sentence(&["-Z"]), "invalid option -- 'Z'");
+        match refusal(&["-Z"]) {
+            Refusal::Getopt(e) => assert_eq!(e.status, 1),
+            other => panic!("expected a getopt error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn an_unknown_long_option_echoes_what_was_typed() {
+        assert_eq!(getopt_sentence(&["--zzz"]), "unrecognized option '--zzz'");
+        // `=VALUE` and all, because nothing resolved to name instead.
+        assert_eq!(
+            getopt_sentence(&["--zzz=1"]),
+            "unrecognized option '--zzz=1'"
+        );
+    }
+
+    #[test]
+    fn an_ambiguous_abbreviation_lists_the_table_in_gnus_order() {
+        // Measured with `bc --=x`, whose empty prefix matches every entry:
+        // GNU's table is alphabetical. `--expression` is ours and sits where
+        // alphabetical order puts it, between `--compile` and `--help`.
+        assert_eq!(
+            getopt_sentence(&["--=x"]),
+            "option '--=x' is ambiguous; possibilities: '--compile' \
+             '--expression' '--help' '--interactive' '--mathlib' '--quiet' \
+             '--standard' '--version' '--warn'"
+        );
+    }
+
+    #[test]
+    fn an_unambiguous_abbreviation_resolves() {
+        assert!(settings(&["--math"]).math_lib);
+        // `--q` is unique, `--warn` and `--version` share no prefix with it.
+        assert!(settings(&["--q"]).quiet);
+    }
+
+    #[test]
+    fn a_flag_that_takes_nothing_refuses_a_value() {
+        assert_eq!(
+            getopt_sentence(&["--mathlib=1"]),
+            "option '--mathlib' doesn't allow an argument"
+        );
+    }
+
+    #[test]
+    fn help_and_version_are_requests_rather_than_settings() {
+        assert_eq!(parse(&["-h"]).ok(), Some(Request::Help));
+        assert_eq!(parse(&["--help"]).ok(), Some(Request::Help));
+        assert_eq!(parse(&["-v"]).ok(), Some(Request::Version));
+        assert_eq!(parse(&["--version"]).ok(), Some(Request::Version));
+        // They win from inside a cluster too, and before a later bad option.
+        assert_eq!(parse(&["-lh"]).ok(), Some(Request::Help));
+    }
+
+    #[test]
+    fn the_usage_block_names_every_flag_the_parser_accepts() {
+        // A usage text that drifts from the parser is how a user learns an
+        // option exists only by reading the source.
+        for flag in ["-h", "-i", "-l", "-q", "-w", "-v", "-e"] {
+            assert!(USAGE.contains(flag), "usage does not mention {flag}");
+        }
+        assert!(
+            USAGE.contains("SlateOS extension"),
+            "-e is not GNU's and the usage must say so"
+        );
+    }
+
+    #[test]
+    fn a_non_utf8_argument_is_a_file_name_rather_than_a_panic() {
+        // `env::args()` panics on one of these, which is what made
+        // `bc $'caf\xe9.bc'` abort before it could name the file. This test
+        // can only build the byte string on a platform whose `OsString` takes
+        // one, so it is Unix-only -- but the parser it exercises is not.
+        #[cfg(unix)]
+        {
+            use std::os::unix::ffi::OsStringExt;
+            let arg = OsString::from_vec(b"caf\xe9.bc".to_vec());
+            let parsed = match parse_args(&[arg.clone()]) {
+                Ok(Request::Run(s)) => s,
+                other => panic!("expected a run, got {other:?}"),
+            };
+            assert_eq!(parsed.inputs, vec![Input::File(arg)]);
+        }
     }
 }

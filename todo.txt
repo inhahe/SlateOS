@@ -54742,3 +54742,53 @@ TRIGGER
   validate the semantics against a real requirement, and the inherit-everything
   default is no weaker than fork.
 
+
+--------------------------------------------------------------------------
+[lane B] bc: -s/--standard and -c/--compile refused; the lexer needs bytes
+--------------------------------------------------------------------------
+Logged 2026-08-22, alongside the fix for
+B-BCS-COMMAND-LINE-EXITED-0-ON-EVERY-KIND-OF-FAILURE (known-issues.md).
+
+WHAT IS DEFERRED
+  Two GNU bc flags we do not implement, and one place we are stricter than
+  GNU:
+
+    -s / --standard   makes non-standard bc constructs errors.  Measured:
+                      `echo 'print 1,2' | bc -s` prints
+                      `(standard_in) 1: Error: print statement` and computes
+                      nothing, where plain bc prints `12`.
+    -c / --compile    emits dc code instead of evaluating.  Undocumented in
+                      GNU's own usage text but present in its option table.
+    UTF-8             our Lexer takes &str, so a source file that is not
+                      valid UTF-8 is refused whole.  GNU lexes bytes, so a
+                      stray byte is a lex error on one line.
+
+WHY IT IS DEFERRED, NOT DONE
+  Both flags need the parser to know, per construct, whether POSIX bc has it
+  -- a tag on roughly thirty productions in `Parser`, plus a warn/error
+  switch threaded through.  That is a real piece of work and unrelated to the
+  command-line bug that surfaced it.  The byte-oriented lexer is a separate
+  rewrite of `Lexer::next_token` and everything that indexes its input.
+
+  Meanwhile the flags are REFUSED, not ignored, with
+  `bc: -s/--standard (reject non-standard constructs) is not implemented`
+  and exit 1.  Accepting and ignoring `-s` would be silently wrong: it would
+  run a program POSIX bc rejects and print an answer.  `-w`/`--warn` IS
+  accepted as a no-op, because ignoring it only omits an advisory on stderr
+  and leaves every computed value identical -- the line between the two is
+  whether the flag's absence changes an answer.
+
+WHAT THE CORRECT FIX LOOKS LIKE
+  Tag each AST production with `Posix | Extension` at construction, and have
+  `Parser` carry a `non_standard: Off | Warn | Error` mode set from the
+  flags.  On an Extension node: Off does nothing, Warn writes
+  `(standard_in) N: (Warning) <construct>` to stderr and continues, Error
+  writes `(standard_in) N: Error: <construct>` and drops the statement.  Note
+  from the measurement that GNU exits 0 in both cases -- the diagnostic does
+  not change the status.  `-c` additionally needs a dc emitter, which is a
+  separate feature and arguably not worth having.
+
+TRIGGER
+  A ported script that passes -s or -w and expects the checking to happen, or
+  the first bc source file in the tree that is not UTF-8.  Neither exists
+  today, which is why refusing loudly is enough for now.

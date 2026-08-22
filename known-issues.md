@@ -50335,7 +50335,7 @@ commands that carry the colour in question, and assert the two renders agree.
 Candidates: anything drawn on the wallpaper, on a video surface, on a
 thumbnail, or on any other content the palette does not own.
 
-**Part 2 progress. 18 of 49 modules converted.**
+**Part 2 progress. 19 of 49 modules converted.**
 
 - [x] `security_dialog.rs` — 29 constants, done 2026-08-22. The method above
   survived contact: the sweep lives in `gui/desktop/src/palette_check.rs` as
@@ -51150,6 +51150,67 @@ thumbnail, or on any other content the palette does not own.
     nothing here: blue, peach, mauve, teal, pink, sapphire, sky.
   - **Deliberate non-change:** the switch knob stays `p.text`, per
     `TD-C-SWITCH-KNOBS-ARE-LOW-CONTRAST-ON-THE-ON-PILL`.
+- [x] `touchpad.rs` — 12 constants, done 2026-08-22. Harness defects
+  AAAAAAAAAAA–RRRRRRRRRRRR (forty-four).
+  - **The slider rule, set here for the remaining thirty modules.** This is the
+    first converted module with a slider, so it had to decide what a slider's
+    three parts are and write it down rather than leave the next module to
+    re-derive it: **the track is a recessed surface (`p.surface1`); the fill and
+    the knob are both the accent.** The reasoning is the same one that governs
+    every other accent site — the accent marks *position and invitation* — and a
+    slider is the one control that carries both at once: between them the fill
+    and the knob say where the value currently sits and where you would take
+    hold of it. The track is neither; it is the space the value moves through.
+  - **The erase check found a real production defect, not a test bug.**
+    `render_slider_label` pushed the filled-portion `FillRect` unconditionally,
+    so a slider resting on its floor (`pointer_speed = 0.1` against a `0.1..3.0`
+    range) emitted a `0 × 4` rectangle — a command the compositor has to carry
+    and cannot draw, on every frame, for as long as the value stays there. Now
+    guarded by `if fill_w > 0.0`. **This is the second time
+    `assert_nothing_is_drawn_and_never_seen` has paid for itself on a module
+    that was not suspected of having anything wrong with it**, which is the
+    argument for running it on every module rather than only where a zero
+    dimension looks plausible.
+  - **Geometry collides three ways now, and this module has two of them.**
+    Module 18 added *across tabs*; this one adds *within one render path* and
+    *across widget kinds sharing a helper*. `12.0 × 12.0` is both the status
+    light and a slider knob, and both are drawn on the General section — the
+    extractors separate them by x (`x < PX + 100.0` vs `x > PX + 100.0`), not by
+    size. Worse, `text: label.to_string(), font_size: 12.0, color: p.text`
+    appears identically in `render_toggle`, `render_slider_label` and
+    `render_choice`, because all three helpers draw their label the same way;
+    each harness defect for those sites needs a distinct *forward* anchor
+    (`// Toggle track.`, `// Slider track.`, the choice well's `x: x + 250.0`).
+    **A shared helper is a geometry collision generator: n callers, one shape.**
+  - **The extractor that keys on x alone is not safe either.** `gesture_columns`
+    first keyed the fingers column on `x == x0 && font_size == 12.0` — which
+    also matches the pinch *choice control's* label, drawn below the table at
+    the same x and size. The colour assertion passed (both are `p.text`); only
+    the row-count arithmetic failed. Fixed by deriving the row count from the
+    two columns that have no such collision and truncating, which is documented
+    in the extractor as relying on the table being drawn before the pinch
+    control. **A test that gets the right answer for the wrong reason is a test
+    that will get the wrong answer later.**
+  - **A reported value is body text.** Extending module 18's clock-face
+    judgement to three more sites: the gesture table's finger count (was
+    `LAVENDER`), its action column (was `BLUE`), and every choice control's
+    current value (was `BLUE`). None is a position, an invitation or a
+    category — each is a value being *reported*, and a reported value follows
+    neither the accent nor a categorical hue. All are `p.text`; the emphasis the
+    finger count needs is already carried by its weight, and the three gesture
+    columns are told apart by their headings and their x-positions, **which is
+    what a table is.**
+  - **The reset button's label was wrong, not merely fragile** — the fifth
+    module with the `crust`-on-a-categorical-fill shape and the second where the
+    coincidence had already broken. It was Mocha `base`, a near-black chosen to
+    read on Mocha's *pale* red. On Latte the fill and that label are both pale
+    and the button says nothing. It is `readable_on(p.red)` now, and
+    `the_reset_buttons_label_can_be_read_on_the_button` asserts both equality
+    with `readable_on(fill)` **and** that the two modes disagree — a label
+    identical in both modes is this bug returning.
+  - **Deliberate non-change:** the toggle knob stays `p.text` on the accent
+    track, per `TD-C-SWITCH-KNOBS-ARE-LOW-CONTRAST-ON-THE-ON-PILL`. Changing it
+    here would be a second change hiding inside this one.
 
 **Trigger:** this is not blocked on anything. It is sequenced after the shell
 event loop (`TD-C-THE-SHELL-CAN-DRAW-ITSELF-AND-NOBODY-CAN-ASK-IT-TO`) only

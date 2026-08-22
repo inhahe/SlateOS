@@ -195,6 +195,11 @@ IGNORE: dict[str, str] = {
     # recomputes the same answer) or that one address. Audited by hand
     # 2026-08-22 alongside the four real races in this crate.
     "posix/src/ctype.rs:CACHED": "memoised pointer to a static table; every write stores the same value",
+    # Reached only from `current()`'s `try_with(...).unwrap_or(&raw mut HOST_FALLBACK)`
+    # arm, which is taken only once a thread's TLS has already been destroyed. A
+    # `#[test]` body always runs with live TLS, so no test can reach it -- and a
+    # thread that does is, as the comment there notes, the last one alive.
+    "posix/src/perthread.rs:HOST_FALLBACK": "only reachable after thread-local teardown, which no #[test] body is",
 }
 
 
@@ -262,6 +267,113 @@ def _block_end(lines: list[str], start: int) -> int:
     return len(lines) - 1
 
 
+_CFG_ATTR = re.compile(r"^\s*#\[cfg\((.*)\)\]\s*$")
+_ATTR_OR_DOC = re.compile(r"^\s*(?:#\[|#!\[|///|//!|//|$)")
+
+
+def _cfg_true_on_host(pred: str) -> bool:
+    """Could an item under `#[cfg(<pred>)]` be compiled by a host `cargo test`?
+
+    Only two facts are known: `target_os = "none"` is false (tests run on the
+    host, not on the bare-metal target) and `test` is true. *Everything else is
+    treated as true*, which is the safe direction: an unknown predicate keeps
+    the item in the report, so the tool can only ever fail toward noise, never
+    toward silence.
+
+    This has to actually parse, not pattern-match. The tree contains
+    `#[cfg(any(target_os = "none", test))]` twenty times, and that item IS
+    compiled on host -- via the `test` arm. A rule that merely looked for the
+    string `target_os = "none"` would excuse all twenty.
+    """
+
+    def parse(s: str, i: int) -> tuple[bool, int]:
+        while i < len(s) and s[i].isspace():
+            i += 1
+        start = i
+        while i < len(s) and (s[i].isalnum() or s[i] in "_"):
+            i += 1
+        word = s[start:i]
+        while i < len(s) and s[i].isspace():
+            i += 1
+
+        if i < len(s) and s[i] == "(":  # all(..) / any(..) / not(..)
+            i += 1
+            args: list[bool] = []
+            while True:
+                val, i = parse(s, i)
+                args.append(val)
+                while i < len(s) and s[i].isspace():
+                    i += 1
+                if i < len(s) and s[i] == ",":
+                    i += 1
+                    # Trailing comma before ')'.
+                    j = i
+                    while j < len(s) and s[j].isspace():
+                        j += 1
+                    if j < len(s) and s[j] == ")":
+                        i = j
+                    else:
+                        continue
+                if i < len(s) and s[i] == ")":
+                    i += 1
+                break
+            if word == "not":
+                return (not args[0] if args else True), i
+            if word == "all":
+                return all(args), i
+            if word == "any":
+                return any(args), i
+            return True, i  # unrecognised combinator: assume compiled
+
+        if i < len(s) and s[i] == "=":  # key = "value"
+            i += 1
+            while i < len(s) and s[i].isspace():
+                i += 1
+            if i < len(s) and s[i] == '"':
+                i += 1
+                vs = i
+                while i < len(s) and s[i] != '"':
+                    i += 1
+                value = s[vs:i]
+                i += 1 if i < len(s) else 0
+                if word == "target_os":
+                    return value != "none", i
+            return True, i
+
+        return True, i  # bare ident (`test`, `unix`, a feature): assume true
+
+    try:
+        return parse(pred, 0)[0]
+    except (IndexError, RecursionError):
+        return True
+
+
+def _host_excluded_lines(lines: list[str]) -> set[int]:
+    """Line indices belonging to items a host `cargo test` never compiles.
+
+    Without this the tool reports the code that did it *right*. `posix`'s
+    `no_new_privs` bit is a `thread_local!` on host and a `static AtomicBool`
+    only under `#[cfg(target_os = "none")]` -- the exact fix this tool exists to
+    ask for -- and the bare-metal half was being flagged by twenty host tests
+    that cannot reach it. Eight of the first 48 baselined entries were this.
+    """
+    excluded: set[int] = set()
+    for i, line in enumerate(lines):
+        m = _CFG_ATTR.match(line)
+        if not m or _cfg_true_on_host(m.group(1)):
+            continue
+        # The attribute binds to the next real item; skip further attributes,
+        # doc comments and blank lines to find it.
+        j = i + 1
+        while j < len(lines) and _ATTR_OR_DOC.match(lines[j]):
+            j += 1
+        if j >= len(lines):
+            continue
+        end = _block_end(lines, j) if "{" in "\n".join(lines[j : j + 3]) else j
+        excluded.update(range(i, end + 1))
+    return excluded
+
+
 def analyse(path: Path) -> list[tuple[str, str, list[str], list[str]]]:
     """Return (name, decl_site, unserialised_tests, serialised_tests) per global."""
     try:
@@ -269,8 +381,13 @@ def analyse(path: Path) -> list[tuple[str, str, list[str], list[str]]]:
     except OSError:
         return []
 
+    # A global the host build never compiles cannot be raced by a host test.
+    excluded = _host_excluded_lines(lines)
+
     globals_: dict[str, str] = {}
     for i, line in enumerate(lines):
+        if i in excluded:
+            continue
         m = _STATIC_MUT.match(line) or _STATIC_ATOMIC.match(line)
         if m and not _IS_LOCK_NAME.search(m.group(1)):
             globals_[m.group(1)] = f"{_relpath(path)}:{i + 1}"
@@ -290,6 +407,8 @@ def analyse(path: Path) -> list[tuple[str, str, list[str], list[str]]]:
     for i, line in enumerate(lines):
         m = _FN.match(line)
         if not m:
+            continue
+        if i in excluded:
             continue
         is_test = any(_TEST_ATTR.match(lines[k]) for k in range(max(0, i - 6), i))
         fns.append((m.group(1), i, _block_end(lines, i), is_test))

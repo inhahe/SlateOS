@@ -59463,7 +59463,7 @@ would have been too. `scripts/raced-globals.py` closes that: it flags a
 Three things make it a check that survives contact rather than one that gets
 deleted:
 
-- **It is a ratchet.** `scripts/raced-globals-baseline.txt` records the 48
+- **It is a ratchet.** `scripts/raced-globals-baseline.txt` records the 40
   pre-existing instances, and `--check` fails only on a global that is *not* in
   it, so the backlog can be worked down without the gate being red on the day it
   lands. The file only ever shrinks. A false positive belongs in the script's
@@ -59479,6 +59479,26 @@ deleted:
   no word resembling "lock". Following the same call graph used for
   reachability is what stops the tool flagging the code that already did it
   right — the failure mode that gets a linter switched off.
+- **`#[cfg]` is evaluated, not ignored.** A global the host build never compiles
+  cannot be raced by a host test. This was not a theoretical concern: the first
+  entry examined from the backlog, `unistd.rs`'s `NO_NEW_PRIVS`, is a
+  `thread_local!` on host and a `static AtomicBool` *only* under
+  `#[cfg(target_os = "none")]` — it is already the fix this tool exists to ask
+  for, and 20 host tests were being credited with racing the bare-metal half
+  they cannot link against. Eight of the original 48 were this, so the tool now
+  parses the predicate under "`target_os = "none"` is false, `test` is true,
+  everything else unknown-and-assumed-true". It has to genuinely parse: the tree
+  writes `#[cfg(any(target_os = "none", test))]` twenty times, and *that* item
+  is compiled on host via the `test` arm, so a rule that merely grepped for the
+  string would have excused all twenty. Unknown predicates resolving to "true"
+  is the safe direction — the tool can fail toward noise, never toward silence.
+
+That left 41, of which one more was a genuine false positive with a reason worth
+recording rather than baselining: `perthread.rs`'s `HOST_FALLBACK` is reached
+only from `current()`'s `try_with(…).unwrap_or(&raw mut HOST_FALLBACK)` arm,
+which is taken only once a thread's TLS has *already been destroyed*. A `#[test]`
+body always runs with live TLS. It is in `IGNORE` with that sentence attached.
+**Backlog: 40.**
 
 It is scoped to `posix/` and `userspace/` for the same reason gate 2 is scoped
 to `userspace/`: a lane A or C push must never pay for, or be blocked by, a lane
@@ -59490,6 +59510,12 @@ counts match the hand analysis exactly (`DL_ERROR` 15, `HTAB` 7, `SAVED` 3,
 which is what demonstrates that both halves work, reachability and guard
 detection. The macro-based globals above remain unaudited, but they are now
 *visible*: they sit in the baseline rather than being invisible until they flake.
+
+One caveat on the backlog's meaning, learned from the `NO_NEW_PRIVS` entry: a
+baselined line says "two or more tests reach this with no lock", **not** "this is
+a bug". Reachability here is a regex over a one-hop call graph, so a global
+touched only on a branch no test takes still counts. Each entry has to be read
+before it is fixed, and some will end in `IGNORE` rather than in a lock.
 
 ### Verification
 

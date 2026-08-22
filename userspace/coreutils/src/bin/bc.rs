@@ -3371,21 +3371,49 @@ s
         );
     }
 
+    /// `env::args()` panics on one of these, which is what made
+    /// `bc $'caf\xe9.bc'` abort before it could name the file.
     #[test]
+    #[cfg(unix)]
     fn a_non_utf8_argument_is_a_file_name_rather_than_a_panic() {
-        // `env::args()` panics on one of these, which is what made
-        // `bc $'caf\xe9.bc'` abort before it could name the file. This test
-        // can only build the byte string on a platform whose `OsString` takes
-        // one, so it is Unix-only -- but the parser it exercises is not.
-        #[cfg(unix)]
-        {
-            use std::os::unix::ffi::OsStringExt;
-            let arg = OsString::from_vec(b"caf\xe9.bc".to_vec());
-            let parsed = match parse_args(&[arg.clone()]) {
-                Ok(Request::Run(s)) => s,
-                other => panic!("expected a run, got {other:?}"),
-            };
-            assert_eq!(parsed.inputs, vec![Input::File(arg)]);
-        }
+        use std::os::unix::ffi::OsStringExt;
+        let arg = OsString::from_vec(b"caf\xe9.bc".to_vec());
+        assert!(
+            arg.to_str().is_none(),
+            "the fixture must be un-representable as String, or it tests nothing"
+        );
+        let parsed = match parse_args(std::slice::from_ref(&arg)) {
+            Ok(Request::Run(s)) => s,
+            other => panic!("expected a run, got {other:?}"),
+        };
+        assert_eq!(parsed.inputs, vec![Input::File(arg)]);
+    }
+
+    /// The twin of the test above, for the development host.
+    ///
+    /// The `#[cfg(unix)]` one is the regression test for the defect this
+    /// parser was rewritten to fix, and on Windows it **does not run** — which
+    /// is the same blind spot that let the defect exist. Windows has its own
+    /// argument that no `String` can hold: an unpaired surrogate (a UTF-16 code
+    /// unit in `0xD800..=0xDFFF` with no partner), which reaches the same
+    /// `unwrap` inside `env::args()` by a different route. Without this the
+    /// only build that checks anything here is the `x86_64-slateos` one.
+    #[test]
+    #[cfg(windows)]
+    fn a_non_utf8_argument_is_a_file_name_rather_than_a_panic() {
+        use std::os::windows::ffi::OsStringExt;
+        // "caf\u{D800}.bc" — a lone high surrogate in the middle of a name.
+        let arg = OsString::from_wide(&[
+            0x0063, 0x0061, 0x0066, 0xD800, 0x002E, 0x0062, 0x0063,
+        ]);
+        assert!(
+            arg.to_str().is_none(),
+            "the fixture must be un-representable as String, or it tests nothing"
+        );
+        let parsed = match parse_args(std::slice::from_ref(&arg)) {
+            Ok(Request::Run(s)) => s,
+            other => panic!("expected a run, got {other:?}"),
+        };
+        assert_eq!(parsed.inputs, vec![Input::File(arg)]);
     }
 }

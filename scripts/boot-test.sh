@@ -2343,6 +2343,46 @@ check_prerequisites() {
 
 check_prerequisites
 
+# A self-test that nothing calls is not a test.  It compiles, it reads as
+# coverage, it gets cited in a commit message as "tested" -- and it has never
+# executed.  `evdev::self_test` sat uncalled for exactly one commit, and the
+# first boot that ran it failed hard on a real ordering bug
+# (B-A-EVDEV-SYN-DROPPED-ARRIVES-ONE-RECORD-LATE); the audit that followed found
+# forty more in the same state.  This gate keeps the count at zero.
+#
+# It runs HERE -- before the build -- because it costs milliseconds and the
+# build costs ten minutes, and a wiring mistake is exactly the kind of thing
+# there is no reason to discover after a build.
+#
+# Skipped only when Python is absent.  A script that exits 2 because it could
+# not run counts as a failure, because a check that cannot fire must not be
+# indistinguishable from a check that passed.
+check_self_tests_wired() {
+    local py=""
+    if command -v python &>/dev/null; then
+        py=python
+    elif command -v python3 &>/dev/null; then
+        py=python3
+    else
+        echo "=== Self-test wiring: skipped (no python) ===" >&2
+        return 0
+    fi
+
+    echo "=== Checking that every self-test is reachable ==="
+    if "$py" "$PROJECT_ROOT/scripts/check-self-tests-wired.py"; then
+        return 0
+    fi
+
+    echo "" >&2
+    echo "ERROR: refusing to build.  Wire the self-test(s) above into" >&2
+    echo "kernel_main, or allowlist them with a reason.  Fixing this now" >&2
+    echo "costs a minute; the ten-minute build that follows would prove" >&2
+    echo "nothing about code that never runs." >&2
+    exit 1
+}
+
+check_self_tests_wired
+
 # Step 1: Build
 if [ "$NO_BUILD" -eq 0 ]; then
     check_free_space "before building"

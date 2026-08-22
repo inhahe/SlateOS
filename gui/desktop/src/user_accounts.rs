@@ -10,28 +10,39 @@
 //! - User switching UI
 //! - Account activity log
 
+use appearance::{Palette, readable_on};
 use guitk::color::Color;
 use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::style::CornerRadii;
 
 // ============================================================================
-// Theme
+// Colour
 // ============================================================================
-
-const MOCHA_BASE: Color = Color::from_hex(0x1E1E2E);
-const MOCHA_SURFACE0: Color = Color::from_hex(0x313244);
-const MOCHA_SURFACE1: Color = Color::from_hex(0x45475A);
-const MOCHA_TEXT: Color = Color::from_hex(0xCDD6F4);
-const MOCHA_SUBTEXT0: Color = Color::from_hex(0xA6ADC8);
-const MOCHA_BLUE: Color = Color::from_hex(0x89B4FA);
-const MOCHA_RED: Color = Color::from_hex(0xF38BA8);
-const MOCHA_GREEN: Color = Color::from_hex(0xA6E3A1);
-const MOCHA_YELLOW: Color = Color::from_hex(0xF9E2AF);
-const MOCHA_PEACH: Color = Color::from_hex(0xFAB387);
-const MOCHA_MAUVE: Color = Color::from_hex(0xCBA6F7);
-const MOCHA_OVERLAY0: Color = Color::from_hex(0x6C7086);
-const MOCHA_MANTLE: Color = Color::from_hex(0x181825);
-const MOCHA_LAVENDER: Color = Color::from_hex(0xB4BEFE);
+//
+// This module used to carry fourteen `MOCHA_*` constants of its own. They are
+// gone; every colour below is read out of the [`Palette`] the caller resolved,
+// so the panel follows the mode and the accent like the rest of the shell.
+// Two judgements are worth writing down, because both look wrong at a glance.
+//
+// **The account-type badge does not follow the accent.** `Administrator` is
+// red, `Standard` is blue, `Guest` is grey — a row of siblings that means
+// "which kind of account is this", exactly as a risk level or a device status
+// does. The blue member is the trap: blue is the *default* accent, so
+// `Standard` reads like an obvious `p.accent` site. It is not one. Moving one
+// cell of a categorical row while its siblings stay put is the bug, not the
+// feature — a user who picks a mauve accent has said nothing about what a
+// standard account is.
+//
+// **The avatar palette is identity, not decoration.** The seven colours a
+// user's initials circle can take are how you tell one account from another at
+// a glance, and they are chosen by an index that comes straight off disk. They
+// are therefore categorical for the same reason, *and* they must stay mutually
+// distinct — which an accent-following member could not guarantee, since it
+// would collide with whichever of the seven the accent happens to equal.
+//
+// The active tab's label and the "+ Add User" button are the accent sites here:
+// both are "you are here" / "the primary thing to do", which is what the accent
+// is for.
 
 // ============================================================================
 // Account types
@@ -78,11 +89,15 @@ impl AccountType {
     }
 
     /// Badge color for UI.
-    pub fn badge_color(self) -> Color {
+    ///
+    /// Categorical, so it reads roles and never the accent: see the colour
+    /// note at the top of this module for why `Standard` staying blue under a
+    /// mauve accent is the correct behaviour rather than a missed conversion.
+    pub fn badge_color(self, p: &Palette) -> Color {
         match self {
-            Self::Administrator => MOCHA_RED,
-            Self::Standard => MOCHA_BLUE,
-            Self::Guest => MOCHA_OVERLAY0,
+            Self::Administrator => p.red,
+            Self::Standard => p.blue,
+            Self::Guest => p.overlay0,
         }
     }
 }
@@ -120,16 +135,17 @@ const AVATAR_COLOR_COUNT: usize = 7;
 /// disagree.
 const AVATAR_COLOR_COUNT_U32: u32 = AVATAR_COLOR_COUNT as u32;
 
-/// Predefined avatar colors.
-const AVATAR_COLORS: [Color; AVATAR_COLOR_COUNT] = [
-    MOCHA_BLUE,
-    MOCHA_GREEN,
-    MOCHA_PEACH,
-    MOCHA_MAUVE,
-    MOCHA_RED,
-    MOCHA_YELLOW,
-    MOCHA_LAVENDER,
-];
+/// The avatar colors, in slot order, drawn from `p`.
+///
+/// A function rather than the `const [Color; 7]` this used to be, because the
+/// values are now roles of a palette that is resolved at runtime. The order is
+/// part of the data format — a user's avatar index is stored on disk, so
+/// reordering this list silently repaints existing accounts.
+fn avatar_colors(p: &Palette) -> [Color; AVATAR_COLOR_COUNT] {
+    [
+        p.blue, p.green, p.peach, p.mauve, p.red, p.yellow, p.lavender,
+    ]
+}
 
 impl Avatar {
     /// The palette color an initials avatar with this index shows.
@@ -139,11 +155,11 @@ impl Avatar {
     /// disk. The wrap used to be written twice, once here in `usize` and once
     /// in [`UserAccount::new`] in `u32`; two spellings of one rule is one too
     /// many.
-    pub fn palette_color(color_index: u8) -> Color {
+    pub fn palette_color(p: &Palette, color_index: u8) -> Color {
         let slot = usize::from(color_index) % AVATAR_COLOR_COUNT;
         // Unreachable: `slot` is a remainder modulo the array's own length.
         // The fallback keeps the function total instead of panicking.
-        AVATAR_COLORS.get(slot).copied().unwrap_or(MOCHA_SURFACE1)
+        avatar_colors(p).get(slot).copied().unwrap_or(p.surface1)
     }
 
     /// The palette slot a brand-new account with this uid starts on, spread
@@ -155,11 +171,11 @@ impl Avatar {
     }
 
     /// Get the background color for this avatar.
-    pub fn background_color(&self) -> Color {
+    pub fn background_color(&self, p: &Palette) -> Color {
         match self {
-            Self::Initials { color_index } => Self::palette_color(*color_index),
-            Self::SystemIcon(_) => MOCHA_SURFACE1,
-            Self::ImagePath(_) => MOCHA_SURFACE0,
+            Self::Initials { color_index } => Self::palette_color(p, *color_index),
+            Self::SystemIcon(_) => p.surface1,
+            Self::ImagePath(_) => p.surface0,
         }
     }
 
@@ -839,7 +855,14 @@ impl Default for AccountSettingsUI {
 
 impl AccountSettingsUI {
     /// Render the account settings panel.
-    pub fn render(&self, x: f32, y: f32, width: f32, height: f32) -> Vec<RenderCommand> {
+    pub fn render(
+        &self,
+        p: &Palette,
+        x: f32,
+        y: f32,
+        width: f32,
+        height: f32,
+    ) -> Vec<RenderCommand> {
         let mut cmds = Vec::with_capacity(64);
 
         // Background
@@ -848,7 +871,7 @@ impl AccountSettingsUI {
             y,
             width,
             height,
-            color: MOCHA_BASE,
+            color: p.base,
             corner_radii: CornerRadii::all(8.0),
         });
 
@@ -858,7 +881,7 @@ impl AccountSettingsUI {
             y: y + 16.0,
             text: "User Accounts".to_string(),
             font_size: 18.0,
-            color: MOCHA_TEXT,
+            color: p.text,
             font_weight: FontWeightHint::Bold,
             max_width: Some(width - 32.0),
             overflow: TextOverflow::Ellipsis,
@@ -876,7 +899,7 @@ impl AccountSettingsUI {
                     y: tab_y,
                     width: 120.0,
                     height: 28.0,
-                    color: MOCHA_SURFACE1,
+                    color: p.surface1,
                     corner_radii: CornerRadii::all(4.0),
                 });
             }
@@ -886,11 +909,7 @@ impl AccountSettingsUI {
                 y: tab_y + 6.0,
                 text: tab.display_name().to_string(),
                 font_size: 12.0,
-                color: if is_active {
-                    MOCHA_BLUE
-                } else {
-                    MOCHA_SUBTEXT0
-                },
+                color: if is_active { p.accent } else { p.subtext0 },
                 font_weight: if is_active {
                     FontWeightHint::Bold
                 } else {
@@ -907,13 +926,14 @@ impl AccountSettingsUI {
 
         match self.active_tab {
             AccountsTab::YourInfo => {
-                self.render_your_info(&mut cmds, x + 16.0, content_y, width - 32.0, content_h);
+                self.render_your_info(p, &mut cmds, x + 16.0, content_y, width - 32.0, content_h);
             }
             AccountsTab::OtherUsers => {
-                self.render_other_users(&mut cmds, x + 16.0, content_y, width - 32.0, content_h);
+                self.render_other_users(p, &mut cmds, x + 16.0, content_y, width - 32.0, content_h);
             }
             AccountsTab::SignInOptions => {
                 self.render_sign_in_options(
+                    p,
                     &mut cmds,
                     x + 16.0,
                     content_y,
@@ -922,7 +942,14 @@ impl AccountSettingsUI {
                 );
             }
             AccountsTab::ActivityLog => {
-                self.render_activity_log(&mut cmds, x + 16.0, content_y, width - 32.0, content_h);
+                self.render_activity_log(
+                    p,
+                    &mut cmds,
+                    x + 16.0,
+                    content_y,
+                    width - 32.0,
+                    content_h,
+                );
             }
         }
 
@@ -933,7 +960,7 @@ impl AccountSettingsUI {
                 y: y + height - 32.0,
                 width: width - 32.0,
                 height: 24.0,
-                color: MOCHA_SURFACE0,
+                color: p.surface0,
                 corner_radii: CornerRadii::all(4.0),
             });
             cmds.push(RenderCommand::Text {
@@ -941,7 +968,7 @@ impl AccountSettingsUI {
                 y: y + height - 28.0,
                 text: msg.clone(),
                 font_size: 11.0,
-                color: MOCHA_YELLOW,
+                color: p.yellow,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(width - 48.0),
                 overflow: TextOverflow::Ellipsis,
@@ -953,6 +980,7 @@ impl AccountSettingsUI {
 
     fn render_your_info(
         &self,
+        p: &Palette,
         cmds: &mut Vec<RenderCommand>,
         x: f32,
         y: f32,
@@ -962,7 +990,7 @@ impl AccountSettingsUI {
         if let Some(user) = self.manager.current_user() {
             // Avatar circle
             let avatar_size = 64.0;
-            let avatar_color = user.avatar.background_color();
+            let avatar_color = user.avatar.background_color(p);
             cmds.push(RenderCommand::FillRect {
                 x,
                 y,
@@ -978,7 +1006,11 @@ impl AccountSettingsUI {
                 y: y + avatar_size / 2.0 - 10.0,
                 text: user.initials(),
                 font_size: 20.0,
-                color: MOCHA_MANTLE,
+                // The initials sit *on* the avatar circle, so they are chosen
+                // for that fill's brightness rather than read off the palette:
+                // a light-mode pale-yellow circle needs dark initials and a
+                // dark-mode one needs the same, but a red circle does not.
+                color: readable_on(avatar_color),
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(avatar_size),
                 overflow: TextOverflow::Ellipsis,
@@ -991,7 +1023,7 @@ impl AccountSettingsUI {
                 y,
                 text: user.display_name.clone(),
                 font_size: 16.0,
-                color: MOCHA_TEXT,
+                color: p.text,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(width - avatar_size - 32.0),
                 overflow: TextOverflow::Ellipsis,
@@ -1002,14 +1034,14 @@ impl AccountSettingsUI {
                 y: y + 24.0,
                 text: format!("@{}", user.username),
                 font_size: 12.0,
-                color: MOCHA_SUBTEXT0,
+                color: p.subtext0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(width - avatar_size - 32.0),
                 overflow: TextOverflow::Ellipsis,
             });
 
             // Account type badge
-            let badge_color = user.account_type.badge_color();
+            let badge_color = user.account_type.badge_color(p);
             cmds.push(RenderCommand::FillRect {
                 x: info_x,
                 y: y + 44.0,
@@ -1023,7 +1055,8 @@ impl AccountSettingsUI {
                 y: y + 47.0,
                 text: user.account_type.display_name().to_string(),
                 font_size: 10.0,
-                color: MOCHA_MANTLE,
+                // On the badge fill, for the same reason as the initials.
+                color: readable_on(badge_color),
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(80.0),
                 overflow: TextOverflow::Ellipsis,
@@ -1032,10 +1065,10 @@ impl AccountSettingsUI {
             // Info rows
             let mut row_y = y + 80.0;
 
-            self.render_info_row(cmds, x, row_y, width, "Home Directory", &user.home_dir);
+            self.render_info_row(p, cmds, x, row_y, width, "Home Directory", &user.home_dir);
             row_y += 24.0;
 
-            self.render_info_row(cmds, x, row_y, width, "Shell", &user.shell);
+            self.render_info_row(p, cmds, x, row_y, width, "Shell", &user.shell);
             row_y += 24.0;
 
             let password_status = if user.login_options.has_password {
@@ -1043,12 +1076,13 @@ impl AccountSettingsUI {
             } else {
                 "Not set"
             };
-            self.render_info_row(cmds, x, row_y, width, "Password", password_status);
+            self.render_info_row(p, cmds, x, row_y, width, "Password", password_status);
         }
     }
 
     fn render_other_users(
         &self,
+        p: &Palette,
         cmds: &mut Vec<RenderCommand>,
         x: f32,
         y: f32,
@@ -1060,7 +1094,7 @@ impl AccountSettingsUI {
             y,
             text: "Other Users".to_string(),
             font_size: 14.0,
-            color: MOCHA_TEXT,
+            color: p.text,
             font_weight: FontWeightHint::Bold,
             max_width: Some(width),
             overflow: TextOverflow::Ellipsis,
@@ -1082,19 +1116,20 @@ impl AccountSettingsUI {
                     y: row_y - 2.0,
                     width,
                     height: 36.0,
-                    color: MOCHA_SURFACE0,
+                    color: p.surface0,
                     corner_radii: CornerRadii::all(4.0),
                 });
             }
 
             // Avatar small circle
             let av_size = 28.0;
+            let av_color = acct.avatar.background_color(p);
             cmds.push(RenderCommand::FillRect {
                 x: x + 4.0,
                 y: row_y + 2.0,
                 width: av_size,
                 height: av_size,
-                color: acct.avatar.background_color(),
+                color: av_color,
                 corner_radii: CornerRadii::all(av_size / 2.0),
             });
 
@@ -1103,7 +1138,7 @@ impl AccountSettingsUI {
                 y: row_y + 7.0,
                 text: acct.initials(),
                 font_size: 11.0,
-                color: MOCHA_MANTLE,
+                color: readable_on(av_color),
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(av_size),
                 overflow: TextOverflow::Ellipsis,
@@ -1115,7 +1150,7 @@ impl AccountSettingsUI {
                 y: row_y + 4.0,
                 text: acct.display_name.clone(),
                 font_size: 12.0,
-                color: MOCHA_TEXT,
+                color: p.text,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(width - 180.0),
                 overflow: TextOverflow::Ellipsis,
@@ -1127,7 +1162,7 @@ impl AccountSettingsUI {
                 y: row_y + 20.0,
                 text: acct.account_type.display_name().to_string(),
                 font_size: 10.0,
-                color: acct.account_type.badge_color(),
+                color: acct.account_type.badge_color(p),
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(100.0),
                 overflow: TextOverflow::Ellipsis,
@@ -1140,9 +1175,9 @@ impl AccountSettingsUI {
                 "Signed out"
             };
             let status_color = if acct.is_logged_in {
-                MOCHA_GREEN
+                p.green
             } else {
-                MOCHA_OVERLAY0
+                p.overlay0
             };
             cmds.push(RenderCommand::Text {
                 x: x + width - 80.0,
@@ -1164,7 +1199,7 @@ impl AccountSettingsUI {
             y: row_y + 8.0,
             width: 140.0,
             height: 28.0,
-            color: MOCHA_BLUE,
+            color: p.accent,
             corner_radii: CornerRadii::all(4.0),
         });
         cmds.push(RenderCommand::Text {
@@ -1172,7 +1207,7 @@ impl AccountSettingsUI {
             y: row_y + 14.0,
             text: "+ Add User".to_string(),
             font_size: 12.0,
-            color: MOCHA_MANTLE,
+            color: readable_on(p.accent),
             font_weight: FontWeightHint::Bold,
             max_width: Some(120.0),
             overflow: TextOverflow::Ellipsis,
@@ -1181,6 +1216,7 @@ impl AccountSettingsUI {
 
     fn render_sign_in_options(
         &self,
+        p: &Palette,
         cmds: &mut Vec<RenderCommand>,
         x: f32,
         y: f32,
@@ -1193,7 +1229,7 @@ impl AccountSettingsUI {
                 y,
                 text: "Sign-in Options".to_string(),
                 font_size: 14.0,
-                color: MOCHA_TEXT,
+                color: p.text,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(width),
                 overflow: TextOverflow::Ellipsis,
@@ -1203,6 +1239,7 @@ impl AccountSettingsUI {
 
             // Auto-login toggle
             self.render_toggle_row(
+                p,
                 cmds,
                 x,
                 row_y,
@@ -1214,6 +1251,7 @@ impl AccountSettingsUI {
 
             // Require password on wake
             self.render_toggle_row(
+                p,
                 cmds,
                 x,
                 row_y,
@@ -1225,6 +1263,7 @@ impl AccountSettingsUI {
 
             // Password hint
             self.render_info_row(
+                p,
                 cmds,
                 x,
                 row_y,
@@ -1244,7 +1283,7 @@ impl AccountSettingsUI {
                 y: row_y,
                 width: 160.0,
                 height: 28.0,
-                color: MOCHA_SURFACE0,
+                color: p.surface0,
                 corner_radii: CornerRadii::all(4.0),
             });
             cmds.push(RenderCommand::Text {
@@ -1252,7 +1291,7 @@ impl AccountSettingsUI {
                 y: row_y + 6.0,
                 text: "Change Password".to_string(),
                 font_size: 12.0,
-                color: MOCHA_TEXT,
+                color: p.text,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(140.0),
                 overflow: TextOverflow::Ellipsis,
@@ -1262,6 +1301,7 @@ impl AccountSettingsUI {
 
     fn render_activity_log(
         &self,
+        p: &Palette,
         cmds: &mut Vec<RenderCommand>,
         x: f32,
         y: f32,
@@ -1273,7 +1313,7 @@ impl AccountSettingsUI {
             y,
             text: "Recent Activity".to_string(),
             font_size: 14.0,
-            color: MOCHA_TEXT,
+            color: p.text,
             font_weight: FontWeightHint::Bold,
             max_width: Some(width),
             overflow: TextOverflow::Ellipsis,
@@ -1288,7 +1328,7 @@ impl AccountSettingsUI {
                 y: row_y,
                 text: "No activity recorded.".to_string(),
                 font_size: 12.0,
-                color: MOCHA_OVERLAY0,
+                color: p.overlay0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(width),
                 overflow: TextOverflow::Ellipsis,
@@ -1308,7 +1348,7 @@ impl AccountSettingsUI {
                 y: row_y,
                 text: format!("{}: {}", username, entry.event.display_text()),
                 font_size: 11.0,
-                color: MOCHA_SUBTEXT0,
+                color: p.subtext0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(width),
                 overflow: TextOverflow::Ellipsis,
@@ -1320,6 +1360,7 @@ impl AccountSettingsUI {
 
     fn render_info_row(
         &self,
+        p: &Palette,
         cmds: &mut Vec<RenderCommand>,
         x: f32,
         y: f32,
@@ -1332,7 +1373,7 @@ impl AccountSettingsUI {
             y,
             text: label.to_string(),
             font_size: 12.0,
-            color: MOCHA_SUBTEXT0,
+            color: p.subtext0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(width * 0.4),
             overflow: TextOverflow::Ellipsis,
@@ -1342,7 +1383,7 @@ impl AccountSettingsUI {
             y,
             text: value.to_string(),
             font_size: 12.0,
-            color: MOCHA_TEXT,
+            color: p.text,
             font_weight: FontWeightHint::Regular,
             max_width: Some(width * 0.55),
             overflow: TextOverflow::Ellipsis,
@@ -1351,6 +1392,7 @@ impl AccountSettingsUI {
 
     fn render_toggle_row(
         &self,
+        p: &Palette,
         cmds: &mut Vec<RenderCommand>,
         x: f32,
         y: f32,
@@ -1363,7 +1405,7 @@ impl AccountSettingsUI {
             y: y + 4.0,
             text: label.to_string(),
             font_size: 12.0,
-            color: MOCHA_TEXT,
+            color: p.text,
             font_weight: FontWeightHint::Regular,
             max_width: Some(width - 60.0),
             overflow: TextOverflow::Ellipsis,
@@ -1371,7 +1413,11 @@ impl AccountSettingsUI {
 
         // Toggle switch
         let toggle_x = x + width - 44.0;
-        let toggle_bg = if enabled { MOCHA_GREEN } else { MOCHA_SURFACE0 };
+        // Green rather than the accent, faithfully to what this module drew
+        // before the conversion. The shell is not consistent about which of the
+        // two an "on" switch uses; that inconsistency is recorded in
+        // known-issues.md and is not a thing to settle mid-conversion.
+        let toggle_bg = if enabled { p.green } else { p.surface0 };
         cmds.push(RenderCommand::FillRect {
             x: toggle_x,
             y: y + 2.0,
@@ -1392,7 +1438,7 @@ impl AccountSettingsUI {
             y: y + 4.0,
             width: 14.0,
             height: 14.0,
-            color: MOCHA_TEXT,
+            color: p.text,
             corner_radii: CornerRadii::all(7.0),
         });
     }
@@ -1416,6 +1462,12 @@ mod tests {
     )]
 
     use super::*;
+    use crate::palette_check;
+
+    /// The palette the ordinary render tests draw with.
+    fn test_palette() -> Palette {
+        Palette::for_mode(false)
+    }
 
     // ---- AccountType tests ----
 
@@ -1482,9 +1534,9 @@ mod tests {
 
     #[test]
     fn test_avatar_background_color() {
+        let p = test_palette();
         let a = Avatar::Initials { color_index: 0 };
-        let c = a.background_color();
-        assert_eq!(c, MOCHA_BLUE);
+        assert_eq!(a.background_color(&p), p.blue);
     }
 
     // ---- UserAccount tests ----
@@ -1793,20 +1845,24 @@ mod tests {
     fn every_avatar_index_names_a_palette_color() {
         // The index is an unconstrained `u8` that can come straight off disk,
         // so all 256 of them have to land somewhere.
+        let p = test_palette();
         let palette: Vec<Color> = (0..AVATAR_COLOR_COUNT)
             .map(|i| {
-                Avatar::palette_color(u8::try_from(i).expect("the palette is far shorter than 256"))
+                Avatar::palette_color(
+                    &p,
+                    u8::try_from(i).expect("the palette is far shorter than 256"),
+                )
             })
             .collect();
         for index in 0..=255u8 {
-            let color = Avatar::Initials { color_index: index }.background_color();
+            let color = Avatar::Initials { color_index: index }.background_color(&p);
             assert!(
                 palette.contains(&color),
                 "index {index} produced a color outside the palette"
             );
             assert_eq!(
                 color,
-                Avatar::palette_color(index),
+                Avatar::palette_color(&p, index),
                 "the avatar and the bare index disagree at {index}"
             );
         }
@@ -1814,14 +1870,15 @@ mod tests {
 
     #[test]
     fn the_palette_wraps_rather_than_clamping() {
+        let p = test_palette();
         for index in 0..=255u8 {
             let wrapped = index.wrapping_add(u8::try_from(AVATAR_COLOR_COUNT).expect("fits"));
             // Only compare where adding the palette length did not itself wrap
             // past 255, which would land on a different slot.
             if wrapped > index {
                 assert_eq!(
-                    Avatar::palette_color(index),
-                    Avatar::palette_color(wrapped),
+                    Avatar::palette_color(&p, index),
+                    Avatar::palette_color(&p, wrapped),
                     "{index} and {wrapped} are the same slot"
                 );
             }
@@ -1876,7 +1933,7 @@ mod tests {
     #[test]
     fn test_ui_render_your_info() {
         let ui = AccountSettingsUI::default();
-        let cmds = ui.render(0.0, 0.0, 600.0, 400.0);
+        let cmds = ui.render(&test_palette(), 0.0, 0.0, 600.0, 400.0);
         assert!(!cmds.is_empty());
     }
 
@@ -1884,7 +1941,7 @@ mod tests {
     fn test_ui_render_other_users() {
         let mut ui = AccountSettingsUI::default();
         ui.active_tab = AccountsTab::OtherUsers;
-        let cmds = ui.render(0.0, 0.0, 600.0, 400.0);
+        let cmds = ui.render(&test_palette(), 0.0, 0.0, 600.0, 400.0);
         assert!(!cmds.is_empty());
     }
 
@@ -1892,7 +1949,7 @@ mod tests {
     fn test_ui_render_sign_in_options() {
         let mut ui = AccountSettingsUI::default();
         ui.active_tab = AccountsTab::SignInOptions;
-        let cmds = ui.render(0.0, 0.0, 600.0, 400.0);
+        let cmds = ui.render(&test_palette(), 0.0, 0.0, 600.0, 400.0);
         assert!(!cmds.is_empty());
     }
 
@@ -1900,7 +1957,7 @@ mod tests {
     fn test_ui_render_activity_log() {
         let mut ui = AccountSettingsUI::default();
         ui.active_tab = AccountsTab::ActivityLog;
-        let cmds = ui.render(0.0, 0.0, 600.0, 400.0);
+        let cmds = ui.render(&test_palette(), 0.0, 0.0, 600.0, 400.0);
         assert!(!cmds.is_empty());
     }
 
@@ -1908,7 +1965,7 @@ mod tests {
     fn test_ui_render_with_status_message() {
         let mut ui = AccountSettingsUI::default();
         ui.status_message = Some("Account created successfully".to_string());
-        let cmds = ui.render(0.0, 0.0, 600.0, 400.0);
+        let cmds = ui.render(&test_palette(), 0.0, 0.0, 600.0, 400.0);
         let has_status = cmds.iter().any(|c| {
             if let RenderCommand::Text { text, .. } = c {
                 text.contains("Account created")
@@ -1923,6 +1980,286 @@ mod tests {
     fn test_tab_display_names() {
         for tab in AccountsTab::ALL {
             assert!(!tab.display_name().is_empty());
+        }
+    }
+
+    // ---- Palette conversion ----
+
+    /// A manager in which every colour-bearing branch is present at once.
+    ///
+    /// One account per avatar slot, so all seven identity colours are actually
+    /// drawn, plus the two non-initials avatar kinds; account types cycle so
+    /// all three badges appear; and the signed-in flag alternates so both
+    /// status colours do.
+    fn every_branch_accounts() -> AccountManager {
+        let mut mgr = AccountManager::new();
+        let types = [
+            AccountType::Standard,
+            AccountType::Guest,
+            AccountType::Administrator,
+        ];
+        for slot in 0..9u8 {
+            let ty = types[usize::from(slot) % types.len()];
+            let uid = mgr
+                .create_account(
+                    &format!("user{slot}"),
+                    &format!("User {slot}"),
+                    ty,
+                    u64::from(slot),
+                )
+                .expect("the fixture's usernames are valid and unique");
+            let account = mgr.get_mut(uid).expect("just created");
+            account.avatar = match slot {
+                7 => Avatar::SystemIcon(3),
+                8 => Avatar::ImagePath("/home/u/avatar.png".to_string()),
+                other => Avatar::Initials { color_index: other },
+            };
+            account.is_logged_in = slot % 2 == 0;
+        }
+        mgr
+    }
+
+    /// The panel wound to one state. `switches` is the current user's
+    /// `(auto_login, require_password_on_wake, has_password)`, which is what
+    /// decides both toggle positions and the password info row.
+    fn wound_ui(
+        populated: bool,
+        tab: AccountsTab,
+        selected: Option<u32>,
+        status: Option<&str>,
+        switches: (bool, bool, bool),
+        avatar: Avatar,
+    ) -> AccountSettingsUI {
+        let mut mgr = if populated {
+            every_branch_accounts()
+        } else {
+            AccountManager::new()
+        };
+        if let Some(uid) = mgr.current_user().map(|a| a.uid)
+            && let Some(account) = mgr.get_mut(uid)
+        {
+            account.login_options.auto_login = switches.0;
+            account.login_options.require_password_on_wake = switches.1;
+            account.login_options.has_password = switches.2;
+            account.avatar = avatar;
+        }
+        AccountSettingsUI {
+            manager: mgr,
+            active_tab: tab,
+            selected_uid: selected,
+            status_message: status.map(str::to_string),
+            ..AccountSettingsUI::default()
+        }
+    }
+
+    /// The membership sweep: nothing this panel draws may be a colour outside
+    /// the palette it was handed. See `palette_check` for why the light render
+    /// is what makes a leftover Mocha constant name itself.
+    #[test]
+    fn every_colour_the_panel_draws_comes_from_its_palette() {
+        for light in [false, true] {
+            let p = Palette::for_mode(light);
+            for populated in [false, true] {
+                for tab in AccountsTab::ALL {
+                    for selected in [None, Some(1001)] {
+                        for status in [None, Some("Account created successfully")] {
+                            for switches in [(false, false, false), (true, true, true)] {
+                                for avatar in [
+                                    Avatar::Initials { color_index: 5 },
+                                    Avatar::SystemIcon(1),
+                                    Avatar::ImagePath("/home/u/a.png".to_string()),
+                                ] {
+                                    let ui = wound_ui(
+                                        populated, *tab, selected, status, switches, avatar,
+                                    );
+                                    let cmds = ui.render(&p, 0.0, 0.0, 600.0, 400.0);
+                                    palette_check::assert_drawn_from(
+                                        &p,
+                                        &cmds,
+                                        &[],
+                                        "user_accounts",
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // And the branch where nobody is signed in, which two of the four tabs
+        // draw nothing at all for.
+        for light in [false, true] {
+            let p = Palette::for_mode(light);
+            let mut ui = wound_ui(
+                true,
+                AccountsTab::YourInfo,
+                None,
+                None,
+                (false, false, false),
+                Avatar::default(),
+            );
+            for account in 0..ui.manager.accounts().len() {
+                let uid = ui.manager.accounts()[account].uid;
+                if let Some(a) = ui.manager.get_mut(uid) {
+                    a.is_current = false;
+                }
+            }
+            for tab in AccountsTab::ALL {
+                ui.active_tab = *tab;
+                let cmds = ui.render(&p, 0.0, 0.0, 600.0, 400.0);
+                palette_check::assert_drawn_from(
+                    &p,
+                    &cmds,
+                    &[],
+                    "user_accounts (nobody signed in)",
+                );
+            }
+        }
+    }
+
+    /// Every colour that says *which user* or *which kind of user* this is.
+    ///
+    /// The avatar circles (64pt on Your Info, 28pt in the list), the
+    /// account-type pill and the 10pt captions under each name — all
+    /// categorical, none of them the accent's to move.
+    fn identity_colors(cmds: &[RenderCommand]) -> Vec<Color> {
+        cmds.iter()
+            .filter_map(|c| match c {
+                RenderCommand::FillRect {
+                    width: 64.0,
+                    height: 64.0,
+                    color,
+                    ..
+                }
+                | RenderCommand::FillRect {
+                    width: 28.0,
+                    height: 28.0,
+                    color,
+                    ..
+                }
+                | RenderCommand::FillRect {
+                    width: 90.0,
+                    height: 20.0,
+                    color,
+                    ..
+                }
+                | RenderCommand::Text {
+                    font_size: 10.0,
+                    color,
+                    ..
+                } => Some(*color),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The one colour on every tab that *is* the accent's: the active tab's
+    /// label, the only bold 12pt text in the tab bar.
+    fn active_tab_label_colors(cmds: &[RenderCommand]) -> Vec<Color> {
+        cmds.iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text {
+                    font_size: 12.0,
+                    font_weight: FontWeightHint::Bold,
+                    text,
+                    color,
+                    ..
+                } if AccountsTab::ALL.iter().any(|t| t.display_name() == text) => Some(*color),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// A user's identity is not the accent's to repaint.
+    ///
+    /// The membership sweep above cannot see this: a wrong *role* is a member
+    /// of both palettes, so swapping `p.blue` for `p.accent` passes it in light
+    /// mode exactly as in dark. Only a second render under a different accent
+    /// separates the two.
+    ///
+    /// The `assert_ne!` on the tab label is the load-bearing half. Without it a
+    /// panel that ignored the accent everywhere — drew the whole thing in one
+    /// frozen colour — would pass the equality check while measuring nothing.
+    #[test]
+    fn a_users_identity_colours_do_not_follow_the_accent() {
+        for tab in AccountsTab::ALL {
+            let ui = wound_ui(
+                true,
+                *tab,
+                Some(1001),
+                None,
+                (true, false, true),
+                Avatar::Initials { color_index: 2 },
+            );
+
+            let mut blue = Palette::for_mode(false);
+            blue.accent = appearance::BLUE;
+            let mut mauve = Palette::for_mode(false);
+            mauve.accent = appearance::MAUVE;
+
+            let under_blue = ui.render(&blue, 0.0, 0.0, 600.0, 400.0);
+            let under_mauve = ui.render(&mauve, 0.0, 0.0, 600.0, 400.0);
+
+            let label_blue = active_tab_label_colors(&under_blue);
+            let label_mauve = active_tab_label_colors(&under_mauve);
+            assert_eq!(
+                label_blue.len(),
+                1,
+                "{} has no active tab label",
+                tab.display_name()
+            );
+            assert_ne!(
+                label_blue,
+                label_mauve,
+                "the {} tab's own label did not move with the accent, so this \
+                 test would pass on a panel that ignored the accent entirely",
+                tab.display_name()
+            );
+
+            let identity_blue = identity_colors(&under_blue);
+            let identity_mauve = identity_colors(&under_mauve);
+            // Only two of the four tabs show a user at all; on the other two
+            // the equality below is vacuous, which is why the emptiness check
+            // is asserted exactly where it means something.
+            let draws_identity = matches!(tab, AccountsTab::YourInfo | AccountsTab::OtherUsers);
+            assert_eq!(
+                !identity_blue.is_empty(),
+                draws_identity,
+                "the {} tab drew {} identity colours",
+                tab.display_name(),
+                identity_blue.len()
+            );
+            assert_eq!(
+                identity_blue,
+                identity_mauve,
+                "an avatar or account-type colour on the {} tab moved with the \
+                 accent. Those say which user and which kind of user, the way a \
+                 risk level or a device status does; a mauve accent says nothing \
+                 about what a standard account is.",
+                tab.display_name()
+            );
+        }
+    }
+
+    /// The seven avatar colours are how you tell accounts apart at a glance, so
+    /// two of them landing on the same value would silently merge two users.
+    #[test]
+    fn the_avatar_colours_stay_distinct_in_both_modes() {
+        for light in [false, true] {
+            let p = Palette::for_mode(light);
+            let mut seen: Vec<Color> = Vec::with_capacity(AVATAR_COLOR_COUNT);
+            for slot in 0..AVATAR_COLOR_COUNT {
+                let index = u8::try_from(slot).expect("the palette is far shorter than 256");
+                let color = Avatar::palette_color(&p, index);
+                assert!(
+                    !seen.contains(&color),
+                    "avatar slots collide at {slot} in {} mode, so two accounts \
+                     would be indistinguishable",
+                    if light { "light" } else { "dark" }
+                );
+                seen.push(color);
+            }
         }
     }
 }

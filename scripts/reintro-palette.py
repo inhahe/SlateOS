@@ -55,6 +55,7 @@ ICON = "gui/desktop/src/icons.rs"
 NOTIF = "gui/desktop/src/notif_pane.rs"
 DEV = "gui/desktop/src/device_settings.rs"
 RULES = "gui/desktop/src/window_rules.rs"
+ACCT = "gui/desktop/src/user_accounts.rs"
 
 # (name, file, [(old, new), ...], [packages], [tests expected to fail])
 DEFECTS = [
@@ -557,6 +558,65 @@ DEFECTS = [
           "                color: if selected { p.blue } else { p.surface0 },")],
         ["desktop"],
         ["the_editors_save_button_does_not_follow_the_accent"],
+    ),
+    (
+        "UU: the accounts panel's background goes back to Mocha base",
+        ACCT,
+        [("            color: p.base,", "            color: Color::from_hex(0x1E1E2E),")],
+        ["desktop"],
+        ["every_colour_the_panel_draws_comes_from_its_palette"],
+    ),
+    (
+        # Only drawn when a status message is set, so this measures the state
+        # matrix too: a fixture that never sets one would leave it unrendered.
+        "VV: the status message goes back to Mocha yellow",
+        ACCT,
+        [("                color: p.yellow,", "                color: Color::from_hex(0xF9E2AF),")],
+        ["desktop"],
+        ["every_colour_the_panel_draws_comes_from_its_palette"],
+    ),
+    (
+        # Behind a tab *and* behind an empty activity log -- the branch a
+        # populated fixture alone would never reach.
+        "WW: the empty activity-log caption goes back to Mocha overlay0",
+        ACCT,
+        [("                color: p.overlay0,", "                color: Color::from_hex(0x6C7086),")],
+        ["desktop"],
+        ["every_colour_the_panel_draws_comes_from_its_palette"],
+    ),
+    (
+        # The last slot of the avatar table, which only an account whose stored
+        # index reduces to 6 ever draws. It is the fixture's one-account-per-slot
+        # loop that makes this visible at all.
+        "XX: the seventh avatar colour goes back to Mocha lavender",
+        ACCT,
+        [("p.mauve, p.red, p.yellow, p.lavender,",
+          "p.mauve, p.red, p.yellow, Color::from_hex(0xB4BEFE),")],
+        ["desktop"],
+        ["every_colour_the_panel_draws_comes_from_its_palette"],
+    ),
+    (
+        # A wrong *role*: blue is the default accent, so a standard account's
+        # badge reads like an obvious accent site. It is not one -- its two
+        # siblings do not move, and moving one cell of a categorical row is the
+        # bug. Invisible to the membership sweep, which sees a legal role.
+        "YY: the Standard account badge is made to follow the accent",
+        ACCT,
+        [("            Self::Standard => p.blue,", "            Self::Standard => p.accent,")],
+        ["desktop"],
+        ["a_users_identity_colours_do_not_follow_the_accent"],
+    ),
+    (
+        # The other direction, and the whole reason that test carries an
+        # `assert_ne!`: freeze the one thing that should follow the accent and
+        # the equality half still passes, certifying a panel that ignores the
+        # accent entirely.
+        "ZZ: the active tab's label stops following the accent",
+        ACCT,
+        [("                color: if is_active { p.accent } else { p.subtext0 },",
+          "                color: if is_active { p.blue } else { p.subtext0 },")],
+        ["desktop"],
+        ["a_users_identity_colours_do_not_follow_the_accent"],
     ),
 ]
 

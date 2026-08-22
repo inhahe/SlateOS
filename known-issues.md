@@ -59612,6 +59612,90 @@ lock hint that was itself only in a comment.
 
 ---
 
+### Third pass: 25 → 22, all three by making the detector obey Rust's scope rules
+
+No code changed in this pass. `signal.rs` declares `static RECEIVED`, `static
+GOT` and `static CALLED` *inside* three separate `#[test]` bodies, each so a
+nested `extern "C"` handler can record what it was passed — which is the
+correct shape, not a hazard. The detector reported two tests apiece anyway: its
+toucher regex (`\bhandler\s*\(`, `\bh\s*\(`) matched calls to unrelated
+same-named helpers elsewhere in a 246-test file.
+
+The fix encodes a language guarantee rather than a better heuristic. A `static`
+declared inside a function body is a process-global *value* but a
+function-local *name*: Rust does not put it in scope anywhere else, so no code
+outside that function — including any other test — can name it, whatever it is
+called. `analyse()` now records each global's declaration line, finds the
+innermost enclosing function, and skips the global outright if that function is
+a `#[test]`; otherwise it restricts the candidate touchers to functions nested
+within the owner rather than the whole file. Sharpening the regex would have
+been the wrong fix: it would have narrowed a false-positive class that the
+language forbids entirely.
+
+**I nearly made the hostname mistake a second time here.** The first
+hypothesis was that the signal *disposition table* was racing, which would have
+meant a lock. Reading `signal.rs` first showed it is already `process_global!`
+(line 158) and therefore per-thread on host — so the fix belonged in the tool,
+not the tree. That is now twice in three passes that "read the code before
+writing the fix" turned a plausible source change into a no-op plus a detector
+correction.
+
+**Writing the scope rule exposed two more ways the tool failed toward
+silence,** both fixed in the same pass:
+
+- **The direct-name match ignored scope.** Only the *toucher* search was
+  restricted to the declaring function. A test that merely contained the token
+  — `let S = 3;` — was still counted as reaching a `static S` it cannot name.
+  The two arms now differ deliberately: naming the global directly requires the
+  name to be in scope, whereas *calling* a toucher works from anywhere, so only
+  the first arm is scope-restricted.
+- **Same-named statics collapsed, and ten of eleven declarations vanished.**
+  `globals_` was a dict keyed by name, but a name identifies a global only at
+  file scope. `userspace/oils/src/interp.rs` declares **eleven** separate
+  statics called `COUNTER` and `kernel/src/sched/mod.rs` four called `WARNED`;
+  keyed by name, only the last of each was analysed at all and the rest were
+  never examined. It is now a list keyed by declaration site. The baseline stays
+  keyed by `path:NAME` on purpose — line numbers churn, and a ratchet whose keys
+  move on every edit is a ratchet that goes red for no reason.
+
+  Today this changes no result: all eleven `COUNTER`s are `fetch_add`-only with
+  no resetting write, so the reset rule drops them correctly, and `--check`
+  still reports 22/0. It is a latent-correctness fix, not a new finding — but
+  the failure mode it removes is the one that never announces itself.
+
+**The checker now has a self-test, and the pre-push gate runs it first.**
+`raced-globals.py --selftest` builds synthetic `.rs` files in a temp directory
+and asserts `analyse()`'s classification across eight rules: the base case is
+reported; a lock moves it to the serialised column; a comment does not make a
+function a toucher; a `static` inside a `#[test]` is not reported;
+`#[cfg(target_os = "none")]` is dropped but `#[cfg(any(target_os = "none",
+test))]` is kept; a `fetch_add`-only counter is not reported; a static owned by
+a non-test function is still reached through a call to its owner but not by a
+test that merely reuses the name; and two same-named function-local statics are
+analysed separately. Each rule exists because it had already produced a wrong
+answer against the real tree, and each is a regex an edit can break silently.
+The rule count in the summary line is computed from the registered rules rather
+than a literal, so adding a case cannot leave the total lying.
+
+The rules were verified to be capable of failing, not merely observed to pass.
+Disabling the comment stripper, the fn-local scope rule, the lock hint, the
+direct-match scope restriction and the name-collapse fix in turn each turned
+**exactly** the corresponding rule red and no other — so the rules are
+independent, and none is passing by accident. That mutation check is the point:
+**a broken detector does not report a broken tree, it reports a clean one**, so
+`--check` passing is meaningless unless `--selftest` passed first. The gate
+therefore runs `--selftest` before `--check` and refuses the push with a
+distinct message if the checker fails its own tests.
+
+Also fixed: `_relpath()` raised `ValueError` on any path outside the repo root,
+which meant the self-test could not analyse a temp file at all — the checker's
+own tests were impossible to write against the function they exist to pin down.
+It now falls back to the bare path.
+
+**Backlog: 22.**
+
+---
+
 ## B-AT-RANDOM-WAS-RE-ROLLED-UNDER-A-RACE — two threads could both fill the stack-canary buffer
 
 **Status:** fixed 2026-08-22 · `posix/src/crt.rs`

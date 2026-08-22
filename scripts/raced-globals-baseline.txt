@@ -18,9 +18,6 @@ posix/src/crt.rs:ON_EXIT_COUNT
 posix/src/crt.rs:ON_EXIT_FUNCS
 posix/src/pthread.rs:THREAD_NAMES
 posix/src/random.rs:GENERATION
-posix/src/signal.rs:CALLED
-posix/src/signal.rs:GOT
-posix/src/signal.rs:RECEIVED
 posix/src/socket.rs:GAI_ADDR
 posix/src/socket.rs:GAI_ADDR2
 posix/src/socket.rs:GAI_RESULT

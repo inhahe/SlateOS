@@ -236,8 +236,18 @@ raced="${repo_root:-.}/scripts/raced-globals.py"
 touches posix/ userspace/ || skip_raced=1
 
 raced_failed=0
-if [ "$skip_raced" != "1" ] && ! "$py" "$raced" --check; then
-    raced_failed=1
+if [ "$skip_raced" != "1" ]; then
+    # Check the checker before believing it. Every rule in --selftest exists
+    # because that rule had already given a wrong answer against the real
+    # tree, and each is a regex a future edit can break silently. A broken
+    # detector does not report a broken tree -- it reports a clean one, so
+    # --check passing means nothing unless --selftest passed first.
+    if ! "$py" "$raced" --selftest; then
+        echo "pre-push: raced-globals.py FAILED ITS OWN SELF-TEST — its --check result is not trustworthy." >&2
+        raced_failed=1
+    elif ! "$py" "$raced" --check; then
+        raced_failed=1
+    fi
 fi
 
 if [ "$raced_failed" = "1" ]; then

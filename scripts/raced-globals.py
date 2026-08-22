@@ -214,7 +214,18 @@ IGNORE: dict[str, str] = {
 
 
 def _relpath(p: Path) -> str:
-    return p.relative_to(ROOT).as_posix()
+    """Repo-relative POSIX path, or the bare path if it is outside the repo.
+
+    Everything the checker scans in anger lives under `ROOT`, so the fallback
+    exists for one caller: `--selftest`, which analyses synthetic files in a
+    temp directory. A `relative_to` that raises there would mean the self-test
+    could not exercise `analyse()` at all -- which is precisely the function
+    the self-test exists to pin down.
+    """
+    try:
+        return p.relative_to(ROOT).as_posix()
+    except ValueError:
+        return p.as_posix()
 
 
 def rust_files() -> list[Path]:
@@ -479,13 +490,20 @@ def analyse(path: Path) -> list[tuple[str, str, list[str], list[str]]]:
     # A global the host build never compiles cannot be raced by a host test.
     excluded = _host_excluded_lines(lines)
 
-    globals_: dict[str, str] = {}
+    # A *list*, not a dict keyed by name: a name identifies a global only at
+    # file scope. Function-local statics make it ambiguous, and the ambiguity
+    # is not theoretical -- `userspace/oils/src/interp.rs` declares eleven
+    # separate statics called `COUNTER`, `kernel/src/sched/mod.rs` four called
+    # `WARNED`. Keyed by name, ten of those eleven simply vanished from the
+    # analysis, which is the failure direction that matters: a checker that
+    # drops declarations reports a clean tree, not a broken one.
+    globals_: list[tuple[str, str, int]] = []
     for i, line in enumerate(lines):
         if i in excluded:
             continue
         m = _STATIC_MUT.match(line) or _STATIC_ATOMIC.match(line)
         if m and not _IS_LOCK_NAME.search(m.group(1)):
-            globals_[m.group(1)] = f"{_relpath(path)}:{i + 1}"
+            globals_.append((m.group(1), f"{_relpath(path)}:{i + 1}", i))
     if not globals_:
         return []
 
@@ -493,7 +511,7 @@ def analyse(path: Path) -> list[tuple[str, str, list[str], list[str]]]:
     # the whole file rather than per function, because the reset and the read
     # are routinely in different places (a helper resets, the test reads).
     text = "\n".join(clean_lines)
-    globals_ = {n: s for n, s in globals_.items() if _reset_write(n).search(text)}
+    globals_ = [g for g in globals_ if _reset_write(g[0]).search(text)]
     if not globals_:
         return []
 
@@ -511,25 +529,59 @@ def analyse(path: Path) -> list[tuple[str, str, list[str], list[str]]]:
     def body(span: tuple[int, int]) -> str:
         return "\n".join(clean_lines[span[0] : span[1] + 1])
 
+    def innermost_fn(line_idx: int) -> tuple[str, int, int, bool] | None:
+        """The smallest function span containing `line_idx`, if any.
+
+        A `static` declared inside a function body is a process-global *value*
+        but a function-local *name*: Rust does not put it in scope anywhere
+        else, so no code outside that function -- including any other test --
+        can touch it. That is a guarantee from the language, not a heuristic,
+        and it is worth encoding because the pattern is common in tests:
+        `signal.rs` declares `static RECEIVED: AtomicI32` inside one `#[test]`
+        purely so a nested `extern "C"` handler can record what it was passed.
+        Three such statics were being reported, each against two tests that
+        could not name them, purely because a generic nested-handler name
+        (`handler`, `h`) collided with an unrelated call elsewhere in the file.
+        """
+        best = None
+        for f in fns:
+            if f[1] <= line_idx <= f[2] and (best is None or f[1] > best[1]):
+                best = f
+        return best
+
     # Helpers that take a lock on the caller's behalf. A test calling one of
     # these is serialised even though the word never appears in it.
     lock_helpers = {n for (n, s, e, _t) in fns if _LOCK_HINT.search(body((s, e)))}
 
     results = []
-    for name, site in globals_.items():
+    for name, site, decl_line in globals_:
         if IGNORE.get(f"*:{name}") or IGNORE.get(f"{site.rsplit(':', 1)[0]}:{name}"):
             continue
         word = re.compile(rf"\b{re.escape(name)}\b")
 
+        # Restrict the search to where the name is actually in scope.
+        owner = innermost_fn(decl_line)
+        if owner is not None and owner[3]:
+            # Declared inside a `#[test]`: exactly one test can name it, so
+            # there is no second test to race against, whatever it does.
+            continue
+        scope = [f for f in fns if owner is None or (owner[1] <= f[1] <= owner[2])]
+
         # Non-test functions that name the global: the one hop a test may take.
-        touchers = {n for (n, s, e, t) in fns if not t and word.search(body((s, e)))}
+        touchers = {n for (n, s, e, t) in scope if not t and word.search(body((s, e)))}
 
         unser, ser = [], []
         for fn_name, s, e, is_test in fns:
             if not is_test:
                 continue
             b = body((s, e))
-            reaches = bool(word.search(b)) or any(
+            # Two different ways a test reaches the global, and only one of
+            # them is scope-free. Naming it directly requires the name to be
+            # in scope, so a match outside the declaring function is a
+            # different `COUNTER` and not this one. *Calling* a toucher works
+            # from anywhere, which is why that arm searches all of `fns`.
+            in_scope = owner is None or (owner[1] <= s <= owner[2])
+            reaches = (in_scope and bool(word.search(b))) or any(
                 re.search(rf"\b{re.escape(t)}\s*\(", b) for t in touchers
             )
             if not reaches:
@@ -556,7 +608,207 @@ def load_baseline() -> set[str]:
     return out
 
 
+def selftest() -> int:
+    """Check the rules that decide what this tool reports.
+
+    Every one of them was added because it had already produced a wrong
+    answer against the real tree, and every one is easy to break silently
+    while editing the regexes -- a checker that fails toward silence looks
+    exactly like a clean tree. So they get real cases rather than a hand
+    verification that is true once.
+
+    Rules are counted from `rule()` calls rather than from a literal, so
+    adding a case cannot leave the summary line claiming a total that no
+    longer matches what ran.
+    """
+    import tempfile
+
+    def classify_all(src: str) -> list[tuple[str, list[str], list[str]]]:
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d) / "x.rs"
+            p.write_text(src, encoding="utf-8")
+            return [(n, u, s) for n, _site, u, s in analyse(p)]
+
+    def classify(src: str) -> dict[str, tuple[list[str], list[str]]]:
+        # Convenience view for the cases that declare each name once. Rules
+        # about *duplicate* names must use `classify_all`, since collapsing
+        # by name here is the very bug rule 8 exists to catch.
+        return {n: (u, s) for n, u, s in classify_all(src)}
+
+    failures: list[str] = []
+    rules: list[str] = []
+    current = ""
+
+    def rule(name: str) -> None:
+        nonlocal current
+        current = name
+        rules.append(name)
+
+    def expect(label: str, got: object, want: object) -> None:
+        if got != want:
+            failures.append(f"{current}: {label}: want {want!r}, got {got!r}")
+
+    # 1. The base case: two tests drive one global, nothing serialises them.
+    rule("base")
+    got = classify(
+        """
+static mut COUNT: u32 = 0;
+fn bump() { unsafe { COUNT = 1; } }
+#[test]
+fn a() { bump(); }
+#[test]
+fn b() { bump(); }
+"""
+    )
+    expect("base/reported", sorted(got.get("COUNT", ([], []))[0]), ["a", "b"])
+
+    # 2. A lock in either test moves it to the serialised column.
+    rule("lock")
+    got = classify(
+        """
+static mut COUNT: u32 = 0;
+static COUNT_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+fn bump() { unsafe { COUNT = 1; } }
+#[test]
+fn a() { let _g = COUNT_TEST_LOCK.lock().unwrap(); bump(); }
+#[test]
+fn b() { let _g = COUNT_TEST_LOCK.lock().unwrap(); bump(); }
+"""
+    )
+    expect("lock/unserialised", got.get("COUNT", ([], []))[0], [])
+    expect("lock/serialised", sorted(got.get("COUNT", ([], []))[1]), ["a", "b"])
+
+    # 3. Comments must not make a function a toucher. Without the stripper
+    #    `unrelated` names COUNT and both tests get dragged in.
+    rule("comment")
+    got = classify(
+        """
+static mut COUNT: u32 = 0;
+fn bump() { unsafe { COUNT = 1; } }
+fn unrelated() -> u32 { /* COUNT is not touched here */ 7 }
+#[test]
+fn a() { unrelated(); }
+#[test]
+fn b() { unrelated(); }
+"""
+    )
+    expect("comment/not-reported", "COUNT" in got, False)
+
+    # 4. A `static` declared inside a `#[test]` is in scope in exactly one
+    #    test, so it cannot race however generic the nested helper's name is.
+    rule("fn-local")
+    got = classify(
+        """
+#[test]
+fn a() {
+    static SEEN: core::sync::atomic::AtomicI32 = core::sync::atomic::AtomicI32::new(0);
+    extern "C" fn h(v: i32) { SEEN.store(v, Ordering::Relaxed); }
+    SEEN.store(0, Ordering::Relaxed);
+    h(1);
+}
+#[test]
+fn b() { h(2); }
+"""
+    )
+    expect("fn-local/not-reported", "SEEN" in got, False)
+
+    # 5. A global the host never compiles cannot be raced by a host test --
+    #    but `test` in the predicate means it *is* compiled on host.
+    rule("cfg")
+    got = classify(
+        """
+#[cfg(target_os = "none")]
+static mut GONE: u32 = 0;
+#[cfg(any(target_os = "none", test))]
+static mut KEPT: u32 = 0;
+fn t1() { unsafe { GONE = 1; } }
+fn t2() { unsafe { KEPT = 1; } }
+#[test]
+fn a() { t1(); t2(); }
+#[test]
+fn b() { t1(); t2(); }
+"""
+    )
+    expect("cfg/none-dropped", "GONE" in got, False)
+    expect("cfg/test-arm-kept", sorted(got.get("KEPT", ([], []))[0]), ["a", "b"])
+
+    # 6. A global nothing ever resets cannot lie to a test.
+    rule("fetch_add-only")
+    got = classify(
+        """
+static TALLY: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+fn hit() { TALLY.fetch_add(1, Ordering::Relaxed); }
+#[test]
+fn a() { hit(); }
+#[test]
+fn b() { hit(); }
+"""
+    )
+    expect("fetch_add-only/not-reported", "TALLY" in got, False)
+
+    # 7. A static owned by a *non-test* function is still reachable -- through
+    #    a call to its owner -- but only tests that can actually name it may
+    #    be counted for naming it. `c` below writes its own local `S`.
+    rule("owner-scope")
+    got = classify(
+        """
+fn owner_fn() {
+    static mut S: u32 = 0;
+    fn inner() { unsafe { S = 1; } }
+    inner();
+}
+#[test]
+fn a() { owner_fn(); }
+#[test]
+fn b() { owner_fn(); }
+#[test]
+fn c() { let S = 3; assert_eq!(S, 3); }
+"""
+    )
+    expect("owner-scope/reached-via-owner", sorted(got.get("S", ([], []))[0]), ["a", "b"])
+
+    # 8. Two function-local statics may share a name. Keyed by name, one of
+    #    them silently replaces the other and its tests are never analysed --
+    #    the real tree has eleven `COUNTER`s in one file and four `WARNED`s.
+    rule("duplicate-names")
+    all_ = classify_all(
+        """
+fn helper1() {
+    static mut S: u32 = 0;
+    fn inner1() { unsafe { S = 1; } }
+    inner1();
+}
+fn helper2() {
+    static mut S: u32 = 0;
+    fn inner2() { unsafe { S = 2; } }
+    inner2();
+}
+#[test]
+fn a() { helper1(); }
+#[test]
+fn b() { helper1(); }
+#[test]
+fn c() { helper2(); }
+#[test]
+fn d() { helper2(); }
+"""
+    )
+    expect(
+        "duplicate-names/both-analysed",
+        sorted(sorted(u) for n, u, _s in all_ if n == "S"),
+        [["a", "b"], ["c", "d"]],
+    )
+
+    for f in failures:
+        print(f"FAIL {f}", file=sys.stderr)
+    bad = {f.split(":", 1)[0] for f in failures}
+    print(f"selftest: {len(rules) - len(bad)}/{len(rules)} rules ok")
+    return 1 if failures else 0
+
+
 def main() -> int:
+    if "--selftest" in sys.argv[1:]:
+        return selftest()
     check = "--check" in sys.argv[1:]
     write = "--write-baseline" in sys.argv[1:]
     show_all = "--all" in sys.argv[1:]

@@ -502,7 +502,7 @@ impl<T> Mutex<T> {
                 };
                 if stalled {
                     warned = true;
-                    self.report_stall(iters);
+                    self.report_stall(iters, crate::bench::rdtsc().saturating_sub(start_tsc));
                 }
             }
         }
@@ -515,8 +515,8 @@ impl<T> Mutex<T> {
     /// [`Mutex`] and [`PreemptSpinMutex`] produce identical stall diagnostics.
     #[cold]
     #[inline(never)]
-    fn report_stall(&self, iters: u64) {
-        report_spin_stall(self.name, self.addr(), &self.owner, iters);
+    fn report_stall(&self, iters: u64, elapsed_cycles: u64) {
+        report_spin_stall(self.name, self.addr(), &self.owner, iters, elapsed_cycles);
     }
 
     /// Try to acquire the lock without blocking.
@@ -787,7 +787,13 @@ impl<T> Drop for MutexIrqGuard<'_, T> {
 /// scheduler / cgroup-table / teardown locks, not serial.
 #[cold]
 #[inline(never)]
-fn report_spin_stall(name: &'static [u8], addr: usize, owner: &AtomicU64, iters: u64) {
+fn report_spin_stall(
+    name: &'static [u8],
+    addr: usize,
+    owner: &AtomicU64,
+    iters: u64,
+    elapsed_cycles: u64,
+) {
     use crate::serial_println;
 
     let n = STALL_REPORTS.fetch_add(1, Ordering::Relaxed);
@@ -799,18 +805,46 @@ fn report_spin_stall(name: &'static [u8], addr: usize, owner: &AtomicU64, iters:
     let tid = crate::sched::current_task_id();
     let name = core::str::from_utf8(name).unwrap_or("<non-utf8>");
     let owner = owner.load(Ordering::Relaxed);
-    serial_println!(
-        "[sync] *** SPINLOCK STALL *** lock '{}' @ {:#x} still not acquired after ~{}s of \
-         spinning (cpu {}, task {}, {} iters). Likely self-deadlock or lock convoy; \
-         the timer-driven liveness watchdog is blind to this if interrupts are \
-         disabled.",
-        name,
-        addr,
-        STALL_SECONDS,
-        cpu,
-        tid,
-        iters
-    );
+
+    // Report how long this spin *actually* ran, not the default threshold.
+    // `spin_with_stall_threshold` takes a caller-supplied threshold — the
+    // self-test uses ~10 ms — so printing the `STALL_SECONDS` default here made
+    // the log claim a 30-second stall for a 10-millisecond one.  A diagnostic
+    // that misstates the magnitude of what it detected is worse than none: the
+    // number is the first thing anyone reading a stall report reasons from.
+    let cycles_per_ms = crate::bench::tsc_freq().checked_div(1000).unwrap_or(0);
+    let elapsed_ms = if cycles_per_ms != 0 && elapsed_cycles != 0 {
+        elapsed_cycles.checked_div(cycles_per_ms)
+    } else {
+        // TSC uncalibrated (very early boot): the loop was counting iterations,
+        // not time, so there is no honest wall-clock figure to print.
+        None
+    };
+    match elapsed_ms {
+        Some(ms) => serial_println!(
+            "[sync] *** SPINLOCK STALL *** lock '{}' @ {:#x} still not acquired after ~{}ms of \
+             spinning (cpu {}, task {}, {} iters). Likely self-deadlock or lock convoy; \
+             the timer-driven liveness watchdog is blind to this if interrupts are \
+             disabled.",
+            name,
+            addr,
+            ms,
+            cpu,
+            tid,
+            iters
+        ),
+        None => serial_println!(
+            "[sync] *** SPINLOCK STALL *** lock '{}' @ {:#x} still not acquired after {} spin \
+             iterations (cpu {}, task {}; TSC uncalibrated, so no wall-clock figure). Likely \
+             self-deadlock or lock convoy; the timer-driven liveness watchdog is blind to this \
+             if interrupts are disabled.",
+            name,
+            addr,
+            iters,
+            cpu,
+            tid
+        ),
+    }
     // Name the holder: if `owner == tid`, this is a recursive self-deadlock
     // (the spinning task already holds the lock); if `owner` is some other
     // (possibly since-dead) task, the guard was leaked / the holder never
@@ -999,7 +1033,13 @@ fn spin_with_stall_threshold<G>(
             };
             if stalled {
                 warned = true;
-                report_spin_stall(name, addr, owner, iters);
+                report_spin_stall(
+                    name,
+                    addr,
+                    owner,
+                    iters,
+                    crate::bench::rdtsc().saturating_sub(start_tsc),
+                );
             }
         }
     }

@@ -558,11 +558,13 @@ impl<T: Transport> ShellSession<T> {
         let Some(surface) = self.surface_for(window) else {
             return Ok(());
         };
-        // Sampled around the whole handler rather than at the one call that
-        // opens the overview, because there is no such call: `show` is reached
-        // from a hotkey, from a taskbar click and from inside the overview's own
-        // action table, and a fade armed at two of those three is a fade that
-        // works until someone uses the third.
+        // Sampled around the whole handler rather than beside the one call that
+        // opens the overview today. `OverviewState::show` is not called from
+        // here at all — it is reached through `handle_hotkey`, several frames
+        // down, and the shell is free to grow a second way in (a taskbar
+        // button, a corner gesture) without this having to learn about it. What
+        // is watched is the observable fact "it is open now and was not
+        // before", which no new caller can arrive behind.
         let overview_was_visible = self.shell.overview.visible;
         match event {
             Event::Mouse(mouse) => self.pointer(&surface.to_screen(&mouse))?,

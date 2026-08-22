@@ -53884,16 +53884,33 @@ coverage rather than a regression test — no marker made it fail. Full table in
 
 **What this does NOT close.**
 
-1. **`gui/desktop/src/animations.rs` still has no caller.** Cost 1 above is
-   unchanged: the 1036 lines are still dead. They are now dead for a fixable
-   reason — there is something to wire them to — rather than an unfixable one.
-   That wiring is the next task, and it is where the fix is actually cashed in;
-   until then this entry has built a heartbeat nothing listens to.
-2. **Rendering is still driven from input, not from the loop.** `paint_chrome`
-   is called in response to something the user did. An animation stepped by a
-   tick must be able to repaint from the tick, which is the re-entrancy note in
-   the fix above and is part of task 1, not of this one.
-3. **Nothing is vsync-locked.** Deliberate — see §521 §1. An animation that must
-   be in step with the display still cannot be; the wire can already carry a
-   `Tick`, so a compositor frame callback remains additive later.
+1. ~~**`gui/desktop/src/animations.rs` still has no caller.**~~ **Closed
+   2026-08-22**, in the follow-on task this entry named as "where the fix is
+   actually cashed in". `ShellSession::step_frame` steps the manager and the
+   overview's backdrop fade from `Event::Tick`, and arms the next one-shot
+   wake-up only while `anything_moving()`. `animations.rs` was changed first:
+   it counted *frames* (`duration_ticks`/`current_tick`, "one tick = one
+   frame"), which under a clock that is allowed to be late makes a busy moment
+   silently *lengthen* every animation rather than drop frames — it now counts
+   milliseconds (`duration_ms`/`elapsed_ms`, `tick(dt_ms)`). The overview's
+   fade came back with the shape that makes §520 structurally impossible:
+   `Option<Animation>` where `None` means *fully open*, so a caller that never
+   ticks sees a finished overlay rather than a blank one. See
+   `design-decisions.md` §522.
+2. ~~**Rendering is still driven from input, not from the loop.**~~ **Closed
+   2026-08-22** by the same change: a tick reaches `pump`'s repaint through
+   `self.dirty`, and the decision to repaint is taken *before* the step so the
+   frame that finishes the last animation is still painted
+   (`the_frame_that_finishes_the_fade_is_still_painted`).
+3. **Nothing is vsync-locked.** Still open, and deliberate — see §521 §1. An
+   animation that must be in step with the display still cannot be; the wire
+   can already carry a `Tick`, so a compositor frame callback remains additive
+   later.
+4. **Most of the shell's chrome is still not animated.** Only the overview's
+   backdrop fade is wired. The start menu, calendar, Alt-Tab, notification pane
+   and login screen are all drawn by the shell and so *could* be, and are not
+   yet. `animate_window` and `animate_desktop_switch` are a different case and
+   are not blocked on the shell at all: a window's geometry belongs to the
+   compositor (§519), so the shell throws the stepped rectangles away and those
+   two are for callers that render the result themselves.
 

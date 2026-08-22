@@ -753,6 +753,9 @@ pub fn process_expired() -> u32 {
     let cpu = crate::smp::current_cpu_index();
     let now = now_ns();
     let mut fired = 0u32;
+    // Re-arms of repeating timers.  Counted into `TOTAL_SCHEDULED` below —
+    // see the comment at the re-arm site for why the tripwire depends on it.
+    let mut rearmed = 0u32;
 
     // Collect expired timers while holding the lock, then fire them
     // after releasing it (callbacks might schedule new timers).
@@ -799,6 +802,18 @@ pub fn process_expired() -> u32 {
                     id: slot.id,
                     slot: root.slot,
                 });
+                // A re-arm *is* an arming, and must be counted as one, or the
+                // `scheduled - fired - cancelled - pending` tripwire in the
+                // self-test is structurally dead: a repeating timer bumps
+                // `fired` on every tick while bumping `scheduled` only once, so
+                // after a few seconds `fired` exceeds `scheduled` permanently
+                // and the `saturating_sub` chain floors the difference at 0 no
+                // matter how many wakeups are being destroyed.  (Boot logs
+                // before this fix read `scheduled=388, fired=75833` — a 195x
+                // gap, and a tripwire that could never trip.)  With re-arms
+                // counted, each firing of a repeating timer is preceded by
+                // exactly one arming, so the two are commensurable again.
+                rearmed = rearmed.saturating_add(1);
             } else {
                 // One-shot: the slot dies here.  Freeing it bumps the
                 // generation, which is what makes a later `cancel()` on this
@@ -841,6 +856,10 @@ pub fn process_expired() -> u32 {
             cb(arg);
             fired = fired.saturating_add(1);
         }
+    }
+
+    if rearmed > 0 {
+        TOTAL_SCHEDULED.fetch_add(u64::from(rearmed), Ordering::Relaxed);
     }
 
     if fired > 0 {
@@ -1375,7 +1394,60 @@ pub fn self_test() {
     });
     serial_println!("[hrtimer]   Stale-handle rejection: OK (recycled slot not stolen)");
 
-    // Test 10: Statistics.
+    // Test 10: a repeating timer's re-arms are counted as armings.
+    //
+    // This is the accounting property that the tripwire in Test 11 rests on,
+    // and until 2026-08-21 it did not hold: `process_expired` re-armed a
+    // repeating timer without incrementing `TOTAL_SCHEDULED`, so `fired`
+    // outran `scheduled` without bound (boot logs read `scheduled=388,
+    // fired=75833`) and the tripwire's `saturating_sub` chain floored at 0
+    // forever.  A guard that reads 0 on a healthy boot *and* on a broken one
+    // is not a guard — so pin the invariant that keeps it alive, rather than
+    // trusting the next reader of `process_expired` to notice.
+    static ACCT_COUNT: AtomicU64 = AtomicU64::new(0);
+    fn acct_cb(_arg: u64) {
+        ACCT_COUNT.fetch_add(1, Ordering::Relaxed);
+    }
+    const ACCT_FIRES: u64 = 5;
+    ACCT_COUNT.store(0, Ordering::Relaxed);
+    crate::cpu::without_interrupts(|| {
+        let s0 = scheduled_count();
+        // 1us interval, so five firings cost ~5us of spinning with interrupts
+        // off — not the ~5ms that Test 5's 1ms interval would cost.
+        let h = schedule_repeating(0, 1_000, acct_cb, 0);
+        // Bounded so a broken re-arm path cannot hang the boot: the loop exits
+        // as soon as the count is reached, and 100k drains is orders of
+        // magnitude more headroom than ~5us of deadlines needs.
+        for _ in 0..100_000u32 {
+            if ACCT_COUNT.load(Ordering::Relaxed) >= ACCT_FIRES {
+                break;
+            }
+            process_expired();
+        }
+        let fires = ACCT_COUNT.load(Ordering::Relaxed);
+        cancel(h);
+        assert!(
+            fires >= ACCT_FIRES,
+            "repeating timer stopped re-arming after {fires} firing(s)"
+        );
+        // One arming for the initial `schedule_repeating`, plus one per re-arm.
+        // Ambient timers can only push this delta *up*, never down, so `>=` is
+        // exact in the direction that matters: with the re-arm counter missing
+        // the delta is 1, and this fails.
+        let delta = scheduled_count().saturating_sub(s0);
+        assert!(
+            delta >= fires.saturating_add(1),
+            "`scheduled` grew by {delta} across {fires} firings of a repeating timer — \
+             re-arms are not being counted as armings, which silently disables the \
+             accounting tripwire below"
+        );
+    });
+    serial_println!(
+        "[hrtimer]   Re-arm accounting: OK ({}+ re-arms counted as armings)",
+        ACCT_FIRES
+    );
+
+    // Test 11: Statistics.
     let sched = scheduled_count();
     let cancelled_n = TOTAL_CANCELLED.load(Ordering::Relaxed);
     let fired_n = fired_count();
@@ -1385,6 +1457,14 @@ pub fn self_test() {
     // were armed and then neither fired, were cancelled, nor are still
     // waiting.  Under the old eviction policy that number was the tally of
     // silently destroyed wakeups; it must now be 0.
+    //
+    // This only means anything because `scheduled` counts a repeating timer's
+    // re-arms as well as its first arming (see `process_expired`).  It did not
+    // until 2026-08-21, and until then the subtraction was dead: `fired` grew
+    // once per tick per repeating timer while `scheduled` stood still, so the
+    // `saturating_sub` floored the result at 0 on every boot regardless of how
+    // many wakeups were being lost.  If you ever "simplify" the re-arm counter
+    // away, delete this check too rather than leave a tripwire that cannot fire.
     let unaccounted = sched
         .saturating_sub(fired_n)
         .saturating_sub(cancelled_n)

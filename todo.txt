@@ -54537,6 +54537,26 @@ caller is written against.
 
 TRIGGER: lane A's reply naming the syscall number and struct layout.
 
+## DONE (2026-08-21, lane A, commit 520634ccc): hrtimer sorted Vec -> binary min-heap
+##
+## Done, with one deliberate departure from the sketch below: **no lazy
+## cancellation.** The sketch assumed "a heap has no cheap remove-by-id" and
+## proposed a per-CPU BTreeSet of cancelled ids consulted at pop time. That is
+## true of a bare BinaryHeap, but not of a heap whose elements know where they
+## are: timers live in a slot slab, each slot stores its own heap_pos, and the
+## handle carries (slot, generation) -- so cancel is an O(1) index plus an
+## O(log n) sift with no tombstones, no set to consult, and no unbounded growth
+## of dead entries when a workload cancels more than it fires. The generation
+## counter is what makes the direct index safe: without it, a cancel through a
+## stale handle would evict whichever timer inherited the recycled slot, which
+## is exactly BUG-HRTIMER-EVICTS-AN-ARMED-TIMER wearing a different hat.
+##
+## Also not from the sketch: the ordering key is (expiry_ns, id), not expiry_ns.
+## A binary heap is not stable, and with a bare-deadline key a timer sharing its
+## deadline with a stream of arrivals can be passed over indefinitely.
+##
+## Original entry follows.
+##
 ## hrtimer: replace the sorted Vec with a real min-heap (lane A)
 
 `kernel/src/hrtimer.rs` keeps each CPU's pending timers in a `Vec<TimerEntry>`

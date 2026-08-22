@@ -51,6 +51,7 @@ APP = "gui/appearance/src/lib.rs"
 DESK = "gui/desktop/src/lib.rs"
 SEC = "gui/desktop/src/security_dialog.rs"
 RUN = "gui/desktop/src/run_dialog.rs"
+ICON = "gui/desktop/src/icons.rs"
 
 # (name, file, [(old, new), ...], [packages], [tests expected to fail])
 DEFECTS = [
@@ -320,6 +321,75 @@ DEFECTS = [
           "        let fg = if primary { guitk::color::Color::from_hex(0x1E1E2E) } else { p.text };")],
         ["desktop"],
         ["every_colour_the_dialog_draws_comes_from_its_palette"],
+    ),
+    # `icons.rs`, 16 constants + 2 written inline. Its sweep is the first that
+    # had to *drive a gesture* to reach a colour at all, so the defects below
+    # are placed to measure that specifically: BB is visible on a resting
+    # desktop, CC needs a marquee being dragged, DD needs icons mid-drag. A
+    # sweep of a still desktop would report green on two of the three.
+    (
+        "BB: the recycle bin keeps this module's own Mocha red",
+        ICON,
+        [("            Self::RecycleBin => p.red,",
+          "            Self::RecycleBin => Color::from_hex(0xF38BA8),")],
+        ["desktop"],
+        ["every_colour_the_icon_layer_draws_comes_from_its_palette"],
+    ),
+    (
+        "CC: the rubber-band outline keeps its own hardcoded blue",
+        ICON,
+        [("                color: p.hint_border(),",
+          "                color: Color::rgba(137, 180, 250, 120),")],
+        ["desktop"],
+        ["every_colour_the_icon_layer_draws_comes_from_its_palette"],
+    ),
+    (
+        # The ghost under a dragged icon. This one was never in the `theme`
+        # block — it was written inline at the call site, which is how a
+        # hardcoded palette spreads past the place you would think to look.
+        "DD: the drag ghost keeps the inline blue it was written with",
+        ICON,
+        [("                        color: p.hint_fill(),",
+          "                        color: Color::rgba(137, 180, 250, 30),")],
+        ["desktop"],
+        ["every_colour_the_icon_layer_draws_comes_from_its_palette"],
+    ),
+    (
+        # The trap `Palette::on_wallpaper` exists to stop: a converter reaches
+        # for the obvious role and a Light desktop gets dark labels under a
+        # black shadow.
+        #
+        # This one went UNCAUGHT on its first run, and the reason is the most
+        # useful thing this harness has said about part 2: the membership sweep
+        # finds *leftover constants*, and a wrong role is not one. `p.text` is
+        # a member of both palettes, so it passes the sweep in light mode
+        # exactly as it passes in dark. The sweep is not a proof that a module
+        # was converted *correctly* — only that it was converted at all.
+        #
+        # The answer was not to weaken the defect but to add the assertion the
+        # sweep structurally cannot make:
+        # `an_icon_label_does_not_change_colour_with_the_mode`, which renders
+        # twice and compares the label commands. Any module whose colour must
+        # NOT follow the mode needs its own such test; do not assume the sweep
+        # covers it.
+        "EE: an icon label is converted to `text` instead of `on_wallpaper`",
+        ICON,
+        [("                color: if icon.selected {\n"
+          "                    p.on_wallpaper()\n"
+          "                } else {\n"
+          "                    p.on_wallpaper_dim()\n"
+          "                },",
+          "                color: if icon.selected { p.text } else { p.subtext0 },")],
+        ["desktop"],
+        ["an_icon_label_does_not_change_colour_with_the_mode"],
+    ),
+    (
+        "FF: `on_wallpaper` is made to follow the mode after all",
+        APP,
+        [("    pub fn on_wallpaper(&self) -> Color {\n        LIGHT_EXTREME",
+          "    pub fn on_wallpaper(&self) -> Color {\n        self.text")],
+        ["appearance"],
+        ["a_label_on_the_wallpaper_does_not_follow_the_mode"],
     ),
 ]
 

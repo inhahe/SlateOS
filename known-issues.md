@@ -50319,7 +50319,23 @@ Do **not** do part 2 without part 1 — threading a struct whose light variant
 does not exist yet just relocates the hardcoding into the struct's
 constructor.
 
-**Part 2 progress. 2 of 49 modules converted.**
+**What the sweep does not prove, learned at module 3.** The membership sweep
+finds a *leftover constant*. It does not find a *wrong role*, and cannot: a
+role is a member of both palettes, so converting a colour to the wrong one
+passes in light mode exactly as it passes in dark. Measured rather than
+assumed — harness defect EE swapped an icon label from `on_wallpaper` to
+`text` and the sweep reported green.
+
+The practical consequence for the remaining modules: **any colour that must
+*not* follow the mode needs its own test.** The sweep covers "was this
+converted at all"; nothing covers "was it converted to the right thing" except
+an assertion someone writes. The pattern is
+`an_icon_label_does_not_change_colour_with_the_mode` — render twice, filter the
+commands that carry the colour in question, and assert the two renders agree.
+Candidates: anything drawn on the wallpaper, on a video surface, on a
+thumbnail, or on any other content the palette does not own.
+
+**Part 2 progress. 3 of 49 modules converted.**
 
 - [x] `security_dialog.rs` — 29 constants, done 2026-08-22. The method above
   survived contact: the sweep lives in `gui/desktop/src/palette_check.rs` as
@@ -50364,6 +50380,35 @@ constructor.
     hovered item, but swapping it in changes what the dialog looks like, and
     this task is a conversion — a redesign hidden inside a 549-substitution
     edit is a redesign nobody reviewed.
+- [x] `icons.rs` — 16 constants plus 2 written inline, done 2026-08-22.
+  Harness defects BB/CC/DD/EE/FF.
+  - **Two of the eighteen were not in the `theme` block at all.** The drag
+    ghost's fill and its glyph tint were `Color::rgba(137, 180, 250, 30)` and
+    an alpha'd copy of the icon hue, written at the call site. Grep for
+    `Color::rgba`/`Color::from_hex` in every module *after* emptying its theme
+    block; the 549 count is of named constants and undercounts.
+  - **Six mapped straight onto `Palette`'s helpers**, alpha for alpha:
+    selection fill/border → `selection_fill`/`selection_border`, rubber-band
+    fill/border → `hint_fill`/`hint_border`, drop target → `drop_target`,
+    label shadow → `text_shadow`. Those helpers were written *from* these
+    values; this is the copy going home. The selection now follows the user's
+    accent, which the hardcoded blue never could.
+  - **The nine icon-type hues stay categorical** — folder yellow, recycle bin
+    red, executable peach. A Red desktop that painted every shortcut and the
+    recycle bin the same colour would be worse than one that ignored the
+    setting.
+  - **New in `appearance`: `Palette::on_wallpaper()` and `on_wallpaper_dim()`,
+    pale in both modes.** An icon label lands on an arbitrary photograph under
+    a black shadow, so its legibility cannot come from the palette — the same
+    argument that already makes `text_shadow` black in both modes (§525
+    decision 3). `p.text` would be dark on Latte, and dark text under a black
+    shadow is legible against nothing. Also new: `LIGHT_EXTREME` and
+    `DARK_EXTREME`, the two answers `readable_on` gives, named so that
+    `on_wallpaper` can share the endpoint without borrowing `LIGHT_BASE`'s
+    meaning.
+  - **The sweep's blind spot showed up here** — see the paragraph above this
+    list. `icons.rs` therefore carries a second test,
+    `an_icon_label_does_not_change_colour_with_the_mode`.
 
 **Trigger:** this is not blocked on anything. It is sequenced after the shell
 event loop (`TD-C-THE-SHELL-CAN-DRAW-ITSELF-AND-NOBODY-CAN-ASK-IT-TO`) only

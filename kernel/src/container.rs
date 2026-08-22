@@ -941,37 +941,48 @@ impl ContainerTable {
 
 static TABLE: Mutex<Option<ContainerTable>> = Mutex::named(None, b"container-tbl");
 
-/// Check whether the container subsystem has been initialized.
+/// Check whether the container subsystem is usable.
+///
+/// Always true: the accessors below build the table on first use, so there is
+/// no window in which a container call is unsafe.
 pub fn is_initialized() -> bool {
-    TABLE.lock().is_some()
+    true
 }
 
 /// Initialize the container manager.
+///
+/// Idempotent, and not a precondition for using the rest of the module -- the
+/// accessors build the table on first use.  This forces that to happen at a
+/// known point in boot, and logs it.
 pub fn init() {
     let mut table = TABLE.lock();
-    *table = Some(ContainerTable::new());
+    let _ = table.get_or_insert_with(ContainerTable::new);
     serial_println!(
         "[container] Initialized ({} max containers)",
         MAX_CONTAINERS
     );
 }
 
+// The `Option` in `TABLE` is an initialization-order artifact, not a state any
+// caller should be able to observe: `Mutex::named` needs a const initializer
+// and `ContainerTable::new()` is not const.  Constructing on first use rather
+// than unwrapping keeps that artifact invisible -- a caller that runs before
+// `init()` gets the correct table instead of panicking the kernel, so the
+// ordering hazard cannot become a DoS.
 fn with_table<F, R>(f: F) -> R
 where
     F: FnOnce(&mut ContainerTable) -> R,
 {
     let mut guard = TABLE.lock();
-    let table = guard.as_mut().expect("[container] not initialized");
-    f(table)
+    f(guard.get_or_insert_with(ContainerTable::new))
 }
 
 fn with_table_ref<F, R>(f: F) -> R
 where
     F: FnOnce(&ContainerTable) -> R,
 {
-    let guard = TABLE.lock();
-    let table = guard.as_ref().expect("[container] not initialized");
-    f(table)
+    let mut guard = TABLE.lock();
+    f(guard.get_or_insert_with(ContainerTable::new))
 }
 
 // ---------------------------------------------------------------------------
@@ -1466,8 +1477,11 @@ pub fn stop(id: ContainerId) -> KernelResult<()> {
 pub fn notify_init_exit(pid: u64, exit_code: i32) {
     // This runs from the generic process-exit path, which can fire during
     // early boot before `container::init()` has populated the table (e.g. a
-    // bootstrap thread exiting). Access the table directly and treat an
-    // uninitialized table as "no containers" rather than panicking.
+    // bootstrap thread exiting).  Deliberately reads `TABLE` directly instead
+    // of going through `with_table`: an absent table means "no containers",
+    // which is the answer here, and `with_table` would *build* one -- a 32-
+    // element `Vec` allocation on every process exit that happens before
+    // `init()`, to then find nothing in it.  Cheaper and clearer to bail.
     let mut net_ns_to_flush = None;
     let mut restart_id: Option<ContainerId> = None;
     let mut restart_attempt: u32 = 0;

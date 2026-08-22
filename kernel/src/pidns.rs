@@ -198,21 +198,33 @@ static TABLE: Mutex<Option<PidNsTable>> = Mutex::new(None);
 
 /// Initialize the PID namespace subsystem.
 ///
-/// Called during boot, after the heap is available.
+/// Called during boot, after the heap is available.  Calling it is not a
+/// precondition for using the rest of the module -- the accessors below
+/// construct the table on first use, and `PidNsTable::new()` is the same value
+/// either way.  This exists to do that work eagerly at a known point in boot,
+/// and to log it.
+/// Idempotent: it must not *replace* an existing table, or a caller that
+/// arrived before this point would have its namespaces silently discarded.
 pub fn init() {
     let mut table = TABLE.lock();
-    *table = Some(PidNsTable::new());
+    let _ = table.get_or_insert_with(PidNsTable::new);
     serial_println!("[pidns] Initialized ({} max namespaces)", MAX_NAMESPACES);
 }
 
-/// Helper: get a mutable reference to the table, panicking if not initialized.
+// The `Option` in `TABLE` is an initialization-order artifact, not a state any
+// caller should be able to observe: `Mutex::new` needs a const initializer and
+// `PidNsTable::new()` is not const.  Constructing on first use rather than
+// unwrapping keeps that artifact invisible -- a caller that runs before
+// `init()` gets the correct table instead of panicking the kernel, so the
+// ordering hazard cannot become a DoS.
+
+/// Helper: get a mutable reference to the table.
 fn with_table<F, R>(f: F) -> R
 where
     F: FnOnce(&mut PidNsTable) -> R,
 {
     let mut guard = TABLE.lock();
-    let table = guard.as_mut().expect("[pidns] not initialized");
-    f(table)
+    f(guard.get_or_insert_with(PidNsTable::new))
 }
 
 /// Helper: get an immutable reference to the table.
@@ -220,9 +232,8 @@ fn with_table_ref<F, R>(f: F) -> R
 where
     F: FnOnce(&PidNsTable) -> R,
 {
-    let guard = TABLE.lock();
-    let table = guard.as_ref().expect("[pidns] not initialized");
-    f(table)
+    let mut guard = TABLE.lock();
+    f(guard.get_or_insert_with(PidNsTable::new))
 }
 
 // ---------------------------------------------------------------------------

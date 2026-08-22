@@ -32092,6 +32092,31 @@ step (e) applied to Settings — an `oswindow` event loop, a window, and one
 `appearance_changed()` call after `AppearanceFile::save()` in
 `save_appearance` (`apps/settings/src/main.rs`, ~line 880).
 
+**Update 2026-08-22 — Settings is wired; 136 to go.** `apps/settings` now has a
+real `main()` that dials the compositor with `oswindow::connect()`/`connect_to()`,
+a real window, and a real event loop (`run`), and the `appearance_changed()`
+call this paragraph asked for is in place — with one correction to the recipe
+above. It is *not* "one `appearance_changed()` call after `AppearanceFile::save()`
+in `save_appearance`": `save_appearance` has no access to the event loop, and
+putting the notification there would either thread the loop into the model or
+notify from a function that cannot report a transport failure. Instead
+`save_appearance` sets a private `appearance_dirty` flag and the loop drains it
+with `take_appearance_change()`, which also makes the notification track *the
+file changing* rather than *an event being consumed* — the two are not the same,
+and both mistakes are pinned by tests. `design-decisions.md` §523 has the
+reasoning.
+
+Fifteen new tests, all proved regression tests by reintroducing the defect each
+names (eighteen markers, every test earned at least one). Four of them are
+`mod against_the_real_compositor`, which puts the shipped `Compositor` on one end
+of a real socket and Settings' shipped `run` on the other: a physical mouse click
+at a theme card changes the appearance the compositor draws with, end to end,
+with no stand-in on either side.
+
+Settings was the application this entry singled out because it had something
+specific it could not call. That is closed. The entry stays open for the other
+136 unwired applications.
+
 ## TD-ONLY-ONE-KEYBOARD-LAYOUT (lane C, 2026-08-17)
 
 **What.** `gui/compositor/src/keymap.rs` holds one hard-coded US-QWERTY
@@ -50782,6 +50807,53 @@ about where input transformation belongs and should not be bundled in.
 **Trigger:** do this when `apps/settings` gains a compositor connection — the
 same moment `ReloadAppearance` gets its first real caller. Both are lane C's.
 
+**Update 2026-08-22 — the trigger is met, and the job is bigger than this entry
+said.** `apps/settings` now has a compositor connection and a real event loop,
+and `ReloadAppearance` has its first real caller (see
+`TD-NO-APP-CONNECTS-TO-THE-COMPOSITOR` and `design-decisions.md` §523). So the
+blocker named above is gone. Two corrections to this entry's own description
+turned up on checking it, and both make the remaining work larger:
+
+1. **There is no file.** This entry says the slider "changes a number in a file".
+   It does not. `gui/desktop/src/mouse_settings.rs` has **no persistence
+   whatsoever** — no save, no load, no path, no serialisation. It is an
+   in-memory struct with clamps. So the mouse settings do not survive a logout,
+   never mind reach the compositor. The appearance settings had
+   `appearance::AppearanceFile` to build on; this has nothing equivalent.
+2. **It is in the wrong crate for the panel that would edit it.**
+   `mouse_settings` lives in `gui/desktop` (the shell), and the settings
+   application is `apps/settings`. Nothing outside its own module references it
+   — the only two mentions in the tree are its `pub mod` line and a comment in
+   the compositor saying nothing wires it through. `apps/settings` has a
+   "Mouse & Pointer" *section*, but it is on the Accessibility page and holds
+   one toggle (Mouse Keys); there is no double-click-speed control in the
+   settings application at all.
+
+**So the proper fix is now four pieces, not one call:**
+
+- **(a) A shared `gui/inputsettings` crate**, the counterpart of `appearance` —
+  the struct, the YAML file, load/save, and the clamps, owned by neither the
+  shell nor the compositor. It must be a third crate for the same reason
+  `appearance` is: the shell, the compositor and the settings application all
+  need to read it, and any two of them depending on the third is a cycle waiting
+  to happen. Note that `gui/*` is globbed in the workspace manifest, so a new
+  crate there needs **no** edit to the workspace-root `Cargo.toml` — which lane
+  C may not touch. `gui/desktop`'s `mouse_settings` then becomes a re-export or
+  is deleted.
+- **(b) A `ReloadInput` control verb**, as this entry already recommended —
+  same shape as `ReloadAppearance` (no payload, no `link.resolve`), and the
+  reasoning against folding pointer behaviour into `AppearanceSettings` stands
+  unchanged.
+- **(c) A real mouse page in `apps/settings`** with the double-click-speed
+  control, writing (a) and notifying (b) — exactly the pattern §523 established
+  for appearance, including the "the change is in force before anyone is told"
+  rule and the dirty flag drained by the loop.
+- **(d) The compositor reads (a) on `ReloadInput`** and calls its existing
+  `set_double_click_ms`.
+
+Only double-click is in scope; the pointer-speed/acceleration question in
+"Scope beyond double-click" above is unchanged and still deferred.
+
 **If never fixed:** a slider that lies. The user moves it, the panel writes the
 file, and the double-click speed is whatever the compositor's constant says.
 Worse than an absent setting, because an absent one cannot be misread as tried
@@ -55082,3 +55154,237 @@ coverage rather than a regression test — no marker made it fail. Full table in
    compositor (§519), so the shell throws the stepped rectangles away and those
    two are for callers that render the result themselves.
 
+
+## TD-C-A-TEST-BINARY-CAN-BE-BROKEN-WITHOUT-ANYONE-NOTICING (lane C, 2026-08-22)
+
+**What.** A crate whose test binary fails to *compile* reports no test
+failures. It reports nothing at all — no `test result` line — and in a filtered
+build log that is indistinguishable from a crate with no problems. Because the
+per-task gate on this lane has usually been `cargo test -p <the crate I edited>`,
+a change in one crate can break a *sibling* crate's tests and nobody finds out
+until something else happens to build the workspace.
+
+**It already happened, and it lasted a day.** `apps/editor`'s
+`mod against_the_real_compositor` — the four tests that put the shipped editor
+on one end of a real socket and the shipped compositor on the other, i.e. the
+most valuable tests in that crate — **had not compiled since commit
+`7d1667856` (2026-08-21, the frame clock, `design-decisions.md` §521)**. That
+change moved `set_wait_timeout` from an inherent method on
+`guiremote::socket::Socket` onto the `Transport` trait, so every transport could
+park with a deadline. `apps/editor`'s test module calls it and does not
+otherwise name the trait, so it stopped resolving:
+
+```
+error[E0599]: no method named `set_wait_timeout` found for struct
+              `guiremote::socket::Socket` in the current scope
+```
+
+§521's own gate was `cargo test -p oswindow -p guiremote -p desktop`, which is a
+perfectly reasonable-looking set, and `apps/editor` is not in it. It was found
+on 2026-08-22 only because the Settings event-loop task happened to run
+`cargo test --workspace` at the end.
+
+**The one-line fix is in** (`use oswindow::ConnectionTransport as _;` in
+`apps/editor/src/main.rs`, with a comment pointing here). This entry is about
+the *process hole*, which is still open.
+
+**Why it is worse than an ordinary silent failure.** A test that fails is loud.
+A test that does not exist is at least visibly absent from the count. A test
+binary that does not compile *claims nothing* — and the crates most likely to
+break this way are exactly the ones whose tests reach across crate boundaries,
+which is to say the integration tests that are the whole reason
+`TD-NO-APP-CONNECTS-TO-THE-COMPOSITOR` was worth closing. The tests that
+protect the seams are the tests most exposed to a change on the other side of a
+seam.
+
+**Reproducing it.** Delete the `use oswindow::ConnectionTransport as _;` line
+from `apps/editor/src/main.rs`, then run
+`cargo test -p oswindow -p guiremote -p desktop --target x86_64-pc-windows-gnu`.
+It is green. `cargo test --workspace` is not.
+
+**The proper fix**, in the order the cost forces:
+
+1. **Make the workspace the gate, not the crate.** Done as practice from
+   2026-08-22: `cargo test --workspace --target x86_64-pc-windows-gnu` before
+   any commit that touches a crate other crates depend on — which, for anything
+   in `gui/`, is all of them. It costs a few minutes and it is the only check
+   that actually covers this.
+   **Use `--no-fail-fast`.** Found the same day, and it is the second half of
+   the same hazard: `cargo test --workspace` stops at the *first* failing test
+   binary, so every crate scheduled after it is never run and reports nothing —
+   which reads, once again, exactly like "no problems". A flaky test in
+   `userspace/polkit` aborted the run before `apps/settings` was reached; the
+   re-run with `--no-fail-fast` then found two *more* flaky tests, in
+   `userspace/ftpd` and `posix`, that the first run had never got far enough to
+   reach. All three are lane B's and are filed as
+   `requests/c-b-three-flaky-tests-fail-the-workspace-gate.md`. A gate that can
+   be silenced by an unrelated crate's unrelated failure is not a gate.
+2. **Do not filter a build log in a way that can hide a compile error.**
+   Grepping for `test result|FAILED` is exactly the filter that made this
+   invisible, because a crate that did not build produces neither. Any filter
+   must include `^error` and the runner's exit status must be checked; a
+   `test result` tally with no `error` line and a zero exit is the only green.
+3. **A `cargo check --workspace --all-targets` in CI** would catch it in a
+   fraction of the time of a full test run, since it is a compile problem and
+   not a behavioural one. There is no CI on this project yet; when there is,
+   this is the cheapest possible guard and should be the first job.
+
+**Severity.** Medium, and it is a *meta*-defect: it does not itself break
+anything a user can see, it removes the evidence that something else did. The
+specific instance is closed; the hole that let it persist for a day is only
+closed by (1) being kept up, which is a habit rather than a mechanism until (3)
+exists.
+
+**Where.** Not a location in the code — a property of how this lane runs its
+gate. The instance was `apps/editor/src/main.rs`'s
+`mod against_the_real_compositor`; the cause was `gui/remote/src/client.rs:143`
+(`Transport::set_wait_timeout`).
+
+## B-POLKIT-FAILLOCK-TEST-RACES-ITS-OWN-ONE-SECOND-DELAY (found by lane C, 2026-08-22 — lane B's crates)
+
+**In short:** One test in `userspace/polkit` earns a rate-limit delay of exactly
+one second and then does a deliberately-slow password hash inside that second
+before checking the delay is still in force. On a busy machine the hash outlasts
+the delay and the test fails. It passes every time when run alone.
+
+**Where.** `userspace/polkit/src/main.rs:1806`,
+`tests::polkit_honours_a_delay_earned_at_another_prompt`. The delay arithmetic is
+`authlib::delay_for` (`userspace/authlib/src/lib.rs:413`) and the clock is
+`wall_clock_secs` (`:429`), both lane B's.
+
+**Why one second.** The test's loop is
+`while elsewhere.rate_limited("alice").is_none() { elsewhere.note_failure("alice") }`,
+which stops at the *first* iteration that produces a delay — `FREE_ATTEMPTS + 1`
+failures, so `delay_for` computes `1 << 0` = 1 s. The clock has whole-second
+granularity, so the real window is 0–1 s depending on where in the current second
+the loop landed. `admin_with_password` → `set_password_with_salt` then runs a real
+KDF inside it.
+
+**How it was found, and why it mattered to lane C.** `cargo test --workspace`
+stops at the first failing binary, so this failure meant `apps/settings` — the
+crate under test in the task that ran the gate — was never run at all. See
+`TD-C-A-TEST-BINARY-CAN-BE-BROKEN-WITHOUT-ANYONE-NOTICING`; this is a second,
+independent way for a workspace gate to report nothing and look green-ish.
+
+**The same bug is in `ftpd`.** `ftpd::tests::repeated_guesses_are_rate_limited`
+(`userspace/ftpd/src/main.rs:3230`) writes the same count out longhand —
+`for _ in 0..=authlib::FREE_ATTEMPTS` — and so also earns exactly one second,
+then spends it on `FREE_ATTEMPTS + 1` real shadow verifications before asserting
+the limit is still in force. It failed on the run where `polkit` passed, which is
+how the family was identified rather than the instance.
+
+**Filed to the owning lane** as
+`requests/c-b-three-flaky-tests-fail-the-workspace-gate.md`, with three suggested
+fixes — the right one being to inject a frozen clock, since the property under
+test in both crates ("a delay earned at another prompt is honoured here", "the
+limit is daemon-wide and survives reconnecting") has nothing to do with wall
+time. Lane C has not touched either file.
+
+**Also noted there, not the cause:** the test's scratch directory is a *fixed*
+path, `temp_dir()/polkit-faillock-share-test`, which it opens by deleting. Two
+concurrent `polkit` runs would delete each other's fixture mid-test.
+
+**Workaround until fixed:** run the gate as
+`cargo test --workspace --no-fail-fast --target x86_64-pc-windows-gnu`.
+
+## B-TWO-POSIX-TDESTROY-TESTS-SHARE-ONE-COUNTER (found by lane C, 2026-08-22 — lane B's crate)
+
+**In short:** Two tests in `posix/src/search.rs` reset and read the same
+process-wide counter, and `cargo test` runs them on different threads at the
+same time. When one's reset lands in the middle of the other's measurement, the
+other reads zero and fails. Nothing is wrong with `tdestroy`.
+
+**Where.** `posix/src/search.rs:919` declares
+`static DESTROY_COUNT: AtomicI32`; `test_tdestroy_empty` (`:929`) and
+`test_tdestroy_calls_free_fn` (`:944`) both `store(0)` into it and both read it.
+
+**The observed failure is exactly the predicted interleaving:**
+
+```
+thread 'search::tests::test_tdestroy_calls_free_fn' panicked at posix\src\search.rs:946:9:
+assertion `left == right` failed: tdestroy should call free_fn for each node
+  left: 0
+ right: 5
+```
+
+`left: 0` is what you get when `test_tdestroy_empty`'s `store(0)` lands *after*
+the five `fetch_add`s and before the `load`.
+
+**Fix.** One static and one `extern "C"` callback per test — two lines, no
+synchronisation and no ordering assumption. A `Mutex` around both would also
+work and is worse, because it makes each test depend on its relationship to the
+other, which is the thing that just bit. `test_tdestroy_empty` in fact needs no
+counter at all: it asserts *no* calls, so a callback that panics on entry is a
+stronger assertion.
+
+**Filed to the owning lane** in
+`requests/c-b-three-flaky-tests-fail-the-workspace-gate.md`. Lane C has not
+touched the file.
+
+**How it was found.** The same `cargo test --workspace --no-fail-fast` run that
+turned up the `ftpd` half of
+`B-POLKIT-FAILLOCK-TEST-RACES-ITS-OWN-ONE-SECOND-DELAY`. Two consecutive full
+runs failed on *different* subsets of the three, which is what identified all of
+them as load-sensitive races rather than regressions.
+
+## TD-C-A-ZONE-BUILD-FAILS-UNLESS-YOU-KNOW-TO-SAY-NIGHTLY (lane C, 2026-08-22)
+
+**In short:** Every zone's `.cargo/config.toml` tells you to build by running
+`cargo build` from inside the zone directory. Do exactly that and you get
+`error: `.json` target specs require -Zjson-target-spec` — a message naming a
+flag that, per `CLAUDE.md`, you are specifically told *not* to pass. The missing
+word is `+nightly`. Nothing is misconfigured; the instructions are incomplete.
+
+**Reproduce** (any zone — checked in `apps/`, `gui/` and `userspace/`):
+
+```
+cd gui/window && cargo build -p oswindow
+error: `.json` target specs require -Zjson-target-spec
+
+cd gui/window && cargo +nightly build -p oswindow
+    Finished `dev` profile ... in 5.38s
+```
+
+**Why.** The workspace-root `.cargo/config.toml` sets
+`[unstable] json-target-spec = true` (`:54`), which is what makes
+`build.target = "../toolchain/x86_64-slateos.json"` in each zone config legal.
+But **cargo on a stable toolchain ignores the entire `[unstable]` table**, without
+warning. The default toolchain in this checkout is
+`stable-x86_64-pc-windows-gnu`, so `json-target-spec` never takes effect and the
+`.json` spec is rejected. `build-std` in the same table is silently dropped for
+the same reason — the `.json` error just happens to fire first.
+
+**Why the error message is actively misleading.** It says the spec "requires
+-Zjson-target-spec", so the obvious next move is to pass `-Zjson-target-spec` on
+the command line. `CLAUDE.md` line 41 says in as many words that this is *not*
+how it is set ("NOT via env var or CLI flag"). Both statements are true and
+neither mentions the toolchain, so the reader is left with a contradiction and no
+route out. The route out is one word.
+
+**What was fixed.** The header comments of `apps/.cargo/config.toml` and
+`gui/.cargo/config.toml` — the two zones lane C owns — now state the `+nightly`
+requirement, quote the exact error, and say plainly that the fix is not a `-Z`
+flag. `gui/`'s header also said *"Zone config for apps/"*, copied verbatim from
+`apps/`, and now names its own zone.
+
+**Still open, and why lane C did not do it:**
+
+- `userspace/.cargo/config.toml`, `net/.cargo/config.toml` and
+  `init/.cargo/config.toml` carry the identical incomplete header. Those are
+  lanes A and B's trees.
+- `CLAUDE.md` line 41 should gain "and only on a nightly toolchain", and the
+  `build-slateos` alias comment at `.cargo/config.toml:62` already shows
+  `cargo +nightly build-slateos` in its example but does not say why the
+  `+nightly` is load-bearing. `CLAUDE.md` may only be edited on an explicit
+  operator instruction, and the workspace-root `.cargo/` is not lane C's.
+
+**Alternative fix not taken:** adding `json-target-spec = true` to each zone
+config would not help — it is the *toolchain*, not the config location, that
+ignores it. A `rust-toolchain.toml` pinning nightly at the workspace root
+**would** fix it properly and for every zone at once, and is the right answer if
+the operator wants one; it is a workspace-root file and a decision with
+consequences for every lane, so it is not lane C's to make unilaterally.
+
+**Severity.** Low as a defect — nothing is broken and the workaround is one
+word — but it costs every newcomer (human or session) the same ten minutes, and
+it cost this one, which is why it is written down rather than remembered.

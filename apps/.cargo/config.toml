@@ -7,6 +7,19 @@
 # the parent; the parent's `[target.x86_64-slateos]` rustflags are
 # additively merged.
 #
+# YOU MUST SAY `cargo +nightly build`. The default toolchain here is
+# stable, and cargo on stable *silently ignores* the whole `[unstable]`
+# table — including the workspace root's `json-target-spec = true`,
+# without which `build.target` below (a `.json` spec) is rejected:
+#
+#     error: `.json` target specs require -Zjson-target-spec
+#
+# That message names a flag you cannot pass, which is why it is worth
+# stating here: the fix is not to add `-Z` anywhere, it is `+nightly`.
+# From the workspace root the equivalent is the `build-slateos` alias,
+# also nightly-only. See known-issues.md
+# TD-C-A-ZONE-BUILD-FAILS-UNLESS-YOU-KNOW-TO-SAY-NIGHTLY.
+#
 # build-std is set here (not at the workspace root) because cargo
 # *appends* arrays during config merge — if the parent set build-std,
 # the kernel build (which runs from kernel/ and would inherit the

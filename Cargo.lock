@@ -9484,7 +9484,9 @@ name = "settings"
 version = "0.1.0"
 dependencies = [
  "appearance",
+ "compositor",
  "guitk",
+ "oswindow",
 ]
 
 [[package]]

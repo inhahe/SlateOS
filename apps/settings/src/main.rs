@@ -26,6 +26,7 @@ use guitk::scroll_window;
 use guitk::style::{CornerRadii, Edges};
 use guitk::text;
 use guitk::wheel;
+use oswindow::{EventLoop, EventResponse, WindowBuilder};
 
 // ============================================================================
 // Catppuccin Mocha theme colors
@@ -657,6 +658,20 @@ pub struct SettingsState {
     // cursors, corners) along with the user's comments.
     pub appearance: AppearanceFile,
 
+    /// Set when `appearance.yaml` was just rewritten; drained by the event loop.
+    ///
+    /// Private, and reachable only through
+    /// [`take_appearance_change`](Self::take_appearance_change), because it is
+    /// a message to whoever is driving this state and not part of the state
+    /// itself. What matters about its shape: **the setting is already saved and
+    /// already in force before this is ever read.** A driver that never drains
+    /// it — every test in this file, and any future embedder — loses nothing
+    /// except the live notification to the compositor, which picks the file up
+    /// at its next start anyway. It is deliberately not a precondition for the
+    /// change taking effect, so a caller that does not know about it cannot end
+    /// up with a Settings window whose controls do nothing.
+    appearance_dirty: bool,
+
     // Network
     pub adapters: Vec<NetworkAdapter>,
     pub selected_adapter: usize,
@@ -890,6 +905,25 @@ impl SettingsState {
         if let Err(err) = self.appearance.save() {
             eprintln!("settings: could not save appearance.yaml: {err}");
         }
+        // Flagged even when the write failed. The compositor answers the
+        // notification by re-reading the file itself, so what it needs to know
+        // is "look again", and the honest answer after a failed write is still
+        // "look again" — it will read whatever is actually on disk, which is
+        // exactly the state the user now has. Suppressing it here would leave
+        // the compositor showing a setting that is no longer stored anywhere.
+        self.appearance_dirty = true;
+    }
+
+    /// Whether `appearance.yaml` has been rewritten since this was last asked,
+    /// clearing the flag.
+    ///
+    /// The event loop calls this after each event and, if it is true, tells the
+    /// compositor to re-read the file — which is what makes a corner-radius or
+    /// drop-shadow change appear on the windows already open rather than at the
+    /// next login. Taking rather than peeking is what stops one change from
+    /// producing a notification per subsequent event.
+    pub fn take_appearance_change(&mut self) -> bool {
+        core::mem::take(&mut self.appearance_dirty)
     }
 
     /// Create a new settings state with sensible defaults.
@@ -965,6 +999,9 @@ impl SettingsState {
                     muted: false,
                 },
             ],
+
+            // Nothing has been written yet, so there is nothing to notify.
+            appearance_dirty: false,
 
             // Personalization defaults, not a read of the configuration
             // file: a constructor that touched $HOME would make every test's
@@ -4496,31 +4533,156 @@ impl SettingsState {
 // Application entry point
 // ============================================================================
 
+/// Drive Settings on `window` until the user closes it or the connection ends.
+///
+/// Everything Settings *decides* is in [`SettingsState::handle_event`]; this is
+/// only the strap between it and the loop. It adds two things.
+///
+/// **When to draw.** A frame is submitted for the initial state and thereafter
+/// exactly when an event reported a visible change. Redrawing unconditionally
+/// would repaint the whole window for every mouse move across it, and this UI
+/// is a sidebar plus a scrolling page — one of the more expensive trees in the
+/// tree to rebuild.
+///
+/// **Telling the compositor.** Settings is the one application that edits
+/// `appearance.yaml`, and window corners, drop shadows and title-bar colours are
+/// drawn by the *compositor* from that file. Without the notification the user
+/// would change the corner radius, watch the preview in this window update, and
+/// see every real window keep its old corners until the next login — a setting
+/// that appears to work and does not, which is worse than one that plainly does
+/// nothing. The notification carries no settings: see
+/// [`EventLoop::appearance_changed`].
+fn run<T: oswindow::ConnectionTransport>(
+    events: &mut EventLoop<T>,
+    window: u64,
+    state: &mut SettingsState,
+) -> Result<(), oswindow::Error<T>> {
+    // Nothing has happened yet, so no event is going to ask for the first frame.
+    events.submit(window, &state.render())?;
+
+    // A failed submit or notify has nowhere to be reported from inside the
+    // handler — its return type is the loop's `EventResponse`, not a `Result` —
+    // so it is carried out here and the loop stopped. Swallowing it would leave
+    // a Settings window that runs on happily while the screen no longer
+    // changes.
+    let mut failure = None;
+    events.run(|events, id, event| {
+        if id != window {
+            return EventResponse::Continue;
+        }
+        let result = state.handle_event(&event);
+        // Asked whatever the event did, and *before* the redraw check: a change
+        // is saved by `handle_event` itself, so a control that reported
+        // `Ignored` having still written the file — there is none today, and a
+        // future one is exactly what this ordering protects — must not lose its
+        // notification to an early return.
+        if state.take_appearance_change()
+            && let Err(e) = events.appearance_changed()
+        {
+            failure = Some(e);
+            return EventResponse::Exit;
+        }
+        if result == EventResult::Consumed {
+            if let Err(e) = events.submit(id, &state.render()) {
+                failure = Some(e);
+                return EventResponse::Exit;
+            }
+        }
+        EventResponse::Continue
+    })?;
+
+    failure.map_or(Ok(()), Err)
+}
+
+/// The command-line arguments: a display address, and nothing else.
+///
+/// `--display ADDR` overrides `SLATE_DISPLAY`, in the same way and for the same
+/// reason a compositor takes an address as its first argument — a second display
+/// on one machine should not require editing the environment of the first.
+///
+/// Anything else is rejected rather than ignored. Settings takes no file and no
+/// page name, so an unrecognised argument is a user who expected something to
+/// happen; silently starting on the Display page would be a wrong answer
+/// delivered confidently.
+fn split_args<I: IntoIterator<Item = String>>(args: I) -> Result<Option<String>, String> {
+    let mut display = None;
+    let mut args = args.into_iter();
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--display" => {
+                display = Some(args.next().ok_or_else(|| {
+                    "--display needs an address, e.g. --display 127.0.0.1:7373".to_string()
+                })?);
+            }
+            other => match other.strip_prefix("--display=") {
+                Some(addr) => display = Some(addr.to_string()),
+                None => return Err(format!("unrecognised argument: {other}")),
+            },
+        }
+    }
+    Ok(display)
+}
+
 fn main() {
+    let display = match split_args(std::env::args().skip(1)) {
+        Ok(display) => display,
+        Err(e) => {
+            eprintln!("settings: {e}");
+            eprintln!("usage: settings [--display HOST:PORT]");
+            std::process::exit(2);
+        }
+    };
+
     let mut state = SettingsState::new();
     // The Personalization pages open on what the user actually has, which is
     // the same file the desktop shell paints from.
     state.load_appearance();
 
-    // In a real Slate OS environment, this would enter the compositor event loop.
-    // For now, render one frame to verify the UI builds correctly.
-    let tree = state.render();
-
-    // The render tree would be submitted to the compositor.
-    // For a basic sanity check, confirm we produced output.
-    assert!(!tree.is_empty(), "Settings UI must produce render commands");
-
-    // Simulate a resize event
-    let resize_event = Event::Resize {
-        width: 1400,
-        height: 900,
+    // Settings names `oswindow` and never TCP — see `design-decisions.md` §460
+    // — so the day the transport becomes a SlateOS channel, none of this
+    // changes.
+    let dialled = match &display {
+        Some(addr) => oswindow::connect_to(addr.as_str()),
+        None => oswindow::connect(),
     };
-    let result = state.handle_event(&resize_event);
-    assert_eq!(result, EventResult::Consumed);
+    let transport = match dialled {
+        Ok(t) => t,
+        Err(e) => {
+            // Almost always "connection refused", which means no compositor is
+            // running. The errno alone reads like a fault in this program, so
+            // say what it actually means and what to do about it.
+            eprintln!("settings: cannot reach the compositor: {e}");
+            eprintln!("  A compositor must be running for Settings to have a window.");
+            eprintln!("  Start one with `compositor`, or point Settings at an existing");
+            eprintln!(
+                "  display with `--display HOST:PORT` or the {} variable.",
+                oswindow::DISPLAY_VAR
+            );
+            std::process::exit(1);
+        }
+    };
 
-    // Re-render after resize
-    let tree2 = state.render();
-    assert!(!tree2.is_empty(), "Settings UI must render after resize");
+    // Cast from the state's own `f32`, which is what the layout arithmetic
+    // wants, to the protocol's pixels. `new()` sets 1200x800 and nothing has
+    // resized it yet, so the values are exact.
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let (w, h) = (state.window_width as u32, state.window_height as u32);
+    let mut events = EventLoop::new(transport);
+    let window = match WindowBuilder::new("Settings".to_string(), w, h)
+        .resizable(true)
+        .build(&mut events)
+    {
+        Ok(id) => id,
+        Err(e) => {
+            eprintln!("settings: the compositor refused the window: {e:?}");
+            std::process::exit(1);
+        }
+    };
+
+    if let Err(e) = run(&mut events, window, &mut state) {
+        eprintln!("settings: the connection failed: {e:?}");
+        std::process::exit(1);
+    }
 }
 
 // ============================================================================
@@ -5054,7 +5216,12 @@ mod tests {
     }
 
     /// Every click band the current page registers, in the order it draws them.
-    fn hit_bands(state: &SettingsState) -> Vec<(RowHit, (f32, f32, f32, f32))> {
+    ///
+    /// `pub(super)` so the event-loop tests can aim a *real* mouse event at a
+    /// real control. Reaching a control by name is the only way a test of the
+    /// loop can be about the loop: a test that clicked a hard-coded coordinate
+    /// would start passing for the wrong reason the day the layout moved.
+    pub(super) fn hit_bands(state: &SettingsState) -> Vec<(RowHit, (f32, f32, f32, f32))> {
         let mut sink = RectSink {
             x: SettingsState::content_x(),
             y: SettingsState::content_top(),
@@ -5065,8 +5232,8 @@ mod tests {
     }
 
     /// The middle of the band the current page gives `what`, or `None` if it
-    /// has none.
-    fn center_of(state: &SettingsState, what: RowHit) -> Option<(f32, f32)> {
+    /// has none. `pub(super)` for the reason [`hit_bands`] is.
+    pub(super) fn center_of(state: &SettingsState, what: RowHit) -> Option<(f32, f32)> {
         hit_bands(state)
             .into_iter()
             .find(|(w, _)| *w == what)
@@ -6794,5 +6961,772 @@ mod tests {
         assert!(layout.item_at(layout.x + 20.0, y).is_none());
         click(&mut state, layout.x + 20.0, y);
         assert_eq!(state.resolution_index, 1);
+    }
+}
+
+/// Settings driven the way it is actually driven: by an event loop.
+///
+/// Everything in `mod tests` calls the model directly — `handle_click`,
+/// `handle_event` — which is the right way to test what a control *does* and
+/// says nothing about whether the program that wraps it works. These tests run
+/// the shipped [`run`] against a stand-in desktop that speaks the real wire
+/// protocol, so they are about the strap: when a frame is drawn, which events
+/// are ours, when the loop stops, and — the reason this task existed — that a
+/// Personalization change is announced to the compositor.
+#[cfg(test)]
+mod loop_tests {
+    // A test that indexes out of range should fail loudly and point at the line
+    // that did it — that is the diagnosis. The defensive lints exist to keep
+    // panics out of code that runs on a user's data, which this is not.
+    //
+    // `float_cmp` for the same reason `mod tests` allows it: the window sizes
+    // compared here are the exact numbers that crossed the wire as integers, and
+    // exact equality *is* the assertion — an epsilon would let a resize arrive
+    // half a pixel wrong with the suite still green.
+    #![allow(
+        clippy::indexing_slicing,
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::arithmetic_side_effects,
+        clippy::float_cmp
+    )]
+
+    use appearance::config::testing::with_scratch_config;
+    use guitk::event::{Event, Key, KeyEvent, Modifiers, MouseButton, MouseEvent, MouseEventKind};
+    use oswindow::testing;
+    use oswindow::{InputEvent, WindowBuilder};
+
+    use super::tests::center_of;
+    use super::{
+        EventResult, RowHit, SelectId, SettingsPage, SettingsState, ThemeMode, run, split_args,
+    };
+
+    /// A left click at a point, as the compositor would deliver it.
+    fn click_at(x: f32, y: f32) -> Event {
+        Event::Mouse(MouseEvent {
+            x,
+            y,
+            kind: MouseEventKind::Press(MouseButton::Left),
+        })
+    }
+
+    /// An event Settings will not act on: Escape with no dropdown open.
+    ///
+    /// Used where a test needs a *delivered* event that changes nothing. A
+    /// mouse move would do the job today and might stop doing it the day
+    /// hovering highlights something, which would make the test fail for a
+    /// reason that has nothing to do with what it is asserting.
+    fn ignored() -> Event {
+        Event::Key(KeyEvent {
+            key: Key::Escape,
+            pressed: true,
+            modifiers: Modifiers::NONE,
+            text: None,
+        })
+    }
+
+    /// A state showing `page`, and the middle of `what`'s click band on it.
+    ///
+    /// The coordinate is computed from the page's own layout rather than
+    /// written down, so a test aims at a control and not at a pixel: a layout
+    /// change moves the target with it instead of silently making the click
+    /// land on nothing while the test still passes.
+    fn control_on(page: SettingsPage, what: RowHit) -> (SettingsState, (f32, f32)) {
+        let mut state = SettingsState::new();
+        state.current_page = page;
+        let at = center_of(&state, what)
+            .unwrap_or_else(|| panic!("{} has no click target for {what:?}", page.label()));
+        (state, at)
+    }
+
+    #[test]
+    fn settings_draws_once_at_startup_and_then_only_when_something_changed() {
+        let (mut events, desktop) = testing::desktop();
+        let window = WindowBuilder::new("Settings", 1200, 800)
+            .resizable(true)
+            .build(&mut events)
+            .expect("the compositor should have created the window");
+
+        let (mut state, at) = control_on(
+            SettingsPage::NetworkStatus,
+            RowHit::Select(SelectId::Adapter, 1),
+        );
+
+        {
+            let mut desk = desktop.borrow_mut();
+            // Each batch is one turn of the loop, so these arrive in order with
+            // Settings processing each before the next appears.
+            desk.script
+                .push_back(vec![InputEvent::new(window, ignored())]);
+            desk.script
+                .push_back(vec![InputEvent::new(window, click_at(at.0, at.1))]);
+            desk.script
+                .push_back(vec![InputEvent::new(window, Event::CloseRequested)]);
+        }
+
+        run(&mut events, window, &mut state).expect("the loopback connection cannot fail");
+
+        assert_eq!(state.selected_adapter, 1, "the click reached the control");
+        let drawn = desktop.borrow_mut().drawn();
+        assert_eq!(
+            drawn.len(),
+            2,
+            "the initial frame and one for the click — not one per event, and \
+             not none: {drawn:?}"
+        );
+        assert!(
+            drawn.iter().all(|(w, count)| *w == window && *count > 0),
+            "every frame is a real picture of this window: {drawn:?}"
+        );
+    }
+
+    #[test]
+    fn events_for_another_window_are_ignored_rather_than_applied() {
+        let (mut events, desktop) = testing::desktop();
+        let mine = WindowBuilder::new("Settings", 1200, 800)
+            .build(&mut events)
+            .unwrap();
+        let theirs = WindowBuilder::new("Other", 100, 100)
+            .build(&mut events)
+            .unwrap();
+        assert_ne!(mine, theirs);
+
+        let (mut state, at) = control_on(
+            SettingsPage::NetworkStatus,
+            RowHit::Select(SelectId::Adapter, 1),
+        );
+
+        {
+            let mut desk = desktop.borrow_mut();
+            desk.script
+                .push_back(vec![InputEvent::new(theirs, click_at(at.0, at.1))]);
+            desk.script
+                .push_back(vec![InputEvent::new(mine, Event::CloseRequested)]);
+        }
+
+        run(&mut events, mine, &mut state).unwrap();
+
+        assert_eq!(
+            state.selected_adapter, 0,
+            "a click addressed to another window must not work this one's controls"
+        );
+        let drawn = desktop.borrow_mut().drawn();
+        assert_eq!(drawn.len(), 1, "only the initial frame: {drawn:?}");
+    }
+
+    #[test]
+    fn closing_the_window_stops_the_loop_rather_than_merely_being_ignored() {
+        let (mut events, desktop) = testing::desktop();
+        let window = WindowBuilder::new("Settings", 1200, 800)
+            .build(&mut events)
+            .unwrap();
+
+        let (mut state, at) = control_on(
+            SettingsPage::NetworkStatus,
+            RowHit::Select(SelectId::Adapter, 1),
+        );
+
+        {
+            let mut desk = desktop.borrow_mut();
+            desk.script
+                .push_back(vec![InputEvent::new(window, Event::CloseRequested)]);
+            // Delivered on a later turn, so it can only arrive if the loop is
+            // still running. `handle_event` returns `Ignored` for
+            // `CloseRequested`, and a loop that took that as "carry on" would
+            // leave a window whose X does nothing — which is why the close is
+            // the loop's decision and not the handler's.
+            desk.script
+                .push_back(vec![InputEvent::new(window, click_at(at.0, at.1))]);
+        }
+
+        run(&mut events, window, &mut state).unwrap();
+
+        assert_eq!(
+            state.selected_adapter, 0,
+            "the loop went on running after the window was closed"
+        );
+    }
+
+    #[test]
+    fn a_resize_is_applied_before_the_frame_that_answers_it() {
+        let (mut events, desktop) = testing::desktop();
+        let window = WindowBuilder::new("Settings", 1200, 800)
+            .resizable(true)
+            .build(&mut events)
+            .unwrap();
+
+        let mut state = SettingsState::new();
+        assert_eq!(state.window_width, 1200.0);
+
+        {
+            let mut desk = desktop.borrow_mut();
+            desk.script.push_back(vec![InputEvent::new(
+                window,
+                Event::Resize {
+                    width: 900,
+                    height: 640,
+                },
+            )]);
+            desk.script
+                .push_back(vec![InputEvent::new(window, Event::CloseRequested)]);
+        }
+
+        run(&mut events, window, &mut state).unwrap();
+
+        assert_eq!((state.window_width, state.window_height), (900.0, 640.0));
+        let drawn = desktop.borrow_mut().drawn();
+        assert_eq!(
+            drawn.len(),
+            2,
+            "a resize is a visible change and must be repainted: {drawn:?}"
+        );
+    }
+
+    #[test]
+    fn changing_an_appearance_setting_asks_the_compositor_to_reload() {
+        with_scratch_config("settings_loop_reload", |_root| {
+            let (mut events, desktop) = testing::desktop();
+            let window = WindowBuilder::new("Settings", 1200, 800)
+                .build(&mut events)
+                .unwrap();
+
+            // Second card: Light, since `ThemeMode::ALL` is Dark, Light, System.
+            let (mut state, at) =
+                control_on(SettingsPage::Themes, RowHit::Select(SelectId::ThemeMode, 1));
+
+            {
+                let mut desk = desktop.borrow_mut();
+                desk.script
+                    .push_back(vec![InputEvent::new(window, click_at(at.0, at.1))]);
+                desk.script
+                    .push_back(vec![InputEvent::new(window, Event::CloseRequested)]);
+            }
+
+            run(&mut events, window, &mut state).unwrap();
+
+            assert_eq!(
+                state.appearance.settings.theme_mode,
+                ThemeMode::Light,
+                "the click picked the Light card"
+            );
+            let asked = desktop.borrow_mut().asked();
+            assert_eq!(
+                asked.iter().filter(|r| **r == "ReloadAppearance").count(),
+                1,
+                "the compositor draws window corners and title bars from this \
+                 file; without the notification every window already on screen \
+                 keeps the old look until the next login: {asked:?}"
+            );
+        });
+    }
+
+    #[test]
+    fn an_event_that_changes_no_appearance_setting_asks_for_no_reload() {
+        with_scratch_config("settings_loop_no_reload", |_root| {
+            let (mut events, desktop) = testing::desktop();
+            let window = WindowBuilder::new("Settings", 1200, 800)
+                .build(&mut events)
+                .unwrap();
+
+            // A control that is genuinely *used* — the click is consumed and a
+            // frame is drawn — but that stores nothing in `appearance.yaml`.
+            // Notifying here would be a compositor woken for every row of every
+            // page, which is what makes "notify whenever an event was consumed"
+            // the wrong rule.
+            let (mut state, at) = control_on(
+                SettingsPage::NetworkStatus,
+                RowHit::Select(SelectId::Adapter, 1),
+            );
+
+            {
+                let mut desk = desktop.borrow_mut();
+                desk.script
+                    .push_back(vec![InputEvent::new(window, click_at(at.0, at.1))]);
+                desk.script
+                    .push_back(vec![InputEvent::new(window, Event::CloseRequested)]);
+            }
+
+            run(&mut events, window, &mut state).unwrap();
+
+            assert_eq!(state.selected_adapter, 1, "the click was consumed");
+            let asked = desktop.borrow_mut().asked();
+            assert!(
+                !asked.contains(&"ReloadAppearance"),
+                "nothing in the appearance file changed: {asked:?}"
+            );
+        });
+    }
+
+    #[test]
+    fn one_change_produces_one_notification_and_not_one_per_later_event() {
+        with_scratch_config("settings_loop_once", |_root| {
+            let (mut events, desktop) = testing::desktop();
+            let window = WindowBuilder::new("Settings", 1200, 800)
+                .build(&mut events)
+                .unwrap();
+
+            let (mut state, at) =
+                control_on(SettingsPage::Themes, RowHit::Select(SelectId::ThemeMode, 1));
+
+            {
+                let mut desk = desktop.borrow_mut();
+                desk.script
+                    .push_back(vec![InputEvent::new(window, click_at(at.0, at.1))]);
+                // Four more events, none of which touches the appearance file.
+                // A flag that were peeked at rather than taken would send a
+                // notification on each of them.
+                for _ in 0..4 {
+                    desk.script
+                        .push_back(vec![InputEvent::new(window, ignored())]);
+                }
+                desk.script
+                    .push_back(vec![InputEvent::new(window, Event::CloseRequested)]);
+            }
+
+            run(&mut events, window, &mut state).unwrap();
+
+            let asked = desktop.borrow_mut().asked();
+            assert_eq!(
+                asked.iter().filter(|r| **r == "ReloadAppearance").count(),
+                1,
+                "the change is announced once, not once per subsequent event: {asked:?}"
+            );
+        });
+    }
+
+    #[test]
+    fn a_change_is_saved_and_in_force_whether_or_not_anyone_drains_the_flag() {
+        with_scratch_config("settings_loop_undrained", |_root| {
+            // No event loop at all — the case every test in `mod tests`, and any
+            // future embedder, is in. The setting must still be applied and
+            // still be written; only the live notification is lost, and it is
+            // recovered at the compositor's next start because it reads the
+            // file. This is the property that stops a Settings window whose
+            // controls appear to do nothing.
+            let (mut state, at) =
+                control_on(SettingsPage::Themes, RowHit::Select(SelectId::ThemeMode, 1));
+            let result = state.handle_event(&click_at(at.0, at.1));
+            assert_eq!(result, EventResult::Consumed);
+            assert_eq!(state.appearance.settings.theme_mode, ThemeMode::Light);
+
+            let mut reloaded = SettingsState::new();
+            reloaded.load_appearance();
+            assert_eq!(
+                reloaded.appearance.settings.theme_mode,
+                ThemeMode::Light,
+                "the change reached the file, not just this copy of the model"
+            );
+        });
+    }
+
+    #[test]
+    fn taking_the_appearance_change_clears_it() {
+        with_scratch_config("settings_loop_take", |_root| {
+            let (mut state, at) =
+                control_on(SettingsPage::Themes, RowHit::Select(SelectId::ThemeMode, 1));
+            assert!(
+                !state.take_appearance_change(),
+                "nothing has been written yet"
+            );
+            state.handle_event(&click_at(at.0, at.1));
+            assert!(state.take_appearance_change(), "the file was rewritten");
+            assert!(
+                !state.take_appearance_change(),
+                "and asking again reports nothing, so one change is one notification"
+            );
+        });
+    }
+
+    #[test]
+    fn the_display_address_can_come_from_either_spelling() {
+        assert_eq!(split_args(Vec::<String>::new()), Ok(None));
+        assert_eq!(
+            split_args(vec!["--display".to_string(), "1.2.3.4:9".to_string()]),
+            Ok(Some("1.2.3.4:9".to_string()))
+        );
+        assert_eq!(
+            split_args(vec!["--display=1.2.3.4:9".to_string()]),
+            Ok(Some("1.2.3.4:9".to_string()))
+        );
+    }
+
+    #[test]
+    fn an_argument_settings_does_not_understand_is_refused_rather_than_ignored() {
+        // Settings takes no file and no page name, so an unrecognised argument
+        // is a user who expected something to happen. Starting anyway on the
+        // Display page would be a wrong answer delivered confidently.
+        let err = split_args(vec!["notes.txt".to_string()]).unwrap_err();
+        assert!(
+            err.contains("notes.txt"),
+            "the message names the argument: {err}"
+        );
+
+        let err = split_args(vec!["--display".to_string()]).unwrap_err();
+        assert!(
+            err.contains("--display"),
+            "a flag with its value missing says which flag: {err}"
+        );
+    }
+}
+
+/// Settings and the real compositor, on both ends of the real display protocol.
+///
+/// `loop_tests` runs the shipped loop against a stand-in desktop, and
+/// `gui/compositor`'s own tests run the shipped compositor against a stand-in
+/// client. Both can be green while the two real halves disagree — the stand-ins
+/// share no code, so a misunderstanding about who does what survives in the gap
+/// between them. This module closes that gap for the one chain this task
+/// exists to build: **a click on a Personalization card changes the appearance
+/// the compositor is actually drawing with**.
+///
+/// That chain is six hops long and every hop is shipped code — a hardware mouse
+/// event, the compositor's hit test, the wire encoder, `oswindow`'s event loop,
+/// `SettingsState::handle_event`, the YAML writer, the `ReloadAppearance`
+/// notification, and the compositor re-reading the file. No stand-in anywhere.
+#[cfg(test)]
+mod against_the_real_compositor {
+    // A test that indexes out of range should fail loudly and point at the line
+    // that did it — that is the diagnosis. The defensive lints exist to keep
+    // panics out of code that runs on a user's data, which this is not.
+    #![allow(
+        clippy::indexing_slicing,
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::arithmetic_side_effects,
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss
+    )]
+
+    use std::net::SocketAddr;
+    use std::sync::mpsc;
+    use std::thread;
+    use std::time::{Duration, Instant};
+
+    use appearance::config::testing::with_scratch_config;
+    use compositor::{Compositor, InputEvent as Hardware, MouseButton as HwButton, Server};
+    // For `set_wait_timeout`, which is a transport's method rather than the
+    // loop's: how long to block on the socket is a property of the carrier.
+    use oswindow::ConnectionTransport as _;
+    use oswindow::{EventLoop, WindowBuilder};
+
+    use super::tests::center_of;
+    use super::{RowHit, SelectId, SettingsPage, SettingsState, ThemeMode, run};
+
+    /// How long a step may take before the test calls it a failure.
+    ///
+    /// Generous, because it is only ever reached when something is wrong: the
+    /// real latency of every step here is one tick, a millisecond.
+    const PATIENCE: Duration = Duration::from_secs(10);
+
+    /// How long the compositor thread lives no matter what.
+    ///
+    /// A watchdog, and a necessary one. `wait` on a socket promises only that it
+    /// *may* return — a timeout there is not an error — so a client blocked in a
+    /// request the compositor never answers would retry for ever, and the test
+    /// would hang rather than fail. When this expires the server drops, the
+    /// sockets close, and the client's next call returns a closed connection,
+    /// which is a failure with a message instead of a killed process.
+    const WATCHDOG: Duration = Duration::from_secs(30);
+
+    /// The screen the test compositor pretends to drive.
+    ///
+    /// Larger than the Settings window in both directions, so the window is
+    /// placed exactly where it asks and no clamp or resize moves the controls
+    /// out from under the coordinates the test computed.
+    const SCREEN: (u32, u32) = (1400, 900);
+
+    /// Where the Settings window is pinned.
+    ///
+    /// Asked for explicitly rather than left to the compositor's cascade,
+    /// because the test has to know where a control *is on screen* to click it:
+    /// the compositor takes desktop coordinates and the page layout is in
+    /// window coordinates, and this constant is the whole of the translation.
+    const AT: (i32, i32) = (10, 10);
+
+    /// What the test can ask the compositor thread to do between ticks.
+    enum Ask {
+        /// Feed the compositor an event as if it came from a mouse.
+        Input(Hardware),
+        /// Report the state of the world.
+        Snapshot(mpsc::Sender<Snap>),
+    }
+
+    /// What the compositor thread reports back.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    struct Snap {
+        windows: usize,
+        clients: usize,
+        served: u64,
+        frames: u64,
+        routed_events: u64,
+        unrouted_events: u64,
+        /// The theme the compositor is drawing decorations with *right now* —
+        /// not what is on disk. This is the field the whole module is about.
+        theme: ThemeMode,
+    }
+
+    /// A compositor running on its own thread, on a port the OS chose.
+    struct Desktop {
+        addr: SocketAddr,
+        ask: mpsc::Sender<Ask>,
+        thread: Option<thread::JoinHandle<()>>,
+    }
+
+    impl Desktop {
+        fn start() -> Self {
+            let (addr_tx, addr_rx) = mpsc::channel();
+            let (ask, asks) = mpsc::channel::<Ask>();
+            let thread = thread::spawn(move || {
+                let mut compositor = Compositor::new(SCREEN.0, SCREEN.1, 60).expect("compositor");
+                // Port zero: the OS picks a free one, so concurrent test
+                // binaries never collide on a fixed port.
+                let mut server = Server::bind("127.0.0.1:0").expect("bind");
+                addr_tx
+                    .send(server.local_addr().expect("the listener knows its address"))
+                    .expect("the test is waiting for this");
+                drop(addr_tx);
+
+                let started = Instant::now();
+                while started.elapsed() < WATCHDOG {
+                    server.tick(&mut compositor).expect("the listener failed");
+                    server.compose(&mut compositor);
+                    match asks.try_recv() {
+                        Ok(Ask::Input(event)) => compositor.handle_input(event),
+                        Ok(Ask::Snapshot(reply)) => {
+                            let stats = *server.stats();
+                            // A send that fails means the test gave up waiting;
+                            // there is nobody left to tell, so it is dropped.
+                            let _ = reply.send(Snap {
+                                windows: compositor.window_count(),
+                                clients: server.client_count(),
+                                served: stats.served,
+                                frames: stats.frames,
+                                routed_events: stats.routed_events,
+                                unrouted_events: stats.unrouted_events,
+                                theme: compositor.appearance().theme_mode,
+                            });
+                        }
+                        // The test finished and dropped its end. Nothing more
+                        // will be asked, so stop rather than spin to the
+                        // watchdog.
+                        Err(mpsc::TryRecvError::Disconnected) => break,
+                        Err(mpsc::TryRecvError::Empty) => {}
+                    }
+                    thread::sleep(Duration::from_millis(1));
+                }
+            });
+
+            let addr = addr_rx
+                .recv_timeout(PATIENCE)
+                .expect("the compositor thread should have bound a port");
+            Self {
+                addr,
+                ask,
+                thread: Some(thread),
+            }
+        }
+
+        fn snapshot(&self) -> Snap {
+            let (tx, rx) = mpsc::channel();
+            self.ask
+                .send(Ask::Snapshot(tx))
+                .expect("the compositor thread died");
+            rx.recv_timeout(PATIENCE)
+                .expect("the compositor thread stopped answering")
+        }
+
+        /// Poll until the compositor's state satisfies `done`, or give up.
+        ///
+        /// Polling rather than a condition variable because the thing being
+        /// waited on is a *remote* effect: bytes have to cross a socket and be
+        /// served on the next tick, and there is no signal to subscribe to.
+        fn until(&self, what: &str, done: impl Fn(&Snap) -> bool) -> Snap {
+            let deadline = Instant::now() + PATIENCE;
+            let mut last = self.snapshot();
+            while Instant::now() < deadline {
+                if done(&last) {
+                    return last;
+                }
+                thread::sleep(Duration::from_millis(2));
+                last = self.snapshot();
+            }
+            panic!("waited {PATIENCE:?} for {what}; the compositor last reported {last:?}");
+        }
+
+        fn input(&self, event: Hardware) {
+            self.ask
+                .send(Ask::Input(event))
+                .expect("the compositor thread died");
+        }
+
+        /// Press and release the left button at a point on the desktop.
+        fn click(&self, x: i32, y: i32) {
+            self.input(Hardware::MouseMove { x, y });
+            self.input(Hardware::MouseButton {
+                button: HwButton::Left,
+                pressed: true,
+                x,
+                y,
+            });
+            self.input(Hardware::MouseButton {
+                button: HwButton::Left,
+                pressed: false,
+                x,
+                y,
+            });
+        }
+    }
+
+    impl Drop for Desktop {
+        fn drop(&mut self) {
+            // Dropping the sender is what ends the loop; joining is what makes
+            // the port free before the next test binds one.
+            let (dead, _) = mpsc::channel();
+            let ask = std::mem::replace(&mut self.ask, dead);
+            drop(ask);
+            if let Some(t) = self.thread.take() {
+                let _ = t.join();
+            }
+        }
+    }
+
+    /// Connect the way `main` does, with a bounded wait so a hang is a failure.
+    fn dial(addr: SocketAddr) -> EventLoop<oswindow::Link> {
+        let mut link = oswindow::connect_to(addr).expect("nothing was listening");
+        link.set_wait_timeout(Some(Duration::from_millis(20)))
+            .expect("the socket refused a wait timeout");
+        EventLoop::new(link)
+    }
+
+    /// A Settings window sized to the model's own idea of itself.
+    ///
+    /// Undecorated and unmovable on purpose. A framed window's client area sits
+    /// below a title bar whose height depends on the display's scale factor, so
+    /// a test that clicked through a frame would be asserting the frame's
+    /// geometry as much as Settings' — and would break for a reason having
+    /// nothing to do with Settings the day a title bar grew a pixel. With no
+    /// frame, `client_rect` *is* the window rect, and desktop coordinates
+    /// translate to page coordinates by subtracting [`AT`] and nothing else.
+    fn open_settings_window(events: &mut EventLoop<oswindow::Link>, w: u32, h: u32) -> u64 {
+        WindowBuilder::new("Settings", w, h)
+            .position(AT.0, AT.1)
+            .decorations(false)
+            .resizable(false)
+            .build(events)
+            .expect("the compositor should have created the window")
+    }
+
+    #[test]
+    fn settings_gets_a_window_from_the_real_compositor_over_a_real_socket() {
+        let desktop = Desktop::start();
+        let mut events = dial(desktop.addr);
+
+        // Blocks on the socket until the compositor answers with the id. Before
+        // this task Settings had no `main` that could reach this line at all —
+        // it printed a render tree and exited.
+        let window = open_settings_window(&mut events, 1200, 800);
+
+        assert_ne!(window, 0, "a window id of zero means nobody assigned one");
+        let snap = desktop.until("the window to exist", |s| s.windows == 1);
+        assert_eq!(snap.clients, 1, "Settings is connected");
+    }
+
+    #[test]
+    fn the_page_settings_draws_reaches_the_compositor_and_is_composited() {
+        let desktop = Desktop::start();
+        let mut events = dial(desktop.addr);
+        let state = SettingsState::new();
+
+        let window = open_settings_window(&mut events, 1200, 800);
+        let before = desktop.until("the window to exist", |s| s.windows == 1);
+
+        // Settings' real render tree — the sidebar, the category rows, the whole
+        // current page — encoded by `oswindow`, carried by TCP, decoded by the
+        // compositor's wire front end and rasterised.
+        let tree = state.render();
+        assert!(!tree.commands.is_empty(), "Settings drew nothing to send");
+        events.submit(window, &tree).expect("submit");
+
+        let after = desktop.until("the picture to be served", |s| s.served > before.served);
+        assert!(
+            after.frames > 0,
+            "the compositor never composited: {after:?}"
+        );
+    }
+
+    #[test]
+    fn clicking_a_theme_card_changes_the_appearance_the_compositor_draws_with() {
+        with_scratch_config("settings_real_compositor", |_root| {
+            let desktop = Desktop::start();
+
+            // Where the Light card is, in the page's own coordinates. Derived
+            // from the page's layout rather than written down, so this aims at
+            // a control and not at a pixel.
+            let mut probe = SettingsState::new();
+            probe.current_page = SettingsPage::Themes;
+            let (cx, cy) = center_of(&probe, RowHit::Select(SelectId::ThemeMode, 1))
+                .expect("the Themes page should offer a Light card");
+            let (w, h) = (probe.window_width as u32, probe.window_height as u32);
+
+            let addr = desktop.addr;
+            let settings = thread::spawn(move || {
+                let mut events = dial(addr);
+                let window = open_settings_window(&mut events, w, h);
+                let mut state = SettingsState::new();
+                state.current_page = SettingsPage::Themes;
+                // The shipped loop, unmodified. When the test drops the desktop
+                // the socket closes under it and this returns an error, which is
+                // the intended way out — there is no window frame to close and
+                // no keyboard shortcut that quits.
+                let _ = run(&mut events, window, &mut state);
+                state
+            });
+
+            let before = desktop.until("Settings to open its window", |s| s.windows == 1);
+            assert_eq!(
+                before.theme,
+                ThemeMode::Dark,
+                "the compositor starts on the default theme, so a test that \
+                 ended on Dark would prove nothing"
+            );
+
+            // A physical click, in desktop coordinates. The compositor is what
+            // decides this lands in Settings' client area and what turns it into
+            // a window-local `guitk` event.
+            desktop.click(AT.0 + cx as i32, AT.1 + cy as i32);
+
+            let after = desktop.until("the compositor to pick up the new theme", |s| {
+                s.theme == ThemeMode::Light
+            });
+            assert_eq!(
+                after.unrouted_events, 0,
+                "an event was addressed to a window no connection owned"
+            );
+
+            drop(desktop);
+            let state = settings.join().expect("the Settings thread panicked");
+            assert_eq!(
+                state.appearance.settings.theme_mode,
+                ThemeMode::Light,
+                "Settings' own model agrees with what the compositor picked up"
+            );
+        });
+    }
+
+    #[test]
+    fn when_settings_exits_the_compositor_reclaims_its_window() {
+        // The failure this guards against is a crashed application leaving a
+        // window on screen that nothing can close, because the only client that
+        // could ask is gone.
+        let desktop = Desktop::start();
+        {
+            let mut events = dial(desktop.addr);
+            open_settings_window(&mut events, 1200, 800);
+            desktop.until("the window to exist", |s| s.windows == 1);
+        }
+        let snap = desktop.until("the window to be reclaimed", |s| s.windows == 0);
+        assert_eq!(snap.clients, 0, "the connection was dropped too");
     }
 }

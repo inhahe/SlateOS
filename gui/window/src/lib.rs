@@ -1465,6 +1465,60 @@ pub mod testing {
             self.seen.extend(pending);
             self.submitted.clone()
         }
+
+        /// Every control request seen so far, named, in arrival order.
+        ///
+        /// [`Self::seen`] carries the decoded `Request` itself, which is the
+        /// right thing for a test *of this crate* and the wrong thing for a
+        /// test of an **application**: matching on `RequestBody` means the
+        /// application's test code names `guiremote` types, which is the exact
+        /// coupling `oswindow` exists to prevent — an application should no
+        /// more name the display protocol in its tests than in its `main`.
+        /// A name is enough for what an application test actually asserts:
+        /// *that* it asked the desktop to reload the appearance, once, and not
+        /// once per mouse move.
+        ///
+        /// Like [`Self::drawn`], this first absorbs whatever is waiting, so a
+        /// request sent since the last turn is visible without a further
+        /// [`Self::serve`].
+        ///
+        /// # Panics
+        ///
+        /// As [`Self::serve`]: on a frame that will not decode.
+        pub fn asked(&mut self) -> Vec<&'static str> {
+            let pending = self.absorb();
+            self.seen.extend(pending);
+            self.seen.iter().map(|r| Self::name_of(&r.body)).collect()
+        }
+
+        /// The wire name of a request, for [`Self::asked`].
+        ///
+        /// Spelled out rather than derived from `Debug`, because `Debug` prints
+        /// the payload too — a test asserting `"SetTitle"` should not have to
+        /// know the title, and should not start failing when a field is added.
+        fn name_of(body: &RequestBody) -> &'static str {
+            match body {
+                RequestBody::CreateWindow(_) => "CreateWindow",
+                RequestBody::DestroyWindow { .. } => "DestroyWindow",
+                RequestBody::SetTitle { .. } => "SetTitle",
+                RequestBody::Move { .. } => "Move",
+                RequestBody::Resize { .. } => "Resize",
+                RequestBody::Minimize { .. } => "Minimize",
+                RequestBody::Maximize { .. } => "Maximize",
+                RequestBody::Restore { .. } => "Restore",
+                RequestBody::SetVisible { .. } => "SetVisible",
+                RequestBody::SetCursor { .. } => "SetCursor",
+                RequestBody::SetFullscreen { .. } => "SetFullscreen",
+                RequestBody::SetOpacity { .. } => "SetOpacity",
+                RequestBody::GetDisplayInfo => "GetDisplayInfo",
+                RequestBody::SubscribeWindowList { .. } => "SubscribeWindowList",
+                RequestBody::ReloadAppearance => "ReloadAppearance",
+                RequestBody::ShellControl { .. } => "ShellControl",
+                RequestBody::ReserveEdge { .. } => "ReserveEdge",
+                RequestBody::SwitchWorkspace { .. } => "SwitchWorkspace",
+                RequestBody::SetWindowWorkspace { .. } => "SetWindowWorkspace",
+            }
+        }
     }
 
     /// A transport that gives the other end a turn when the client blocks.

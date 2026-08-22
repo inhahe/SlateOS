@@ -57133,15 +57133,15 @@ nice nohup patch ps readlink realpath renice rm rmdir sed sh sha256sum sleep
 stat strings tar tee time_cmd touch tty which xargs yes
 ```
 
-**Burn-down progress.** Converted so far: `rm`, `mv` (both 2026-08-22, see the
-sections at the end of this entry). The live count is whatever `python
+**Burn-down progress.** Converted so far: `rm`, `mv`, `cp` (all 2026-08-22, see
+the sections at the end of this entry). The live count is whatever `python
 scripts/argv-utf8.py --check` prints; the baseline shrinks by one line per
 conversion and never grows, so this paragraph cannot silently go stale in the
 dangerous direction — if it disagrees with the tool, the tool is right.
 
 **Every conversion so far has uncovered unrelated bugs in the `main` it
-replaced** — three in `rm`, four in `mv`, none of them about UTF-8 and all of
-them in code that no test touched. That is the argument for converting these
+replaced** — three in `rm`, four in `mv`, six in `cp`, none of them about UTF-8
+and all of them in code that no test touched. That is the argument for converting these
 files properly rather than mechanically swapping `env::args()` for
 `env::args_os()`: the defect is a marker for *untested `main`*, and the panic
 is only the part of that a checker can see.
@@ -57410,6 +57410,95 @@ to pass.)
   that `--v` is ambiguous between `--verbose` and `--version`, and `--n`
   between `--no-clobber` and `--no-target-directory`, and those are the tests
   that fail if someone prunes the table to what is actually handled.
+
+### `cp` converted, and the six further bugs the rewrite uncovered (2026-08-22)
+
+Same shape again: `env::args_os()`, a byte-wise option loop over
+`coreutils::getopt`, `OsString` operands, `cfg(unix)`+`cfg(windows)` twins of
+the non-UTF-8 regression test, and a build for the real target
+(`cd userspace && cargo +nightly build -p coreutils --bin cp`). Gate count
+49 → 48. 36 tests, and — as with `mv` — the copy path had **no tests at all**
+before, so all of its coverage is new.
+
+Two of the six are severe enough to state first: **`cp -r` could not terminate**
+on a directory containing a symlink to an ancestor, and **`cp -r a a` copied a
+directory into itself without limit.** Both fill the disk.
+
+**The six bugs**, in the lines the rewrite replaced:
+
+1. **The recursive walk followed symlinks, so `cp -r` did not terminate.**
+   `copy_dir_recursive` asked `src_path.is_dir()` — which follows a symlink —
+   and then handed non-directories to `fs::copy`, which also follows. So
+   `ln -s .. loop` inside a copied tree made the walk descend into the parent,
+   find `loop` again, and descend again, for ever, writing a copy of the whole
+   tree at each level until the disk filled. Without a loop it was still wrong
+   in a quieter way: every symlink came out as a full copy of the file it
+   pointed at, and a *dangling* one aborted the copy with an error naming the
+   link rather than what it pointed at. The walk now uses
+   `DirEntry::file_type`, which is the call that does **not** follow, and
+   recreates links with `symlink(2)`.
+
+   The behaviour now matches GNU: with `-r`/`-R` and none of `-H`/`-L`/`-P`,
+   symlinks are not dereferenced anywhere, *including* the operands named on
+   the command line — but plain `cp link dst` with no `-r` still dereferences,
+   because that is the one case where GNU does. There is a test for each half,
+   since "matches GNU" is otherwise indistinguishable from "we happened to pick
+   the same answer".
+2. **`cp -r` would copy a directory into itself, without limit.** `cp -r a a`
+   and `cp -r a .` both resolve to a destination *inside* the source, so the
+   walk kept finding the copies it had just written. GNU refuses this by name
+   (`cannot copy a directory into itself`) and now so does this one. The check
+   resolves both paths first, so it also catches the spellings that are not
+   textually equal — `cp -r a ./a/../a` is the same directory and is refused,
+   which is what `is_inside_sees_through_a_different_spelling` pins.
+3. **A copied directory came out world-readable.** `create_dir_all` applies the
+   process umask, so a source directory mode 0700 — the mode that means "only I
+   can look in here" — produced a copy at 0755. Copying a private tree into a
+   shared location therefore published it, with no message. The mode is now
+   carried over, and applied **after** the directory has been filled rather
+   than before: a source mode of 0500 applied first would lock the copying
+   process out of the directory it is still writing into.
+4. **`--` was not an end-of-options marker** — same as `rm` and `mv`, same
+   consequence: a file whose name begins with a dash could not be copied.
+5. **A source ending in `..` or `/` copied into the wrong place.** The same
+   `file_name().unwrap_or_default()` shape as `mv` bug 3, with a different
+   outcome: `dest.join("")` collapsed to `dest`, so `cp -r a/.. dst` merged the
+   *contents* of `a`'s parent into `dst` instead of creating anything under it.
+   **The old test suite asserted this**, in a case named
+   `target_source_with_no_filename_into_dir`, which is why it survived: the
+   behaviour was pinned, so it read as intentional. A test can preserve a bug
+   as effectively as it can prevent one; the fix included deleting that
+   assertion and writing `a_source_with_no_file_name_is_refused_not_collapsed`
+   in its place.
+6. **One unreadable file abandoned the rest of the copy.** The walk propagated
+   the first error with `?`, so a single permission-denied file part-way
+   through a large tree stopped everything after it — and the files already
+   written stayed, so the result was a silent partial copy with a non-zero
+   status and one message. It now continues past each failure, reports every
+   one, and returns non-zero if any failed. (Same anti-silence direction as the
+   batch-error rule in `CLAUDE.md`: report the worst error, do not stop at the
+   first.)
+
+**What `cp` still does not do:**
+
+- **Every option but `-r`/`-R`**, all rejected by name rather than ignored:
+  `-a`, `-b`, `-d`, `-f`, `-H`, `-i`, `-l`, `-L`, `-n`, `-p`, `-P`, `-s`, `-S`,
+  `-t`, `-T`, `-u`, `-v`, `-x`, `-Z` and their long spellings. Ignoring `-p`
+  would silently drop the permissions the user asked to preserve; ignoring `-n`
+  would overwrite a file they asked to leave alone; ignoring `-i` would skip a
+  confirmation. All of GNU's 31 long options stay in the table so abbreviation
+  resolution stays correct — including the **deprecated `--path` alias**, whose
+  only remaining job is to keep `--pa` ambiguous with `--parents`. Tests pin
+  that, and that `--r` is ambiguous between `--recursive` and `--reflink`; they
+  are what fails if someone prunes the table to what is implemented.
+- **Hard links are not preserved.** A tree containing two names for one inode
+  copies as two independent files, silently doubling its size. GNU needs `-a`
+  or `-d` for link preservation, neither of which exists here, so this is a
+  missing feature rather than a deviation — but it is the kind that is only
+  noticed by whoever runs out of disk.
+- **No `-p`**, so ownership, timestamps and the setuid/setgid bits are not
+  carried over on *files*. Directory modes are (bug 3), because leaving those
+  wrong is a confidentiality bug rather than a fidelity one.
 
 ---
 

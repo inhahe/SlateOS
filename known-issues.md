@@ -61750,7 +61750,39 @@ both hosts behave alike. That trades a correct program for a testable one: it
 would break `touch` on four real file types on the only OS this is for, to make
 the dev host's limitation universal. The asymmetry is the right outcome.
 
-## TD-B-GETOPT-HAS-NO-DRIVER-FOR-OPTIONS-THAT-TAKE-VALUES (lane B, 2026-08-22) — OPEN
+## TD-B-GETOPT-HAS-NO-DRIVER-FOR-OPTIONS-THAT-TAKE-VALUES (lane B, 2026-08-22) — RESOLVED 2026-08-22
+
+**Resolved.** The trigger fired: `realpath` is the second bin needing a
+value-taking option (`--relative-to=DIR`, `--relative-base=DIR`), so the walk was
+lifted rather than copied. `coreutils::getopt` now has `Program::parse` /
+`parse_aliased`, the `Opt` enum and the `Parser` iterator; `touch` was converted
+onto it and its private `Cursor`, `parse_long`, `parse_cluster`,
+`short_takes_argument` and `apply_short*` are gone. All 45 of `touch`'s tests
+passed **unchanged** across the swap, which is the evidence that the lift is
+behaviour-preserving.
+
+Two deliberate deviations from the plan below, both of which the plan got wrong:
+
+- **The signature is lazy, not eager.** `-> Result<Vec<Opt>, Error>` would have
+  broken `--help`: measured, `readlink --help --bogus` prints the help and exits
+  0, while `readlink --bogus --help` is an error. A parser that validated all of
+  argv before returning cannot produce the first. `parse` returns an
+  `Iterator<Item = Result<Opt, Error>>` instead, so a caller acts on each item
+  before asking for the next — which is what `getopt_long` itself does.
+- **`Takes::Optional` now has a design and a test**, though still no bin using
+  it: an optional value is *never* the next word, only the glued one. That was
+  the case the entry said would shape the design, and it did — it is the whole
+  difference between `--check x` (operand) and `--key x` (value).
+
+The tests named below as the specification moved into `getopt.rs` alongside the
+code, keeping `touch`'s table as their subject. `touch`'s own copies stayed, now
+testing one layer up: that each `Opt` is wired to the right field.
+
+The original entry follows.
+
+---
+
+## TD-B-GETOPT-HAS-NO-DRIVER-FOR-OPTIONS-THAT-TAKE-VALUES (original entry, lane B, 2026-08-22)
 
 **In short:** Our command-line tools share a helper that produces the *error
 messages* for bad options ("invalid option -- 'q'"). It does not do the actual

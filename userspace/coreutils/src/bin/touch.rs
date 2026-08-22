@@ -159,8 +159,8 @@
 //! sometimes being a file name.
 
 use coreutils::errmsg::strerror;
-use coreutils::getopt::{self, Program, Takes};
-use coreutils::quote::{os_bytes, os_from_bytes, quoteaf_os};
+use coreutils::getopt::{self, Opt, Program, Takes};
+use coreutils::quote::{os_bytes, quoteaf_os};
 use std::ffi::{OsStr, OsString};
 use std::fs::{self, File, FileTimes, OpenOptions};
 use std::io::{self, Write};
@@ -214,16 +214,13 @@ const TIME_WORDS: &[(&str, Which)] = &[
     ("modify", Which::Modify),
 ];
 
-/// Which short options consume an argument, from GNU `touch`'s `getopt_long`
-/// string, which is exactly `"acd:fhmr:t:"`.
+/// GNU `touch`'s `getopt_long` string, copied verbatim.
 ///
-/// `-d` and `-t` are here even though they are refused, so that `touch -d`
-/// answers `option requires an argument -- 'd'` as GNU does rather than
-/// jumping to the refusal — and so that the `2001-01-01` in `touch -d
-/// 2001-01-01 f` is not left behind to be created as a file.
-fn short_takes_argument(flag: u8) -> bool {
-    matches!(flag, b'd' | b'r' | b't')
-}
+/// `-d` and `-t` are declared as taking a value even though they are refused,
+/// so that `touch -d` answers `option requires an argument -- 'd'` as GNU does
+/// rather than jumping to the refusal — and so that the `2001-01-01` in
+/// `touch -d 2001-01-01 f` is not left behind to be created as a file.
+const SHORT_OPTIONS: &str = "acd:fhmr:t:";
 
 #[derive(Default, Clone)]
 #[cfg_attr(test, derive(Debug, PartialEq, Eq))]
@@ -402,37 +399,18 @@ Mandatory arguments to long options are mandatory for short options too.
 
 // ---------------------------------------------------------------- parsing ---
 
-/// argv, as a cursor, because `touch` is the first converted utility with
-/// options that take arguments.
-///
-/// `-r FILE` and `--reference FILE` may put the value in the *next* word, so
-/// the option handlers need to advance the same position the outer loop reads —
-/// which a `for arg in args` loop cannot give them. The three forms
-/// `getopt_long` accepts are `-rFILE`, `-r FILE` and `--reference=FILE`
-/// /`--reference FILE`, and all four spellings are measured to work.
-///
-/// This wants to be in [`coreutils::getopt`] once a second bin needs it; see
-/// `known-issues.md` → `TD-B-GETOPT-HAS-NO-DRIVER-FOR-OPTIONS-THAT-TAKE-VALUES`.
-/// It is here rather than there today because an API designed from one caller
-/// is one the second caller has to fight — `getopt` still has no
-/// `Takes::Optional` caller, and that case is where the design actually bites.
-struct Cursor<'a> {
-    items: &'a [OsString],
-    next: usize,
-}
-
-impl<'a> Cursor<'a> {
-    fn take(&mut self) -> Option<&'a OsString> {
-        let item = self.items.get(self.next)?;
-        self.next = self.next.saturating_add(1);
-        Some(item)
-    }
-}
-
 /// Parse `touch`'s argv into `(flags, operands)`.
 ///
-/// Options and operands may be interleaved — `touch a -c b` is `touch -c a b` —
-/// which is `getopt_long`'s default permuting behaviour.
+/// The walk over argv is [`Program::parse`], shared with every other converted
+/// utility; what is left here is only what `touch` does with each item. Options
+/// and operands may be interleaved — `touch a -c b` is `touch -c a b` — which is
+/// `getopt_long`'s default permuting behaviour.
+///
+/// `--help` and `--version` return immediately rather than setting a flag, which
+/// is why this consumes the walk in a `for` loop instead of collecting it.
+/// Measured: `touch --help --bogus` prints the help and exits 0, while
+/// `touch --bogus --help` is an error — so an option after `--help` must never
+/// be looked at.
 ///
 /// # Errors
 ///
@@ -441,192 +419,52 @@ impl<'a> Cursor<'a> {
 fn parse_args(args: &[OsString]) -> Result<Request, getopt::Error> {
     let mut flags = TouchFlags::default();
     let mut files: Vec<OsString> = Vec::new();
-    let mut only_operands = false;
-    let mut cursor = Cursor {
-        items: args,
-        next: 0,
-    };
 
-    while let Some(arg) = cursor.take() {
-        if only_operands {
-            files.push(arg.clone());
-            continue;
-        }
-        let bytes = os_bytes(arg.as_os_str());
+    for item in TOUCH.parse(args, SHORT_OPTIONS, LONG_OPTIONS) {
+        match item? {
+            // A lone `-` arrives here as an operand and survives to
+            // [`touch_one`], which is where it becomes standard output rather
+            // than a file. Measured: `touch -- -` behaves exactly like
+            // `touch -`, so `--` must not turn it into a name.
+            Opt::Operand(file) => files.push(file.clone()),
 
-        if *bytes == *b"--" {
-            only_operands = true;
-        } else if *bytes == *b"-" || bytes.first() != Some(&b'-') {
-            // A lone `-` is an operand, and it survives to [`touch_one`], which
-            // is where it becomes standard output rather than a file. Measured:
-            // `touch -- -` behaves exactly like `touch -`, so `--` must not turn
-            // it into a name.
-            files.push(arg.clone());
-        } else if let Some(body) = bytes.strip_prefix(b"--") {
-            match parse_long(body, &bytes, &mut flags, &mut cursor)? {
-                Some(request) => return Ok(request),
-                None => continue,
+            Opt::Short(b'a', _) => flags.select(Which::Access),
+            Opt::Short(b'm', _) => flags.select(Which::Modify),
+            Opt::Short(b'c', _) | Opt::Long("no-create", _) => flags.no_create = true,
+            // Accepted and discarded, which is what GNU's `--help` means by
+            // `-f  (ignored)`. It is compatibility ballast for a BSD `touch`, so
+            // ignoring it is the implementation rather than the absence of one.
+            Opt::Short(b'f', _) => {}
+            Opt::Short(b'r', value) | Opt::Long("reference", value) => flags.reference = value,
+            Opt::Long("time", value) => {
+                // `--time` is `Takes::Required`, so this is always `Some`. An
+                // empty word is nonetheless the right thing to fall back to: it
+                // is what GNU answers `ambiguous argument ‘’ for ‘--time’` to,
+                // which is exactly what a missing one deserves.
+                let word = value.unwrap_or_default();
+                flags.select(TOUCH.argmatch(&os_bytes(&word), "--time", TIME_WORDS)?);
             }
-        } else {
-            parse_cluster(bytes.get(1..).unwrap_or_default(), &mut flags, &mut cursor)?;
+
+            Opt::Long("help", _) => return Ok(Request::Help),
+            Opt::Long("version", _) => return Ok(Request::Version),
+
+            // The value of `-d`/`-t` was consumed before the refusal on purpose:
+            // it means `touch -d` still reports a *missing argument*, and it
+            // means the `2001-01-01` in `touch -d 2001-01-01 f` cannot be left
+            // behind to be created as a file if the refusal is ever softened.
+            Opt::Short(flag @ (b'd' | b'h' | b't'), _) => return Err(unimplemented_short(flag)),
+            Opt::Long(name, _) => return Err(unimplemented_long(name)),
+            // Unreachable: every letter of [`SHORT_OPTIONS`] is matched above,
+            // and one that is not in it never gets this far — the walk answers
+            // `invalid option` itself. It is spelled out rather than left to a
+            // catch-all so that adding a letter to the string without handling
+            // it is a compile-time gap and not a silent no-op.
+            Opt::Short(other, _) => return Err(TOUCH.invalid_option(other)),
         }
     }
 
     flags.default_to_both();
     Ok(Request::Run(flags, files))
-}
-
-/// Handle one `--name[=value]` argument.
-///
-/// Returns `Some(request)` for the two options that end parsing immediately, and
-/// `None` for one that only sets a flag.
-///
-/// # Errors
-///
-/// The name resolving to nothing or to more than one option, a value given to an
-/// option that takes none, a required value missing, a bad `--time` word, or an
-/// option this implementation lacks.
-fn parse_long(
-    body: &[u8],
-    whole: &[u8],
-    flags: &mut TouchFlags,
-    rest: &mut Cursor<'_>,
-) -> Result<Option<Request>, getopt::Error> {
-    // Split before resolving: the name is what gets matched, and the argument
-    // *as typed* — `=VALUE` included — is what gets echoed back if it resolves
-    // to nothing.
-    let (typed, inline) = match body.iter().position(|&c| c == b'=') {
-        Some(at) => (
-            body.get(..at).unwrap_or_default(),
-            Some(body.get(at.saturating_add(1)..).unwrap_or_default()),
-        ),
-        None => (body, None),
-    };
-    // Every option name is ASCII, so a name that is not UTF-8 can match none of
-    // them. It takes the unrecognised path — reported as the bytes typed —
-    // rather than failing in some third way.
-    let typed = std::str::from_utf8(typed).map_err(|_| TOUCH.unrecognized_option(whole))?;
-    let (name, takes) = TOUCH.resolve_long(typed, whole, LONG_OPTIONS)?;
-
-    if inline.is_some() && takes == Takes::Nothing {
-        return Err(TOUCH.long_unwanted_argument(name));
-    }
-    // `Takes::Required` is the only value-taking shape in `touch`'s table.
-    // `--reference ref` with the value in the next word is measured to work, so
-    // a missing `=` is not the same as a missing value.
-    let value: Option<OsString> = match takes {
-        Takes::Nothing | Takes::Optional => None,
-        Takes::Required => Some(match inline {
-            Some(text) => os_from_bytes(text),
-            None => rest
-                .take()
-                .cloned()
-                .ok_or_else(|| TOUCH.long_missing_argument(name))?,
-        }),
-    };
-
-    match (name, value) {
-        ("help", _) => Ok(Some(Request::Help)),
-        ("version", _) => Ok(Some(Request::Version)),
-        ("no-create", _) => {
-            flags.no_create = true;
-            Ok(None)
-        }
-        ("reference", value) => {
-            flags.reference = value;
-            Ok(None)
-        }
-        ("time", value) => {
-            // `--time` is `Takes::Required`, so this is always `Some`. An empty
-            // word is nonetheless the right thing to fall back to: it is what
-            // GNU answers `ambiguous argument ‘’ for ‘--time’` to, which is
-            // exactly what a missing one deserves.
-            let word = value.unwrap_or_default();
-            flags.select(TOUCH.argmatch(&os_bytes(&word), "--time", TIME_WORDS)?);
-            Ok(None)
-        }
-        (other, _) => Err(unimplemented_long(other)),
-    }
-}
-
-/// Handle one `-abc` argument, whose last option may take the rest as its value.
-///
-/// Measured: `touch -cr ref zz` is `touch -c -r ref zz`, and `touch -rref f` is
-/// `touch -r ref f`.
-///
-/// # Errors
-///
-/// A byte that is no option of `touch`'s, one this implementation lacks, or an
-/// argument-taking option with nothing left to take.
-fn parse_cluster(
-    cluster: &[u8],
-    flags: &mut TouchFlags,
-    rest: &mut Cursor<'_>,
-) -> Result<(), getopt::Error> {
-    let mut at = 0usize;
-    // Bytes, not `char`s. `-é` is two bytes in UTF-8, and iterating `char`s
-    // would answer `invalid option -- 'é'` — an option nobody typed, and one
-    // that cannot be typed, since options are single bytes. It also would not
-    // survive an argument that is not UTF-8 at all.
-    while let Some(&flag) = cluster.get(at) {
-        at = at.saturating_add(1);
-        if !short_takes_argument(flag) {
-            apply_short(flag, flags)?;
-            continue;
-        }
-        let tail = cluster.get(at..).unwrap_or_default();
-        let value = if tail.is_empty() {
-            rest.take()
-                .cloned()
-                .ok_or_else(|| TOUCH.short_missing_argument(flag))?
-        } else {
-            os_from_bytes(tail)
-        };
-        return apply_short_with_value(flag, value, flags);
-    }
-    Ok(())
-}
-
-/// Handle one short option byte that takes no argument.
-///
-/// # Errors
-///
-/// A byte that is no option of `touch`'s, or one this implementation lacks.
-fn apply_short(flag: u8, flags: &mut TouchFlags) -> Result<(), getopt::Error> {
-    match flag {
-        b'a' => flags.select(Which::Access),
-        b'm' => flags.select(Which::Modify),
-        b'c' => flags.no_create = true,
-        // Accepted and discarded, which is what GNU's `--help` means by
-        // `-f  (ignored)`. It is compatibility ballast for a BSD `touch`, so
-        // ignoring it is the implementation rather than the absence of one.
-        b'f' => {}
-        b'h' => return Err(unimplemented_short(flag)),
-        other => return Err(TOUCH.invalid_option(other)),
-    }
-    Ok(())
-}
-
-/// Handle one short option byte together with the value it consumed.
-///
-/// # Errors
-///
-/// A byte that is no option of `touch`'s, or one this implementation lacks.
-fn apply_short_with_value(
-    flag: u8,
-    value: OsString,
-    flags: &mut TouchFlags,
-) -> Result<(), getopt::Error> {
-    match flag {
-        b'r' => flags.reference = Some(value),
-        // The value was consumed before the refusal on purpose: it means
-        // `touch -d` still reports a *missing argument*, and it means the
-        // `2001-01-01` in `touch -d 2001-01-01 f` cannot be left behind to be
-        // created as a file if the refusal is ever softened.
-        b'd' | b't' => return Err(unimplemented_short(flag)),
-        other => return Err(TOUCH.invalid_option(other)),
-    }
-    Ok(())
 }
 
 /// The diagnostic for an option that GNU `touch` has and this one does not.
@@ -1076,6 +914,15 @@ mod tests {
     }
 
     // ------------------------------------------------------------ parsing --
+    //
+    // The walk over argv now lives in `coreutils::getopt`, and its own tests
+    // there are the specification of the four value spellings, the bundle that
+    // ends in a value-taking letter, the missing value, and the rest. What is
+    // tested here is one layer up and is not the same thing: that `touch` wires
+    // each item to the right field. `-r ref` arriving as `Opt::Short(b'r', …)`
+    // is the driver's business; that it ends up in `flags.reference` rather
+    // than being pushed onto `files` is `touch`'s, and is exactly what the bug
+    // these tests were written for got wrong.
 
     /// The old parser returned every word as a file name, so `touch -a f` made a
     /// file called `-a`. This is the assertion that would have caught it.

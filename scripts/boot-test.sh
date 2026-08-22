@@ -451,37 +451,29 @@ check_rootfs_freshness() {
 
     echo "=== Verifying rootfs.ext4 matches the built fixtures ==="
     if ! "$py" "$SCRIPT_DIR/ctest-fixtures.py" image-check; then
-        # Follow the content check with the history check.
+        # Follow the content check with the sysroot check, which answers the
+        # question `image-check` structurally cannot: it can say an ELF and its
+        # recorded inputs differ, but not which side is behind.  `sysroot-check`
+        # says whether `libc.a` — the input every fixture links — is behind the
+        # `posix/` sources it was built from, which is the answer that tells the
+        # reader whether to rebuild the image or rebuild the sysroot first.
         #
-        # The two answer different questions, and only the second is actionable
-        # by the reader who most often sees this.  `image-check` is a content
-        # check: it can say an ELF and its recorded inputs differ, but never
-        # which of them is behind — so its remedy ("rebuild it") is addressed
-        # to whoever owns the fixtures, while the lane that trips over the
-        # staleness has, every time so far, been a different lane from the one
-        # that caused it, one to three days later.  `stamp-ancestry.py` names
-        # the commits since the stamp that touched the declared sources, and a
-        # commit names an author and therefore a lane.
-        #
-        # This has been the same failure four times now
-        # (requests/c-a-the-staleness-detector-has-no-caller.md), with a
-        # working detector present for the last three and a caller for none of
-        # them.  Lane C recovered "d5a23c2f9, and it is lane B's" by hand —
-        # hashing libc.a across four worktrees and diffing posix/ between them
-        # — to learn something the tree already knew and would print on
-        # request.  A detector wired to no actor reads, from outside, exactly
-        # like no detector at all.
+        # This slot used to hold `stamp-ancestry.py`, a git-history walk that
+        # named the commits since each stamp that had touched the declared
+        # sources.  It is retired: the fixtures are now gitignored
+        # build-on-demand artifacts (design-decisions.md §355), so it had no
+        # tracked stamps left to walk and failed unconditionally on every run.
+        # A content stamp answers the same question better anyway — it sees
+        # uncommitted edits, which a history walk never could.  See §277.
         #
         # Deliberately cannot change the outcome.  This path already fails and
         # the exit below is unconditional, so the diagnostic is additive; a
         # diagnostic able to fail the run would be a new way to break a boot
-        # test.  Hence the existence guard and `|| true`.
-        if [ -f "$SCRIPT_DIR/stamp-ancestry.py" ]; then
-            echo "" >&2
-            echo "--- which commits invalidated these fixtures ---" >&2
-            "$py" "$SCRIPT_DIR/stamp-ancestry.py" >&2 || true
-            echo "" >&2
-        fi
+        # test.  Hence the `|| true`.
+        echo "" >&2
+        echo "--- is the sysroot these fixtures link still current? ---" >&2
+        "$py" "$SCRIPT_DIR/ctest-fixtures.py" sysroot-check >&2 || true
+        echo "" >&2
         echo "ERROR: rootfs.ext4 does not match the binaries in this tree." >&2
         echo "       Booting it would run the Path-Z self-tests against stale" >&2
         echo "       binaries and then report PASSED.  Rebuild the image:" >&2
@@ -491,23 +483,24 @@ check_rootfs_freshness() {
         exit 1
     fi
 
-    # Run the history check on the *passing* path too, which is the case the
-    # original request did not ask for and is the one that actually bites.
+    # Run the staleness check on the *passing* path too, which is the case that
+    # actually bites and the one a failure-path-only wiring would have missed.
     #
-    # The two checks disagree in this worktree right now, and the disagreement
-    # is the whole point: `image-check` says "73 staged ELFs match the tree"
-    # and passes, while `stamp-ancestry.py` says the fixtures are STALE behind
-    # d5a23c2f9 and 6604160d7.  Both are correct.  The content check compares
-    # each ELF against the input hashes recorded in its stamp, and `libc.a` on
-    # disk still matches what the stamps recorded — because `libc.a` is itself
-    # the artifact that is behind.  A content check cannot see past its own
-    # recorded inputs; only history can tell you an input is stale.
+    # `image-check` passing means the image matches the ELFs on disk.  It does
+    # not mean those ELFs are current, and the two can diverge without anyone
+    # touching them: build the fixtures and pack the image while `libc.a` is
+    # fresh, then merge `origin/main` with new `posix/` commits in it.  Nothing
+    # on disk changed, so `image-check` still passes — but every fixture now
+    # links a libc that is not in the tree.  That is a green boot test whose
+    # Path-Z rungs covered a system this tree cannot build, which is the silent
+    # version of the failure above and worse than the loud one.
     #
-    # So wiring the detector to the failure path alone would have left the
-    # common case exactly as it was: a green boot test whose Path-Z rungs ran
-    # against three-day-old fixtures and reported PASSED.  That is the silent
-    # version of the same bug, and it is worse than the loud one — this is why
-    # the check runs here rather than only above.
+    # `sysroot-check` catches exactly that by hashing the 2312 sources `libc.a`
+    # is built from against the stamp recorded when it was built.  It replaces
+    # `stamp-ancestry.py`, which walked git history to reach a weaker form of
+    # the same conclusion and, since §355 made the fixtures untracked, could
+    # only fail.  A content stamp also sees uncommitted `posix/` edits, which a
+    # history walk cannot see at all.
     #
     # A warning, not a failure, for two reasons.  Repairing it means rebuilding
     # the sysroot and relinking fixtures under services/**, which is lane B's
@@ -516,15 +509,17 @@ check_rootfs_freshness() {
     # slightly-old fixtures — it is only the Path-Z rungs whose coverage is in
     # question, not the kernel under test.  What was missing was never the
     # blocking, it was the reader being told.
-    if [ -f "$SCRIPT_DIR/stamp-ancestry.py" ] \
-       && ! "$py" "$SCRIPT_DIR/stamp-ancestry.py" >/dev/null 2>&1; then
+    if ! "$py" "$SCRIPT_DIR/ctest-fixtures.py" sysroot-check >/dev/null 2>&1; then
         echo "=== WARNING: fixtures are behind the tree (boot test still valid) ==="
-        "$py" "$SCRIPT_DIR/stamp-ancestry.py" 2>&1 || true
+        "$py" "$SCRIPT_DIR/ctest-fixtures.py" sysroot-check 2>&1 || true
         echo "    The content check above passed, so the image matches the ELFs"
         echo "    in this tree -- but those ELFs link a libc.a older than the"
-        echo "    posix/ commits named above.  The kernel result below is"
+        echo "    posix/ sources named above.  The kernel result below is"
         echo "    unaffected; treat the Path-Z rung results as covering the"
         echo "    older libc rather than the current one."
+        echo "    To repair:  powershell -File toolchain/build-sysroot.ps1"
+        echo "                python scripts/ctest-fixtures.py build"
+        echo "                wsl -d Ubuntu -- bash scripts/create-ext4-rootfs.sh"
     fi
 }
 

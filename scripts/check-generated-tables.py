@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
 r"""Verify that checked-in generated tables still match what their generator emits.
 
-Run this after every merge, next to ``scripts/ki_dupes.py`` and
-``scripts/stamp-ancestry.py``::
+Run this after every merge, next to ``scripts/ki_dupes.py``::
 
     python scripts/check-generated-tables.py
 
@@ -29,7 +28,7 @@ a table. That is exactly the profile that wants a mechanical check.
     nothing to stamp *against*: the stamp records a hash of the inputs, and the
     input here is the generator, which is already tracked. Hashing a tracked
     file against a tracked file is what ``git diff`` does.
-  * **``stamp-ancestry.py``** asks a question about *history* -- "did a source
+  * **An ancestry check** asks a question about *history* -- "did a source
     commit land after the artifact's commit?" -- and for this family that
     question false-positives, which was established rather than assumed.
     ``9b75e15aa`` edited ``gen_indic_machine.py`` after ``indic_machine.rs`` was
@@ -38,7 +37,11 @@ a table. That is exactly the profile that wants a mechanical check.
     so the Universal Shaping Engine could reuse the machinery: the default is
     the old constant, and regenerating produces a byte-identical file. A history
     check cannot tell that refactor from a real one, and the script that gets
-    flagged for a non-problem is the script that gets ignored.
+    flagged for a non-problem is the script that gets ignored. (``scripts/
+    stamp-ancestry.py`` was the tree's one ancestry check; it was retired in
+    design-decisions.md §277 for a related reason -- it ended up flagging
+    *everything* -- so this bullet now argues against a technique rather than
+    against an existing script.)
 
 So this asks the question directly: **run the generator, diff the output.** No
 false positives are possible, because the answer is the artifact itself.

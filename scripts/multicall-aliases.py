@@ -214,7 +214,10 @@ def main() -> int:
             "",
         ]
         body += sorted(unreachable)
-        BASELINE.write_text("\n".join(body) + "\n", encoding="utf-8")
+        # newline="" stops Python translating "\n" to "\r\n" on Windows. Git
+        # normalises it on commit either way, so without this the file on disk
+        # differs from the file in the index and every checkout shows it dirty.
+        BASELINE.write_text("\n".join(body) + "\n", encoding="utf-8", newline="")
         print(f"wrote {BASELINE.relative_to(ROOT)} with {len(unreachable)} entries")
         return 0
 

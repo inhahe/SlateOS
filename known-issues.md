@@ -56438,9 +56438,46 @@ the moment they ran. A test that cannot fail never ran them.
 module were unrunnable, including the only coverage of a path that contained a
 fatal deadlock.
 
-### TD-A-REAP-WINDOW-BETWEEN-SET-CURRENT-AND-SWITCH. `set_current_task` retires a dying task from the reaper's exclusion set while it is still running on its own kernel stack — SMP-only, latent 2026-08-22
+### [RESOLVED 2026-08-22] TD-A-REAP-WINDOW-BETWEEN-SET-CURRENT-AND-SWITCH. `set_current_task` retires a dying task from the reaper's exclusion set while it is still running on its own kernel stack — SMP-only, latent 2026-08-22
 
-**What it is.** `reap_dead_tasks` (`sched/mod.rs:4667`) frees a `Dead` task's
+**RESOLVED** the same day it was logged, with exactly the fix this entry
+specified: a cache-padded per-CPU `PREV_TASK_IDS`, stored between
+`set_current_task` and `switch_context` at **both** switch sites (the main
+`schedule_inner` path and the idle fallback — the latter matters more, not
+less, since it is reached from `task_exit` and so its outgoing task is
+frequently already `Dead`), cleared by the incoming task, and unioned into
+`reap_dead_tasks`'s exclusion set. Design rationale, the alternatives, and the
+memory-ordering argument for why the two coverage windows *overlap* rather than
+abut are in `design-decisions.md` §276.
+
+**One thing the plan in this entry did not mention, and it is load-bearing.**
+"The first thing the incoming task does after the switch returns is clear it"
+covers a *resumed* task only. A task running for the **first** time never
+returns from `switch_context` — it arrives at `task_entry_trampoline` instead —
+so the trampoline needed its own `call sched_finish_task_switch`, placed before
+`call rbx` (safe: it clobbers only caller-saved registers, and the trampoline's
+two live values `rbx`/`r12` are callee-saved). Without it the predecessor stays
+pinned until the next context switch on that CPU, which on an idle CPU is
+never, turning the intended bounded delay into a permanent leak of one stack
+per CPU.
+
+Also worth recording: the clear re-reads the CPU index rather than using the
+`cpu` local already in `schedule_inner`'s frame. A resumed task can come back
+on a different CPU than it blocked on, in which case that local is the *old*
+CPU's index — clearing it would leak this CPU's pin and drop a live pin on the
+other one at the same time.
+
+**Regression test:** `sched::test_prev_task_pins_outgoing_stack`, with two
+independently-failing halves because the race itself is unprovokable under a
+uniprocessor boot test (a soak would pass forever and prove nothing): a `Dead`
+task named in `PREV_TASK_IDS` must survive a reap *and* be reaped once released
+— without the second leg the test also passes against a reaper that never reaps
+anything — and a brand-new task must observe a cleared slot, which is the only
+thing that would fail if the trampoline's one asm line were deleted. Verified
+in boot cycle 11: `Pinned Dead task survives reap: OK`, `Released Dead task is
+reaped: OK`, `First-run task clears the pin: OK`, `Scheduler self-test PASSED`.
+
+**What it was.** `reap_dead_tasks` (`sched/mod.rs:4667`) frees a `Dead` task's
 kernel stack, and it correctly refuses to reap any task that is *current* on
 any CPU — it builds `active_ids` from `CURRENT_TASK_IDS` across all online
 CPUs, with a comment explaining that reaping a task another CPU is running is

@@ -552,6 +552,42 @@ static CURRENT_TASK_IDS: [CachePadded<AtomicU64>; priority_rr::MAX_CPUS] = {
     [INIT; priority_rr::MAX_CPUS]
 };
 
+/// Per-CPU "task this CPU has switched away from but is still standing on".
+///
+/// `CURRENT_TASK_IDS` stops naming the outgoing task the instant
+/// `set_current_task` publishes its successor — but that is not the instant
+/// the CPU stops using it.  Everything between that store and
+/// [`switch_context`] still executes on the *outgoing* task's kernel stack,
+/// and `switch_context` itself pushes the outgoing register set onto that
+/// stack before loading the incoming one.  A concurrent
+/// [`reap_dead_tasks`] on another CPU that consulted `CURRENT_TASK_IDS`
+/// alone would therefore see a `Dead` task nobody is running and free the
+/// stack out from under the CPU standing on it.
+///
+/// This slot closes the window by handing the outgoing task to the incoming
+/// one instead of declaring it free — Linux's `finish_task_switch` /
+/// `put_task_struct` shape.  The writer stores the outgoing id here
+/// immediately before `switch_context`; the first thing the *incoming* task
+/// does, once it is provably on its own stack, is clear it
+/// ([`finish_task_switch`]).  The reaper excludes the union of both arrays,
+/// so there is no instant at which a task is absent from both while a CPU is
+/// still executing on its stack.
+///
+/// A stale non-zero entry can only ever *delay* a reap by one context switch
+/// on that CPU, never cause one to happen too early — the failure mode is
+/// deliberately on the safe side of the tradeoff.
+///
+/// Note this is emphatically **not** a timer-based grace period.  Skipping
+/// "recently dead" tasks would turn a correctness bug into a probabilistic
+/// one; this names the exact task and the exact window.
+///
+/// OPT: cache-line padded for the same false-sharing reason as
+/// `CURRENT_TASK_IDS` — it is written on every context switch.
+static PREV_TASK_IDS: [CachePadded<AtomicU64>; priority_rr::MAX_CPUS] = {
+    const INIT: CachePadded<AtomicU64> = CachePadded::new(AtomicU64::new(0));
+    [INIT; priority_rr::MAX_CPUS]
+};
+
 /// Per-CPU idle flags.
 ///
 /// Set when a CPU enters the schedule_inner idle fallback (no runnable
@@ -1216,6 +1252,44 @@ fn load_current_task() -> TaskId {
     // SAFETY: cpu < MAX_CPUS.
     #[allow(clippy::indexing_slicing)]
     CURRENT_TASK_IDS[cpu].load(Ordering::Acquire)
+}
+
+/// Publish `id` as the task this CPU is switching away from but still
+/// standing on.  See [`PREV_TASK_IDS`].
+///
+/// Call this *after* `set_current_task` and *before* `switch_context`, on the
+/// CPU doing the switch.  The store is `Release` and the reaper's load is
+/// `Acquire`, so a reaper on another CPU that has not yet observed the store
+/// necessarily still observes the outgoing task in `CURRENT_TASK_IDS` — the
+/// two windows overlap rather than abut, which is what makes the handoff gap
+/// free rather than merely small.
+#[inline]
+fn set_prev_task(cpu: usize, id: TaskId) {
+    // SAFETY: cpu < MAX_CPUS (guaranteed by smp::current_cpu_index).
+    #[allow(clippy::indexing_slicing)]
+    PREV_TASK_IDS[cpu].store(id, Ordering::Release);
+}
+
+/// Release the task this CPU switched away from — the counterpart of
+/// [`set_prev_task`], and the analogue of Linux's `finish_task_switch`.
+///
+/// Called by the *incoming* task as its first action once it is provably
+/// running on its own stack: immediately after `switch_context` returns for a
+/// resumed task, and from `task_entry_trampoline` for a task running for the
+/// very first time (which never returns from `switch_context` at all, and so
+/// would otherwise leave its predecessor pinned forever).
+///
+/// The CPU index is re-read here rather than passed in, because a resumed
+/// task may come back on a *different* CPU than the one it blocked on: the
+/// `cpu` local in its `schedule_inner` frame is the old CPU's index, and
+/// clearing that slot would both leak the pin on this CPU and drop a live
+/// pin on the other one.
+#[inline]
+pub(crate) fn finish_task_switch() {
+    let cpu = current_cpu_id();
+    // SAFETY: cpu < MAX_CPUS.
+    #[allow(clippy::indexing_slicing)]
+    PREV_TASK_IDS[cpu].store(0, Ordering::Release);
 }
 
 /// Re-initialize the per-CPU scheduler with the actual CPU count.
@@ -4675,12 +4749,24 @@ pub fn reap_dead_tasks() -> usize {
     // which is an SMP correctness bug: CPU 0 could reap a dead task
     // whose stack CPU 1 is still using (e.g., in the idle fallback
     // after task_exit).
+    //
+    // `CURRENT_TASK_IDS` alone is still one step short, which is why
+    // `PREV_TASK_IDS` is consulted too: a CPU stops naming the outgoing task
+    // as *current* the moment it publishes the incoming one, but it keeps
+    // running on the outgoing task's kernel stack until `switch_context` has
+    // loaded the new RSP.  A task in that window would be absent from
+    // `CURRENT_TASK_IDS` on every CPU while a CPU stands on its stack, and
+    // freeing the stack there is a use-after-free of exactly the memory the
+    // switch is writing to.  See `PREV_TASK_IDS`.
     let num_cpus = crate::smp::cpu_count().max(1);
     let active_ids: alloc::vec::Vec<TaskId> = (0..num_cpus)
-        .map(|i| {
-            CURRENT_TASK_IDS
-                .get(i)
-                .map_or(0, |a| a.load(Ordering::Acquire))
+        .flat_map(|i| {
+            [
+                CURRENT_TASK_IDS
+                    .get(i)
+                    .map_or(0, |a| a.load(Ordering::Acquire)),
+                PREV_TASK_IDS.get(i).map_or(0, |a| a.load(Ordering::Acquire)),
+            ]
         })
         .collect();
 
@@ -6753,6 +6839,15 @@ fn schedule_inner(requeue: bool, kind: SwitchKind) {
 
                         set_current_task(cpu, ready_id);
 
+                        // Pin the outgoing task until it is off its own stack
+                        // — same reason as the main `schedule_inner` switch
+                        // below; see `PREV_TASK_IDS`.  This path matters more,
+                        // not less: it is reached from the idle fallback after
+                        // `task_exit`, so `current_id` here is frequently a
+                        // task that is already `Dead` and therefore already a
+                        // candidate the reaper is actively looking for.
+                        set_prev_task(cpu, current_id);
+
                         // Switch address space if needed.
                         if o_pml4 != n_pml4 {
                             let target = if n_pml4 == 0 {
@@ -6836,6 +6931,13 @@ fn schedule_inner(requeue: bool, kind: SwitchKind) {
                         unsafe {
                             switch_context(&mut *old_p, &*new_p, old_fpu, new_fpu);
                         }
+
+                        // Release whichever task this CPU switched away from
+                        // to reach us.  See `PREV_TASK_IDS`; done before the
+                        // profiling `end()` so the pin is held for the
+                        // shortest correct span rather than the shortest
+                        // convenient one.
+                        finish_task_switch();
 
                         // NOTE: After switch_context returns, we're now
                         // running as the OLD task (resumed later).  The
@@ -7021,6 +7123,14 @@ fn schedule_inner(requeue: bool, kind: SwitchKind) {
 
     set_current_task(cpu, next_id);
 
+    // Pin the outgoing task until it is off its own stack.  `set_current_task`
+    // above has just retired `current_id` from the reaper's exclusion set, but
+    // everything from here to `switch_context` — the CR3 write, the FS/GS
+    // MSRs, the TSS update, and `switch_context`'s own register pushes — still
+    // runs on `current_id`'s kernel stack.  Without this store a reaper on
+    // another CPU could free that stack mid-flight.  See `PREV_TASK_IDS`.
+    set_prev_task(cpu, current_id);
+
     // Switch CR3 if the new task uses a different address space.
     // pml4_phys == 0 means "kernel address space" → use KERNEL_PML4.
     if old_pml4 != new_pml4 {
@@ -7107,6 +7217,13 @@ fn schedule_inner(requeue: bool, kind: SwitchKind) {
 
     // When we return here, some other task has switched back to us.
     // We're now running as current_id again.
+
+    // Release whichever task *this* CPU just switched away from to reach us.
+    // That is not `next_id` and generally not any id in this frame — we may
+    // have been resumed long afterwards, and on a different CPU — which is
+    // why `finish_task_switch` re-reads the CPU index and clears the slot
+    // rather than taking an id.  See `PREV_TASK_IDS`.
+    finish_task_switch();
 }
 
 // ---------------------------------------------------------------------------
@@ -7243,9 +7360,137 @@ pub fn self_test() -> KernelResult<()> {
     test_load_average()?;
     test_liveness_watchdog()?;
     test_try_wake_contract()?;
+    test_prev_task_pins_outgoing_stack()?;
 
     serial_println!("[sched] Scheduler self-test PASSED");
     Ok(())
+}
+
+/// Pin the handoff that keeps a CPU's kernel stack alive across a context
+/// switch — the fix for `TD-A-REAP-WINDOW-BETWEEN-SET-CURRENT-AND-SWITCH`.
+///
+/// The bug: `set_current_task` retires the outgoing task from
+/// [`reap_dead_tasks`]'s exclusion set, but the CPU keeps executing on that
+/// task's kernel stack all the way through `switch_context`'s register
+/// pushes.  A `Dead` task in that window belonged to no CPU by the reaper's
+/// reckoning while a CPU was standing on it, so the reaper could free the
+/// stack the switch was mid-write to.
+///
+/// It is SMP-only and the boot test is uniprocessor, so there is no way to
+/// *provoke* it here — a soak would pass forever and prove nothing.  What can
+/// be pinned deterministically is the mechanism that closes it, and that is
+/// what this test does, in the two halves that fail independently:
+///
+/// 1. **The reaper honours the pin.**  A `Dead` task named in
+///    `PREV_TASK_IDS` survives a reap, and is reaped once released.  This is
+///    the half that would regress if someone "simplified" `reap_dead_tasks`
+///    back to consulting `CURRENT_TASK_IDS` alone.
+/// 2. **A first-run task clears the pin.**  A task running for the first time
+///    never returns from `switch_context`, so it cannot run the
+///    `finish_task_switch()` call that follows it; it must be released by
+///    `task_entry_trampoline` instead.  Dropping that one asm line leaks the
+///    pin — the predecessor stays unreapable until the next switch on that
+///    CPU, which on an idle CPU is never — and *nothing else in the tree
+///    notices*, because a leaked pin only ever delays a reap.
+fn test_prev_task_pins_outgoing_stack() -> KernelResult<()> {
+    let cpu = current_cpu_id();
+
+    // --- Half 1: a pinned Dead task is not reaped. ---
+
+    // Spawn a task that runs to completion, then let it die.  `spawn` +
+    // yields is how every other test in this file produces a Dead task; the
+    // point here is only to obtain one, not to test the spawn path.
+    TEST_COUNTER.store(0, Ordering::SeqCst);
+    let victim = spawn(b"test-prev-pin", 16, test_task_incr, 1, 0)?;
+    for _ in 0..8 {
+        if TEST_COUNTER.load(Ordering::SeqCst) != 0 {
+            break;
+        }
+        yield_now();
+    }
+    // A couple more yields so `task_finished` → `task_exit` has published
+    // `Dead`, not merely "the entry function returned".
+    yield_now();
+    yield_now();
+    {
+        let state = SCHED.lock();
+        match state.tasks.get(&victim).map(|t| t.state) {
+            Some(TaskState::Dead) => {}
+            other => {
+                serial_println!(
+                    "[sched]   FAIL: prev-pin victim {} is {:?}, expected Dead \
+                     (test cannot run)",
+                    victim,
+                    other
+                );
+                return Err(KernelError::InternalError);
+            }
+        }
+    }
+
+    // Stand in for a CPU mid-switch: this is exactly what `schedule_inner`
+    // stores between `set_current_task` and `switch_context`.
+    set_prev_task(cpu, victim);
+    reap_dead_tasks();
+    if !SCHED.lock().tasks.contains_key(&victim) {
+        // Release the pin before bailing out — leaving it set would silently
+        // hold one task unreapable for the rest of the boot.
+        finish_task_switch();
+        serial_println!(
+            "[sched]   FAIL: reaped task {} while it was pinned in PREV_TASK_IDS \
+             (use-after-free of a live kernel stack on SMP)",
+            victim
+        );
+        return Err(KernelError::InternalError);
+    }
+    serial_println!("[sched]   Pinned Dead task survives reap: OK");
+
+    // Release it the way the incoming task does, and it must now be reapable.
+    // Without this leg the test would also pass against a `reap_dead_tasks`
+    // that simply never reaps anything.
+    finish_task_switch();
+    reap_dead_tasks();
+    if SCHED.lock().tasks.contains_key(&victim) {
+        serial_println!(
+            "[sched]   FAIL: task {} still present after the pin was released",
+            victim
+        );
+        return Err(KernelError::InternalError);
+    }
+    serial_println!("[sched]   Released Dead task is reaped: OK");
+
+    // --- Half 2: a first-run task clears the pin from the trampoline. ---
+
+    TEST_PREV_OBSERVED.store(0, Ordering::SeqCst);
+    let observer = spawn(b"test-prev-obs", 16, test_task_record_prev, 0, 0)?;
+    for _ in 0..8 {
+        if TEST_PREV_OBSERVED.load(Ordering::SeqCst) != 0 {
+            break;
+        }
+        yield_now();
+    }
+    match TEST_PREV_OBSERVED.load(Ordering::SeqCst) {
+        0 => {
+            serial_println!(
+                "[sched]   FAIL: prev-observer task {} never ran (test inconclusive)",
+                observer
+            );
+            Err(KernelError::InternalError)
+        }
+        1 => {
+            serial_println!("[sched]   First-run task clears the pin: OK");
+            Ok(())
+        }
+        // The reading is offset by one; recover the id it actually saw.
+        n => {
+            serial_println!(
+                "[sched]   FAIL: new task saw stale PREV_TASK_IDS = {} — \
+                 task_entry_trampoline is not calling sched_finish_task_switch",
+                n.saturating_sub(1)
+            );
+            Err(KernelError::InternalError)
+        }
+    }
 }
 
 /// Pin [`try_wake`]'s return contract: `false` means **only** "the scheduler
@@ -9139,6 +9384,29 @@ fn test_exit_hooks() -> KernelResult<()> {
 /// Used by suspend/resume and priority change tests.
 extern "C" fn test_task_incr(arg: u64) {
     TEST_COUNTER.fetch_add(arg, Ordering::SeqCst);
+}
+
+/// What `test_task_record_prev` saw in its CPU's `PREV_TASK_IDS` slot, plus
+/// one: `0` means "the task never ran", `1` means "it ran and the slot was
+/// clear", anything else is the stale id it found.  Offsetting by one is what
+/// lets a never-ran task be told apart from a correct observation of `0` —
+/// without it, a test that silently failed to schedule its helper would read
+/// exactly like a pass.
+static TEST_PREV_OBSERVED: AtomicU64 = AtomicU64::new(0);
+
+/// Test task: record this CPU's `PREV_TASK_IDS` slot as the first thing a
+/// brand-new task does.
+///
+/// The scheduler stored the *outgoing* task's id there just before switching
+/// to us, so a non-zero reading means `task_entry_trampoline`'s
+/// `sched_finish_task_switch` call did not happen — the first-run half of the
+/// handoff.  See `test_prev_task_pins_outgoing_stack`.
+extern "C" fn test_task_record_prev(_arg: u64) {
+    let cpu = current_cpu_id();
+    let seen = PREV_TASK_IDS
+        .get(cpu)
+        .map_or(0, |a| a.load(Ordering::Acquire));
+    TEST_PREV_OBSERVED.store(seen.saturating_add(1), Ordering::SeqCst);
 }
 
 /// Test task A: adds `arg` to `TEST_COUNTER`, yields, adds again, exits.

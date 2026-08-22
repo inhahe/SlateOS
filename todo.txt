@@ -54594,8 +54594,19 @@ regression traceable to timer scheduling.
 
 ---
 
-sched: the deferred-wake drain does not IPI a remote target CPU (lane A)
-------------------------------------------------------------------------
+sched: the deferred-wake drain does not IPI a remote target CPU (lane A) — DONE
+-------------------------------------------------------------------------------
+
+DONE 2026-08-22. The drain now returns a `u64` mask of the CPUs it enqueued
+onto and `schedule_inner` signals them through `PendingWakeSignals` once the
+guard is released. Sending under the lock was considered and rejected: the
+reschedule ISR is a bare EOI so it could not deadlock, but `send_fixed_ipi`
+spins on the ICR delivery-status bit, which is I/O inside the scheduler's own
+critical section. `PendingWakeSignals` is a `Drop` type declared before the
+guard so that the six release points in `schedule_inner` — and any a later edit
+adds — signal correctly without code at the exit. Test:
+`sched::self_test` → `test_deferred_wake_signal_mask`. Rationale:
+`design-decisions.md` §280. Original entry below.
 
 `kernel/src/sched/mod.rs`, `drain_deferred_wakes_locked()`.
 

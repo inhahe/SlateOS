@@ -52299,7 +52299,7 @@ bias the check safe rather than manufacture a spurious failure.
 
 ### Not fixed, and deliberately so
 
-- **`IRQ 10` storming at ~500 kHz.** IRQ 10 is a shared level-triggered PCI
+- ~~**`IRQ 10` storming at ~500 kHz.** IRQ 10 is a shared level-triggered PCI
   line in this QEMU config (virtio-net, virtio-blk dev 0, ATI VGA, AC97, NVMe,
   xHCI, AHCI, SMBus). The dispatcher at `kernel/src/ioapic.rs:735-770` acks
   virtio-blk, virtio-net and rtl8139 on every IRQ; the other five devices have
@@ -52309,7 +52309,10 @@ bias the check safe rather than manufacture a spurious failure.
   the cooldown. So the storm is a real and separate defect, but it was a
   passenger here, not the driver. Needs its own investigation: identify which
   of the five unhandled devices asserts, and either give it a stub handler that
-  acks or mask it at the PCI command register.
+  acks or mask it at the PCI command register.~~
+  **FIXED 2026-08-22 (lane A).** See
+  `A-IRQ10-STORM-IS-AN-UNHANDLED-DEVICE-ALLOWED-TO-ASSERT` below and
+  `design-decisions.md` §281.
 - ~~**`hrtimer`'s sorted `Vec`.** O(n) insert under a lock with interrupts
   disabled. At the new ceiling that is a 160 KiB memmove worst case. Logged in
   `todo.txt`; wants a real min-heap with lazy cancel-by-id, or a timer wheel.~~
@@ -52538,7 +52541,15 @@ queue, the deferred-wake queue (occupied slots, the pending flag, the drop
 count) and the hrtimer lists together, from both the liveness watchdog and the
 idle-fallback wedge dump, so the log tells them apart.
 
-### `BUG-DEFERRED-WAKE-NO-REMOTE-IPI` - open, latency only
+### `BUG-DEFERRED-WAKE-NO-REMOTE-IPI` - fixed
+
+**In short:** when one CPU decides another CPU should run a task, it normally
+taps that CPU on the shoulder so it stops idling and picks the task up right
+away. One of the three code paths that hands out work forgot the tap. Nothing
+was lost - the other CPU noticed on its own a few milliseconds later, on its
+next clock tick - but "a few milliseconds" is an eternity here, and it only
+affected machines with more than one CPU, which the boot test is not. Now all
+three paths tap.
 
 `kernel/src/sched/mod.rs`, `drain_deferred_wakes_locked()`.
 
@@ -52558,6 +52569,44 @@ set and have `schedule_inner` signal them after it drops the guard. Deferred
 rather than done now only because the boot in progress is validating the
 lost-wakeup fix and this would change the same function; it is not blocked on
 anything. Currently invisible because the boot tests run single-CPU.
+
+**Fixed** as described. `drain_deferred_wakes_locked` now returns a `u64`
+bitmask of the CPUs it enqueued onto (`cpu_bit`; a mask is what
+`Task::cpu_affinity` already uses for a set of CPUs, and `MAX_CPUS` is 16), and
+`schedule_inner` fires it through a new `PendingWakeSignals` once the guard is
+released.
+
+Two things about the shape are worth keeping in mind if this code is touched
+again:
+
+1. **The IPI genuinely cannot move inside the drain**, even though the
+   reschedule ISR is a bare EOI and so could not deadlock against `SCHED`.
+   `signal_cpu` ends in `send_fixed_ipi`, which brackets its APIC writes with
+   `wait_icr_idle` spins on the ICR delivery-status bit - device I/O, once per
+   target, with the kernel's hottest lock held. That is the "no locks across
+   I/O" rule, not a deadlock worry.
+
+2. **`PendingWakeSignals` is a `Drop` type rather than a plain `u64` on
+   purpose.** `schedule_inner` releases the guard at six points; a release that
+   forgets to signal costs the target a full tick and leaves no trace in any
+   log. Declaring the accumulator *before* the guard makes reverse-declaration
+   drop order signal every early exit automatically, including exits a later
+   edit adds. Only the two paths that continue into `switch_context` - where
+   the frame's locals are not dropped until the task is resumed, possibly
+   milliseconds later - need the explicit `flush()`, and `flush` clears the
+   mask so the eventual drop is a harmless no-op.
+
+**Test:** `sched::self_test` -> `test_deferred_wake_signal_mask`. The symptom
+is not reachable single-CPU (every target is local, and `signal_cpu` correctly
+sends no IPI to itself), so the test pins the *reporting* instead, which is
+what was actually missing: it parks a real task, defers a wake for it, drains
+with interrupts off (otherwise a timer tick's `process_deferred_wakes` can
+empty the slot first and the test fails for a non-reason), and asserts the
+returned set names exactly the CPU the task was enqueued onto. It also checks
+that a drain which enqueues nothing reports nothing - a spurious bit is a
+wasted IPI on every schedule - and that `add` unions rather than overwrites
+(two drains feed one accumulator per `schedule_inner` call) and that `flush`
+empties, without which the `Drop` backstop would double-signal.
 
 ### BUG-BLOCKED-TASK-RESUMED-IN-PLACE - fixed (the barrier-self-test hang)
 
@@ -59729,7 +59778,7 @@ would have been too. `scripts/raced-globals.py` closes that: it flags a
 Three things make it a check that survives contact rather than one that gets
 deleted:
 
-- **It is a ratchet.** `scripts/raced-globals-baseline.txt` records the 48
+- **It is a ratchet.** `scripts/raced-globals-baseline.txt` records the 40
   pre-existing instances, and `--check` fails only on a global that is *not* in
   it, so the backlog can be worked down without the gate being red on the day it
   lands. The file only ever shrinks. A false positive belongs in the script's
@@ -59745,6 +59794,273 @@ deleted:
   no word resembling "lock". Following the same call graph used for
   reachability is what stops the tool flagging the code that already did it
   right — the failure mode that gets a linter switched off.
+- **`#[cfg]` is evaluated, not ignored.** A global the host build never compiles
+  cannot be raced by a host test. This was not a theoretical concern: the first
+  entry examined from the backlog, `unistd.rs`'s `NO_NEW_PRIVS`, is a
+  `thread_local!` on host and a `static AtomicBool` *only* under
+  `#[cfg(target_os = "none")]` — it is already the fix this tool exists to ask
+  for, and 20 host tests were being credited with racing the bare-metal half
+  they cannot link against. Eight of the original 48 were this, so the tool now
+  parses the predicate under "`target_os = "none"` is false, `test` is true,
+  everything else unknown-and-assumed-true". It has to genuinely parse: the tree
+  writes `#[cfg(any(target_os = "none", test))]` twenty times, and *that* item
+  is compiled on host via the `test` arm, so a rule that merely grepped for the
+  string would have excused all twenty. Unknown predicates resolving to "true"
+  is the safe direction — the tool can fail toward noise, never toward silence.
+
+That left 41, of which one more was a genuine false positive with a reason worth
+recording rather than baselining: `perthread.rs`'s `HOST_FALLBACK` is reached
+only from `current()`'s `try_with(…).unwrap_or(&raw mut HOST_FALLBACK)` arm,
+which is taken only once a thread's TLS has *already been destroyed*. A `#[test]`
+body always runs with live TLS. It is in `IGNORE` with that sentence attached.
+**Backlog: 40.**
+
+### First burn-down: 40 → 32, and the fix is not always a lock
+
+Eight entries closed in the first pass, by two different fixes — which is the
+point, because picking the wrong one produces a comment that lies.
+
+*Locked* (7): `stdlib.rs`'s `RAND_STATE`, `RAND48_STATE`, `OLD_SEED` and
+`L64A_BUF`, and `syslog.rs`'s ident/options/mask. These are shared **by
+specification** — POSIX mandates one `rand` sequence, one `drand48` sequence,
+one `l64a` return buffer and one syslog configuration per process — so they
+cannot stop being shared, and the fix is a test-only `Mutex` taken as the first
+statement of every touching test. Three separate locks in `stdlib.rs` rather
+than one, because the three pieces of state are unrelated and a single lock
+would serialise 21 tests that mostly do not contend; `OLD_SEED` rides the
+`drand48` lock because `seed48` writes it and `RAND48_STATE` in one call.
+
+*Converted* (1): `unistd.rs`'s `HOSTID`. **I started to write a lock for this
+one and the lock would have been wrong** — worth recording, because the error
+is exactly the defect class this whole entry is about. I had drafted a
+`HOSTNAME_TEST_LOCK`, 26 guards, and a `sethostname` SAFETY comment asserting
+that "two concurrent writers can leave the buffer holding one name and the
+length belonging to another." Then I read `posix/src/perprocess.rs` and found
+the hostname is not a `static` at all: it is `process_global!`, which expands
+to a `thread_local!` on the host. The hostname was already per-thread. The
+claim was false, and it was false in the specific way the self-review rule
+warns about — *a SAFETY comment stating an unchecked fact is worse than none,
+because it tells the next reader the question has been considered.*
+
+The real defect was the opposite of the one I had written up: `HOSTID` was a
+plain `static AtomicI64` while the hostname it is *derived from* was
+per-thread. Two halves of one piece of state with two different sharing rules
+— so a test could set the hostname and read back a hostid derived from another
+thread's. The fix is to make the halves agree: `HOSTID` is now a
+`process_global!` too, which is design-decisions.md §110's established answer
+(§110 deleted a 138-site `CAP_TEST_LOCK` in favour of per-thread state,
+rejecting "keep the lock" because it "leaves a live hazard behind an unwritten
+convention"). Zero test guards, one baseline entry gone.
+
+The discriminator, stated so the next 32 don't need re-deriving: **ask whether
+POSIX requires the state to be shared.** If it does, it cannot stop being
+shared and needs a lock. If it is shared only because someone wrote `static`,
+`process_global!` it and the problem is deleted rather than guarded.
+
+`reset_hostid_for_test()` was kept even though per-thread storage makes it
+unnecessary for isolation, because several tests call `sethostid` twice and
+need to return to the unset sentinel *within* one body. Its doc says so.
+
+**Backlog: 32.** Confirmed green: `cargo test -p posix --lib`, 20515 passed.
+
+### Second pass: 32 → 25, and the detector was reading comments
+
+Four more closed by the discriminator above, and one real bug fell out of it.
+
+*Converted* (2): `unistd.rs`'s `KLOG_READ_CURSOR` and `KLOG_CLEAR_FLOOR` — the
+`klogctl` read cursor and clear floor, whose own doc comments already said
+"per-process". They were plain `static AtomicU64`s, which is right on the
+target and wrong under libtest; `SYSLOG_ACTION_READ` *consumes* from the
+cursor, so a second reader sharing it sees entries the first already took.
+`process_global!`, four one-line wrappers to keep `unsafe` out of the match
+body, no test guards.
+
+*Deleted* (1): `linux_seccomp.rs`'s `DUMMY` was a `static mut u8` existing only
+to be a non-null pointer for an EFAULT check, carrying a "single-threaded test"
+SAFETY note that was untrue. Nothing ever wrote through it, so the `mut` was
+excusing a mutability that was never used: it is now `static DUMMY: u8 = 0`
+with `(&raw const DUMMY).cast_mut()`, and there is nothing left to race.
+
+*Fixed, and it was a real bug* (1): `crt.rs`'s `AT_RANDOM_BYTES` — see
+**B-AT-RANDOM-WAS-RE-ROLLED-UNDER-A-RACE** below.
+
+*Locked* (3 new findings): `pthread.rs`'s four TSD error-path tests bypassed
+the `TSD_TEST_LOCK` their happy-path siblings take. Three of them provably
+return before `tsd_lock()`, but `tsd_key_delete_returns_zero` does not:
+`pthread_key_delete(0)` clears `TSD_DESTRUCTORS[0]` unconditionally, and key 0
+is the *first* key `pthread_key_create` hands out — so unlocked it silently
+wipes the destructor `tsd_create_set_get` had just registered. All four now
+take the lock, because whether the other three touch shared state depends on
+where each function's argument checks sit relative to `tsd_lock()`, which is
+an implementation detail nobody editing those functions would think to
+preserve.
+
+**The detector was matching the global's name inside comments.** This is worth
+recording because it inverted the tool's precision exactly where precision
+matters. `time.rs`'s `settimeofday` contains
+
+```rust
+// as a (deprecated) timezone-only update.  We accept it as a no-op.
+```
+
+which made it a "toucher" of the `timezone` global and dragged **all 31**
+`settimeofday` tests into the report — not one of which reads the zone. Prose
+*about* a global is the single most likely place for its name to appear
+without being an access, so this was not background noise; it was noise
+concentrated on the entries a reader would most want to trust.
+
+`strip_comments_and_strings()` now blanks Rust line comments, nested block
+comments, string/byte/raw-string/char literals — space-for-character, so line
+numbers and block matching still work against the result — and body matching
+runs on that. Sixteen unit cases cover nesting, escapes, `r#"…"#`, the
+lifetime-vs-char-literal ambiguity and an unterminated string.
+
+Effect: `timezone` (31), `stdio.rs:FILE_POOL` (24) and `dirent.rs:GETDENTS_POOL`
+(6) all fall to zero unserialised, and `--all` confirms each is still *seen*
+and classified as fully serialised rather than having vanished from analysis —
+the fix moved the tool toward precision, not toward silence, which is the
+direction that matters for a checker nobody re-derives by hand. It also
+*exposed* the three pthread TSD entries above, which had been hidden behind a
+lock hint that was itself only in a comment.
+
+**Backlog: 25.**
+
+---
+
+### Third pass: 25 → 22, all three by making the detector obey Rust's scope rules
+
+No code changed in this pass. `signal.rs` declares `static RECEIVED`, `static
+GOT` and `static CALLED` *inside* three separate `#[test]` bodies, each so a
+nested `extern "C"` handler can record what it was passed — which is the
+correct shape, not a hazard. The detector reported two tests apiece anyway: its
+toucher regex (`\bhandler\s*\(`, `\bh\s*\(`) matched calls to unrelated
+same-named helpers elsewhere in a 246-test file.
+
+The fix encodes a language guarantee rather than a better heuristic. A `static`
+declared inside a function body is a process-global *value* but a
+function-local *name*: Rust does not put it in scope anywhere else, so no code
+outside that function — including any other test — can name it, whatever it is
+called. `analyse()` now records each global's declaration line, finds the
+innermost enclosing function, and skips the global outright if that function is
+a `#[test]`; otherwise it restricts the candidate touchers to functions nested
+within the owner rather than the whole file. Sharpening the regex would have
+been the wrong fix: it would have narrowed a false-positive class that the
+language forbids entirely.
+
+**I nearly made the hostname mistake a second time here.** The first
+hypothesis was that the signal *disposition table* was racing, which would have
+meant a lock. Reading `signal.rs` first showed it is already `process_global!`
+(line 158) and therefore per-thread on host — so the fix belonged in the tool,
+not the tree. That is now twice in three passes that "read the code before
+writing the fix" turned a plausible source change into a no-op plus a detector
+correction.
+
+**Writing the scope rule exposed two more ways the tool failed toward
+silence,** both fixed in the same pass:
+
+- **The direct-name match ignored scope.** Only the *toucher* search was
+  restricted to the declaring function. A test that merely contained the token
+  — `let S = 3;` — was still counted as reaching a `static S` it cannot name.
+  The two arms now differ deliberately: naming the global directly requires the
+  name to be in scope, whereas *calling* a toucher works from anywhere, so only
+  the first arm is scope-restricted.
+- **Same-named statics collapsed, and ten of eleven declarations vanished.**
+  `globals_` was a dict keyed by name, but a name identifies a global only at
+  file scope. `userspace/oils/src/interp.rs` declares **eleven** separate
+  statics called `COUNTER` and `kernel/src/sched/mod.rs` four called `WARNED`;
+  keyed by name, only the last of each was analysed at all and the rest were
+  never examined. It is now a list keyed by declaration site. The baseline stays
+  keyed by `path:NAME` on purpose — line numbers churn, and a ratchet whose keys
+  move on every edit is a ratchet that goes red for no reason.
+
+  Today this changes no result: all eleven `COUNTER`s are `fetch_add`-only with
+  no resetting write, so the reset rule drops them correctly, and `--check`
+  still reports 22/0. It is a latent-correctness fix, not a new finding — but
+  the failure mode it removes is the one that never announces itself.
+
+**The checker now has a self-test, and the pre-push gate runs it first.**
+`raced-globals.py --selftest` builds synthetic `.rs` files in a temp directory
+and asserts `analyse()`'s classification across eight rules: the base case is
+reported; a lock moves it to the serialised column; a comment does not make a
+function a toucher; a `static` inside a `#[test]` is not reported;
+`#[cfg(target_os = "none")]` is dropped but `#[cfg(any(target_os = "none",
+test))]` is kept; a `fetch_add`-only counter is not reported; a static owned by
+a non-test function is still reached through a call to its owner but not by a
+test that merely reuses the name; and two same-named function-local statics are
+analysed separately. Each rule exists because it had already produced a wrong
+answer against the real tree, and each is a regex an edit can break silently.
+The rule count in the summary line is computed from the registered rules rather
+than a literal, so adding a case cannot leave the total lying.
+
+The rules were verified to be capable of failing, not merely observed to pass.
+Disabling the comment stripper, the fn-local scope rule, the lock hint, the
+direct-match scope restriction and the name-collapse fix in turn each turned
+**exactly** the corresponding rule red and no other — so the rules are
+independent, and none is passing by accident. That mutation check is the point:
+**a broken detector does not report a broken tree, it reports a clean one**, so
+`--check` passing is meaningless unless `--selftest` passed first. The gate
+therefore runs `--selftest` before `--check` and refuses the push with a
+distinct message if the checker fails its own tests.
+
+Also fixed: `_relpath()` raised `ValueError` on any path outside the repo root,
+which meant the self-test could not analyse a temp file at all — the checker's
+own tests were impossible to write against the function they exist to pin down.
+It now falls back to the bare path.
+
+**Backlog: 22.**
+
+---
+
+## B-AT-RANDOM-WAS-RE-ROLLED-UNDER-A-RACE — two threads could both fill the stack-canary buffer
+
+**Status:** fixed 2026-08-22 · `posix/src/crt.rs`
+
+**In short:** every program gets a small random number at startup that the
+compiler uses to detect a stack overrun — if the number changes underneath a
+running function, the program kills itself reporting an attack that never
+happened. Our code that produced that number could be run by two threads at
+once, and each would generate a *different* number and overwrite the other's.
+A program doing nothing wrong could therefore abort at random. It is fixed;
+this entry records what was wrong and why the old comment said it was fine.
+
+`getauxval(AT_RANDOM)` returns a pointer to a 16-byte buffer that glibc and
+musl both use to seed `__stack_chk_guard` — the "stack canary", a value written
+below a function's local variables on entry and checked on exit, on the theory
+that an overrun would have to clobber it. `ensure_at_random_initialized()`
+filled that buffer on first use, gated on an `AtomicBool`, with this comment:
+
+> The buffer is owned by this module and only ever written here. A race in
+> single-process userspace is harmless: both racers fill the same buffer, and
+> the second write simply overwrites the first.
+
+That is wrong twice. It is a data race in the language sense — a 16-byte write
+concurrent with the 16-byte read a third thread is doing through the pointer
+`getauxval` just handed it. And "both racers fill the same buffer" is the
+failure, not the excuse for it: `fill_random` gives each racer *different*
+bytes, so a thread that re-rolls the buffer after another has already cached a
+canary makes that thread's next function epilogue compare a new guard against
+an old one and abort a process that was never smashed.
+
+The fix is a three-state latch (`UNINIT` / `FILLING` / `READY`) instead of a
+bool. `compare_exchange(UNINIT → FILLING)` admits exactly one filler; every
+other caller spins on `Acquire` until `READY` rather than writing, which is
+correct here because the critical section is one `fill_random` call, it runs
+at most once per process, and the futex machinery a blocking wait would need
+is itself a posix facility that may not be initialized this early. The
+`Release` store pairs with those `Acquire` loads so a thread that sees `READY`
+sees all sixteen bytes. On the `abort()` path the latch is deliberately left
+at `FILLING`: `abort()` does not return and takes the process with it, so
+there is no thread left to spin.
+
+`AT_RANDOM_BYTES` is now in the detector's `IGNORE` table rather than the
+baseline, with that reasoning attached — it is reachable from ten tests but
+executes in one, and the entry records a fixed bug rather than an excused one.
+
+**How it was found:** not by a test. The raced-globals detector flagged it, and
+the flag was only readable because the entry had to be *read before it was
+fixed* — the caveat written into this file one pass earlier. A tool that only
+listed line numbers would have produced a lock here, which would have been the
+wrong fix and would have left the target build racing.
 
 It is scoped to `posix/` and `userspace/` for the same reason gate 2 is scoped
 to `userspace/`: a lane A or C push must never pay for, or be blocked by, a lane
@@ -59757,8 +60073,285 @@ which is what demonstrates that both halves work, reachability and guard
 detection. The macro-based globals above remain unaudited, but they are now
 *visible*: they sit in the baseline rather than being invisible until they flake.
 
+One caveat on the backlog's meaning, learned from the `NO_NEW_PRIVS` entry: a
+baselined line says "two or more tests reach this with no lock", **not** "this is
+a bug". Reachability here is a regex over a one-hop call graph, so a global
+touched only on a branch no test takes still counts. Each entry has to be read
+before it is fixed, and some will end in `IGNORE` rather than in a lock.
+
 ### Verification
 
 `cargo test -p posix --lib` — 20515 passed, 0 failed. Then the pairing that
 exposed it: `cargo test -p coreutils -p posix`, which is the load condition
 under which the original failure appeared.
+
+---
+
+## `A-IRQ10-STORM-IS-AN-UNHANDLED-DEVICE-ALLOWED-TO-ASSERT` — fixed 2026-08-22 (lane A)
+
+**In short:** Several plug-in devices share a single "please look at me" wire to
+the CPU. That wire works by being *held down* until whichever device pulled it
+lets go — and only that device's own driver knows how to make it let go. Six of
+the eight devices sharing this wire have drivers that never listen to it, so if
+one of them pulled the wire, nothing ever released it and the CPU spent all its
+time answering a call nobody would hang up: about half a million times a second,
+enough to starve everything else and, once, to wedge a boot. The fix tells every
+device whose interrupt nobody listens for that it is not allowed to pull the wire
+at all.
+
+The fix's own logging then showed the problem was **worse than the report said**:
+three devices were holding a wire down with nobody listening, and only one of
+them was on the wire the original report named. A *second* shared wire had the
+same latent fault and had simply not been unlucky yet.
+
+### Why an unhandled interrupt is not merely wasteful here
+
+An unhandled *edge*-triggered interrupt costs one wasted trip through the
+handler. An unhandled *level*-triggered one costs the machine, because the
+condition that caused it is still true when the handler returns, so the CPU
+re-enters immediately, forever. Legacy PCI interrupt pins are level-triggered
+and shared, which is the combination that makes a single unserviced function
+able to halt the system.
+
+On this tree's QEMU configuration IRQ 10 carries eight functions:
+
+| Function | Device | Serviced by `handle_device_irq`? |
+|---|---|---|
+| `00:04.0` | virtio-net | yes |
+| `00:05.0` | virtio-blk (disk 0) | yes |
+| `00:08.0` | ATI Rage VGA | no |
+| `00:09.0` | AC'97 audio | no |
+| `00:0c.0` | NVMe | no |
+| `00:0d.0` | xHCI USB | no |
+| `00:1f.2` | AHCI SATA | no |
+| `00:1f.3` | SMBus | no |
+
+### Confirmed by observation: three offenders across two lines
+
+The sweep samples Status bit 3 *before* silencing each function, so the boot log
+answers the question the original entry could not. On the first boot carrying the
+fix:
+
+```
+[pci] INTx disabled on 00:02.0 (8086:10d3, irq 11)
+[pci] INTx disabled on 00:07.0 (1af4:1050, irq 11) — WAS ASSERTING with no handler
+[pci] INTx disabled on 00:08.0 (1002:5159, irq 10)
+[pci] INTx disabled on 00:09.0 (8086:2415, irq 10)
+[pci] INTx disabled on 00:0a.0 (8086:2668, irq 11)
+[pci] INTx disabled on 00:0b.0 (1af4:1059, irq 11) — WAS ASSERTING with no handler
+[pci] INTx disabled on 00:0c.0 (1b36:0010, irq 10)
+[pci] INTx disabled on 00:0d.0 (1b36:000d, irq 10) — WAS ASSERTING with no handler
+[pci] INTx disabled on 00:1f.2 (8086:2922, irq 10)
+[pci] INTx disabled on 00:1f.3 (8086:2930, irq 10)
+[pci] INTx quiesce: 10 unclaimed function(s) silenced
+```
+
+`00:0d.0` is xHCI, which confirms the diagnosis below directly rather than by
+argument. But **two of the three offenders are on IRQ 11, not IRQ 10**:
+`00:07.0` virtio-gpu and `00:0b.0` virtio-sound. Both are polled drivers that
+leave the virtio queue's interrupt-suppression flag clear, so every completion
+asserts a pin nobody services — the same defect as xHCI, on a line that had
+simply not yet been unlucky enough to storm.
+
+That is the entry's main lesson. Had the fix been the narrow one this entry
+originally proposed — find the IRQ 10 offender and give it a stub handler — IRQ
+11 would still be carrying two armed devices, and the next report would have read
+identically with a different number in it.
+
+The claim/sweep split also verified itself: of 17 functions, 3 have no routed
+interrupt (`irq=255`) and 4 were claimed (rtl8139, virtio-net, and *both*
+virtio-blk disks), leaving exactly the 10 above.
+
+### The specific offender, and why it is not the whole story
+
+`kernel/src/xhci.rs` is a **polled** driver — `poll_event` walks the event ring
+and there is no xHCI ISR anywhere — yet at `xhci.rs:878-890` it enables
+Interrupter 0 (`IMAN.IE`) and sets `USBCMD.INTE`. It then never clears
+`IMAN.IP` or `USBSTS.EINT`, the two write-1-to-clear bits that deassert the pin.
+There is a live USB keyboard on an interrupt endpoint (`[xhci] Configured
+keyboard on slot 1 (EP1 IN, 8 bytes, interval=7)`), so events arrive
+continuously. A polled driver asking the hardware to raise interrupts nobody
+handles is a bug on its own terms.
+
+But fixing only xHCI would have been fixing the instance and not the class.
+`ac97.rs` declares `CR_IOCE` and never writes it; `ahci.rs` declares `GHC_IE`
+and `PORT_IE` and never writes them; `nvme.rs` passes `IEN=0`. Every one of
+those is one line away from the same defect, and the next driver added to a
+shared line starts from the same position. The IRQ 11 pair above is that
+prediction already come true — written before the evidence arrived, and confirmed
+by it.
+
+**Follow-up, not yet done:** the sweep silences virtio-gpu and virtio-sound from
+the outside, which stops the storm but leaves the underlying driver bug in place
+— a polled virtio driver should be setting `VRING_AVAIL_F_NO_INTERRUPT` on its
+queues so the device never asserts in the first place. Both drivers
+(`kernel/src/virtio/gpu.rs`, `kernel/src/virtio/sound.rs`) are lane A's, so this
+is lane A's to fix. Tracked here rather than in `todo.txt` because the symptom is
+already contained and the fix is a cleanup, not a repair.
+
+### The fix: a function nobody services may not assert
+
+PCI 2.3 Command bit 10, **Interrupt Disable**, forbids a function from driving
+its pin. It is one bit with identical meaning on every conforming function,
+which is what makes it the right tool — the alternative, a per-device stub
+handler that acks, requires correct knowledge of a *different* status register
+for each of AC'97, NVMe, xHCI and AHCI, and a stub that guesses wrong leaves the
+storm in place while looking like a fix.
+
+Implemented in `kernel/src/pci.rs` as a claim/sweep pair:
+
+- `pci::claim_intx(addr)` — called by the three drivers `handle_device_irq`
+  actually dispatches to (virtio-blk, virtio-net, rtl8139), at the point each
+  already calls `enable_bus_master`.
+- `pci::quiesce_unclaimed_intx()` — called from `main.rs` immediately after
+  `xhci::init`, the last PCI driver init. Disables INTx on every enumerated
+  function that no driver claimed, and logs each one, noting whether it was
+  asserting at the time.
+
+The two are **order-independent**: a claim arriving after the sweep re-enables
+its own function. That is deliberate, because an ordering requirement between a
+sweep and every present and future driver init is exactly the kind of invariant
+that holds until someone adds a driver and then fails silently.
+
+### The diagnostic, which is the durable half
+
+Status bit 3 (Interrupt Status) reports whether a function is asserting, is
+read-only, and is *independent of* the Interrupt Disable bit — so it still names
+a culprit after that culprit has been silenced. `irq_storm.rs` now calls
+`pci::report_intx_asserting_on_irq` when it masks a line.
+
+Before this, a storm reported only `[irq-storm] IRQ 10 MASKED: ~500000 IRQs/sec`
+— which on a line with eight functions narrows the culprit to eight suspects.
+That is precisely why the previous entry closed with "needs its own
+investigation" rather than a fix. The next storm on any line names its own
+device.
+
+The report is deliberately **allocation-free** (`pci::for_each_function` rather
+than `scan_bus0`): it runs from the timer softirq while a device is melting the
+line, and a failed allocation in a kernel is a panic. A diagnostic that can turn
+a recoverable storm into a dead machine is worse than no diagnostic.
+
+### Two unrelated defects found in the same register
+
+- **`enable_bus_master` erased recorded bus faults.** It read the
+  Command/Status dword and wrote it back. Status' error bits (Master Data Parity
+  Error, Signalled Target Abort, Received Master Abort, …) are
+  **write-1-to-clear**, so writing back a read value sets a 1 into every bit that
+  was already 1 — clearing exactly the errors that had been recorded. Enabling
+  DMA destroyed the evidence of a bus fault. Fixed by `pci::write_command`,
+  which writes **zero** into the status half; 0 is a no-op for a write-1-to-clear
+  bit. `pci::self_test` asserts the invariant across every function on the bus,
+  and reports how many carried a write-1-to-clear bit at the time so the log says
+  whether the check was real or vacuous on that boot.
+- **Clippy was error-level red on the tree**, on lane A's own
+  `ex2_copy_plan` (`manual_is_multiple_of`, `proc/spawn.rs:481`). Anything
+  running `cargo clippy -p kernel` got a hard failure unrelated to its own
+  change. Fixed.
+
+### Test
+
+`pci::self_test_intx`, run from `pci::self_test` on every boot, before any
+driver has claimed anything and before the sweep — so it is free to toggle bits
+provided it restores them:
+
+1. The claim key is injective over bus/device/function and never collides with
+   the empty-slot sentinel. A collision would make one function's claim silently
+   protect a *different* function; the sentinel case would make an empty slot
+   read as a claim. Both fail in the direction of leaving a storm in place.
+2. Enable/disable is observable and reversible on every function on the bus, and
+   the Status register's write-1-to-clear bits survive the Command write.
+   Functions that hardwire Interrupt Disable (QEMU's host bridge does) are
+   tolerated and not counted; the test fails if *no* function accepts a toggle.
+3. The claim table is empty before any driver initialises.
+
+## `A-KERNEL-UNIT-TESTS-NEVER-RUN` — open, found 2026-08-22 (lane A)
+
+**In short:** The kernel contains 54 blocks of code marked as automated tests,
+spread over 8 files. None of them has ever run. They are not merely skipped —
+they are never compiled either, so the compiler has never checked them and they
+are free to have rotted into code that would not build. Anyone reading those
+files sees tests and reasonably concludes the code beneath them is checked. It
+is not. The worst case is the file that handles filenames, which has ten of
+these and no other test of any kind.
+
+### How this happened, and why the cause is not itself a mistake
+
+`kernel/Cargo.toml` sets `test = false` on the kernel binary, with a correct
+rationale: the kernel is `#![no_std]` and supplies its own `panic_impl` lang
+item, which conflicts with host `std`, so a host-side test harness genuinely
+cannot link it. Kernel code is tested by *boot self-tests* under the bare-metal
+target instead — `self_test()` functions called from `main.rs`, which is the
+mechanism that has produced essentially all of this tree's real kernel coverage.
+
+That decision is sound and is not what is being reported here. The defect is that
+54 `#[test]` functions were written *anyway*, against a harness that was never
+going to run them. There is no `lib.rs`, so `[[bin]] test = false` removes the
+only target a test harness could attach to:
+
+```
+$ cargo test -p kernel --target x86_64-pc-windows-gnu
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 3.87s
+```
+
+No `Compiling kernel`, no `running N tests`, no test binary. Nothing built,
+nothing ran.
+
+### Where they are
+
+| File | dead `#[test]`s | has a `self_test()`? |
+|---|---|---|
+| `kernel/src/fs/ext4/vfs_impl.rs` | 13 | yes |
+| `kernel/src/fs/pathutil.rs` | 10 | **no** |
+| `kernel/src/net/frag.rs` | 7 | yes |
+| `kernel/src/net/httpd.rs` | 7 | yes |
+| `kernel/src/fs/ext4/driver.rs` | 6 | yes |
+| `kernel/src/tty/mod.rs` | 6 | yes |
+| `kernel/src/fs/ext4/balloc.rs` | 3 | yes |
+| `kernel/src/net/raw.rs` | 2 | **no** |
+
+Six of the eight have a boot self-test, so the module is not wholly unchecked —
+but the self-test and the dead unit tests cover different things, and the dead
+ones are the finer-grained half.
+
+`pathutil.rs` and `raw.rs` have **no** other coverage. `pathutil.rs` is the
+priority: path handling is a trust boundary (`CLAUDE.md` self-review items 7 and
+8 — bytes not UTF-8, resolve before crossing), it is reached by every `open`,
+and its ten tests have never once executed.
+
+### Why "never compiled" is worse than "never run"
+
+A skipped test is a test you can run. Dead `#[cfg(test)]` code is not
+type-checked at all, so it drifts with every refactor of the code it tests and
+nothing objects. By the time someone enables it, the failures will be a mix of
+real regressions and tests that simply no longer match the API — and telling
+those apart costs far more than writing them again. Assume some of the 54 do not
+currently compile; that is the expected state, not a surprise.
+
+### The fix
+
+Convert them to boot self-tests, which is the mechanism that actually runs. This
+also fixes lane B's `raw.rs` report for free: boot self-tests run sequentially on
+one CPU, so the `CLAIMED`/`OWNER` interleaving they traced is impossible by
+construction rather than by a mutex.
+
+Two things to get right while converting:
+
+- **A boot self-test cannot `assert!`.** A failed assertion in the kernel is a
+  panic, and a panic during boot is a dead machine rather than a failed test.
+  The established pattern is `Result<(), &'static str>` with the caller logging
+  and continuing, so a broken test reports and the boot survives.
+- **Don't convert blindly.** Each one has to be re-read against the current API
+  before it is trusted, per the point above. A converted test that passes because
+  it no longer tests anything is worse than the dead one, which at least does not
+  claim to pass.
+
+### How this was found
+
+Lane B's `scripts/raced-globals.py` flagged `raw.rs`'s `CLAIMED`/`OWNER` as
+raced by two unserialised `#[test]`s, and filed
+`requests/b-a-raw-nic-claim-tests-race-and-the-reader-is-the-writer.md`. The
+analysis was correct about the interleaving and could not have been correct about
+the consequence, because the tests do not run. Checking that before applying the
+suggested mutex is what turned up the larger problem. Reply in
+`requests/a-b-raced-globals-flags-tests-that-cannot-run.md`, which also suggests
+the checker skip crates whose test target is disabled.

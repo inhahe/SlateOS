@@ -148,6 +148,18 @@ pub const fn log_upto(p: i32) -> i32 {
 // State
 // ---------------------------------------------------------------------------
 
+// One logger per process, by specification: `openlog` and `setlogmask`
+// configure the whole program, which is the point of them, so this state cannot
+// become per-thread the way a test-only counter can. POSIX therefore leaves
+// serialising it to the caller — and the callers here include this crate's own
+// tests, which drive all three from several libtest threads at once.
+// `tests::lock_syslog_for_test` is how they meet that.
+//
+// The three share one lock rather than having one each: `openlog` writes ident
+// and options in a single call, and `syslog`'s observable behaviour depends on
+// the mask as well, so separate locks could not make any of those pairs
+// indivisible — which is the only property the tests actually need.
+
 /// Ident string pointer from openlog (may be null).
 static mut SYSLOG_IDENT: *const u8 = core::ptr::null();
 /// Log options from openlog.
@@ -337,6 +349,28 @@ fn write_u32(mut val: u32, buf: &mut [u8; 16]) -> usize {
 mod tests {
     use super::*;
 
+    /// Serialises `SYSLOG_IDENT`, `SYSLOG_OPTIONS` and `SYSLOG_MASK`.
+    ///
+    /// Every test below that touches the logger's configuration does
+    /// "put it in a known state, call something, read it back", and libtest
+    /// runs those on separate threads. `test_openlog_sets_ident` asserts the
+    /// stored pointer equals the one it just passed — which is simply false if
+    /// `test_openlog_null_ident` lands between the store and the load.
+    ///
+    /// The guard must be the first statement and stay bound for the whole body:
+    /// the indivisible unit is the set-provoke-read sequence, not any one call.
+    ///
+    /// Poison is recovered rather than propagated, so a genuine failure in one
+    /// of these reports once instead of poisoning its thirteen siblings.
+    static SYSLOG_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[must_use = "the guard serialises the process-wide logger config; bind it to `_g`"]
+    fn lock_syslog_for_test() -> std::sync::MutexGuard<'static, ()> {
+        SYSLOG_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
     // -- Pure helper tests --
 
     #[test]
@@ -425,6 +459,7 @@ mod tests {
 
     #[test]
     fn test_setlogmask_returns_previous() {
+        let _g = lock_syslog_for_test();
         // Reset to known state.
         unsafe {
             core::ptr::addr_of_mut!(SYSLOG_MASK).write(0xFF);
@@ -439,6 +474,7 @@ mod tests {
 
     #[test]
     fn test_setlogmask_zero_queries() {
+        let _g = lock_syslog_for_test();
         // setlogmask(0) queries without changing.
         unsafe {
             core::ptr::addr_of_mut!(SYSLOG_MASK).write(0xFF);
@@ -488,6 +524,7 @@ mod tests {
 
     #[test]
     fn test_openlog_sets_ident() {
+        let _g = lock_syslog_for_test();
         let ident = b"test_prog\0";
         openlog(ident.as_ptr(), 0, LOG_USER);
         // Verify ident was stored.
@@ -499,6 +536,7 @@ mod tests {
 
     #[test]
     fn test_openlog_sets_options() {
+        let _g = lock_syslog_for_test();
         openlog(core::ptr::null(), LOG_PID | LOG_PERROR, LOG_DAEMON);
         let stored = unsafe { *core::ptr::addr_of!(SYSLOG_OPTIONS) };
         assert_eq!(stored, LOG_PID | LOG_PERROR);
@@ -507,6 +545,7 @@ mod tests {
 
     #[test]
     fn test_closelog_clears_state() {
+        let _g = lock_syslog_for_test();
         let ident = b"test\0";
         openlog(ident.as_ptr(), LOG_PID, LOG_USER);
         closelog();
@@ -518,6 +557,7 @@ mod tests {
 
     #[test]
     fn test_openlog_null_ident() {
+        let _g = lock_syslog_for_test();
         openlog(core::ptr::null(), 0, 0);
         let stored = unsafe { *core::ptr::addr_of!(SYSLOG_IDENT) };
         assert!(stored.is_null());
@@ -602,6 +642,7 @@ mod tests {
 
     #[test]
     fn test_syslog_no_crash() {
+        let _g = lock_syslog_for_test();
         unsafe {
             core::ptr::addr_of_mut!(SYSLOG_MASK).write(0xFF);
         }
@@ -617,6 +658,7 @@ mod tests {
 
     #[test]
     fn test_syslog_filtered_by_mask() {
+        let _g = lock_syslog_for_test();
         // Set mask to only allow ERR and below.
         unsafe {
             core::ptr::addr_of_mut!(SYSLOG_MASK).write(log_upto(LOG_ERR) as i32);
@@ -644,6 +686,7 @@ mod tests {
 
     #[test]
     fn test_syslog_null_message_no_crash() {
+        let _g = lock_syslog_for_test();
         unsafe {
             core::ptr::addr_of_mut!(SYSLOG_MASK).write(0xFF);
         }
@@ -657,6 +700,7 @@ mod tests {
     /// a regression guard for BUG-POSIX-PRINTF-ARG-ARRAY-OOB.
     #[test]
     fn test_syslog_more_than_eight_int_args_no_crash() {
+        let _g = lock_syslog_for_test();
         unsafe {
             core::ptr::addr_of_mut!(SYSLOG_MASK).write(0xFF);
         }
@@ -681,6 +725,7 @@ mod tests {
 
     #[test]
     fn test_syslog_expands_format() {
+        let _g = lock_syslog_for_test();
         // Build a synthetic va_list and verify vsyslog formats without crashing.
         unsafe {
             core::ptr::addr_of_mut!(SYSLOG_MASK).write(0xFF);
@@ -702,6 +747,7 @@ mod tests {
 
     #[test]
     fn test_vsyslog_null_va_no_crash() {
+        let _g = lock_syslog_for_test();
         unsafe {
             core::ptr::addr_of_mut!(SYSLOG_MASK).write(0xFF);
         }
@@ -712,6 +758,7 @@ mod tests {
 
     #[test]
     fn test_vsyslog_chk_expands_format() {
+        let _g = lock_syslog_for_test();
         // The _FORTIFY_SOURCE form: extra `flag` arg, otherwise like vsyslog.
         unsafe {
             core::ptr::addr_of_mut!(SYSLOG_MASK).write(0xFF);
@@ -734,6 +781,7 @@ mod tests {
 
     #[test]
     fn test_setlogmask_specific_mask() {
+        let _g = lock_syslog_for_test();
         unsafe {
             core::ptr::addr_of_mut!(SYSLOG_MASK).write(0xFF);
         }

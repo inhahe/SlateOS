@@ -1230,13 +1230,28 @@ pub unsafe extern "C" fn bsearch(
 
 /// Linear congruential PRNG state.
 ///
-/// Not thread-safe. Uses the glibc LCG parameters.
+/// Uses the glibc LCG parameters. POSIX gives a process exactly one `rand`
+/// sequence, so this is shared by specification and cannot become per-thread —
+/// `rand_r` is the reentrant form for callers that need their own stream.
+///
+/// Serialising it is therefore the *caller's* obligation, not this module's;
+/// POSIX marks `rand`/`srand` as not thread-safe for exactly this reason. The
+/// crate's own tests discharge it with `tests::lock_rand_for_test`.
 static mut RAND_STATE: u64 = 1;
 
 /// Seed the random number generator.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn srand(seed: u32) {
-    // SAFETY: Single-threaded userspace. Using addr_of_mut for Rust 2024.
+    // SAFETY: `addr_of_mut!` never forms a reference to the static, so no
+    // aliasing rule is at stake; the write is a plain aligned store to a
+    // `u64` that outlives the program.
+    //
+    // Concurrency is a *caller* obligation imported from POSIX, not a fact
+    // about this program: `srand` is one of the functions POSIX explicitly
+    // declines to make thread-safe. (The previous comment here claimed
+    // "single-threaded userspace", which was false — this crate's own test
+    // suite runs it on several libtest threads at once, and the determinism
+    // tests silently depended on winning that race.)
     unsafe {
         core::ptr::addr_of_mut!(RAND_STATE).write(u64::from(seed));
     }
@@ -1248,7 +1263,9 @@ pub extern "C" fn srand(seed: u32) {
 /// Returns the upper 31 bits.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn rand() -> i32 {
-    // SAFETY: Single-threaded access.
+    // SAFETY: As `srand` — `addr_of_mut!` forms no reference, and the
+    // read-modify-write below is *not* atomic, which is exactly why POSIX
+    // makes serialising `rand` the caller's job. See `RAND_STATE`.
     let state = unsafe { core::ptr::addr_of_mut!(RAND_STATE).read() };
     let new_state = state
         .wrapping_mul(6_364_136_223_846_793_005)
@@ -1886,6 +1903,11 @@ fn char_to_digit(c: u8, base: i32) -> i32 {
 // where a = 0x5DEECE66D, c = 0xB.
 
 /// 48-bit PRNG state.
+///
+/// One sequence per process, by specification — `drand48_r` and friends are the
+/// reentrant forms for a caller that wants its own. So, as with [`RAND_STATE`],
+/// serialising this is the caller's obligation; `tests::lock_rand48_for_test`
+/// is how this crate's own tests meet it.
 static mut RAND48_STATE: u64 = 0x330E_ABCD_1234_u64;
 
 /// LCG multiplier (POSIX standard value).
@@ -1898,7 +1920,11 @@ const RAND48_MASK: u64 = (1_u64 << 48) - 1;
 /// Advance the 48-bit LCG state.
 #[inline]
 fn rand48_step() -> u64 {
-    // SAFETY: Single-threaded access.
+    // SAFETY: `addr_of_mut!` forms no reference to the static. The
+    // read-modify-write is deliberately non-atomic: POSIX assigns the caller
+    // responsibility for serialising the `drand48` family, so adding a lock
+    // here would slow every caller to fix a problem only unserialised ones
+    // have. See `RAND48_STATE`.
     let state = unsafe { core::ptr::addr_of_mut!(RAND48_STATE).read() };
     let next = (state.wrapping_mul(RAND48_A).wrapping_add(RAND48_C)) & RAND48_MASK;
     unsafe {
@@ -1956,6 +1982,11 @@ pub extern "C" fn srand48(seedval: i64) {
 /// `seed16v` must point to at least 3 `u16` values.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn seed48(seed16v: *const u16) -> *const u16 {
+    /// Storage for the value `seed48` hands back. Same hazard as [`L64A_BUF`]:
+    /// the caller gets a pointer *into* it, so it is still shared while being
+    /// read. It rides on `tests::lock_rand48_for_test` rather than a lock of
+    /// its own, because `seed48` writes this and `RAND48_STATE` in one call —
+    /// two locks could not make that pair atomic.
     static mut OLD_SEED: [u16; 3] = [0; 3];
 
     // Use addr_of_mut to avoid creating shared references to mutable
@@ -2275,6 +2306,14 @@ pub extern "C" fn a64l(s: *const u8) -> i64 {
 }
 
 /// Static buffer for `l64a` output (max 7 bytes: 6 digits + null).
+///
+/// `l64a` returns a pointer *into* this buffer, which makes it the same hazard
+/// as `strtok`'s save pointer rather than merely a racy counter: the bytes stay
+/// shared while the caller is still reading them, so a concurrent `l64a`
+/// rewrites a string another thread is midway through. POSIX says as much — the
+/// returned pointer "may be a pointer into a static buffer that is overwritten
+/// by each call" — which is what makes serialisation the caller's obligation.
+/// `tests::lock_l64a_for_test` discharges it here.
 static mut L64A_BUF: [u8; 7] = [0; 7];
 
 /// `l64a` — convert a long integer to a base-64 string.
@@ -2322,6 +2361,62 @@ pub extern "C" fn l64a(n: i64) -> *const u8 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // -- Serialising the process-wide state these tests drive -------------
+    //
+    // `cargo test` runs these on separate threads, and three of the globals
+    // below are shared *by specification* -- POSIX gives a process one `rand`
+    // sequence, one `drand48` sequence and one `l64a` return buffer, so they
+    // cannot stop being shared the way a test-only counter can (which would
+    // become a `thread_local!`; see `posix::malloc::live_regions`). The
+    // remaining option is to stop the tests overlapping.
+    //
+    // Each guard must be the FIRST statement of its test and stay bound for
+    // the whole body: the indivisible unit is the entire "seed it, draw from
+    // it, read the result back" sequence, not any single call inside it.
+    //
+    // Poison is recovered rather than propagated. A test that genuinely fails
+    // while holding one of these should report once, not poison its fourteen
+    // siblings and bury the cause under a wall of secondary panics.
+    //
+    // Three locks rather than one, because these are three unrelated pieces of
+    // state and a single lock would serialise 21 tests that mostly do not
+    // contend. `OLD_SEED` rides on the rand48 lock because `seed48` writes both
+    // it and `RAND48_STATE` in one call.
+
+    static RAND_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    static RAND48_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    static L64A_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// Serialises `RAND_STATE` (`srand`/`rand`).
+    #[must_use = "the guard serialises the global rand state; bind it to `_g`"]
+    fn lock_rand_for_test() -> std::sync::MutexGuard<'static, ()> {
+        RAND_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// Serialises `RAND48_STATE` and `seed48`'s `OLD_SEED`.
+    #[must_use = "the guard serialises the global rand48 state; bind it to `_g`"]
+    fn lock_rand48_for_test() -> std::sync::MutexGuard<'static, ()> {
+        RAND48_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// Serialises `L64A_BUF`.
+    ///
+    /// This one is not merely about a wrong assertion. `l64a` returns a pointer
+    /// *into* the shared buffer, so the value is still live in it while the
+    /// caller reads -- `test_a64l_l64a_roundtrip` holds it across a second
+    /// call. An unserialised `l64a` on another thread rewrites the bytes the
+    /// reader is midway through.
+    #[must_use = "the guard serialises l64a's shared return buffer; bind it to `_g`"]
+    fn lock_l64a_for_test() -> std::sync::MutexGuard<'static, ()> {
+        L64A_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
 
     // -- atoi / atol / atoll tests --
 
@@ -2598,6 +2693,7 @@ mod tests {
 
     #[test]
     fn test_srand_rand_deterministic() {
+        let _g = lock_rand_for_test();
         srand(12345);
         let a = rand();
         srand(12345);
@@ -2607,6 +2703,7 @@ mod tests {
 
     #[test]
     fn test_rand_nonnegative() {
+        let _g = lock_rand_for_test();
         srand(42);
         for _ in 0..100 {
             assert!(rand() >= 0);
@@ -3423,6 +3520,7 @@ mod tests {
 
     #[test]
     fn drand48_range() {
+        let _g = lock_rand48_for_test();
         // After seeding, drand48 must return values in [0.0, 1.0).
         srand48(12345);
         for _ in 0..100 {
@@ -3433,6 +3531,7 @@ mod tests {
 
     #[test]
     fn lrand48_range() {
+        let _g = lock_rand48_for_test();
         // lrand48 returns values in [0, 2^31).
         srand48(42);
         for _ in 0..100 {
@@ -3444,6 +3543,7 @@ mod tests {
 
     #[test]
     fn mrand48_full_signed_range() {
+        let _g = lock_rand48_for_test();
         // mrand48 returns values in [-2^31, 2^31).  After many calls,
         // we should see at least one negative and one positive value.
         srand48(99);
@@ -3466,6 +3566,7 @@ mod tests {
 
     #[test]
     fn srand48_deterministic() {
+        let _g = lock_rand48_for_test();
         // Same seed must produce same sequence.
         srand48(777);
         let a1 = drand48();
@@ -3484,6 +3585,7 @@ mod tests {
 
     #[test]
     fn srand48_different_seeds_diverge() {
+        let _g = lock_rand48_for_test();
         srand48(1);
         let a = drand48();
         srand48(2);
@@ -3563,6 +3665,7 @@ mod tests {
 
     #[test]
     fn seed48_basic() {
+        let _g = lock_rand48_for_test();
         let seed: [u16; 3] = [0x1111, 0x2222, 0x3333];
         let old_ptr = seed48(seed.as_ptr());
         assert!(!old_ptr.is_null(), "seed48 should return non-null");
@@ -3574,6 +3677,7 @@ mod tests {
 
     #[test]
     fn seed48_null_returns_old_pointer() {
+        let _g = lock_rand48_for_test();
         let ptr = seed48(core::ptr::null());
         assert!(!ptr.is_null());
     }
@@ -4884,6 +4988,7 @@ mod tests {
 
     #[test]
     fn test_srand48_drand48_deterministic() {
+        let _g = lock_rand48_for_test();
         srand48(123);
         let a = drand48();
         srand48(123);
@@ -4893,6 +4998,7 @@ mod tests {
 
     #[test]
     fn test_drand48_range() {
+        let _g = lock_rand48_for_test();
         srand48(42);
         for _ in 0..20 {
             let val = drand48();
@@ -4903,6 +5009,7 @@ mod tests {
 
     #[test]
     fn test_lrand48_range() {
+        let _g = lock_rand48_for_test();
         srand48(42);
         for _ in 0..20 {
             let val = lrand48();
@@ -4913,6 +5020,7 @@ mod tests {
 
     #[test]
     fn test_mrand48_signed() {
+        let _g = lock_rand48_for_test();
         // mrand48 returns values in [-2^31, 2^31).
         srand48(42);
         // Just verify it doesn't crash and produces i64 values.
@@ -4923,6 +5031,7 @@ mod tests {
 
     #[test]
     fn test_seed48_returns_old_seed() {
+        let _g = lock_rand48_for_test();
         srand48(0);
         let seed: [u16; 3] = [0x1234, 0x5678, 0x9ABC];
         let old = seed48(seed.as_ptr());
@@ -4931,6 +5040,7 @@ mod tests {
 
     #[test]
     fn test_seed48_null_returns_old_seed() {
+        let _g = lock_rand48_for_test();
         let old = seed48(core::ptr::null());
         assert!(
             !old.is_null(),
@@ -4940,6 +5050,7 @@ mod tests {
 
     #[test]
     fn test_seed48_updates_state() {
+        let _g = lock_rand48_for_test();
         let seed: [u16; 3] = [1, 2, 3];
         seed48(seed.as_ptr());
         let a = drand48();
@@ -5220,6 +5331,7 @@ mod tests {
 
     #[test]
     fn test_l64a_zero() {
+        let _g = lock_l64a_for_test();
         let result = l64a(0);
         assert!(!result.is_null());
         assert_eq!(unsafe { *result }, 0, "l64a(0) should return empty string");
@@ -5227,6 +5339,7 @@ mod tests {
 
     #[test]
     fn test_l64a_one() {
+        let _g = lock_l64a_for_test();
         let result = l64a(1);
         assert!(!result.is_null());
         assert_eq!(unsafe { *result }, b'/', "l64a(1) should be '/'");
@@ -5234,6 +5347,7 @@ mod tests {
 
     #[test]
     fn test_l64a_two() {
+        let _g = lock_l64a_for_test();
         let result = l64a(2);
         assert!(!result.is_null());
         assert_eq!(unsafe { *result }, b'0', "l64a(2) should be '0'");
@@ -5241,6 +5355,7 @@ mod tests {
 
     #[test]
     fn test_a64l_l64a_roundtrip() {
+        let _g = lock_l64a_for_test();
         // Encode then decode should give back the original.
         for val in [1i64, 42, 255, 1000, 12345, 0x3FFFF] {
             let encoded = l64a(val);
@@ -5251,6 +5366,7 @@ mod tests {
 
     #[test]
     fn test_l64a_63() {
+        let _g = lock_l64a_for_test();
         // 63 → 'z' (last base-64 digit).
         let result = l64a(63);
         assert_eq!(unsafe { *result }, b'z');

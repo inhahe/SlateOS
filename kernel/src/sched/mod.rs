@@ -5965,6 +5965,88 @@ pub fn process_deferred_wakes() {
     }
 }
 
+/// The [`PendingWakeSignals`] bit standing for CPU `cpu`, or `0` if the index
+/// is too large to name.
+///
+/// A `u64` mask covers `MAX_CPUS` (16) with room to spare, and it is the same
+/// representation `Task::cpu_affinity` already uses for a set of CPUs.  An
+/// out-of-range index cannot occur — nothing can be enqueued onto a CPU that
+/// does not exist — but returning `0` rather than shifting past the width
+/// keeps that a missed signal instead of a panic on a scheduler hot path.
+const fn cpu_bit(cpu: usize) -> u64 {
+    if cpu < u64::BITS as usize {
+        1u64 << cpu
+    } else {
+        0
+    }
+}
+
+/// Reschedule signals owed to CPUs that [`drain_deferred_wakes_locked`] just
+/// enqueued work onto, carried out of the locked region and fired on drop.
+///
+/// # Why the signal cannot happen inside the drain
+///
+/// [`wake`] and [`try_wake`] both call [`signal_cpu`] *after* releasing the
+/// scheduler lock, and that ordering is not stylistic: `signal_cpu` ends in
+/// `send_fixed_ipi`, which brackets its two APIC writes with `wait_icr_idle`
+/// spins on the ICR delivery-status bit.  That is device I/O, and a drain with
+/// several remote targets would do one such round trip per target with `SCHED`
+/// held — the "holding locks across I/O" anti-pattern, on the hottest lock in
+/// the kernel.  The drain runs with the guard already held and cannot release
+/// it, so it returns the target set instead and someone else fires it.
+///
+/// # Why a `Drop` type rather than a plain `u64`
+///
+/// `schedule_inner` releases the guard at six different points — two
+/// fall-throughs into a context switch and four `return`/`continue` paths —
+/// and a release that forgets to signal silently costs the target CPU up to a
+/// full timer tick of wake latency, which is invisible in a log.  Declaring
+/// this *before* the guard makes Rust's reverse-declaration drop order do the
+/// work: the guard drops first, then this, so every early exit signals
+/// correctly with no code at the exit at all, including exits a later edit
+/// adds.  The two fall-through paths continue past the guard's scope into a
+/// context switch that may not return for a long time, so those call
+/// [`PendingWakeSignals::flush`] explicitly; `flush` clears the mask, so the
+/// eventual drop is a no-op and calling both is always safe.
+struct PendingWakeSignals {
+    /// Bit `n` set = CPU `n` had a task enqueued onto it and owes a signal.
+    mask: u64,
+}
+
+impl PendingWakeSignals {
+    const fn new() -> Self {
+        Self { mask: 0 }
+    }
+
+    /// Merge in the target set returned by a drain.
+    fn add(&mut self, mask: u64) {
+        self.mask |= mask;
+    }
+
+    /// Signal every owed CPU now, and clear the set.
+    ///
+    /// The caller must have released the `SCHED` guard.  Idempotent: a second
+    /// call (including the one `Drop` makes) does nothing.
+    fn flush(&mut self) {
+        let mut remaining = core::mem::take(&mut self.mask);
+        while remaining != 0 {
+            let cpu = remaining.trailing_zeros() as usize;
+            // Clear the lowest set bit.  `remaining` is non-zero here, so the
+            // subtraction cannot underflow.
+            remaining &= remaining.wrapping_sub(1);
+            // `signal_cpu` decides for itself whether the target needs an IPI
+            // or only the flag stores, exactly as it does for `wake`.
+            signal_cpu(cpu);
+        }
+    }
+}
+
+impl Drop for PendingWakeSignals {
+    fn drop(&mut self) {
+        self.flush();
+    }
+}
+
 /// Drain the deferred wake queue while holding the SCHED lock.
 ///
 /// Called from `schedule_inner` with the lock already held.  This is
@@ -5972,11 +6054,21 @@ pub fn process_deferred_wakes() {
 /// processed at the next scheduling decision, even on single-CPU
 /// systems where the ISR-context `try_wake` always fails (because the
 /// interrupted code was holding the lock).
-fn drain_deferred_wakes_locked(state: &mut SchedState, _cpu: usize) {
+///
+/// Returns a bitmask of the CPUs that had a task enqueued onto them, which the
+/// caller must hand to [`PendingWakeSignals`] and fire once the guard is
+/// released.  Without that, a wake landing on a *remote* CPU was the only wake
+/// path in the kernel that sent no reschedule IPI: an idle target picked the
+/// task up on its next APIC tick instead, adding up to ~10 ms of latency and
+/// leaving this path silently asymmetric with `wake`/`try_wake` — the same
+/// class of asymmetry that hid `BUG-DEFERRED-WAKE-DROPPED-BEFORE-PARK`.
+fn drain_deferred_wakes_locked(state: &mut SchedState, _cpu: usize) -> u64 {
     // OPT: Quick check — skip the scan if no wakes were deferred.
     if !DEFERRED_WAKES_PENDING.load(Ordering::Acquire) {
-        return;
+        return 0;
     }
+
+    let mut signal_mask: u64 = 0;
 
     // Clear the flag *before* the scan, not after.  A `defer_wake` that claims
     // a slot this loop has already walked past sets the flag again behind us;
@@ -5999,6 +6091,9 @@ fn drain_deferred_wakes_locked(state: &mut SchedState, _cpu: usize) {
                 let target_cpu = choose_cpu_for_task(task);
                 task.last_cpu = target_cpu;
                 PER_CPU_SCHED.enqueue(task_id, prio, target_cpu);
+                // Owe `target_cpu` a reschedule signal, to be sent once the
+                // caller has released the guard.
+                signal_mask |= cpu_bit(target_cpu);
             } else {
                 // Task has not parked yet (Running/Ready).  Record the wake on
                 // the task so its next `block_current()` returns immediately —
@@ -6020,6 +6115,8 @@ fn drain_deferred_wakes_locked(state: &mut SchedState, _cpu: usize) {
         // by another path, or may not exist anymore).
         slot.store(DEFERRED_WAKE_EMPTY, Ordering::Release);
     }
+
+    signal_mask
 }
 
 /// Dump scheduler + timer state when the `schedule_inner` idle fallback has
@@ -6504,6 +6601,11 @@ fn schedule_inner(requeue: bool, kind: SwitchKind) {
     let new_gs_base: u64;
     let next_id: TaskId;
 
+    // Declared before the `SCHED` guard so it drops *after* it on every early
+    // exit below — see `PendingWakeSignals` for why that ordering is the whole
+    // mechanism.  Empty in the common case, where firing it costs one branch.
+    let mut wake_signals = PendingWakeSignals::new();
+
     {
         let mut state = SCHED.lock();
 
@@ -6514,7 +6616,7 @@ fn schedule_inner(requeue: bool, kind: SwitchKind) {
         // Process any deferred wakes that were queued by ISR-context
         // hrtimer callbacks when the SCHED lock was contended.  We now
         // hold the lock, so we can safely wake these tasks.
-        drain_deferred_wakes_locked(&mut state, cpu);
+        wake_signals.add(drain_deferred_wakes_locked(&mut state, cpu));
 
         // Re-enqueue the current task if requested (on its current CPU).
         //
@@ -6676,6 +6778,12 @@ fn schedule_inner(requeue: bool, kind: SwitchKind) {
                 }
                 drop(state);
 
+                // Signal before the HLT below, not after: a remote CPU that a
+                // deferred wake just gave work to must be kicked *now*, since
+                // this CPU is about to stop executing entirely and will not
+                // reach another release point until something wakes it.
+                wake_signals.flush();
+
                 // Idle loop: HLT until a task becomes ready, then do a
                 // full context switch.  The blocked/dead task's context
                 // save area is still in the task table — we save our
@@ -6698,7 +6806,11 @@ fn schedule_inner(requeue: bool, kind: SwitchKind) {
                     // us between try_lock and drop).  Those wakes are
                     // deferred and MUST be processed here — otherwise the
                     // woken task is never enqueued and we spin forever.
-                    drain_deferred_wakes_locked(&mut s, cpu);
+                    //
+                    // `wake_signals` is empty on entry to every iteration: each
+                    // of the paths out of this loop body flushes it after
+                    // dropping `s`.
+                    wake_signals.add(drain_deferred_wakes_locked(&mut s, cpu));
 
                     let mut idle_migrated = priority_rr::MigratedTasks::new();
                     let ready_id = match PER_CPU_SCHED.pick_next_local(cpu) {
@@ -6716,6 +6828,7 @@ fn schedule_inner(requeue: bool, kind: SwitchKind) {
                                     dump_idle_fallback_wedge(&s, cpu, current_id);
                                 }
                                 drop(s);
+                                wake_signals.flush();
                                 continue;
                             }
                         },
@@ -6810,6 +6923,7 @@ fn schedule_inner(requeue: bool, kind: SwitchKind) {
                             ready_id,
                         );
                         drop(s);
+                        wake_signals.flush();
                         continue;
                     }
 
@@ -6830,6 +6944,12 @@ fn schedule_inner(requeue: bool, kind: SwitchKind) {
                         // Account CPU cycles to the outgoing task (idle fallback path).
                         account_cycles(&mut s, current_id, cpu);
                         drop(s);
+
+                        // Explicit, because this path runs into `switch_context`
+                        // and returns from inside the `if let` — the drop that
+                        // would otherwise cover it is on the far side of a
+                        // switch that may not come back for a long time.
+                        wake_signals.flush();
 
                         // Clear idle flag BEFORE the switch so the new
                         // task's timer ticks see normal (non-idle) state.
@@ -6960,6 +7080,7 @@ fn schedule_inner(requeue: bool, kind: SwitchKind) {
                     // `Some` here.  Kept as a defensive no-op for the borrow
                     // checker's exhaustiveness.
                     drop(s);
+                    wake_signals.flush();
                 }
             }
 
@@ -7118,6 +7239,13 @@ fn schedule_inner(requeue: bool, kind: SwitchKind) {
 
         // Lock is dropped here before the context switch.
     }
+
+    // The guard is gone, so any CPU a deferred wake gave work to can be kicked
+    // now.  Explicit rather than left to the drop below, because everything
+    // from here on runs into `switch_context`, and this frame's locals are not
+    // dropped until whoever resumes this task lets it return — potentially
+    // milliseconds later, which is the very latency the signal exists to avoid.
+    wake_signals.flush();
 
     // --- Context switch (outside the lock) ---
 
@@ -7360,6 +7488,7 @@ pub fn self_test() -> KernelResult<()> {
     test_load_average()?;
     test_liveness_watchdog()?;
     test_try_wake_contract()?;
+    test_deferred_wake_signal_mask()?;
     test_prev_task_pins_outgoing_stack()?;
 
     serial_println!("[sched] Scheduler self-test PASSED");
@@ -7537,6 +7666,209 @@ fn test_try_wake_contract() -> KernelResult<()> {
     }
 
     serial_println!("[sched]   try_wake contract (retry only on lock contention): OK");
+    Ok(())
+}
+
+/// Pin the target-CPU set that [`drain_deferred_wakes_locked`] reports, and
+/// the accumulate/flush contract of [`PendingWakeSignals`] that carries it out
+/// of the locked region.
+///
+/// The drain was for a long time the only wake path in the kernel that sent no
+/// reschedule IPI, because it runs with the `SCHED` guard held and
+/// `signal_cpu` must not be called there (see `PendingWakeSignals`).  A
+/// deferred wake landing on an *idle remote* CPU therefore waited for that
+/// CPU's next APIC tick — up to ~10 ms — instead of being kicked awake.  The
+/// fix is for the drain to report its targets and for `schedule_inner` to
+/// signal them after releasing.
+///
+/// The symptom itself is not observable here: the boot test runs single-CPU,
+/// so every target is the local CPU and `signal_cpu` correctly sends no IPI.
+/// What *is* observable, and is what actually broke, is the reporting — a
+/// drain that enqueues a task and returns an empty set signals nobody no
+/// matter how many CPUs exist.  So this checks the set, not the interrupt.
+fn test_deferred_wake_signal_mask() -> KernelResult<()> {
+    let cpu = current_cpu_id();
+
+    // --- 1. `add` unions, it does not overwrite. ---
+    //
+    // Two drains in one `schedule_inner` call (the main path and then the idle
+    // fallback) both feed the same accumulator, and a second drain that found
+    // nothing must not erase the first one's targets.
+    {
+        let mut acc = PendingWakeSignals::new();
+        acc.add(0b0101);
+        acc.add(0b0110);
+        let got = acc.mask;
+        // Never flush synthetic bits: they name CPUs that may not exist, and
+        // `signal_cpu` would leave a reschedule flag set on a phantom index.
+        acc.mask = 0;
+        if got != 0b0111 {
+            serial_println!(
+                "[sched]   FAIL: PendingWakeSignals::add overwrote instead of unioning \
+                 (got {:#b}, want {:#b})",
+                got,
+                0b0111
+            );
+            return Err(KernelError::InternalError);
+        }
+    }
+
+    // --- 2. `flush` empties the set, so the `Drop` backstop cannot double-signal. ---
+    //
+    // Two of `schedule_inner`'s release points flush explicitly *and* are
+    // followed by the drop; if `flush` left the mask set, every one of those
+    // would signal twice, and — worse — the idle loop would re-signal stale
+    // targets on every HLT iteration.  Uses this CPU's own bit, which is a
+    // real index and which `signal_cpu` handles without an IPI, so the check
+    // costs nothing observable.
+    {
+        let mut acc = PendingWakeSignals::new();
+        acc.add(cpu_bit(cpu));
+        acc.flush();
+        if acc.mask != 0 {
+            serial_println!(
+                "[sched]   FAIL: PendingWakeSignals::flush left {:#x} behind — Drop would \
+                 signal it a second time",
+                acc.mask
+            );
+            return Err(KernelError::InternalError);
+        }
+        acc.flush(); // idempotent: must not fault or re-signal
+    }
+
+    // --- 3. A drain that enqueues a task reports that task's CPU. ---
+    //
+    // The end-to-end shape: park a task, defer a wake for it, drain, and check
+    // that the set names the CPU the task was actually enqueued onto.
+    static PARKED: AtomicU64 = AtomicU64::new(0);
+    static RESUMED: AtomicU64 = AtomicU64::new(0);
+
+    extern "C" fn parker_task(_arg: u64) {
+        PARKED.store(1, Ordering::Release);
+        block_current();
+        RESUMED.store(1, Ordering::Release);
+    }
+
+    PARKED.store(0, Ordering::Relaxed);
+    RESUMED.store(0, Ordering::Relaxed);
+
+    let pml4 = crate::mm::page_table::active_pml4_phys();
+    let tid = spawn(
+        b"test-wake-mask",
+        task::DEFAULT_PRIORITY,
+        parker_task,
+        0,
+        pml4,
+    )?;
+
+    // Let it reach `block_current`.  Bounded so a failure to park is a test
+    // failure rather than a boot hang.
+    let deadline = crate::apic::tick_count().saturating_add(50);
+    loop {
+        let parked = {
+            let state = SCHED.lock();
+            state
+                .tasks
+                .get(&tid)
+                .is_some_and(|t| t.state == TaskState::Blocked)
+        };
+        if parked && PARKED.load(Ordering::Acquire) != 0 {
+            break;
+        }
+        if crate::apic::tick_count() >= deadline {
+            serial_println!(
+                "[sched]   FAIL: test task {} never parked (parked_flag={})",
+                tid,
+                PARKED.load(Ordering::Acquire)
+            );
+            return Err(KernelError::InternalError);
+        }
+        yield_now();
+    }
+
+    // Interrupts off across defer + drain.  Otherwise a timer tick landing in
+    // the gap runs `process_deferred_wakes`, whose `try_wake` succeeds (we
+    // hold no lock yet) and empties the slot — the drain would then correctly
+    // report nothing and the test would fail for a reason that is not a bug.
+    let (mask, target_cpu) = crate::cpu::without_interrupts(|| {
+        defer_wake(tid);
+        let mut state = SCHED.lock();
+        let m = drain_deferred_wakes_locked(&mut state, cpu);
+        let t = state.tasks.get(&tid).map(|task| task.last_cpu);
+        drop(state);
+        (m, t)
+    });
+
+    // Signal for real, through the type `schedule_inner` uses — the task was
+    // genuinely enqueued, so the wake owes its target a kick either way.
+    {
+        let mut acc = PendingWakeSignals::new();
+        acc.add(mask);
+        acc.flush();
+    }
+
+    let Some(target_cpu) = target_cpu else {
+        serial_println!(
+            "[sched]   FAIL: test task {} vanished across the drain",
+            tid
+        );
+        return Err(KernelError::InternalError);
+    };
+
+    let want = cpu_bit(target_cpu);
+    if mask != want {
+        serial_println!(
+            "[sched]   FAIL: drain enqueued task {} onto cpu {} but reported target set \
+             {:#x} (want {:#x}) — a remote target would get no reschedule IPI and wait \
+             for its next timer tick",
+            tid,
+            target_cpu,
+            mask,
+            want
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    // --- 4. A drain that enqueues nothing reports nothing. ---
+    //
+    // A spurious bit is a wasted IPI on every schedule, which on a busy SMP
+    // box is a real cost.  `u64::MAX` is never handed out by the monotonic
+    // task-id allocator, so this drain finds a slot it must simply discard.
+    let empty_mask = crate::cpu::without_interrupts(|| {
+        defer_wake(u64::MAX);
+        let mut state = SCHED.lock();
+        let m = drain_deferred_wakes_locked(&mut state, cpu);
+        drop(state);
+        m
+    });
+    if empty_mask != 0 {
+        serial_println!(
+            "[sched]   FAIL: drain of a wake for a nonexistent task reported target set \
+             {:#x} (want 0)",
+            empty_mask
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    // Let the woken task finish so it does not linger as a parked stranger in
+    // the task table for the rest of the boot.
+    let deadline = crate::apic::tick_count().saturating_add(50);
+    while RESUMED.load(Ordering::Acquire) == 0 && crate::apic::tick_count() < deadline {
+        yield_now();
+    }
+    if RESUMED.load(Ordering::Acquire) == 0 {
+        serial_println!(
+            "[sched]   FAIL: task {} was enqueued by the drain but never resumed",
+            tid
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    serial_println!(
+        "[sched]   Deferred-wake reschedule targets (union, flush, enqueue reports cpu {}, \
+         no-op reports none): OK",
+        target_cpu
+    );
     Ok(())
 }
 

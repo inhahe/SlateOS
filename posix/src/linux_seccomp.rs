@@ -1082,11 +1082,20 @@ mod tests {
 
         /// One-byte buffer good enough to satisfy the NULL-args
         /// EFAULT check.  The filter is never inspected by our stub.
+        ///
+        /// Deliberately a `static` and not a `static mut`: the only thing
+        /// twelve concurrently-running tests need from this address is that
+        /// it is non-null and readable, and nothing ever writes through it.
+        /// It was previously `static mut` with a "single-threaded test"
+        /// SAFETY note, which was not true — libtest runs these on separate
+        /// threads — and the mutability it was excusing was never used.
+        static DUMMY: u8 = 0;
         fn nonnull_args() -> *mut u8 {
-            static mut DUMMY: u8 = 0;
-            // SAFETY: single-threaded test, just need a non-null ptr
-            // for the EFAULT check to pass.
-            (&raw mut DUMMY).cast::<u8>()
+            // Casting away constness is sound here because the pointer is
+            // only ever compared against null by the code under test; if the
+            // stub ever starts writing through `args`, this must become real
+            // per-caller storage rather than a shared byte.
+            (&raw const DUMMY).cast_mut()
         }
 
         // -- Per-error-class ----------------------------------------------

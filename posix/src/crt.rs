@@ -1033,15 +1033,35 @@ pub static mut __libc_single_threaded: u8 = 1;
 /// stable for the rest of the process lifetime, which matches the Linux ABI
 /// contract.
 static mut AT_RANDOM_BYTES: [u8; 16] = [0; 16];
-/// Whether `AT_RANDOM_BYTES` has been initialized.
+/// Initialization state of [`AT_RANDOM_BYTES`] — a three-state latch, not a
+/// bool, so that exactly one thread ever writes the buffer.
 ///
-/// Single-process userspace: one of the AT_RANDOM bytes happening to be
-/// zero on a freshly-RDRAND'd buffer is harmless (a stack canary with
-/// one zero byte is still 120 bits of entropy), but the `initialized`
-/// flag avoids re-rolling the value on every getauxval call so callers
-/// who cache the pointer see stable bytes through the buffer.
-static AT_RANDOM_INITIALIZED: core::sync::atomic::AtomicBool =
-    core::sync::atomic::AtomicBool::new(false);
+/// A bool was not enough. The old code loaded it, and on `false` went
+/// straight to filling the buffer, on the reasoning that "a race in
+/// single-process userspace is harmless: both racers fill the same buffer,
+/// and the second write simply overwrites the first." That is wrong twice
+/// over. It is a data race in the language sense — a 16-byte write
+/// concurrent with the 16-byte read a third thread is doing through the
+/// pointer `getauxval` just handed it — and it is wrong in the concrete
+/// sense that matters here: these bytes are the process's stack canary.
+/// glibc and musl seed `__stack_chk_guard` from them, so a thread that
+/// re-rolls the buffer after another thread has already cached a canary
+/// makes that thread's next function epilogue compare a *new* guard against
+/// an *old* one and abort a process that was never smashed. "Both racers
+/// fill the same buffer" is precisely the failure, not the excuse for it.
+///
+/// The latch admits one filler via `compare_exchange`; every other caller
+/// waits for `READY` rather than filling. The `Release` store pairs with the
+/// `Acquire` loads so a thread that sees `READY` sees all 16 bytes.
+static AT_RANDOM_STATE: core::sync::atomic::AtomicU8 =
+    core::sync::atomic::AtomicU8::new(AT_RANDOM_UNINIT);
+
+/// Nobody has started filling [`AT_RANDOM_BYTES`].
+const AT_RANDOM_UNINIT: u8 = 0;
+/// One thread is inside `fill_random`; the buffer is not readable yet.
+const AT_RANDOM_FILLING: u8 = 1;
+/// The buffer holds its final value and will never be written again.
+const AT_RANDOM_READY: u8 = 2;
 
 /// AT_PLATFORM backing string ("x86_64", null-terminated).
 ///
@@ -1051,24 +1071,50 @@ static AT_PLATFORM_BYTES: [u8; 7] = *b"x86_64\0";
 
 /// Initialize the AT_RANDOM buffer if not yet done.
 ///
-/// Safe to call repeatedly — only the first call writes the buffer.
-/// Subsequent calls observe the AtomicBool and short-circuit.
+/// Safe to call repeatedly and from any number of threads at once: exactly
+/// one caller ever writes the buffer, and every other caller either
+/// short-circuits (already `READY`) or waits until it is.
 fn ensure_at_random_initialized() {
     use core::sync::atomic::Ordering;
 
-    // Acquire ordering pairs with the Release on the store below: a
-    // reader that observes `initialized = true` is guaranteed to see
-    // the full random buffer.
-    if AT_RANDOM_INITIALIZED.load(Ordering::Acquire) {
+    // Acquire pairs with the Release store at the end: a thread that observes
+    // READY is guaranteed to see all sixteen bytes the filler wrote.
+    if AT_RANDOM_STATE.load(Ordering::Acquire) == AT_RANDOM_READY {
         return;
     }
 
-    // The buffer is owned by this module and only ever written here.  A race
-    // in single-process userspace is harmless: both racers fill the same
-    // buffer, and the second write simply overwrites the first.
+    if AT_RANDOM_STATE
+        .compare_exchange(
+            AT_RANDOM_UNINIT,
+            AT_RANDOM_FILLING,
+            Ordering::Acquire,
+            Ordering::Acquire,
+        )
+        .is_err()
+    {
+        // Another thread won the latch. It is either mid-`fill_random` or
+        // already done; either way we must not write, and we must not return
+        // until the bytes are readable — our caller is about to hand the
+        // buffer's address to someone who will read it immediately.
+        //
+        // Spinning rather than blocking is right here: the critical section
+        // is one `fill_random` call, this runs at most once per process, and
+        // the futex machinery a blocking wait would need is itself a posix
+        // facility that may not be initialized this early in startup.
+        while AT_RANDOM_STATE.load(Ordering::Acquire) != AT_RANDOM_READY {
+            core::hint::spin_loop();
+        }
+        return;
+    }
+
+    // We hold the latch, so this is the only live reference to the buffer:
+    // no other thread can reach the write (they all lost the
+    // `compare_exchange`), and no reader can be past `getauxval`'s call to
+    // this function yet, because that call has not returned for them either.
     //
     // SAFETY: `AT_RANDOM_BYTES` is a live 16-byte static owned by this
-    // module, so the pointer is valid for the 16-byte write below.
+    // module, so the pointer is valid for the 16-byte write below, and the
+    // latch above establishes exclusivity.
     let ptr = core::ptr::addr_of_mut!(AT_RANDOM_BYTES).cast::<u8>();
     // Flags `0` — the blocking request.  A stack canary is the one value in a
     // process that must not correlate with any other process's, so waiting for
@@ -1086,9 +1132,14 @@ fn ensure_at_random_initialized() {
         // option; it can only happen if neither the kernel CSPRNG nor a
         // hardware RNG is reachable, which on this target means the kernel
         // is broken.
+        //
+        // Leaving the latch at FILLING is deliberate and costs nothing: any
+        // thread spinning above would spin forever, but `abort()` does not
+        // return and takes the whole process with it, so there is no thread
+        // left to spin.
         crate::unistd::abort();
     }
-    AT_RANDOM_INITIALIZED.store(true, Ordering::Release);
+    AT_RANDOM_STATE.store(AT_RANDOM_READY, Ordering::Release);
 }
 
 /// Query the auxiliary vector (glibc extension).

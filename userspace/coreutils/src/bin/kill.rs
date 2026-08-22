@@ -47,11 +47,12 @@
 //! scripts send most.
 
 use std::env;
+use std::ffi::{OsStr, OsString};
 use std::io::{self, ErrorKind, Write};
 use std::process;
 
 use coreutils::errmsg::strerror;
-use coreutils::quote::quote;
+use coreutils::quote::{os_bytes, quote};
 
 #[cfg(target_os = "linux")]
 unsafe extern "C" {
@@ -112,10 +113,10 @@ const SIGTERM: i32 = 15;
 enum KillAction {
     /// `-l` / `-L` / `--list` / `--table`. With no operands, list every signal;
     /// with operands, translate each one between name and number.
-    List { operands: Vec<String>, table: bool },
+    List { operands: Vec<OsString>, table: bool },
     /// Send `signal` to each of `pids`. A negative PID is a process group and
     /// is passed through as written.
-    Send { signal: i32, pids: Vec<String> },
+    Send { signal: i32, pids: Vec<OsString> },
 }
 
 /// Look up a signal name, with or without a `SIG` prefix, in any case.
@@ -161,41 +162,56 @@ fn resolve_signal(token: &str) -> Option<i32> {
     signal_by_name(token)
 }
 
+/// An argument as text, if it is text.
+///
+/// An argument that is not valid UTF-8 is not an option, not a signal name and
+/// not a number, so every decision below wants `None` for it and the right
+/// diagnostic falls out on its own. The thing that must not happen — and what
+/// `env::args()` did — is a panic *before* any of those decisions is reached:
+/// `std::env::args`'s iterator is `…into_string().unwrap()`, so a single
+/// mistyped byte killed the program instead of producing a message about it.
+fn text(arg: &OsStr) -> Option<String> {
+    std::str::from_utf8(&os_bytes(arg))
+        .ok()
+        .map(ToString::to_string)
+}
+
 /// Parse kill's argv. The error string is wordable as `kill: {e}`.
-fn parse_args(args: &[String]) -> Result<KillAction, String> {
+fn parse_args(args: &[OsString]) -> Result<KillAction, String> {
     let Some(first) = args.first() else {
         return Err("missing operand".to_string());
     };
     let rest = args.get(1..).unwrap_or(&[]);
+    let head = text(first);
 
     // Options, all of which may only appear first. `-` alone is not an option;
     // it falls through to be parsed (and rejected) as a PID, which is what GNU
     // does and what keeps the "everything after argv[0] is a PID" rule true.
-    let (signal, operands): (i32, &[String]) = match first.as_str() {
-        "-l" | "--list" => {
+    let (signal, operands): (i32, &[OsString]) = match head.as_deref() {
+        Some("-l" | "--list") => {
             return Ok(KillAction::List {
                 operands: rest.to_vec(),
                 table: false,
             });
         }
-        "-L" | "--table" => {
+        Some("-L" | "--table") => {
             return Ok(KillAction::List {
                 operands: rest.to_vec(),
                 table: true,
             });
         }
-        "--" => (SIGTERM, rest),
-        "-s" | "-n" | "--signal" => {
+        Some("--") => (SIGTERM, rest),
+        Some(opt @ ("-s" | "-n" | "--signal")) => {
             let Some(spec) = rest.first() else {
-                return Err(format!("option {first} requires an argument"));
+                return Err(format!("option {opt} requires an argument"));
             };
-            let Some(sig) = resolve_signal(spec) else {
-                return Err(format!("{}: invalid signal", quote(spec.as_bytes())));
+            let Some(sig) = text(spec).as_deref().and_then(resolve_signal) else {
+                return Err(format!("{}: invalid signal", quote(&os_bytes(spec))));
             };
             (sig, rest.get(1..).unwrap_or(&[]))
         }
-        _ if first.starts_with("--signal=") => {
-            let spec = first.strip_prefix("--signal=").unwrap_or_default();
+        Some(f) if f.starts_with("--signal=") => {
+            let spec = f.strip_prefix("--signal=").unwrap_or_default();
             let Some(sig) = resolve_signal(spec) else {
                 return Err(format!("{}: invalid signal", quote(spec.as_bytes())));
             };
@@ -203,11 +219,24 @@ fn parse_args(args: &[String]) -> Result<KillAction, String> {
         }
         // Every long option this program has was matched above, so anything
         // else starting with `--` is a typo, not a signal named `-foo`.
-        _ if first.starts_with("--") => {
-            return Err(format!("unrecognized option {}", quote(first.as_bytes())));
+        Some(f) if f.starts_with("--") => {
+            return Err(format!("unrecognized option {}", quote(f.as_bytes())));
         }
-        _ => {
-            match first.strip_prefix('-').filter(|body| !body.is_empty()) {
+        // Not text at all. It cannot be an option or a signal name, so the
+        // only question left is whether it was *meant* as one: a leading `-`
+        // says yes, and gets the signal diagnostic rather than a confusing
+        // complaint about a process id.
+        None => {
+            let bytes = os_bytes(first);
+            if let Some(body) = bytes.strip_prefix(b"-")
+                && !body.is_empty()
+            {
+                return Err(format!("{}: invalid signal", quote(body)));
+            }
+            (SIGTERM, args)
+        }
+        Some(f) => {
+            match f.strip_prefix('-').filter(|body| !body.is_empty()) {
                 Some(body) => {
                     // The whole body is tried as a signal spec *first*, so
                     // `-segv` is SIGSEGV. Only if that fails is it re-read as
@@ -288,7 +317,12 @@ fn format_signal_table() -> String {
 /// *n* is `128 + n` — so 128 is subtracted first. That is the whole reason the
 /// synopsis says `EXIT_STATUS` and not `SIGNAL`: the usual call is
 /// `kill -l $?`.
-fn translate_operand(operand: &str) -> Result<String, String> {
+fn translate_operand(operand: &OsStr) -> Result<String, String> {
+    let bytes = os_bytes(operand);
+    let Some(operand) = text(operand) else {
+        return Err(format!("{}: invalid signal", quote(&bytes)));
+    };
+    let operand = operand.as_str();
     if let Ok(n) = operand.parse::<i32>() {
         let sig = if n >= 128 { n.saturating_sub(128) } else { n };
         return signal_by_number(sig)
@@ -340,7 +374,7 @@ fn write_out(text: &str) -> i32 {
 }
 
 fn main() {
-    let args: Vec<String> = env::args().skip(1).collect();
+    let args: Vec<OsString> = env::args_os().skip(1).collect();
     let action = match parse_args(&args) {
         Ok(a) => a,
         Err(e) => {
@@ -386,18 +420,18 @@ fn main() {
 /// Continuing matters: `kill -9 111 222` must still try 222 after 111 turns
 /// out to be gone. The exit status is 1 if *any* target failed, which is what
 /// a caller testing `if kill …` is asking about.
-fn send_all(signal: i32, pids: &[String]) -> i32 {
+fn send_all(signal: i32, pids: &[OsString]) -> i32 {
     let mut status = 0;
     for pid_str in pids {
-        let Ok(pid) = pid_str.parse::<i32>() else {
-            eprintln!("kill: {}: invalid process id", quote(pid_str.as_bytes()));
+        let Some(pid) = text(pid_str).and_then(|t| t.parse::<i32>().ok()) else {
+            eprintln!("kill: {}: invalid process id", quote(&os_bytes(pid_str)));
             status = 1;
             continue;
         };
         if let Err(err) = send_one(pid, signal) {
             eprintln!(
                 "kill: {}: {}",
-                quote(pid_str.as_bytes()),
+                quote(&os_bytes(pid_str)),
                 errno_text(err.raw_os_error(), &err)
             );
             status = 1;
@@ -440,12 +474,16 @@ fn send_one(_pid: i32, _signal: i32) -> io::Result<()> {
 mod tests {
     use super::*;
 
-    fn s(items: &[&str]) -> Vec<String> {
-        items.iter().map(|x| (*x).to_string()).collect()
+    /// Arguments as the operating system hands them over: owned, and *not*
+    /// required to be UTF-8. Every test goes through this rather than through
+    /// `String`, so that the parser is exercised on the same type `main` will
+    /// actually give it.
+    fn s(items: &[&str]) -> Vec<OsString> {
+        items.iter().map(OsString::from).collect()
     }
 
     /// The signal and PID list of a `Send`, or a panic naming what came back.
-    fn sent(args: &[&str]) -> (i32, Vec<String>) {
+    fn sent(args: &[&str]) -> (i32, Vec<OsString>) {
         match parse_args(&s(args)).unwrap() {
             KillAction::Send { signal, pids } => (signal, pids),
             other => panic!("expected a Send, got {other:?}"),
@@ -703,24 +741,29 @@ mod tests {
         }
     }
 
+    /// One operand, as the operating system would hand it over.
+    fn one(arg: &str) -> &OsStr {
+        OsStr::new(arg)
+    }
+
     #[test]
     fn translate_number_to_name_and_back() {
-        assert_eq!(translate_operand("9").unwrap(), "KILL");
-        assert_eq!(translate_operand("KILL").unwrap(), "9");
-        assert_eq!(translate_operand("sigterm").unwrap(), "15");
+        assert_eq!(translate_operand(one("9")).unwrap(), "KILL");
+        assert_eq!(translate_operand(one("KILL")).unwrap(), "9");
+        assert_eq!(translate_operand(one("sigterm")).unwrap(), "15");
     }
 
     #[test]
     fn translate_subtracts_128_from_a_wait_status() {
         // `kill -l $?` after a process died of SIGKILL: `$?` is 137.
-        assert_eq!(translate_operand("137").unwrap(), "KILL");
-        assert_eq!(translate_operand("143").unwrap(), "TERM");
+        assert_eq!(translate_operand(one("137")).unwrap(), "KILL");
+        assert_eq!(translate_operand(one("143")).unwrap(), "TERM");
     }
 
     #[test]
     fn translate_rejects_what_it_cannot_name() {
-        assert!(translate_operand("200").is_err());
-        assert!(translate_operand("NOPE").is_err());
+        assert!(translate_operand(one("200")).is_err());
+        assert!(translate_operand(one("NOPE")).is_err());
     }
 
     #[test]

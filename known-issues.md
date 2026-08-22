@@ -55696,6 +55696,175 @@ and the shipped one is smaller because it was written against a summary of it.
 
 ---
 
+## B-env-PANICS-ON-THE-ENVIRONMENT-AND-HAS-NO-OPTIONS (lane B, 2026-08-22) — FIXED 2026-08-22
+
+**In short:** Two things. First, `env` — the program whose whole job is to
+carry environment variables around — *crashed* if any variable in the
+environment was not valid text. Our OS lets a variable, like a filename, hold
+any byte at all, so this is reachable, and what the user saw was a Rust crash
+message instead of their environment. Second, `env` had no options whatsoever.
+`env -i somecommand`, the standard way to run a program with a clean
+environment (what a build script or a security boundary reaches for), was read
+as "run the program called `-i`" and failed.
+
+Fixed: `userspace/coreutils/src/bin/env.rs`, rewritten. 11 → 29 tests.
+
+### The panic is one `unwrap` in std, and 54 utilities inherit it
+
+`std::env::args()` is not a safe reading of the command line. Its iterator, in
+`library/std/src/env.rs`:
+
+```rust
+fn next(&mut self) -> Option<String> {
+    self.inner.next().map(|s| s.into_string().unwrap())
+}
+```
+
+A literal `unwrap`, documented as such: *"The returned iterator will panic
+during iteration if any argument to the process is not valid Unicode."*
+`env::vars()` is the same. So the first line of the old `env`,
+
+```rust
+let args: Vec<String> = env::args().skip(1).collect();
+```
+
+panics *during `collect`* — before a single line of the program's own logic
+runs — if any argument holds a byte sequence that is not UTF-8. And its print
+loop, `for (key, value) in env::vars()`, panics if any *variable* does.
+
+This is CLAUDE.md's rule 7 ("never force UTF-8 on filesystem paths,
+environment variables, or pipe data") violated at the point where it costs the
+most. `env` now uses `args_os` and `vars_os`, and is `OsString`/`&[u8]` end to end,
+with the `NAME=VALUE` split done on bytes so a name or a value may be anything
+the OS allows.
+
+**This is not just `env`.** 52 of the 84 shipped `coreutils` bins open with
+`env::args()`, including every one that takes a filename: `cp`, `mv`, `rm`,
+`ls`, `ln`, `mkdir`, `rmdir`, `touch`, `find`, `grep`, `du`, `df`, `readlink`,
+`realpath`, `basename`, `dirname`, `stat`, `chmod`, `chown`, `tar`, `xargs`.
+On an OS whose paths are byte strings, `rm <name-with-a-non-UTF-8-byte>`
+panics before it does anything. Tracked separately as
+**`B-COREUTILS-PANIC-ON-A-NON-UTF-8-ARGUMENT`** below, because it is a sweep
+rather than one fix.
+
+### The options
+
+POSIX defines exactly two for `env`, and this had neither:
+
+| Typed | Old behaviour | Correct |
+|---|---|---|
+| `env -i prog` | runs a program named `-i`; `No such file or directory`, exit 127 | `prog` with an empty environment |
+| `env -u FOO prog` | runs a program named `-u` | `prog` without `FOO` |
+| `env -- -i` | runs a program named `--` | runs the program named `-i` |
+
+These failed loudly rather than quietly, which is the one mercy — but `env -i`
+not existing is a larger hole than any single wrong answer, since the whole
+reason to reach for it is to establish a known-clean environment, and a script
+that believes it did but did not is a security problem rather than a bug.
+
+Added: `-i`/`--ignore-environment` (and bare `-`, GNU's historical synonym),
+`-u`/`--unset`, `-0`/`--null`, `-C`/`--chdir`, `--`, short-option bundling
+(`-i0`, `-iuFOO`), and GNU's rule that option parsing stops at the first
+operand so `env FOO=1 prog -i` passes `-i` to `prog`.
+
+### Three more
+
+1. **Exit status 127 for everything.** GNU distinguishes 127 (no such command)
+   from 126 (found it, cannot run it — permissions, or not an executable
+   format), and scripts test for them. The old code returned 127 for both, so
+   a non-executable file was reported as a missing one. `env`'s *own* failures
+   are 125, a third number, which is why the distinction needs one.
+
+2. **A signalled child reported `1`.** `status.code().unwrap_or(1)` — so a
+   command killed by SIGKILL looked like one that returned failure. The shell
+   convention is `128 + signal`; `env` must not change the answer merely by
+   standing in front of the command. Now 137 for SIGKILL, 143 for SIGTERM.
+
+3. **The two paths built the environment differently.** The print path applied
+   assignments with `unsafe { env::set_var }` and mutated the process's own
+   environment to do it; the exec path used `Command::env`. Two implementations
+   of one question — what does `env -u FOO FOO=bar` leave `FOO` as? — is two
+   chances to answer it differently. There is now one `effective_env` that both
+   call, and the `unsafe` block is gone.
+
+Also: `println!` panics on a write error, so `env | head -1` produced a panic
+message. Checked writes, `BrokenPipe` the one deliberate success — the same
+family as `tee`, `tar`, `dd`, `stat` and `kill`.
+
+**Not implemented:** `-S`/`--split-string`, GNU's `#!`-line helper. It is a
+quoting grammar rather than a flag, nothing in the tree uses it (verified: no
+`env -S` anywhere in `userspace/`, `services/`, `init/`, `scripts/`), and the
+proper shape for it is recorded in `todo.txt`.
+
+**Eight for eight.**
+
+---
+
+## B-COREUTILS-PANIC-ON-A-NON-UTF-8-ARGUMENT (lane B, 2026-08-22) — OPEN
+
+**In short:** On this OS a filename may contain any byte except `/` and NUL —
+that is a deliberate design decision, written down in `design.txt`. But 52 of
+our 84 core utilities read their command line with a Rust function that
+*crashes* when an argument is not valid text. So `rm` on a file whose name
+contains such a byte does not delete it, does not report an error, and does
+not even reach its own code: it dies with a Rust crash message. The same is
+true of `cp`, `mv`, `ls`, `find`, `grep` and most of the rest.
+
+**Where it lives:** the first line of `main` in each of these files:
+
+```rust
+let args: Vec<String> = env::args().collect();
+```
+
+`std::env::args()`'s iterator is `self.inner.next().map(|s| s.into_string().unwrap())`
+— a literal `unwrap` in std, documented to panic. The fix in each case is
+`env::args_os()` plus carrying `OsString`/`&[u8]` through to wherever the
+argument is used, which for a filename means all the way to the syscall. The
+tree already has the pieces: `coreutils::quote::os_bytes`, `quotef_os`,
+`quote_os`, and `getopt`'s byte-based error constructors.
+
+**How to reproduce (needs QEMU — see below):** create a file whose name
+contains byte `0x80`, then `rm` it.
+
+**Scale, measured 2026-08-22 (`grep -l '^[^/]*env::args()' src/bin/*.rs`):**
+52 of 84 bins.
+
+```
+basename bc cal chmod chown cmp cp dd df diff dirname du echo ed fetch
+find free grep hostname id ln logger ls md5sum mkdir mkfifo more mv
+nice nohup patch ps readlink realpath renice rm rmdir sed sh sha256sum sleep
+stat strings tar tee time_cmd touch tty uname which xargs yes
+```
+
+`env` and `kill` were on this list and were fixed the same day, which is why
+they are absent above. `stat`, `chmod`, `chown` and `tar` were rewritten this
+week for other reasons and use `os_bytes` internally but still *read* argv as
+`String`, so they remain on it.
+
+**The correlation is the whole argument for how to fix this.** Of the 32 bins
+that are already clean, **22 use `coreutils::getopt`**; of the 52 dirty ones,
+**none do** — not one. `getopt` is byte-based, so a bin that goes through it
+never had a reason to reach for `String` in the first place. That is a
+structural cause, not a coincidence, and it means finishing the `getopt`
+migration fixes the class, whereas patching 52 `main`s independently fixes 52
+instances and leaves the next new bin free to reintroduce it.
+
+**Why it survived:** the same reason as everything else in this audit. The
+development host is Windows, where argv arrives as UTF-16 and a test cannot
+easily produce an invalid argument; and `cargo test` never runs the binaries
+at all, only their internal functions. A `main` is the least-tested line in
+every one of these files. This is now the **sixth** consecutive entry arguing
+for a filesystem-level harness that runs the shipped binaries inside QEMU.
+
+**Priority:** the file-touching ones first — `rm`, `mv`, `cp`, `ln`, `ls`,
+`find`, `touch`, `mkdir`, `rmdir`, `du`, `readlink`, `realpath` — because for
+those the panic happens on data the *user does not control and cannot see*: a
+single oddly-named file in a directory is enough to make `rm -r` abort
+part-way, and a backup or a cleanup script that dies half-done is worse than
+one that refuses to start.
+
+---
+
 ## TD-C-COMPOSITOR-TILES-UNDER-THE-TASKBAR (lane C, 2026-08-21) — MOSTLY RESOLVED 2026-08-21, step 4 blocked
 
 **In short:** When you tile a window — drag it to the left edge, or press

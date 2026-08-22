@@ -54680,3 +54680,26 @@ The fix, when taken: give `LineBuf` a column counter advanced by the same
 `\n`/`\r`, and have the `VERASE`/`VKILL` arms compute the rub-out width as the
 column delta rather than as a per-byte sum. Note this also fixes `VKILL`'s
 `ECHOKE` width, which sums the same per-byte widths and is wrong in the same way.
+
+--- env -S / --split-string not implemented (lane B, 2026-08-22) ---
+
+`userspace/coreutils/src/bin/env.rs` implements -i, -u, -0, -C and --, but not
+GNU's -S/--split-string. That option exists for one purpose: a `#!` line may
+carry only a single argument on some kernels, so
+`#!/usr/bin/env -S perl -w -T` packs several into one.
+
+Deferred because it is a whole quoting grammar rather than a flag -- it splits
+on whitespace but honours \ escapes, single and double quotes, a `\c` line
+continuation, and `${VAR}` substitution against the environment env is *in the
+middle of building*, which is the subtle part: the substitution must see -i,
+-u and the NAME=VALUE operands already applied.
+
+Nothing in the tree uses it yet: no `#!` line in userspace/, services/ or
+init/ passes -S (checked 2026-08-22). Trigger to implement: the first script
+that needs multiple interpreter arguments, or a port that ships one.
+
+The proper fix: a `split_string(&OsStr, &[(OsString, OsString)]) -> Result<Vec<OsString>, String>`
+next to `split_assignment`, byte-based like everything else in that file, fed
+the output of `effective_env` so the substitution sees the right environment;
+then splice its result in front of `cfg.command`. It is pure and therefore
+testable on the host, which is the shape the rest of that file already has.

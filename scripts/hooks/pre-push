@@ -1,8 +1,15 @@
 #!/bin/sh
-# Refuse to push anything that would publish the operator's private files.
+# Two gates at the push boundary. Either one aborts the push.
 #
-# Why this exists
-# ---------------
+#   1. Refuse to publish the operator's private files (`todo2.txt`).
+#   2. Refuse to publish a command name that nothing can produce an executable
+#      for -- see the comment above that gate, near the bottom.
+#
+# They are unrelated, and each has its own bypass variable so silencing one
+# never silences the other.
+#
+# Gate 1 — why this exists
+# ------------------------
 # The operator wants `todo2.txt` — their raw instruction queue for the agents —
 # to be committable to the *local* repository but never to reach GitHub
 # (2026-08-14). Git has no per-file push filter: a pushed branch carries every
@@ -37,14 +44,18 @@ set -u
 # git reports, so these are repo-root-relative with no leading slash.
 GUARDED="todo2.txt"
 
-if [ "${ALLOW_PRIVATE_PUSH:-0}" = "1" ]; then
-    echo "pre-push: ALLOW_PRIVATE_PUSH=1 set — private-file check skipped." >&2
-    exit 0
-fi
-
 z40=0000000000000000000000000000000000000000
 remote_name="${1:-origin}"
 violations=""
+
+# The bypass skips gate 1 only -- it must not `exit 0` out of the script, or
+# approving the private file would silently disable the unrelated gate below.
+# Emptying the guarded list is how it opts out: the scan below then has nothing
+# to look for, and the loop keeps its single shape for both cases.
+if [ "${ALLOW_PRIVATE_PUSH:-0}" = "1" ]; then
+    echo "pre-push: ALLOW_PRIVATE_PUSH=1 set — private-file check skipped." >&2
+    GUARDED=""
+fi
 
 # stdin gets one line per ref being pushed:
 #   <local ref> <local sha> <remote ref> <remote sha>
@@ -96,6 +107,75 @@ To fix, pick one:
     commits you have not pushed yet.
   * If the operator has explicitly approved publishing it:
         ALLOW_PRIVATE_PUSH=1 git push $remote_name ...
+
+EOF
+    exit 1
+fi
+
+# ---------------------------------------------------------------------------
+# Gate 2: refuse to publish a new *unreachable* command name.
+#
+# A multi-call program answers to several names by inspecting the name it was
+# started under -- `userspace/e2fsprogs` is `mke2fs` when invoked as `mke2fs`.
+# That only works if something creates the second name. We wrote the dispatch
+# about seventy times and never wrote the producer, so `e2fsck`, `mke2fs`,
+# `strip`, `xxd` and dozens more are finished implementations that no user can
+# run. See known-issues.md ->
+# B-DOZENS-OF-COMMANDS-EXIST-IN-SOURCE-AND-CAN-NEVER-BE-RUN.
+#
+# The known set is recorded in scripts/multicall-aliases-baseline.txt and this
+# fails only on a name that is *not* in it -- a ratchet, so the backlog can be
+# worked down without the check being red (and therefore deleted) from day one.
+#
+# Two deliberate limits keep this from taxing anyone it is not about:
+#   * It runs only when the push actually adds commits touching `userspace/`,
+#     which is lane B's tree. A lane A or C push never pays the ~3 seconds and
+#     can never be blocked by it.
+#   * A missing python is a skip, not a failure. A hook that breaks pushing on
+#     a machine without the interpreter is a hook that gets uninstalled.
+#
+# Bypass: ALLOW_UNREACHABLE_ALIAS=1 git push origin <branch>
+# ---------------------------------------------------------------------------
+
+if [ "${ALLOW_UNREACHABLE_ALIAS:-0}" = "1" ]; then
+    echo "pre-push: ALLOW_UNREACHABLE_ALIAS=1 set — alias check skipped." >&2
+    exit 0
+fi
+
+repo_root=$(git rev-parse --show-toplevel 2>/dev/null) || exit 0
+checker="$repo_root/scripts/multicall-aliases.py"
+[ -f "$checker" ] || exit 0
+
+py=$(command -v python3 || command -v python) || exit 0
+[ -n "$py" ] || exit 0
+
+# Only lane B's tree can introduce one of these, so only pay for it there.
+touches_userspace=$(git rev-list HEAD --not --remotes="$remote_name" \
+                        -- userspace/ 2>/dev/null | head -n 1)
+[ -n "$touches_userspace" ] || exit 0
+
+if ! "$py" "$checker" --check; then
+    cat >&2 <<EOF
+
+pre-push: REFUSING to push — a new command name exists that nothing can run.
+
+A program above answers to that name, but no crate, no coreutils bin, and no
+alias staged by scripts/create-ext4-rootfs.sh produces an executable for it, so
+the code behind the name is unreachable.
+
+The fix is to give the tool its own crate. Do NOT add it to
+scripts/multicall-aliases-baseline.txt to turn this green -- the baseline
+records the existing backlog and is only ever meant to shrink. Do NOT add a
+symlink either: one executable answering to several tool names must hold the
+union of all their capabilities, which is the least-privilege problem this OS
+exists to avoid (coreutils-canonical-answer.md).
+
+If this is genuinely a false positive -- a string that looks like a dispatch but
+is not -- add it to the IGNORE table in scripts/multicall-aliases.py with the
+reason, which is auditable, rather than to the baseline, which is not.
+
+To push anyway:
+    ALLOW_UNREACHABLE_ALIAS=1 git push $remote_name ...
 
 EOF
     exit 1

@@ -1271,7 +1271,9 @@ pub extern "C" fn pause() -> i32 {
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn sysconf(name: i32) -> i64 {
     match name {
-        _SC_PAGESIZE => 16384, // Our OS uses 16 KiB pages.
+        // Widening `usize` -> `i64` on a 64-bit target; `PAGE_SIZE` is 16 KiB.
+        #[allow(clippy::cast_possible_wrap)]
+        _SC_PAGESIZE => PAGE_SIZE as i64,
         _SC_NPROCESSORS_CONF | _SC_NPROCESSORS_ONLN => {
             // On bare metal, query the kernel for the online CPU count.
             // On host (cargo test), fall back to 1 — the host's syscall
@@ -1350,13 +1352,38 @@ pub extern "C" fn sysconf(name: i32) -> i64 {
     }
 }
 
+/// The system page size — **the one place this number is written down.**
+///
+/// SlateOS uses 16 KiB pages rather than the x86 default of 4 KiB; that is an
+/// architectural invariant of the whole project (`CLAUDE.md` → "16 KiB pages,
+/// not 4 KiB"), not a tunable.  It is nevertheless a number a great many things
+/// have to agree on, and it had drifted into five independent literal `16384`s
+/// inside this crate alone: `sysconf(_SC_PAGESIZE)`, `getpagesize()`,
+/// `getauxval(AT_PAGESZ)`, `malloc::REGION_ALIGN`, and `valloc`/`pvalloc`'s own
+/// copies.  Five copies of a constant are five chances for four of them to be
+/// right.
+///
+/// Everything that needs the page size now derives it from here.  It lives in
+/// `unistd` because that is where the two POSIX-blessed ways to *ask* for it
+/// live (`sysconf(_SC_PAGESIZE)` and `getpagesize()`), so a reader who wants to
+/// know what those return finds the answer beside them rather than in a
+/// header-mirror module.  [`crate::linux_stddef::KERNEL_PAGE_SIZE`] is an alias
+/// of this for code written against the Linux uapi spelling.
+pub const PAGE_SIZE: usize = 16 * 1024;
+
 /// Get the page size of the system.
 ///
-/// Our OS uses 16 KiB pages.  This is equivalent to
+/// Returns [`PAGE_SIZE`] (16 KiB).  This is equivalent to
 /// `sysconf(_SC_PAGESIZE)` but more convenient.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn getpagesize() -> i32 {
-    16384
+    // 16384 is four orders of magnitude below `i32::MAX`, and
+    // `every_spelling_of_the_page_size_agrees` pins the result against
+    // `PAGE_SIZE` itself, so the cast cannot silently narrow.
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    {
+        PAGE_SIZE as i32
+    }
 }
 
 /// Adjust the program break (legacy heap interface).
@@ -4080,6 +4107,59 @@ mod tests {
     #[test]
     fn test_getpagesize() {
         assert_eq!(getpagesize(), 16384);
+    }
+
+    /// Every name the page size goes by must return the same number.
+    ///
+    /// The page size is an architectural invariant of the project
+    /// (`CLAUDE.md` → "16 KiB pages, not 4 KiB"), but it is also a number a
+    /// great many APIs have to agree on, and it had drifted into eight
+    /// independent literal `16384`s inside this crate: `sysconf(_SC_PAGESIZE)`,
+    /// `sysconf(_SC_PAGE_SIZE)`, `getpagesize()`, `getauxval(AT_PAGESZ)`,
+    /// `linux_stddef::KERNEL_PAGE_SIZE`, `sys_param::{PAGE_SIZE, NBPG}`,
+    /// `sysv_shm::SHMLBA`, `mman`'s alignment check, and `malloc`'s
+    /// `REGION_ALIGN`.  Eight copies of a constant are eight chances for seven
+    /// of them to be right.
+    ///
+    /// They are all aliases of [`PAGE_SIZE`] now, so this test cannot fail by
+    /// *drift* — but it can fail if somebody re-introduces a literal, and it is
+    /// the test both `linux_stddef` and `crt` name in their doc comments as the
+    /// thing that keeps them honest.  Cheap insurance on a number whose
+    /// disagreement would corrupt memory rather than raise an error: `valloc`
+    /// promising a page-aligned pointer that `mman` then rejects as unaligned
+    /// is not a diagnosable bug, it is a caller that quietly gets EINVAL.
+    #[test]
+    fn every_spelling_of_the_page_size_agrees() {
+        // The value itself, asserted once, here.
+        assert_eq!(PAGE_SIZE, 16 * 1024);
+        assert!(PAGE_SIZE.is_power_of_two());
+
+        // The two POSIX ways to ask.
+        assert_eq!(sysconf(_SC_PAGESIZE), PAGE_SIZE as i64);
+        assert_eq!(sysconf(_SC_PAGE_SIZE), PAGE_SIZE as i64);
+        assert_eq!(i64::from(getpagesize()), PAGE_SIZE as i64);
+
+        // The auxiliary vector, used by glibc/musl startup.  `crt::getauxval`
+        // spells the tag as a bare `6`; `sys_auxv` names it, and re-exports the
+        // same function — so asserting through the named constant checks the
+        // literal in `crt` at the same time as the value it returns.
+        assert_eq!(crate::sys_auxv::AT_PAGESZ, 6);
+        assert_eq!(
+            crate::sys_auxv::getauxval(crate::sys_auxv::AT_PAGESZ),
+            PAGE_SIZE as u64
+        );
+
+        // The header-mirror spellings.
+        assert_eq!(crate::linux_stddef::KERNEL_PAGE_SIZE, PAGE_SIZE);
+        assert_eq!(crate::sys_param::PAGE_SIZE, PAGE_SIZE);
+        assert_eq!(crate::sys_param::NBPG, PAGE_SIZE);
+        assert_eq!(crate::sysv_shm::SHMLBA, PAGE_SIZE);
+
+        // `PAGE_SHIFT`/`PAGE_MASK` must describe *this* page size.  These are
+        // the two that can drift silently: nothing else forces the log and the
+        // mask to track a change to the size.
+        assert_eq!(1usize << crate::sys_param::PAGE_SHIFT, PAGE_SIZE);
+        assert_eq!(crate::sys_param::PAGE_MASK, PAGE_SIZE - 1);
     }
 
     #[test]

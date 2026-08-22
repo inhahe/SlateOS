@@ -46,8 +46,15 @@ macro_rules! offset_of {
 // Size constants
 // ---------------------------------------------------------------------------
 
-/// Kernel page size (our OS uses 16 KiB pages).
-pub const KERNEL_PAGE_SIZE: usize = 16384;
+/// Kernel page size, under the Linux uapi spelling.
+///
+/// An alias of [`crate::unistd::PAGE_SIZE`], which is where the number itself
+/// is written down; this exists so code transcribed from a Linux header can
+/// keep using the name that header uses without minting a second copy of the
+/// value.  It is deliberately *not* an independent definition — the two
+/// agreeing is asserted by `every_spelling_of_the_page_size_agrees` in
+/// `unistd`.
+pub const KERNEL_PAGE_SIZE: usize = crate::unistd::PAGE_SIZE;
 
 /// Bits per byte.
 pub const BITS_PER_BYTE: usize = 8;

@@ -2771,6 +2771,14 @@ mod against_the_real_compositor {
     use std::time::{Duration, Instant};
 
     use compositor::{Compositor, InputEvent as Hardware, Server};
+    // For `set_wait_timeout`. It was an inherent method on the socket until the
+    // frame clock (`design-decisions.md` §521) needed every transport to be able
+    // to park with a deadline, at which point it moved onto the transport trait
+    // — and this module, which does not otherwise name the trait, stopped
+    // compiling. Nothing noticed, because `cargo test -p editor` was not in the
+    // gate any single-crate task ran; see `known-issues.md`
+    // TD-C-A-TEST-BINARY-CAN-BE-BROKEN-WITHOUT-ANYONE-NOTICING.
+    use oswindow::ConnectionTransport as _;
     use oswindow::{EventLoop, WindowBuilder};
 
     use super::EditorState;

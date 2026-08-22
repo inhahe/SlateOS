@@ -268,6 +268,12 @@ pub fn init(hhdm_offset: u64) {
     // Enable bus mastering for DMA.
     pci::enable_bus_master(pci_dev.address);
 
+    // `handle_device_irq` calls this driver's `handle_irq` on every device IRQ,
+    // and that acknowledges the device's interrupt status register, which
+    // deasserts the line.  Recording the claim keeps `quiesce_unclaimed_intx`
+    // from silencing a function that is in fact serviced.
+    pci::claim_intx(pci_dev.address);
+
     // Power on the device (write 0x00 to Config1).
     // SAFETY: Standard RTL8139 register write.
     unsafe {

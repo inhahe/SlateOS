@@ -204,6 +204,12 @@ impl VirtioNetDevice {
         // Enable bus mastering for DMA.
         pci::enable_bus_master(pci_dev.address);
 
+        // `handle_device_irq` calls this driver's `handle_irq` on every device
+        // IRQ, and that reads the ISR status register, which deasserts the
+        // line.  Recording the claim keeps `quiesce_unclaimed_intx` from
+        // silencing a function that is in fact serviced.
+        pci::claim_intx(pci_dev.address);
+
         let transport = VirtioLegacyPci::new(io_base);
 
         // 1. Reset.

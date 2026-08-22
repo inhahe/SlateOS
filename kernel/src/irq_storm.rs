@@ -220,6 +220,16 @@ pub fn periodic_check() {
                     new_cooldown
                 );
 
+                // Name the device, not just the line.  A legacy PCI IRQ is
+                // shared — IRQ 10 in this tree's QEMU config carries eight
+                // functions — so "IRQ 10 is storming" on its own narrows the
+                // culprit to eight suspects and leaves the real question open.
+                // Status bit 3 answers it directly, and stays readable after
+                // the line has been masked because masking happens at the
+                // IOAPIC and the bit lives on the device.
+                #[allow(clippy::cast_possible_truncation)]
+                crate::pci::report_intx_asserting_on_irq(irq as u8);
+
                 // Log to kwarn for kshell visibility.
                 crate::kwarn::warn("IRQ storm detected and masked", "irq_storm.rs", line!());
             }

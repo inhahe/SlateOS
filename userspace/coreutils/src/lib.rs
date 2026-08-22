@@ -7,7 +7,7 @@
 //! to read and no faster to build. This library is for the exceptions: the
 //! things where two utilities disagreeing would itself be the bug.
 //!
-//! There are eleven so far. Three are about the interface these programs share
+//! There are twelve so far. Three are about the interface these programs share
 //! whether or not anyone designed it that way: a script that reads `grep`'s
 //! diagnostic and a script that reads `cp`'s are the same script, and a person
 //! who learned to type `ls --col` expects `cat --squeeze` to work too.
@@ -150,6 +150,23 @@
 //!   bookkeeping before it starts recording, and that constant decides which
 //!   of a three-link cycle's members `-m` prints.
 //!
+//! The twelfth is [`canon`]'s question asked without touching the disk, and it
+//! earns its place the same way [`human`] did — by being duplicated already,
+//! wrongly, in code nobody suspected:
+//!
+//! - [`pathname`] — cutting a name into a directory part and a last component,
+//!   which is gnulib's `dirname.h` family. Sixteen binaries here do this, and
+//!   nearly all of them called [`std::path::Path`]'s `parent` and `file_name`.
+//!   Those answer a *host* question: on the build host `\` is a separator and
+//!   `C:` is a drive, so a name containing a backslash — which our filesystem
+//!   permits, forbidding only `/` and NUL — was cut where the target would
+//!   never cut it. The rules are also not the ones a reasonable person would
+//!   write: trailing slashes are ignored rather than stripped, so `dirname a/`
+//!   is `.` and not `a`; a slash run collapses only where it separates, so
+//!   `dirname ////a////b////` keeps all four leading slashes; and `dirname /`
+//!   is `/`, which the previous implementation's own unit test asserted was
+//!   `.`.
+//!
 //! The regex engine, which is the other thing they must not disagree about,
 //! lives in `userspace/ere` rather than here — the shell needs it too, and it
 //! cannot depend on the coreutils. See `design-decisions.md` §322.
@@ -162,6 +179,7 @@ pub mod extfloat;
 pub mod filekind;
 pub mod getopt;
 pub mod human;
+pub mod pathname;
 pub mod quote;
 pub mod shell;
 pub mod tabstops;

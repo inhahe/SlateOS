@@ -90,6 +90,36 @@ _TESTS = re.compile(r"^#\[cfg\(test\)\]", re.MULTILINE)
 # deleted the tested implementation. It is the same mistake, in miniature, that
 # the whole duplication caused with `bc`.
 _TABLE = re.compile(r'\(\s*"([a-z][-a-z0-9]+)"\s*,\s*[A-Z][A-Za-z0-9]*(?:::|\s*\))')
+# A third shape, in the bins that dispatch on the stripped name directly rather
+# than through a table: `match typed { "regexp-extended" => out.ere = true, …`.
+# `sed` is the one that made this necessary -- it was reported as missing
+# `--expression`, `--in-place` and `--regexp-extended`, all three of which it
+# has had all along, as match arms.
+#
+# This is the loosest of the three patterns: *any* `match` on a lowercase string
+# has this shape, and an unrestricted scan credited `seq` with `--expr`,
+# `--index`, `--length`, `--match`, `--substr` and `--yes`, none of which is an
+# option of anything. So it is applied per function, and only inside a function
+# that also mentions `--` somewhere -- which is where long-option dispatch
+# lives, and is not where a `match` on a format specifier or a subcommand name
+# lives. That is a locality argument rather than a syntactic one, so it still
+# lets some noise through; `--verbose` prints the names precisely so that a
+# reader can see an implausible one for what it is.
+_ARM = re.compile(r'"([a-z][-a-z0-9]{2,})"\s*=>')
+# Function starts, at any indentation, including `pub fn` and `async fn`. Used
+# only to chop the file into regions for the rule above.
+_FN = re.compile(r"^[ \t]*(?:pub(?:\([^)]*\))?\s+)?(?:async\s+)?fn\s", re.MULTILINE)
+
+
+def _match_arm_options(text: str) -> set[str]:
+    starts = [m.start() for m in _FN.finditer(text)]
+    bounds = list(zip([0] + starts, starts + [len(text)]))
+    found: set[str] = set()
+    for lo, hi in bounds:
+        chunk = text[lo:hi]
+        if "--" in chunk:
+            found |= set(_ARM.findall(chunk))
+    return found
 
 
 def options(text: str) -> set[str]:
@@ -98,6 +128,7 @@ def options(text: str) -> set[str]:
     opts = set(_SHORT.findall(text)) | set(_LONG.findall(text))
     opts |= {"-" + c for c in _BYTE.findall(text)}
     opts |= {"--" + n for n in _TABLE.findall(text)}
+    opts |= {"--" + n for n in _match_arm_options(text)}
     return opts
 
 

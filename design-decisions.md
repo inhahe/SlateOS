@@ -35473,6 +35473,37 @@ also `chmod`, `who` also `w`.
    that covers what the loser could do. Deleting first and discovering the gap
    later is exactly the failure this entry exists to end.
 
+### Two traps found doing the first one
+
+`bc` was consolidated first, being the one that started this. Both of these bit
+within ten minutes of each other, and both will recur on the other forty.
+
+**A `git mv` is invisible to cargo.** Cargo decides freshness from mtimes, and a
+rename preserves the *source* file's mtime. `userspace/bc/src/main.rs` was last
+edited on the 16th, so moving it over `coreutils/src/bin/bc.rs` produced a file
+six days older than the `bc.exe` already sitting in `target/`, and
+`cargo build -p coreutils --bin bc` answered `Finished` in five seconds without
+compiling anything. The binary then still printed the *old* implementation's
+banner — the same confident wrong answer that `scripts/diff-subject.sh` exists
+to prevent, arriving by a route that building every run does not close. So each
+move ends with a `touch` on the destination, or copies the bytes instead of
+renaming: a rename alone is not a change as far as the build is concerned.
+
+**Do not restructure a crate while a harness run is in flight.** Removing
+`userspace/bc` during a `scripts/all-diff.sh` run turned every harness after the
+fourth into `failed to load manifest for workspace member … bc`, because
+`members = ["userspace/*"]` is re-globbed on every invocation. Twenty-two
+harnesses reported an error that had nothing to do with what they measure, and
+the run had to be repeated. `all-diff.sh`'s header already warns against editing
+*that file* mid-run; this is the same hazard one level out — the workspace's
+shape is as much a shared input as the script is.
+
+A related detail, when a crate directory goes: `git rm -r` removes the tracked
+files but leaves the now-empty directories, and an empty `userspace/bc/` still
+matches the members glob while no longer containing a `Cargo.toml` — which is
+precisely the state that produced the error above. The `rmdir` is part of the
+change, not tidying up after it.
+
 ### Alternatives considered
 
 *Consolidate the other way — keep the standalone crates, delete `coreutils`'s

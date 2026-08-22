@@ -237,8 +237,17 @@ impl LimineBackend {
         gem.virt_addr()
     }
 
+    /// Total addressable bytes of the firmware framebuffer.
+    ///
+    /// Unlike the virtio-gpu scanout this region really is linear — the
+    /// bootloader programmed the display engine to scan a contiguous aperture
+    /// — so a byte offset is all a blit needs. What it still needs is an
+    /// *end*, which is what this provides.
+    fn fb_len(&self) -> usize {
+        (self.pitch as usize).saturating_mul(self.height as usize)
+    }
+
     /// Page flip: copy GEM backing to the Limine framebuffer.
-    #[allow(clippy::arithmetic_side_effects)]
     pub fn page_flip(
         &mut self,
         _crtc_id: DrmObjectId,
@@ -255,48 +264,26 @@ impl LimineBackend {
         let frames = gem.ram_frames()?;
 
         let dst = self.fb_addr as *mut u8;
+        let dst_len = self.fb_len();
+        let dst_pitch = self.pitch as usize;
         let copy_h = fb.height.min(self.height) as usize;
-        let copy_w_bytes = (fb.width.min(self.width) as usize) * (fb.format.bpp() as usize);
+        let row_bytes =
+            (fb.width.min(self.width) as usize).saturating_mul(fb.format.bpp() as usize);
 
         for row in 0..copy_h {
-            // Source: GEM backing (may span multiple frames).
-            let src_byte_offset = row * (fb.pitch as usize);
-            let frame_idx = src_byte_offset / FRAME_SIZE;
-            let frame_offset = src_byte_offset % FRAME_SIZE;
-
-            if let Some(pf) = frames.get(frame_idx) {
-                let src_virt = pf.addr() + hhdm + (frame_offset as u64);
-                // SAFETY: dst is the Limine framebuffer base (mapped at boot).
-                // row * pitch stays within the framebuffer's linear region.
-                let dst_row = unsafe { dst.add(row * (self.pitch as usize)) };
-
-                // How many bytes are available in this frame.
-                let avail = FRAME_SIZE - frame_offset;
-                let to_copy = copy_w_bytes.min(avail);
-
-                // SAFETY: Both src and dst point to valid mapped memory.
-                // src is in the HHDM range (we just allocated the frame).
-                // dst is the Limine framebuffer (mapped at init).
-                unsafe {
-                    core::ptr::copy_nonoverlapping(src_virt as *const u8, dst_row, to_copy);
-                }
-
-                // If the row spans a frame boundary, copy the rest from
-                // the next frame.
-                if to_copy < copy_w_bytes {
-                    if let Some(pf2) = frames.get(frame_idx + 1) {
-                        let src2 = pf2.addr() + hhdm;
-                        let remaining = copy_w_bytes - to_copy;
-                        // SAFETY: src2 is HHDM-mapped; dst_row + to_copy is within framebuffer.
-                        unsafe {
-                            core::ptr::copy_nonoverlapping(
-                                src2 as *const u8,
-                                dst_row.add(to_copy),
-                                remaining,
-                            );
-                        }
-                    }
-                }
+            // SAFETY: `frames` are HHDM-mapped and owned by this GEM object;
+            // `dst` is the bootloader framebuffer mapped at init and is a
+            // different region, so the two cannot alias.
+            unsafe {
+                blit_run_flat(
+                    dst,
+                    dst_len,
+                    frames,
+                    hhdm,
+                    row.saturating_mul(fb.pitch as usize),
+                    row.saturating_mul(dst_pitch),
+                    row_bytes,
+                );
             }
         }
         Ok(())
@@ -353,6 +340,13 @@ impl LimineBackend {
     }
 
     /// Flush region: same as page_flip but for a sub-rectangle.
+    ///
+    /// The rectangle is clamped on every side against both the source
+    /// framebuffer and the display, so a caller that asks for more than either
+    /// holds gets the intersection rather than a copy that runs off the end of
+    /// one of them. The right-edge clamp in particular is not cosmetic: without
+    /// it an over-wide rectangle on the last row wrote past the end of the
+    /// firmware framebuffer.
     #[allow(clippy::arithmetic_side_effects)]
     pub fn flush_region(
         &mut self,
@@ -372,30 +366,34 @@ impl LimineBackend {
         // rather than misread, since its "frames" would be BAR addresses.
         let frames = gem.ram_frames()?;
 
-        let dst_base = self.fb_addr as *mut u8;
+        let dst = self.fb_addr as *mut u8;
+        let dst_len = self.fb_len();
+        let dst_pitch = self.pitch as usize;
         let bpp = fb.format.bpp() as usize;
-        let copy_w_bytes = (w as usize) * bpp;
 
-        let y_end = (y + h).min(fb.height).min(self.height);
+        let y_end = y.saturating_add(h).min(fb.height).min(self.height);
         let x_start = x.min(fb.width).min(self.width) as usize;
+        // Right edge: never past the narrower of source and display.
+        let max_w = (fb.width.min(self.width) as usize).saturating_sub(x_start);
+        let row_bytes = (w as usize).min(max_w).saturating_mul(bpp);
 
         for row in (y as usize)..(y_end as usize) {
-            let src_byte_offset = row * (fb.pitch as usize) + x_start * bpp;
-            let frame_idx = src_byte_offset / FRAME_SIZE;
-            let frame_offset = src_byte_offset % FRAME_SIZE;
-
-            if let Some(pf) = frames.get(frame_idx) {
-                let src_virt = pf.addr() + hhdm + (frame_offset as u64);
-                // SAFETY: dst_base points to the framebuffer; offset is within pitch × height.
-                let dst_row = unsafe { dst_base.add(row * (self.pitch as usize) + x_start * bpp) };
-
-                let avail = FRAME_SIZE - frame_offset;
-                let to_copy = copy_w_bytes.min(avail);
-
-                // SAFETY: Both addresses point to valid mapped memory.
-                unsafe {
-                    core::ptr::copy_nonoverlapping(src_virt as *const u8, dst_row, to_copy);
-                }
+            // SAFETY: `frames` are HHDM-mapped and owned by this GEM object;
+            // `dst` is the bootloader framebuffer mapped at init and is a
+            // different region, so the two cannot alias. `blit_run_flat` bounds
+            // both sides itself.
+            unsafe {
+                blit_run_flat(
+                    dst,
+                    dst_len,
+                    frames,
+                    hhdm,
+                    row.saturating_mul(fb.pitch as usize)
+                        .saturating_add(x_start.saturating_mul(bpp)),
+                    row.saturating_mul(dst_pitch)
+                        .saturating_add(x_start.saturating_mul(bpp)),
+                    row_bytes,
+                );
             }
         }
         Ok(())
@@ -756,5 +754,67 @@ unsafe fn blit_run(
             return;
         }
         done += written;
+    }
+}
+
+/// Copy `len` bytes out of a GEM object's frame list into a *flat* destination
+/// of `dst_len` bytes, at byte offsets `src_off` and `dst_off`.
+///
+/// The counterpart to [`blit_run`] for the firmware framebuffer, whose
+/// destination genuinely is one linear aperture. Only the source needs
+/// splitting — but it needs splitting *generally*, once per frame boundary the
+/// run crosses, not the single crossing the previous code allowed. A row wider
+/// than one 16 KiB frame (4096 px at 32bpp) crossed two or more, and every
+/// crossing past the first was silently dropped.
+///
+/// The destination is bounded here rather than trusted, so an over-wide
+/// rectangle is truncated at the end of the framebuffer instead of writing into
+/// whatever the firmware mapped next. The clamp discards, matching
+/// [`crate::virtio::gpu::ScanoutMem::write_at`]: a wrong picture is a reportable
+/// bug, memory corruption three subsystems away is not.
+///
+/// # Safety
+///
+/// `frames` must be HHDM-mapped through `hhdm`. `dst` must be valid for writes
+/// of `dst_len` bytes and must not alias `frames`.
+#[allow(clippy::arithmetic_side_effects)]
+unsafe fn blit_run_flat(
+    dst: *mut u8,
+    dst_len: usize,
+    frames: &[PhysFrame],
+    hhdm: u64,
+    src_off: usize,
+    dst_off: usize,
+    len: usize,
+) {
+    if dst_off >= dst_len {
+        return;
+    }
+    // Truncate the run at the end of the destination before copying any of it.
+    let len = len.min(dst_len - dst_off);
+    let mut done = 0usize;
+    while done < len {
+        let so = src_off.saturating_add(done);
+        let idx = so / FRAME_SIZE;
+        let within = so % FRAME_SIZE;
+        let Some(pf) = frames.get(idx) else {
+            // Source exhausted: the GEM object is smaller than the rectangle
+            // claims. Stop rather than read whatever follows the frame list.
+            return;
+        };
+        let chunk = (FRAME_SIZE - within).min(len - done);
+        // SAFETY: `within < FRAME_SIZE` and `chunk <= FRAME_SIZE - within`, so
+        // the read stays inside frame `idx`, which the caller guarantees is
+        // HHDM-mapped. `dst_off + done + chunk <= dst_len` because `len` was
+        // clamped above, so the write stays inside the destination. The caller
+        // guarantees the two regions do not alias.
+        unsafe {
+            core::ptr::copy_nonoverlapping(
+                (pf.addr() + hhdm + within as u64) as *const u8,
+                dst.add(dst_off + done),
+                chunk,
+            );
+        }
+        done += chunk;
     }
 }

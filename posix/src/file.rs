@@ -3026,7 +3026,14 @@ pub extern "C" fn lchown(path: *const u8, owner: UidT, group: GidT) -> i32 {
 /// Process-local file mode creation mask.
 ///
 /// Initialized to 0o022 (typical POSIX default: owner rw, group/other r).
-/// umask() reads and writes this value atomically (single-threaded).
+///
+/// One value for the whole process, which is what POSIX specifies: the umask
+/// is a property of the process, not of a thread, so there is nothing to make
+/// per-thread. `umask()` is a read-then-write and is therefore *not* atomic —
+/// two threads swapping masks concurrently can each observe the other's value.
+/// POSIX does not promise otherwise, and real programs set the umask once
+/// during startup; the obligation not to race it is the caller's. This crate's
+/// own tests are such a caller, and serialise on `UMASK_TEST_LOCK`.
 static mut UMASK_VALUE: ModeT = 0o022;
 
 /// Set file mode creation mask.
@@ -3036,7 +3043,10 @@ static mut UMASK_VALUE: ModeT = 0o022;
 /// for programs that query or chain umask values.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn umask(cmask: ModeT) -> ModeT {
-    // SAFETY: Single-threaded access to UMASK_VALUE.
+    // SAFETY: `UMASK_VALUE` is touched only through raw pointers, never through
+    // a reference, so no `&mut` to a `static mut` is formed. Serialising the
+    // read-then-write against other threads is the caller's obligation — see
+    // the note on `UMASK_VALUE`.
     let previous = unsafe { core::ptr::addr_of!(UMASK_VALUE).read() };
     // Only the low 9 bits (rwxrwxrwx) are meaningful for the mask.
     unsafe {
@@ -3051,7 +3061,9 @@ pub extern "C" fn umask(cmask: ModeT) -> ModeT {
 /// to apply the mask (e.g., open, mkdir) without side effects.
 #[allow(dead_code)]
 pub(crate) fn get_umask() -> ModeT {
-    // SAFETY: Single-threaded access.
+    // SAFETY: A plain read through a raw pointer; no reference is formed. See
+    // the note on `UMASK_VALUE` for why a concurrent `umask()` is the caller's
+    // problem and not this function's.
     unsafe { core::ptr::addr_of!(UMASK_VALUE).read() }
 }
 
@@ -5713,8 +5725,31 @@ mod tests {
         assert_eq!(lchown(b"/link\0".as_ptr(), 0, 0), 0);
     }
 
+    /// Serialises every test that sets the process umask.
+    ///
+    /// There is one `UMASK_VALUE` for the process and `libtest` runs these
+    /// three tests on three threads at once. Each one is a "reset to a known
+    /// value, then assert on what the next call gives back" sequence, and that
+    /// sequence is only meaningful if nothing else moves the mask in between —
+    /// so the *whole test body*, not each call, is the unit that has to be
+    /// atomic. Held from the first statement for that reason.
+    ///
+    /// This has not been observed to fail, unlike the `strtok` and `HTAB`
+    /// races in this crate; it is the same defect found by reading rather than
+    /// by a flake, and is fixed the same way. Poison is recovered so that one
+    /// genuine failure reports once instead of poisoning its two siblings.
+    static UMASK_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[must_use = "the guard serialises the process-wide umask; bind it to `_g`"]
+    fn lock_umask_for_test() -> std::sync::MutexGuard<'static, ()> {
+        UMASK_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
     #[test]
     fn test_umask_returns_previous() {
+        let _g = lock_umask_for_test();
         // Reset to known state.
         umask(0o022);
         // Setting a new mask returns the previous one.
@@ -5727,6 +5762,7 @@ mod tests {
 
     #[test]
     fn test_umask_masks_high_bits() {
+        let _g = lock_umask_for_test();
         // Reset to known state.
         umask(0o022);
         // Setting bits beyond the low 9 should be masked off.
@@ -5738,6 +5774,7 @@ mod tests {
 
     #[test]
     fn test_get_umask_no_side_effect() {
+        let _g = lock_umask_for_test();
         umask(0o137);
         let val = get_umask();
         assert_eq!(val, 0o137);

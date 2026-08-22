@@ -58101,7 +58101,7 @@ concurrent `polkit` runs would delete each other's fixture mid-test.
 **Workaround until fixed:** run the gate as
 `cargo test --workspace --no-fail-fast --target x86_64-pc-windows-gnu`.
 
-## B-TWO-POSIX-TDESTROY-TESTS-SHARE-ONE-COUNTER (found by lane C, 2026-08-22 — lane B's crate)
+## B-TWO-POSIX-TDESTROY-TESTS-SHARE-ONE-COUNTER (found by lane C, 2026-08-22 — lane B's crate) — FIXED 2026-08-22
 
 **In short:** Two tests in `posix/src/search.rs` reset and read the same
 process-wide counter, and `cargo test` runs them on different threads at the
@@ -58141,7 +58141,34 @@ turned up the `ftpd` half of
 runs failed on *different* subsets of the three, which is what identified all of
 them as load-sensitive races rather than regressions.
 
-## B-POSIX-HSEARCH-TESTS-RACE-ONE-GLOBAL-TABLE-AND-SEGFAULT (found by lane C, 2026-08-22 — lane B's crate)
+### Fixed 2026-08-22 (lane B) — thread-local counters, not per-test statics
+
+`DESTROY_COUNT` and `WALK_COUNT` are now `std::thread_local!` `Cell<i32>`s with
+`reset_*`/`*_count()` accessors, so each test observes only its own thread's
+count. `libtest` gives every test its own thread, so that is exactly per-test
+isolation — no lock, no serialisation, and the tests still run concurrently.
+It is the same shape, and the same argument, as `malloc::live_regions`, which
+had already solved this problem one file away.
+
+**Two deviations from lane C's prescription, both deliberate:**
+
+1. *"One static and one callback per test"* fixes the two `tdestroy` tests and
+   leaves `WALK_COUNT` alone — but `WALK_COUNT` has the identical defect and
+   **three** tests on it (`test_twalk_empty`, `test_twalk_single`,
+   `test_twalk_multiple`), each doing the same store-walk-load. Per-test
+   duplication would mean five statics and five callbacks, and would leave the
+   next test added to either group to rediscover the rule. Thread-locals fix
+   both counters at once and make the correct thing the default.
+2. *"`test_tdestroy_empty` needs no counter — a callback that panics on entry is
+   a stronger assertion"* is a good idea that is unsafe **here**: the callback
+   is an `extern "C"` function, and a panic unwinding out of an `extern "C"`
+   frame aborts the process rather than failing the test. That would convert a
+   test failure into a dead test binary — precisely the failure mode being
+   fixed in the sibling entry below. With a thread-local counter, reading `0`
+   is already a real assertion about this test alone, so the counter is doing
+   the job the panic was meant to do.
+
+## B-POSIX-HSEARCH-TESTS-RACE-ONE-GLOBAL-TABLE-AND-SEGFAULT (found by lane C, 2026-08-22 — lane B's crate) — FIXED 2026-08-22
 
 **In short:** Seven tests in `posix/src/search.rs` all drive one process-wide
 hash table at the same time, on different threads. One test frees the table
@@ -58197,6 +58224,29 @@ cannot give each test its own, so the only thing left to fix is the concurrency.
 and exposure as `DESTROY_COUNT` — `test_twalk_multiple` (`:900`) resets and
 reads it, and any sibling `twalk` test that does the same will race it. It has
 not been seen to fail yet.
+
+### Fixed 2026-08-22 (lane B) — as prescribed, plus the SAFETY comments
+
+`HTAB_TEST_LOCK` is a `std::sync::Mutex<()>` in `search.rs`'s test module, taken
+as the **first statement** of all seven tests so it is held from before
+`hcreate`/`hdestroy` to past the end of the body. Poison is recovered with
+`unwrap_or_else(PoisonError::into_inner)`, so one failing test reports one
+failure instead of six poisoned-lock failures burying the cause. `WALK_COUNT`
+was done in the same pass, by the different route the entry above explains.
+
+**The production `// SAFETY: single-threaded access` comments were the real
+root, and all three are rewritten.** They asserted a *fact* that nothing
+established. What is actually true is an *obligation*: POSIX defines the
+`hsearch` family around one process-global table and does not make it
+thread-safe (`hsearch_r` is the reentrant form), so serialising calls is the
+caller's job. The tests were simply a caller that did not do it. The new
+comments name the obligation, say who discharges it, and record that the old
+wording was false — because a SAFETY comment stating an unchecked fact is worse
+than none: it tells the next reader the question has been considered.
+
+**Verified** by 10 consecutive `cargo test -p posix --lib` runs, against a
+baseline of 3 pre-fix runs that gave one segfault, one assertion failure and one
+pass. A single green run would not have been evidence for a load-sensitive race.
 
 **Filed to the owning lane** as item 4 of
 `requests/c-b-three-flaky-tests-fail-the-workspace-gate.md`. Lane C has not
@@ -59144,3 +59194,106 @@ reverted while B-Q7 is open (see `design-decisions.md` §359, amendment
 2026-08-22). If B-Q7 is answered **A** — standalone crates canonical — then fix
 (1) stops being an improvement and becomes a prerequisite, because at that point
 *no* utility in the tree is covered by the test at all.
+
+## B-POSIX-FOUR-MORE-PROCESS-GLOBALS-ARE-RACED-BY-THEIR-OWN-TESTS (lane B, 2026-08-22) — FIXED 2026-08-22
+
+**In short:** A C library has a handful of functions that remember something
+between calls — `strtok` remembers where it stopped, `dlerror` remembers the
+last error, `umask` remembers the mask. That memory is *one slot for the whole
+program*, on purpose: that is how POSIX defines these functions. But `cargo
+test` runs tests on many threads at once, so several tests were writing to the
+same slot simultaneously and reading back each other's values. One of them
+started failing; the rest had not yet, but had the same defect.
+
+**Why this entry exists separately from the two above it:** those two were found
+because they *failed*. These were found by then going and reading every
+process-global in the crate, which is what should have happened the first time.
+
+### How it surfaced
+
+`cargo test -p coreutils -p posix` — the two crates together, so the machine is
+busier than `posix` alone — failed once on:
+
+```
+---- string::tests::test_strtok_basic stdout ----
+thread 'string::tests::test_strtok_basic' panicked at posix\src\string.rs:4114:9:
+assertion failed: !tok2.is_null()
+```
+
+Ten consecutive runs of `-p posix --lib` on its own had passed immediately
+before. That is the load-sensitivity signature: the same code, a busier
+machine, a different answer.
+
+### What was actually wrong, and why `strtok` was the serious one
+
+| Global | Where | Tests racing it | Worst case |
+|---|---|---|---|
+| `SAVED` (strtok) | `posix/src/string.rs:573` | 3 | **cross-thread memory corruption** |
+| `DL_ERROR` | `posix/src/dlfcn.rs:35` | 15 | wrong/absent error message |
+| `UMASK_VALUE` | `posix/src/file.rs:3030` | 3 | wrong previous-mask assertion |
+
+The failed assertion is the least of what `strtok` can do. Each test's buffer is
+a local on *its own thread's stack*. `SAVED` points into whichever buffer was
+tokenised last, so under interleaving it points into **another live thread's
+stack frame** — and `strtok` writes a NUL through that pointer to terminate the
+token it returns. The observed symptom was a null return; the available symptom
+was one thread silently overwriting a byte in another thread's frame.
+
+`DL_ERROR` and `UMASK_VALUE` cannot corrupt anything — `DL_ERROR` only ever
+holds pointers to `'static` strings, and `UMASK_VALUE` is a plain integer. They
+are ordinary flaky-assertion races, and both would have failed the workspace
+gate eventually.
+
+`dlerror`'s test count is high (15, not 6) because `dlerror` is a *destructive*
+read: it returns the message and clears the slot. So a test that merely calls
+`dlopen` is a writer that can refill a slot another test just asserted was
+empty. Being a writer is enough to break a reader, so every test that calls any
+of `dlopen`/`dlsym`/`dlclose`/`dlerror` had to take the lock, not just the ones
+with `dlerror` in the assertion.
+
+### Fixed 2026-08-22 (lane B)
+
+A `Mutex` per global in the test module — `STRTOK_TEST_LOCK`,
+`DL_ERROR_TEST_LOCK`, `UMASK_TEST_LOCK` — taken as the **first statement** of
+each affected test, because in all three cases the indivisible unit is the whole
+"set a known state, provoke, read it back" body and not any single call. Poison
+is recovered with `unwrap_or_else(PoisonError::into_inner)` so one genuine
+failure reports once instead of poisoning up to fourteen siblings and burying
+the cause. This is the idiom `getopt.rs`, `crypt.rs`, `libintl.rs` and
+`error.rs` already use in this crate; these three modules were simply the ones
+that had not adopted it.
+
+Thread-locals — the fix used for `search.rs`'s counters — are **not** applicable
+here. That fix works when state is only *incidentally* shared; these three are
+shared *by specification*. `strtok` with a per-thread save pointer would be
+`strtok_r`, which already exists next to it.
+
+**The production `// SAFETY: Single-threaded access` comments were the root, and
+all four are rewritten.** Each asserted a fact — "this is single-threaded" —
+that nothing in the crate established and that the crate's own test suite
+falsified. What is true is an *obligation*: POSIX specifies these interfaces
+around process-global state and does not make them thread-safe, so serialising
+is the caller's job. The new comments say that, name who discharges it, and
+record that the previous wording was false. A SAFETY comment stating an
+unchecked fact is worse than no comment, because it tells the next reader the
+question has already been considered.
+
+### What was checked and left alone
+
+`ctype.rs`'s `CACHED` locale-table pointers (`:336`, `:394`, `:408`) are a
+memoisation: every writer stores the *same* address of the *same* static table,
+so a race stores the value that was already there. Left as is.
+
+`crt.rs`, `fdtable.rs`, `aio.rs`, `dirent.rs`, `pthread.rs` and `perthread.rs`
+reach their globals through the `perprocess!`/`perthread` macros, which is a
+separate mechanism with its own story and was not part of this pass. **Neither
+is covered by any automated check** — the next instance of this defect will
+again be found by a flake or by someone reading. A lint that flags a
+`static mut` reachable from more than one `#[test]` without an intervening lock
+or thread-local would close that, and does not exist.
+
+### Verification
+
+`cargo test -p posix --lib` — 20515 passed, 0 failed. Then the pairing that
+exposed it: `cargo test -p coreutils -p posix`, which is the load condition
+under which the original failure appeared.

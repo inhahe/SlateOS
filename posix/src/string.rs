@@ -572,8 +572,22 @@ pub unsafe extern "C" fn strtok(s: *mut u8, delim: *const u8) -> *mut u8 {
     // Static saved position (POSIX strtok is not reentrant).
     static mut SAVED: *mut u8 = core::ptr::null_mut();
 
-    // SAFETY: Single-threaded access; POSIX strtok is explicitly not
-    // thread-safe. Using addr_of_mut to comply with Rust 2024 rules.
+    // SAFETY: `SAVED` is reached only through `addr_of_mut!`, never through a
+    // reference, so no `&mut` to a `static mut` is ever formed (the Rust 2024
+    // rule). Sound *serialisation* of the accesses is a caller obligation, not
+    // a fact about this function: POSIX specifies `strtok` around one
+    // process-global save pointer and does not make it thread-safe —
+    // `strtok_r`, which takes the save pointer as an argument, is the
+    // reentrant form. A caller that needs concurrency must use that instead.
+    //
+    // This comment previously read "Single-threaded access", which asserted a
+    // fact nothing established: this crate's own test module called `strtok`
+    // from three tests on three `libtest` threads at once. That is now
+    // serialised by `STRTOK_TEST_LOCK`. The danger there was not the flaky
+    // assertion it produced but what it implies — a stale `SAVED` points into
+    // whichever caller's buffer ran last, and the delimiter-overwrite below
+    // writes a NUL through it, so an unserialised second caller corrupts a
+    // *different* thread's live buffer.
     let start = if s.is_null() {
         let p = unsafe { core::ptr::addr_of_mut!(SAVED).read() };
         if p.is_null() {
@@ -4104,8 +4118,40 @@ mod tests {
 
     // -- strtok (non-reentrant) --
 
+    /// Serialises every test that calls `strtok`.
+    ///
+    /// `strtok`'s save pointer is one `static mut` for the whole process, and
+    /// `libtest` runs these three tests on three threads at once. Two hazards,
+    /// in ascending order of seriousness:
+    ///
+    /// * The *observed* one: a sibling's first call overwrites `SAVED` between
+    ///   this test's first and second call, so the continuation call tokenises
+    ///   the sibling's buffer, or finds the pointer already exhausted and
+    ///   returns null. `test_strtok_basic` failed on `!tok2.is_null()` under a
+    ///   loaded `cargo test -p coreutils -p posix`.
+    /// * The one that matters: each test's buffer is a local on its own
+    ///   thread's stack, so `SAVED` routinely points into *another live
+    ///   thread's* stack frame — and `strtok` writes a NUL through it to
+    ///   terminate the token. An unlucky interleaving is memory corruption in
+    ///   a frame the writing thread does not own, not a failed assertion.
+    ///
+    /// Taken as the first statement of each test, so it covers the whole
+    /// first-call/continuation-call sequence, which is the unit that must be
+    /// atomic. Poison is recovered rather than propagated: one failing test
+    /// should report one failure, not poison the lock and bury the cause under
+    /// two more.
+    static STRTOK_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[must_use = "the guard serialises strtok's global save pointer; bind it to `_g`"]
+    fn lock_strtok_for_test() -> std::sync::MutexGuard<'static, ()> {
+        STRTOK_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
     #[test]
     fn test_strtok_basic() {
+        let _g = lock_strtok_for_test();
         let mut buf = *b"hello,world\0";
         let tok1 = unsafe { strtok(buf.as_mut_ptr(), b",\0".as_ptr()) };
         assert!(!tok1.is_null());
@@ -4119,6 +4165,7 @@ mod tests {
 
     #[test]
     fn test_strtok_no_delimiters() {
+        let _g = lock_strtok_for_test();
         let mut buf = *b"single\0";
         let tok = unsafe { strtok(buf.as_mut_ptr(), b",\0".as_ptr()) };
         assert!(!tok.is_null());
@@ -4129,6 +4176,7 @@ mod tests {
 
     #[test]
     fn test_strtok_all_delimiters() {
+        let _g = lock_strtok_for_test();
         let mut buf = *b",,,\0";
         let tok = unsafe { strtok(buf.as_mut_ptr(), b",\0".as_ptr()) };
         assert!(tok.is_null());

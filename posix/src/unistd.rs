@@ -1058,6 +1058,36 @@ process_global! {
     fn domain_len_ptr() -> usize = 6; // "(none)".len()
 }
 
+/// Copy the current domain name into `out`, returning the number of bytes
+/// written (excluding any null terminator).  Truncates if `out` is smaller
+/// than the stored name; never null-terminates — the caller owns
+/// null-termination semantics.
+///
+/// The counterpart of `copy_hostname`, and used the same way: `utsname::uname`
+/// falls back to it for the `domainname` field when the kernel's
+/// `/proc/sys/kernel/domainname` cannot be read, so `uname()` and
+/// `getdomainname()` agree rather than reporting two different names.
+pub(crate) fn copy_domainname(out: &mut [u8]) -> usize {
+    // SAFETY: Single-address-space, no concurrent writes during the read.
+    // Same access pattern as `getdomainname()` below.
+    let (src_ptr, src_len) = unsafe { (domain_buf_ptr().cast_const(), *domain_len_ptr()) };
+    let n = core::cmp::min(out.len(), src_len);
+    let mut i = 0;
+    while i < n {
+        // SAFETY: i < src_len <= HOST_NAME_MAX, the domain buffer is at least
+        // HOST_NAME_MAX + 1 bytes, and out[i] is in-bounds because
+        // i < n <= out.len().
+        unsafe {
+            let b = *src_ptr.cast::<u8>().add(i);
+            if let Some(slot) = out.get_mut(i) {
+                *slot = b;
+            }
+        }
+        i = i.wrapping_add(1);
+    }
+    n
+}
+
 /// Get the hostname.
 ///
 /// Copies the stored hostname into `name` (null-terminated when it fits).

@@ -10482,6 +10482,12 @@ pub fn sys_fs_handle_path(args: &SyscallArgs) -> SyscallResult {
 /// Each entry is serialized as:
 ///   `u8 entry_type | u32 name_len | name bytes | u64 size`
 ///
+/// `entry_type` is `0=file, 1=dir, 2=volume_label, 3=symlink, 4=char_device`
+/// — the same encoding `SYS_FS_READDIR` and `SYS_FS_STAT` use, so one decoder
+/// serves all three. The record *layout* differs between them (this one is
+/// variable-length, `SYS_FS_READDIR`'s is fixed-size); only the type byte is
+/// shared, and it is shared deliberately.
+///
 /// Returns: packed `(total_entries << 32) | entries_written`.
 #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
 pub fn sys_fs_readdir_at(args: &SyscallArgs) -> SyscallResult {
@@ -10534,13 +10540,29 @@ pub fn sys_fs_readdir_at(args: &SyscallArgs) -> SyscallResult {
                     break; // Buffer full — stop writing (not an error).
                 }
 
-                // Entry type: 0=file, 1=dir, 2=symlink, 3=volume_label.
+                // Entry type: 0=file, 1=dir, 2=volume_label, 3=symlink,
+                // 4=char_device — the same byte `SYS_FS_READDIR` and
+                // `SYS_FS_STAT` use. This encoder used to swap 2 and 3 while
+                // agreeing on 0, 1 and 4, which is the worst shape an ABI byte
+                // can have: a decoder written against either syscall looks
+                // correct on every ordinary file and silently mistakes a
+                // symlink for a volume label. Aligned before any client existed
+                // to depend on the old numbering — nothing outside the kernel
+                // decodes this record today, and `strace` only names the call.
+                //
+                // A volume label still consumes a record here, unlike in
+                // `SYS_FS_READDIR`, which skips it. This call is paginated by
+                // an offset into the directory, so dropping an entry would make
+                // `entries_written` disagree with how far the offset actually
+                // advanced, and the caller's next page would step over a real
+                // neighbour. Filtering belongs where the offset is computed,
+                // not where the record is packed.
                 if let Some(b) = out_slice.get_mut(pos) {
                     *b = match entry.entry_type {
                         crate::fs::vfs::EntryType::File => 0,
                         crate::fs::vfs::EntryType::Directory => 1,
-                        crate::fs::vfs::EntryType::Symlink => 2,
-                        crate::fs::vfs::EntryType::VolumeLabel => 3,
+                        crate::fs::vfs::EntryType::VolumeLabel => 2,
+                        crate::fs::vfs::EntryType::Symlink => 3,
                         crate::fs::vfs::EntryType::CharDevice => 4,
                     };
                 }

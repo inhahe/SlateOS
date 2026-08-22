@@ -54300,3 +54300,74 @@ coverage rather than a regression test — no marker made it fail. Full table in
    be in step with the display still cannot be; the wire can already carry a
    `Tick`, so a compositor frame callback remains additive later.
 
+
+---
+
+## B-A-EVDEV-SYN-DROPPED-ARRIVES-ONE-RECORD-LATE (lane A, 2026-08-22) — FIXED 2026-08-22
+
+**In short:** when a program reading the keyboard or mouse falls so far behind
+that the kernel has to throw away events it never delivered, the kernel is
+supposed to tell it "your picture of the device is stale — ask the device what
+state it is in and start again from here." That message was being sent one event
+too late: the program received one real event *first*, and only then the
+warning. So it would apply that event to the very state it was about to be told
+to discard — a key that stays stuck down, or a mouse button that latches the
+wrong way, for as long as the program runs.
+
+**Where:** `kernel/src/evdev.rs`, `EvdevClient::next_event`. The function
+answered an owed `SYN_DROPPED` before calling `resync()`, so a lap discovered on
+that same call set the flag *after* it had already been tested.
+
+**Fix:** `resync()` moved to the top of the retry loop, ahead of both the
+pending-marker test and the caught-up test. The caught-up test has to stay below
+the marker test, because a grab released via `discard_pending()` leaves the
+cursor level with the head with a marker still owed, and that read must return
+the marker rather than "nothing available". Commit `de5e9743b`.
+
+**How it was found, and why it took a boot to find it:** `evdev::self_test`
+existed in `46e69a1c1` but was only wired into `main.rs` as a fatal check in
+`f37616f4c`, so the first boot that actually ran it failed hard —
+`[evdev] SELF-TEST FAILED: ...specifically SYN_DROPPED`. The test was itself
+weak enough to have nearly missed it: it asserted the first record's type and
+its code in two separate `check!`s, and `EV_SYN` is 0, so the trailing
+`SYN_REPORT` of the resumed group satisfied the type assertion on its own. Both
+are now asserted as a single four-byte pair, and the second record is pinned to
+the oldest event the ring still holds (derived from `RING_CAP` and the
+three-events-per-press shape, not hardcoded).
+
+**Lesson worth keeping:** a self-test that is written but not *called* is not a
+test. Grep for `self_test` functions with no caller before trusting a "tested"
+claim in a commit message.
+
+---
+
+## B-A-READDIR-AT-TYPE-BYTE-DISAGREED-WITH-EVERY-OTHER-ENCODER (lane A, 2026-08-22) — FIXED 2026-08-22
+
+**In short:** the kernel tells a program what kind of thing each directory entry
+is with a single number — 0 for a file, 1 for a folder, and so on. Four places
+in the kernel write that number, and one of them had two of the values swapped:
+it called a shortcut (symlink) 3 where everything else called it 2. Anything
+reading a directory through that one call would have seen shortcuts reported as
+disk labels and vice versa.
+
+**Where:** `kernel/src/syscall/handlers.rs`, `sys_fs_readdir_at` (~line 10537).
+It encoded `Symlink => 2, VolumeLabel => 3`, while `sys_fs_readdir` (~8333),
+`encode_fs_stat_result` (~8509) and the second stat encoder (~9659) all use
+`VolumeLabel => 2, Symlink => 3`. All four already agreed on `File => 0`,
+`Directory => 1` and (as of `40404447a`) `CharDevice => 4`, which is the most
+dangerous shape an ABI byte can take: a decoder written against either syscall
+looks correct on every ordinary file and is wrong only on the two rare kinds.
+
+**Fix:** aligned `sys_fs_readdir_at` to the other three, and documented the
+encoding on the syscall's doc comment so the next encoder has something to copy
+from. Safe to change silently because nothing outside the kernel decodes this
+record yet — `userspace/strace` only names the syscall, and no libc or app path
+reaches it.
+
+**Not fixed, and deliberately:** `sys_fs_readdir_at` still emits a FAT volume
+label as a record, where `sys_fs_readdir` skips it. It is paginated by an offset
+into the directory, so dropping an entry would make `entries_written` disagree
+with how far the offset actually advanced and the caller's next page would step
+over a real neighbour. Filtering belongs where the offset is computed, in
+`Vfs::readdir_at_resolved`, not where the record is packed. Low priority: FAT
+volume labels appear only in the root of a FAT volume.

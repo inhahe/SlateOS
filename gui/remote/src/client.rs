@@ -47,7 +47,7 @@ use crate::control::{
 use crate::frame::{Frame, try_decode_any};
 use crate::input::InputEvent;
 use crate::submit::encode_submit_into;
-use crate::window_list::WindowInfo;
+use crate::window_list::{WindowInfo, WindowList};
 
 /// What the loop should do after handing an event to an application.
 ///
@@ -208,7 +208,7 @@ pub struct Connection<T: Transport> {
     /// `None` until the first frame arrives, which is distinct from `Some([])`:
     /// "not told yet" and "told, and the desktop is empty" are different, and a
     /// shell that conflated them would blank its taskbar during startup.
-    window_list: Option<Vec<WindowInfo>>,
+    window_list: Option<WindowList>,
     /// Increments on every window-list frame received.
     ///
     /// Lets a shell repaint on change without diffing the list against its own
@@ -343,8 +343,8 @@ impl<T: Transport> Connection<T> {
             // is a frame the compositor decided to send, and dropping it as
             // "unrequested" would make an unsubscribe race look like a
             // protocol error rather than the ordinary crossing it is.
-            Frame::WindowList(windows) => {
-                self.window_list = Some(windows);
+            Frame::WindowList(list) => {
+                self.window_list = Some(list);
                 self.window_list_revision = self.window_list_revision.saturating_add(1);
             }
             // Everything else travels the other way. A compositor that sends
@@ -364,7 +364,34 @@ impl<T: Transport> Connection<T> {
     /// [`window_list`](crate::window_list) for what a shell does with it.
     #[must_use]
     pub fn window_list(&self) -> Option<&[WindowInfo]> {
-        self.window_list.as_deref()
+        self.window_list.as_ref().map(|l| l.windows.as_slice())
+    }
+
+    /// The last `WLST` frame whole — the windows *and* the desktop showing.
+    ///
+    /// For the caller that needs both, which is any shell drawing a taskbar:
+    /// which windows the user can see is the comparison between a window's own
+    /// [`WindowInfo::workspace`] and this frame's
+    /// [`WindowList::current_workspace`], and taking them from two calls invites
+    /// taking them from two different frames.
+    #[must_use]
+    pub const fn desktop(&self) -> Option<&WindowList> {
+        self.window_list.as_ref()
+    }
+
+    /// The virtual desktop the compositor says is on screen, as of the last
+    /// `WLST` frame.
+    ///
+    /// **Read this; do not remember it.** The compositor switches desktops on
+    /// its own account -- activating a window that is filed elsewhere is a
+    /// switch -- so a shell that tracked the number itself would list one
+    /// desktop's windows while the screen showed another's.
+    ///
+    /// `None` before the first frame, for the same reason
+    /// [`window_list`](Self::window_list) is: "not told yet" is not "desktop 0".
+    #[must_use]
+    pub fn current_workspace(&self) -> Option<u32> {
+        self.window_list.as_ref().map(|l| l.current_workspace)
     }
 
     /// How many window lists have arrived. A shell repaints when this moves.
@@ -406,6 +433,49 @@ impl<T: Transport> Connection<T> {
         action: ShellControlAction,
     ) -> Result<(), ClientError<T::Error>> {
         self.confirm(RequestBody::ShellControl { window, action })
+    }
+
+    /// Show a different virtual desktop.
+    ///
+    /// A shell's, for the same reason [`shell_control`](Self::shell_control) is:
+    /// it acts on every window on the display, most of which the caller does
+    /// not own. The compositor picks which window gets the keyboard afterwards,
+    /// so nothing here names one — and the result comes back in the next window
+    /// list, not from this call.
+    ///
+    /// *How many* desktops there are is not the compositor's business and it
+    /// enforces no bound: a desktop with nothing on it is a legal thing to show.
+    /// The count is a user preference, and the shell that owns the preference
+    /// is the thing that should refuse to walk past it.
+    ///
+    /// # Errors
+    ///
+    /// As [`shell_control`](Self::shell_control).
+    pub fn switch_workspace(&mut self, workspace: u32) -> Result<(), ClientError<T::Error>> {
+        self.confirm(RequestBody::SwitchWorkspace { workspace })
+    }
+
+    /// File a window on a different virtual desktop.
+    ///
+    /// If it is the one showing the window appears, and if not it disappears —
+    /// the compositor decides that, from the number it now holds for the window.
+    ///
+    /// A window outside `Layer::Normal` — a taskbar, a menu, a lock screen — is
+    /// on every desktop, and this stores the number for it without obeying it
+    /// rather than refusing. Refusing would make the caller special-case a
+    /// distinction it cannot always see: layers change, and a shell iterating
+    /// "everything the user has open" would have to filter for a rule it has no
+    /// stake in.
+    ///
+    /// # Errors
+    ///
+    /// As [`shell_control`](Self::shell_control).
+    pub fn set_window_workspace(
+        &mut self,
+        window: u64,
+        workspace: u32,
+    ) -> Result<(), ClientError<T::Error>> {
+        self.confirm(RequestBody::SetWindowWorkspace { window, workspace })
     }
 
     /// Take the oldest queued input event, if any.

@@ -27,7 +27,7 @@ use crate::control::{
 use crate::input::{INPUT_MAGIC, InputEvent, decode_input_frame};
 use crate::scene::{SCENE_MAGIC, SceneFrame, decode_scene_frame};
 use crate::submit::{SUBMIT_MAGIC, Submission, decode_submit};
-use crate::window_list::{WINDOW_LIST_MAGIC, WindowInfo, decode_window_list};
+use crate::window_list::{WINDOW_LIST_MAGIC, WindowList, decode_window_list};
 use crate::{DecodeError, MAGIC, decode_frame};
 
 /// One decoded frame of any kind this crate defines.
@@ -48,7 +48,7 @@ pub enum Frame {
     /// Window-control responses (`CRSP`).
     Responses(Vec<Response>),
     /// The desktop's window set, for a subscribed shell (`WLST`).
-    WindowList(Vec<WindowInfo>),
+    WindowList(WindowList),
 }
 
 impl Frame {
@@ -109,8 +109,8 @@ pub fn decode_any(input: &[u8]) -> Result<(Frame, usize), DecodeError> {
             Ok((Frame::Responses(resps), used))
         }
         WINDOW_LIST_MAGIC => {
-            let (windows, used) = decode_window_list(input)?;
-            Ok((Frame::WindowList(windows), used))
+            let (list, used) = decode_window_list(input)?;
+            Ok((Frame::WindowList(list), used))
         }
         _ => Err(DecodeError::BadMagic),
     }
@@ -186,7 +186,10 @@ mod tests {
                 "control response",
             ),
             (
-                crate::window_list::encode_window_list(&[crate::WindowInfo::new(1, 2, "Editor")]),
+                crate::window_list::encode_window_list(&crate::window_list::WindowList::new(
+                    0,
+                    vec![crate::WindowInfo::new(1, 2, "Editor")],
+                )),
                 "window list",
             ),
         ];
@@ -239,7 +242,10 @@ mod tests {
             crate::submit::encode_submit(1, &RenderTree::new()),
             encode_input_frame(&[crate::InputEvent::new(1, Event::FocusIn)]),
             control::encode_responses(&[control::Response::new(1, ResponseBody::Ok)]),
-            crate::window_list::encode_window_list(&[crate::WindowInfo::new(1, 2, "Editor")]),
+            crate::window_list::encode_window_list(&crate::window_list::WindowList::new(
+                0,
+                vec![crate::WindowInfo::new(1, 2, "Editor")],
+            )),
         ] {
             for n in 0..bytes.len() {
                 assert!(

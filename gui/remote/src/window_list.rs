@@ -46,16 +46,32 @@
 //! magic    : [u8;4] = b"WLST"
 //! version  : u8     = WINDOW_LIST_VERSION
 //! flags    : u8     = 0 (reserved)
+//! showing  : u32                       the virtual desktop now on screen
 //! n_win    : u32                       window count, bottom→top stacking order
 //!   per window:
 //!     id      : u64                    compositor's window id
 //!     pid     : u64                    owning process
 //!     layer   : u8                     Layer::as_byte
 //!     state   : u8                     bitfield, see STATE_* below
+//!     workspce: u32                    which virtual desktop it is filed on
 //!     title   : u32 length + UTF-8 bytes
 //! ```
 //!
 //! Scalars are little-endian, matching every other codec in this crate.
+//!
+//! ## Why the desktop number is in the header *as well as* per window
+//!
+//! The per-window number alone would leave the shell guessing which desktop is
+//! showing, and it cannot guess: the compositor switches desktops on its own
+//! account. Clicking a taskbar button for a window on desktop 3 sends
+//! [`Activate`](crate::control::ShellControlAction::Activate), and the
+//! compositor's answer to "make that window reachable" is to switch to desktop
+//! 3 — a decision the shell did not make and would not otherwise hear about. A
+//! shell that kept its own idea of the current desktop would then list desktop
+//! 2's windows while the screen showed desktop 3's, which is the same class of
+//! bug — a taskbar disagreeing with the glass — that virtual desktops were
+//! fixed to remove. One field in the header settles it: the compositor says
+//! which desktop is showing, and the shell reads rather than remembers.
 
 use crate::control::Layer;
 use crate::{DecodeError, Reader, capacity_hint, write_string, write_u32, write_u64};
@@ -65,10 +81,16 @@ pub const WINDOW_LIST_MAGIC: [u8; 4] = *b"WLST";
 
 /// Window-list protocol version. Bump on any incompatible layout change; never
 /// reuse a number.
-pub const WINDOW_LIST_VERSION: u8 = 1;
+///
+/// - `1` — the original list.
+/// - `2` — added the showing-desktop header field and the per-window desktop
+///   number. Not backward compatible on purpose: a v1 shell reading a v2 frame
+///   would silently place every window on desktop 0, which looks exactly like a
+///   working taskbar right up to the first switch.
+pub const WINDOW_LIST_VERSION: u8 = 2;
 
-/// Window-list header: magic + version + flags + window count.
-const WINDOW_LIST_HEADER_LEN: usize = 4 + 1 + 1 + 4;
+/// Window-list header: magic + version + flags + showing desktop + window count.
+const WINDOW_LIST_HEADER_LEN: usize = 4 + 1 + 1 + 4 + 4;
 
 /// Upper bound on entries in one list, so a hostile or corrupt sender cannot
 /// make the decoder pre-allocate unboundedly.
@@ -120,11 +142,24 @@ pub struct WindowInfo {
     pub maximized: bool,
     /// Whether it currently holds keyboard focus. At most one entry has this.
     pub focused: bool,
+    /// Which virtual desktop the window is filed on.
+    ///
+    /// Compare against [`WindowList::current_workspace`] to know whether the
+    /// user can see it — but only for [`Layer::Normal`] windows. Everything
+    /// outside that band is on *every* desktop, because the wallpaper and the
+    /// shell's own chrome belong to the screen rather than to a desktop. A
+    /// taskbar that filtered itself out by this field would disappear on the
+    /// first switch, taking the only means of switching back with it.
+    ///
+    /// The compositor records the number for non-`Normal` windows too, and
+    /// ignores it. Refusing to store it would push the stickiness rule out to
+    /// every caller that moves "all of my windows" somewhere.
+    pub workspace: u32,
 }
 
 impl WindowInfo {
-    /// An ordinary visible, unfocused window — the base a builder-ish caller
-    /// (mostly a test) can adjust.
+    /// An ordinary visible, unfocused window on the first desktop — the base a
+    /// builder-ish caller (mostly a test) can adjust.
     #[must_use]
     pub fn new(id: u64, pid: u64, title: impl Into<String>) -> Self {
         Self {
@@ -136,6 +171,7 @@ impl WindowInfo {
             minimized: false,
             maximized: false,
             focused: false,
+            workspace: 0,
         }
     }
 
@@ -157,37 +193,74 @@ impl WindowInfo {
     }
 }
 
+/// The desktop as a shell sees it: every window, plus which virtual desktop is
+/// on screen.
+///
+/// The second half is not decoration. Without it a shell has to *remember*
+/// which desktop it asked for, and it will be wrong the moment the compositor
+/// switches on its own account — which it does whenever a shell activates a
+/// window that is filed elsewhere. See the module docs.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct WindowList {
+    /// The virtual desktop the compositor is showing right now.
+    pub current_workspace: u32,
+    /// Every window, bottom-to-top in stacking order — including the ones on
+    /// other desktops, which keep their ids and their place in the stack.
+    ///
+    /// Listing them is deliberate: a switcher that offered only this desktop's
+    /// windows would make the others unreachable, which was the original bug.
+    pub windows: Vec<WindowInfo>,
+}
+
+impl WindowList {
+    /// A list of `windows` seen from `current_workspace`.
+    #[must_use]
+    pub const fn new(current_workspace: u32, windows: Vec<WindowInfo>) -> Self {
+        Self {
+            current_workspace,
+            windows,
+        }
+    }
+}
+
 // ============================================================================
 // Encoding
 // ============================================================================
 
 /// Encode a window list as one self-contained `WLST` frame.
 ///
-/// `windows` is in bottom-to-top stacking order, which is the order
-/// [`scene`](crate::scene) uses and the order the compositor keeps internally.
-/// A shell that wants most-recent-first reverses it; one that wants a stable
-/// button order sorts by [`WindowInfo::id`], which is monotonic in creation.
+/// [`WindowList::windows`] is in bottom-to-top stacking order, which is the
+/// order [`scene`](crate::scene) uses and the order the compositor keeps
+/// internally. A shell that wants most-recent-first reverses it; one that wants
+/// a stable button order sorts by [`WindowInfo::id`], which is monotonic in
+/// creation.
 #[must_use]
-pub fn encode_window_list(windows: &[WindowInfo]) -> Vec<u8> {
-    let mut out = Vec::with_capacity(capacity_hint(WINDOW_LIST_HEADER_LEN, windows.len(), 40));
-    encode_window_list_into(&mut out, windows);
+pub fn encode_window_list(list: &WindowList) -> Vec<u8> {
+    let mut out = Vec::with_capacity(capacity_hint(
+        WINDOW_LIST_HEADER_LEN,
+        list.windows.len(),
+        44,
+    ));
+    encode_window_list_into(&mut out, list);
     out
 }
 
 /// Encode into a caller-provided buffer, appending to whatever it holds. Lets
 /// the compositor reuse one allocation across ticks.
-pub fn encode_window_list_into(out: &mut Vec<u8>, windows: &[WindowInfo]) {
+pub fn encode_window_list_into(out: &mut Vec<u8>, list: &WindowList) {
     out.extend_from_slice(&WINDOW_LIST_MAGIC);
     out.push(WINDOW_LIST_VERSION);
     out.push(0); // flags
+    write_u32(out, list.current_workspace);
     // Saturating rather than panicking, as everywhere else in this crate: the
     // decoder rejects anything past MAX_WINDOWS_PER_LIST regardless.
-    write_u32(out, u32::try_from(windows.len()).unwrap_or(u32::MAX));
-    for win in windows {
+    write_u32(out, u32::try_from(list.windows.len()).unwrap_or(u32::MAX));
+    for win in &list.windows {
         write_u64(out, win.id);
         write_u64(out, win.pid);
         out.push(win.layer.as_byte());
         out.push(win.state_byte());
+        write_u32(out, win.workspace);
         write_string(out, &win.title);
     }
 }
@@ -207,7 +280,7 @@ pub fn encode_window_list_into(out: &mut Vec<u8>, windows: &[WindowInfo]) {
 /// this build does not know, [`DecodeError::TooManyListedWindows`] for a count
 /// that would allocate absurdly, and [`DecodeError::UnexpectedEof`] for a short
 /// buffer.
-pub fn decode_window_list(input: &[u8]) -> Result<(Vec<WindowInfo>, usize), DecodeError> {
+pub fn decode_window_list(input: &[u8]) -> Result<(WindowList, usize), DecodeError> {
     decode_internal(input)
 }
 
@@ -217,9 +290,7 @@ pub fn decode_window_list(input: &[u8]) -> Result<(Vec<WindowInfo>, usize), Deco
 /// # Errors
 ///
 /// As [`decode_window_list`], except that a short buffer is `Ok(None)`.
-pub fn try_decode_window_list(
-    input: &[u8],
-) -> Result<Option<(Vec<WindowInfo>, usize)>, DecodeError> {
+pub fn try_decode_window_list(input: &[u8]) -> Result<Option<(WindowList, usize)>, DecodeError> {
     match decode_internal(input) {
         Ok(v) => Ok(Some(v)),
         Err(DecodeError::UnexpectedEof) => Ok(None),
@@ -227,7 +298,7 @@ pub fn try_decode_window_list(
     }
 }
 
-fn decode_internal(input: &[u8]) -> Result<(Vec<WindowInfo>, usize), DecodeError> {
+fn decode_internal(input: &[u8]) -> Result<(WindowList, usize), DecodeError> {
     let mut r = Reader::new(input);
     // The whole header is required before any of it is read, so a buffer
     // holding part of one reports `UnexpectedEof` — "incomplete, read more" —
@@ -242,6 +313,7 @@ fn decode_internal(input: &[u8]) -> Result<(Vec<WindowInfo>, usize), DecodeError
     if flags != 0 {
         return Err(DecodeError::ReservedFlags(flags));
     }
+    let current_workspace = r.read_u32()?;
     let n = r.read_u32()?;
     if n > MAX_WINDOWS_PER_LIST {
         return Err(DecodeError::TooManyListedWindows(n));
@@ -252,7 +324,13 @@ fn decode_internal(input: &[u8]) -> Result<(Vec<WindowInfo>, usize), DecodeError
     for _ in 0..n {
         windows.push(decode_one(&mut r)?);
     }
-    Ok((windows, r.position()))
+    Ok((
+        WindowList {
+            current_workspace,
+            windows,
+        },
+        r.position(),
+    ))
 }
 
 fn decode_one(r: &mut Reader<'_>) -> Result<WindowInfo, DecodeError> {
@@ -264,6 +342,7 @@ fn decode_one(r: &mut Reader<'_>) -> Result<WindowInfo, DecodeError> {
     if state & !STATE_KNOWN != 0 {
         return Err(DecodeError::ReservedFlags(state));
     }
+    let workspace = r.read_u32()?;
     let title = r.read_string()?;
     Ok(WindowInfo {
         id,
@@ -274,6 +353,7 @@ fn decode_one(r: &mut Reader<'_>) -> Result<WindowInfo, DecodeError> {
         minimized: state & STATE_MINIMIZED != 0,
         maximized: state & STATE_MAXIMIZED != 0,
         focused: state & STATE_FOCUSED != 0,
+        workspace,
     })
 }
 
@@ -289,49 +369,59 @@ mod tests {
 
     use super::*;
 
-    fn sample() -> Vec<WindowInfo> {
-        vec![
-            WindowInfo {
-                id: 1,
-                pid: 100,
-                layer: Layer::Background,
-                title: "Wallpaper".to_string(),
-                visible: true,
-                minimized: false,
-                maximized: false,
-                focused: false,
-            },
-            WindowInfo {
-                id: 2,
-                pid: 200,
-                layer: Layer::Normal,
-                title: "Editor — notes.txt".to_string(),
-                visible: true,
-                minimized: false,
-                maximized: true,
-                focused: true,
-            },
-            WindowInfo {
-                id: 3,
-                pid: 200,
-                layer: Layer::Normal,
-                title: String::new(),
-                visible: false,
-                minimized: true,
-                maximized: false,
-                focused: false,
-            },
-            WindowInfo {
-                id: 4,
-                pid: 300,
-                layer: Layer::Overlay,
-                title: "Taskbar".to_string(),
-                visible: true,
-                minimized: false,
-                maximized: false,
-                focused: false,
-            },
-        ]
+    fn sample() -> WindowList {
+        WindowList::new(
+            2,
+            vec![
+                WindowInfo {
+                    id: 1,
+                    pid: 100,
+                    layer: Layer::Background,
+                    title: "Wallpaper".to_string(),
+                    visible: true,
+                    minimized: false,
+                    maximized: false,
+                    focused: false,
+                    // Furniture: recorded, ignored, and deliberately not equal
+                    // to the showing desktop, so a codec that confused the two
+                    // numbers cannot pass.
+                    workspace: 0,
+                },
+                WindowInfo {
+                    id: 2,
+                    pid: 200,
+                    layer: Layer::Normal,
+                    title: "Editor — notes.txt".to_string(),
+                    visible: true,
+                    minimized: false,
+                    maximized: true,
+                    focused: true,
+                    workspace: 2,
+                },
+                WindowInfo {
+                    id: 3,
+                    pid: 200,
+                    layer: Layer::Normal,
+                    title: String::new(),
+                    visible: false,
+                    minimized: true,
+                    maximized: false,
+                    focused: false,
+                    workspace: 7,
+                },
+                WindowInfo {
+                    id: 4,
+                    pid: 300,
+                    layer: Layer::Overlay,
+                    title: "Taskbar".to_string(),
+                    visible: true,
+                    minimized: false,
+                    maximized: false,
+                    focused: false,
+                    workspace: 1,
+                },
+            ],
+        )
     }
 
     #[test]
@@ -351,18 +441,44 @@ mod tests {
         // must be told about when the last window closes. Encoding it as
         // "nothing to send" would leave the taskbar showing the last window
         // forever.
-        let bytes = encode_window_list(&[]);
+        let bytes = encode_window_list(&WindowList::default());
         let (back, used) = decode_window_list(&bytes).expect("decodes");
-        assert!(back.is_empty());
+        assert!(back.windows.is_empty());
         assert_eq!(used, bytes.len());
     }
 
     #[test]
-    fn a_non_ascii_title_is_not_mangled() {
-        let windows = vec![WindowInfo::new(9, 1, "日本語 — файл — 🗔")];
-        let bytes = encode_window_list(&windows);
+    fn an_empty_desktop_still_says_which_desktop_it_is() {
+        // The switch that empties the screen is exactly when a shell most needs
+        // to be told where it landed: with no windows to read a number off, the
+        // header field is the only thing that can say the user is now looking
+        // at desktop 3 rather than at a broken desktop 0.
+        let bytes = encode_window_list(&WindowList::new(3, Vec::new()));
         let (back, _) = decode_window_list(&bytes).expect("decodes");
-        assert_eq!(back[0].title, "日本語 — файл — 🗔");
+        assert!(back.windows.is_empty());
+        assert_eq!(back.current_workspace, 3);
+    }
+
+    #[test]
+    fn a_non_ascii_title_is_not_mangled() {
+        let list = WindowList::new(0, vec![WindowInfo::new(9, 1, "日本語 — файл — 🗔")]);
+        let bytes = encode_window_list(&list);
+        let (back, _) = decode_window_list(&bytes).expect("decodes");
+        assert_eq!(back.windows[0].title, "日本語 — файл — 🗔");
+    }
+
+    #[test]
+    fn a_window_keeps_its_own_desktop_number_when_it_is_not_the_one_showing() {
+        // The whole point of carrying both numbers: "which desktop is showing"
+        // and "which desktop is this window on" are different questions, and a
+        // codec that answered one with the other would look right on the desktop
+        // the user happens to be on and wrong everywhere else.
+        let mut away = WindowInfo::new(1, 1, "Elsewhere");
+        away.workspace = 9;
+        let bytes = encode_window_list(&WindowList::new(4, vec![away]));
+        let (back, _) = decode_window_list(&bytes).expect("decodes");
+        assert_eq!(back.current_workspace, 4);
+        assert_eq!(back.windows[0].workspace, 9);
     }
 
     #[test]
@@ -399,9 +515,9 @@ mod tests {
     fn a_state_bit_with_no_meaning_is_refused_rather_than_ignored() {
         // The point of STATE_KNOWN. A newer compositor that grows a fifth state
         // must not have an older shell silently drop it.
-        let windows = vec![WindowInfo::new(1, 1, "W")];
-        let mut bytes = encode_window_list(&windows);
-        // header (10) + id (8) + pid (8) + layer (1) = state byte at 27.
+        let list = WindowList::new(0, vec![WindowInfo::new(1, 1, "W")]);
+        let mut bytes = encode_window_list(&list);
+        // header + id (8) + pid (8) + layer (1) = the state byte.
         let state_at = WINDOW_LIST_HEADER_LEN + 8 + 8 + 1;
         assert_eq!(bytes[state_at], STATE_VISIBLE, "located the state byte");
         bytes[state_at] |= 1 << 6;
@@ -413,8 +529,8 @@ mod tests {
 
     #[test]
     fn a_layer_this_build_does_not_know_is_refused() {
-        let windows = vec![WindowInfo::new(1, 1, "W")];
-        let mut bytes = encode_window_list(&windows);
+        let list = WindowList::new(0, vec![WindowInfo::new(1, 1, "W")]);
+        let mut bytes = encode_window_list(&list);
         let layer_at = WINDOW_LIST_HEADER_LEN + 8 + 8;
         bytes[layer_at] = 0x7F;
         assert_eq!(decode_window_list(&bytes), Err(DecodeError::BadTag(0x7F)));
@@ -422,12 +538,13 @@ mod tests {
 
     #[test]
     fn an_absurd_count_is_refused_before_anything_is_allocated() {
-        // Ten bytes claiming four billion windows: the allocation a hostile
+        // A bare header claiming four billion windows: the allocation a hostile
         // sender would aim at if the bound were not checked first.
         let mut bytes = Vec::new();
         bytes.extend_from_slice(&WINDOW_LIST_MAGIC);
         bytes.push(WINDOW_LIST_VERSION);
         bytes.push(0);
+        bytes.extend_from_slice(&0u32.to_le_bytes()); // showing desktop
         bytes.extend_from_slice(&u32::MAX.to_le_bytes());
         assert_eq!(
             decode_window_list(&bytes),

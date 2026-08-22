@@ -116,7 +116,7 @@ use guiremote::reserve::ReservedEdges;
 use guiremote::scene::{SceneFrame, SceneSession, WindowSnapshot};
 // Same reason: `window_list` returns these, and a shell reading one should not
 // have to reach past the compositor to name what it got.
-pub use guiremote::window_list::WindowInfo;
+pub use guiremote::window_list::{WindowInfo, WindowList};
 // Same reason again: `Window::snapped` can hold one, and `snap_window_to_zone`
 // takes one. The type belongs to the protocol crate because both ends have to
 // agree on which rectangle a slot names — see `guiremote::zones`.
@@ -2807,6 +2807,20 @@ pub enum CompositorRequest {
         edge: PanelEdge,
         size: u32,
     },
+    /// Show a different virtual desktop. Answered with
+    /// [`CompositorResponse::Ok`].
+    ///
+    /// Names no window -- which is why it could not be a
+    /// [`ShellControlAction`], every one of which is a verb aimed at one. It is
+    /// privileged for the plainest possible reason: it changes what every
+    /// client on the machine is showing.
+    SwitchWorkspace { workspace: u32 },
+    /// File a window on a virtual desktop. Answered with
+    /// [`CompositorResponse::Ok`].
+    ///
+    /// Like [`ShellControl`](Self::ShellControl) it names somebody else's
+    /// window and is therefore not resolved against the sender's own.
+    SetWindowWorkspace { window_id: WindowId, workspace: u32 },
 }
 
 /// Responses from the compositor to clients.
@@ -7330,6 +7344,19 @@ impl Compositor {
                     message: e.to_string(),
                 },
             },
+            CompositorRequest::SwitchWorkspace { workspace } => {
+                self.switch_workspace(workspace);
+                CompositorResponse::Ok
+            }
+            CompositorRequest::SetWindowWorkspace {
+                window_id,
+                workspace,
+            } => match self.set_window_workspace(window_id, workspace) {
+                Ok(()) => CompositorResponse::Ok,
+                Err(e) => CompositorResponse::Error {
+                    message: e.to_string(),
+                },
+            },
             CompositorRequest::StreamStart => {
                 let stream_id = self.start_stream();
                 CompositorResponse::StreamStarted { stream_id }
@@ -7923,25 +7950,34 @@ impl Compositor {
     ///
     /// Ordered by `z_stack` rather than by creation, so consecutive entries are
     /// neighbours on screen and the last one is the topmost window.
+    ///
+    /// Windows on other virtual desktops are in it, carrying their own desktop
+    /// number, and the list says which desktop is showing. Leaving them out
+    /// would be the original bug back in a new place: a switcher that could only
+    /// offer this desktop's windows makes the others unreachable.
     #[must_use]
-    pub fn window_list(&self) -> Vec<WindowInfo> {
-        self.z_stack
-            .iter()
-            .filter_map(|&id| self.window_ref(id))
-            .map(|w| WindowInfo {
-                id: w.id.raw(),
-                pid: w.client_pid,
-                layer: w.layer,
-                title: w.title.clone(),
-                visible: w.visible,
-                minimized: w.minimized,
-                maximized: w.maximized,
-                // From the window's own flag rather than from
-                // `self.focused_window`, so the list cannot disagree with the
-                // window it describes if the two ever drift apart.
-                focused: w.focused,
-            })
-            .collect()
+    pub fn window_list(&self) -> WindowList {
+        WindowList::new(
+            self.current_workspace,
+            self.z_stack
+                .iter()
+                .filter_map(|&id| self.window_ref(id))
+                .map(|w| WindowInfo {
+                    id: w.id.raw(),
+                    pid: w.client_pid,
+                    layer: w.layer,
+                    title: w.title.clone(),
+                    visible: w.visible,
+                    minimized: w.minimized,
+                    maximized: w.maximized,
+                    // From the window's own flag rather than from
+                    // `self.focused_window`, so the list cannot disagree with
+                    // the window it describes if the two ever drift apart.
+                    focused: w.focused,
+                    workspace: w.workspace,
+                })
+                .collect(),
+        )
     }
 
     /// Update z_order fields on all windows based on their position in z_stack.
@@ -16384,7 +16420,7 @@ mod tests {
         let id = comp.create_window("Away".to_string(), 100, 80, 1);
         comp.switch_workspace(1);
         assert!(
-            comp.window_list().iter().any(|w| w.id == id.raw()),
+            comp.window_list().windows.iter().any(|w| w.id == id.raw()),
             "a window on another desktop disappeared from the window list"
         );
     }

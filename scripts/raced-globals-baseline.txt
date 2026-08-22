@@ -36,15 +36,7 @@ posix/src/stdio.rs:STATIC_BUF
 posix/src/stdio.rs:STDERR_FILE
 posix/src/stdio.rs:STDIN_FILE
 posix/src/stdio.rs:STDOUT_FILE
-posix/src/stdlib.rs:L64A_BUF
-posix/src/stdlib.rs:OLD_SEED
-posix/src/stdlib.rs:RAND48_STATE
-posix/src/stdlib.rs:RAND_STATE
-posix/src/syslog.rs:SYSLOG_IDENT
-posix/src/syslog.rs:SYSLOG_MASK
-posix/src/syslog.rs:SYSLOG_OPTIONS
 posix/src/time.rs:timezone
-posix/src/unistd.rs:HOSTID
 posix/src/unistd.rs:KLOG_CLEAR_FLOOR
 posix/src/unistd.rs:KLOG_READ_CURSOR
 posix/src/wchar.rs:INTERNAL_MBSTATE

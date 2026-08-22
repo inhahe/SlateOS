@@ -1806,19 +1806,34 @@ pub extern "C" fn sethostname(name: *const u8, len: usize) -> i32 {
 // gethostid / sethostid — host identifier
 // ---------------------------------------------------------------------------
 
-/// Process-local host identifier.
-///
-/// Initialized to 0 (= "unset" sentinel).  `sethostid()` writes here.
-/// When unset, `gethostid()` derives a value from the current hostname
-/// via FNV-1a so callers get a stable-per-hostname 32-bit identifier
-/// instead of always seeing 0 (which would defeat the function's
-/// purpose of distinguishing hosts).
-///
-/// Real Linux persists the value in `/etc/hostid`; we have no on-disk
-/// store yet so it lives in memory only, lost across reboots.  Once
-/// the OS gains a proper config-files directory, this should migrate
-/// to a file under `/etc/hostid` to match Linux semantics.
-static HOSTID: core::sync::atomic::AtomicI64 = core::sync::atomic::AtomicI64::new(0);
+process_global! {
+    /// Process-local host identifier.
+    ///
+    /// Initialized to 0 (= "unset" sentinel).  `sethostid()` writes here.
+    /// When unset, `gethostid()` derives a value from the current hostname
+    /// via FNV-1a so callers get a stable-per-hostname 32-bit identifier
+    /// instead of always seeing 0 (which would defeat the function's
+    /// purpose of distinguishing hosts).
+    ///
+    /// Real Linux persists the value in `/etc/hostid`; we have no on-disk
+    /// store yet so it lives in memory only, lost across reboots.  Once
+    /// the OS gains a proper config-files directory, this should migrate
+    /// to a file under `/etc/hostid` to match Linux semantics.
+    ///
+    /// This is a `process_global!` rather than a plain `static AtomicI64`
+    /// for the same reason the hostname buffer above is: the hostid is
+    /// *derived from* the hostname when unset, so the two are one unit of
+    /// state and must have the same lifetime and the same sharing rules.
+    /// A `static` here would have been shared across `libtest` threads
+    /// while the hostname it derives from was per-thread — so a test that
+    /// set the hostname and read the hostid back could observe a value
+    /// derived from a *different* thread's hostname, or a `sethostid`
+    /// another test had just performed.  Under `process_global!` both
+    /// halves are one process-wide `static mut` on the target and one
+    /// per-thread cell on the host, which is the arrangement
+    /// design-decisions.md §110 established for exactly this case.
+    fn hostid_ptr() -> i64 = 0;
+}
 
 /// FNV-1a 32-bit hash — used to derive a stable hostid from the hostname
 /// when no explicit hostid was set via `sethostid()`.
@@ -1850,15 +1865,18 @@ fn fnv1a32(bytes: &[u8]) -> u32 {
 /// `tar`'s archive UUID seed).
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn gethostid() -> i64 {
-    use core::sync::atomic::Ordering;
-
-    let stored = HOSTID.load(Ordering::Relaxed);
+    // SAFETY: `hostid_ptr()` returns a pointer to this process's (host
+    // build: this thread's) `i64`, which is live for the whole program and
+    // properly aligned.  The read borrows it only for this expression, so
+    // no other reference to the same storage is alive across it.
+    let stored = unsafe { *hostid_ptr() };
     if stored != 0 {
         return stored;
     }
 
-    // Derive from hostname.  SAFETY: single-address-space, no concurrent
-    // writes during read (matches the gethostname / copy_hostname pattern).
+    // Derive from hostname.
+    // SAFETY: same argument as above for the hostname storage — both halves
+    // come from `process_global!`, so they share one scope and one lifetime.
     let (src_ptr, src_len) = unsafe { (hostname_buf_ptr().cast_const(), *hostname_len_ptr()) };
     let mut tmp = [0u8; HOST_NAME_MAX];
     let n = core::cmp::min(src_len, tmp.len());
@@ -1895,8 +1913,6 @@ pub extern "C" fn gethostid() -> i64 {
 /// Returns 0 on success.  Never fails on this platform.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn sethostid(hostid: i64) -> i32 {
-    use core::sync::atomic::Ordering;
-
     // Truncate to 32 bits and sign-extend back, matching Linux's
     // `sethostid(int)` historical behaviour even though our prototype
     // takes `long`.  Callers that pass a 64-bit value will see the low
@@ -1913,7 +1929,14 @@ pub extern "C" fn sethostid(hostid: i64) -> i32 {
     } else {
         truncated
     };
-    HOSTID.store(to_store, Ordering::Relaxed);
+    // SAFETY: `hostid_ptr()` returns a pointer to this process's (host
+    // build: this thread's) `i64`, live for the whole program and properly
+    // aligned.  The write borrows it only for this statement — note the
+    // `gethostid()` call that can also touch the storage has already
+    // finished and released its borrow by the time `to_store` is bound.
+    unsafe {
+        *hostid_ptr() = to_store;
+    }
     0
 }
 
@@ -8439,10 +8462,18 @@ mod tests {
     // gethostid / sethostid
     // ------------------------------------------------------------------
 
-    /// Reset HOSTID to the unset sentinel so per-test setup is consistent.
+    /// Reset the hostid to the unset sentinel so per-test setup is consistent.
+    ///
+    /// Since the storage moved to `process_global!` this is no longer needed
+    /// for *isolation* — every test thread starts from the `0` initializer —
+    /// but it is kept because several tests below call `sethostid` twice and
+    /// need to return to the unset state *within* one test body.
     fn reset_hostid_for_test() {
-        use core::sync::atomic::Ordering;
-        HOSTID.store(0, Ordering::Relaxed);
+        // SAFETY: sole borrow of this thread's hostid cell, released at the
+        // end of the statement.
+        unsafe {
+            *hostid_ptr() = 0;
+        }
     }
 
     #[test]

@@ -59500,6 +59500,54 @@ which is taken only once a thread's TLS has *already been destroyed*. A `#[test]
 body always runs with live TLS. It is in `IGNORE` with that sentence attached.
 **Backlog: 40.**
 
+### First burn-down: 40 → 32, and the fix is not always a lock
+
+Eight entries closed in the first pass, by two different fixes — which is the
+point, because picking the wrong one produces a comment that lies.
+
+*Locked* (7): `stdlib.rs`'s `RAND_STATE`, `RAND48_STATE`, `OLD_SEED` and
+`L64A_BUF`, and `syslog.rs`'s ident/options/mask. These are shared **by
+specification** — POSIX mandates one `rand` sequence, one `drand48` sequence,
+one `l64a` return buffer and one syslog configuration per process — so they
+cannot stop being shared, and the fix is a test-only `Mutex` taken as the first
+statement of every touching test. Three separate locks in `stdlib.rs` rather
+than one, because the three pieces of state are unrelated and a single lock
+would serialise 21 tests that mostly do not contend; `OLD_SEED` rides the
+`drand48` lock because `seed48` writes it and `RAND48_STATE` in one call.
+
+*Converted* (1): `unistd.rs`'s `HOSTID`. **I started to write a lock for this
+one and the lock would have been wrong** — worth recording, because the error
+is exactly the defect class this whole entry is about. I had drafted a
+`HOSTNAME_TEST_LOCK`, 26 guards, and a `sethostname` SAFETY comment asserting
+that "two concurrent writers can leave the buffer holding one name and the
+length belonging to another." Then I read `posix/src/perprocess.rs` and found
+the hostname is not a `static` at all: it is `process_global!`, which expands
+to a `thread_local!` on the host. The hostname was already per-thread. The
+claim was false, and it was false in the specific way the self-review rule
+warns about — *a SAFETY comment stating an unchecked fact is worse than none,
+because it tells the next reader the question has been considered.*
+
+The real defect was the opposite of the one I had written up: `HOSTID` was a
+plain `static AtomicI64` while the hostname it is *derived from* was
+per-thread. Two halves of one piece of state with two different sharing rules
+— so a test could set the hostname and read back a hostid derived from another
+thread's. The fix is to make the halves agree: `HOSTID` is now a
+`process_global!` too, which is design-decisions.md §110's established answer
+(§110 deleted a 138-site `CAP_TEST_LOCK` in favour of per-thread state,
+rejecting "keep the lock" because it "leaves a live hazard behind an unwritten
+convention"). Zero test guards, one baseline entry gone.
+
+The discriminator, stated so the next 32 don't need re-deriving: **ask whether
+POSIX requires the state to be shared.** If it does, it cannot stop being
+shared and needs a lock. If it is shared only because someone wrote `static`,
+`process_global!` it and the problem is deleted rather than guarded.
+
+`reset_hostid_for_test()` was kept even though per-thread storage makes it
+unnecessary for isolation, because several tests call `sethostid` twice and
+need to return to the unset sentinel *within* one body. Its doc says so.
+
+**Backlog: 32.** Confirmed green: `cargo test -p posix --lib`, 20515 passed.
+
 It is scoped to `posix/` and `userspace/` for the same reason gate 2 is scoped
 to `userspace/`: a lane A or C push must never pay for, or be blocked by, a lane
 B check. Bypass is `ALLOW_RACED_GLOBAL=1`, separate from the other two gates'.

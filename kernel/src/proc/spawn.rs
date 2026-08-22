@@ -478,7 +478,9 @@ pub const SPAWN_EX2_MAX_SIZE: u64 = 4096;
 /// [`SPAWN_EX2_MIN_SIZE`], above [`SPAWN_EX2_MAX_SIZE`], or not a multiple of 8.
 /// All three mean the pointer does not address the struct we were promised.
 pub const fn ex2_copy_plan(struct_size: u64) -> KernelResult<(usize, usize)> {
-    if struct_size < SPAWN_EX2_MIN_SIZE || struct_size > SPAWN_EX2_MAX_SIZE || struct_size % 8 != 0
+    if struct_size < SPAWN_EX2_MIN_SIZE
+        || struct_size > SPAWN_EX2_MAX_SIZE
+        || !struct_size.is_multiple_of(8)
     {
         return Err(KernelError::InvalidArgument);
     }

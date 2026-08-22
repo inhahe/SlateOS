@@ -1306,6 +1306,19 @@ extern "C" fn kernel_main() -> ! {
             // No-op without xHCI hardware (common in QEMU unless -device qemu-xhci).
             xhci::init(boot_info.hhdm_offset);
 
+            // Every PCI driver has now had its chance to claim the legacy
+            // interrupt of the function it drives.  Silence the pin on every
+            // function that nobody claimed.
+            //
+            // This must come *after* the last PCI driver init, and it is
+            // placed here rather than later because everything below runs with
+            // interrupts live: a device that would storm should be muzzled
+            // before it gets the chance, not after a self-test has already
+            // been starved.  Ordering is not load-bearing for correctness
+            // though — a driver claiming later re-enables its own function
+            // (see `pci::claim_intx`).
+            pci::quiesce_unclaimed_intx();
+
             // Start fetching USB HID reports on a timer rather than only when
             // somebody is already blocked on a console read.
             //

@@ -63,6 +63,17 @@ const CMD_IO_SPACE: u16 = 1 << 0;
 const CMD_MEMORY_SPACE: u16 = 1 << 1;
 /// Bus master enable (required for DMA).
 const CMD_BUS_MASTER: u16 = 1 << 2;
+/// INTx assertion **disable** (PCI 2.3+).  Set = the function may not drive
+/// its legacy interrupt pin.  Note the inverted sense: the bit *disables*.
+const CMD_INTX_DISABLE: u16 = 1 << 10;
+
+// Status register bits
+/// Interrupt Status (PCI 2.3+): set while this function is asserting INTx.
+///
+/// Read-only, and unaffected by [`CMD_INTX_DISABLE`] — the bit reports what
+/// the function *wants*, so it still names a culprit after it has been
+/// silenced.  That is what makes it usable as a diagnostic.
+const STATUS_INTERRUPT: u16 = 1 << 3;
 
 // ---------------------------------------------------------------------------
 // Types
@@ -272,6 +283,45 @@ pub fn scan_bus0() -> Vec<PciDevice> {
     devices
 }
 
+/// Call `f` once for each PCI function present on bus 0, without allocating.
+///
+/// [`scan_bus0`] is the convenient form, but it builds a `Vec`, and a caller
+/// running in interrupt or softirq context during a fault — the IRQ storm
+/// diagnostic is exactly that — must not depend on the heap being healthy.  An
+/// allocation failure inside a kernel is a panic, so a diagnostic that
+/// allocates can turn a recoverable storm into a dead machine at precisely the
+/// moment it was supposed to explain one.
+///
+/// The traversal rule is the same as `scan_bus0`'s: probe function 0, and only
+/// look at functions 1–7 when the header type says the device is
+/// multi-function.
+fn for_each_function(mut f: impl FnMut(PciAddress)) {
+    for device in 0..32u8 {
+        if config_read16(0, device, 0, CFG_VENDOR_ID) == 0xFFFF {
+            continue; // No device in this slot.
+        }
+
+        f(PciAddress {
+            bus: 0,
+            device,
+            function: 0,
+        });
+
+        // Multi-function device (header type bit 7)?
+        if config_read8(0, device, 0, _CFG_HEADER_TYPE) & 0x80 != 0 {
+            for function in 1..8u8 {
+                if config_read16(0, device, function, CFG_VENDOR_ID) != 0xFFFF {
+                    f(PciAddress {
+                        bus: 0,
+                        device,
+                        function,
+                    });
+                }
+            }
+        }
+    }
+}
+
 /// Read all fields for one PCI function and add it to the device list.
 #[allow(clippy::cast_possible_truncation)]
 fn scan_function(bus: u8, device: u8, function: u8, devices: &mut Vec<PciDevice>) {
@@ -342,17 +392,302 @@ pub fn find_devices_by_class(class: u8, subclass: u8) -> Vec<PciDevice> {
         .collect()
 }
 
+/// Write the 16-bit Command register without disturbing the Status register
+/// that shares its dword.
+///
+/// Command (0x04) and Status (0x06) are two halves of one dword, and the only
+/// config-space write the 0xCF8/0xCFC mechanism offers is 32 bits wide — so
+/// every command write necessarily writes *something* to status.  The Status
+/// register's error bits (Master Data Parity Error, Signalled Target Abort,
+/// Received Master Abort, …) are **write-1-to-clear**, which makes the obvious
+/// read-modify-write wrong: reading status and writing it back sets a 1 into
+/// every bit that was already 1, and so clears exactly the errors that had
+/// been recorded.  A routine that merely enables DMA would silently destroy
+/// the evidence of a bus fault.
+///
+/// Writing **zero** into the status half is the correct move: 0 is a no-op for
+/// a write-1-to-clear bit, so every recorded error survives untouched.
+fn write_command(addr: PciAddress, cmd: u16) {
+    // Status half deliberately zero — see the doc comment.
+    config_write32(
+        addr.bus,
+        addr.device,
+        addr.function,
+        CFG_COMMAND,
+        u32::from(cmd),
+    );
+}
+
 /// Enable bus mastering (DMA) for a PCI device.
 ///
 /// Also enables I/O space and memory space access.
 pub fn enable_bus_master(addr: PciAddress) {
     let cmd = config_read16(addr.bus, addr.device, addr.function, CFG_COMMAND);
-    let new_cmd = cmd | CMD_IO_SPACE | CMD_MEMORY_SPACE | CMD_BUS_MASTER;
-    // Write back as 32-bit (the upper 16 bits are the status register,
-    // writing back what we read is safe — status bits are write-1-to-clear).
-    let status = config_read16(addr.bus, addr.device, addr.function, CFG_COMMAND + 2);
-    let dword = u32::from(new_cmd) | (u32::from(status) << 16);
-    config_write32(addr.bus, addr.device, addr.function, CFG_COMMAND, dword);
+    write_command(addr, cmd | CMD_IO_SPACE | CMD_MEMORY_SPACE | CMD_BUS_MASTER);
+}
+
+// ---------------------------------------------------------------------------
+// Legacy INTx interrupt control
+// ---------------------------------------------------------------------------
+//
+// Legacy PCI interrupt pins are **level-triggered and shared**: several
+// functions are wired to one IOAPIC input, and the line stays asserted until
+// *every* function driving it has been told to stop, by a device-specific
+// write that only that device's driver knows how to make.
+//
+// That makes an unhandled asserting function uniquely destructive.  An
+// unhandled *edge* interrupt is one wasted trip through the ISR; an unhandled
+// *level* interrupt never deasserts, so the CPU re-enters the handler the
+// instant it returns, forever.  On this tree's QEMU configuration IRQ 10 is
+// shared by eight functions, of which the kernel's ISR knows how to quiesce
+// three — and a storm there has been observed at ~500 kHz, starving the
+// scheduler badly enough to wedge a boot (`known-issues.md`, "IRQ 10 storming
+// at ~500 kHz").
+//
+// PCI 2.3 gives the generic remedy: Command bit 10, **Interrupt Disable**.
+// Setting it forbids the function from asserting its pin at all.  It is one
+// bit with identical meaning on every conforming function, which is what
+// makes it the right tool — the alternative, a per-device stub handler that
+// acks, needs correct knowledge of a different status register for each of
+// AC'97, NVMe, xHCI and AHCI, and a stub that guesses wrong leaves the storm
+// in place while looking like a fix.
+//
+// The policy this module implements: **a function whose interrupt nothing
+// services must not be permitted to assert one.**  Drivers that do service a
+// function's INTx call [`claim_intx`]; [`quiesce_unclaimed_intx`] then
+// silences everything else.  Order does not matter — a claim that arrives
+// after the sweep re-enables the function it names.
+
+use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+
+/// Sentinel for an unused slot in [`INTX_CLAIMS`].
+///
+/// A real packed address always has bit 31 clear (bus, device and function
+/// together occupy 16 bits), so `u32::MAX` cannot collide with one.
+const CLAIM_EMPTY: u32 = u32::MAX;
+
+/// Upper bound on functions claiming INTx.
+///
+/// Sized for a bus-0-only enumeration (32 devices × 8 functions is the
+/// theoretical ceiling, but only a handful ever take a legacy interrupt).
+/// Overflow is reported rather than silently dropped — see [`claim_intx`].
+const MAX_INTX_CLAIMS: usize = 32;
+
+/// Functions whose driver services their legacy interrupt.
+static INTX_CLAIMS: [AtomicU32; MAX_INTX_CLAIMS] = {
+    #[allow(clippy::declare_interior_mutable_const)]
+    const EMPTY: AtomicU32 = AtomicU32::new(CLAIM_EMPTY);
+    [EMPTY; MAX_INTX_CLAIMS]
+};
+
+/// Set once [`quiesce_unclaimed_intx`] has run.
+///
+/// Read by [`claim_intx`] so that a claim registered after the sweep undoes
+/// the sweep's effect on that one function, making the two order-independent.
+static INTX_SWEPT: AtomicBool = AtomicBool::new(false);
+
+/// Pack a [`PciAddress`] into the 16-bit key stored in [`INTX_CLAIMS`].
+///
+/// Bus occupies bits 15:8, device bits 7:3, function bits 2:0 — so the key is
+/// always below `1 << 16` and can never be mistaken for [`CLAIM_EMPTY`].
+fn pack_addr(addr: PciAddress) -> u32 {
+    (u32::from(addr.bus) << 8)
+        | ((u32::from(addr.device) & 0x1F) << 3)
+        | (u32::from(addr.function) & 0x07)
+}
+
+/// Is this function currently asserting its legacy interrupt pin?
+///
+/// Reads Status bit 3, which PCI 2.3 defines as read-only and **independent of
+/// Command bit 10** — a function that has been silenced still reports that it
+/// wanted to interrupt.  That independence is the point: it lets a storm
+/// diagnostic name the culprit even after the culprit has been muzzled.
+pub fn intx_asserting(addr: PciAddress) -> bool {
+    let status = config_read16(addr.bus, addr.device, addr.function, CFG_STATUS);
+    status & STATUS_INTERRUPT != 0
+}
+
+/// May this function assert its legacy interrupt pin?
+pub fn intx_is_enabled(addr: PciAddress) -> bool {
+    let cmd = config_read16(addr.bus, addr.device, addr.function, CFG_COMMAND);
+    // Inverted sense: the *set* bit is the disable.
+    cmd & CMD_INTX_DISABLE == 0
+}
+
+/// Permit or forbid this function from asserting its legacy interrupt pin.
+///
+/// Forbidding is safe for any function whose interrupt nothing handles: the
+/// only thing lost is an interrupt that would have been ignored, and on a
+/// shared level-triggered line "ignored" means "re-delivered forever".
+///
+/// This does not touch MSI or MSI-X, which are separate mechanisms with their
+/// own enables; a function using either is unaffected either way.
+pub fn intx_set_enabled(addr: PciAddress, enabled: bool) {
+    let cmd = config_read16(addr.bus, addr.device, addr.function, CFG_COMMAND);
+    let new_cmd = if enabled {
+        cmd & !CMD_INTX_DISABLE
+    } else {
+        cmd | CMD_INTX_DISABLE
+    };
+    if new_cmd != cmd {
+        write_command(addr, new_cmd);
+    }
+}
+
+/// Declare that this function's legacy interrupt is serviced by a driver.
+///
+/// Call this from any driver that installs an ISR path capable of quiescing
+/// the device — for the in-kernel drivers that means the ones
+/// `ioapic::handle_device_irq` dispatches to.  A function that is not claimed
+/// is silenced by [`quiesce_unclaimed_intx`].
+///
+/// Safe to call before or after the sweep, and safe to call twice.
+pub fn claim_intx(addr: PciAddress) {
+    let key = pack_addr(addr);
+    let mut recorded = false;
+    for slot in &INTX_CLAIMS {
+        // Already recorded — a second claim from the same driver is a no-op.
+        if slot.load(Ordering::Acquire) == key {
+            recorded = true;
+            break;
+        }
+        if slot
+            .compare_exchange(CLAIM_EMPTY, key, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+        {
+            recorded = true;
+            break;
+        }
+    }
+
+    if !recorded {
+        // Louder than a silent drop on purpose: an unrecorded claim means the
+        // sweep will silence a device whose driver is expecting interrupts,
+        // which presents as that device simply never responding.
+        crate::serial_println!(
+            "[pci] WARNING: INTx claim table full ({} entries); {:02x}:{:02x}.{} not recorded",
+            MAX_INTX_CLAIMS,
+            addr.bus,
+            addr.device,
+            addr.function
+        );
+        return;
+    }
+
+    // If the sweep already ran, this function was silenced by it.  Undo that
+    // now, so a driver initialising late is not penalised for its ordering.
+    if INTX_SWEPT.load(Ordering::Acquire) {
+        intx_set_enabled(addr, true);
+    }
+}
+
+/// Has this function been claimed by a driver?
+fn intx_is_claimed(addr: PciAddress) -> bool {
+    let key = pack_addr(addr);
+    INTX_CLAIMS
+        .iter()
+        .any(|slot| slot.load(Ordering::Acquire) == key)
+}
+
+/// Forbid legacy interrupts on every enumerated function no driver has
+/// claimed, and report what was silenced.
+///
+/// Call once, after the last PCI driver has initialised.  Functions claimed
+/// later via [`claim_intx`] re-enable themselves, so a late driver still
+/// works; the sweep is therefore safe to run early rather than needing to be
+/// threaded through every driver's completion.
+///
+/// Returns the number of functions silenced.
+pub fn quiesce_unclaimed_intx() -> usize {
+    // Publish before the scan.  A claim racing this sweep then either lands
+    // in the table before we read it (and is skipped), or observes the flag
+    // and re-enables itself afterwards.  It cannot fall between the two.
+    INTX_SWEPT.store(true, Ordering::Release);
+
+    let mut silenced = 0usize;
+    for dev in scan_bus0() {
+        // 0xFF means "not routed to any legacy interrupt line"; such a
+        // function has no pin to silence.
+        if dev.irq_line == 0xFF {
+            continue;
+        }
+        if intx_is_claimed(dev.address) {
+            continue;
+        }
+        if !intx_is_enabled(dev.address) {
+            continue;
+        }
+
+        // Sample before silencing: a function asserting *right now* with no
+        // handler is not a hypothetical risk, it is an active storm source,
+        // and saying so turns the next storm report into a confirmation
+        // rather than an investigation.
+        let asserting = intx_asserting(dev.address);
+        intx_set_enabled(dev.address, false);
+        silenced = silenced.saturating_add(1);
+
+        crate::serial_println!(
+            "[pci] INTx disabled on {:02x}:{:02x}.{} ({:04x}:{:04x}, irq {}){}",
+            dev.address.bus,
+            dev.address.device,
+            dev.address.function,
+            dev.vendor_id,
+            dev.device_id,
+            dev.irq_line,
+            if asserting {
+                " — WAS ASSERTING with no handler"
+            } else {
+                ""
+            }
+        );
+    }
+
+    crate::serial_println!(
+        "[pci] INTx quiesce: {} unclaimed function(s) silenced",
+        silenced
+    );
+    silenced
+}
+
+/// Log every function wired to `irq` that is asserting its interrupt pin.
+///
+/// Used by the IRQ storm detector to name the device responsible.  Before this
+/// existed, a storm on a shared line reported only the line number, which on
+/// IRQ 10 narrows the culprit to one of eight functions — which is why
+/// `known-issues.md` recorded the storm as needing "its own investigation"
+/// rather than simply being fixed.
+///
+/// Allocation-free by way of [`for_each_function`], because this runs from the
+/// timer softirq while a device is melting the line: the heap is not something
+/// to lean on there.
+pub fn report_intx_asserting_on_irq(irq: u8) {
+    for_each_function(|addr| {
+        if config_read8(addr.bus, addr.device, addr.function, CFG_INTERRUPT_LINE) != irq {
+            return;
+        }
+        if !intx_asserting(addr) {
+            return;
+        }
+        crate::serial_println!(
+            "[pci]   irq {} asserted by {:02x}:{:02x}.{} ({:04x}:{:04x}){}{}",
+            irq,
+            addr.bus,
+            addr.device,
+            addr.function,
+            config_read16(addr.bus, addr.device, addr.function, CFG_VENDOR_ID),
+            config_read16(addr.bus, addr.device, addr.function, CFG_DEVICE_ID),
+            if intx_is_claimed(addr) {
+                " [claimed]"
+            } else {
+                " [UNCLAIMED]"
+            },
+            if intx_is_enabled(addr) {
+                ""
+            } else {
+                " [INTx already disabled — cannot be the source]"
+            }
+        );
+    });
 }
 
 // ---------------------------------------------------------------------------
@@ -484,6 +819,111 @@ pub fn self_test() -> Result<(), &'static str> {
     }
     crate::serial_println!("[pci]   {} device(s) found", devices.len());
 
+    self_test_intx(&devices)?;
+
     crate::serial_println!("[pci] Self-test PASSED");
+    Ok(())
+}
+
+/// Exercise the legacy-INTx control path against the real devices on the bus.
+///
+/// Runs before any driver has claimed anything and before
+/// [`quiesce_unclaimed_intx`], so it is free to toggle bits as long as it puts
+/// every one of them back.
+fn self_test_intx(devices: &[PciDevice]) -> Result<(), &'static str> {
+    // --- 1. The claim key is injective and never collides with the sentinel.
+    //
+    // A collision would make one function's claim silently protect a
+    // different function, and the sentinel case would make an empty slot read
+    // as a claim — both fail in the direction of leaving a storm in place.
+    let probe = [
+        (0u8, 0u8, 0u8),
+        (0, 0, 1),
+        (0, 1, 0),
+        (1, 0, 0),
+        (0xFF, 0x1F, 7),
+    ]
+    .map(|(bus, device, function)| PciAddress {
+        bus,
+        device,
+        function,
+    });
+    for (i, a) in probe.iter().enumerate() {
+        let key = pack_addr(*a);
+        if key == CLAIM_EMPTY {
+            return Err("pack_addr collided with the empty-slot sentinel");
+        }
+        for b in probe.iter().skip(i.saturating_add(1)) {
+            if key == pack_addr(*b) {
+                return Err("pack_addr is not injective over bus/device/function");
+            }
+        }
+    }
+    crate::serial_println!("[pci]   INTx claim key: injective, no sentinel collision OK");
+
+    // --- 2. Enable/disable is observable and reversible on every function,
+    //        and the write does not disturb the Status register.
+    //
+    // Command and Status share one dword and the config mechanism only writes
+    // 32 bits, so every command write touches status.  Status' error bits are
+    // write-1-to-clear, which means a read-modify-write of the whole dword
+    // clears exactly the errors that were recorded.  Assert the bits survive.
+    let mut toggled = 0usize;
+    let mut rw1c_witnessed = 0usize;
+    for dev in devices {
+        let addr = dev.address;
+        let original = intx_is_enabled(addr);
+        let status_before = config_read16(addr.bus, addr.device, addr.function, CFG_STATUS);
+
+        // Any write-1-to-clear bit set right now makes the status check below
+        // a real test rather than a vacuous one; count them so the log says
+        // which it was.
+        const RW1C_MASK: u16 = (1 << 8) | (1 << 11) | (1 << 12) | (1 << 13) | (1 << 14) | (1 << 15);
+        if status_before & RW1C_MASK != 0 {
+            rw1c_witnessed = rw1c_witnessed.saturating_add(1);
+        }
+
+        intx_set_enabled(addr, !original);
+        let flipped = intx_is_enabled(addr);
+        let status_after = config_read16(addr.bus, addr.device, addr.function, CFG_STATUS);
+
+        // Put it back before judging, so a failure cannot also leave the bus
+        // in a changed state.
+        intx_set_enabled(addr, original);
+        let restored = intx_is_enabled(addr);
+
+        // The bit did not move, i.e. it read back as it was before the write.
+        if flipped == original {
+            // Not fatal on its own: a function that hardwires Interrupt
+            // Disable is permitted, and QEMU's host bridge does exactly that.
+            // Only count the ones that genuinely moved.
+            continue;
+        }
+        toggled = toggled.saturating_add(1);
+
+        if status_after & RW1C_MASK != status_before & RW1C_MASK {
+            return Err("a Command-register write cleared write-1-to-clear Status bits");
+        }
+        if restored != original {
+            return Err("INTx enable state was not restored after the toggle");
+        }
+    }
+
+    if toggled == 0 {
+        return Err("no PCI function accepted an INTx enable/disable toggle");
+    }
+    crate::serial_println!(
+        "[pci]   INTx enable/disable: {} function(s) toggled and restored, Status preserved ({} carried a write-1-to-clear bit) OK",
+        toggled,
+        rw1c_witnessed
+    );
+
+    // --- 3. Nothing is claimed yet — the sweep has not run and no driver has
+    //        initialised, so a `true` here would mean the table starts dirty.
+    if devices.iter().any(|d| intx_is_claimed(d.address)) {
+        return Err("INTx claim table was non-empty before any driver initialised");
+    }
+    crate::serial_println!("[pci]   INTx claim table: empty before driver init OK");
+
     Ok(())
 }

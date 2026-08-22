@@ -899,6 +899,12 @@ not the `bc` anyone thought it was measuring
   puts the separate project ahead on features for ~25 and `coreutils` ahead for
   ~9, the rest level. **Neither side is uniformly better** — which is why no
   option below should delete a whole side sight-unseen.
+- One thing that is *not* a differentiator, though it looks like it should be:
+  automated code-quality checking. `coreutils` opts out of the project-wide
+  checks (no `[lints]` in its manifest — 86 unchecked programs), but so do
+  **all 41** of the separate projects. Whichever side wins has to be opted in
+  afterwards either way; this is tracked separately as
+  `TD-B-USERSPACE-CRATES-DO-NOT-INHERIT-THE-WORKSPACE-LINTS`.
 
 ### Options
 

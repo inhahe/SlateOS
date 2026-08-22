@@ -61,6 +61,7 @@ UPD = "gui/desktop/src/update_settings.rs"
 STOR = "gui/desktop/src/storage_settings.rs"
 POW = "gui/desktop/src/power_settings.rs"
 NET = "gui/desktop/src/network_indicator.rs"
+CLIP = "gui/desktop/src/clipboard_viewer.rs"
 
 # (name, file, [(old, new), ...], [packages], [tests expected to fail])
 DEFECTS = [
@@ -1053,6 +1054,129 @@ DEFECTS = [
         [("            Self::Good => p.green,", "            Self::Good => p.yellow,")],
         ["desktop"],
         ["signal_strength_stays_a_ladder_under_every_accent"],
+    ),
+    (
+        "TTTT: the popup's own background is left as a Mocha literal",
+        CLIP,
+        [(
+            "            color: p.base,\n            corner_radii: CornerRadii::all(8.0),",
+            "            color: Color::from_hex(0x1E1E2E),\n            corner_radii: CornerRadii::all(8.0),",
+        )],
+        ["desktop"],
+        ["every_colour_the_popup_draws_comes_from_its_palette"],
+    ),
+    (
+        "UUUU: the empty-list caption keeps its old grey (only drawn when the "
+        "filter matches nothing)",
+        CLIP,
+        [(
+            "                color: p.subtext0,\n                font_size: 12.0,",
+            "                color: Color::from_hex(0xA6ADC8),\n                font_size: 12.0,",
+        )],
+        ["desktop"],
+        ["every_colour_the_popup_draws_comes_from_its_palette"],
+    ),
+    (
+        "VVVV: the pin marker keeps its old yellow (only drawn for a pinned entry)",
+        CLIP,
+        [(
+            '                        text: "P".to_string(),\n                        color: p.yellow,',
+            '                        text: "P".to_string(),\n                        color: Color::from_hex(0xF9E2AF),',
+        )],
+        ["desktop"],
+        ["every_colour_the_popup_draws_comes_from_its_palette"],
+    ),
+    (
+        "WWWW: the plain-text badge is repainted the user's accent",
+        CLIP,
+        [("            Self::PlainText => p.blue,", "            Self::PlainText => p.accent,")],
+        ["desktop"],
+        [
+            "only_the_active_filter_tab_follows_the_accent",
+            "the_format_badges_stay_distinct_under_every_accent",
+        ],
+    ),
+    (
+        "XXXX: the active filter tab is frozen to blue, so it stops tracking the accent",
+        CLIP,
+        [(
+            "            let bg = if is_active { p.accent } else { p.surface0 };",
+            "            let bg = if is_active { p.blue } else { p.surface0 };",
+        )],
+        ["desktop"],
+        [
+            "only_the_active_filter_tab_follows_the_accent",
+            "the_active_filter_tabs_label_is_legible_on_it",
+        ],
+    ),
+    (
+        "YYYY: the active tab's label is fixed instead of chosen for its own fill",
+        CLIP,
+        [(
+            "            let fg = if is_active { p.on_accent() } else { p.subtext0 };",
+            "            let fg = if is_active { p.base } else { p.subtext0 };",
+        )],
+        ["desktop"],
+        ["the_active_filter_tabs_label_is_legible_on_it"],
+    ),
+    (
+        "ZZZZ: the sensitive marker is repainted the user's accent",
+        CLIP,
+        [(
+            '                        text: "S".to_string(),\n                        color: p.red,',
+            '                        text: "S".to_string(),\n                        color: p.accent,',
+        )],
+        ["desktop"],
+        ["only_the_active_filter_tab_follows_the_accent"],
+    ),
+    (
+        "AAAAA: the destructive \"Clear All\" is repainted the user's accent",
+        CLIP,
+        [(
+            '            text: "Clear All".to_string(),\n            color: p.red,',
+            '            text: "Clear All".to_string(),\n            color: p.accent,',
+        )],
+        ["desktop"],
+        ["only_the_active_filter_tab_follows_the_accent"],
+    ),
+    (
+        "BBBBB: a faint underlay is pushed beneath the search field, where the "
+        "field's own opaque fill erases it",
+        CLIP,
+        [(
+            "        cmds.push(RenderCommand::FillRect {\n"
+            "            x: x + 8.0,\n"
+            "            y: search_y,\n"
+            "            width: w - 16.0,\n"
+            "            height: 28.0,\n"
+            "            color: search_bg,",
+            "        cmds.push(RenderCommand::FillRect {\n"
+            "            x: x + 8.0,\n"
+            "            y: search_y,\n"
+            "            width: w - 16.0,\n"
+            "            height: 28.0,\n"
+            "            color: p.surface2,\n"
+            "            corner_radii: CornerRadii::all(6.0),\n"
+            "        });\n"
+            "        cmds.push(RenderCommand::FillRect {\n"
+            "            x: x + 8.0,\n"
+            "            y: search_y,\n"
+            "            width: w - 16.0,\n"
+            "            height: 28.0,\n"
+            "            color: search_bg,",
+        )],
+        ["desktop"],
+        ["the_popup_draws_nothing_that_is_immediately_erased"],
+    ),
+    (
+        "CCCCC: the format badge's wash is emitted with zero width",
+        CLIP,
+        [(
+            "                    y: ey + 6.0,\n                    width: 20.0,\n                    height: 20.0,",
+            "                    y: ey + 6.0,\n                    width: 0.0,\n                    height: 20.0,",
+        )],
+        ["desktop"],
+        ["the_popup_draws_nothing_that_is_immediately_erased"],
     ),
 ]
 

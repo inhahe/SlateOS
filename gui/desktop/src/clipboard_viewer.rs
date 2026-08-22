@@ -4,6 +4,7 @@
 //! recent clipboard entries with preview, search, pinning, and format info.
 //! Integrates with the gui/clipboard service.
 
+use appearance::Palette;
 use guitk::color::Color;
 use guitk::idseq::IdSeq;
 use guitk::listview::ListViewport;
@@ -14,23 +15,35 @@ use guitk::text;
 /// How many entries the popup shows at its default height.
 const DEFAULT_VISIBLE_ENTRIES: usize = 8;
 
-// ============================================================================
-// Theme
-// ============================================================================
-
-const COL_BASE: Color = Color::from_hex(0x1E1E2E);
-const COL_MANTLE: Color = Color::from_hex(0x181825);
-const COL_SURFACE0: Color = Color::from_hex(0x313244);
-const COL_SURFACE1: Color = Color::from_hex(0x45475A);
-const COL_SURFACE2: Color = Color::from_hex(0x585B70);
-const COL_TEXT: Color = Color::from_hex(0xCDD6F4);
-const COL_SUBTEXT0: Color = Color::from_hex(0xA6ADC8);
-const COL_BLUE: Color = Color::from_hex(0x89B4FA);
-const COL_GREEN: Color = Color::from_hex(0xA6E3A1);
-const COL_YELLOW: Color = Color::from_hex(0xF9E2AF);
-const COL_RED: Color = Color::from_hex(0xF38BA8);
-const COL_PEACH: Color = Color::from_hex(0xFAB387);
-const COL_LAVENDER: Color = Color::from_hex(0xB4BEFE);
+// Colour
+// ------
+//
+// Every colour this popup draws is read out of the resolved [`Palette`] the
+// shell hands down, so it follows the light/dark mode and the accent the user
+// chose. Three judgements are baked into which role each site takes.
+//
+// 1. **One site follows the accent: the active format-filter tab.** Which of
+//    "All / Text / Image / Files" you are filtering by is precisely the "which
+//    of these am I on" question the accent exists to answer. Its label is
+//    [`Palette::on_accent`] rather than a fixed near-black, because a pale
+//    Latte accent wants dark text on it and a deep one wants light -- the same
+//    pairing `run_dialog`'s primary button makes.
+//
+// 2. **The format badge is a category and stays fixed.** [`ClipFormat::color`]
+//    runs blue / lavender / green / peach / grey, and the blue arm is a trap:
+//    blue is also the *default* accent, so `PlainText => p.accent` would look
+//    right on a fresh install and collapse onto whichever colour the user
+//    picked next. Distinctness matters more here than in a tray icon, because
+//    the list draws every visible entry's badge at once -- two formats sharing
+//    a colour are wrong side by side in a single glance, not merely in a
+//    user's memory. The badge is drawn twice, as a 60-alpha wash with the icon
+//    at full strength over it; alpha is how a role becomes a wash, so that is
+//    one colour and not two.
+//
+// 3. **Pinned, sensitive and "Clear All" are statuses, not invitations.** The
+//    pin's yellow, the sensitive marker's red and the destructive action's red
+//    all say what a thing *is*. The accent says where you are and what to
+//    press, so none of the three may take it.
 
 /// The ellipsis marking a cut. `guitk::table` keeps its own copy private, so
 /// this module needs one.
@@ -109,13 +122,18 @@ impl ClipFormat {
     }
 
     /// Badge color.
-    pub fn color(&self) -> Color {
+    ///
+    /// Categorical, and frozen against the accent: see the module's colour
+    /// note. Every visible row shows its badge at the same moment, so two
+    /// formats drawing the same colour is a side-by-side confusion rather than
+    /// a remembered one.
+    pub fn color(&self, p: &Palette) -> Color {
         match self {
-            Self::PlainText => COL_BLUE,
-            Self::RichText => COL_LAVENDER,
-            Self::Image => COL_GREEN,
-            Self::FilePaths => COL_PEACH,
-            Self::Custom => COL_SURFACE2,
+            Self::PlainText => p.blue,
+            Self::RichText => p.lavender,
+            Self::Image => p.green,
+            Self::FilePaths => p.peach,
+            Self::Custom => p.surface2,
         }
     }
 }
@@ -522,7 +540,7 @@ impl ClipboardViewer {
     }
 
     /// Render the clipboard viewer popup.
-    pub fn render(&self) -> Vec<RenderCommand> {
+    pub fn render(&self, p: &Palette) -> Vec<RenderCommand> {
         if !self.is_open {
             return Vec::new();
         }
@@ -539,7 +557,7 @@ impl ClipboardViewer {
             y,
             width: w,
             height: h,
-            color: COL_BASE,
+            color: p.base,
             corner_radii: CornerRadii::all(8.0),
         });
 
@@ -549,7 +567,7 @@ impl ClipboardViewer {
             y,
             width: w,
             height: h,
-            color: COL_SURFACE1,
+            color: p.surface1,
             line_width: 1.0,
             corner_radii: CornerRadii::all(8.0),
         });
@@ -559,7 +577,7 @@ impl ClipboardViewer {
             x: x + 12.0,
             y: y + 10.0,
             text: "Clipboard History".to_string(),
-            color: COL_TEXT,
+            color: p.text,
             font_size: 14.0,
             font_weight: FontWeightHint::Bold,
             max_width: Some(w - 80.0),
@@ -573,14 +591,14 @@ impl ClipboardViewer {
             y: y + 8.0,
             width: 30.0,
             height: 20.0,
-            color: COL_SURFACE1,
+            color: p.surface1,
             corner_radii: CornerRadii::all(10.0),
         });
         cmds.push(RenderCommand::Text {
             x: x + w - 44.0,
             y: y + 11.0,
             text: count_text,
-            color: COL_SUBTEXT0,
+            color: p.subtext0,
             font_size: 11.0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(24.0),
@@ -590,9 +608,9 @@ impl ClipboardViewer {
         // Search field.
         let search_y = y + 36.0;
         let search_bg = if self.search_focused {
-            COL_SURFACE1
+            p.surface1
         } else {
-            COL_SURFACE0
+            p.surface0
         };
         cmds.push(RenderCommand::FillRect {
             x: x + 8.0,
@@ -608,9 +626,9 @@ impl ClipboardViewer {
             self.search_query.clone()
         };
         let search_color = if self.search_query.is_empty() {
-            COL_SUBTEXT0
+            p.subtext0
         } else {
-            COL_TEXT
+            p.text
         };
         cmds.push(RenderCommand::Text {
             x: x + 16.0,
@@ -635,8 +653,12 @@ impl ClipboardViewer {
         for (fmt, label) in &filters {
             let is_active = self.format_filter == *fmt;
             let tab_w = text::padded_width(label, 8.0, 11.0, FontWeightHint::Regular);
-            let bg = if is_active { COL_BLUE } else { COL_SURFACE0 };
-            let fg = if is_active { COL_BASE } else { COL_SUBTEXT0 };
+            // The one accent site in the popup, and its label is chosen
+            // *for* it rather than fixed: `on_accent` is near-black on a pale
+            // accent and near-white on a deep one, so a Latte user with a
+            // yellow accent still gets a readable tab.
+            let bg = if is_active { p.accent } else { p.surface0 };
+            let fg = if is_active { p.on_accent() } else { p.subtext0 };
             cmds.push(RenderCommand::FillRect {
                 x: tab_x,
                 y: filter_y,
@@ -668,7 +690,7 @@ impl ClipboardViewer {
                 x: x + w / 2.0 - 60.0,
                 y: list_y + 40.0,
                 text: "No clipboard entries".to_string(),
-                color: COL_SUBTEXT0,
+                color: p.subtext0,
                 font_size: 12.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(w - 40.0),
@@ -687,13 +709,13 @@ impl ClipboardViewer {
                         y: ey,
                         width: w - 8.0,
                         height: entry_h - 2.0,
-                        color: COL_SURFACE1,
+                        color: p.surface1,
                         corner_radii: CornerRadii::all(4.0),
                     });
                 }
 
                 // Format badge.
-                let badge_color = entry.format.color();
+                let badge_color = entry.format.color(p);
                 cmds.push(RenderCommand::FillRect {
                     x: x + 12.0,
                     y: ey + 6.0,
@@ -741,7 +763,7 @@ impl ClipboardViewer {
                         12.0,
                         FontWeightHint::Regular,
                     ),
-                    color: COL_TEXT,
+                    color: p.text,
                     font_size: 12.0,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(preview_room),
@@ -769,7 +791,7 @@ impl ClipboardViewer {
                     x: text_x,
                     y: ey + 22.0,
                     text: text::elide(&meta, meta_room, ELLIPSIS, 10.0, FontWeightHint::Light),
-                    color: COL_SUBTEXT0,
+                    color: p.subtext0,
                     font_size: 10.0,
                     font_weight: FontWeightHint::Light,
                     max_width: Some(meta_room),
@@ -782,7 +804,7 @@ impl ClipboardViewer {
                         x: x + w - ROW_INDICATOR_INSET,
                         y: ey + 6.0,
                         text: "P".to_string(),
-                        color: COL_YELLOW,
+                        color: p.yellow,
                         font_size: 11.0,
                         font_weight: FontWeightHint::Bold,
                         max_width: Some(16.0),
@@ -796,7 +818,7 @@ impl ClipboardViewer {
                         x: x + w - ROW_INDICATOR_INSET,
                         y: ey + 22.0,
                         text: "S".to_string(),
-                        color: COL_RED,
+                        color: p.red,
                         font_size: 10.0,
                         font_weight: FontWeightHint::Regular,
                         max_width: Some(16.0),
@@ -813,7 +835,7 @@ impl ClipboardViewer {
             y: bottom_y,
             width: w,
             height: 30.0,
-            color: COL_MANTLE,
+            color: p.mantle,
             corner_radii: CornerRadii {
                 top_left: 0.0,
                 top_right: 0.0,
@@ -827,7 +849,7 @@ impl ClipboardViewer {
             x: x + 12.0,
             y: bottom_y + 8.0,
             text: "Clear All".to_string(),
-            color: COL_RED,
+            color: p.red,
             font_size: 11.0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(80.0),
@@ -841,7 +863,7 @@ impl ClipboardViewer {
                 x: x + w - 100.0,
                 y: bottom_y + 8.0,
                 text: format!("{} pinned", pinned),
-                color: COL_YELLOW,
+                color: p.yellow,
                 font_size: 11.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(80.0),
@@ -877,6 +899,13 @@ mod tests {
     )]
 
     use super::*;
+    use crate::draw_check::assert_nothing_is_drawn_and_never_seen;
+    use crate::palette_check::assert_drawn_from;
+
+    /// The palette these tests render against: the shell's own dark answer.
+    fn test_palette() -> Palette {
+        Palette::for_mode(false)
+    }
 
     // -- ClipEntry --
 
@@ -985,11 +1014,12 @@ mod tests {
 
     #[test]
     fn test_format_colors_distinct() {
+        let p = test_palette();
         let colors = [
-            ClipFormat::PlainText.color(),
-            ClipFormat::RichText.color(),
-            ClipFormat::Image.color(),
-            ClipFormat::FilePaths.color(),
+            ClipFormat::PlainText.color(&p),
+            ClipFormat::RichText.color(&p),
+            ClipFormat::Image.color(&p),
+            ClipFormat::FilePaths.color(&p),
         ];
         // All should be different.
         for i in 0..colors.len() {
@@ -1155,14 +1185,14 @@ mod tests {
     #[test]
     fn test_viewer_render_closed_empty() {
         let v = ClipboardViewer::new();
-        assert!(v.render().is_empty());
+        assert!(v.render(&test_palette()).is_empty());
     }
 
     #[test]
     fn test_viewer_render_open_not_empty() {
         let mut v = ClipboardViewer::new();
         v.toggle();
-        let cmds = v.render();
+        let cmds = v.render(&test_palette());
         assert!(!cmds.is_empty());
     }
 
@@ -1173,7 +1203,7 @@ mod tests {
         v.now_timestamp = 5000;
         v.history.push_text("hello", 4000);
         v.history.push_text("world", 4500);
-        let cmds = v.render();
+        let cmds = v.render(&test_palette());
         assert!(cmds.len() > 10); // Should have many render commands.
     }
 
@@ -1386,7 +1416,10 @@ mod tests {
     fn a_non_ascii_clip_does_not_abort_the_viewer() {
         for width in [240.0_f32, 360.0, 520.0] {
             let v = viewer_with_adversarial_clips(width);
-            assert!(!v.render().is_empty(), "no commands at width {width}");
+            assert!(
+                !v.render(&test_palette()).is_empty(),
+                "no commands at width {width}"
+            );
         }
     }
 
@@ -1424,7 +1457,7 @@ mod tests {
         let mut checked = 0usize;
         for width in [240.0_f32, 360.0, 520.0] {
             let v = viewer_with_adversarial_clips(width);
-            let cmds = v.render();
+            let cmds = v.render(&test_palette());
 
             // Indicators are the only text drawn at the indicator inset.
             let indicator_x = width - ROW_INDICATOR_INSET;
@@ -1503,7 +1536,7 @@ mod tests {
     #[test]
     fn a_short_clip_is_drawn_verbatim() {
         let v = viewer_with_adversarial_clips(520.0);
-        let cmds = v.render();
+        let cmds = v.render(&test_palette());
         let drawn: Vec<&str> = cmds
             .iter()
             .filter_map(|c| match c {
@@ -1515,5 +1548,295 @@ mod tests {
             drawn.contains(&"brief"),
             "a short preview was altered: {drawn:?}"
         );
+    }
+
+    // --- Palette conversion --------------------------------------------------
+
+    /// A viewer holding one entry of every format, with the pin and the
+    /// sensitive marker both in use.
+    ///
+    /// All five formats have to be present because the badge is the one colour
+    /// a row picks by category, and both markers because each is drawn only
+    /// inside an `if` — a fixture without a pinned entry never renders the pin
+    /// and so compares nothing when the pin's colour is checked.
+    ///
+    /// Two of the formats have no public constructor (nothing pushes rich text
+    /// or a custom blob yet), so the fixture reaches into `history.entries` to
+    /// set them. That is a test in the same module as the field, not a hole in
+    /// the encapsulation.
+    fn wound(
+        filter: Option<ClipFormat>,
+        focused: bool,
+        query: &str,
+        selected: Option<usize>,
+    ) -> ClipboardViewer {
+        let mut v = ClipboardViewer::new();
+        v.is_open = true;
+        v.now_timestamp = 100_000;
+        v.history.push_text("a plain clipping", 99_000);
+        v.history.push_image(1920, 1080, 8_000_000, 98_000);
+        v.history
+            .push_files(&["/home/u/a.txt", "/home/u/b.txt"], 97_000);
+        v.history.push_text("<b>rich</b> markup", 96_000);
+        v.history.push_text("an opaque blob", 95_000);
+        // Most recent first, so index 0 is the last pushed.
+        v.history.entries[0].format = ClipFormat::Custom;
+        v.history.entries[1].format = ClipFormat::RichText;
+        v.history.entries[2].source_app = Some("editor".to_string());
+        v.history.entries[3].sensitive = true;
+        v.history.entries[4].pinned = true;
+        v.format_filter = filter;
+        v.search_focused = focused;
+        v.search_query = query.to_string();
+        v.select(selected);
+        v
+    }
+
+    /// The sweep: in light mode a colour this popup still holds privately is a
+    /// Mocha value the Latte palette does not contain, and it names itself.
+    ///
+    /// The search box's focus, the query being empty or not, and a filter that
+    /// matches nothing are all walked, because each of the three picks between
+    /// two colours or removes the list entirely. The empty-list branch draws a
+    /// caption nothing else does.
+    #[test]
+    fn every_colour_the_popup_draws_comes_from_its_palette() {
+        for light in [false, true] {
+            let p = Palette::for_mode(light);
+            for filter in [
+                None,
+                Some(ClipFormat::PlainText),
+                Some(ClipFormat::RichText),
+                Some(ClipFormat::Image),
+                Some(ClipFormat::FilePaths),
+                Some(ClipFormat::Custom),
+            ] {
+                for focused in [false, true] {
+                    for query in ["", "rich", "matches-nothing-at-all"] {
+                        for selected in [None, Some(0), Some(1)] {
+                            let v = wound(filter, focused, query, selected);
+                            assert_drawn_from(&p, &v.render(&p), &[], "clipboard viewer");
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// No fill this popup emits is erased by a later one. See
+    /// [`crate::draw_check`] for the rule and the bug that produced it.
+    #[test]
+    fn the_popup_draws_nothing_that_is_immediately_erased() {
+        for light in [false, true] {
+            let p = Palette::for_mode(light);
+            for filter in [None, Some(ClipFormat::Image), Some(ClipFormat::Custom)] {
+                for query in ["", "matches-nothing-at-all"] {
+                    let v = wound(filter, true, query, Some(1));
+                    assert_nothing_is_drawn_and_never_seen(
+                        &v.render(&p),
+                        &format!(
+                            "clipboard viewer (filter={filter:?}, query={query:?}, light={light})"
+                        ),
+                    );
+                }
+            }
+        }
+    }
+
+    /// The four format-filter tabs' backgrounds — the only 22pt-high fills.
+    fn tab_backgrounds(cmds: &[RenderCommand]) -> Vec<Color> {
+        cmds.iter()
+            .filter_map(|c| match c {
+                RenderCommand::FillRect {
+                    height: 22.0,
+                    color,
+                    ..
+                } => Some(*color),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The four tabs' labels, found by the words on them rather than by size:
+    /// the entry-count badge, "Clear All" and the pinned count are all 11pt
+    /// regular too.
+    fn tab_labels(cmds: &[RenderCommand]) -> Vec<Color> {
+        cmds.iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, color, .. }
+                    if matches!(text.as_str(), "All" | "Text" | "Image" | "Files") =>
+                {
+                    Some(*color)
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Whether a command belongs to the filter-tab strip.
+    fn is_tab(c: &RenderCommand) -> bool {
+        match c {
+            RenderCommand::FillRect { height: 22.0, .. } => true,
+            RenderCommand::Text { text, .. } => {
+                matches!(text.as_str(), "All" | "Text" | "Image" | "Files")
+            }
+            _ => false,
+        }
+    }
+
+    /// Every colour the popup draws *apart* from the filter tabs' own two.
+    ///
+    /// Taken as one vector rather than a site at a time because this is the
+    /// frozen half: an `assert_eq!` over a union fails if any single element
+    /// moves, so it loses nothing. (The *negative* half is the one that must
+    /// be split per site — an `assert_ne!` over a union passes as soon as one
+    /// member moves, which is how a frozen site hides behind a moving one.)
+    fn colors_apart_from_the_tabs(cmds: &[RenderCommand]) -> Vec<Color> {
+        cmds.iter()
+            .filter(|c| !is_tab(c))
+            .filter_map(|c| match c {
+                RenderCommand::FillRect { color, .. }
+                | RenderCommand::StrokeRect { color, .. }
+                | RenderCommand::Text { color, .. } => Some(*color),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Exactly one thing here follows the accent: the tab you are filtering by.
+    ///
+    /// The membership sweep is blind to this. `p.blue` and `p.accent` are both
+    /// legal palette roles, so writing one where the other belongs still draws
+    /// a colour the light palette contains; only varying the accent separates
+    /// them.
+    #[test]
+    fn only_the_active_filter_tab_follows_the_accent() {
+        let mut blue = Palette::for_mode(false);
+        blue.accent = appearance::BLUE;
+        let mut mauve = Palette::for_mode(false);
+        mauve.accent = appearance::MAUVE;
+
+        // Walk every tab as the active one. A fixture that only ever filtered
+        // by "All" would prove nothing about the other three, and the tab
+        // colour is chosen by a boolean per tab — the same trap the network
+        // flyout's toggles sprang.
+        for filter in [
+            None,
+            Some(ClipFormat::PlainText),
+            Some(ClipFormat::Image),
+            Some(ClipFormat::FilePaths),
+        ] {
+            let v = wound(filter, false, "", Some(1));
+            let a = v.render(&blue);
+            let b = v.render(&mauve);
+
+            // The negative half. Without it every assertion below would also
+            // pass on a popup that ignored the accent entirely.
+            assert_eq!(tab_backgrounds(&a).len(), 4, "four filter tabs are drawn");
+            assert_ne!(
+                tab_backgrounds(&a),
+                tab_backgrounds(&b),
+                "the {filter:?} tab's fill did not move with the accent"
+            );
+
+            // The positive half: everything else stands still.
+            assert_eq!(
+                colors_apart_from_the_tabs(&a),
+                colors_apart_from_the_tabs(&b),
+                "something outside the filter strip moved with the accent \
+                 (filter={filter:?}) — the format badges are categories, and \
+                 the pin, the sensitive marker and \"Clear All\" are statuses"
+            );
+        }
+    }
+
+    /// The active tab's label is picked for its own fill, not fixed.
+    ///
+    /// This is the half the accent test above cannot reach: every accent on
+    /// offer is pale, so [`appearance::readable_on`] answers the same
+    /// near-black for all of them and an `assert_ne!` between two accents would
+    /// fail on correct code. What separates `p.on_accent()` from a hard-coded
+    /// `p.base` is the *mode* — Latte's `base` is near-white, which on a pale
+    /// accent is illegible.
+    #[test]
+    fn the_active_filter_tabs_label_is_legible_on_it() {
+        for light in [false, true] {
+            for accent in [
+                appearance::BLUE,
+                appearance::GREEN,
+                appearance::RED,
+                appearance::YELLOW,
+                appearance::MAUVE,
+            ] {
+                let mut p = Palette::for_mode(light);
+                p.accent = accent;
+                // "Image" is the third of All / Text / Image / Files.
+                let v = wound(Some(ClipFormat::Image), false, "", None);
+                let cmds = v.render(&p);
+                let bgs = tab_backgrounds(&cmds);
+                let labels = tab_labels(&cmds);
+                assert_eq!(bgs.len(), 4, "four filter tabs are drawn");
+                assert_eq!(labels.len(), 4, "four filter tabs are labelled");
+                assert_eq!(
+                    (bgs[2].r, bgs[2].g, bgs[2].b),
+                    (accent.r, accent.g, accent.b),
+                    "the active tab is not filled with the accent (light={light})"
+                );
+                let want = appearance::readable_on(accent);
+                assert_eq!(
+                    (labels[2].r, labels[2].g, labels[2].b),
+                    (want.r, want.g, want.b),
+                    "the active tab's label is not chosen for its own fill \
+                     (light={light}); a fixed colour is unreadable on half the \
+                     accents in one of the two modes"
+                );
+            }
+        }
+    }
+
+    /// The five format badges stay tellable apart under every accent.
+    ///
+    /// Stronger than a tray icon's distinctness argument: the list draws all
+    /// the visible entries' badges at once, so two formats sharing a colour do
+    /// not merely confuse a learnt code — they make two rows look like the same
+    /// kind of thing side by side, in one glance. Four of the fourteen
+    /// selectable accents are exactly the colours this row uses, which is why
+    /// the accent has to be varied and not merely defaulted.
+    #[test]
+    fn the_format_badges_stay_distinct_under_every_accent() {
+        for light in [false, true] {
+            for accent in [
+                appearance::BLUE,
+                appearance::GREEN,
+                appearance::RED,
+                appearance::YELLOW,
+                appearance::MAUVE,
+            ] {
+                let mut p = Palette::for_mode(light);
+                p.accent = accent;
+
+                let mut seen: Vec<(ClipFormat, Color)> = Vec::new();
+                for f in [
+                    ClipFormat::PlainText,
+                    ClipFormat::RichText,
+                    ClipFormat::Image,
+                    ClipFormat::FilePaths,
+                    ClipFormat::Custom,
+                ] {
+                    let c = f.color(&p);
+                    if let Some((other, _)) = seen
+                        .iter()
+                        .find(|(_, o)| o.r == c.r && o.g == c.g && o.b == c.b)
+                    {
+                        panic!(
+                            "a {f:?} badge is drawn exactly like a {other:?} one \
+                             (light={light}, accent={accent:?}), so two rows of \
+                             different kinds look alike side by side"
+                        );
+                    }
+                    seen.push((f, c));
+                }
+            }
+        }
     }
 }

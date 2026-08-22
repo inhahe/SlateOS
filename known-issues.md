@@ -50335,7 +50335,7 @@ commands that carry the colour in question, and assert the two renders agree.
 Candidates: anything drawn on the wallpaper, on a video surface, on a
 thumbnail, or on any other content the palette does not own.
 
-**Part 2 progress. 12 of 49 modules converted.**
+**Part 2 progress. 13 of 49 modules converted.**
 
 - [x] `security_dialog.rs` — 29 constants, done 2026-08-22. The method above
   survived contact: the sweep lives in `gui/desktop/src/palette_check.rs` as
@@ -50781,6 +50781,53 @@ thumbnail, or on any other content the palette does not own.
     at a time — it rests on a code the user has learnt rather than on a
     comparison. `Wifi` is excluded from that row because it has no colour of
     its own, delegating to the signal ladder.
+- [x] `clipboard_viewer.rs` — 13 constants, done 2026-08-22. Harness defects
+  TTTT/UUUU/VVVV/WWWW/XXXX/YYYY/ZZZZ/AAAAA/BBBBB/CCCCC.
+  - **The invisible-draw rule was lifted out of `power_settings.rs` into
+    `gui/desktop/src/draw_check.rs`**, as the note on that module said it
+    should be once a second module wanted it. The public entry point is
+    `assert_nothing_is_drawn_and_never_seen(&[RenderCommand], what)`; it keeps
+    the two halves of the rule (a fill covered outright by a *later* opaque
+    fill that is no more rounded at the corners; a fill of zero width or
+    height) and it now carries seven self-tests of its own, which the inline
+    copy never had — a translucent cover is not a cover, a cover drawn *first*
+    is a background, a rounder cover leaves the corners peeking out, and a
+    partial overlap is how every border on this desktop is drawn. `#[cfg(test)]
+    pub mod` in `lib.rs`, beside `palette_check`, for the same reason: a
+    release build has nothing to check.
+  - **A site whose *foreground* is derived from its own background.** The
+    active format-filter tab is the one accent site, and its label is
+    `p.on_accent()` — `readable_on(accent)` — not a fixed near-black. That
+    pairing needs its own test and it cannot be an `assert_ne!` between two
+    accents: every accent on offer is pale, so `readable_on` answers the same
+    near-black for all fourteen and a correct implementation would fail such an
+    assertion. What separates `p.on_accent()` from a hard-coded `p.base` is the
+    *mode* — Latte's `base` is near-white, illegible on a pale tab. So
+    `the_active_filter_tabs_label_is_legible_on_it` asserts the label *equals*
+    `readable_on` of the fill, in both modes, over five accents. Defect YYYY
+    (fix the label to `p.base`) is caught by that test and by nothing else.
+  - **The frozen half may be one assertion over a union; the negative half may
+    not.** `colors_apart_from_the_tabs` takes every colour outside the filter
+    strip as one vector and `assert_eq!`s it across two accents — an `assert_eq!`
+    over a union fails if *any* member moves, so it loses nothing, and it
+    covers sites nobody thought to name. The `assert_ne!` half stays per-site
+    (here, per-tab), for the reason FFF/NNN/WWW/EEEE established: a union
+    `assert_ne!` passes as soon as one member moves, so a frozen site hides
+    behind a moving one. Defects ZZZZ and AAAAA (the sensitive marker and
+    "Clear All" repainted with the accent) are both caught by the union
+    `assert_eq!`.
+  - **Two entry formats have no public constructor**, so the fixture reaches
+    into the private `history.entries` to set `RichText` and `Custom`. Without
+    them two of the five badge arms are never rendered and the badge ladder is
+    only three rungs wide in practice. Absences and unreachable-by-the-API
+    states have to be *constructed*, not waited for.
+  - **The badge row is the side-by-side distinctness case again**, one step
+    below the network scan list: every visible entry draws its badge at the
+    same moment, so two formats sharing a colour is a one-glance confusion.
+    `PlainText => p.blue` is the blue-state trap for the third time — blue is
+    the default accent, so `p.accent` there looks right until the user picks
+    Green and Text becomes Image (defect WWWW, caught by both the accent test
+    and the distinctness test).
 
 **Trigger:** this is not blocked on anything. It is sequenced after the shell
 event loop (`TD-C-THE-SHELL-CAN-DRAW-ITSELF-AND-NOBODY-CAN-ASK-IT-TO`) only

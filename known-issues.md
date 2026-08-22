@@ -61672,3 +61672,50 @@ without becoming vacuous. Two suites, the same root cause, two different correct
 fixes — the question to ask is not "how do I ignore other writers" but "what is
 this assertion actually claiming, and is that claim still true when the system
 is busy".
+
+---
+
+## CLOSED 2026-08-22 — the kernel has no `.unwrap()`/`.expect()` left in production paths, and a script to keep it that way
+
+`CLAUDE.md` has always said "every `unwrap`/`expect` in non-test code is a
+potential DoS if an attacker can shape the input." That was policy with no
+instrument. `scripts/scan-unwrap.py` is the instrument: it classifies every
+`.unwrap()`/`.expect()` site in `kernel/` as production or test and prints the
+production ones as `file:line: [fn name] source`.
+
+**It now reports 0, down from 71.** The removals are commits `4eba85262`,
+`a7e393361`, `10f4f6b01` and `69021e7f6`; the reasoning is `design-decisions.md`
+§282 (the fixes) and §283 (the classifier).
+
+### If you are adding kernel code
+
+Run `python scripts/scan-unwrap.py` before you commit. Zero is the expected
+output; anything else is a new way to kill the machine. The exit status is 1
+when it finds something, so it can gate a script.
+
+Test code is exempt and correctly detected — a panic on bad data in a test is
+the point. Detection walks a *stack* of enclosing functions, so a helper defined
+inside a `self_test` is still test code (§283 explains why two earlier versions
+got this wrong in opposite directions).
+
+### What this does NOT cover, and is still open
+
+Zero unwrap sites is not zero panics. Still present in kernel production paths,
+and **not** measured by this script:
+
+- `panic!` and `assert!`/`debug_assert!` called directly.
+- Indexing and slicing (`a[i]`, `&s[a..b]`), which panic out of range.
+- Unchecked arithmetic, which panics on overflow in debug builds.
+
+The defensive clippy lints that would surface those report roughly **18 000**
+warnings across `kernel/`, untriaged. That backlog is separate from the
+userspace-crate tally earlier in this file and has not been worked.
+
+Two smaller notes for whoever picks that up:
+
+- The three fix shapes that make a panic *unrepresentable* (see §282) apply just
+  as well to indexing: `.get()` returning `Option` is the "return the error"
+  shape, but a fixed-size array plus a `const` assertion is the "delete the
+  possibility" shape and leaves less behind.
+- Do not bulk-`allow` the lints in kernel modules to clear the count. The
+  userspace crates that did this are recorded above as a warning, not a model.

@@ -58880,6 +58880,22 @@ flag. `gui/`'s header also said *"Zone config for apps/"*, copied verbatim from
 - `userspace/.cargo/config.toml`, `net/.cargo/config.toml` and
   `init/.cargo/config.toml` carry the identical incomplete header. Those are
   lanes A and B's trees.
+
+  **Lane B, 2026-08-22: `userspace/` and `init/` are done** — both now carry
+  the `+nightly` paragraph, and both had *also* inherited lane C's original
+  first line verbatim ("Zone config for apps/ — userspace GUI/CLI
+  applications"), which now names the right zone. `net/` is untouched; per the
+  lane table in `CLAUDE.md` it is lane C's, not lane A's.
+
+  Lane B lost exactly the ten minutes this entry predicts, converting `mv`.
+  The cost is worse in `userspace/` than elsewhere and the fixed header now
+  says so: the target's family is `unix` and the development host is Windows,
+  so `cargo test` on the host never compiles the `#[cfg(unix)]` arm of
+  anything in that tree. A zone build is not a convenience there — it is the
+  only thing that type-checks half the source, and it is the half that runs in
+  production. An agent who does not know the `+nightly` word therefore does not
+  merely lose ten minutes; it concludes the target build is unavailable and
+  commits code whose `#[cfg(unix)]` branches have never been compiled.
 - `CLAUDE.md` line 41 should gain "and only on a nightly toolchain", and the
   `build-slateos` alias comment at `.cargo/config.toml:62` already shows
   `cargo +nightly build-slateos` in its example but does not say why the

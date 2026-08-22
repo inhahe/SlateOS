@@ -169,11 +169,57 @@ unsafe fn find_corruption(addr: usize, len: usize) -> Option<usize> {
     None
 }
 
+/// Where a corruption report came from: a genuine find, or the self-test's own
+/// deliberate stomp.
+///
+/// This distinction is not cosmetic. Before it existed, [`self_test`] corrupted
+/// its own scratch buffer to prove the detector works — and the resulting
+/// report was word-for-word identical to a real one, `*** CORRUPTION ***` and a
+/// plausible address included. Two things then went wrong on **every** boot:
+///
+/// 1. Anyone grepping a serial log for corruption got a false positive. It cost
+///    about an hour during the `B-VIRTIO-GPU-FLAT-SCANOUT-WILD-WRITE`
+///    diagnosis, because the reported slot lay inside `KERNEL_BOOT_STACK` and
+///    so looked like the allocator handing out a slot inside the live boot
+///    stack — a spectacular bug, and not a real one. The only disambiguation
+///    was in the *surrounding* lines.
+/// 2. The synthetic find was counted in `CORRUPTIONS`, which
+///    `stats().corruptions` exposes and which `main.rs`'s Path-Z hunt
+///    checkpoint prints as the number a soak reads to decide a boot was clean.
+///    A health signal that is nonzero on a healthy boot is not a health signal.
+///
+/// A log line that means two different things is not a diagnostic.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Origin {
+    /// A real find: poison in a parked slot was overwritten by something.
+    Real,
+    /// The self-test corrupting its own stack buffer on purpose.
+    SelfTest,
+}
+
 /// Report a corrupted parked slot to the serial log (B-KNULLJUMP candidate).
-fn report(addr: usize, class_idx: usize, slot_size: usize, off: usize) {
-    CORRUPTIONS.fetch_add(1, Ordering::Relaxed);
+fn report(addr: usize, class_idx: usize, slot_size: usize, off: usize, origin: Origin) {
+    if origin == Origin::Real {
+        CORRUPTIONS.fetch_add(1, Ordering::Relaxed);
+    }
     // SAFETY: `off < slot_size` and the slot is readable here.
     let bad = unsafe { rawmem::read_u8((addr.wrapping_add(off)) as *const u8) };
+    if origin == Origin::SelfTest {
+        // Deliberately does NOT contain the string `*** CORRUPTION ***`, so that
+        // grepping a log for it finds only the real thing.
+        serial_println!(
+            "[quarantine]   (self-test) expected corruption at scratch slot {:#x} \
+             (class {}, {} B) byte +{} = {:#04x} (expected {:#04x}) — this is the \
+             detector proving itself, not a finding",
+            addr,
+            class_idx,
+            slot_size,
+            off,
+            bad,
+            POISON_FREE
+        );
+        return;
+    }
     serial_println!(
         "[quarantine] *** CORRUPTION *** parked slot {:#x} (class {}, {} B) \
          byte +{} = {:#04x} (expected {:#04x}) — stale-pointer/UAF write \
@@ -259,7 +305,9 @@ pub unsafe fn on_free(
         // has not been reused since (it was held in the ring), so it is still
         // mapped and readable.
         if let Some(off) = unsafe { find_corruption(old_addr, old_size) } {
-            report(old_addr, old_class, old_size, off);
+            // Always `Real`: the self-test never stomps a slot it is about to
+            // have evicted, so a find here is genuine even during the self-test.
+            report(old_addr, old_class, old_size, off, Origin::Real);
         }
         TOTAL_EVICTED.fetch_add(1, Ordering::Relaxed);
         return Some((old_addr as *mut u8, old_class));
@@ -273,6 +321,16 @@ pub unsafe fn on_free(
 /// Call at a suspected corruption point (e.g. a Path-Z teardown checkpoint) to
 /// pin the corruption to a tight window instead of waiting for eviction.
 pub fn scan_all() -> usize {
+    scan_all_from(Origin::Real)
+}
+
+/// [`scan_all`], tagging any find with `origin`.
+///
+/// The origin is threaded as an argument rather than held in a global "we are
+/// self-testing now" flag on purpose: a flag would be readable by a *different*
+/// CPU sweeping the ring at the same moment, and would downgrade its genuine
+/// find to a self-test line. An argument cannot be misread by anyone else.
+fn scan_all_from(origin: Origin) -> usize {
     let mut corrupted = 0usize;
     crate::cpu::without_interrupts(|| {
         let q = RING.lock();
@@ -286,7 +344,7 @@ pub fn scan_all() -> usize {
             }
             // SAFETY: parked slots remain mapped/readable until evicted.
             if let Some(off) = unsafe { find_corruption(e.addr, e.slot_size) } {
-                report(e.addr, e.class_idx, e.slot_size, off);
+                report(e.addr, e.class_idx, e.slot_size, off, origin);
                 corrupted += 1;
             }
         }
@@ -297,7 +355,12 @@ pub fn scan_all() -> usize {
 /// Drain all parked slots, invoking `return_slot(ptr, class_idx)` for each so
 /// the caller can return them to the slab free list. Each slot's poison is
 /// verified first (corruption reported). Used to reclaim memory after a hunt.
-pub fn drain(mut return_slot: impl FnMut(*mut u8, usize)) {
+pub fn drain(return_slot: impl FnMut(*mut u8, usize)) {
+    drain_from(Origin::Real, return_slot);
+}
+
+/// [`drain`], tagging any find with `origin`. See [`scan_all_from`].
+fn drain_from(origin: Origin, mut return_slot: impl FnMut(*mut u8, usize)) {
     loop {
         let next: Option<(usize, usize, usize)> = crate::cpu::without_interrupts(|| {
             let mut q = RING.lock();
@@ -318,7 +381,7 @@ pub fn drain(mut return_slot: impl FnMut(*mut u8, usize)) {
                 }
                 // SAFETY: parked slot still mapped/readable.
                 if let Some(off) = unsafe { find_corruption(addr, slot_size) } {
-                    report(addr, class_idx, slot_size, off);
+                    report(addr, class_idx, slot_size, off, origin);
                 }
                 TOTAL_EVICTED.fetch_add(1, Ordering::Relaxed);
                 return_slot(addr as *mut u8, class_idx);
@@ -408,7 +471,9 @@ pub fn self_test() {
     unsafe {
         *a.add(7) = 0x00;
     } // stomp poison (like a zeroed link pointer)
-    let c1 = scan_all();
+      // `scan_all_from(SelfTest)`, not `scan_all()`: this find is ours and must
+      // not print `*** CORRUPTION ***` or move the global counter. See `Origin`.
+    let c1 = scan_all_from(Origin::SelfTest);
     assert!(c1 >= 1, "scan_all must catch the stomped parked slot");
     serial_println!("[quarantine]   scan_all (corrupted): OK ({} found)", c1);
 
@@ -417,7 +482,10 @@ pub fn self_test() {
     // SAFETY: b is a valid 32-byte writable stack slot.
     let _ = unsafe { on_free(b, 2, 32) };
     let mut returned = 0usize;
-    drain(|_ptr, class_idx| {
+    // `SelfTest` because slot A is still carrying test 3's deliberate stomp:
+    // drain re-verifies every slot on the way out, so a `Real` drain here would
+    // report the same synthetic corruption a second time.
+    drain_from(Origin::SelfTest, |_ptr, class_idx| {
         assert_eq!(class_idx, 2, "class index preserved through the ring");
         returned += 1;
     });
@@ -451,9 +519,30 @@ pub fn self_test() {
     assert_eq!(final_count, 0, "ring drained clean at end of self-test");
     serial_println!("[quarantine]   FIFO eviction accounting: OK");
 
+    // Test 6: the self-test's own deliberate corruption must not have moved the
+    // global counter. `stats().corruptions` is what `main.rs`'s Path-Z hunt
+    // checkpoint prints, and what a soak reads to decide a boot was clean — so
+    // a self-test that bumps it makes every healthy boot look unhealthy. This
+    // asserts the property rather than trusting the plumbing above, because the
+    // failure it guards against is silent by construction.
+    //
+    // Two things can trip this, and the message names both: either the
+    // `Origin` plumbing regressed and our synthetic stomp got counted, or a
+    // *genuine* corruption was found while the self-test ran. Both deserve a
+    // hard stop, but they want opposite responses — so do not let this message
+    // assert one cause the way the report line used to.
     let st = stats();
+    assert_eq!(
+        st.corruptions, baseline.corruptions,
+        "quarantine corruption count moved during the self-test: either the \
+         Origin tagging regressed and the synthetic stomp was counted, or a \
+         real corruption was detected — check the lines above for whether any \
+         said `*** CORRUPTION ***`"
+    );
+    serial_println!("[quarantine]   synthetic corruption stays out of stats: OK");
     serial_println!(
-        "[quarantine]   stats: parked+{}, evicted+{}, corruptions+{}",
+        "[quarantine]   stats: parked+{}, evicted+{}, corruptions+{} \
+         (corruptions must be 0 — the stomp in test 3 is tagged self-test)",
         st.total_parked - baseline.total_parked,
         st.total_evicted - baseline.total_evicted,
         st.corruptions - baseline.corruptions

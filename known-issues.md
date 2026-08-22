@@ -54883,7 +54883,27 @@ on the reaper being called from the right places.
 That converts a correctness bug into a probabilistic one and makes the failure
 rarer and harder to attribute, which is strictly worse.
 
-### TD-A-LOCKDEP-VIOLATION-REPORT-NAMES-NO-ADDRESS. `Vfs::unmount` and four other sites take a per-mount filesystem lock while holding the global VFS lock, inverting the order the overlay depends on — found 2026-08-22 (reported for weeks as unreadable `lock "?"` warnings; diagnostic fixed, root cause now identified)
+### [RESOLVED 2026-08-22] TD-A-LOCKDEP-VIOLATION-REPORT-NAMES-NO-ADDRESS. `Vfs::unmount` and four other sites took a per-mount filesystem lock while holding the global VFS lock, inverting the order the overlay depends on — found 2026-08-22 (reported for weeks as unreadable `lock "?"` warnings)
+
+**RESOLVED.** Fixed in `1422972ad` (vfs), after `b215b83c1` (lockdep prints
+addresses) made the reports readable and `70794b766` (symbolize picks the ELF
+that was actually built) made the addresses resolvable.
+
+Verified by boot cycle 10: `BOOT_OK`, and **all four violations are gone** —
+the only `Holding lock` lines left are lockdep's own self-test pairs at
+`0xdead000{1,2,3}`. No regressions: the FAIL count is unchanged at 5 (the 2
+known lane-B `make` failures and 3 `drm-atomic` negative tests, all
+pre-existing), overlay's 13 tests, container's 61 and OCI's 23 all pass, and
+the `[vfs] Unmounted <fstype> from '<path>'` lines still name the right
+filesystem, which exercises the rewritten two-phase `fs_type` capture.
+
+Worth recording *why* one fix cleared four reports: only the `VFS -> per-mount`
+direction was wrong. Removing that single edge broke every cycle in the order
+graph, so the overlay's `per-mount -> VFS` / `-> OVERLAYS` edges — which are
+the design working as §43 intends — stopped being reported as inversions
+because there was no longer a reverse edge for them to invert against. This is
+the confirmation that the analysis below was right; had the overlay's edges
+been independently wrong, they would still be firing.
 
 **Owner: lane A** (`kernel/src/lockdep.rs`, plus whichever subsystems the
 inversions turn out to be in).

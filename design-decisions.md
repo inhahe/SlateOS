@@ -36904,3 +36904,30 @@ holds one, so a request for one is already `PermissionDenied`.
 rejected, never clamped to the permissive one. "Unrecognised" and "written
 against a newer kernel" are indistinguishable from inside the kernel, and the
 safe reading of both is "no".
+
+### How the argument rules are actually tested
+
+Three tests, because the syscall has three layers and no single test reaches
+all of them:
+
+| Layer | Test | Runs where |
+|---|---|---|
+| The size arithmetic (`ex2_copy_plan`) | `spawn::self_test` → `test_ex2_copy_plan` — an exhaustive sweep of every multiple of 8 up to 4096 | pure math, no process |
+| The delegation policy | `spawn::self_test` → `test_spawn_capability_subset` | kernel; calls `spawn_process_with_caps` directly |
+| The copy-in path — reading `struct_size` from a user pointer, the tail check, the `cap_mode` dispatch, the `CapEntryInfo` decode | `spawn::self_test_spawn_ex2_abi` (`elf::build_spawn_ex2_abi_test_elf`) | **ring 3** |
+
+The third exists because the second cannot reach it: calling
+`spawn_process_with_caps` from the kernel skips the entire argument struct,
+which is where every rule in this section lives. The probe program pins each
+rule down with an accept/reject pair differing in one field, using a
+deliberately unmapped `elf_ptr` so that an accepted call returns
+`InvalidAddress` while a rejected one returns `InvalidArgument`. That
+difference is the whole trick — it makes it possible to tell *which* check
+fired, rather than only that something did.
+
+Writing it found a real defect. The subset arm had inherited
+`SYS_PROCESS_SPAWN_EX`'s lenience toward null *optional* array pointers, so
+`cap_ptr == 0` with `cap_count == 3` silently became "no capabilities" — the
+exact silent under-privileging this section argues against, reintroduced by
+copied code a few lines from where the argument against it is written down.
+Fixed in `0b78b6a01`; probe `0x1A` is now the regression test.

@@ -123,6 +123,33 @@ error out.
 Rights may be narrowed, never widened; the child gets the *requested* rights,
 not the parent's.
 
+### Exactly which error each malformed call gets
+
+Every row below is asserted from **ring 3** by
+`spawn::self_test_spawn_ex2_abi` — a native-ABI probe program that calls 559
+sixteen times with deliberately-shaped structs and checks each verdict, so
+these are observed returns, not intentions. Useful if you write negative
+tests against the mirror.
+
+| You pass | `rax` |
+|---|---|
+| `struct_size` = 0, 96, 108, or 4104 | `InvalidArgument` (-3) |
+| `struct_size` = 104, 128, or 136-with-zero-tail | accepted (proceeds to read `elf_ptr`) |
+| `struct_size` = 136 with a non-zero tail | `InvalidArgument` |
+| `cap_mode` = 2 (or anything not 0/1) | `InvalidArgument` |
+| `cap_mode` = 1, `cap_ptr` = 0, `cap_count` != 0 | `InvalidArgument` |
+| `cap_mode` = 1, `cap_ptr` = 0, `cap_count` = 0 | accepted — child gets nothing |
+| `cap_mode` = 1, bad `cap_ptr`, `cap_count` != 0 | `InvalidAddress` (-101) |
+| entry with an undefined `resource_type` | `InvalidArgument` |
+| entry with a non-zero `_reserved` | `InvalidArgument` |
+| `cap_mode` = 0 with junk in `cap_ptr`/`cap_count` | accepted — the array is never read |
+
+The one to notice is row 5. `SYS_PROCESS_SPAWN_EX` treats a null pointer as
+"this optional array is absent" for its fd map and argv, and it would have
+been easy to carry that over — but here the array is not optional, and
+silently substituting the empty list would start a child holding nothing.
+Don't emulate the lenient shape in the mirror.
+
 ## What I'd like from lane B
 
 1. **Mirror `SpawnEx2Args` + the three constants** in `posix/src/spawn.rs`,
@@ -157,5 +184,5 @@ that refusal, it can go.
 | Handler | `kernel/src/syscall/handlers.rs`, `sys_process_spawn_ex2` |
 | Number + full ABI doc | `kernel/src/syscall/number.rs`, `SYS_PROCESS_SPAWN_EX2` |
 | Delegation check | `kernel/src/proc/pcb.rs`, `inherit_caps_subset` |
-| Tests | `spawn::self_test` → `test_spawn_capability_subset`, `test_ex2_copy_plan`; `dispatch::self_test` → `test_dispatch_spawn_ex2_registered` |
+| Tests | `spawn::self_test` → `test_spawn_capability_subset`, `test_ex2_copy_plan`; `dispatch::self_test` → `test_dispatch_spawn_ex2_registered`; ring 3 → `spawn::self_test_spawn_ex2_abi` |
 | Rationale | `design-decisions.md` §279 |

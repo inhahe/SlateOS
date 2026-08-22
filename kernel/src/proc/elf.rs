@@ -6150,6 +6150,283 @@ pub fn build_exec_test_elf(elf_addr: u64, elf_len: u32) -> alloc::vec::Vec<u8> {
     buf
 }
 
+/// Build a **native-ABI** `ET_EXEC` test ELF that exercises the *argument
+/// validation* of `SYS_PROCESS_SPAWN_EX2` (559) from ring 3.
+///
+/// # Why this has to be a ring-3 program
+///
+/// `sys_process_spawn_ex2` is reachable in exactly one way — a userspace
+/// pointer to a `SpawnEx2Args` — and almost everything it does before it
+/// reaches shared code is *about* that pointer: reading `struct_size` out of
+/// the caller's memory, deciding how many bytes to copy, checking that the
+/// tail it does not understand is zero, dispatching on `cap_mode`, and
+/// decoding a `CapEntryInfo` array.  The kernel-side `spawn::self_test`
+/// covers the delegation *policy* by calling `spawn_process_with_caps`
+/// directly, and `ex2_copy_plan` covers the size arithmetic exhaustively as
+/// pure math — but neither of those crosses the user/kernel boundary, so the
+/// whole copy-in path is invisible to them.  This program is the only thing
+/// that runs it.
+///
+/// # Shape
+///
+/// The program reserves 256 bytes of stack, zeroes them (so every field the
+/// probes do not set is `0`, not whatever the loader happened to leave), and
+/// then runs a series of probes.  Each probe mutates one or two fields, calls
+/// syscall 559 with `rdi = rsp`, and compares `rax` against the expected
+/// error; on a mismatch it exits immediately with a probe-specific code, so a
+/// failure names the exact rule that broke rather than just "the spawn was
+/// wrong".  A clean `exit(0)` means every probe agreed.
+///
+/// `elf_ptr` is fixed at `0x0000_0030_0000_0000` — a canonical *user* address
+/// that is deliberately not mapped.  That is what makes the test able to
+/// distinguish two outcomes: a probe **rejected by the argument gate**
+/// returns `InvalidArgument` (-3), while a probe that **passes the gate**
+/// gets as far as reading the ELF image and returns `InvalidAddress` (-101).
+/// So `-101` means "this input was accepted", and the probes are arranged in
+/// accept/reject pairs differing in one field, which pins down *which* check
+/// fired instead of merely observing that something did.
+///
+/// # Probes
+///
+/// | Code | Input | Expect | Proves |
+/// |---|---|---|---|
+/// | `0x11` | `struct_size = 0` | `-3` | zero size is not "legacy" |
+/// | `0x12` | `struct_size = 96` | `-3` | below `SPAWN_EX2_MIN_SIZE` |
+/// | `0x13` | `struct_size = 108` | `-3` | not a multiple of 8 |
+/// | `0x14` | `struct_size = 4104` | `-3` | above `SPAWN_EX2_MAX_SIZE` |
+/// | `0x15` | `struct_size = 104` | `-101` | a short struct is legal, and the missing tail is zero-filled — an unzeroed `cap_mode` would have been rejected |
+/// | `0x16` | `struct_size = 128` | `-101` | the exact current size is accepted |
+/// | `0x17` | `struct_size = 136`, tail `= 0` | `-101` | a *newer* caller with an all-zero tail is accepted |
+/// | `0x18` | `struct_size = 136`, tail `= 1` | `-3` | a non-zero unknown field is refused, never ignored |
+/// | `0x19` | `cap_mode = 2` | `-3` | an unknown mode is not clamped to a known one |
+/// | `0x1A` | `cap_mode = 1`, `cap_ptr = 0`, `cap_count = 3` | `-3` | a null array with a count is a caller bug, not "no capabilities" |
+/// | `0x1B` | `cap_mode = 1`, `cap_ptr = 0`, `cap_count = 0` | `-101` | …but the two spellings of "nothing" agree |
+/// | `0x1C` | `cap_ptr` unmapped, `cap_count = 1` | `-101` | the array itself is bounced through `read_user_items` |
+/// | `0x1D` | entry `resource_type = 9999` | `-3` | an undefined resource type is refused |
+/// | `0x1E` | entry `_reserved[0] = 1` | `-3` | the reserved field is validated, not skipped |
+/// | `0x1F` | a well-formed entry | `-101` | …and a clean entry passes the decode |
+/// | `0x20` | `cap_mode = 0` with a junk `cap_ptr`/`cap_count` | `-101` | inherit-all ignores the array entirely |
+///
+/// # Deliberately out of scope
+///
+/// A *successful* subset spawn is not attempted here.  `spawn_ex_common`
+/// reads the ELF image out of user memory before `spawn_process_inner` runs
+/// the delegation check, so with an unmapped `elf_ptr` the delegation verdict
+/// can never be reached — and giving this program a real nested ELF would
+/// test the loader, not the ABI.  The delegation rules (narrowing allowed,
+/// widening and unheld resources refused, whole spawn aborted) are covered by
+/// `spawn::self_test` → `test_spawn_capability_subset`.
+#[must_use]
+#[allow(
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects,
+    clippy::cast_possible_truncation
+)]
+pub fn build_spawn_ex2_abi_test_elf() -> alloc::vec::Vec<u8> {
+    use alloc::vec;
+
+    let phdr_offset: u64 = 64;
+    let code_offset: u64 = 120; // 64 + 56
+    let load_vaddr: u64 = 0x0000_0040_0000_0000;
+
+    /// A canonical user address that is never mapped in a fresh process, so
+    /// touching it yields `InvalidAddress` rather than a fault or a success.
+    const UNMAPPED: u64 = 0x0000_0030_0000_0000;
+
+    /// `KernelError::InvalidArgument` as it arrives in `rax`.
+    const EINVAL: i32 = -3;
+    /// `KernelError::InvalidAddress` as it arrives in `rax`.
+    const EFAULT: i32 = -101;
+
+    // `SpawnEx2Args` field displacements from `rsp`.
+    const F_SIZE: u32 = 0;
+    const F_ELF_PTR: u32 = 8;
+    const F_ELF_LEN: u32 = 16;
+    const F_CAP_MODE: u32 = 104;
+    const F_CAP_PTR: u32 = 112;
+    const F_CAP_COUNT: u32 = 120;
+    /// The first byte past the struct — the "unknown tail" a newer caller
+    /// would have written a new field into.
+    const F_TAIL: u32 = 128;
+    /// A scratch `CapEntryInfo`: `resource_type` and `_reserved[3]` share this
+    /// qword, then `rights`, then `resource_id` (both left zero).
+    const F_ENTRY: u32 = 160;
+
+    let mut code: alloc::vec::Vec<u8> = alloc::vec::Vec::new();
+
+    // --- emitters -----------------------------------------------------------
+    /// `mov rax, imm` — the short `mov eax` form when the value fits, since it
+    /// zero-extends and every value here is unsigned.
+    fn mov_rax(code: &mut alloc::vec::Vec<u8>, v: u64) {
+        if v <= u64::from(u32::MAX) {
+            code.push(0xB8);
+            code.extend_from_slice(&(v as u32).to_le_bytes());
+        } else {
+            code.extend_from_slice(&[0x48, 0xB8]);
+            code.extend_from_slice(&v.to_le_bytes());
+        }
+    }
+    /// `mov [rsp+disp32], rax`.  disp32 throughout: the scratch entry sits
+    /// past +127, and one uniform form is easier to check by eye than a mix.
+    fn store(code: &mut alloc::vec::Vec<u8>, off: u32) {
+        code.extend_from_slice(&[0x48, 0x89, 0x84, 0x24]);
+        code.extend_from_slice(&off.to_le_bytes());
+    }
+    /// `mov qword [rsp+off], imm`.
+    fn set(code: &mut alloc::vec::Vec<u8>, off: u32, v: u64) {
+        mov_rax(code, v);
+        store(code, off);
+    }
+    /// `lea rax, [rsp+disp32]`.
+    fn lea_rax(code: &mut alloc::vec::Vec<u8>, off: u32) {
+        code.extend_from_slice(&[0x48, 0x8D, 0x84, 0x24]);
+        code.extend_from_slice(&off.to_le_bytes());
+    }
+    /// `spawn_ex2(rsp)`; if `rax != expect`, `exit(fail)` on the spot.
+    ///
+    /// `rdi` is reloaded from `rsp` every time rather than kept in a
+    /// callee-saved register, so a probe depends on nothing surviving the
+    /// syscall except `rsp` itself.
+    fn probe(code: &mut alloc::vec::Vec<u8>, expect: i32, fail: u32) {
+        code.push(0xB8); // mov eax, 559
+        code.extend_from_slice(&559u32.to_le_bytes());
+        code.extend_from_slice(&[0x48, 0x89, 0xE7]); // mov rdi, rsp
+        code.extend_from_slice(&[0x0F, 0x05]); // syscall
+        code.extend_from_slice(&[0x48, 0x3D]); // cmp rax, imm32 (sign-extended)
+        code.extend_from_slice(&(expect as u32).to_le_bytes());
+        code.extend_from_slice(&[0x74, 0x0D]); // je +13 — over the exit block
+        code.push(0xBF); // mov edi, <fail>
+        code.extend_from_slice(&fail.to_le_bytes());
+        code.extend_from_slice(&[0xB8, 0x01, 0x00, 0x00, 0x00]); // mov eax, SYS_EXIT
+        code.extend_from_slice(&[0x0F, 0x05]); // syscall
+        code.push(0xCC); // int3 — exit does not return
+    }
+
+    // --- prologue: 256 zeroed bytes of stack --------------------------------
+    // Zeroing matters as much as reserving: every probe below sets only the
+    // fields it is about, and reads a guaranteed-zero value for the rest.
+    code.extend_from_slice(&[0x48, 0x81, 0xEC]); // sub rsp, imm32
+    code.extend_from_slice(&256u32.to_le_bytes());
+    code.push(0xFC); // cld — `rep stosq` must count upward
+    code.extend_from_slice(&[0x48, 0x89, 0xE7]); // mov rdi, rsp
+    code.extend_from_slice(&[0x31, 0xC0]); // xor eax, eax
+    code.push(0xB9); // mov ecx, 32 (× 8 bytes = 256)
+    code.extend_from_slice(&32u32.to_le_bytes());
+    code.extend_from_slice(&[0xF3, 0x48, 0xAB]); // rep stosq
+
+    // A non-zero `elf_len` is required before the ELF pointer is even looked
+    // at, so set both once: they are the same for every probe.
+    set(&mut code, F_ELF_PTR, UNMAPPED);
+    set(&mut code, F_ELF_LEN, 16);
+
+    // --- the size gate ------------------------------------------------------
+    set(&mut code, F_SIZE, 0);
+    probe(&mut code, EINVAL, 0x11);
+    set(&mut code, F_SIZE, 96); // SPAWN_EX2_MIN_SIZE - 8
+    probe(&mut code, EINVAL, 0x12);
+    set(&mut code, F_SIZE, 108); // not a multiple of 8
+    probe(&mut code, EINVAL, 0x13);
+    set(&mut code, F_SIZE, 4104); // SPAWN_EX2_MAX_SIZE + 8
+    probe(&mut code, EINVAL, 0x14);
+
+    // 104 is the shortest legal size: a version-1 caller.  Reaching the ELF
+    // read proves both that it was accepted *and* that the fields it stopped
+    // short of were zero-filled — `cap_mode` is one of them, and any value but
+    // zero there is rejected.
+    set(&mut code, F_SIZE, 104);
+    probe(&mut code, EFAULT, 0x15);
+    set(&mut code, F_SIZE, 128);
+    probe(&mut code, EFAULT, 0x16);
+
+    // --- the unknown tail ---------------------------------------------------
+    set(&mut code, F_SIZE, 136);
+    set(&mut code, F_TAIL, 0);
+    probe(&mut code, EFAULT, 0x17);
+    set(&mut code, F_TAIL, 1);
+    probe(&mut code, EINVAL, 0x18);
+    set(&mut code, F_TAIL, 0);
+    set(&mut code, F_SIZE, 128);
+
+    // --- cap_mode dispatch --------------------------------------------------
+    set(&mut code, F_CAP_MODE, 2);
+    probe(&mut code, EINVAL, 0x19);
+
+    // --- the capability array ----------------------------------------------
+    set(&mut code, F_CAP_MODE, 1);
+    set(&mut code, F_CAP_PTR, 0);
+    set(&mut code, F_CAP_COUNT, 3);
+    probe(&mut code, EINVAL, 0x1A);
+    set(&mut code, F_CAP_COUNT, 0);
+    probe(&mut code, EFAULT, 0x1B);
+    set(&mut code, F_CAP_PTR, UNMAPPED);
+    set(&mut code, F_CAP_COUNT, 1);
+    probe(&mut code, EFAULT, 0x1C);
+
+    // Point at the scratch entry for the remaining three.
+    lea_rax(&mut code, F_ENTRY);
+    store(&mut code, F_CAP_PTR);
+    set(&mut code, F_ENTRY, 9999); // resource_type = 9999, _reserved = 0
+    probe(&mut code, EINVAL, 0x1D);
+    set(&mut code, F_ENTRY, 1 | (1 << 16)); // resource_type = 1, _reserved[0] = 1
+    probe(&mut code, EINVAL, 0x1E);
+    set(&mut code, F_ENTRY, 1); // resource_type = 1, _reserved = 0
+    probe(&mut code, EFAULT, 0x1F);
+
+    // --- inherit-all ignores the array --------------------------------------
+    // Only the mode changes here; the pointer and count are junk, so an accept
+    // can only mean the array was never consulted.
+    set(&mut code, F_CAP_MODE, 0);
+    set(&mut code, F_CAP_PTR, UNMAPPED);
+    set(&mut code, F_CAP_COUNT, 7);
+    probe(&mut code, EFAULT, 0x20);
+
+    // --- every probe agreed -------------------------------------------------
+    code.extend_from_slice(&[0x31, 0xFF]); // xor edi, edi
+    code.extend_from_slice(&[0xB8, 0x01, 0x00, 0x00, 0x00]); // mov eax, SYS_EXIT
+    code.extend_from_slice(&[0x0F, 0x05]); // syscall
+    code.push(0xCC); // int3
+
+    // --- file image ---------------------------------------------------------
+    let code_len = code.len();
+    let file_size = code_offset as usize + code_len;
+    let mut buf = vec![0u8; file_size];
+
+    buf[0] = 0x7F;
+    buf[1] = b'E';
+    buf[2] = b'L';
+    buf[3] = b'F';
+    buf[EI_CLASS] = ELFCLASS64;
+    buf[EI_DATA] = ELFDATA2LSB;
+    buf[EI_VERSION] = EV_CURRENT;
+    write_u16(&mut buf, 16, ET_EXEC);
+    write_u16(&mut buf, 18, EM_X86_64);
+    write_u32(&mut buf, 20, u32::from(EV_CURRENT));
+    write_u64(&mut buf, 24, load_vaddr); // e_entry
+    write_u64(&mut buf, 32, phdr_offset); // e_phoff
+    write_u64(&mut buf, 40, 0); // e_shoff
+    write_u32(&mut buf, 48, 0); // e_flags
+    write_u16(&mut buf, 52, ELF64_EHDR_SIZE as u16);
+    write_u16(&mut buf, 54, ELF64_PHDR_SIZE as u16);
+    write_u16(&mut buf, 56, 1); // e_phnum
+    write_u16(&mut buf, 58, ELF64_SHDR_SIZE as u16);
+    write_u16(&mut buf, 60, 0); // e_shnum
+    write_u16(&mut buf, 62, 0); // e_shstrndx
+
+    let ph = phdr_offset as usize;
+    write_u32(&mut buf, ph, PT_LOAD);
+    write_u32(&mut buf, ph + 4, PF_R | PF_X);
+    write_u64(&mut buf, ph + 8, code_offset); // p_offset
+    write_u64(&mut buf, ph + 16, load_vaddr); // p_vaddr
+    write_u64(&mut buf, ph + 24, 0); // p_paddr
+    write_u64(&mut buf, ph + 32, code_len as u64); // p_filesz
+    write_u64(&mut buf, ph + 40, code_len as u64); // p_memsz
+    write_u64(&mut buf, ph + 48, 0x1000); // p_align
+
+    buf[code_offset as usize..file_size].copy_from_slice(&code);
+
+    buf
+}
+
 /// Build a test ELF for SEH: exception handler catches fault and exits.
 ///
 /// The ELF contains two code regions:

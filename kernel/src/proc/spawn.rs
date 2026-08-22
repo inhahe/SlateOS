@@ -21649,6 +21649,92 @@ pub fn self_test_linux_execveat() -> KernelResult<()> {
     Ok(())
 }
 
+/// Ring-3 end-to-end test of the `SYS_PROCESS_SPAWN_EX2` (559) **argument
+/// ABI**: the size gate, the unknown-tail rule, the `cap_mode` dispatch and
+/// the `CapEntryInfo` decode, all driven through a real userspace pointer.
+///
+/// The kernel-side tests in [`self_test`] reach the delegation *policy* by
+/// calling [`spawn_process_with_caps`] directly, and `ex2_copy_plan` proves
+/// the size arithmetic exhaustively as pure math — but between the two sits
+/// the copy-in path, which only exists for a userspace caller and which no
+/// kernel-side test can execute.  This runs it.
+///
+/// The probe program is [`elf::build_spawn_ex2_abi_test_elf`]; its doc
+/// comment lists all sixteen probes and what each one proves.  Every probe
+/// compares the syscall's return against an expected error and exits on the
+/// first disagreement with its own code, so a non-zero exit names the exact
+/// rule that broke.  `exit(0)` means all sixteen agreed.
+///
+/// The child is given **no capabilities**, because it never gets far enough
+/// to need one: `SYS_PROCESS_SPAWN_EX2` is not capability-gated (neither is
+/// `SYS_PROCESS_SPAWN_EX`), and every probe is designed to fail before a
+/// process is created.
+pub fn self_test_spawn_ex2_abi() -> KernelResult<()> {
+    serial_println!("[spawn] Running SYS_PROCESS_SPAWN_EX2 argument-ABI (ring 3) test...");
+
+    let probe_elf = elf::build_spawn_ex2_abi_test_elf();
+
+    let argv: &[&[u8]] = &[b"spawnex2abi"];
+    let envp: &[&[u8]] = &[];
+    let options = SpawnOptions {
+        name: "spawn-test-ex2-abi",
+        parent: 0,
+        priority: DEFAULT_PRIORITY,
+        capabilities: &[],
+        fd_map: &[],
+        argv,
+        envp,
+        exe_path: None,
+        cwd: None,
+        uid_gid: None,
+    };
+
+    let result = match spawn_process(&probe_elf, &options) {
+        Ok(r) => r,
+        Err(e) => {
+            serial_println!("[spawn]   FAIL: spawn-ex2-abi probe spawn returned {:?}", e);
+            return Err(e);
+        }
+    };
+
+    // Sixteen syscalls, none of which block, so the probe runs to exit within
+    // its first slice; the yields are the same belt-and-braces the other ring-3
+    // tests use for the scheduler to actually reap it.
+    crate::sched::yield_now();
+    crate::sched::yield_now();
+    crate::sched::yield_now();
+
+    let state = pcb::state(result.pid);
+    let exit_code = pcb::exit_code(result.pid);
+
+    thread::on_thread_exit(result.task_id);
+    pcb::destroy(result.pid);
+
+    if state != Some(pcb::ProcessState::Zombie) {
+        serial_println!(
+            "[spawn]   FAIL: spawn_ex2 ABI (ring 3) — expected Zombie, got {:?}",
+            state
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    if exit_code != Some(0) {
+        serial_println!(
+            "[spawn]   FAIL: spawn_ex2 ABI (ring 3) — probe {:#04x} disagreed (exit {:?}); \
+             see build_spawn_ex2_abi_test_elf's probe table for what that code checks",
+            exit_code.unwrap_or(-1),
+            exit_code
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    serial_println!(
+        "[spawn]   SYS_PROCESS_SPAWN_EX2 argument ABI (ring 3: 16 probes — size gate, \
+         unknown tail, cap_mode, CapEntryInfo): OK"
+    );
+    Ok(())
+}
+
 /// Path Z end-to-end test: run a **real, prebuilt, dynamically-linked glibc**
 /// Linux binary to completion.
 ///

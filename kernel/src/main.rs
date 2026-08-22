@@ -3058,6 +3058,19 @@ extern "C" fn kernel_main() -> ! {
         );
     }
 
+    // Ring-3 test of the SYS_PROCESS_SPAWN_EX2 (559) argument ABI: a native
+    // probe program calls the syscall sixteen times with deliberately-shaped
+    // argument structs and checks each verdict.  This is the only test that
+    // crosses the user/kernel boundary for that syscall — the kernel-side
+    // tests reach the delegation policy and the size arithmetic directly, but
+    // never the copy-in path a real caller uses.
+    if let Err(e) = proc::spawn::self_test_spawn_ex2_abi() {
+        serial_println!(
+            "WARNING: SYS_PROCESS_SPAWN_EX2 argument-ABI (ring 3) self-test failed: {:?}",
+            e
+        );
+    }
+
     {
         #[inline(never)]
         fn case() {

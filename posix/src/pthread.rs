@@ -5014,8 +5014,23 @@ mod tests {
         assert_eq!(got, core::ptr::addr_of!(val) as *mut u8);
     }
 
+    // The four error-path tests below take `TSD_TEST_LOCK` like their
+    // happy-path siblings, even though three of them provably return before
+    // touching any shared state. `tsd_key_delete_returns_zero` is not one of
+    // the three and is why the rule is "all of them": `pthread_key_delete(0)`
+    // clears `TSD_DESTRUCTORS[0]` unconditionally, and key 0 is the *first*
+    // key `pthread_key_create` hands out — so, run unlocked, it silently wipes
+    // the destructor `tsd_create_set_get` had just registered.
+    //
+    // The other three lock for a reason worth stating: whether they touch
+    // shared state is a property of where `pthread_*`'s argument checks sit
+    // relative to `tsd_lock()`, which is an implementation detail nobody
+    // editing these functions would think to preserve. Making the test depend
+    // on it buys nothing and can go quietly wrong later.
+
     #[test]
     fn tsd_key_create_null_returns_efault() {
+        let _g = TSD_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         assert_eq!(
             unsafe { pthread_key_create(core::ptr::null_mut(), None) },
             errno::EFAULT
@@ -5024,11 +5039,13 @@ mod tests {
 
     #[test]
     fn tsd_key_delete_returns_zero() {
+        let _g = TSD_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         assert_eq!(pthread_key_delete(0), 0);
     }
 
     #[test]
     fn tsd_getspecific_invalid_key() {
+        let _g = TSD_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         // Key beyond MAX_KEYS should return null.
         let got = unsafe { pthread_getspecific(9999) };
         assert!(got.is_null());
@@ -5036,6 +5053,7 @@ mod tests {
 
     #[test]
     fn tsd_setspecific_invalid_key() {
+        let _g = TSD_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let ret = unsafe { pthread_setspecific(9999, core::ptr::null_mut()) };
         assert_eq!(ret, errno::EINVAL);
     }

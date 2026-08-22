@@ -12,13 +12,10 @@
 
 kernel/src/net/raw.rs:CLAIMED
 kernel/src/net/raw.rs:OWNER
-posix/src/crt.rs:AT_RANDOM_BYTES
 posix/src/crt.rs:EXCEPTION_BUF
 posix/src/crt.rs:INIT_FDS_BUF
 posix/src/crt.rs:ON_EXIT_COUNT
 posix/src/crt.rs:ON_EXIT_FUNCS
-posix/src/dirent.rs:GETDENTS_POOL
-posix/src/linux_seccomp.rs:DUMMY
 posix/src/pthread.rs:THREAD_NAMES
 posix/src/random.rs:GENERATION
 posix/src/signal.rs:CALLED
@@ -31,14 +28,10 @@ posix/src/socket.rs:GAI_RESULT2
 posix/src/socket.rs:IF_NAMEINDEX_NAMES
 posix/src/socket.rs:IF_NAMEINDEX_TABLE
 posix/src/stdio.rs:COUNTER
-posix/src/stdio.rs:FILE_POOL
 posix/src/stdio.rs:STATIC_BUF
 posix/src/stdio.rs:STDERR_FILE
 posix/src/stdio.rs:STDIN_FILE
 posix/src/stdio.rs:STDOUT_FILE
-posix/src/time.rs:timezone
-posix/src/unistd.rs:KLOG_CLEAR_FLOOR
-posix/src/unistd.rs:KLOG_READ_CURSOR
 posix/src/wchar.rs:INTERNAL_MBSTATE
 userspace/authlib/src/lib.rs:FAKE_NOW_PAIR
 userspace/ping/src/main.rs:RUNNING

@@ -59548,6 +59548,121 @@ need to return to the unset sentinel *within* one body. Its doc says so.
 
 **Backlog: 32.** Confirmed green: `cargo test -p posix --lib`, 20515 passed.
 
+### Second pass: 32 → 25, and the detector was reading comments
+
+Four more closed by the discriminator above, and one real bug fell out of it.
+
+*Converted* (2): `unistd.rs`'s `KLOG_READ_CURSOR` and `KLOG_CLEAR_FLOOR` — the
+`klogctl` read cursor and clear floor, whose own doc comments already said
+"per-process". They were plain `static AtomicU64`s, which is right on the
+target and wrong under libtest; `SYSLOG_ACTION_READ` *consumes* from the
+cursor, so a second reader sharing it sees entries the first already took.
+`process_global!`, four one-line wrappers to keep `unsafe` out of the match
+body, no test guards.
+
+*Deleted* (1): `linux_seccomp.rs`'s `DUMMY` was a `static mut u8` existing only
+to be a non-null pointer for an EFAULT check, carrying a "single-threaded test"
+SAFETY note that was untrue. Nothing ever wrote through it, so the `mut` was
+excusing a mutability that was never used: it is now `static DUMMY: u8 = 0`
+with `(&raw const DUMMY).cast_mut()`, and there is nothing left to race.
+
+*Fixed, and it was a real bug* (1): `crt.rs`'s `AT_RANDOM_BYTES` — see
+**B-AT-RANDOM-WAS-RE-ROLLED-UNDER-A-RACE** below.
+
+*Locked* (3 new findings): `pthread.rs`'s four TSD error-path tests bypassed
+the `TSD_TEST_LOCK` their happy-path siblings take. Three of them provably
+return before `tsd_lock()`, but `tsd_key_delete_returns_zero` does not:
+`pthread_key_delete(0)` clears `TSD_DESTRUCTORS[0]` unconditionally, and key 0
+is the *first* key `pthread_key_create` hands out — so unlocked it silently
+wipes the destructor `tsd_create_set_get` had just registered. All four now
+take the lock, because whether the other three touch shared state depends on
+where each function's argument checks sit relative to `tsd_lock()`, which is
+an implementation detail nobody editing those functions would think to
+preserve.
+
+**The detector was matching the global's name inside comments.** This is worth
+recording because it inverted the tool's precision exactly where precision
+matters. `time.rs`'s `settimeofday` contains
+
+```rust
+// as a (deprecated) timezone-only update.  We accept it as a no-op.
+```
+
+which made it a "toucher" of the `timezone` global and dragged **all 31**
+`settimeofday` tests into the report — not one of which reads the zone. Prose
+*about* a global is the single most likely place for its name to appear
+without being an access, so this was not background noise; it was noise
+concentrated on the entries a reader would most want to trust.
+
+`strip_comments_and_strings()` now blanks Rust line comments, nested block
+comments, string/byte/raw-string/char literals — space-for-character, so line
+numbers and block matching still work against the result — and body matching
+runs on that. Sixteen unit cases cover nesting, escapes, `r#"…"#`, the
+lifetime-vs-char-literal ambiguity and an unterminated string.
+
+Effect: `timezone` (31), `stdio.rs:FILE_POOL` (24) and `dirent.rs:GETDENTS_POOL`
+(6) all fall to zero unserialised, and `--all` confirms each is still *seen*
+and classified as fully serialised rather than having vanished from analysis —
+the fix moved the tool toward precision, not toward silence, which is the
+direction that matters for a checker nobody re-derives by hand. It also
+*exposed* the three pthread TSD entries above, which had been hidden behind a
+lock hint that was itself only in a comment.
+
+**Backlog: 25.**
+
+---
+
+## B-AT-RANDOM-WAS-RE-ROLLED-UNDER-A-RACE — two threads could both fill the stack-canary buffer
+
+**Status:** fixed 2026-08-22 · `posix/src/crt.rs`
+
+**In short:** every program gets a small random number at startup that the
+compiler uses to detect a stack overrun — if the number changes underneath a
+running function, the program kills itself reporting an attack that never
+happened. Our code that produced that number could be run by two threads at
+once, and each would generate a *different* number and overwrite the other's.
+A program doing nothing wrong could therefore abort at random. It is fixed;
+this entry records what was wrong and why the old comment said it was fine.
+
+`getauxval(AT_RANDOM)` returns a pointer to a 16-byte buffer that glibc and
+musl both use to seed `__stack_chk_guard` — the "stack canary", a value written
+below a function's local variables on entry and checked on exit, on the theory
+that an overrun would have to clobber it. `ensure_at_random_initialized()`
+filled that buffer on first use, gated on an `AtomicBool`, with this comment:
+
+> The buffer is owned by this module and only ever written here. A race in
+> single-process userspace is harmless: both racers fill the same buffer, and
+> the second write simply overwrites the first.
+
+That is wrong twice. It is a data race in the language sense — a 16-byte write
+concurrent with the 16-byte read a third thread is doing through the pointer
+`getauxval` just handed it. And "both racers fill the same buffer" is the
+failure, not the excuse for it: `fill_random` gives each racer *different*
+bytes, so a thread that re-rolls the buffer after another has already cached a
+canary makes that thread's next function epilogue compare a new guard against
+an old one and abort a process that was never smashed.
+
+The fix is a three-state latch (`UNINIT` / `FILLING` / `READY`) instead of a
+bool. `compare_exchange(UNINIT → FILLING)` admits exactly one filler; every
+other caller spins on `Acquire` until `READY` rather than writing, which is
+correct here because the critical section is one `fill_random` call, it runs
+at most once per process, and the futex machinery a blocking wait would need
+is itself a posix facility that may not be initialized this early. The
+`Release` store pairs with those `Acquire` loads so a thread that sees `READY`
+sees all sixteen bytes. On the `abort()` path the latch is deliberately left
+at `FILLING`: `abort()` does not return and takes the process with it, so
+there is no thread left to spin.
+
+`AT_RANDOM_BYTES` is now in the detector's `IGNORE` table rather than the
+baseline, with that reasoning attached — it is reachable from ten tests but
+executes in one, and the entry records a fixed bug rather than an excused one.
+
+**How it was found:** not by a test. The raced-globals detector flagged it, and
+the flag was only readable because the entry had to be *read before it was
+fixed* — the caveat written into this file one pass earlier. A tool that only
+listed line numbers would have produced a lock here, which would have been the
+wrong fix and would have left the target build racing.
+
 It is scoped to `posix/` and `userspace/` for the same reason gate 2 is scoped
 to `userspace/`: a lane A or C push must never pay for, or be blocked by, a lane
 B check. Bypass is `ALLOW_RACED_GLOBAL=1`, separate from the other two gates'.

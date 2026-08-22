@@ -200,6 +200,16 @@ IGNORE: dict[str, str] = {
     # `#[test]` body always runs with live TLS, so no test can reach it -- and a
     # thread that does is, as the comment there notes, the last one alive.
     "posix/src/perthread.rs:HOST_FALLBACK": "only reachable after thread-local teardown, which no #[test] body is",
+    # Write-once under a three-state latch. `ensure_at_random_initialized()`
+    # admits exactly one writer via compare_exchange(UNINIT -> FILLING); every
+    # other caller spins until READY rather than writing, and the Release/Acquire
+    # pair publishes all sixteen bytes. So the `addr_of_mut!` the detector sees
+    # is reachable from ten tests but executes in only one of them, and no test
+    # can observe a partially-written or re-rolled buffer. It genuinely raced
+    # before 2026-08-22 -- the old bool let two threads both fill it, which
+    # would re-roll a stack canary another thread had already cached -- so this
+    # entry records a fixed bug, not an excused one.
+    "posix/src/crt.rs:AT_RANDOM_BYTES": "write-once behind a compare_exchange latch; losers wait rather than write",
 }
 
 
@@ -374,12 +384,97 @@ def _host_excluded_lines(lines: list[str]) -> set[int]:
     return excluded
 
 
+def strip_comments_and_strings(src: str) -> str:
+    """Blank out Rust comments and literals, keeping every byte offset intact.
+
+    This is not cosmetic. Reachability here is "does the word appear in the
+    body", and `time.rs`'s `settimeofday` contains the line
+
+        // as a (deprecated) timezone-only update.  We accept it as a no-op.
+
+    which made it a "toucher" of the `timezone` global and dragged all
+    thirty-one settimeofday tests into the report -- none of which read the
+    zone at all. Prose about a global is the single most likely place for its
+    name to appear without being an access, so matching in comments does not
+    merely add noise, it adds noise concentrated exactly where the tool is
+    supposed to be precise.
+
+    Replacement is space-for-character (newlines kept) so line numbers, block
+    matching and `_host_excluded_lines` all keep working against the result.
+    """
+    out = list(src)
+    i, n = 0, len(src)
+
+    def blank(start: int, stop: int) -> None:
+        for k in range(start, min(stop, n)):
+            if out[k] != "\n":
+                out[k] = " "
+
+    while i < n:
+        c = src[i]
+        # Raw string: r"..." / r#"..."# / br##"..."##
+        m = re.compile(r"(?:b|c)?r(#*)\"").match(src, i)
+        if m and (i == 0 or not (src[i - 1].isalnum() or src[i - 1] == "_")):
+            close = '"' + m.group(1)
+            end = src.find(close, m.end())
+            end = n if end < 0 else end + len(close)
+            blank(i, end)
+            i = end
+            continue
+        if c == "/" and i + 1 < n and src[i + 1] == "/":
+            end = src.find("\n", i)
+            end = n if end < 0 else end
+            blank(i, end)
+            i = end
+            continue
+        if c == "/" and i + 1 < n and src[i + 1] == "*":
+            # Rust block comments nest.
+            depth, j = 1, i + 2
+            while j < n and depth:
+                if src.startswith("/*", j):
+                    depth, j = depth + 1, j + 2
+                elif src.startswith("*/", j):
+                    depth, j = depth - 1, j + 2
+                else:
+                    j += 1
+            blank(i, j)
+            i = j
+            continue
+        if c == '"':
+            j = i + 1
+            while j < n:
+                if src[j] == "\\":
+                    j += 2
+                    continue
+                if src[j] == '"':
+                    j += 1
+                    break
+                j += 1
+            blank(i, j)
+            i = j
+            continue
+        if c == "'":
+            # A char literal, or a lifetime (`'a`) -- only the former closes.
+            m = re.compile(r"'(?:\\.|[^\\'])'").match(src, i)
+            if m:
+                blank(i, m.end())
+                i = m.end()
+                continue
+        i += 1
+    return "".join(out)
+
+
 def analyse(path: Path) -> list[tuple[str, str, list[str], list[str]]]:
     """Return (name, decl_site, unserialised_tests, serialised_tests) per global."""
     try:
-        lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+        raw = path.read_text(encoding="utf-8", errors="replace")
     except OSError:
         return []
+    lines = raw.splitlines()
+    # Structural matching (`#[cfg]`, `///`, `#[test]`, `fn`) needs the real
+    # text; word matching inside bodies must not see prose. Same line count, so
+    # every index below is valid against either.
+    clean_lines = strip_comments_and_strings(raw).splitlines()
 
     # A global the host build never compiles cannot be raced by a host test.
     excluded = _host_excluded_lines(lines)
@@ -397,7 +492,7 @@ def analyse(path: Path) -> list[tuple[str, str, list[str], list[str]]]:
     # Drop the globals nothing ever resets -- see `_reset_write`. Checked over
     # the whole file rather than per function, because the reset and the read
     # are routinely in different places (a helper resets, the test reads).
-    text = "\n".join(lines)
+    text = "\n".join(clean_lines)
     globals_ = {n: s for n, s in globals_.items() if _reset_write(n).search(text)}
     if not globals_:
         return []
@@ -414,7 +509,7 @@ def analyse(path: Path) -> list[tuple[str, str, list[str], list[str]]]:
         fns.append((m.group(1), i, _block_end(lines, i), is_test))
 
     def body(span: tuple[int, int]) -> str:
-        return "\n".join(lines[span[0] : span[1] + 1])
+        return "\n".join(clean_lines[span[0] : span[1] + 1])
 
     # Helpers that take a lock on the caller's behalf. A test calling one of
     # these is serialised even though the word never appears in it.

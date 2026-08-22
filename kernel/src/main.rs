@@ -1484,10 +1484,8 @@ extern "C" fn kernel_main() -> ! {
                 if let Err(e) = fs::journal::self_test() {
                     serial_println!("WARNING: Change journal self-test failed: {:?}", e);
                 }
-                // ext4 self-test (reads directory listing and files if mounted).
-                if let Err(e) = fs::ext4::self_test() {
-                    serial_println!("WARNING: ext4 self-test failed: {:?}", e);
-                }
+                // (ext4's own self-test is NOT here — it has nothing to do with the
+                // FAT root.  See the unconditional block below.)
                 // VFS-level self-test (symlinks, cross-mount resolution) — relies on
                 // the FAT root for cross-mount cases.
                 if let Err(e) = fs::vfs::self_test() {
@@ -1513,6 +1511,37 @@ extern "C" fn kernel_main() -> ! {
             // Path-Z boot too, where the sparse fastpy ELFs on /mnt/tests are loaded.
             if let Err(e) = fs::ext4::self_test_pure() {
                 serial_println!("WARNING: ext4 pure self-test failed: {:?}", e);
+            }
+            // Full ext4 self-test: eight per-module unit suites (ondisk, superblock,
+            // io, balloc, journal, fsck, driver, vfs_impl) followed by integration
+            // tests against a mounted ext4.
+            //
+            // This sat under `if fat_ok` until 2026-08-22, which was simply the wrong
+            // condition: `fat_ok` says the *FAT root* mounted, and nothing in here
+            // touches the FAT root.  Phase 0 does no I/O at all, and Phase 1 works
+            // entirely off whatever path ext4 is mounted at, returning early with a
+            // "no ext4 mounted" note when there is none.  The gate therefore bought
+            // no safety and cost the whole tier: the boot test boots a diskless root
+            // with ext4 mounted rw at /mnt, so `fat_ok` was false and these eight
+            // suites had never once run in CI, on an image they could have tested all
+            // along.  Phase 1 writes a scratch file into the ext4 mount, which is
+            // discarded — the boot test attaches rootfs.ext4 with `snapshot=on`.
+            if let Err(e) = fs::ext4::self_test() {
+                serial_println!("WARNING: ext4 self-test failed: {:?}", e);
+            }
+            // Phase 1 above creates and removes a scratch file on the ext4 mount, so
+            // it leaves dirty blocks in the buffer cache.  The flush that used to
+            // follow it lives in the `fat_ok` block, which has already run by now and
+            // is skipped entirely on a diskless root — so flush here rather than rely
+            // on it.  `flush_all` is global (it walks every dirty entry, whatever the
+            // device), which is exactly what is wanted: without this, a power loss
+            // right after the self-test could leave a half-written `_ext4_xattr_test`
+            // in an image the test believes it cleaned up.
+            if let Err(e) = fs::cache::flush_all() {
+                serial_println!(
+                    "WARNING: Buffer cache flush after ext4 self-test failed: {:?}",
+                    e
+                );
             }
             // Path predicates: subtree matching and the `confine_under` jail
             // guard.  Pure (constants only, no disk), so it runs on every boot

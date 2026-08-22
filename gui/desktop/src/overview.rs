@@ -65,6 +65,7 @@
 
 use crate::animations::{Animation, DEFAULT_DURATION_MS, Easing};
 use crate::{Layer, ShellControlAction, ShellRequest, WindowId};
+use appearance::{Palette, readable_on};
 use guiremote::window_list::WindowList;
 use guitk::color::Color;
 use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
@@ -72,21 +73,49 @@ use guitk::step;
 use guitk::style::CornerRadii;
 
 // ============================================================================
-// Catppuccin Mocha palette
+// Colour
 // ============================================================================
-
-const MOCHA_BASE: Color = Color::from_hex(0x1E1E2E);
-const MOCHA_SURFACE0: Color = Color::from_hex(0x313244);
-const MOCHA_SURFACE1: Color = Color::from_hex(0x45475A);
-const MOCHA_SURFACE2: Color = Color::from_hex(0x585B70);
-const MOCHA_TEXT: Color = Color::from_hex(0xCDD6F4);
-const MOCHA_SUBTEXT0: Color = Color::from_hex(0xA6ADC8);
-const MOCHA_BLUE: Color = Color::from_hex(0x89B4FA);
-const MOCHA_LAVENDER: Color = Color::from_hex(0xB4BEFE);
-const MOCHA_RED: Color = Color::from_hex(0xF38BA8);
-const MOCHA_YELLOW: Color = Color::from_hex(0xF9E2AF);
-const MOCHA_OVERLAY0: Color = Color::from_hex(0x6C7086);
-const MOCHA_MANTLE: Color = Color::from_hex(0x181825);
+//
+// Every colour drawn here comes from the `&Palette` threaded through
+// `render_overview`, so the overlay follows the desktop's mode and accent.
+// Four judgements had to be made when the hardcoded hexes came out, because a
+// literal carries no role until someone assigns one:
+//
+// *Three things follow the accent*: the search bar's border once a query is
+// active, the bar marking the current desktop, and a card's border while the
+// pointer is over it.  Each is a position or an invitation, which is what the
+// accent is for.
+//
+// *A card's border carries two independent kinds of "current", and they must
+// not collapse into one.*  Hover says **where you are pointing**; focus says
+// **which window has the keyboard**.  They are orthogonal — the focused window
+// is usually not the one under the pointer — so painting them alike would lose
+// a distinction silently, and no membership sweep could see it because both
+// would be palette roles.  The border is a three-rung ladder that no accent can
+// flatten: `surface2` when the card is merely present, `subtext0` when it holds
+// focus, the accent when it is under the pointer.  Focus was `lavender`, which
+// is a *category* colour being used to mark a *state* — it would have meant
+// nothing on a lavender-accented desktop.  `subtext0` is within a few percent
+// of the same pixel and cannot collide with any accent, because it is a grey.
+//
+// *Two badges are frozen*, because they report facts about a window rather
+// than offering choices about the desktop: the minimised marker's yellow and
+// the close button's red.  A close button that means destructive on one desktop
+// and matches the wallpaper on another has stopped saying anything.
+//
+// *Both badge labels were wrong, not merely fragile.*  Each was Mocha `base` —
+// a near-black picked to read on Mocha's *pale* yellow and *pale* red.  Latte's
+// yellow and red are deep, and its `base` is near-white, so on a light desktop
+// the marks would sit on the wrong side of their own fills.  Each is
+// `readable_on()` of the fill it is actually drawn on now, which answers the
+// question rather than assuming the answer.
+//
+// The two translucent washes — the backdrop and a search-dimmed card — keep
+// their own alpha and take only the *RGB* of their role.  That is the rule for
+// every wash in this crate: a wash is a role seen through a veil, so the veil
+// is the alpha and the role is everything else.  Note that the two-mode
+// membership sweep cannot check the alpha, since it compares RGB only; the
+// washes therefore carry their own test.
 
 // ============================================================================
 // Public types
@@ -721,6 +750,7 @@ pub fn overview_layout(
 pub fn render_overview(
     state: &OverviewState,
     config: &OverviewConfig,
+    p: &Palette,
     screen_w: f32,
     screen_h: f32,
 ) -> Vec<RenderCommand> {
@@ -741,12 +771,12 @@ pub fn render_overview(
         y: 0.0,
         width: screen_w,
         height: screen_h,
-        color: Color::rgba(MOCHA_MANTLE.r, MOCHA_MANTLE.g, MOCHA_MANTLE.b, alpha),
+        color: Color::rgba(p.mantle.r, p.mantle.g, p.mantle.b, alpha),
         corner_radii: CornerRadii::ZERO,
     });
 
     // Search bar at top.
-    render_search_bar(&mut cmds, state, screen_w);
+    render_search_bar(&mut cmds, state, p, screen_w);
 
     // Content area (below search bar).
     let content_y = CONTENT_TOP;
@@ -756,7 +786,7 @@ pub fn render_overview(
 
     // Desktop labels (AllDesktops only).
     if state.mode == OverviewMode::AllDesktops && config.show_desktop_labels {
-        render_desktop_labels(&mut cmds, state, config, content_y, screen_w, content_h);
+        render_desktop_labels(&mut cmds, state, config, p, content_y, screen_w, content_h);
     }
 
     // Thumbnail cards.
@@ -766,7 +796,7 @@ pub fn render_overview(
             !state.search_query.is_empty() && state.search_results.contains(&layout.window_id);
         let is_dimmed = !state.search_query.is_empty() && !is_search_match;
 
-        render_thumbnail_card(&mut cmds, layout, is_hovered, is_dimmed);
+        render_thumbnail_card(&mut cmds, layout, p, is_hovered, is_dimmed);
     }
 
     // There was a "+" button here, bottom-right, for adding a virtual desktop.
@@ -787,7 +817,12 @@ pub fn render_overview(
 }
 
 /// Render the search bar at the top of the overlay.
-fn render_search_bar(cmds: &mut Vec<RenderCommand>, state: &OverviewState, screen_w: f32) {
+fn render_search_bar(
+    cmds: &mut Vec<RenderCommand>,
+    state: &OverviewState,
+    p: &Palette,
+    screen_w: f32,
+) {
     let bar_w = 400.0_f32.min(screen_w - 40.0);
     let bar_x = (screen_w - bar_w) / 2.0;
     let bar_y = 16.0;
@@ -799,15 +834,15 @@ fn render_search_bar(cmds: &mut Vec<RenderCommand>, state: &OverviewState, scree
         y: bar_y,
         width: bar_w,
         height: bar_h,
-        color: MOCHA_SURFACE0,
+        color: p.surface0,
         corner_radii: CornerRadii::all(8.0),
     });
 
     // Border (highlights when query is active).
     let border_color = if state.search_query.is_empty() {
-        MOCHA_SURFACE1
+        p.surface1
     } else {
-        MOCHA_BLUE
+        p.accent
     };
     cmds.push(RenderCommand::StrokeRect {
         x: bar_x,
@@ -821,9 +856,9 @@ fn render_search_bar(cmds: &mut Vec<RenderCommand>, state: &OverviewState, scree
 
     // Text.
     let (display_text, text_color) = if state.search_query.is_empty() {
-        ("Search windows...".to_string(), MOCHA_OVERLAY0)
+        ("Search windows...".to_string(), p.overlay0)
     } else {
-        (state.search_query.clone(), MOCHA_TEXT)
+        (state.search_query.clone(), p.text)
     };
     cmds.push(RenderCommand::Text {
         x: bar_x + 12.0,
@@ -842,6 +877,7 @@ fn render_desktop_labels(
     cmds: &mut Vec<RenderCommand>,
     state: &OverviewState,
     config: &OverviewConfig,
+    p: &Palette,
     content_y: f32,
     screen_w: f32,
     content_h: f32,
@@ -866,7 +902,7 @@ fn render_desktop_labels(
                 y: ly,
                 width: 4.0,
                 height: 24.0,
-                color: MOCHA_BLUE,
+                color: p.accent,
                 corner_radii: CornerRadii::all(2.0),
             });
         }
@@ -876,11 +912,7 @@ fn render_desktop_labels(
             x: 32.0,
             y: ly + 4.0,
             text: lane.name.clone(),
-            color: if lane.is_current {
-                MOCHA_TEXT
-            } else {
-                MOCHA_SUBTEXT0
-            },
+            color: if lane.is_current { p.text } else { p.subtext0 },
             font_size: 13.0,
             font_weight: if lane.is_current {
                 FontWeightHint::Bold
@@ -897,6 +929,7 @@ fn render_desktop_labels(
 fn render_thumbnail_card(
     cmds: &mut Vec<RenderCommand>,
     layout: &ThumbnailLayout,
+    p: &Palette,
     is_hovered: bool,
     is_dimmed: bool,
 ) {
@@ -917,9 +950,9 @@ fn render_thumbnail_card(
 
     // Card background (window representation).
     let bg_color = if is_dimmed {
-        Color::rgba(MOCHA_SURFACE0.r, MOCHA_SURFACE0.g, MOCHA_SURFACE0.b, 100)
+        Color::rgba(p.surface0.r, p.surface0.g, p.surface0.b, 100)
     } else {
-        MOCHA_SURFACE0
+        p.surface0
     };
     cmds.push(RenderCommand::FillRect {
         x: x + dx,
@@ -932,11 +965,7 @@ fn render_thumbnail_card(
 
     // Title inside card.
     let title_display: String = layout.title.chars().take(30).collect();
-    let title_color = if is_dimmed {
-        MOCHA_OVERLAY0
-    } else {
-        MOCHA_TEXT
-    };
+    let title_color = if is_dimmed { p.overlay0 } else { p.text };
     cmds.push(RenderCommand::Text {
         x: x + dx + 8.0,
         y: y + dy + 8.0,
@@ -950,11 +979,11 @@ fn render_thumbnail_card(
 
     // Border.
     let border_color = if is_hovered {
-        MOCHA_BLUE
+        p.accent
     } else if layout.is_focused {
-        MOCHA_LAVENDER
+        p.subtext0
     } else {
-        MOCHA_SURFACE2
+        p.surface2
     };
     let border_width = if is_hovered { 2.0 } else { 1.0 };
     cmds.push(RenderCommand::StrokeRect {
@@ -974,14 +1003,14 @@ fn render_thumbnail_card(
             y: y + dy + 4.0,
             width: 16.0,
             height: 16.0,
-            color: MOCHA_YELLOW,
+            color: p.yellow,
             corner_radii: CornerRadii::all(3.0),
         });
         cmds.push(RenderCommand::Text {
             x: x + dx + w + dw - 18.0,
             y: y + dy + 6.0,
             text: "_".to_string(),
-            color: MOCHA_BASE,
+            color: readable_on(p.yellow),
             font_size: 10.0,
             font_weight: FontWeightHint::Bold,
             max_width: Some(12.0),
@@ -998,14 +1027,14 @@ fn render_thumbnail_card(
             y: cb_y,
             width: 18.0,
             height: 18.0,
-            color: MOCHA_RED,
+            color: p.red,
             corner_radii: CornerRadii::all(9.0),
         });
         cmds.push(RenderCommand::Text {
             x: cb_x + 4.0,
             y: cb_y + 2.0,
             text: "x".to_string(),
-            color: MOCHA_BASE,
+            color: readable_on(p.red),
             font_size: 11.0,
             font_weight: FontWeightHint::Bold,
             max_width: Some(12.0),
@@ -1441,18 +1470,18 @@ mod tests {
         let mut s = OverviewState::new();
         let cfg = default_config();
         assert!(
-            render_overview(&s, &cfg, 1920.0, 1080.0).is_empty(),
+            render_overview(&s, &cfg, &Palette::for_mode(false), 1920.0, 1080.0).is_empty(),
             "a hidden overview drew something"
         );
         s.show(OverviewMode::AllWindows);
         assert!(
-            !render_overview(&s, &cfg, 1920.0, 1080.0).is_empty(),
+            !render_overview(&s, &cfg, &Palette::for_mode(false), 1920.0, 1080.0).is_empty(),
             "a shown overview drew nothing — the caller has no second step to \
              take, so this is the whole of what opening it does"
         );
         s.hide();
         assert!(
-            render_overview(&s, &cfg, 1920.0, 1080.0).is_empty(),
+            render_overview(&s, &cfg, &Palette::for_mode(false), 1920.0, 1080.0).is_empty(),
             "a hidden overview drew something"
         );
     }
@@ -1750,7 +1779,7 @@ mod tests {
     fn test_render_hidden_produces_nothing() {
         let state = OverviewState::new();
         let config = default_config();
-        let cmds = render_overview(&state, &config, 1920.0, 1080.0);
+        let cmds = render_overview(&state, &config, &Palette::for_mode(false), 1920.0, 1080.0);
         assert!(cmds.is_empty());
     }
 
@@ -1760,7 +1789,7 @@ mod tests {
         state.show(OverviewMode::AllWindows);
         state.lanes = sample_lanes();
         let config = default_config();
-        let cmds = render_overview(&state, &config, 1920.0, 1080.0);
+        let cmds = render_overview(&state, &config, &Palette::for_mode(false), 1920.0, 1080.0);
         assert!(!cmds.is_empty());
     }
 
@@ -1778,7 +1807,7 @@ mod tests {
         state.show(OverviewMode::AllDesktops);
         state.lanes = sample_lanes();
         let config = default_config();
-        let cmds = render_overview(&state, &config, 1920.0, 1080.0);
+        let cmds = render_overview(&state, &config, &Palette::for_mode(false), 1920.0, 1080.0);
         let has_plus = cmds.iter().any(|c| {
             if let RenderCommand::Text { text, .. } = c {
                 text == "+"
@@ -1794,7 +1823,7 @@ mod tests {
         let mut state = OverviewState::new();
         state.show(OverviewMode::AllWindows);
         let config = default_config();
-        let cmds = render_overview(&state, &config, 1920.0, 1080.0);
+        let cmds = render_overview(&state, &config, &Palette::for_mode(false), 1920.0, 1080.0);
         let has_placeholder = cmds.iter().any(|c| {
             if let RenderCommand::Text { text, .. } = c {
                 text.contains("Search windows")
@@ -1813,7 +1842,7 @@ mod tests {
         state.search_query = "term".to_string();
         state.update_search();
         let config = default_config();
-        let cmds = render_overview(&state, &config, 1920.0, 1080.0);
+        let cmds = render_overview(&state, &config, &Palette::for_mode(false), 1920.0, 1080.0);
         let has_query = cmds.iter().any(|c| {
             if let RenderCommand::Text { text, .. } = c {
                 text == "term"
@@ -2122,7 +2151,7 @@ mod tests {
 
     /// The alpha of the first `FillRect`, which is the backdrop.
     fn backdrop_alpha(state: &OverviewState, config: &OverviewConfig) -> u8 {
-        match render_overview(state, config, 1920.0, 1080.0).first() {
+        match render_overview(state, config, &Palette::for_mode(false), 1920.0, 1080.0).first() {
             Some(&RenderCommand::FillRect { color, .. }) => color.a,
             other => panic!("the first command was not the backdrop: {other:?}"),
         }
@@ -2160,7 +2189,7 @@ mod tests {
         s.begin_fade(200);
         let cfg = default_config();
 
-        let cards = render_overview(&s, &cfg, 1920.0, 1080.0)
+        let cards = render_overview(&s, &cfg, &Palette::for_mode(false), 1920.0, 1080.0)
             .iter()
             .filter(|c| matches!(c, RenderCommand::Text { .. }))
             .count();
@@ -2248,5 +2277,649 @@ mod tests {
 
         s.show(OverviewMode::AllWindows);
         assert!((s.fade_opacity() - 1.0).abs() < f32::EPSILON);
+    }
+
+    // ========================================================================
+    // The palette conversion
+    // ========================================================================
+
+    use crate::draw_check::assert_nothing_is_drawn_and_never_seen;
+    use crate::palette_check::assert_drawn_from;
+
+    const SW: f32 = 1920.0;
+    const SH: f32 = 1080.0;
+
+    /// A colour without its alpha, for comparing a wash against its role.
+    fn rgb(c: Color) -> (u8, u8, u8) {
+        (c.r, c.g, c.b)
+    }
+
+    fn draw(state: &OverviewState, p: &Palette) -> Vec<RenderCommand> {
+        render_overview(state, &default_config(), p, SW, SH)
+    }
+
+    /// Lanes exercising every branch a card can take: one plain, one focused,
+    /// one minimised.
+    ///
+    /// All three live on the *current* desktop deliberately. `AllWindows`
+    /// collects only the current lane, so a minimised window parked on the
+    /// second desktop would never be drawn in the mode most of these tests use
+    /// — and a badge that is never drawn cannot fail an assertion about its
+    /// colour. The second lane exists so `AllDesktops` has more than one to
+    /// draw.
+    fn rich_lanes() -> Vec<DesktopLane> {
+        let plain = sample_thumb(1, 0, "Terminal");
+        let mut focused = sample_thumb(2, 0, "Editor");
+        focused.is_focused = true;
+        let mut minimised = sample_thumb(3, 0, "Browser");
+        minimised.is_minimized = true;
+        vec![
+            DesktopLane {
+                desktop_id: 0,
+                name: "Desktop 1".to_string(),
+                thumbnails: vec![plain, focused, minimised],
+                is_current: true,
+            },
+            DesktopLane {
+                desktop_id: 1,
+                name: "Desktop 2".to_string(),
+                thumbnails: vec![sample_thumb(4, 1, "Files")],
+                is_current: false,
+            },
+        ]
+    }
+
+    fn shown(mode: OverviewMode) -> OverviewState {
+        let mut s = OverviewState::new();
+        s.show(mode);
+        s.mode = mode;
+        s.lanes = rich_lanes();
+        s
+    }
+
+    /// Every state the overlay can be drawn in, named so a failure says which.
+    ///
+    /// A hidden overview is deliberately absent: it draws nothing, so it can
+    /// satisfy any assertion about what it draws.
+    fn every_state() -> Vec<(OverviewState, String)> {
+        let mut out = Vec::new();
+        for mode in [
+            OverviewMode::AllWindows,
+            OverviewMode::AllDesktops,
+            OverviewMode::RecentApps,
+        ] {
+            out.push((shown(mode), format!("{mode:?}, at rest")));
+
+            let mut hovered = shown(mode);
+            hovered.hovered_window = Some(1);
+            out.push((hovered, format!("{mode:?}, pointer over a card")));
+
+            // A live query dims every card that does not match, and lights the
+            // search bar's border. Both branches of both are on screen at once.
+            let mut searching = shown(mode);
+            searching.search_query = "edit".to_string();
+            searching.search_results = vec![2];
+            out.push((searching, format!("{mode:?}, searching")));
+
+            let mut empty = shown(mode);
+            empty.lanes = Vec::new();
+            out.push((empty, format!("{mode:?}, no windows at all")));
+        }
+        out
+    }
+
+    /// Accents that collide with nothing this module freezes.
+    ///
+    /// The two badges are yellow and red, and the border ladder's middle rung
+    /// is `subtext0`; an accent equal to any of those would let a wrongly
+    /// accented site coincide with a frozen neighbour on exactly the accent
+    /// that matters.
+    const SAFE_ACCENTS: [Color; 6] = [
+        appearance::BLUE,
+        appearance::MAUVE,
+        appearance::TEAL,
+        appearance::PINK,
+        appearance::SAPPHIRE,
+        appearance::SKY,
+    ];
+
+    fn fills(cmds: &[RenderCommand], keep: impl Fn(f32, f32, f32, f32) -> bool) -> Vec<Color> {
+        cmds.iter()
+            .filter_map(|c| match *c {
+                RenderCommand::FillRect {
+                    x,
+                    y,
+                    width,
+                    height,
+                    color,
+                    ..
+                } if keep(x, y, width, height) => Some(color),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn strokes(cmds: &[RenderCommand], keep: impl Fn(f32, f32, f32, f32) -> bool) -> Vec<Color> {
+        cmds.iter()
+            .filter_map(|c| match *c {
+                RenderCommand::StrokeRect {
+                    x,
+                    y,
+                    width,
+                    height,
+                    color,
+                    ..
+                } if keep(x, y, width, height) => Some(color),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn texts(cmds: &[RenderCommand], keep: impl Fn(f32, f32, &str) -> bool) -> Vec<Color> {
+        cmds.iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text {
+                    x, y, text, color, ..
+                } if keep(*x, *y, text) => Some(*color),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The backdrop, which is the first command and the full screen.
+    fn backdrop(cmds: &[RenderCommand]) -> Color {
+        match cmds.first() {
+            Some(&RenderCommand::FillRect { color, .. }) => color,
+            other => panic!("the first command was not the backdrop: {other:?}"),
+        }
+    }
+
+    /// The search bar is the one 400x36 shape; a card is scaled from an 800x600
+    /// window, so it is 4:3 and can never take those dimensions.
+    fn search_bar_is(x: f32, _y: f32, w: f32, h: f32) -> bool {
+        let _ = x;
+        w == 400.0 && h == 36.0
+    }
+
+    fn search_bar_fill(cmds: &[RenderCommand]) -> Color {
+        let v = fills(cmds, search_bar_is);
+        assert_eq!(v.len(), 1, "expected exactly one search bar");
+        v[0]
+    }
+
+    fn search_bar_border(cmds: &[RenderCommand]) -> Color {
+        let v = strokes(cmds, search_bar_is);
+        assert_eq!(v.len(), 1, "expected exactly one search bar border");
+        v[0]
+    }
+
+    /// Every card border: every stroke that is not the search bar's.
+    fn card_borders(cmds: &[RenderCommand]) -> Vec<Color> {
+        strokes(cmds, |x, y, w, h| !search_bar_is(x, y, w, h))
+    }
+
+    /// The bar marking the current desktop — 4x24 at a fixed x, drawn only in
+    /// `AllDesktops`.
+    fn current_desktop_bars(cmds: &[RenderCommand]) -> Vec<Color> {
+        fills(cmds, |x, _, w, h| x == 20.0 && w == 4.0 && h == 24.0)
+    }
+
+    fn minimised_badges(cmds: &[RenderCommand]) -> Vec<Color> {
+        fills(cmds, |_, _, w, h| w == 16.0 && h == 16.0)
+    }
+
+    fn close_buttons(cmds: &[RenderCommand]) -> Vec<Color> {
+        fills(cmds, |_, _, w, h| w == 18.0 && h == 18.0)
+    }
+
+    /// The badge marks, keyed on their text rather than their size: the close
+    /// mark is 11pt, and so is every card title.
+    fn minimised_marks(cmds: &[RenderCommand]) -> Vec<Color> {
+        texts(cmds, |_, _, t| t == "_")
+    }
+
+    fn close_marks(cmds: &[RenderCommand]) -> Vec<Color> {
+        texts(cmds, |_, _, t| t == "x")
+    }
+
+    /// Everything the overlay draws except the three sites that follow the
+    /// accent, so a change here is a change somewhere it should not be.
+    ///
+    /// The card borders come out whole rather than selectively, because which
+    /// border is the hovered one is not knowable from a colour list — that is
+    /// what `a_cards_border_says_both_where_you_point_and_what_has_focus` is
+    /// for.
+    fn colours_apart_from_the_accent_sites(cmds: &[RenderCommand]) -> Vec<Color> {
+        let mut out = Vec::new();
+        for (i, c) in cmds.iter().enumerate() {
+            match *c {
+                RenderCommand::FillRect {
+                    x,
+                    width,
+                    height,
+                    color,
+                    ..
+                } => {
+                    let is_current_bar = x == 20.0 && width == 4.0 && height == 24.0;
+                    if !is_current_bar {
+                        out.push(color);
+                    }
+                }
+                RenderCommand::StrokeRect { .. } => {
+                    // Both the search bar's border and every card's can carry
+                    // the accent, so no stroke belongs in the frozen set.
+                    let _ = i;
+                }
+                RenderCommand::Text { color, .. } => out.push(color),
+                _ => {}
+            }
+        }
+        out
+    }
+
+    // -- The sweep -----------------------------------------------------------
+
+    /// No hardcoded colour survived the conversion.
+    ///
+    /// Rendered in both modes and checked in the light one: every deleted
+    /// constant was a Catppuccin *Mocha* value, and a Mocha value is not a
+    /// member of Latte, so a leftover shows up as a colour the light palette
+    /// does not contain.
+    ///
+    /// The two washes are declared derived, because they carry their role's RGB
+    /// under their own alpha; that the alpha is right is
+    /// `a_wash_keeps_its_own_alpha_and_the_colour_of_its_role`'s job, since
+    /// this check compares RGB only.
+    #[test]
+    fn every_colour_the_overlay_draws_comes_from_its_palette() {
+        for light in [false, true] {
+            let p = Palette::for_mode(light);
+            let derived = [readable_on(p.yellow), readable_on(p.red)];
+            for (state, what) in every_state() {
+                assert_drawn_from(&p, &draw(&state, &p), &derived, &what);
+            }
+        }
+    }
+
+    /// Nothing is drawn that no one can ever see.
+    #[test]
+    fn the_overlay_draws_nothing_that_is_immediately_erased() {
+        for light in [false, true] {
+            let p = Palette::for_mode(light);
+            for (state, what) in every_state() {
+                assert_nothing_is_drawn_and_never_seen(
+                    &draw(&state, &p),
+                    &format!("{what}, light={light}"),
+                );
+            }
+        }
+    }
+
+    // -- What follows the accent, and what does not --------------------------
+
+    /// The three sites that mark a position or an invitation follow the accent.
+    ///
+    /// One assertion per *source* site rather than per drawn instance: two
+    /// cards drawn by one loop cannot disagree with each other, so counting
+    /// them would count the loop, not the code.
+    #[test]
+    fn every_control_that_offers_something_follows_the_accent() {
+        for light in [false, true] {
+            for accent in SAFE_ACCENTS {
+                let mut p = Palette::for_mode(light);
+                p.accent = accent;
+
+                // 1. The search bar's border, once a query is live.
+                let mut searching = shown(OverviewMode::AllWindows);
+                searching.search_query = "edit".to_string();
+                searching.search_results = vec![2];
+                assert_eq!(
+                    search_bar_border(&draw(&searching, &p)),
+                    accent,
+                    "an active search bar's border did not follow the accent \
+                     (light={light})"
+                );
+
+                // 2. The bar marking the current desktop.
+                let lanes = draw(&shown(OverviewMode::AllDesktops), &p);
+                let bars = current_desktop_bars(&lanes);
+                assert_eq!(bars.len(), 1, "expected one current-desktop bar");
+                assert_eq!(
+                    bars[0], accent,
+                    "the current desktop's marker did not follow the accent \
+                     (light={light})"
+                );
+
+                // 3. A card's border while the pointer is over it. The hovered
+                //    card is the only one with a 2.0-wide border, which is how
+                //    it is told from the rest without re-deriving the layout.
+                let mut hovered = shown(OverviewMode::AllWindows);
+                hovered.hovered_window = Some(1);
+                let cmds = draw(&hovered, &p);
+                let thick: Vec<Color> = cmds
+                    .iter()
+                    .filter_map(|c| match *c {
+                        RenderCommand::StrokeRect {
+                            color,
+                            line_width: 2.0,
+                            ..
+                        } => Some(color),
+                        _ => None,
+                    })
+                    .collect();
+                assert_eq!(thick.len(), 1, "expected exactly one hovered card");
+                assert_eq!(
+                    thick[0], accent,
+                    "a hovered card's border did not follow the accent \
+                     (light={light})"
+                );
+            }
+        }
+    }
+
+    /// Changing the accent changes the three accent sites and nothing else.
+    ///
+    /// The sweep above cannot see a *wrong role*, because a role is a member of
+    /// both palettes. This can: it renders the same state under two accents and
+    /// requires every other colour to be identical.
+    #[test]
+    fn nothing_else_moves_when_the_accent_does() {
+        for light in [false, true] {
+            let mut a = Palette::for_mode(light);
+            a.accent = appearance::MAUVE;
+            let mut b = Palette::for_mode(light);
+            b.accent = appearance::TEAL;
+
+            for (state, what) in every_state() {
+                assert_eq!(
+                    colours_apart_from_the_accent_sites(&draw(&state, &a)),
+                    colours_apart_from_the_accent_sites(&draw(&state, &b)),
+                    "{what} (light={light}): something outside the three accent \
+                     sites moved when the accent did"
+                );
+            }
+        }
+    }
+
+    // -- Surfaces ------------------------------------------------------------
+
+    /// The overlay's own surfaces are the roles they claim to be.
+    ///
+    /// Stronger than the membership sweep and for a different reason: the sweep
+    /// allows `readable_on`'s two endpoints at any alpha, and one of them
+    /// (`0x11111B`) is also Mocha `crust` — so a surface wrongly set to `crust`
+    /// would pass membership in *both* modes. Equality with the named role
+    /// cannot be satisfied that way.
+    #[test]
+    fn the_overlays_own_surfaces_come_from_the_palette() {
+        for light in [false, true] {
+            let p = Palette::for_mode(light);
+            let at_rest = draw(&shown(OverviewMode::AllWindows), &p);
+
+            assert_eq!(
+                search_bar_fill(&at_rest),
+                p.surface0,
+                "the search bar is not surface0 (light={light})"
+            );
+            assert_eq!(
+                search_bar_border(&at_rest),
+                p.surface1,
+                "an idle search bar's border is not surface1 (light={light})"
+            );
+            assert_eq!(
+                rgb(backdrop(&at_rest)),
+                rgb(p.mantle),
+                "the backdrop is not the mantle (light={light})"
+            );
+        }
+    }
+
+    // -- The border ladder ---------------------------------------------------
+
+    /// A card's border says two independent things, and must not blur them.
+    ///
+    /// Hover is *where you are pointing*; focus is *which window has the
+    /// keyboard*. They are orthogonal, so the three rungs — present, focused,
+    /// pointed at — have to stay three colours under every accent. Nothing in
+    /// the membership sweep could see them collapse, because all three are
+    /// palette roles.
+    #[test]
+    fn a_cards_border_says_both_where_you_point_and_what_has_focus() {
+        for light in [false, true] {
+            for accent in SAFE_ACCENTS {
+                let mut p = Palette::for_mode(light);
+                p.accent = accent;
+
+                // Window 1 is plain, window 2 has focus; point at window 1 so
+                // all three rungs are on screen at once.
+                let mut s = shown(OverviewMode::AllWindows);
+                s.hovered_window = Some(1);
+                let borders = card_borders(&draw(&s, &p));
+                assert_eq!(borders.len(), 3, "expected one border per card");
+
+                let distinct: std::collections::BTreeSet<(u8, u8, u8)> =
+                    borders.iter().map(|c| (c.r, c.g, c.b)).collect();
+                assert_eq!(
+                    distinct.len(),
+                    3,
+                    "two of the three card states drew the same border \
+                     (light={light}, accent={accent:?}): {borders:?}"
+                );
+
+                assert!(
+                    borders.contains(&accent),
+                    "no card border took the accent (light={light})"
+                );
+                assert!(
+                    borders.contains(&p.subtext0),
+                    "the focused card's border is not subtext0 (light={light})"
+                );
+                assert!(
+                    borders.contains(&p.surface2),
+                    "a plain card's border is not surface2 (light={light})"
+                );
+            }
+        }
+    }
+
+    // -- The two frozen badges -----------------------------------------------
+
+    /// Neither badge follows the accent.
+    ///
+    /// Both report a fact about a window rather than offering a choice about
+    /// the desktop: minimised is a state, and close is destructive. A close
+    /// button that matches the wallpaper has stopped saying anything.
+    #[test]
+    fn neither_badge_follows_the_accent() {
+        for light in [false, true] {
+            for accent in SAFE_ACCENTS {
+                let mut p = Palette::for_mode(light);
+                p.accent = accent;
+
+                // Window 3 is minimised; point at window 1 so a close button is
+                // drawn too.
+                let mut s = shown(OverviewMode::AllWindows);
+                s.hovered_window = Some(1);
+                let cmds = draw(&s, &p);
+
+                let badges = minimised_badges(&cmds);
+                assert_eq!(badges.len(), 1, "expected one minimised badge");
+                assert_eq!(
+                    badges[0], p.yellow,
+                    "the minimised badge is not the palette's yellow \
+                     (light={light})"
+                );
+
+                let closes = close_buttons(&cmds);
+                assert_eq!(closes.len(), 1, "expected one close button");
+                assert_eq!(
+                    closes[0], p.red,
+                    "the close button is not the palette's red (light={light})"
+                );
+            }
+        }
+    }
+
+    /// Each badge's mark can be read on the badge it is drawn on.
+    ///
+    /// Both marks were Mocha `base` — a near-black chosen against Mocha's pale
+    /// yellow and pale red. Latte's yellow and red are deep and its `base` is
+    /// near-white, so the fixed value was on the wrong side of its own fill in
+    /// one of the two modes. Asserting the two modes *disagree* is what stops a
+    /// fixed value coming back: a mark identical in both modes is this bug
+    /// returning.
+    ///
+    /// Every expectation here is computed from the fill the render *actually
+    /// emitted*, never from `p.yellow`/`p.red` directly. Deriving it from the
+    /// palette instead would assert what the badge was supposed to be painted
+    /// rather than what it was painted, which is a different question and the
+    /// wrong one — a badge reverted to a hardcoded fill would keep passing.
+    ///
+    /// The straddling palettes below exist because **neither shipped palette
+    /// can tell the two badges apart**: Mocha's yellow and red are both pale
+    /// and Latte's are both deep, so `readable_on` returns the same endpoint
+    /// for both in both modes. A mark that answered for the *other* badge's
+    /// fill would therefore be invisible in every mode we ship. Only a palette
+    /// whose two fills fall on opposite sides of the threshold distinguishes
+    /// "answers for its own fill" from "answers for a fill that happens to
+    /// agree with it", and that distinction is the whole point of the fix.
+    #[test]
+    fn each_badges_mark_can_be_read_on_the_badge() {
+        /// Render the badges and assert each mark answers for its own fill.
+        fn check(p: &Palette, what: &str) -> (Color, Color) {
+            let mut s = shown(OverviewMode::AllWindows);
+            s.hovered_window = Some(1);
+            let cmds = draw(&s, p);
+
+            let fills = minimised_badges(&cmds);
+            assert_eq!(fills.len(), 1, "expected one minimised badge ({what})");
+            let minimised = minimised_marks(&cmds);
+            assert_eq!(minimised.len(), 1, "expected one minimised mark ({what})");
+            assert_eq!(
+                minimised[0],
+                readable_on(fills[0]),
+                "the minimised mark does not answer for the fill it sits on \
+                 ({what})"
+            );
+
+            let close_fills = close_buttons(&cmds);
+            assert_eq!(close_fills.len(), 1, "expected one close button ({what})");
+            let close = close_marks(&cmds);
+            assert_eq!(close.len(), 1, "expected one close mark ({what})");
+            assert_eq!(
+                close[0],
+                readable_on(close_fills[0]),
+                "the close mark does not answer for the fill it sits on ({what})"
+            );
+
+            (minimised[0], close[0])
+        }
+
+        let mut marks = Vec::new();
+        for light in [false, true] {
+            let p = Palette::for_mode(light);
+            marks.push(check(&p, &format!("light={light}")));
+        }
+
+        // Yellow pale, red deep — and then the mirror image. Under either, the
+        // two marks must differ, so a mark answering for the wrong badge lands
+        // on the wrong endpoint and is caught.
+        for (yellow, red, what) in [
+            (0x00F9_E2AF, 0x007F_1D2E, "pale yellow, deep red"),
+            (0x0054_4A12, 0x00F3_8BA8, "deep yellow, pale red"),
+        ] {
+            let mut p = Palette::for_mode(false);
+            p.yellow = Color::from_hex(yellow);
+            p.red = Color::from_hex(red);
+            assert_ne!(
+                readable_on(p.yellow),
+                readable_on(p.red),
+                "the {what} fixture does not straddle the readable_on threshold, \
+                 so it cannot tell the two badges apart"
+            );
+            check(&p, what);
+        }
+        assert_ne!(
+            marks[0].0, marks[1].0,
+            "the minimised mark is the same colour in both modes, so it is a \
+             fixed value again rather than an answer about its fill"
+        );
+        assert_ne!(
+            marks[0].1, marks[1].1,
+            "the close mark is the same colour in both modes, so it is a fixed \
+             value again rather than an answer about its fill"
+        );
+    }
+
+    // -- The washes ----------------------------------------------------------
+
+    /// A wash is a role seen through a veil: the veil is the alpha, the role is
+    /// everything else.
+    ///
+    /// The membership sweep compares RGB only, so it would pass a wash whose
+    /// alpha had been dropped — which is the whole of what a wash is. This
+    /// checks both halves, and that the alpha is not simply opaque.
+    #[test]
+    fn a_wash_keeps_its_own_alpha_and_the_colour_of_its_role() {
+        let cfg = default_config();
+        for light in [false, true] {
+            let p = Palette::for_mode(light);
+
+            // The backdrop: the mantle, under the configured opacity.
+            let at_rest = draw(&shown(OverviewMode::AllWindows), &p);
+            let back = backdrop(&at_rest);
+            assert_eq!(
+                rgb(back),
+                rgb(p.mantle),
+                "the backdrop is not the mantle's colour (light={light})"
+            );
+            assert_eq!(
+                back.a,
+                (cfg.background_opacity * 255.0) as u8,
+                "the backdrop lost the opacity it was configured with \
+                 (light={light})"
+            );
+            assert!(
+                back.a < 255,
+                "the backdrop is fully opaque, so it is no longer a wash \
+                 (light={light})"
+            );
+
+            // A card the search has dimmed: surface0, under a fixed veil. Its
+            // undimmed neighbour is the same role at full strength, which is
+            // what makes the pair worth asserting together — the dimming is the
+            // alpha and nothing else.
+            let mut searching = shown(OverviewMode::AllWindows);
+            searching.search_query = "edit".to_string();
+            searching.search_results = vec![2];
+            let cmds = draw(&searching, &p);
+            // Cards: big rectangles that are neither the search bar nor the
+            // full-screen backdrop, which is also a wash and also surface-like.
+            let cards = fills(&cmds, |_, _, w, h| {
+                w > 40.0 && h > 40.0 && w != 400.0 && w < SW
+            });
+            assert!(
+                cards.len() >= 2,
+                "expected a dimmed card and an undimmed one, got {cards:?}"
+            );
+            for c in &cards {
+                assert_eq!(
+                    rgb(*c),
+                    rgb(p.surface0),
+                    "a card is not surface0 (light={light})"
+                );
+            }
+            let dimmed: Vec<u8> = cards.iter().map(|c| c.a).filter(|a| *a != 255).collect();
+            assert!(
+                !dimmed.is_empty(),
+                "no card was dimmed by the search, so the veil is gone \
+                 (light={light})"
+            );
+            assert!(
+                dimmed.iter().all(|a| *a == 100),
+                "a dimmed card lost the alpha that dims it (light={light}): \
+                 {dimmed:?}"
+            );
+        }
     }
 }

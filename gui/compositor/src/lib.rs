@@ -116,7 +116,7 @@ use guiremote::reserve::ReservedEdges;
 use guiremote::scene::{SceneFrame, SceneSession, WindowSnapshot};
 // Same reason: `window_list` returns these, and a shell reading one should not
 // have to reach past the compositor to name what it got.
-pub use guiremote::window_list::WindowInfo;
+pub use guiremote::window_list::{WindowInfo, WindowList};
 // Same reason again: `Window::snapped` can hold one, and `snap_window_to_zone`
 // takes one. The type belongs to the protocol crate because both ends have to
 // agree on which rectangle a slot names — see `guiremote::zones`.
@@ -917,6 +917,21 @@ pub struct Window {
     /// 1.0 until the compositor first refreshes it, which is what makes this
     /// field invisible on a single 96dpi display.
     pub scale_factor: f32,
+    /// Which virtual desktop this window belongs to.
+    ///
+    /// Meaningful only for [`Layer::Normal`] windows: see
+    /// [`Window::is_showing`]. A window is created on whichever workspace was
+    /// being shown at the time, which is where a window that just opened
+    /// belongs.
+    ///
+    /// **Held here rather than in the shell** because the shell cannot act on
+    /// it: hiding a window it does not own would need a verb that lets any
+    /// shell hide any client's window, which is exactly the ambient authority
+    /// the `ShellControl` design exists to avoid. The compositor already owns
+    /// every other reason a window is not on screen (`visible`, `minimized`),
+    /// and a switch is then one recomposite rather than N requests. See
+    /// `design-decisions.md` §518.
+    pub workspace: u32,
 }
 
 /// Scale a decoration dimension to physical pixels, never rounding a visible
@@ -989,7 +1004,35 @@ impl Window {
             // default is the one that leaves geometry exactly as it was before
             // this field existed.
             scale_factor: 1.0,
+            // Overwritten by `create_window_from_spec` with the workspace being
+            // shown. A `Window` on its own has no way to know which that is,
+            // and 0 is the workspace a compositor that never switches stays on.
+            workspace: 0,
         }
+    }
+
+    /// Whether this window is on screen right now.
+    ///
+    /// The one predicate for "the user can see this and click on it", which
+    /// every render pass, every hit test and every occlusion cull asks instead
+    /// of spelling the conditions out. It was three separate spellings of
+    /// `visible && !minimized` across twelve call sites before workspaces
+    /// existed; adding a third reason a window is hidden to twelve places
+    /// independently is how a window ends up invisible but still taking clicks.
+    ///
+    /// **A window outside [`Layer::Normal`] is on every workspace.** The
+    /// wallpaper and the shell's chrome — taskbar, start menu, the switcher
+    /// overlay — are furniture belonging to the *screen*, not documents
+    /// belonging to a desktop, and a taskbar that vanished when you switched
+    /// desktop would take the only means of switching back with it. Using the
+    /// layer for this rather than a separate `sticky` flag keeps it a property
+    /// of what a surface *is*: the same distinction the shell already makes
+    /// when it drops non-`Normal` windows from its taskbar.
+    #[must_use]
+    pub const fn is_showing(&self, current_workspace: u32) -> bool {
+        self.visible
+            && !self.minimized
+            && (!matches!(self.layer, Layer::Normal) || self.workspace == current_workspace)
     }
 
     /// Whether this window is drawn with a frame right now.
@@ -2764,6 +2807,20 @@ pub enum CompositorRequest {
         edge: PanelEdge,
         size: u32,
     },
+    /// Show a different virtual desktop. Answered with
+    /// [`CompositorResponse::Ok`].
+    ///
+    /// Names no window -- which is why it could not be a
+    /// [`ShellControlAction`], every one of which is a verb aimed at one. It is
+    /// privileged for the plainest possible reason: it changes what every
+    /// client on the machine is showing.
+    SwitchWorkspace { workspace: u32 },
+    /// File a window on a virtual desktop. Answered with
+    /// [`CompositorResponse::Ok`].
+    ///
+    /// Like [`ShellControl`](Self::ShellControl) it names somebody else's
+    /// window and is therefore not resolved against the sender's own.
+    SetWindowWorkspace { window_id: WindowId, workspace: u32 },
 }
 
 /// Responses from the compositor to clients.
@@ -4381,6 +4438,14 @@ pub struct Compositor {
     stream_sessions: BTreeMap<u64, SceneSession>,
     /// Monotonic allocator for stream session ids.
     next_stream_id: u64,
+    /// Which virtual desktop is being shown.
+    ///
+    /// The compositor deliberately has no idea how many there are: a count is a
+    /// user preference, it belongs to whatever is offering the user the choice,
+    /// and a second copy of it here would be a second answer to drift from the
+    /// shell's. What the compositor owns is which one is *showing*, because
+    /// that is the part that decides pixels.
+    current_workspace: u32,
 }
 
 impl Compositor {
@@ -4419,6 +4484,7 @@ impl Compositor {
             scanout: Scanout::Composited,
             stream_sessions: BTreeMap::new(),
             next_stream_id: 1,
+            current_workspace: 0,
         })
     }
 
@@ -4546,6 +4612,12 @@ impl Compositor {
         let (w, h) = window.clamp_size(window.width, window.height);
         window.width = w;
         window.height = h;
+        // The desktop the user is looking at, which is where a window that just
+        // opened belongs. A client cannot ask for a workspace in its spec on
+        // purpose: choosing which desktop a program appears on is the user's,
+        // and a client that could pick would be able to open a window somewhere
+        // the user is not looking.
+        window.workspace = self.current_workspace;
         let id = window.id;
 
         self.windows.push(window);
@@ -4949,7 +5021,7 @@ impl Compositor {
             let Some((edge, size)) = window.reserved_edge else {
                 continue;
             };
-            if size == 0 || !window.visible || window.minimized {
+            if size == 0 || !window.is_showing(self.current_workspace) {
                 continue;
             }
             if self.work_bounds_for(window.frame_rect()) == bounds {
@@ -5348,7 +5420,7 @@ impl Compositor {
         // Topmost visible window in z-order (z_stack top == last).
         let &top = self.z_stack.iter().rev().find(|&&id| {
             self.window_ref(id)
-                .is_some_and(|w| w.visible && !w.minimized)
+                .is_some_and(|w| w.is_showing(self.current_workspace))
         })?;
 
         let win = self.window_ref(top)?;
@@ -5393,9 +5465,15 @@ impl Compositor {
                 .push_back(EventNotification::FocusLost { window_id: old_id });
         }
 
-        // Focus the new window.
+        // Focus the new window — unless it is not on screen. A minimized
+        // window and a window on another workspace are refused for the same
+        // reason: the keyboard would be going somewhere the user cannot see,
+        // and no amount of typing would reveal where. `activate_window` is the
+        // verb that means "make it reachable *and* focus it", and it undoes
+        // both kinds of hiding before calling this.
+        let workspace = self.current_workspace;
         if let Some(win) = self.window_mut(window_id)
-            && !win.minimized
+            && win.is_showing(workspace)
         {
             win.focused = true;
             win.dirty = true;
@@ -5412,16 +5490,24 @@ impl Compositor {
         }
     }
 
-    /// Bring a window to the user: un-minimize it if it is minimized, then
-    /// focus and raise it within its band.
+    /// Bring a window to the user: un-minimize it and switch to its workspace
+    /// if either is hiding it, then focus and raise it within its band.
     ///
     /// What a taskbar button and an Alt-Tab switcher do, and the reason it is
     /// one operation rather than two: [`focus_window`](Self::focus_window)
-    /// deliberately refuses a minimized window — a window nobody can see must
-    /// not hold the keyboard — so un-minimizing has to come *first*. A caller
-    /// issuing the two separately would be depending on that order without
-    /// anything stating it, and would silently do nothing to a minimized
-    /// window if it got them the wrong way round.
+    /// deliberately refuses a window that is not on screen — a window nobody
+    /// can see must not hold the keyboard — so the un-hiding has to come
+    /// *first*. A caller issuing the two separately would be depending on that
+    /// order without anything stating it, and would silently do nothing to a
+    /// hidden window if it got them the wrong way round.
+    ///
+    /// **It follows the window to another virtual desktop rather than dragging
+    /// the window to this one.** Activating is a request to *see* a particular
+    /// window, and the two ways to grant it differ in what happens to
+    /// everything else: switching moves one thing (which desktop is showing)
+    /// and is undone by switching back, whereas moving the window rearranges
+    /// the desktops themselves and leaves the user to notice and repair it.
+    /// This is also what every desktop that has workspaces does.
     ///
     /// Distinct from [`restore_window`](Self::restore_window), which also
     /// un-*maximizes*. A taskbar button on a minimized-while-maximized window
@@ -5437,14 +5523,111 @@ impl Compositor {
         let window = self
             .window_mut(window_id)
             .ok_or(CompositorError::WindowNotFound(window_id))?;
+        let (layer, workspace) = (window.layer, window.workspace);
         if window.minimized {
             window.minimized = false;
             window.visible = true;
             window.dirty = true;
             self.full_recomposite = true;
         }
+        if matches!(layer, Layer::Normal) {
+            self.switch_workspace(workspace);
+        }
         self.damage_window(window_id);
         self.focus_window(window_id);
+        Ok(())
+    }
+
+    /// Which virtual desktop is being shown.
+    #[must_use]
+    pub const fn current_workspace(&self) -> u32 {
+        self.current_workspace
+    }
+
+    /// Show a different virtual desktop.
+    ///
+    /// Every [`Layer::Normal`] window assigned elsewhere stops being drawn,
+    /// stops taking clicks and stops being an occluder in the same instant,
+    /// because all three read [`Window::is_showing`]. Nothing else about a
+    /// window changes: it is not minimized, not unmapped, not moved, and its
+    /// client is not told, because from the client's point of view nothing has
+    /// happened that it could act on — the user looked away.
+    ///
+    /// Focus follows the screen. A window on the desktop being left cannot keep
+    /// the keyboard (that is a window nobody can see swallowing every
+    /// keystroke), so focus moves to the topmost window that *is* showing, and
+    /// to nothing at all on an empty desktop.
+    ///
+    /// A no-op when the named workspace is already the one showing, so a shell
+    /// re-asserting its state costs nothing. There is no upper bound to check
+    /// against: see [`Compositor::current_workspace`]'s field.
+    pub fn switch_workspace(&mut self, workspace: u32) {
+        if workspace == self.current_workspace {
+            return;
+        }
+        self.current_workspace = workspace;
+        // Every window on both desktops changes, and none of them is dirty in
+        // the damage sense — no window moved. Only a full recomposite repaints
+        // the desktop the departing windows were standing on.
+        self.full_recomposite = true;
+        if let Some(focused) = self.focused_window
+            && !self
+                .window_ref(focused)
+                .is_some_and(|w| w.is_showing(workspace))
+        {
+            if let Some(win) = self.window_mut(focused) {
+                win.focused = false;
+                win.dirty = true;
+            }
+            self.focused_window = None;
+            self.pending_notifications
+                .push_back(EventNotification::FocusLost { window_id: focused });
+            self.focus_topmost_visible();
+        }
+    }
+
+    /// Put a window on a virtual desktop.
+    ///
+    /// Takes effect immediately: moving the focused window off the desktop
+    /// being shown hides it, and the keyboard goes to whatever is left, by the
+    /// same rule [`switch_workspace`](Self::switch_workspace) follows.
+    ///
+    /// Accepted but meaningless for a window outside [`Layer::Normal`] — the
+    /// assignment is stored and [`Window::is_showing`] ignores it, so a taskbar
+    /// stays on every desktop no matter what it is told. Refusing it would make
+    /// a shell that moves "all its windows" have to know which of them are
+    /// furniture.
+    ///
+    /// # Errors
+    ///
+    /// [`CompositorError::WindowNotFound`] if the window does not exist, which
+    /// for a shell acting on a snapshot is an ordinary race.
+    pub fn set_window_workspace(
+        &mut self,
+        window_id: WindowId,
+        workspace: u32,
+    ) -> CompositorResult<()> {
+        let showing = self.current_workspace;
+        let window = self
+            .window_mut(window_id)
+            .ok_or(CompositorError::WindowNotFound(window_id))?;
+        if window.workspace == workspace {
+            return Ok(());
+        }
+        window.workspace = workspace;
+        window.dirty = true;
+        let vanished = !window.is_showing(showing);
+        self.full_recomposite = true;
+        self.damage_window(window_id);
+        if vanished && self.focused_window == Some(window_id) {
+            if let Some(win) = self.window_mut(window_id) {
+                win.focused = false;
+            }
+            self.focused_window = None;
+            self.pending_notifications
+                .push_back(EventNotification::FocusLost { window_id });
+            self.focus_topmost_visible();
+        }
         Ok(())
     }
 
@@ -6083,8 +6266,7 @@ impl Compositor {
         // Iterate z_stack from top to bottom.
         for &window_id in self.z_stack.iter().rev() {
             if let Some(win) = self.window_ref(window_id)
-                && win.visible
-                && !win.minimized
+                && win.is_showing(self.current_workspace)
                 && win.client_rect().contains(x, y)
             {
                 return Some(window_id);
@@ -6097,8 +6279,7 @@ impl Compositor {
     fn window_at_with_decorations(&self, x: i32, y: i32) -> Option<WindowId> {
         for &window_id in self.z_stack.iter().rev() {
             if let Some(win) = self.window_ref(window_id)
-                && win.visible
-                && !win.minimized
+                && win.is_showing(self.current_workspace)
                 && win.outer_rect().contains(x, y)
             {
                 return Some(window_id);
@@ -6171,7 +6352,7 @@ impl Compositor {
             let Some(win) = self.window_ref(window_id) else {
                 continue;
             };
-            if !win.visible || win.minimized {
+            if !win.is_showing(self.current_workspace) {
                 continue;
             }
             if let Some(mode) = self.detect_border_drag(win, x, y) {
@@ -6391,7 +6572,7 @@ impl Compositor {
     fn opaque_cover_rects(&self) -> Vec<Rect> {
         self.windows
             .iter()
-            .filter_map(Self::window_opaque_cover)
+            .filter_map(|win| Self::window_opaque_cover(win, self.current_workspace))
             .collect()
     }
 
@@ -6402,8 +6583,8 @@ impl Compositor {
     /// and the inter-window cull in [`render_all_windows`](Self::render_all_windows),
     /// so the two can never disagree about what counts as opaque — a window
     /// treated as an occluder by one and not the other would leave a hole.
-    fn window_opaque_cover(win: &Window) -> Option<Rect> {
-        if !win.visible || win.minimized || win.opacity < 1.0 {
+    fn window_opaque_cover(win: &Window, current_workspace: u32) -> Option<Rect> {
+        if !win.is_showing(current_workspace) || win.opacity < 1.0 {
             return None;
         }
         if let Some(buf) = win.buffer.as_ref() {
@@ -6531,14 +6712,17 @@ impl Compositor {
         // `first_command_covers_client` walks a command list).
         let covers: Vec<Option<Rect>> = z_stack_copy
             .iter()
-            .map(|&id| self.window_ref(id).and_then(Self::window_opaque_cover))
+            .map(|&id| {
+                self.window_ref(id)
+                    .and_then(|win| Self::window_opaque_cover(win, self.current_workspace))
+            })
             .collect();
 
         for (idx, &window_id) in z_stack_copy.iter().enumerate() {
             let Some(win) = self.window_ref(window_id) else {
                 continue;
             };
-            if !win.visible || win.minimized {
+            if !win.is_showing(self.current_workspace) {
                 continue;
             }
             let extent = Self::window_drawn_extent(win);
@@ -6579,7 +6763,7 @@ impl Compositor {
         let z_stack_copy: Vec<WindowId> = self.z_stack.clone();
         for &window_id in &z_stack_copy {
             if let Some(win) = self.window_ref(window_id) {
-                if !win.visible || win.minimized {
+                if !win.is_showing(self.current_workspace) {
                     continue;
                 }
                 let outer = win.outer_rect();
@@ -6635,7 +6819,7 @@ impl Compositor {
     fn render_window(&mut self, window_id: WindowId) {
         // Gather window data we need (avoiding borrow conflicts with self).
         let win_data = match self.window_ref(window_id) {
-            Some(win) if win.visible && !win.minimized => (
+            Some(win) if win.is_showing(self.current_workspace) => (
                 win.x,
                 win.y,
                 win.width,
@@ -7156,6 +7340,19 @@ impl Compositor {
                         height: rect.height,
                     }
                 }
+                Err(e) => CompositorResponse::Error {
+                    message: e.to_string(),
+                },
+            },
+            CompositorRequest::SwitchWorkspace { workspace } => {
+                self.switch_workspace(workspace);
+                CompositorResponse::Ok
+            }
+            CompositorRequest::SetWindowWorkspace {
+                window_id,
+                workspace,
+            } => match self.set_window_workspace(window_id, workspace) {
+                Ok(()) => CompositorResponse::Ok,
                 Err(e) => CompositorResponse::Error {
                     message: e.to_string(),
                 },
@@ -7753,25 +7950,44 @@ impl Compositor {
     ///
     /// Ordered by `z_stack` rather than by creation, so consecutive entries are
     /// neighbours on screen and the last one is the topmost window.
+    ///
+    /// Windows on other virtual desktops are in it, carrying their own desktop
+    /// number, and the list says which desktop is showing. Leaving them out
+    /// would be the original bug back in a new place: a switcher that could only
+    /// offer this desktop's windows makes the others unreachable.
     #[must_use]
-    pub fn window_list(&self) -> Vec<WindowInfo> {
-        self.z_stack
-            .iter()
-            .filter_map(|&id| self.window_ref(id))
-            .map(|w| WindowInfo {
-                id: w.id.raw(),
-                pid: w.client_pid,
-                layer: w.layer,
-                title: w.title.clone(),
-                visible: w.visible,
-                minimized: w.minimized,
-                maximized: w.maximized,
-                // From the window's own flag rather than from
-                // `self.focused_window`, so the list cannot disagree with the
-                // window it describes if the two ever drift apart.
-                focused: w.focused,
-            })
-            .collect()
+    pub fn window_list(&self) -> WindowList {
+        WindowList::new(
+            self.current_workspace,
+            self.z_stack
+                .iter()
+                .filter_map(|&id| self.window_ref(id))
+                .map(|w| WindowInfo {
+                    id: w.id.raw(),
+                    pid: w.client_pid,
+                    layer: w.layer,
+                    title: w.title.clone(),
+                    visible: w.visible,
+                    minimized: w.minimized,
+                    maximized: w.maximized,
+                    // From the window's own flag rather than from
+                    // `self.focused_window`, so the list cannot disagree with
+                    // the window it describes if the two ever drift apart.
+                    focused: w.focused,
+                    workspace: w.workspace,
+                    // Reported, never accepted back. Nothing in `ShellControl`
+                    // takes a rectangle — a snap names an edge (§505) and a
+                    // maximize names nothing — so this is something a shell
+                    // draws with, not something it can move a window by. That
+                    // is the whole difference between this and the per-window
+                    // geometry §506 deleted from the shell's own list.
+                    x: w.x,
+                    y: w.y,
+                    width: w.width,
+                    height: w.height,
+                })
+                .collect(),
+        )
     }
 
     /// Update z_order fields on all windows based on their position in z_stack.
@@ -7798,7 +8014,7 @@ impl Compositor {
         let mut snaps: Vec<WindowSnapshot<'_>> = Vec::with_capacity(self.z_stack.len());
         for &id in &self.z_stack {
             if let Some(win) = self.window_ref(id) {
-                if !win.visible || win.minimized {
+                if !win.is_showing(self.current_workspace) {
                     continue;
                 }
                 snaps.push(WindowSnapshot {
@@ -7858,7 +8074,7 @@ impl Compositor {
     fn focus_topmost_visible(&mut self) {
         let topmost = self.z_stack.iter().rev().copied().find(|&id| {
             self.window_ref(id)
-                .is_some_and(|w| w.visible && !w.minimized)
+                .is_some_and(|w| w.is_showing(self.current_workspace))
         });
 
         if let Some(id) = topmost {
@@ -15822,6 +16038,530 @@ mod tests {
             comp.display_manager.displays()[0].id,
             0,
             "a failed rename renamed something else"
+        );
+    }
+
+    // ---- a virtual desktop the compositor can actually show ----
+
+    /// A compositor whose vsync gate is open.
+    ///
+    /// `should_compose` refuses a frame within one refresh interval of the
+    /// last, so at 60 Hz a test that composites twice in a row is told "nothing
+    /// was drawn" by the *clock* rather than by the scene -- which would make
+    /// "the switch repainted nothing" pass for entirely the wrong reason. A
+    /// refresh rate this high rounds the interval to zero.
+    fn ungated_compositor(width: u32, height: u32) -> Compositor {
+        Compositor::new(width, height, 2_000_000).expect("compositor")
+    }
+
+    /// A window filled edge to edge with one opaque colour, so a test can ask
+    /// whether it is on screen by looking at the pixel under it.
+    ///
+    /// A shared buffer rather than a render tree because a buffer covers the
+    /// whole client area with known bytes and takes part in the occlusion cull
+    /// as an opaque occluder -- which is the half of "is it showing" that a
+    /// hit test cannot see.
+    ///
+    /// **`Xrgb8888`, and that is load-bearing.** `Buffer::is_opaque` is a
+    /// question about the *format*, not about the bytes: an `Argb8888` buffer
+    /// full of 0xFF alpha is still not an occluder, because the compositor will
+    /// not scan a client's pixels to find out. Written the obvious way with
+    /// `Argb8888`, `window_opaque_cover` returned `None` for every window here
+    /// and the occlusion test passed without ever reaching the cull it names.
+    fn painted_window(
+        comp: &mut Compositor,
+        layer: Layer,
+        rect: Rect,
+        colour: u32,
+    ) -> (WindowId, i32, i32) {
+        let mut spec = WindowSpec::new("Painted", rect.width, rect.height);
+        spec.position = Some((rect.x, rect.y));
+        spec.decorations = false;
+        spec.layer = layer;
+        let id = comp.create_window_from_spec(&spec, 1);
+        let bytes = solid_buffer_bytes(rect.width, rect.height, colour);
+        comp.attach_buffer(
+            id,
+            u64::from(rect.width),
+            rect.width,
+            rect.height,
+            rect.width.saturating_mul(4),
+            BufferFormat::Xrgb8888,
+            &bytes,
+        )
+        .expect("attach buffer");
+        let win = comp.window_ref(id).expect("window");
+        let client = win.client_rect();
+        (id, client.x + 1, client.y + 1)
+    }
+
+    fn pixel_at(comp: &Compositor, x: i32, y: i32) -> u32 {
+        let (w, _) = comp.backend.size();
+        let index = usize::try_from(y).expect("y") * usize::try_from(w).expect("w")
+            + usize::try_from(x).expect("x");
+        comp.backend.presented_pixels()[index]
+    }
+
+    /// Build a stack in which a window belonging to *another* desktop sits
+    /// **above** a window on the desktop being shown, and return the lower
+    /// window's id together with a point inside it.
+    ///
+    /// **The obvious way to write this does not produce that stack.** Creating
+    /// two overlapping windows and moving the upper one away with
+    /// `set_window_workspace` leaves the hidden window at the *bottom*: handing
+    /// the keyboard on raises the window it lands on (`focus_window` calls
+    /// `raise_within_layer`), so the window left showing climbs over the one
+    /// just hidden. A hidden window underneath everything can neither occlude
+    /// nor overpaint, and both tests below passed against a deliberately broken
+    /// cull for exactly that reason — they never reached the code they name.
+    ///
+    /// A third window on the showing desktop is what fixes it: the focus
+    /// handoff raises *that* one, and the window from the other desktop keeps
+    /// its place above the one the test looks at. That is also the ordinary
+    /// case rather than a contrivance — open something on desktop 2, switch
+    /// back to desktop 1, and the desktop-2 window is still stacked above
+    /// everything except the window you landed on.
+    fn stack_with_a_hidden_window_on_top(
+        comp: &mut Compositor,
+        colour: u32,
+    ) -> (WindowId, i32, i32) {
+        let (lower, x, y) = painted_window(comp, Layer::Normal, Rect::new(20, 20, 60, 60), colour);
+        // Elsewhere on screen, so its only role is to be the focus target.
+        painted_window(comp, Layer::Normal, Rect::new(200, 20, 60, 60), 0xFF00_FF00);
+        comp.switch_workspace(1);
+        painted_window(
+            comp,
+            Layer::Normal,
+            Rect::new(20, 20, 60, 60),
+            HIDDEN_COLOUR,
+        );
+        comp.switch_workspace(0);
+        (lower, x, y)
+    }
+
+    /// The colour of the window that is on the desktop the user is *not*
+    /// looking at — so a failure message can say which window won.
+    const HIDDEN_COLOUR: u32 = 0xFF99_8877;
+
+    #[test]
+    fn a_window_on_another_virtual_desktop_is_not_drawn() {
+        // The defect this whole feature exists to fix: switching desktop used
+        // to change which windows the *taskbar listed* and nothing else, so the
+        // window you just left stayed on screen, kept taking clicks, and was no
+        // longer reachable from the taskbar -- worse than not having virtual
+        // desktops at all.
+        let mut comp = ungated_compositor(400, 300);
+        let colour = 0xFF11_2233;
+        let (_, x, y) = painted_window(&mut comp, Layer::Normal, Rect::new(20, 20, 40, 40), colour);
+        assert!(comp.compose_frame(), "nothing was drawn");
+        assert_eq!(
+            pixel_at(&comp, x, y),
+            colour,
+            "the window was never on screen"
+        );
+
+        comp.switch_workspace(1);
+        assert!(comp.compose_frame(), "switching desktop repainted nothing");
+        assert_ne!(
+            pixel_at(&comp, x, y),
+            colour,
+            "the window of the desktop we left is still on screen"
+        );
+
+        comp.switch_workspace(0);
+        assert!(comp.compose_frame(), "switching back repainted nothing");
+        assert_eq!(
+            pixel_at(&comp, x, y),
+            colour,
+            "the window did not come back with its desktop"
+        );
+    }
+
+    #[test]
+    fn a_window_on_another_virtual_desktop_does_not_take_clicks() {
+        // Drawing and hit testing are separate passes over the same stack, and
+        // a window that is invisible but still clickable is the worse of the
+        // two failures: the user aims at what they can see and something they
+        // cannot see answers.
+        let mut comp = ungated_compositor(400, 300);
+        let (id, x, y) = painted_window(
+            &mut comp,
+            Layer::Normal,
+            Rect::new(20, 20, 40, 40),
+            0xFF11_2233,
+        );
+        assert_eq!(comp.window_at(x, y), Some(id), "the window was never hit");
+        assert_eq!(
+            comp.window_at_with_decorations(x, y),
+            Some(id),
+            "the window's frame was never hit"
+        );
+
+        comp.switch_workspace(1);
+        assert_eq!(
+            comp.window_at(x, y),
+            None,
+            "a window on another desktop swallowed a click"
+        );
+        assert_eq!(
+            comp.window_at_with_decorations(x, y),
+            None,
+            "a window on another desktop swallowed a click on its frame"
+        );
+    }
+
+    #[test]
+    fn a_window_on_another_virtual_desktop_does_not_occlude_the_one_in_front_of_you() {
+        // The occlusion cull decides what *not* to draw by asking which
+        // rectangles are opaquely covered. A hidden window left in that answer
+        // is the most confusing possible symptom: the window you are looking at
+        // is genuinely on this desktop and genuinely mapped, and a rectangular
+        // hole appears in it where something on another desktop used to be.
+        let mut comp = ungated_compositor(400, 300);
+        let under = 0xFF11_2233;
+        let (_, x, y) = stack_with_a_hidden_window_on_top(&mut comp, under);
+
+        assert!(comp.compose_frame(), "nothing was drawn");
+        assert_eq!(
+            pixel_at(&comp, x, y),
+            under,
+            "the window in front of the user was culled away by one on another desktop"
+        );
+    }
+
+    #[test]
+    fn the_taskbar_is_on_every_virtual_desktop() {
+        // A taskbar that vanished on a switch would take the only means of
+        // switching back with it. Layer is the property that says so: the
+        // wallpaper and the shell's chrome belong to the screen, not to a
+        // desktop.
+        let mut comp = ungated_compositor(400, 300);
+        let colour = 0xFF44_5566;
+        let (bar, x, y) = painted_window(
+            &mut comp,
+            Layer::Overlay,
+            Rect::new(0, 270, 400, 30),
+            colour,
+        );
+        comp.switch_workspace(3);
+        assert!(comp.compose_frame(), "nothing was drawn");
+        assert_eq!(
+            pixel_at(&comp, x, y),
+            colour,
+            "the taskbar went away with the desktop it was created on"
+        );
+        assert_eq!(
+            comp.window_at(x, y),
+            Some(bar),
+            "the taskbar is drawn but no longer takes clicks"
+        );
+    }
+
+    #[test]
+    fn an_assignment_a_panel_ignores_is_stored_rather_than_refused() {
+        // A shell moving "all its windows" must not have to know which of them
+        // are furniture. The assignment is taken and remembered; `is_showing`
+        // is what ignores it.
+        let mut comp = ungated_compositor(400, 300);
+        let (bar, x, y) = painted_window(
+            &mut comp,
+            Layer::Overlay,
+            Rect::new(0, 270, 400, 30),
+            0xFF44_5566,
+        );
+        comp.set_window_workspace(bar, 2).expect("move");
+        assert_eq!(
+            comp.window_ref(bar).expect("window").workspace,
+            2,
+            "the assignment was dropped instead of stored"
+        );
+        assert_eq!(
+            comp.window_at(x, y),
+            Some(bar),
+            "a panel told it was on desktop 2 left desktop 0"
+        );
+    }
+
+    #[test]
+    fn switching_desktop_takes_the_keyboard_off_the_window_it_hides() {
+        // A window nobody can see must not hold the keyboard: every keystroke
+        // would go somewhere the user cannot find, and nothing on screen would
+        // say where.
+        let mut comp = ungated_compositor(400, 300);
+        let first = comp.create_window("First".to_string(), 100, 80, 1);
+        comp.switch_workspace(1);
+        let second = comp.create_window("Second".to_string(), 100, 80, 1);
+        assert_eq!(
+            comp.focused_window,
+            Some(second),
+            "the new window is focused"
+        );
+
+        comp.switch_workspace(0);
+        assert_eq!(
+            comp.focused_window,
+            Some(first),
+            "the keyboard did not follow the screen"
+        );
+        assert!(
+            !comp.window_ref(second).expect("window").focused,
+            "a window on another desktop still believes it has the keyboard"
+        );
+    }
+
+    #[test]
+    fn switching_to_an_empty_desktop_focuses_nothing() {
+        // Not "keeps the last window focused", which is the tempting shortcut:
+        // an empty desktop genuinely has nothing to type into, and saying so is
+        // what stops keystrokes reaching a window on a desktop nobody is
+        // looking at.
+        let mut comp = ungated_compositor(400, 300);
+        let id = comp.create_window("Only".to_string(), 100, 80, 1);
+        assert_eq!(comp.focused_window, Some(id));
+        comp.switch_workspace(1);
+        assert_eq!(
+            comp.focused_window, None,
+            "an empty desktop kept the keyboard on a window it does not have"
+        );
+    }
+
+    #[test]
+    fn moving_the_focused_window_away_hands_the_keyboard_on() {
+        // The other way a focused window can leave the screen. It goes through
+        // the same rule as a switch rather than a second one, because two rules
+        // for "what has the keyboard now" is how the two answers drift.
+        let mut comp = ungated_compositor(400, 300);
+        let staying = comp.create_window("Staying".to_string(), 100, 80, 1);
+        let leaving = comp.create_window("Leaving".to_string(), 100, 80, 1);
+        assert_eq!(comp.focused_window, Some(leaving));
+        comp.set_window_workspace(leaving, 1).expect("move");
+        assert_eq!(
+            comp.focused_window,
+            Some(staying),
+            "the keyboard stayed on a window that left the desktop"
+        );
+    }
+
+    #[test]
+    fn a_window_opens_on_the_desktop_the_user_is_looking_at() {
+        // Not on desktop 0, which is what a `Default`-derived field would give
+        // it: a program started from the desktop you are on must appear on the
+        // desktop you are on. A client cannot name a workspace in its spec at
+        // all -- see `create_window_from_spec`.
+        let mut comp = ungated_compositor(400, 300);
+        comp.switch_workspace(2);
+        let id = comp.create_window("New".to_string(), 100, 80, 1);
+        assert_eq!(
+            comp.window_ref(id).expect("window").workspace,
+            2,
+            "a window opened on a desktop the user was not looking at"
+        );
+        assert_eq!(
+            comp.focused_window,
+            Some(id),
+            "a window opened on this desktop did not get the keyboard"
+        );
+    }
+
+    #[test]
+    fn activating_a_window_on_another_desktop_goes_to_it_rather_than_dragging_it_here() {
+        // Activating is a request to *see* a particular window. Switching moves
+        // one thing and is undone by switching back; dragging the window here
+        // rearranges the desktops themselves and leaves the user to notice.
+        let mut comp = ungated_compositor(400, 300);
+        let away = comp.create_window("Away".to_string(), 100, 80, 1);
+        comp.switch_workspace(1);
+        comp.create_window("Here".to_string(), 100, 80, 1);
+
+        comp.activate_window(away).expect("activate");
+        assert_eq!(
+            comp.current_workspace(),
+            0,
+            "activating a window elsewhere did not follow it"
+        );
+        assert_eq!(
+            comp.window_ref(away).expect("window").workspace,
+            0,
+            "the window was dragged to the current desktop instead"
+        );
+        assert_eq!(
+            comp.focused_window,
+            Some(away),
+            "followed the window but did not focus it"
+        );
+    }
+
+    #[test]
+    fn a_window_the_user_cannot_see_is_not_handed_the_whole_screen() {
+        // The direct-scanout bypass hands one window's buffer straight to the
+        // display. A fullscreen window on another desktop passing that test
+        // would put the desktop you left back on screen in its entirety, with
+        // nothing else composited over it at all.
+        let mut comp = ungated_compositor(64, 48);
+        let mut spec = WindowSpec::new("Game", 64, 48);
+        spec.position = Some((0, 0));
+        spec.decorations = false;
+        let id = comp.create_window_from_spec(&spec, 1);
+        comp.set_fullscreen(id, true).expect("fullscreen");
+        let bytes = solid_buffer_bytes(64, 48, 0xFF00_FF00);
+        comp.attach_buffer(id, 7, 64, 48, 256, BufferFormat::Argb8888, &bytes)
+            .expect("attach");
+        assert_eq!(
+            comp.direct_scanout_window(),
+            Some(id),
+            "the bypass never took this window"
+        );
+
+        comp.switch_workspace(1);
+        assert_eq!(
+            comp.direct_scanout_window(),
+            None,
+            "a window on another desktop was scanned out over the one in front of the user"
+        );
+    }
+
+    #[test]
+    fn a_window_on_another_desktop_is_still_in_the_window_list() {
+        // The list is what a taskbar is built from, and a taskbar has to be
+        // able to show the other desktops' windows -- that is how the user
+        // finds them again. Hiding is a compositing decision, not a reason to
+        // deny the window exists.
+        let mut comp = ungated_compositor(400, 300);
+        let id = comp.create_window("Away".to_string(), 100, 80, 1);
+        comp.switch_workspace(1);
+        assert!(
+            comp.window_list().windows.iter().any(|w| w.id == id.raw()),
+            "a window on another desktop disappeared from the window list"
+        );
+    }
+
+    #[test]
+    fn the_window_list_reports_where_each_window_actually_is() {
+        // An overview draws thumbnails in proportion to the real windows, so
+        // the rectangle in the list has to be the window's own -- not a
+        // placeholder, and not the previous frame's. A list that reported
+        // zero-by-zero would draw an empty desktop over a full one, which reads
+        // as "nothing is running" rather than as a bug.
+        let mut comp = ungated_compositor(1920, 1080);
+        let id = comp.create_window("Placed".to_string(), 640, 480, 1);
+        comp.move_window(id, -100, 250).expect("move");
+
+        let list = comp.window_list();
+        let w = list
+            .windows
+            .iter()
+            .find(|w| w.id == id.raw())
+            .expect("the window is listed");
+        let real = comp.window_ref(id).expect("window");
+        assert_eq!(
+            (w.x, w.y, w.width, w.height),
+            (real.x, real.y, real.width, real.height),
+            "the list's rectangle is not the window's"
+        );
+        // Stated separately from the equality above, because that one would
+        // still hold if both sides were zero. The move must be visible.
+        assert_eq!((w.x, w.y), (-100, 250));
+    }
+
+    #[test]
+    fn moving_a_window_moves_it_in_the_next_window_list() {
+        // The list is rebuilt per call rather than cached, and this is the test
+        // that says so: a cache that filled once at creation would pass every
+        // other geometry assertion here and go stale the instant a user dragged
+        // a window.
+        let mut comp = ungated_compositor(1920, 1080);
+        let id = comp.create_window("Dragged".to_string(), 300, 200, 1);
+        comp.move_window(id, 10, 20).expect("move");
+        let before = comp.window_list();
+        comp.move_window(id, 700, 400).expect("move again");
+        let after = comp.window_list();
+
+        let pos = |list: &WindowList| {
+            let w = list
+                .windows
+                .iter()
+                .find(|w| w.id == id.raw())
+                .expect("listed");
+            (w.x, w.y)
+        };
+        assert_eq!(pos(&before), (10, 20));
+        assert_eq!(pos(&after), (700, 400), "the list did not follow the move");
+    }
+
+    #[test]
+    fn a_window_comes_back_from_another_desktop_exactly_as_it_was_left() {
+        // Hiding must be *only* hiding. Minimizing or unmapping the departing
+        // windows would be visible on the way back -- a maximized window that
+        // came back restored, a client told to redraw for a switch it has no
+        // business hearing about.
+        let mut comp = ungated_compositor(400, 300);
+        let id = comp.create_window("Kept".to_string(), 100, 80, 1);
+        comp.maximize_window(id).expect("maximize");
+        let before = comp.window_ref(id).expect("window").clone();
+
+        comp.switch_workspace(1);
+        let hidden = comp.window_ref(id).expect("window");
+        assert!(!hidden.minimized, "hiding a desktop minimized its windows");
+        assert!(hidden.visible, "hiding a desktop unmapped its windows");
+
+        comp.switch_workspace(0);
+        let after = comp.window_ref(id).expect("window");
+        assert_eq!(
+            (after.x, after.y, after.width, after.height, after.maximized),
+            (
+                before.x,
+                before.y,
+                before.width,
+                before.height,
+                before.maximized
+            ),
+            "the window came back changed"
+        );
+    }
+
+    #[test]
+    fn switching_to_the_desktop_already_showing_is_not_a_repaint() {
+        // A shell re-asserting its state on every frame is a normal thing for a
+        // shell to do. If that forced a full recomposite the desktop would
+        // repaint entirely, every frame, for ever.
+        let mut comp = ungated_compositor(400, 300);
+        comp.create_window("Any".to_string(), 100, 80, 1);
+        assert!(comp.compose_frame(), "nothing was drawn");
+        comp.switch_workspace(comp.current_workspace());
+        assert!(
+            !comp.full_recomposite,
+            "re-asserting the current desktop asked for a full repaint"
+        );
+        assert!(
+            !comp.compose_frame(),
+            "re-asserting the current desktop redrew the frame"
+        );
+    }
+
+    #[test]
+    fn the_damage_path_does_not_repaint_a_window_from_another_desktop() {
+        // A switch asks for a full recomposite, so every other test in this
+        // section goes through `render_all_windows` and never reaches the
+        // *damage* pass -- which is a second, independent walk of the same z
+        // stack, with its own copy of the "is it showing" question. A window
+        // moving on the desktop you are looking at is what drives it, and a
+        // window from another desktop overlapping the damaged rectangle is what
+        // it would wrongly repaint.
+        let mut comp = ungated_compositor(400, 300);
+        let under = 0xFF11_2233;
+        let (here, x, y) = stack_with_a_hidden_window_on_top(&mut comp, under);
+        assert!(comp.compose_frame(), "nothing was drawn");
+        assert!(
+            !comp.full_recomposite,
+            "the first frame left a full recomposite pending, so the damage pass would be skipped"
+        );
+
+        comp.damage_window(here);
+        assert!(comp.compose_frame(), "a damaged window redrew nothing");
+        assert_eq!(
+            pixel_at(&comp, x, y),
+            under,
+            "the damage pass repainted a window belonging to another desktop"
         );
     }
 

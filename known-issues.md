@@ -49738,10 +49738,10 @@ Still open, and both now stated in the crate doc: the geometry half of the old
 private window manager (`add_window`, `focus_window`, `minimize_window`,
 `maximize_window`, `restore_window`, `toggle_maximize`, `remove_window`,
 `snap_window`, `snap_window_to_zone`, `take_window_id`) has no caller outside
-the demo and the tests and should go; and `TD-C-VIRTUAL-DESKTOPS-HIDE-NOTHING`
-below, which this work made visible.
+the demo and the tests and should go. `TD-C-VIRTUAL-DESKTOPS-HIDE-NOTHING`
+below was also made visible by this work, and is now resolved.
 
-## TD-C-VIRTUAL-DESKTOPS-HIDE-NOTHING (lane C, 2026-08-21)
+## TD-C-VIRTUAL-DESKTOPS-HIDE-NOTHING (lane C, 2026-08-21) — RESOLVED 2026-08-21 (see the final note)
 
 **What:** switching virtual desktop changes which windows the *taskbar lists*
 and nothing else. On a live session the windows of the desktop you just left
@@ -49780,6 +49780,49 @@ incomplete, not wrong-when-used.
 **If never fixed:** the virtual-desktop shortcuts and the desktop indicator are
 worse than absent — they promise a switch and deliver a taskbar that disagrees
 with the screen.
+
+**RESOLVED 2026-08-21, by option (a) — the compositor learned what a virtual
+desktop is.** Two commits, and the fork above was decided the way the entry
+itself predicted, for the reason it gave: option (b) needed a
+hide-any-window-you-do-not-own verb, and that is the ambient authority the
+whole `ShellControl` design exists to refuse. Full reasoning in
+`design-decisions.md` section 518.
+
+| Stage | Commit | What landed |
+|---|---|---|
+| 1 | `a86ff739` | The compositor holds it. `Window::workspace`, `Compositor::current_workspace`, `switch_workspace`, `set_window_workspace`; one `shows_on_current_workspace` predicate consulted by the full-scene pass, the per-window draw, the damage path, hit testing, focus and activation. `Layer` is the stickiness rule — a window outside `Layer::Normal` is on every desktop, so panels and menus never vanish. |
+| 2 | `ed8d5eea2` | It reaches a screen. `WLST` went to version 2 with a `showing` field in the header and a `workspace` on every window; `RequestBody::SwitchWorkspace` (`0x12`) and `SetWindowWorkspace` (`0x13`) behind `require_shell()`; `Connection`/`EventLoop` accessors that return `Option` so "not told yet" cannot be read as "desktop 0"; and a `DesktopShell` that asks instead of deciding. |
+
+**The shell's three second copies are gone.** `current_desktop` and the
+per-window `desktop` are still fields, but nothing writes them except
+`apply_window_list`, which takes the whole `WindowList` and copies the
+compositor's answers in. `switch_desktop` and `move_window_to_desktop` became
+`&self` and return a `ShellRequest` — a new enum, because a desktop switch
+names no window at all and so could not honestly be carried in
+`ShellControlAction`'s `(window, action)` pair. The cost is one round trip
+before the taskbar relabels; the alternative draws the new desktop's buttons
+over the old desktop's windows for a frame, which is this bug in miniature.
+
+**Two stage-1 tests were passing for the wrong reason, and reintroducing the
+defects is what found them** — not reading.
+`a_window_on_another_virtual_desktop_does_not_occlude_the_one_in_front_of_you`
+survived a deliberately broken occlusion cull because `Buffer::is_opaque()` is
+a question about the pixel *format*, so an `Argb8888` buffer full of opaque
+alpha is not an occluder and the hidden window could never have occluded
+anything either way. Fixing that was still not enough: `focus_window` ends in
+`raise_within_layer`, so moving a window elsewhere hands the keyboard to the
+window below it and *reorders the stack* — the window left showing climbs above
+the one just hidden, and a hidden window at the bottom can neither occlude nor
+overpaint. `stack_with_a_hidden_window_on_top` gives the focus handoff a third
+window to land on, which is the ordinary arrangement rather than a contrivance.
+
+**Still open, and named in section 518 as what this deliberately does not do:**
+no per-desktop wallpaper, no per-desktop window arrangement, no memory of which
+window was focused on a desktop you return to, no drag-a-window-to-a-desktop,
+and the number is not persisted across a compositor restart. All of those want
+a per-desktop record rather than a per-window number. The desktop *count* is
+still fixed at `DesktopShell` construction, which is what blocks the overview
+screen's "add a desktop" — see `TD-C-THE-OVERVIEW-SCREEN-IS-1856-LINES-NOBODY-CALLS`.
 
 ## TD-C-ANY-CLIENT-CAN-READ-EVERY-WINDOW-TITLE
 
@@ -53910,3 +53953,350 @@ subsystem three layers away.
 | virtio-gpu | 250 discontiguous 16 KiB frames | was wrong on both sides — `B-VIRTIO-GPU-FLAT-SCANOUT-WILD-WRITE` |
 | Limine | genuinely linear firmware aperture | destination safe; unclamped width + dropped source crossings — this entry |
 | ATI | zero-copy VRAM, no blit at all | clean |
+
+---
+
+## TD-C-THE-OVERVIEW-SCREEN-IS-1856-LINES-NOBODY-CALLS (lane C, 2026-08-21) — RESOLVED 2026-08-22
+
+**In short:** The desktop has a finished Expose / Mission-Control screen —
+thumbnails of every window, one lane per virtual desktop, arrow-key navigation,
+type-to-search, click to switch. It is 1856 lines, it is tested, and *nothing in
+the operating system ever shows it*. There is no key that opens it, no code that
+fills it with real windows, and no code that acts on what the user clicks.
+
+**Where:** `gui/desktop/src/overview.rs`, declared `pub mod overview;` at
+`gui/desktop/src/lib.rs:109`. A search of the whole tree for `OverviewState`,
+`DesktopLane` and `overview::` matches exactly one file — `overview.rs` itself.
+Its only constructors of `DesktopLane` are its own `sample_lanes()` fixture and
+three tests.
+
+**How it looks:** it does not look like anything. That is the defect. A user
+cannot reach it; a developer reading `roadmap.md` would tick the feature off.
+
+**Why it was not noticed sooner:** the module is *good* — 15 public items with
+doc comments, a grid layout, a lane layout, a full render pass and a keyboard
+model, all covered by tests that pass. Every test drives the module directly, so
+"is this wired to anything?" is a question none of them can ask. This is the
+same failure mode as `TD-C-VIRTUAL-DESKTOPS-HIDE-NOTHING` — a self-consistent
+component whose tests prove it correct with respect to inputs no one supplies.
+
+**Three things are missing, and they are not the same size.**
+
+1. *A data source. The wire change it needed is now done (`WLST` v3,
+   design-decisions.md §519); the projection is not.* `WindowThumbnail` wants
+   `window_id`, `desktop_id`, `title`, focus, minimized and a rectangle. All of
+   those are now on `guiremote::window_list::WindowInfo`, with
+   `DesktopLane::is_current` being the header's `current_workspace`. The
+   rectangle was the blocker and is why this entry originally said the wire had
+   to change first: `compute_grid_layout` calls
+   `fit_aspect(thumb.width, thumb.height, …)`, and `fit_aspect` returns
+   `(0.0, 0.0)` for a zero input, so a projection written against the v2 list
+   would have given every thumbnail a zero-by-zero rectangle — nothing drawn,
+   and `on_mouse_click` hit-testing against nothing. That is the exact failure
+   `Hit::WindowContent` had before §506 deleted it, for the exact same reason: a
+   rectangle nobody supplies. Uniform boxes were rejected as the substitute — an
+   Exposé whose thumbnails do not have their windows' proportions is a list,
+   which is the taskbar. What remains is the projection itself: a
+   `DesktopShell` → `OverviewState` function driven by the same `WindowList`
+   that `apply_window_list` already takes, so the overview cannot disagree with
+   the taskbar about which desktop is showing.
+   The *thumbnail image* is separately absent and is the part that should stay
+   absent for now: the module lays out rectangles and draws titles, and never
+   asks the compositor for window contents. Live thumbnails need a verb that
+   does not exist (a scaled read of another client's buffer) and is a capability
+   question of the same shape as `TD-C-ANY-CLIENT-CAN-READ-EVERY-WINDOW-TITLE` —
+   only worse, because a title is text and a thumbnail is the screen. Titled
+   proportional rectangles are a usable Exposé without it.
+2. *An output path.* `OverviewAction` is a fourth spelling of verbs the shell
+   already has: `SwitchToWindow(u64)` is `ShellControlAction::Activate`,
+   `SwitchToDesktop(u32)` is `ShellRequest::SwitchDesktop`, `CloseWindow(u64)`
+   is `ShellControlAction::Close`. Wiring should *delete* those three variants
+   and return `Option<ShellRequest>`, exactly as the zone-snapping work deleted
+   the shell's second copy of the edge rules (see
+   `TD-C-EDGE-DRAG-TILING-HAS-NO-DRAG-TO-FIRE-ON`, resolved). A second spelling
+   is a second thing to drift.
+   `OverviewAction::AddDesktop` has no counterpart and cannot get one today:
+   `DesktopShell::num_desktops` is fixed at construction and is the only bound
+   either side enforces (design-decisions.md §518). Making the desktop count
+   mutable is a real decision, not a wiring detail.
+3. *A field nothing in the system can fill.* `WindowThumbnail::app_name` is
+   rendered as a second label under each title (`overview.rs:757`) and is one of
+   the two things type-to-search matches (`overview.rs:183`). Nothing in the
+   shell knows it. `guiremote::window_list::WindowInfo` carries `id`, `pid`,
+   `layer`, `title`, four state bits, a desktop number and (as of `WLST` v3) a
+   rectangle — no application identity; a tree-wide search finds `app_name` only
+   in `context_ext.rs`, `focus_assist.rs` and `notif_pane.rs`, all of which are
+   given the string by whoever registers with them, and none of which is
+   reachable from a window id. Only the three test fixtures inside `overview.rs`
+   ever set it, always to the literal `"app"`, which is exactly why the tests do
+   not notice. A projection written today would have to pass the empty string,
+   and then the overview would render a blank line under every title and
+   type-to-search would silently match half of what its doc comment promises.
+   The honest fix is to *delete* the field rather than invent a value for it:
+   an application's name is a property of the program, which means it comes from
+   the package/desktop-entry metadata keyed by executable, and the compositor
+   would have to learn an app identity per window before the wire could carry
+   one. Until that exists, a titled rectangle is the whole of what the shell
+   knows. (Deleting it also removes the second search key, so `update_search`'s
+   doc comment has to stop promising it.)
+
+**Proper fix:** (a) a `DesktopShell` → `OverviewState` projection driven by the
+same `WindowList` `apply_window_list` already takes, so the overview cannot
+disagree with the taskbar about which desktop is showing; (b) `OverviewAction`
+collapsed into `Option<ShellRequest>` with the three duplicate variants deleted;
+(c) a hotkey in `handle_hotkey` to open it and `Esc` to close; (d) thumbnails
+left as titled rectangles until the compositor can serve window contents under a
+capability, with the module doc saying so rather than implying pictures;
+(e) `app_name` deleted from `WindowThumbnail` and `ThumbnailLayout`, and
+`update_search` reduced to matching titles, until an application identity exists
+to put there.
+
+**If never fixed:** 1856 lines of dead weight that reads as a shipped feature.
+The concrete cost is not the disk space — it is that the next person to want an
+Expose screen finds this one, believes it works, and wires a data source to an
+action enum that has since drifted from the shell's.
+
+**RESOLVED 2026-08-22, in two stages.** Stage 1 (commit `7438f13ff`) put each
+window's rectangle on the `WLST` wire at v3, which was the blocker named in
+point 1; see `design-decisions.md` §519. Stage 2 connected the overview to it;
+see §520. Every lettered step of the proper fix above is done:
+
+- **(a) the projection** — `OverviewState::apply_window_list(list, num_desktops)`
+  is called from the same `DesktopShell::apply_window_list` that refreshes the
+  taskbar, from the one statement, so the two cannot disagree about which
+  desktop is showing. Lanes come from `num_desktops`, not from the windows that
+  happen to exist, so an empty desktop still has a lane — the screen whose job
+  is to show you where everything is must show the empty places too.
+- **(b) the output path** — `SwitchToWindow`, `SwitchToDesktop` and
+  `CloseWindow` are deleted; `OverviewAction::Request(ShellRequest)` carries the
+  shell's own vocabulary, and `DesktopShell::act_on_overview` is the only thing
+  that reads it.
+- **(c) the hotkey** — `Super+Tab` opens it (`DesktopAction::ToggleOverview`),
+  `Esc` closes it, and while it is up it is *modal*: `handle_press` routes to
+  `press_on_overview` before `hit_test`, and `handle_hotkey` routes to
+  `key_on_overview` before the shortcut table. Both orderings are load-bearing
+  and both are guarded by a reintroduction marker — see §520's Verification
+  table. Without the first, a click on the strip the taskbar occupies reaches
+  the taskbar from behind an opaque fullscreen overlay; without the second,
+  typing `d` into the search box runs Show Desktop.
+- **(d) thumbnails stay titled rectangles** — the module doc says so, and says
+  why (a scaled read of another client's buffer is a capability question of the
+  same shape as `TD-C-ANY-CLIENT-CAN-READ-EVERY-WINDOW-TITLE`, only worse).
+- **(e) `app_name` deleted** from `WindowThumbnail` and `ThumbnailLayout`;
+  `update_search` matches titles and its doc comment no longer promises more.
+  This was not cosmetic: the empty string a projection would have had to pass
+  is a substring of *every* query, so search would have silently returned the
+  whole desktop. The test that used to prove the field worked
+  (`test_search_filters_by_app_name`) proved it against a fixture that set
+  `"app"` by hand, which is exactly why nothing noticed.
+
+**`AddDesktop` is resolved by deletion, not by making the desktop count
+mutable.** The entry above called that "a real decision, not a wiring detail",
+and it still is — but the "+" button did not have to wait for it. A control
+that asks for something no verb in the system can do is the *same defect this
+whole entry is about*, one button large: it draws, it hit-tests, and it reaches
+nothing. It is gone, and with it `on_mouse_click`'s `screen_w`/`screen_h`
+parameters, since it was the only thing in the overview placed independently of
+the layout pass and therefore the only thing that could be drawn in one place
+and clicked in another. Two tests were inverted to keep it deleted
+(`nothing_draws_an_add_desktop_button`, `the_bottom_right_corner_is_not_a_button`).
+If the desktop count ever becomes mutable, the button comes back with a verb
+behind it.
+
+**Wiring it up exposed a second dead feature, now filed separately.** The
+overview's open animation had never run and could not: see
+`TD-C-THE-SHELL-HAS-NO-FRAME-CLOCK`. Because every draw path began
+`if progress <= 0.0 { return }` and `show()` set it to `0.0`, the first working
+build of this feature drew a blank, un-clickable overlay. That is worth
+recording as the general lesson of this entry: a component tested only against
+its own inputs can be wrong in a way no amount of its own tests can see, and
+the failure surfaces the moment — and only the moment — something real is
+plugged into it.
+
+
+## TD-C-THE-SHELL-HAS-NO-FRAME-CLOCK (lane C, 2026-08-22) — RESOLVED 2026-08-22
+
+**In short:** Nothing on the desktop can move by itself. A menu cannot slide
+open, a window cannot fade, a progress spinner cannot spin — not because the
+code for those is missing, but because there is no heartbeat to step it with.
+The shell only wakes up when the user does something; if nobody touches the
+keyboard or mouse it goes to sleep in the middle of any animation and stays
+there. Roughly a thousand lines of animation code exist and none of it has ever
+run.
+
+**Where.** `gui/window/src/lib.rs:914`, `EventLoop::run`:
+
+```rust
+while self.running && self.conn.is_open() {
+    let mut dispatched = false;
+    while let Some((window, event)) = self.poll()? { ... }
+    if !dispatched && self.running {
+        self.conn.wait()?;      // blocks until a byte arrives on the socket
+    }
+}
+```
+
+`Connection::wait` (`gui/remote/src/socket.rs:373`) blocks on socket
+readability and takes no timeout. There is no timer, no deadline, no frame
+callback and no "wake me in 16 ms" anywhere in `oswindow`'s API surface, so a
+loop with no input pending simply stops. That is the correct design for an
+*event-driven* client — it burns no CPU on an idle desktop, which is exactly
+what a polling loop would get wrong (compare `TD-COMPOSITOR-POLLS-INSTEAD-OF-WAITING`,
+which is the same tradeoff resolved the other way and filed as debt for it).
+What is missing is the second wake-up source, not the blocking.
+
+**What it costs today, in order of size.**
+
+1. **`gui/desktop/src/animations.rs` is 1036 lines with no caller.** Six
+   `tick()` methods, a `tick_render`, easing curves, an animated-rect
+   interpolator and a per-window batch stepper — and a tree-wide search for
+   `animations::` outside the module itself returns nothing. `session.rs` and
+   `lib.rs` call no `tick` of any kind. This is the same defect as
+   `TD-C-THE-OVERVIEW-SCREEN-IS-1856-LINES-NOBODY-CALLS`, a module larger than
+   half of that one, and it is *not* fixable by wiring: there is nothing to
+   wire it to.
+2. **The overview's open fade was deleted rather than shipped broken.**
+   `OverviewState` had an `animation_progress: f32` stepped by `tick_animation`,
+   `show()` set it to `0.0`, and every draw path began
+   `if progress <= 0.0 { return }`. With no clock, the first genuinely working
+   build of the overview drew **a blank, un-clickable, fullscreen overlay** —
+   the feature not working, not a missing polish detail. Keeping the field to
+   preserve the *possibility* of a fade would have meant shipping the blank
+   version in order to protect an animation that does not exist. It is gone;
+   see `design-decisions.md` §520.
+3. **Anything else with a `tick(dt)` is in the same position** —
+   `notif_pane.rs:600` (slide-in), `login_screen.rs:419` — and is currently
+   saved only by not gating its rendering on progress the way the overview did.
+   They render at their final state, which looks like a missing animation
+   rather than a missing feature. That is luck, not design: the next module
+   that writes the obvious `if progress <= 0.0 { return }` reproduces defect 2.
+
+The `tick`s that take an explicit `now_ms` and are driven by an *event* rather
+than a frame — `osd.rs:249`, `power.rs:601`, `a11y.rs:664` — are fine and are
+not part of this entry. The distinction is whether the caller has a reason to
+call at all when nothing happened.
+
+**Corrected 2026-08-22 — the gap is higher up than first written.** This entry
+originally proposed adding a `wait_until(deadline)` at the socket layer. That
+was wrong: **`SocketTransport` already has one.** `set_wait_timeout(Option<Duration>)`
+(`gui/remote/src/socket.rs:204`) caps how long `park()` blocks, by way of
+`set_read_timeout`, and it already refuses a zero duration with an explanation.
+Its own doc comment even names the use case — *"Only useful to a client that has
+something to do on a timer — an animation, a blinking caret"*. Nothing above it
+has ever called it.
+
+**And the event type already exists too.** `guitk::event::Event::Tick { elapsed_ms }`
+is in the shared vocabulary, `gui/remote/src/input.rs` encodes and decodes it on
+the wire in both directions, and **50 references to it exist across the toolkit
+and the applications** — `modal.rs` (three), `grid.rs`, `asteroids`, `breakout`,
+`dots`, `benchmark`, `diskimager`, `credmanager` and more all have a
+`Event::Tick { elapsed_ms } =>` arm ready to receive one. A tree-wide search for
+anything that *constructs* one outside a test finds nothing. The compositor
+never sends a `Tick`; `EventLoop` never synthesises one.
+
+So this is not a missing mechanism at either end. It is a **missing producer in
+the middle**, with a working consumer vocabulary on one side and a working
+bounded wait on the other, and no line of code joining them. That makes it
+markedly cheaper to fix than first assessed, and markedly worse to leave: every
+one of those 50 arms is dead code that its author had no way to notice was dead,
+because a `handle_event(Event::Tick { elapsed_ms: 16 })` written by hand in a
+unit test passes perfectly.
+
+**Proper fix:** `EventLoop` synthesises the tick locally.
+
+1. `Transport` grows `set_wait_timeout(Option<Duration>)`, defaulting to
+   `Ok(())`. The default is sound rather than lax: the default `wait()` returns
+   immediately, and a wait that never blocks trivially honours any bound. The
+   rule is the same one `wait` already states — every transport that really
+   blocks must implement it. `SocketTransport`'s inherent method becomes the
+   trait impl.
+2. `EventLoop` grows `wake_at(window, Instant)` / `wake_after(window, Duration)`
+   and `cancel_wake(window)`. Wake-ups are **one-shot**, so an animation re-arms
+   from its own handler: that makes stopping the default and continuing the
+   deliberate act, which is what keeps an idle desktop idle.
+3. `run` computes the nearest pending deadline each pass, bounds the wait to it,
+   and delivers `Event::Tick { elapsed_ms }` — measured, not assumed — to each
+   window whose deadline has passed. With no registrations it blocks for ever
+   and burns nothing, exactly as now.
+
+This is deliberately **not** a fixed-rate frame timer. A shell that wakes 60
+times a second to discover it has nothing to draw is
+`TD-COMPOSITOR-POLLS-INSTEAD-OF-WAITING` in a different place.
+
+It is also deliberately **local**, not a compositor frame callback. The wire can
+already carry a `Tick`, so a compositor-driven, vsync-locked version remains
+open later for anything that needs to be in step with the display; but routing
+every animation frame through a socket round trip to get a timer the client can
+read from its own clock would put the compositor in the middle of every blinking
+caret on the desktop.
+
+Rendering also has to become re-entrant from the loop rather than from an input
+event, which is the part that touches `session.rs`: `paint_chrome` is called
+today only in response to something the user did.
+
+**Owned by lane C** — `gui/window` and `gui/remote` are both in lane C's tree,
+so no cross-lane request is needed.
+
+**If never fixed:** no visual transition on the desktop can ever work, and the
+1036 lines of `animations.rs` stay dead. It gets slowly worse rather than
+staying still: each new module that writes an animation writes it against an
+API that cannot run, and every one of them will pass its own unit tests,
+because a `tick(dt)` called directly by a test advances exactly as designed.
+That is the trap — the tests are not wrong, they are just answering a question
+nobody in production asks.
+
+---
+
+**RESOLVED 2026-08-22.** `EventLoop` now synthesises the tick locally, exactly
+as the three-step fix above proposed. See `design-decisions.md` §521 for the
+four choices behind it (local vs. compositor, one-shot vs. repeating, on-demand
+vs. fixed-rate, measured vs. assumed `elapsed_ms`) and for the verification.
+
+**What shipped.**
+
+- `Transport::set_wait_timeout(Option<Duration>)` (`gui/remote/src/client.rs`),
+  defaulting to `Ok(())`; `Connection::set_wait_timeout` forwards it. `Socket`'s
+  inherent method became the trait impl, unchanged. (This entry called the type
+  `SocketTransport` above — it is actually named `Socket`, aliased to `Link` in
+  `oswindow`.)
+- `EventLoop::wake_at(window, Instant)`, `wake_after(window, Duration)`,
+  `cancel_wake(window)`, `is_waking(window)`, `next_wakeup()`
+  (`gui/window/src/lib.rs`). One-shot; arming twice replaces rather than
+  accumulates; `close()` cancels.
+- `EventLoop::wait()` — now public — bounds the park by the nearest deadline,
+  floored at 1 ms so an already-past deadline never reaches the socket as a zero
+  timeout (which the platform reads as *never* time out, the exact opposite).
+  With nothing armed the bound is `None` and the loop blocks for ever, burning
+  nothing, exactly as before.
+- `poll()` mixes the due ticks into the ordinary pending queue, so a manual loop
+  driver gets them too, not just `run()`. `elapsed_ms` is measured from the
+  previous tick for that window, carried across the handler that re-armed, and
+  dropped when an animation stops so a restart does not report the pause.
+- `ShellSession` now parks through `EventLoop::wait` rather than
+  `Connection::wait`, and exposes `events_mut()` so a shell can register its own
+  wake-ups. **This was a real bypass, not a precaution**: without it the frame
+  clock would have worked everywhere except in the shell, and the only symptom
+  would have been an animation that stops.
+
+Seventeen tests added across `oswindow`, `guiremote` and `desktop`; fourteen
+defects were reintroduced one at a time into the real tree to prove sixteen of
+them fail against the defect they name, with every touched file verified
+restored byte-for-byte. `an_idle_loop_has_no_deadline` is recorded as additional
+coverage rather than a regression test — no marker made it fail. Full table in
+`design-decisions.md` §521.
+
+**What this does NOT close.**
+
+1. **`gui/desktop/src/animations.rs` still has no caller.** Cost 1 above is
+   unchanged: the 1036 lines are still dead. They are now dead for a fixable
+   reason — there is something to wire them to — rather than an unfixable one.
+   That wiring is the next task, and it is where the fix is actually cashed in;
+   until then this entry has built a heartbeat nothing listens to.
+2. **Rendering is still driven from input, not from the loop.** `paint_chrome`
+   is called in response to something the user did. An animation stepped by a
+   tick must be able to repaint from the tick, which is the re-entrancy note in
+   the fix above and is part of task 1, not of this one.
+3. **Nothing is vsync-locked.** Deliberate — see §521 §1. An animation that must
+   be in step with the display still cannot be; the wire can already carry a
+   `Tick`, so a compositor frame callback remains additive later.
+

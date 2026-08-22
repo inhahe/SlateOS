@@ -21,10 +21,14 @@
 //! connection, no display and no window system — which is what keeps every test
 //! around it offline. It is *told* what windows exist
 //! ([`DesktopShell::apply_window_list`]) rather than keeping its own answer, and
-//! what a click or a keystroke wants done to a window comes back out as a
-//! [`WindowRequest`] — in [`ShellAction::Control`] from the pointer, in
+//! what a click or a keystroke wants done comes back out as a
+//! [`ShellRequest`] — in [`ShellAction::Control`] from the pointer, in
 //! [`HotkeyOutcome::requests`] from the keyboard — which is a request to be sent
-//! on, not a change already made.
+//! on, not a change already made. Switching virtual desktop is one of those
+//! requests and not a field the shell sets: the compositor holds each window's
+//! desktop number and hides the ones filed elsewhere, so a shell that switched
+//! by itself would relabel a taskbar over an unchanged screen — which is
+//! exactly what it used to do.
 //!
 //! [`session::ShellSession`] is the loop that does the sending: it opens the
 //! shell's three compositor surfaces, feeds input in, submits the render trees
@@ -49,11 +53,6 @@
 //!   without a round trip. The rules are `guiremote::zones::drop_at`, shared by
 //!   both. The shell used to carry its own copy of them with no drag to fire on
 //!   and no caller; it was deleted rather than kept as a second opinion.
-//! - **Virtual desktops are a taskbar filter and nothing more.** Switching
-//!   desktop changes which windows the shell *lists*, but the compositor has no
-//!   notion of desktops and nothing unmaps the windows of the one being left, so
-//!   on a live session they stay on screen. See `known-issues.md`
-//!   `TD-C-VIRTUAL-DESKTOPS-HIDE-NOTHING`.
 //! - **Theme support reaches five surfaces, not the desktop.** The appearance
 //!   settings are read and honoured by [`DesktopShell`]'s own render methods.
 //!   The 49 modules beside it — every settings page, dialog and OSD — each hold
@@ -146,7 +145,11 @@ use appearance::{
 // itself. `Layer` arrives with them because the list carries the shell's own
 // surfaces too, and telling those apart is the whole reason the field exists.
 pub use guiremote::control::{Layer, ShellControlAction};
-pub use guiremote::window_list::WindowInfo;
+// `WindowList` comes with it because a window's own desktop and the desktop
+// being shown arrive together, in one frame, and comparing them is the only way
+// to know what the user can see. Taking the windows without the header is what
+// made virtual desktops a taskbar filter.
+pub use guiremote::window_list::{WindowInfo, WindowList};
 use guitk::color::Color;
 use guitk::event::{Key, KeyEvent, Modifiers, MouseButton, MouseEvent, MouseEventKind};
 use guitk::render::RenderTree;
@@ -524,7 +527,7 @@ pub enum ShellAction {
     /// the shell's own state changes here, which is why a click that is refused
     /// — the window closed between the list the button was drawn from and the
     /// click — needs no undo.
-    Control(WindowRequest),
+    Control(ShellRequest),
 }
 
 /// Something the shell wants done to a window it does not own.
@@ -551,6 +554,58 @@ impl WindowRequest {
     }
 }
 
+/// Anything the shell wants the compositor to do.
+///
+/// [`WindowRequest`] answered this on its own for a long time, because
+/// everything a shortcut could ask for named exactly one window. Virtual
+/// desktops broke that: *show desktop 3* names no window at all, and *put this
+/// window on desktop 3* names one plus a number that has nowhere to live in a
+/// `(window, action)` pair. The alternative — inventing a
+/// `ShellControlAction::SwitchDesktop(n)` and sending it against some arbitrary
+/// window — would have made the wire lie about what the request was aimed at,
+/// and left "which window?" unanswerable on an empty desktop.
+///
+/// The desktop variants exist at all because the *compositor*, not the shell,
+/// decides which desktop is showing. Before that it did not: switching desktop
+/// changed which windows the taskbar *listed* and nothing else, so the windows
+/// of the desktop being left stayed on screen. See `known-issues.md`
+/// `TD-C-VIRTUAL-DESKTOPS-HIDE-NOTHING`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ShellRequest {
+    /// Activate, minimise, restore, maximise, tile or close a window.
+    Window(WindowRequest),
+    /// Show a different virtual desktop.
+    ///
+    /// The compositor answers by hiding every `Layer::Normal` window filed
+    /// elsewhere and handing the keyboard to the topmost one that is left — one
+    /// recomposite, with no intermediate state in which half the desktop has
+    /// changed. It picks the new focus itself, which is why nothing here says
+    /// who should get it.
+    SwitchDesktop {
+        /// The desktop to show, counting from zero.
+        desktop: u32,
+    },
+    /// File a window on a different virtual desktop.
+    ///
+    /// If that is the desktop showing, the window appears; if not, it
+    /// disappears. Either way the shell learns which from the next window list
+    /// rather than from having asked.
+    MoveWindowToDesktop {
+        /// The window to file.
+        window: WindowId,
+        /// Where to file it, counting from zero.
+        desktop: u32,
+    },
+}
+
+impl ShellRequest {
+    /// Ask for `action` on `window` — the common case, spelt short.
+    #[must_use]
+    pub const fn window(window: WindowId, action: ShellControlAction) -> Self {
+        Self::Window(WindowRequest::new(window, action))
+    }
+}
+
 /// What a keyboard shortcut did, and what it wants the compositor to do.
 ///
 /// The `consumed` flag is what [`DesktopShell::handle_hotkey`] used to return on
@@ -573,7 +628,7 @@ pub struct HotkeyOutcome {
     /// the event.
     pub consumed: bool,
     /// What to ask the compositor for, in the order the shortcut named it.
-    pub requests: Vec<WindowRequest>,
+    pub requests: Vec<ShellRequest>,
 }
 
 impl HotkeyOutcome {
@@ -591,7 +646,7 @@ impl HotkeyOutcome {
     }
 
     /// The shell claimed the key and wants one thing.
-    fn ask(request: Option<WindowRequest>) -> Self {
+    fn ask(request: Option<ShellRequest>) -> Self {
         Self {
             consumed: true,
             requests: request.into_iter().collect(),
@@ -599,7 +654,7 @@ impl HotkeyOutcome {
     }
 
     /// The shell claimed the key and wants several things.
-    fn ask_all(requests: Vec<WindowRequest>) -> Self {
+    fn ask_all(requests: Vec<ShellRequest>) -> Self {
         Self {
             consumed: true,
             requests,
@@ -675,6 +730,22 @@ pub struct DesktopShell {
     pub alt_tab_active: bool,
     /// Alt+Tab selection index.
     pub alt_tab_index: usize,
+    /// The Exposé overlay: every window on every desktop, laid out to scale.
+    ///
+    /// Its lanes are refreshed from the same `WindowList` that
+    /// [`apply_window_list`](Self::apply_window_list) folds into `windows`, in
+    /// that one call, so the two cannot disagree about which desktop is showing
+    /// or which windows exist. That is why the overlay's state lives on the
+    /// shell rather than beside it: a copy refreshed from somewhere else would
+    /// be refreshed at some other moment.
+    ///
+    /// Note what this does *not* put on `ManagedWindow`: the thumbnails carry
+    /// rectangles and `ManagedWindow` still does not. The shell has no opinion
+    /// about where a window sits (§506); the overlay is a picture drawn from the
+    /// last frame and thrown away on the next one.
+    pub overview: overview::OverviewState,
+    /// How the overview looks — cell padding, column cap, animation length.
+    pub overview_config: overview::OverviewConfig,
     /// What the user chose in the appearance panel.
     ///
     /// Kept whole rather than reduced to [`theme`](Self::theme) because it
@@ -938,6 +1009,8 @@ impl DesktopShell {
             apps: launcher::builtin_app_database(),
             alt_tab_active: false,
             alt_tab_index: 0,
+            overview: overview::OverviewState::new(),
+            overview_config: overview::OverviewConfig::default(),
             appearance: AppearanceSettings::default(),
             theme: DesktopTheme::default(),
             datetime: datetime_settings::DateTimeSettings::default(),
@@ -1477,6 +1550,15 @@ impl DesktopShell {
             // the one exception below; forwarding the rest is what keeps hover
             // states alive in clients.
             MouseEventKind::Move | MouseEventKind::Enter | MouseEventKind::Leave => {
+                // The overview covers the screen, so while it is up nothing
+                // behind it is reachable — including by a motion event, which is
+                // how a client keeps its own hover states alive. Forwarding one
+                // would light a button under an opaque overlay.
+                if self.overview.visible {
+                    let layouts = self.overview_layout();
+                    overview::on_mouse_move(&mut self.overview, event.x, event.y, &layouts);
+                    return ShellAction::Consumed;
+                }
                 // The tiling overlay is the shell's only hover-driven surface,
                 // and while it is up nothing behind it can be hovered anyway.
                 if self.snap.is_overlay_visible() {
@@ -1507,6 +1589,14 @@ impl DesktopShell {
     }
 
     fn handle_press(&mut self, x: f32, y: f32, button: MouseButton) -> ShellAction {
+        // Before `hit_test`, and before everything: the overview covers the
+        // whole screen, so a press while it is up landed on it whatever the
+        // taskbar geometry says. Asking `hit_test` first would let a press over
+        // the strip the taskbar occupies raise a window from behind the overlay.
+        if self.overview.visible {
+            return self.press_on_overview(x, y, button);
+        }
+
         self.sync_snap_area();
         let hit = self.hit_test(x, y);
 
@@ -1608,7 +1698,7 @@ impl DesktopShell {
             Hit::StartMenuPanel | Hit::PowerMenuPanel | Hit::TaskbarPanel => ShellAction::Consumed,
             Hit::TaskbarButton(index) => {
                 match self.visible_windows().get(index).map(|w| w.id) {
-                    Some(id) => ShellAction::Control(WindowRequest::new(
+                    Some(id) => ShellAction::Control(ShellRequest::window(
                         id,
                         // The button of the window you are already looking at
                         // minimises it — the taskbar button is a toggle, not a
@@ -1755,16 +1845,63 @@ impl DesktopShell {
         }
     }
 
+    /// One press while the overview is up.
+    ///
+    /// Modal, like the tiling overlay: every press either picks a window,
+    /// switches a desktop, closes a window, or abandons the overview, and none
+    /// of them reach what is behind it.
+    fn press_on_overview(&mut self, x: f32, y: f32, button: MouseButton) -> ShellAction {
+        // A non-primary press abandons rather than picks, matching
+        // `press_on_zone_overlay`. Right-clicking a thumbnail to get a menu is a
+        // gesture this overlay does not have, and inventing one here would be a
+        // second window menu that the taskbar's would then drift from.
+        if button != MouseButton::Left {
+            self.overview.hide();
+            return ShellAction::Consumed;
+        }
+        let layouts = self.overview_layout();
+        let action = overview::on_mouse_click(&mut self.overview, x, y, &layouts);
+        self.act_on_overview(action)
+    }
+
+    /// Turn what the overview decided into what the session should do.
+    ///
+    /// Every arm is `Consumed` or better: the overview covers the screen, so
+    /// there is no such thing as a press it saw and something behind it should
+    /// also see.
+    fn act_on_overview(&mut self, action: overview::OverviewAction) -> ShellAction {
+        match action {
+            overview::OverviewAction::Request(request) => ShellAction::Control(request),
+            overview::OverviewAction::Close => {
+                self.overview.hide();
+                ShellAction::Consumed
+            }
+            // A press on the backdrop, an arrow key, a typed character. The
+            // overlay has redrawn itself either way, which is what `Consumed`
+            // buys — the session repaints on it.
+            overview::OverviewAction::None
+            | overview::OverviewAction::NavigateSelection
+            | overview::OverviewAction::SearchChanged => ShellAction::Consumed,
+        }
+    }
+
     /// Ask for the focused window to be tiled into `zone_id` of the active
     /// layout.
     ///
     /// `None` when there is no focused window or the layout has no such zone.
-    fn zone_request(&self, zone_id: snap::ZoneId) -> Option<WindowRequest> {
+    fn zone_request(&self, zone_id: snap::ZoneId) -> Option<ShellRequest> {
         let slot = self.snap.slot_for_zone(zone_id)?;
         self.request_on_focused(ShellControlAction::SnapToZone(slot))
     }
 
     fn handle_scroll(&mut self, x: f32, y: f32, dy: f32) -> ShellAction {
+        // Before the hit test, for the reason `handle_press` is: the overview
+        // covers the screen, so a wheel event while it is up is the overview's
+        // wherever the pointer happens to be.
+        if self.overview.visible {
+            let action = overview::on_mouse_scroll(&mut self.overview, dy);
+            return self.act_on_overview(action);
+        }
         // Asked of the hit test rather than of `start_menu_rect` directly, so
         // that a wheel over the power menu — which covers part of the list —
         // does not scroll the rows hidden behind it.
@@ -1818,18 +1955,26 @@ impl DesktopShell {
     /// # What is kept
     ///
     /// Per-window shell-local state that the compositor has no opinion about —
-    /// currently which virtual desktop a window is on, and its icon. A window
-    /// already known keeps those across the update; a newly-seen one gets the
-    /// current desktop, which is where a window that just appeared belongs.
+    /// now only the icon. A window already known keeps it across the update.
+    ///
+    /// **Which virtual desktop a window is on used to be kept here too**, and
+    /// that was the bug. The compositor had no notion of desktops, so switching
+    /// one changed which windows the taskbar listed and left every one of them
+    /// on screen. The number now comes down with the window
+    /// ([`WindowInfo::workspace`]) and the desktop being *shown* comes down in
+    /// the list's header ([`WindowList::current_workspace`]) — both read, never
+    /// remembered, because the compositor changes desktops on its own account:
+    /// activating a window filed elsewhere is a switch nobody asked for.
     ///
     /// Stacking comes from the list's own order, which the compositor emits
     /// bottom-to-top, so `visible_windows().last()` is the topmost window here
     /// for the same reason it is there.
-    pub fn apply_window_list(&mut self, list: &[WindowInfo]) {
+    pub fn apply_window_list(&mut self, list: &WindowList) {
         let mut kept: BTreeMap<WindowId, ManagedWindow> = BTreeMap::new();
         let mut focused = None;
+        self.current_desktop = list.current_workspace;
 
-        for (index, info) in list.iter().enumerate() {
+        for (index, info) in list.windows.iter().enumerate() {
             if info.layer != Layer::Normal {
                 continue;
             }
@@ -1850,7 +1995,7 @@ impl DesktopShell {
                     } else {
                         WindowState::Normal
                     },
-                    desktop: previous.map_or(self.current_desktop, |w| w.desktop),
+                    desktop: info.workspace,
                     focused: info.focused,
                     // Both flags have to hold: the compositor distinguishes a
                     // window that is unmapped from one that is minimised, and a
@@ -1874,6 +2019,13 @@ impl DesktopShell {
         // authority on focus too, and "no window is focused" is a state it can
         // genuinely be in — every window minimised, or the desktop empty.
         self.focused_window = focused;
+        // In the same call, from the same frame. The overview is a second view
+        // of exactly this data, and folding it here rather than at the moment
+        // the overlay opens is what makes "the overview and the taskbar
+        // disagree" unrepresentable: there is no second instant at which one of
+        // them could have been refreshed and the other not.
+        self.overview
+            .apply_window_list(list, self.num_desktops.max(1));
     }
 
     /// Get visible windows on current desktop, sorted by Z-order.
@@ -1916,37 +2068,47 @@ impl DesktopShell {
         self.current_desktop.saturating_add(1)
     }
 
-    /// Show a different virtual desktop, and say which window should now have
-    /// the keyboard.
+    /// Ask for a different virtual desktop to be shown.
     ///
-    /// Which desktop is showing is one of the few things here that really is the
-    /// shell's own: the compositor has no notion of virtual desktops, so nothing
-    /// else holds a second copy of it to drift from. *Focus* is not — so the
-    /// window that should come forward is returned as a request rather than
-    /// focused here. Returns `None` if the desktop does not exist, or exists and
-    /// is empty.
-    pub fn switch_desktop(&mut self, desktop: u32) -> Option<WindowRequest> {
+    /// **Nothing changes here.** This used to assign `self.current_desktop` and
+    /// return an `Activate` for the topmost window on the new desktop, which is
+    /// as far as a virtual desktop ever got: the taskbar relabelled itself, the
+    /// windows of the desktop being left stayed on screen, and the one raised
+    /// was raised *over* them. Hiding windows is the compositor's to do — it
+    /// owns the z-stack, the scene and the keyboard — so this returns the ask
+    /// and reads the result out of the next window list like everything else.
+    /// Optimism would only buy a taskbar that showed the new desktop's buttons
+    /// over the old desktop's windows for a frame.
+    ///
+    /// `None` if the desktop does not exist. *How many* there are is the
+    /// shell's — it is a user preference with nothing on the wire behind it —
+    /// which is why that bound is checked here and not by the compositor.
+    #[must_use]
+    pub const fn switch_desktop(&self, desktop: u32) -> Option<ShellRequest> {
         if desktop >= self.num_desktops {
             return None;
         }
-        self.current_desktop = desktop;
-        // Cleared rather than left pointing at a window on the desktop we just
-        // left: until the compositor answers the request below, the honest
-        // answer to "what is focused *here*" is nothing.
-        self.focused_window = None;
-        // The topmost window on the new desktop — `visible_windows` is ordered
-        // bottom to top and already filtered to the current desktop, which the
-        // assignment above has just changed.
-        let id = self.visible_windows().last()?.id;
-        Some(WindowRequest::new(id, ShellControlAction::Activate))
+        Some(ShellRequest::SwitchDesktop { desktop })
     }
 
-    pub fn move_window_to_desktop(&mut self, id: WindowId, desktop: u32) {
-        if desktop < self.num_desktops
-            && let Some(w) = self.windows.get_mut(&id)
-        {
-            w.desktop = desktop;
+    /// Ask for a window to be filed on a different virtual desktop.
+    ///
+    /// As [`switch_desktop`](Self::switch_desktop), and for the same reason:
+    /// this used to edit the shell's own copy of the window's desktop number,
+    /// which the next [`apply_window_list`](Self::apply_window_list) discarded
+    /// unread. `None` if the desktop does not exist; a window that has closed
+    /// since the list it was named from is *not* checked for, because the
+    /// compositor's refusal is the only answer that cannot be stale.
+    #[must_use]
+    pub const fn move_window_to_desktop(
+        &self,
+        window: WindowId,
+        desktop: u32,
+    ) -> Option<ShellRequest> {
+        if desktop >= self.num_desktops {
+            return None;
         }
+        Some(ShellRequest::MoveWindowToDesktop { window, desktop })
     }
 
     // ======================================================================
@@ -1997,13 +2159,13 @@ impl DesktopShell {
     /// that no longer names a window because it closed while the user was
     /// holding Alt. Closing the switcher is the shell's own business; raising
     /// the window it chose is the compositor's.
-    pub fn finish_alt_tab(&mut self) -> Option<WindowRequest> {
+    pub fn finish_alt_tab(&mut self) -> Option<ShellRequest> {
         if !self.alt_tab_active {
             return None;
         }
         self.alt_tab_active = false;
         let id = self.visible_windows().get(self.alt_tab_index)?.id;
-        Some(WindowRequest::new(id, ShellControlAction::Activate))
+        Some(ShellRequest::window(id, ShellControlAction::Activate))
     }
 
     pub fn cancel_alt_tab(&mut self) {
@@ -2031,10 +2193,83 @@ impl DesktopShell {
             return HotkeyOutcome::ignored();
         }
 
+        // The overview gets every press before the shortcut table does, and
+        // swallows the ones it does not recognise. It has a text field in it:
+        // if the table went first, typing "d" into the search bar would show the
+        // desktop out from under the overlay the user is typing into, and "e"
+        // would open a file manager behind it. A modal surface with a text field
+        // has to be modal about keys as well as clicks.
+        if self.overview.visible {
+            return self.key_on_overview(key);
+        }
+
         match DesktopAction::for_chord(key.modifiers, key.key) {
             Some(action) => self.run_desktop_action(action),
             None => HotkeyOutcome::ignored(),
         }
+    }
+
+    /// One press while the overview is up.
+    fn key_on_overview(&mut self, key: &KeyEvent) -> HotkeyOutcome {
+        // The one shortcut that still reaches the table: the chord that opened
+        // the overview closes it. Without this the binding would be one-way —
+        // Super+Tab would open the overlay and then, arriving as a bare Tab,
+        // cycle its mode — and a toggle you cannot press twice is a trap.
+        if DesktopAction::for_chord(key.modifiers, key.key) == Some(DesktopAction::ToggleOverview) {
+            return self.run_desktop_action(DesktopAction::ToggleOverview);
+        }
+        let Some(ok) = Self::overview_key(key) else {
+            // Not a key the overview has a meaning for — a bare modifier, a
+            // function key. Consumed rather than passed on, because the overlay
+            // is modal: a press it did not use is not therefore the desktop's.
+            return HotkeyOutcome::consumed();
+        };
+        let action = overview::on_key(&mut self.overview, ok);
+        match self.act_on_overview(action) {
+            ShellAction::Control(request) => HotkeyOutcome::ask(Some(request)),
+            // `act_on_overview` returns only `Control` or `Consumed`; the other
+            // two arms exist because `ShellAction` has them, not because this
+            // call can produce them.
+            _ => HotkeyOutcome::consumed(),
+        }
+    }
+
+    /// Translate a key press into the overview's own small vocabulary.
+    ///
+    /// `None` for a press the overview has no meaning for. The printable case
+    /// comes from [`KeyEvent::text`] rather than from mapping [`Key::A`] to
+    /// `'a'`: `text` is what the keyboard layout produced, so searching works on
+    /// a Dvorak or an AZERTY keyboard, and a `Key`-to-letter table would search
+    /// for the character printed on a US keycap the user does not have.
+    fn overview_key(key: &KeyEvent) -> Option<overview::OverviewKey> {
+        use overview::OverviewKey as K;
+        // Checked before `text`, because on many layouts Enter, Tab, Escape and
+        // Backspace all *have* a `text` value ('\r', '\t', '\x1b', '\x08'), and
+        // taking that branch first would type a control character into the
+        // search box instead of acting.
+        let named = match key.key {
+            Key::Escape => Some(K::Escape),
+            Key::Enter => Some(K::Enter),
+            Key::Up => Some(K::ArrowUp),
+            Key::Down => Some(K::ArrowDown),
+            Key::Left => Some(K::ArrowLeft),
+            Key::Right => Some(K::ArrowRight),
+            Key::Backspace => Some(K::Backspace),
+            Key::Tab => Some(K::Tab),
+            _ => None,
+        };
+        if named.is_some() {
+            return named;
+        }
+        // A held Ctrl or Alt makes the press a shortcut attempt, not typing.
+        // Ctrl+C is not the letter c, and putting it in the search box would
+        // both fail to copy and quietly filter the overview to nothing.
+        if key.modifiers.ctrl || key.modifiers.alt || key.modifiers.super_key {
+            return None;
+        }
+        key.text
+            .filter(|ch| !ch.is_control())
+            .map(overview::OverviewKey::Char)
     }
 
     /// Carry out a shortcut that has already been recognised.
@@ -2085,7 +2320,7 @@ impl DesktopShell {
                 self.windows
                     .values()
                     .filter(|w| w.visible && w.desktop == self.current_desktop)
-                    .map(|w| WindowRequest::new(w.id, ShellControlAction::Minimize))
+                    .map(|w| ShellRequest::window(w.id, ShellControlAction::Minimize))
                     .collect(),
             ),
             DesktopAction::SnapLeft => {
@@ -2101,6 +2336,14 @@ impl DesktopShell {
             // shell's key in either case, and letting it through to the focused
             // window on an empty desktop would make a shortcut that sometimes
             // types a `z`.
+            // Consumed unconditionally, for the same reason as the zone
+            // overlay: Super+Tab is the shell's chord whether or not there is
+            // anything to show, and a shortcut that sometimes reaches the
+            // focused window is a shortcut that sometimes types a Tab into it.
+            DesktopAction::ToggleOverview => {
+                self.overview.toggle(overview::OverviewMode::AllDesktops);
+                HotkeyOutcome::consumed()
+            }
             DesktopAction::ToggleZoneOverlay => {
                 self.toggle_zone_overlay();
                 HotkeyOutcome::consumed()
@@ -2143,8 +2386,8 @@ impl DesktopShell {
     /// "there is no focused window" is answered once here rather than in each
     /// arm — a shortcut pressed on an empty desktop is consumed and asks for
     /// nothing, which is not the same as not being a shortcut.
-    fn request_on_focused(&self, action: ShellControlAction) -> Option<WindowRequest> {
-        Some(WindowRequest::new(self.focused_window?, action))
+    fn request_on_focused(&self, action: ShellControlAction) -> Option<ShellRequest> {
+        Some(ShellRequest::window(self.focused_window?, action))
     }
 }
 
@@ -2181,6 +2424,15 @@ enum DesktopAction {
     /// chooser, because there are twenty-two zones across the six layouts and
     /// no plausible set of chords for them.
     ToggleZoneOverlay,
+    /// Open (or close) the Exposé overlay — every window on every desktop.
+    ///
+    /// Distinct from [`CycleWindows`](Self::CycleWindows), which is the same
+    /// job for the common case: Alt-Tab is fast and blind, showing a strip of
+    /// titles you step through without looking. This shows all of them at once,
+    /// to scale, and is what you reach for when you do not remember how many
+    /// presses away the window is — or which desktop it is on, which Alt-Tab
+    /// cannot answer at all.
+    ToggleOverview,
     RestoreOrMinimize,
     PreviousDesktop,
     NextDesktop,
@@ -2221,6 +2473,10 @@ impl DesktopAction {
             // the four one-press placements above, and the chooser needs a key
             // that is not one of them.
             (false, false, false, true, Key::Z) => Some(Self::ToggleZoneOverlay),
+            // Super+Tab, which is the chord every other desktop uses for this
+            // and is not one of the four above. Alt+Tab is deliberately left
+            // alone: the two are complements, not alternatives.
+            (false, false, false, true, Key::Tab) => Some(Self::ToggleOverview),
             (false, true, false, true, Key::Left) => Some(Self::PreviousDesktop),
             (false, true, false, true, Key::Right) => Some(Self::NextDesktop),
             // Bare Escape. The shell had no binding for it at all, so the only
@@ -2815,11 +3071,19 @@ impl DesktopShell {
         let any = self.start_menu_open
             || self.power_menu_open
             || self.calendar.visible
-            || self.snap.is_overlay_visible();
+            || self.snap.is_overlay_visible()
+            || self.overview.visible;
         self.start_menu_open = false;
         self.power_menu_open = false;
         self.calendar.set_visible(false);
         self.snap.hide_overlay();
+        // Escape closes the overview along with everything else. It is a
+        // fullscreen overlay that covers the whole desktop, so it is the
+        // *most* important thing on this list to be able to get out of: with
+        // no binding for it, the only way back would be the same chord that
+        // opened it, and a user who does not remember what that was is left
+        // looking at a screen they cannot dismiss.
+        self.overview.hide();
         any
     }
 
@@ -2861,6 +3125,42 @@ impl DesktopShell {
         }
         tree.commands.extend(self.snap.render_picker());
         Some(tree)
+    }
+
+    /// Render the Exposé-style overview, if it is open.
+    ///
+    /// The thumbnails are proportioned from the rectangles that arrived in the
+    /// last window list (§519) — which is why this method exists now and could
+    /// not before: with no geometry on the wire every thumbnail was zero by
+    /// zero, and [`overview::compute_grid_layout`] would return a screen of
+    /// cards that rasterised to no pixels and matched no click.
+    #[must_use]
+    pub fn render_overview(&self) -> Option<RenderTree> {
+        if !self.overview.visible {
+            return None;
+        }
+        let mut tree = RenderTree::new();
+        tree.commands.extend(overview::render_overview(
+            &self.overview,
+            &self.overview_config,
+            self.screen_width as f32,
+            self.screen_height as f32,
+        ));
+        Some(tree)
+    }
+
+    /// Where each overview thumbnail is on screen, for hit-testing a click.
+    ///
+    /// Deliberately the same call [`Self::render_overview`] draws from, rather
+    /// than a second computation that agrees with it today.
+    #[must_use]
+    pub fn overview_layout(&self) -> Vec<overview::ThumbnailLayout> {
+        overview::overview_layout(
+            &self.overview,
+            &self.overview_config,
+            self.screen_width as f32,
+            self.screen_height as f32,
+        )
     }
 }
 
@@ -3195,8 +3495,8 @@ mod window_manager_tests {
     )]
 
     use super::{
-        DesktopShell, Key, KeyEvent, ManagedWindow, Modifiers, ShellControlAction, TextRole,
-        WindowId, WindowInfo, WindowRequest, WindowState, text,
+        DesktopShell, HotkeyOutcome, Key, KeyEvent, ManagedWindow, Modifiers, ShellControlAction,
+        ShellRequest, TextRole, WindowId, WindowInfo, WindowList, WindowState, text,
     };
 
     fn shell() -> DesktopShell {
@@ -3209,6 +3509,10 @@ mod window_manager_tests {
         info.minimized = window.state == WindowState::Minimized;
         info.maximized = window.state == WindowState::Maximized;
         info.focused = window.focused;
+        // Round-tripped, because it is the compositor's field now: a helper
+        // that dropped it would move every window to desktop 0 on the next
+        // list, and the desktop tests below would pass by accident.
+        info.workspace = window.desktop;
         info
     }
 
@@ -3248,8 +3552,11 @@ mod window_manager_tests {
         }
         let mut fresh = WindowInfo::new(id.0, 1, title);
         fresh.focused = true;
+        // Where a window the user just opened belongs: the desktop they are
+        // looking at. The compositor is what decides that in a live session.
+        fresh.workspace = shell.current_desktop;
         list.push(fresh);
-        shell.apply_window_list(&list);
+        shell.apply_window_list(&WindowList::new(shell.current_desktop, list));
         id
     }
 
@@ -3262,7 +3569,7 @@ mod window_manager_tests {
         if let Some(top) = list.last_mut() {
             top.focused = true;
         }
-        shell.apply_window_list(&list);
+        shell.apply_window_list(&WindowList::new(shell.current_desktop, list));
     }
 
     /// The compositor raised a window to the front and gave it the keyboard —
@@ -3279,7 +3586,7 @@ mod window_manager_tests {
             other.focused = false;
         }
         list.push(window);
-        shell.apply_window_list(&list);
+        shell.apply_window_list(&WindowList::new(shell.current_desktop, list));
     }
 
     /// The compositor maximized a window.
@@ -3290,7 +3597,7 @@ mod window_manager_tests {
                 info.maximized = true;
             }
         }
-        shell.apply_window_list(&list);
+        shell.apply_window_list(&WindowList::new(shell.current_desktop, list));
     }
 
     fn press(key: Key, modifiers: Modifiers) -> KeyEvent {
@@ -3362,7 +3669,49 @@ mod window_manager_tests {
 
     // ==================================================================
     // Virtual desktops
+    //
+    // Which desktop is showing is the compositor's answer, never the shell's
+    // decision: every test here presses the key, checks what was *asked*, and
+    // then plays the compositor's part. A test that asserted on
+    // `shell.current_desktop` straight after the keystroke would be asserting
+    // the old bug -- a taskbar that relabelled itself over an unchanged screen.
     // ==================================================================
+
+    /// The compositor granted a switch: the same windows, a new desktop showing.
+    ///
+    /// It takes the keyboard off a window it has just hidden -- its own tested
+    /// behaviour, modelled here so a shell test can rely on it.
+    fn compositor_switched(shell: &mut DesktopShell, desktop: u32) {
+        let mut list = as_list(shell);
+        for info in &mut list {
+            if info.workspace != desktop {
+                info.focused = false;
+            }
+        }
+        shell.apply_window_list(&WindowList::new(desktop, list));
+    }
+
+    /// The compositor granted a move: the window is filed on another desktop.
+    fn compositor_moved(shell: &mut DesktopShell, id: WindowId, desktop: u32) {
+        let showing = shell.current_desktop;
+        let mut list = as_list(shell);
+        for info in &mut list {
+            if info.id == id.0 {
+                info.workspace = desktop;
+                info.focused = info.focused && desktop == showing;
+            }
+        }
+        shell.apply_window_list(&WindowList::new(showing, list));
+    }
+
+    /// Which desktop a shortcut asked for, or `None` if it asked for nothing.
+    fn desktop_asked(outcome: &HotkeyOutcome) -> Option<u32> {
+        match outcome.requests.as_slice() {
+            [ShellRequest::SwitchDesktop { desktop }] => Some(*desktop),
+            [] => None,
+            other => panic!("expected at most one desktop switch, got {other:?}"),
+        }
+    }
 
     #[test]
     fn desktop_navigation_stops_at_both_ends() {
@@ -3370,28 +3719,34 @@ mod window_manager_tests {
         let last = shell.num_desktops - 1;
 
         assert_eq!(shell.previous_desktop(), None);
+        let outcome = shell.handle_hotkey(&press(Key::Left, ctrl_super()));
         assert!(
-            shell
-                .handle_hotkey(&press(Key::Left, ctrl_super()))
-                .consumed
+            outcome.consumed,
+            "the chord is the shell's whether or not there is a desktop to go to"
         );
-        assert_eq!(shell.current_desktop, 0);
+        assert_eq!(
+            desktop_asked(&outcome),
+            None,
+            "there is nothing left of the first desktop to ask for"
+        );
 
         for expected in 1..=last {
-            assert!(
-                shell
-                    .handle_hotkey(&press(Key::Right, ctrl_super()))
-                    .consumed
+            let outcome = shell.handle_hotkey(&press(Key::Right, ctrl_super()));
+            assert!(outcome.consumed);
+            assert_eq!(desktop_asked(&outcome), Some(expected));
+            assert_eq!(
+                shell.current_desktop,
+                expected - 1,
+                "asking is not arriving: nothing moves until the next list"
             );
+            compositor_switched(&mut shell, expected);
             assert_eq!(shell.current_desktop, expected);
         }
 
         assert_eq!(shell.next_desktop(), None);
-        assert!(
-            shell
-                .handle_hotkey(&press(Key::Right, ctrl_super()))
-                .consumed
-        );
+        let outcome = shell.handle_hotkey(&press(Key::Right, ctrl_super()));
+        assert!(outcome.consumed);
+        assert_eq!(desktop_asked(&outcome), None);
         assert_eq!(shell.current_desktop, last);
     }
 
@@ -3404,17 +3759,23 @@ mod window_manager_tests {
 
         assert_eq!(shell.previous_desktop(), None);
         assert_eq!(shell.next_desktop(), None);
-        assert!(
-            shell
-                .handle_hotkey(&press(Key::Left, ctrl_super()))
-                .consumed
-        );
-        assert!(
-            shell
-                .handle_hotkey(&press(Key::Right, ctrl_super()))
-                .consumed
-        );
+        for key in [Key::Left, Key::Right] {
+            let outcome = shell.handle_hotkey(&press(key, ctrl_super()));
+            assert!(outcome.consumed);
+            assert_eq!(desktop_asked(&outcome), None);
+        }
         assert_eq!(shell.current_desktop, 0);
+    }
+
+    /// How many desktops there are is the shell's, and this is the only place
+    /// the bound is enforced. The compositor takes any `u32`: a desktop with
+    /// nothing on it is a legal thing to show, and the count is a user
+    /// preference the compositor has never been told.
+    #[test]
+    fn a_desktop_that_does_not_exist_is_not_asked_for() {
+        let shell = shell();
+        assert_eq!(shell.switch_desktop(shell.num_desktops), None);
+        assert_eq!(shell.switch_desktop(u32::MAX), None);
     }
 
     #[test]
@@ -3422,7 +3783,17 @@ mod window_manager_tests {
         let mut shell = shell();
         assert_eq!(shell.current_desktop_number(), 1);
 
-        assert_eq!(shell.switch_desktop(2), None, "nothing there to raise");
+        assert_eq!(
+            shell.switch_desktop(2),
+            Some(ShellRequest::SwitchDesktop { desktop: 2 })
+        );
+        assert_eq!(
+            shell.current_desktop_number(),
+            1,
+            "the ask is not the answer -- the screen has not changed yet"
+        );
+
+        compositor_switched(&mut shell, 2);
         assert_eq!(shell.current_desktop_number(), 3);
     }
 
@@ -3431,11 +3802,14 @@ mod window_manager_tests {
         let mut shell = shell();
         let id = open(&mut shell, "app");
 
-        assert_eq!(shell.switch_desktop(1), None);
+        compositor_switched(&mut shell, 1);
         assert!(shell.visible_windows().is_empty());
-        assert_eq!(shell.focused_window, None);
+        assert_eq!(
+            shell.focused_window, None,
+            "the window that had the keyboard is not on screen to have it"
+        );
 
-        shell.move_window_to_desktop(id, 1);
+        compositor_moved(&mut shell, id, 1);
         assert_eq!(
             shell
                 .visible_windows()
@@ -3446,36 +3820,46 @@ mod window_manager_tests {
         );
     }
 
-    /// Which desktop a window is on is shell-local — the compositor has no
-    /// notion of desktops — so it is the one thing about a window that a new
-    /// window list must *not* reset.
+    /// The inverse of what this used to assert, and the whole of the fix.
+    ///
+    /// Which desktop a window is on used to be shell-local -- the compositor
+    /// had no notion of desktops -- so a new list had to leave it alone. It is
+    /// the compositor's now, so a new list is exactly what sets it. That is
+    /// what lets the *screen* change when the taskbar does.
     #[test]
-    fn a_window_list_does_not_move_a_window_back_off_its_desktop() {
+    fn a_window_list_is_what_says_which_desktop_a_window_is_on() {
         let mut shell = shell();
         let id = open(&mut shell, "app");
-        shell.move_window_to_desktop(id, 1);
+        assert_eq!(shell.windows.get(&id).unwrap().desktop, 0);
 
-        // The compositor says nothing has changed, which is true of everything
-        // it knows about.
-        let list = as_list(&shell);
-        shell.apply_window_list(&list);
-
+        compositor_moved(&mut shell, id, 1);
         assert_eq!(shell.windows.get(&id).unwrap().desktop, 1);
         assert!(
             shell.visible_windows().is_empty(),
-            "and it is still not on the desktop being shown"
+            "and it is no longer on the desktop being shown"
         );
+
+        // And back, with the shell never having asked: another shell, or the
+        // compositor answering an activation, can move a window too.
+        compositor_moved(&mut shell, id, 0);
+        assert_eq!(shell.windows.get(&id).unwrap().desktop, 0);
     }
 
     #[test]
     fn a_window_cannot_be_moved_to_a_desktop_that_does_not_exist() {
-        let mut shell = shell();
-        let id = open(&mut shell, "app");
+        let shell = shell();
+        let id = WindowId(1);
+        let last = shell.num_desktops - 1;
 
-        shell.move_window_to_desktop(id, shell.num_desktops);
-        shell.move_window_to_desktop(id, u32::MAX);
-
-        assert_eq!(shell.windows.get(&id).unwrap().desktop, 0);
+        assert_eq!(shell.move_window_to_desktop(id, shell.num_desktops), None);
+        assert_eq!(shell.move_window_to_desktop(id, u32::MAX), None);
+        assert_eq!(
+            shell.move_window_to_desktop(id, last),
+            Some(ShellRequest::MoveWindowToDesktop {
+                window: id,
+                desktop: last
+            })
+        );
     }
 
     // ==================================================================
@@ -3495,7 +3879,7 @@ mod window_manager_tests {
         shell.start_alt_tab();
         assert_eq!(
             shell.finish_alt_tab(),
-            Some(WindowRequest::new(first, ShellControlAction::Activate)),
+            Some(ShellRequest::window(first, ShellControlAction::Activate)),
         );
         // Standing in for the compositor doing as it was asked. The switcher
         // *asks* for the window to be raised; nothing about the shell's own
@@ -3506,7 +3890,7 @@ mod window_manager_tests {
         shell.start_alt_tab();
         assert_eq!(
             shell.finish_alt_tab(),
-            Some(WindowRequest::new(second, ShellControlAction::Activate)),
+            Some(ShellRequest::window(second, ShellControlAction::Activate)),
             "and back again"
         );
     }
@@ -3555,7 +3939,7 @@ mod window_manager_tests {
 
         assert_eq!(
             shell.finish_alt_tab(),
-            Some(WindowRequest::new(ids[0], ShellControlAction::Activate)),
+            Some(ShellRequest::window(ids[0], ShellControlAction::Activate)),
             "the one window left is the one it lands on"
         );
         assert!(!shell.alt_tab_active);
@@ -3608,7 +3992,7 @@ mod window_manager_tests {
         assert!(right.consumed);
         assert_eq!(
             right.requests,
-            vec![WindowRequest::new(id, ShellControlAction::SnapRight)],
+            vec![ShellRequest::window(id, ShellControlAction::SnapRight)],
             "plain Super+Right tiles the focused window"
         );
         assert_eq!(
@@ -3619,22 +4003,16 @@ mod window_manager_tests {
         let left = shell.handle_hotkey(&press(Key::Left, super_only()));
         assert_eq!(
             left.requests,
-            vec![WindowRequest::new(id, ShellControlAction::SnapLeft)],
+            vec![ShellRequest::window(id, ShellControlAction::SnapLeft)],
             "and Super+Left tiles it the other way, not the same way"
         );
 
         let switch = shell.handle_hotkey(&press(Key::Right, ctrl_super()));
         assert!(switch.consumed);
         assert_eq!(
-            shell.current_desktop, 1,
+            desktop_asked(&switch),
+            Some(1),
             "Ctrl+Super+Right switches desktop; it must not snap"
-        );
-        assert!(
-            !switch.requests.iter().any(|request| matches!(
-                request.action,
-                ShellControlAction::SnapLeft | ShellControlAction::SnapRight
-            )),
-            "and it must not tile anything on the way there"
         );
     }
 
@@ -3679,7 +4057,7 @@ mod window_manager_tests {
         assert!(!shell.alt_tab_active);
         assert_eq!(
             finished.requests,
-            vec![WindowRequest::new(first, ShellControlAction::Activate)],
+            vec![ShellRequest::window(first, ShellControlAction::Activate)],
             "the window it landed on, which is not the one already focused"
         );
         assert_eq!(shell.focused_window, Some(second), "not yet, anyway");
@@ -3739,7 +4117,7 @@ mod window_manager_tests {
         let one = open(&mut shell, "one");
         let two = open(&mut shell, "two");
         let elsewhere = open(&mut shell, "elsewhere");
-        shell.move_window_to_desktop(elsewhere, 1);
+        compositor_moved(&mut shell, elsewhere, 1);
 
         let super_d = Modifiers {
             super_key: true,
@@ -3751,8 +4129,13 @@ mod window_manager_tests {
         let mut asked: Vec<WindowId> = outcome
             .requests
             .iter()
-            .inspect(|request| assert_eq!(request.action, ShellControlAction::Minimize))
-            .map(|request| request.window)
+            .map(|request| match request {
+                ShellRequest::Window(w) => {
+                    assert_eq!(w.action, ShellControlAction::Minimize);
+                    w.window
+                }
+                other => panic!("Super+D names windows and nothing else, got {other:?}"),
+            })
             .collect();
         asked.sort_unstable();
         assert_eq!(
@@ -3811,7 +4194,7 @@ mod window_manager_tests {
             shell
                 .handle_hotkey(&press(Key::Down, super_only()))
                 .requests,
-            vec![WindowRequest::new(id, ShellControlAction::Minimize)],
+            vec![ShellRequest::window(id, ShellControlAction::Minimize)],
         );
 
         maximize(&mut shell, id);
@@ -3819,7 +4202,7 @@ mod window_manager_tests {
             shell
                 .handle_hotkey(&press(Key::Down, super_only()))
                 .requests,
-            vec![WindowRequest::new(id, ShellControlAction::Restore)],
+            vec![ShellRequest::window(id, ShellControlAction::Restore)],
         );
     }
 
@@ -3834,7 +4217,7 @@ mod window_manager_tests {
         let outcome = shell.handle_hotkey(&press(Key::F4, Modifiers::alt()));
         assert_eq!(
             outcome.requests,
-            vec![WindowRequest::new(id, ShellControlAction::Close)],
+            vec![ShellRequest::window(id, ShellControlAction::Close)],
         );
         assert!(
             shell.windows.contains_key(&id),
@@ -3842,30 +4225,59 @@ mod window_manager_tests {
         );
     }
 
-    /// Switching desktop raises whatever is topmost on the one arrived at —
-    /// asked for, not done, because focus is the compositor's.
+    /// Switching desktop names no window, and that is the change.
+    ///
+    /// This used to assert that the shell picked the topmost window on the
+    /// desktop it was arriving at and asked for it to be activated -- which was
+    /// the closest a virtual desktop ever got to working, and was wrong twice
+    /// over: the window was raised *over* the windows of the desktop being
+    /// left, which nothing hid, and the shell had to guess a focus target from
+    /// a list it did not own. The compositor hides the one and chooses the
+    /// other, in the same recomposite, and says so in the next list.
     #[test]
-    fn switching_desktop_asks_for_the_topmost_window_there() {
+    fn switching_desktop_names_no_window() {
         let mut shell = shell();
         let stays = open(&mut shell, "stays");
         let moves = open(&mut shell, "moves");
-        shell.move_window_to_desktop(moves, 1);
+        compositor_moved(&mut shell, moves, 1);
 
         let outcome = shell.handle_hotkey(&press(Key::Right, ctrl_super()));
-        assert_eq!(shell.current_desktop, 1);
         assert_eq!(
             outcome.requests,
-            vec![WindowRequest::new(moves, ShellControlAction::Activate)],
+            vec![ShellRequest::SwitchDesktop { desktop: 1 }],
+            "one ask, naming a desktop and no window"
         );
         assert_eq!(
-            shell.focused_window, None,
-            "and until it answers, nothing here is focused"
+            shell
+                .visible_windows()
+                .iter()
+                .map(|w| w.id)
+                .collect::<Vec<_>>(),
+            vec![stays],
+            "and nothing has moved: the screen still shows desktop 0"
+        );
+
+        // The compositor did it, and picked the focus itself.
+        let mut list = as_list(&shell);
+        for info in &mut list {
+            info.focused = info.id == moves.0;
+        }
+        shell.apply_window_list(&WindowList::new(1, list));
+        assert_eq!(shell.current_desktop, 1);
+        assert_eq!(shell.focused_window, Some(moves));
+        assert_eq!(
+            shell
+                .visible_windows()
+                .iter()
+                .map(|w| w.id)
+                .collect::<Vec<_>>(),
+            vec![moves]
         );
 
         let back = shell.handle_hotkey(&press(Key::Left, ctrl_super()));
         assert_eq!(
             back.requests,
-            vec![WindowRequest::new(stays, ShellControlAction::Activate)],
+            vec![ShellRequest::SwitchDesktop { desktop: 0 }]
         );
     }
 
@@ -4096,5 +4508,340 @@ mod window_manager_tests {
                 "{t} rendered by the shell and by the shared clock"
             );
         }
+    }
+}
+
+/// The overview, as the rest of the shell sees it.
+///
+/// Everything here is about the *seams*: that the same window list refreshes
+/// the overview and the taskbar, that a rectangle survives the trip from the
+/// wire to a thumbnail, that a press while the overlay is up cannot reach past
+/// it, and that the layout a click is tested against is the layout that was
+/// drawn. The overview's own behaviour — grids, search, navigation — is tested
+/// in `overview.rs` beside the code that implements it.
+#[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects,
+    clippy::float_cmp
+)]
+mod overview_wiring_tests {
+    use super::{
+        DesktopShell, Key, KeyEvent, Modifiers, MouseButton, MouseEvent, MouseEventKind,
+        RenderTree, ShellAction, ShellControlAction, ShellRequest, WindowId, WindowInfo,
+        WindowList, overview,
+    };
+    use guitk::render::RenderCommand;
+
+    fn shell() -> DesktopShell {
+        DesktopShell::new(1920, 1080)
+    }
+
+    /// One window, placed, on desktop `workspace`.
+    fn placed(id: u64, title: &str, workspace: u32, rect: (i32, i32, u32, u32)) -> WindowInfo {
+        let mut info = WindowInfo::new(id, 1, title.to_string()).at(rect.0, rect.1, rect.2, rect.3);
+        info.workspace = workspace;
+        info
+    }
+
+    fn press(shell: &mut DesktopShell, x: f32, y: f32) -> ShellAction {
+        shell.handle_mouse(&MouseEvent {
+            x,
+            y,
+            kind: MouseEventKind::Press(MouseButton::Left),
+        })
+    }
+
+    fn key(k: Key, modifiers: Modifiers, text: Option<char>) -> KeyEvent {
+        KeyEvent {
+            key: k,
+            pressed: true,
+            modifiers,
+            text,
+        }
+    }
+
+    fn super_tab() -> KeyEvent {
+        key(
+            Key::Tab,
+            Modifiers {
+                super_key: true,
+                ..Modifiers::NONE
+            },
+            None,
+        )
+    }
+
+    // -- The seam between the window list and the overview -------------------
+
+    #[test]
+    fn the_list_that_refreshes_the_taskbar_refreshes_the_overview() {
+        // There is one call, in `apply_window_list`, and this is why: two
+        // refreshes at two instants is how the overview comes to show a window
+        // the taskbar has already dropped. The shell should not be able to hold
+        // one opinion about which windows exist.
+        let mut s = shell();
+        s.apply_window_list(&WindowList::new(
+            0,
+            vec![
+                placed(1, "Terminal", 0, (0, 0, 800, 600)),
+                placed(2, "Editor", 0, (100, 100, 640, 480)),
+            ],
+        ));
+        let titles: Vec<&str> = s.overview.lanes[0]
+            .thumbnails
+            .iter()
+            .map(|t| t.title.as_str())
+            .collect();
+        assert_eq!(titles, ["Terminal", "Editor"]);
+        assert_eq!(
+            titles.len(),
+            s.visible_windows().len(),
+            "the overview and the taskbar disagree about how many windows there are"
+        );
+    }
+
+    #[test]
+    fn a_thumbnail_carries_the_window_s_real_rectangle() {
+        // The whole reason §519 put geometry on the wire. If the projection
+        // dropped it, every thumbnail would be zero by zero, `fit_aspect` would
+        // return `(0.0, 0.0)`, and the overview would be a screen of cards that
+        // rasterise to no pixels and match no click.
+        let mut s = shell();
+        s.apply_window_list(&WindowList::new(
+            0,
+            vec![placed(1, "Placed", 0, (-100, 250, 1024, 768))],
+        ));
+        let thumb = &s.overview.lanes[0].thumbnails[0];
+        assert_eq!((thumb.x, thumb.y), (-100.0, 250.0));
+        assert_eq!((thumb.width, thumb.height), (1024.0, 768.0));
+    }
+
+    #[test]
+    fn a_thumbnail_with_a_real_rectangle_lays_out_to_real_pixels() {
+        // Stated separately from the field-by-field check above, because that
+        // one would still pass if `compute_grid_layout` threw the numbers away.
+        // This is the claim that actually matters on screen: something is drawn.
+        let mut s = shell();
+        s.apply_window_list(&WindowList::new(
+            0,
+            vec![placed(1, "Placed", 0, (0, 0, 1024, 768))],
+        ));
+        s.overview.show(overview::OverviewMode::AllWindows);
+        let layouts = s.overview_layout();
+        assert_eq!(layouts.len(), 1);
+        assert!(
+            layouts[0].render_width > 1.0 && layouts[0].render_height > 1.0,
+            "the thumbnail laid out to {}x{}",
+            layouts[0].render_width,
+            layouts[0].render_height
+        );
+        // The aspect ratio of the window it stands for, not the cell's.
+        let ratio = layouts[0].render_width / layouts[0].render_height;
+        assert!(
+            (ratio - 1024.0 / 768.0).abs() < 0.01,
+            "aspect ratio {ratio} is not the window's"
+        );
+    }
+
+    #[test]
+    fn every_desktop_gets_a_lane_even_the_empty_ones() {
+        // Lanes come from the shell's desktop count, not from the windows that
+        // happen to exist. Deriving them from the windows would make an empty
+        // desktop invisible in the very screen whose job is to show you where
+        // everything is — and there would be nothing to drag a window onto.
+        let mut s = shell();
+        s.num_desktops = 4;
+        s.apply_window_list(&WindowList::new(
+            0,
+            vec![placed(1, "Only", 2, (0, 0, 8, 8))],
+        ));
+        assert_eq!(s.overview.lanes.len(), 4);
+        assert_eq!(s.overview.lanes[2].thumbnails.len(), 1);
+        assert!(s.overview.lanes[0].thumbnails.is_empty());
+        assert!(s.overview.lanes[3].thumbnails.is_empty());
+    }
+
+    #[test]
+    fn a_window_hovered_in_the_overview_stops_being_hovered_when_it_closes() {
+        // The hover is a window id held across frames, which makes it the one
+        // piece of overview state that can outlive the window it names. Pressing
+        // Enter on a stale one would ask the compositor to raise a window that
+        // is gone — harmless — but it would also *draw* a highlight on a card
+        // that is no longer there, which is not.
+        let mut s = shell();
+        s.apply_window_list(&WindowList::new(
+            0,
+            vec![
+                placed(1, "Going", 0, (0, 0, 800, 600)),
+                placed(2, "Staying", 0, (0, 0, 800, 600)),
+            ],
+        ));
+        s.overview.hovered_window = Some(1);
+        s.apply_window_list(&WindowList::new(
+            0,
+            vec![placed(2, "Staying", 0, (0, 0, 800, 600))],
+        ));
+        assert_eq!(s.overview.hovered_window, None);
+    }
+
+    // -- Modality ------------------------------------------------------------
+
+    #[test]
+    fn a_press_over_the_taskbar_does_not_reach_it_while_the_overview_is_up() {
+        // The overview covers the whole screen, so the taskbar is behind it.
+        // `hit_test` answers from geometry alone and does not know that, which
+        // is why the overview is consulted first: ask it second and a click on
+        // the strip the taskbar occupies raises a window from behind an opaque
+        // overlay.
+        let mut s = shell();
+        s.apply_window_list(&WindowList::new(
+            0,
+            vec![placed(1, "Terminal", 0, (0, 0, 800, 600))],
+        ));
+        let button = s.taskbar_button_rect(0);
+        let (x, y) = (button.x + button.w / 2.0, button.y + button.h / 2.0);
+        // The control this is contrasted against: with the overview closed, the
+        // same press is the taskbar's and asks for something.
+        assert!(
+            matches!(press(&mut s, x, y), ShellAction::Control(_)),
+            "the test's premise is wrong: that press is not a taskbar button"
+        );
+
+        s.overview.show(overview::OverviewMode::AllWindows);
+        assert_eq!(press(&mut s, x, y), ShellAction::Consumed);
+    }
+
+    #[test]
+    fn typing_in_the_overview_search_does_not_run_a_desktop_shortcut() {
+        // The overview has a text field in it. If the shortcut table saw keys
+        // first, typing would fire whatever the letters happen to be bound to —
+        // behind the overlay the user is typing into, where they cannot see it.
+        let mut s = shell();
+        s.overview.show(overview::OverviewMode::AllWindows);
+        let outcome = s.handle_hotkey(&key(Key::E, Modifiers::NONE, Some('e')));
+        assert!(outcome.consumed);
+        assert!(outcome.requests.is_empty());
+        assert_eq!(s.overview.search_query, "e");
+    }
+
+    #[test]
+    fn the_chord_that_opens_the_overview_closes_it() {
+        // Super+Tab arrives at an open overview as a Tab, which the overview
+        // spends on cycling its own mode. Without the toggle being checked
+        // first the binding is one-way, and a toggle you cannot press twice is
+        // a trap: the only way out would be a key the user has to guess.
+        let mut s = shell();
+        assert!(s.handle_hotkey(&super_tab()).consumed);
+        assert!(s.overview.visible);
+        assert!(s.handle_hotkey(&super_tab()).consumed);
+        assert!(!s.overview.visible);
+    }
+
+    #[test]
+    fn escape_leaves_the_overview() {
+        let mut s = shell();
+        s.overview.show(overview::OverviewMode::AllWindows);
+        assert!(
+            s.handle_hotkey(&key(Key::Escape, Modifiers::NONE, None))
+                .consumed
+        );
+        assert!(!s.overview.visible);
+    }
+
+    // -- Drawing and hit-testing are one answer ------------------------------
+
+    #[test]
+    fn a_click_selects_the_window_whose_card_is_under_it() {
+        // The click point comes out of the *render tree*, not out of
+        // `overview_layout`. That distinction is the whole test. Asking
+        // `overview_layout` where a card is and then clicking there proves only
+        // that a function agrees with itself: transpose the screen inside it and
+        // both the question and the answer move together, so the assertion holds
+        // just as well against a layout that has nothing to do with what is on
+        // the glass. (Measured — the earlier version of this test passed
+        // unchanged against the `overviewclickrelayout` marker, which swaps
+        // width for height in the hit-test path.)
+        //
+        // Reading the coordinate back off the drawn commands is the only way to
+        // ask the question the user asks: I clicked the middle of the card I can
+        // see — did that select the window whose title is written on it?
+        let mut s = shell();
+        s.apply_window_list(&WindowList::new(
+            0,
+            vec![
+                placed(1, "First", 0, (0, 0, 800, 600)),
+                placed(2, "Second", 0, (0, 0, 800, 600)),
+                placed(3, "Third", 0, (0, 0, 800, 600)),
+            ],
+        ));
+        s.overview.show(overview::OverviewMode::AllWindows);
+
+        // The middle card, so that an off-by-one layout lands on a neighbour
+        // rather than off the edge where it would miss and be caught anyway.
+        let tree = s.render_overview().expect("the overview is open");
+        let (cx, cy) = drawn_card_centre(&tree, "Second");
+        assert_eq!(
+            press(&mut s, cx, cy),
+            ShellAction::Control(ShellRequest::window(
+                WindowId(2),
+                ShellControlAction::Activate
+            ))
+        );
+    }
+
+    /// The centre of the card `title` is written on, taken from the drawn
+    /// commands rather than from any layout function.
+    ///
+    /// `render_thumbnail_card` emits the card's background `FillRect` and then
+    /// the `Text` holding its title, so the nearest `FillRect` above a title is
+    /// that title's card. This is deliberately a reader of the output and not a
+    /// second caller of `overview_layout`: a test that recomputes the layout it
+    /// is checking cannot fail when the layout is wrong.
+    fn drawn_card_centre(tree: &RenderTree, title: &str) -> (f32, f32) {
+        let mut last_rect = None;
+        for cmd in &tree.commands {
+            match cmd {
+                RenderCommand::FillRect {
+                    x,
+                    y,
+                    width,
+                    height,
+                    ..
+                } => last_rect = Some((*x, *y, *width, *height)),
+                RenderCommand::Text { text, .. } if text == title => {
+                    let (x, y, w, h) = last_rect.expect("a card is drawn before its title");
+                    return (x + w / 2.0, y + h / 2.0);
+                }
+                _ => {}
+            }
+        }
+        panic!("no card drawn for {title}");
+    }
+
+    #[test]
+    fn the_overview_is_drawn_only_while_it_is_open() {
+        let mut s = shell();
+        assert!(s.render_overview().is_none());
+        s.overview.show(overview::OverviewMode::AllWindows);
+        let tree = s.render_overview().expect("an open overview draws");
+        assert!(
+            !tree.commands.is_empty(),
+            "an open overview drew no commands"
+        );
+    }
+
+    #[test]
+    fn dismissing_popups_dismisses_the_overview() {
+        // Anything that clears the shell's transient surfaces has to clear this
+        // one too, or the overlay survives a desktop switch and covers the
+        // desktop it switched to.
+        let mut s = shell();
+        s.overview.show(overview::OverviewMode::AllWindows);
+        s.dismiss_popups();
+        assert!(!s.overview.visible);
     }
 }

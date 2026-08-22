@@ -58,7 +58,9 @@
 
 use crate::reserve::PanelEdge;
 use crate::zones::SnapSlot;
-use crate::{DecodeError, Reader, capacity_hint, write_f32, write_string, write_u32, write_u64};
+use crate::{
+    DecodeError, Reader, capacity_hint, write_f32, write_i32, write_string, write_u32, write_u64,
+};
 
 /// Request-frame magic: `b"CREQ"` (client → compositor).
 pub const REQUEST_MAGIC: [u8; 4] = *b"CREQ";
@@ -629,6 +631,54 @@ pub enum RequestBody {
         edge: PanelEdge,
         size: u32,
     },
+    /// Show a different virtual desktop.
+    ///
+    /// The compositor holds each window's desktop number and decides from it
+    /// what is on screen; this is how a shell asks for a different one. One
+    /// request produces one recomposite computed from a consistent picture --
+    /// which is why the alternative design, where the shell hides each of the
+    /// departing windows in turn, was refused: that is N requests arriving one
+    /// at a time, with every intermediate mixture of two desktops visible on
+    /// the glass, and a failure halfway through leaving a permanent one.
+    ///
+    /// **There is no upper bound.** How many desktops there are is a user
+    /// preference and belongs to whatever is offering the user the choice; a
+    /// second copy of the number in the compositor would be a second answer,
+    /// and the two would drift the first time the preference changed. What the
+    /// compositor owns is the part that decides pixels.
+    ///
+    /// Switching to the desktop already showing is not an error and is not a
+    /// repaint.
+    ///
+    /// **Privileged**, via `ClientLink::require_shell`: this changes what every
+    /// other client on the machine is showing.
+    ///
+    /// Answered with [`ResponseBody::Ok`].
+    SwitchWorkspace { workspace: u32 },
+    /// File a window on a virtual desktop -- "move that window to desktop 3".
+    ///
+    /// Names somebody else's window, like [`ShellControl`](Self::ShellControl),
+    /// and for the same reason: moving a window between desktops is a shell's
+    /// job, and no client may choose the desktop its own window opens on. A new
+    /// window goes on whichever desktop is showing, because a client that could
+    /// pick would be able to open a window somewhere the user is not looking --
+    /// either a window that seems not to have opened, or a place to hide one.
+    ///
+    /// Aimed at a window outside [`Layer::Normal`], this **succeeds, records
+    /// the number, and changes nothing about what is drawn**. Panels and the
+    /// wallpaper are on every desktop. Refusing would make every shell that
+    /// moves "all of my windows" first work out which of them are furniture,
+    /// pushing the stickiness rule out of the compositor and into every caller.
+    ///
+    /// If this hides the window holding the keyboard, focus goes to the topmost
+    /// window that is still showing, or to nothing at all.
+    ///
+    /// **Privileged**, via `ClientLink::require_shell`.
+    ///
+    /// Answered with [`ResponseBody::Ok`], or an error if there is no such
+    /// window -- an ordinary race against a window that closed between the
+    /// snapshot and the click.
+    SetWindowWorkspace { window: u64, workspace: u32 },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -651,6 +701,8 @@ enum RequestTag {
     ReloadAppearance = 0x0F,
     ShellControl = 0x10,
     ReserveEdge = 0x11,
+    SwitchWorkspace = 0x12,
+    SetWindowWorkspace = 0x13,
 }
 
 impl RequestTag {
@@ -673,6 +725,8 @@ impl RequestTag {
             0x0F => Self::ReloadAppearance,
             0x10 => Self::ShellControl,
             0x11 => Self::ReserveEdge,
+            0x12 => Self::SwitchWorkspace,
+            0x13 => Self::SetWindowWorkspace,
             _ => return None,
         })
     }
@@ -809,10 +863,6 @@ fn write_header(out: &mut Vec<u8>, magic: [u8; 4], count: usize) {
     write_u32(out, u32::try_from(count).unwrap_or(u32::MAX));
 }
 
-fn write_i32(out: &mut Vec<u8>, v: i32) {
-    write_u32(out, v.cast_unsigned());
-}
-
 fn write_optional_point(out: &mut Vec<u8>, p: Option<(i32, i32)>) {
     match p {
         Some((x, y)) => {
@@ -924,6 +974,15 @@ fn encode_request_body(out: &mut Vec<u8>, body: &RequestBody) {
             out.push(edge.as_byte());
             write_u32(out, *size);
         }
+        RequestBody::SwitchWorkspace { workspace } => {
+            out.push(RequestTag::SwitchWorkspace as u8);
+            write_u32(out, *workspace);
+        }
+        RequestBody::SetWindowWorkspace { window, workspace } => {
+            out.push(RequestTag::SetWindowWorkspace as u8);
+            write_u64(out, *window);
+            write_u32(out, *workspace);
+        }
     }
 }
 
@@ -1030,10 +1089,6 @@ fn read_header(input: &[u8], magic: [u8; 4]) -> Result<(Reader<'_>, u32), Decode
     Ok((r, n))
 }
 
-fn read_i32(r: &mut Reader<'_>) -> Result<i32, DecodeError> {
-    Ok(r.read_u32()?.cast_signed())
-}
-
 fn read_bool(r: &mut Reader<'_>) -> Result<bool, DecodeError> {
     // Any non-zero byte is true rather than an error: this is a boolean, and
     // there is no encoder in this crate that can produce a 2. Rejecting it
@@ -1043,8 +1098,8 @@ fn read_bool(r: &mut Reader<'_>) -> Result<bool, DecodeError> {
 
 fn read_optional_point(r: &mut Reader<'_>) -> Result<Option<(i32, i32)>, DecodeError> {
     if read_bool(r)? {
-        let x = read_i32(r)?;
-        let y = read_i32(r)?;
+        let x = r.read_i32()?;
+        let y = r.read_i32()?;
         Ok(Some((x, y)))
     } else {
         Ok(None)
@@ -1102,8 +1157,8 @@ fn decode_request_body(r: &mut Reader<'_>) -> Result<RequestBody, DecodeError> {
         }
         RequestTag::Move => {
             let window = r.read_u64()?;
-            let x = read_i32(r)?;
-            let y = read_i32(r)?;
+            let x = r.read_i32()?;
+            let y = r.read_i32()?;
             RequestBody::Move { window, x, y }
         }
         RequestTag::Resize => {
@@ -1177,6 +1232,16 @@ fn decode_request_body(r: &mut Reader<'_>) -> Result<RequestBody, DecodeError> {
                 size: r.read_u32()?,
             }
         }
+        RequestTag::SwitchWorkspace => RequestBody::SwitchWorkspace {
+            workspace: r.read_u32()?,
+        },
+        RequestTag::SetWindowWorkspace => {
+            let window = r.read_u64()?;
+            RequestBody::SetWindowWorkspace {
+                window,
+                workspace: r.read_u32()?,
+            }
+        }
     })
 }
 
@@ -1204,8 +1269,8 @@ fn decode_response_body(r: &mut Reader<'_>) -> Result<ResponseBody, DecodeError>
             })
         }
         ResponseTag::WorkArea => {
-            let x = read_i32(r)?;
-            let y = read_i32(r)?;
+            let x = r.read_i32()?;
+            let y = r.read_i32()?;
             let width = r.read_u32()?;
             let height = r.read_u32()?;
             ResponseBody::WorkArea {
@@ -1898,5 +1963,38 @@ mod tests {
             decode_requests(&bytes).is_err(),
             "an edge byte naming nothing decoded to an edge anyway"
         );
+    }
+
+    #[test]
+    fn both_workspace_requests_survive_the_wire() {
+        // Two requests one byte apart in tag and both carrying a u32 last: a
+        // decoder that read `SetWindowWorkspace` for `SwitchWorkspace` would
+        // take the desktop number as a window id and move a window nobody
+        // named, so they are round-tripped together rather than separately.
+        let reqs = vec![
+            Request::new(1, RequestBody::SwitchWorkspace { workspace: 3 }),
+            Request::new(
+                2,
+                RequestBody::SetWindowWorkspace {
+                    window: 77,
+                    workspace: 3,
+                },
+            ),
+        ];
+        assert_eq!(round_trip_requests(&reqs), reqs);
+    }
+
+    #[test]
+    fn switching_to_the_last_desktop_a_u32_can_name_is_not_clamped() {
+        // The compositor deliberately holds no idea of how many desktops there
+        // are -- that is the shell's preference -- so the wire must carry the
+        // whole range rather than a small field someone sized by guessing.
+        let req = Request::new(
+            9,
+            RequestBody::SwitchWorkspace {
+                workspace: u32::MAX,
+            },
+        );
+        assert_eq!(round_trip_requests(std::slice::from_ref(&req)), vec![req]);
     }
 }

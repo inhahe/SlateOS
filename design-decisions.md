@@ -34042,3 +34042,844 @@ Deliberate. This kernel has no block device nodes to name: storage is reached
 through the VFS, not through `/dev/sdaN`. A variant with no producer is one that
 every `match` in the tree must answer for, and its presence would tell the next
 reader that block device nodes exist somewhere in this system. They do not.
+## 518. A virtual desktop is a number on a window that the compositor reads, not a filter the taskbar applies
+
+**Decided by:** Claude (autonomous)
+
+**In short:** the desktop had four "virtual desktops" — four separate screenfuls
+of windows you switch between with a button on the taskbar — and switching one
+changed nothing except which buttons the taskbar drew. The windows of the
+desktop you left stayed on the glass, kept swallowing clicks, and could no
+longer be reached from the taskbar, because the taskbar was now showing a
+different desktop's list. That is worse than not having the feature at all: it
+takes windows away from the user and gives back no way to get them. This
+section decides that the *compositor* — the program that decides which pixels
+are on the screen — is the thing that has to know about desktops, and that the
+taskbar's job is only to ask it.
+
+**Two ways to do it, and only one of them is safe.** The shell (the taskbar and
+its menus) already knew which desktop each window was filed on; it just had no
+power to act on it. So the cheap fix is to keep the filing where it is and give
+the shell a new request — "hide that window" — that it sends for each window
+belonging to a desktop being left. The cost is not the request count. It is
+that such a verb necessarily lets *any* shell hide *any* client's window, which
+is precisely the ambient authority (power you have merely by being who you are,
+rather than by holding a token for it) that the whole `ShellControl` design
+exists to refuse. A window's visibility would become something a program other
+than its owner can take away, permanently, with no record of who did it. The
+alternative — the compositor holds each window's desktop number — needs a wire
+field and two new verbs, and in exchange the shell's power stays exactly what
+it already was: it can ask which desktop is showing and ask for a different one.
+It cannot reach into a window. That is the one chosen.
+
+There is a second, quieter reason. Once the compositor holds the number, a
+switch is *one* recomposite computed from a consistent picture. With the shell
+driving it, a switch is N requests that arrive one at a time, and the desktop is
+briefly a mixture of two of them — every intermediate state visible, and a
+failure halfway through leaving a permanent mixture that nothing detects.
+
+**One predicate, not twelve spellings.** Before this, "on screen" was written
+out by hand as `visible && !minimized` at twelve places: the panel-reservation
+scan, the direct-scanout candidate, focusing, hit-testing against the client
+area, hit-testing against the decorated frame, the cursor-shape lookup, the
+opaque-occluder test, the full-scene draw, the damage draw, the per-window draw,
+the screen-capture stream, and the topmost-window focus search. A *third* reason
+a window is not on screen, added to twelve sites independently, is exactly how a
+window ends up invisible but still clickable — which is the bug being fixed
+here, so repeating its shape would have been perverse. All twelve now call
+`Window::is_showing(current_workspace)`. The next reason a window is hidden goes
+in one place, and there are six markers below (`wsoccludesanyway`,
+`wshittestsanyway`, `wsrenderallanyway`, `wsrenderdamagedanyway`,
+`wsrenderwindowanyway`, `wsscanoutanyway`) that exist purely to prove a
+*partially* converted compositor is caught — because the half-converted state is
+the one that ships by accident.
+
+**The layer is the stickiness rule.** A window outside `Layer::Normal` — the
+wallpaper below everything, the taskbar and panels above it — is on every
+desktop. This is not a special case bolted on; it is the same distinction the
+shell already draws when it leaves non-`Normal` windows out of its taskbar.
+Those surfaces are furniture belonging to the *screen*, not documents belonging
+to a desktop. The alternative, a `sticky` flag someone has to remember to set,
+has an obvious failure mode: a taskbar that vanishes on a switch takes with it
+the only control that could switch back. Reusing `Layer` means the property
+cannot be forgotten, because it is a consequence of what the surface already
+declared itself to be.
+
+**The compositor owns *which* desktop shows; the shell owns *how many* there
+are.** The compositor deliberately has no idea that four is the number, and
+`switch_workspace` has no upper bound to check against. A count is a user
+preference and belongs to whatever is offering the user the choice; a second
+copy in the compositor would be a second answer, and the two would drift the
+first time the preference changed. What the compositor owns is the part that
+decides pixels.
+
+**Activating follows the window; it does not drag it here.** Clicking a taskbar
+button for a window on another desktop switches to that desktop. The other
+reading — bring the window to me — is defensible and some desktops do it, but it
+is not undoable by the same gesture that caused it: switching moves exactly one
+thing (which desktop is showing) and switching back restores it, whereas
+dragging rearranges the desktops themselves and leaves the user to notice the
+damage and repair it by hand. The rule extends to `activate_window` generally:
+un-minimizing and switching desktop are the same act — undo whatever is hiding
+this window — done in one call, because a shell should not have to know *which*
+kind of hiding it is undoing.
+
+**Hiding is only hiding.** A window on a desktop that is not showing is not
+minimized, not unmapped, not moved, and its client is not told. The temptation
+is to reuse minimize, since the machinery exists — but minimize is a *user's*
+statement about a window, one they can see in the taskbar and undo; borrowing it
+for a switch would silently overwrite that statement, and the windows would come
+back from the other desktop minimized. From the client's side nothing has
+happened that it could act on: the user looked away. The test named
+`a_window_comes_back_from_another_desktop_exactly_as_it_was_left` is what holds
+this line, and it fails the moment the switch is implemented by minimizing.
+
+**Focus follows the screen.** A window nobody can see must not hold the
+keyboard — that is every keystroke disappearing into a window the user cannot
+find. Both `switch_workspace` and `set_window_workspace` therefore check whether
+the focused window is still showing, and if it is not, drop focus, tell the
+client it lost focus, and hand the keyboard to the topmost window that *is*
+showing — or to nothing at all, on an empty desktop. `focus_window` itself now
+refuses a window that is not showing, for the same reason it already refused a
+minimized one.
+
+**A window's desktop is not in its spec.** A new window is put on whichever
+desktop is showing, and a client cannot ask for another. Choosing which desktop
+a program appears on is the user's business, and a client that could pick would
+be able to open a window somewhere the user is not looking — which is either a
+window that seems not to have opened, or a place to hide one.
+
+**An assignment aimed at a panel is stored and ignored, not refused.** Setting a
+non-`Normal` window's desktop succeeds, records the number, and changes nothing
+about what is drawn. Refusing it would make every shell that moves "all of my
+windows" first work out which of them are furniture — pushing the stickiness
+rule out of the compositor and into every caller, which is the opposite of the
+point.
+
+**What this does not do.** The compositor holds no per-desktop state beyond the
+number on each window: no per-desktop wallpaper, no per-desktop window
+arrangement, no memory of which window was focused on a desktop you return to
+(focus goes to the topmost showing window, which is usually but not always the
+same thing). Nothing yet moves a window to a desktop by dragging it. And the
+number is not persisted across a compositor restart. All of those want a
+per-desktop record rather than a per-window number, which is a larger design
+than this one.
+
+### The wire: a desktop number per window, *and* one in the header
+
+The window list (`WLST`) went to version 2 and gained two things: a `showing`
+field in the header, and a `workspace` on every window. Only the second is
+obviously needed, and the first looks redundant — a shell could infer which
+desktop is up by finding a `Layer::Normal` window that is `visible`. It cannot,
+for two reasons, and both of them are ordinary rather than exotic:
+
+- **An empty desktop has no window to infer it from.** Switch to a desktop
+  nobody has opened anything on and the list is either empty or entirely windows
+  filed elsewhere. A taskbar that has to guess would show the previous desktop's
+  number until the user opened something.
+- **The compositor switches desktops on its own account.** Activating a window
+  that is filed elsewhere *is* a switch (see "Activating follows the window"
+  above), so a shell that remembered the number it last asked for would list one
+  desktop's windows over another desktop's screen — which is a smaller version of
+  the very bug being fixed. Both `Connection::current_workspace` and
+  `EventLoop::current_desktop` are documented "read this, do not remember it",
+  and both return `Option` so that "not told yet" cannot be confused with
+  "desktop 0".
+
+The field order was chosen to leave the existing decoder tests' byte offsets
+alone: `workspace` goes *after* the state byte, so `state_at = HEADER + 8 + 8 + 1`
+and `layer_at = HEADER + 8 + 8` still name the fields they were written for.
+That is not laziness — those tests exist to catch a field being written in the
+wrong place, and rewriting their arithmetic in the same change that moves the
+fields would have disarmed them for exactly one commit.
+
+### Two new request verbs, not a new `ShellControlAction`
+
+`ShellControlAction` is a byte in a `(window, action)` pair, and the obvious
+cheap move was to add `SwitchDesktop(n)` to it. It does not fit, twice over:
+
+- **A switch names no window.** Sending it against an arbitrary window makes the
+  wire lie about what the request is aimed at, and leaves "which window?"
+  unanswerable on an empty desktop — the one case that most needs to work.
+- **`ShellControlAction` has no room.** Its `ZONE_BYTE_BASE = 7` opens an
+  unbounded tail for zone slots, so there is no free byte to take.
+
+So `RequestBody` gained `SwitchWorkspace { workspace }` (tag `0x12`) and
+`SetWindowWorkspace { window, workspace }` (tag `0x13`), both behind
+`require_shell()` — the same seam as reading the window list, for the same
+reason: they act on windows the sender does not own. (`require_shell()` still
+refuses nobody; it is a named place for a capability check that needs kernel
+attestation. See §495 and `TD-C-ANY-CLIENT-CAN-READ-EVERY-WINDOW-TITLE`.)
+
+### The shell asks; it no longer decides
+
+This is the half that made the compositor's new knowledge reach a screen.
+`DesktopShell` kept three pieces of state that were now second copies:
+`current_desktop`, a per-window `desktop`, and the arithmetic that moved them.
+All three are gone in the sense that mattered — the fields remain, but nothing
+writes them except `apply_window_list`, which takes the whole `WindowList` and
+copies the compositor's answers in.
+
+- `switch_desktop` and `move_window_to_desktop` became `&self` and return a
+  `ShellRequest` instead of mutating. They used to assign `current_desktop` and
+  return an `Activate` for the topmost window on the desktop being arrived at,
+  which was as far as a virtual desktop ever got: the taskbar relabelled itself,
+  the windows of the desktop being left stayed on screen, and the window it
+  raised was raised *over* them.
+- `HotkeyOutcome::requests` and `ShellAction::Control` carry `ShellRequest`
+  rather than `WindowRequest`. One shape for everything the shell asks for,
+  because the alternative is two shapes and two places to forget a verb.
+- What the shell kept is the *count* of desktops, which is the only bound either
+  side enforces, and the per-window icon, which the compositor has never heard
+  of.
+
+The cost of not being optimistic is one round trip before the taskbar changes.
+That is the right trade even ignoring correctness: the alternative shows the new
+desktop's buttons over the old desktop's windows for a frame, which is the
+original bug in miniature and would be indistinguishable from it if the request
+were ever refused.
+
+### Verification
+
+The whole point of the exercise is that a test which passes is not yet evidence.
+Every test named below was proved by putting its defect back with
+`D:/tmp/reintro.py` — a guarded, reversible one-string patcher that refuses to
+apply unless the string occurs exactly once, and verifies the file is restored
+byte-for-byte by SHA-256 afterwards. `git checkout` was never used, because it
+would discard unrelated uncommitted work.
+
+**Two tests were passing for the wrong reason, and both were found this way
+rather than by reading.**
+
+- `a_window_on_another_virtual_desktop_does_not_occlude_the_one_in_front_of_you`
+  survived a deliberately broken occlusion cull, because `Buffer::is_opaque()`
+  is a question about the pixel *format* and not about the bytes: an
+  `Argb8888` buffer full of `0xFF` alpha is not an occluder, so the hidden
+  window could never have occluded anything whether the cull worked or not.
+- Then *that* fix was still not enough, and the reason was subtler:
+  `focus_window` ends by calling `raise_within_layer`. Moving a window to
+  another desktop hands the keyboard to the window below it, so the focus
+  handoff *reorders the stack* — the window left showing climbs above the one
+  just hidden. A hidden window at the bottom of the stack can neither occlude
+  nor overpaint, so both the occlusion test and the damage-path test were
+  exercising nothing. `stack_with_a_hidden_window_on_top` fixes it by giving the
+  handoff a third window elsewhere on screen to land on, which is also the
+  ordinary arrangement rather than a contrivance.
+
+**Some guards are deliberately redundant, and single markers cannot prove them.**
+The full-scene pass culls a hidden window and the per-window draw refuses it
+again, so a defect at exactly one of those sites is invisible. Three of the
+stage-1 markers therefore only fire in combination:
+
+| Markers | Tests that fail |
+|---|---|
+| `wsrenderallanyway` + `wsrenderwindowanyway` | `…is_not_drawn`, `…does_not_occlude…` |
+| `wsrenderdamagedanyway` + `wsrenderwindowanyway` | `the_damage_path_does_not_repaint_a_window_from_another_desktop` |
+
+That redundancy is kept rather than removed: two passes that each independently
+refuse to draw a hidden window is the correct belt-and-braces for the one thing
+this whole section exists to guarantee. The price is that proving it needs
+combinations, and the markers record that price honestly.
+
+**Sixteen stage-2 markers, and the prover rebuilt all four crates for each one.**
+That is slow — the whole GUI stack per marker — and it is the only honest way to
+watch a defect in `guiremote` surface as a failure in `desktop`. It did: the two
+encoder markers each fail tests in three different crates, which a per-crate
+prover would have scored as a `guiremote` problem and stopped there.
+
+| Marker — what it puts back | Tests that fail |
+|---|---|
+| `wl2noheader` — the header's desktop is never written | `an_empty_desktop_still_says_which_desktop_it_is`, `a_window_keeps_its_own_desktop_number_when_it_is_not_the_one_showing`, `the_desktop_being_shown_comes_from_the_compositor_and_not_from_memory`, `the_list_says_which_desktop_is_showing_after_a_switch_the_shell_did_not_ask_for` |
+| `wl2nowindowdesktop` — a window's own desktop is dropped | `a_shell_moves_a_window_to_another_desktop_and_the_list_says_so`, `a_window_keeps_its_own_desktop_number…`, `the_desktop_being_shown…` |
+| `wl2shortheader` — the header is measured four bytes short | *no stage-2 test; see below* |
+| `ctlswapworkspaceverbs` — the two verbs decode to each other | `both_workspace_requests_survive_the_wire`, `switching_to_the_last_desktop_a_u32_can_name_is_not_clamped`, `switching_desktop_off_the_wire_reaches_the_compositor`, `a_shell_moves_a_window…`, `the_list_says_which_desktop_is_showing…` |
+| `compnoshowing` — the compositor always reports desktop 0 showing | `the_list_says_which_desktop_is_showing_after_a_switch_the_shell_did_not_ask_for` |
+| `compnowindowdesktop` — every window is reported on desktop 0 | `a_shell_moves_a_window_to_another_desktop_and_the_list_says_so` |
+| `wireswitchdropped` — a switch is answered yes and discarded | `switching_desktop_off_the_wire_reaches_the_compositor` |
+| `wiremovedropped` — a move is answered yes and discarded | `a_shell_moves_a_window…`, `the_list_says_which_desktop_is_showing…` |
+| `clientforgetsshowing` — the client remembers 0 rather than reading | `the_desktop_being_shown_comes_from_the_compositor_and_not_from_memory` |
+| `shellkeepsitsown` — the shell ignores the header | `desktop_navigation_stops_at_both_ends`, `the_desktop_indicator_counts_from_one`, `a_window_is_only_visible_on_its_own_desktop`, `switching_desktop_names_no_window` |
+| `shelllocalwindowdesktop` — a window's desktop is shell-local again | `a_window_list_is_what_says_which_desktop_a_window_is_on`, `a_window_is_only_visible_on_its_own_desktop`, `switching_desktop_names_no_window`, `super_d_minimizes_everything_on_the_current_desktop`, `a_retitle_reaches_the_button_without_disturbing_shell_local_state` |
+| `shellnodesktopbound` — switching walks past the last desktop | `a_desktop_that_does_not_exist_is_not_asked_for` |
+| `shellnomovebound` — a window is filed on a desktop that does not exist | `a_window_cannot_be_moved_to_a_desktop_that_does_not_exist` |
+| `winguessesdesktopzero` — the client answers 0 before it has been told | `the_desktop_being_shown_comes_from_the_compositor_and_not_from_memory` |
+| `shellnextunderflows` — `num_desktops - 1` on a shell with no desktops | `a_shell_with_no_desktops_does_not_underflow` |
+| `shellprevunderflows` — `current_desktop - 1` at desktop 0 | `a_shell_with_no_desktops_does_not_underflow`, `desktop_navigation_stops_at_both_ends` |
+
+**`wl2shortheader` fails no stage-2 test, and that is the field-order decision
+working.** It fails `a_layer_this_build_does_not_know_is_refused` and
+`a_state_bit_with_no_meaning_is_refused_rather_than_ignored` instead — tests written for
+something else entirely. `workspace` was put *after* the state byte precisely so
+that `state_at = HEADER + 8 + 8 + 1` and `layer_at = HEADER + 8 + 8` kept naming
+the fields they were written for; the reward for not rewriting their arithmetic
+is that they still catch a mismeasured header. A marker proved only by older
+tests is a weaker claim than one proved by its own, and it is recorded as the
+weaker claim rather than folded into the count.
+
+**The last two markers exist because the coverage table found a hole.** Running
+the first fourteen left `a_shell_with_no_desktops_does_not_underflow` with no
+marker at all — every bound-check defect it might have caught was already caught
+by a *named* test elsewhere, so the underflow test was passing without ever being
+the reason anything failed. The defect it actually guards is written down in
+`next_desktop`'s own doc comment — the obvious right-edge test,
+`current_desktop < num_desktops - 1`, underflows because `num_desktops` is a
+public field that nothing clamps and may be `0`. Putting that back, and the
+matching `current_desktop - 1` on the left edge, is what makes the doc comment
+checkable rather than merely asserted.
+
+**One marker was refused by the tooling, correctly.** `shellkeepsitsown` was
+first written as a *deletion* — replace the assignment with nothing — and
+`reintro.py` declines an empty side on purpose: with nothing to search for, the
+restore step cannot tell a file that had the anchor from one that never did, so
+the byte-for-byte guarantee would be vacuous. Rewritten to replace the
+assignment with an inert `let _ = list.current_workspace;`, which drops the
+effect and keeps the shape. All six guarded files were verified byte-identical
+to baseline after every run.
+
+3193 tests across `guiremote`, `oswindow`, `compositor` and `desktop`; clippy
+clean on `x86_64-pc-windows-gnu` (`--all-targets`) and on
+`x86_64-unknown-linux-gnu` (`--bins`, the only way the Linux-only arm of the
+compositor's `main.rs` is compiled at all); fmt clean.
+
+## 519. The window list reports each window's rectangle; nothing lets a shell set one
+
+**Decided by:** Claude (autonomous) — flagged to the operator before starting; see
+"Flagged, and proceeded on the default" below.
+
+**In short:** SlateOS has an "overview" screen — the Exposé-style view that shrinks
+every open window to a thumbnail so you can pick one — and 1856 lines of code for
+it that nothing calls. It was never wired up because it *cannot* be: drawing a
+thumbnail in proportion to the real window needs the real window's size, and the
+list of windows the desktop shell receives did not carry one. So the window-list
+frame now carries each window's position and size. The shell can read a
+rectangle; it still has no way to set one.
+
+### The problem
+
+`gui/desktop/src/overview.rs` builds its grid of thumbnails through
+`compute_grid_layout`, which calls `fit_aspect(thumb.width, thumb.height, …)`.
+With no geometry available every thumbnail is zero by zero, and `fit_aspect`
+returns `(0.0, 0.0)` for zero input — so the grid would be a screen full of
+rectangles that rasterise to no pixels and match no click. That is precisely the
+failure `Hit::WindowContent` had before §506 deleted it: a feature that looks
+present in the code and is absent on the screen. It is why the overview was
+demoted from `[x]` to `[-]` in the roadmap and filed as
+`TD-C-THE-OVERVIEW-SCREEN-IS-1856-LINES-NOBODY-CALLS`.
+
+So the question was never "should the overview have geometry". It was "should the
+shell be told rectangles at all".
+
+### Why this is not a reversal of §506
+
+§506 *deleted* per-window geometry from the shell's own window list, which reads
+like a flat contradiction of this section. It is worth being exact about why it
+is not.
+
+What §506 removed was geometry the shell **wrote and then acted on**: the shell
+kept its own rectangles, decided where a window belonged, and the compositor
+followed. Two copies of one truth with the shell's copy authoritative — so every
+drift between them was a window in the wrong place, and the shell was a window
+manager rather than a client of one.
+
+What version 3 adds is geometry that is:
+
+- **read-only.** No verb in `ShellControl` accepts a rectangle. A snap names a
+  *named edge* (§505), a maximize names nothing, a move-to-desktop names a
+  number. There is deliberately no `SetWindowRect`, and adding one would be a
+  separate decision that this section does not make.
+- **replaced wholesale by every list.** The shell accumulates no copy that can
+  drift; each `WLST` frame supersedes the last one entirely.
+- **read off the compositor's own `Window` at the instant the list is built**
+  (`w.x`, `w.y`, `w.width`, `w.height`), not out of a cache.
+
+The distinction is *report* versus *accept*. A client that can see where the
+windows are can draw a picture of the desktop. A client that can move them by
+naming coordinates is the thing §506 refused. Only the second is authority.
+
+### Alternatives considered
+
+**(1) Uniform thumbnails — no geometry on the wire.** Draw every window as the
+same box. *Against:* an overview whose tiles are all one size and carry no
+picture is a list of window titles, and the taskbar is already a list of window
+titles. The feature would exist and be pointless, which is worse than not having
+it — it costs the same screen and teaches the user that the overview shows less
+than the thing it covers up.
+
+**(2) A separate "overview" request returning geometry only when asked.** *For:*
+keeps the common `WLST` frame smaller, and makes the extra reporting explicit and
+opt-in. *Against:* it is a second source of truth for the same windows arriving at
+a different instant, so the overview would routinely draw a window where it was
+one frame ago. And the saving is not real: 16 bytes per window against a title
+that is typically 20–60.
+
+**(3) Geometry, reported, in the list that already exists — chosen.** One list,
+one instant, one truth. The cost is 16 bytes per window and a version bump.
+
+### The wire
+
+Four fields per window, placed **after** the state byte and the workspace, so
+that the existing decoder tests' byte arithmetic (`state_at = HEADER + 8 + 8 + 1`)
+keeps naming the fields it was written for:
+
+```
+x       : i32    top-left in desktop coordinates
+y       : i32
+width   : u32    outer size, decorations included
+height  : u32
+```
+
+`x` and `y` are **signed**, which is the one non-obvious choice here. The desktop
+origin is the primary monitor's top-left corner, so a monitor arranged to its
+left occupies negative x across its whole width. Narrowing that to unsigned turns
+x = −1920 into 4 293 047 296 — not a clipped window but one two million pixels
+off-screen, which draws as nothing and reads to the user as "that application
+closed".
+
+`WINDOW_LIST_VERSION` goes 2 → 3, and a v2 shell reading a v3 frame is refused
+rather than allowed to short-read, on the same reasoning the 1 → 2 bump used: a
+shell that saw zero-by-zero windows would look like an empty desktop rather than
+like a decoding error, and an empty desktop is a state that legitimately happens.
+
+`write_i32` and `Reader::read_i32` were hoisted out of `control.rs` into `lib.rs`
+and `reader.rs`, because two codecs now need them, and two spellings of one
+scalar is how the two ends of a wire come to disagree about it.
+
+### Verification
+
+Seven markers, applied one at a time through the guarded reversible patcher and
+reverted with a byte-for-byte SHA-256 check, each run against all four GUI
+crates:
+
+| Marker | The defect put back | New tests that failed |
+|---|---|---|
+| `wl3swapxy` | decoder reads y before x | negative-origin, not-interchangeable, extremes |
+| `wl3swapsize` | decoder reads height before width | not-interchangeable, extremes |
+| `wl3xunsigned` | encoder writes `unsigned_abs()` — "a position cannot be negative" | negative-origin |
+| `wl3decodedropsgeometry` | bytes consumed, rectangle discarded (v3 frame, v2 struct) | negative-origin, not-interchangeable, extremes |
+| `wl3newinventsasize` | an unplaced window given a plausible default size | nobody-placed |
+| `i32signmagnitude` | the shared `write_i32` as sign-magnitude, not two's complement | negative-origin |
+| `compnogeometry` | the compositor reports a rectangle it never filled in | reports-where-it-is, moves-in-the-next-list |
+
+Every marker was caught, and every one of the six new tests was failed by at
+least one marker. Three results are worth recording as *weaker* than the table
+makes them look, because a proof round is only useful if what it did not prove
+is written down too:
+
+- **`i32signmagnitude` did not fail the extremes test, and the comment inside
+  that test was wrong about why it would.** The comment claimed `i32::MIN` was
+  the witness against sign-magnitude. It is the opposite: `i32::MIN` is the one
+  negative value where the two encodings agree, because
+  `i32::MIN.unsigned_abs()` is `0x8000_0000`, which is already the sign bit and
+  nothing else. The ordinary negative in the other test is what catches it. The
+  comment has been corrected to say so, and to say that the reintroduction run
+  is what settled it. This is exactly the class of error the exercise exists to
+  find — a test whose *stated* reason for existing is not the reason it passes.
+- **`i32signmagnitude` also failed four `control.rs` tests**, including
+  `a_negative_position_is_not_read_as_a_huge_one` and
+  `a_reserve_reply_carries_a_signed_origin_so_a_left_hand_monitor_survives`.
+  That is the hoist working as intended: the two codecs really do share one
+  scalar, and a defect in it surfaces on both wires rather than on one.
+- **`moving_a_window_moves_it_in_the_next_window_list` is proved by the same
+  single marker as its neighbour.** Its distinct claim — that the list is
+  rebuilt per call rather than cached at window creation — has no marker of its
+  own, because a stale cache cannot be expressed as a one-string replacement in
+  a function that has no cache to make stale. It is honest additional coverage
+  against a defect that does not exist yet, not a proved regression test for one
+  that did.
+
+### Flagged, and proceeded on the default
+
+This rests on a reading of §506 — report versus accept — and the operator may
+read it differently. The question was put before the work began: *if you would
+rather the shell never see rectangles at all, say so and I will stop; the
+fallback is alternative (1), uniform boxes, which makes the overview a list,
+which is what the taskbar already is.* No objection came back, and the change is
+small and wholly revertible — one version bump, four fields, no new verb — so it
+proceeded on the default. If the operator prefers (1), the reversal is this
+commit backed out and the overview left filed as dead code.
+
+## 520. The overview is a fullscreen modal that takes input before the shell does, and one layout pass answers both "where is it drawn" and "what did I click"
+
+**Date:** 2026-08-22
+**Decided by:** Claude (autonomous)
+
+**In short:** The desktop has an Exposé screen — press a key, see a card for
+every open window, click one to switch to it. It was written months ago,
+complete and tested, and nothing ever showed it (`known-issues.md`,
+`TD-C-THE-OVERVIEW-SCREEN-IS-1856-LINES-NOBODY-CALLS`). §519 put each window's
+rectangle on the wire, which was the missing ingredient; this entry is about the
+four choices made in connecting it up. The short version of all four: while the
+overview is on screen it is the only thing on screen, it works out where
+everything goes exactly once, and two features that could not possibly work were
+deleted rather than kept.
+
+### 1. One layout pass, shared by drawing and hit-testing
+
+`overview::overview_layout(state, config, screen_w, screen_h) -> Vec<ThumbnailLayout>`
+is the single answer to "where does each card go". `render_overview` draws those
+rectangles; `DesktopShell::press_on_overview` hit-tests the same ones. Neither
+works the layout out for itself.
+
+*Alternative rejected:* let each side compute what it needs, which is how the
+module was written — the grid maths lived inline in `render_overview`, and
+`on_mouse_click` took `screen_w`/`screen_h` so it could redo the parts it
+needed. That is cheap, and it is wrong in a specific way: the two computations
+drift, and the symptom is that a click selects the window *next to* the one that
+was lit. The snap overlay already made this call for the same reason —
+`render_zone_overlay`'s doc says "what is lit and what a press would place are
+the same answer to the same question" — and there is no argument for the
+overview being different.
+
+*Cost:* the hit-test path recomputes the layout on every press rather than
+caching it. That is a few dozen rectangle divisions once per click, against a
+class of bug that is invisible in every unit test and obvious to every user.
+Caching would reintroduce the same hazard in a third form — a cache that is
+stale rather than a computation that disagrees — so it was not done.
+
+### 2. Modal: presses before `hit_test`, keys before the shortcut table
+
+`DesktopShell::handle_press` routes to `press_on_overview` **before**
+`sync_snap_area()` and `hit_test`. `handle_hotkey` routes to `key_on_overview`
+**before** `DesktopAction::for_chord`. Both orderings are load-bearing:
+
+| Without it | What the user sees |
+|---|---|
+| press routed after `hit_test` | Clicking the bottom strip presses a taskbar button, through an opaque fullscreen overlay |
+| keys routed after the chord table | Typing `d` into the search box runs Show Desktop |
+
+*Alternative rejected:* leave the overview as one more thing `hit_test` knows
+about, ranked above the taskbar. That is the right shape for the start menu and
+the calendar, which are *panels* — they occupy a rectangle, and everything
+outside it still belongs to whoever was there. The overview is not a panel; it
+covers the screen and dims it. A hit-test that has to be told "…and this one
+covers everything" is expressing modality in the vocabulary of layering, which
+works right up until something is added above it.
+
+*The exception that proves it is modal, not deaf:* the chord that opened it
+still reaches the table, so `Super+Tab` closes it. `key_on_overview` checks
+`for_chord(...) == Some(ToggleOverview)` first and hands that one case back. A
+toggle you can only press once is not a toggle, and a user who does not remember
+which chord they hit is otherwise left looking at a screen they cannot dismiss —
+which is also why `dismiss_popups` closes it, so `Esc` works even from a state
+the key handler did not anticipate.
+
+### 3. The "+" add-desktop button: deleted, not documented
+
+The overview drew a "+" in the bottom-right corner and returned
+`OverviewAction::AddDesktop` when it was clicked. Nothing could act on it:
+`DesktopShell::num_desktops` is fixed at construction and is the only bound
+either side enforces (§518). Making the desktop count mutable is a real decision
+with a real design behind it, and it is not this task.
+
+*Alternative rejected:* keep the button, wire it to a no-op, note it in
+`todo.txt`. That is precisely the defect this whole task exists to remove, one
+button large — a control that draws, hit-tests and reaches nothing. Shipping a
+fresh instance of a bug while fixing the old one is not a trade worth making for
+a corner glyph.
+
+It was also, incidentally, the only thing in the overview positioned
+independently of the layout pass — placed relative to the bottom-right corner
+rather than taken from `layouts` — and therefore the only thing that could be
+drawn in one place and clicked in another. Deleting it let `on_mouse_click` drop
+its `screen_w`/`screen_h` parameters, which is decision 1 becoming true of the
+whole module rather than most of it.
+
+### 4. The open animation: deleted, because it had never run and could not
+
+`OverviewState` carried `animation_progress: f32`, stepped by `tick_animation`,
+and `show()` set it to `0.0`. Every draw path began
+`if progress <= 0.0 { return }`. **There is no clock in the shell.**
+`oswindow::EventLoop::run` blocks in `Connection::wait()` when there is no input,
+and `wait` takes no timeout; there is no timer, no deadline and no frame callback
+anywhere in the stack. So `tick_animation` had no caller and could not have one,
+progress never left zero, and the first genuinely working build of this feature
+drew a blank, un-clickable, fullscreen overlay.
+
+*Alternative rejected:* keep the field, initialise it to `1.0`, step it if a
+clock ever appears. That reads like prudence and is not. It preserves the
+*possibility* of a fade at the cost of a live branch on the drawing path with
+exactly one correct value, and leaves the next reader to discover for themselves
+that `tick_animation` is unreachable. The animation is not deferred polish — with
+no clock it is a feature that cannot exist, and code that cannot run is not an
+asset.
+
+*What was kept:* the reasoning, in a comment where the function was, pointing at
+`known-issues.md` → `TD-C-THE-SHELL-HAS-NO-FRAME-CLOCK`. That entry is the real
+finding here and is much larger than one fade: `gui/desktop/src/animations.rs` is
+1036 lines with six `tick()` methods and **no caller anywhere in the tree**, for
+the same reason. The fade comes back when there is a clock to run it from.
+
+### What made this findable
+
+Every test in `overview.rs` drove the module directly, and all of them passed
+against an overlay that rendered nothing. That is not a gap in the tests'
+coverage of the module — it is the module's own tests being unable, in principle,
+to ask whether anything calls it. Both defects found here surfaced within an hour
+of something real being plugged in, and neither was visible before. See §519's
+closing note and `TD-C-VIRTUAL-DESKTOPS-HIDE-NOTHING` for the same shape twice
+more.
+
+### Verification
+
+Eleven defects reintroduced one at a time into the real tree with
+`D:/tmp/reintro.py`, each reverted afterwards and every touched file re-checked
+byte-for-byte by SHA-256 (`restored: True`). A test that does not fail against
+the marker naming its own defect is not a regression test for it, whatever it is
+called.
+
+| Marker | Defect put back | Tests that failed |
+|---|---|---|
+| `shellnooverviewrefresh` | the window list refreshes the taskbar but not the overview | 6 |
+| `overviewdropsgeometry` | the projection files a zero rectangle, as before §519 | 2 |
+| `overviewlanesfromwindows` | lanes derived from the windows that exist, so an empty desktop vanishes | 1 |
+| `overviewkeepsstalehover` | a hover outlives the window it named | 1 |
+| `overviewpressfallsthrough` | presses reach `hit_test` from behind the overlay | 2 |
+| `overviewkeysfallthrough` | keys reach the shortcut table before the search box | 1 |
+| `overviewtogglenotreentrant` | the opening chord arrives as a bare `Tab` and no longer closes it | 1 |
+| `overviewclickrelayout` | hit-testing computes its own layout, against a transposed screen | 1 |
+| `overviewsurvivesdismiss` | `dismiss_popups` clears everything except the fullscreen overlay | 1 |
+| `overviewneedsasecondstep` | drawing gated on state `show()` clears — the animation defect, respelled | 3 |
+| `overviewaddsdesktopbutton` | the "+" glyph comes back | 1 |
+
+**One marker caught nothing on the first run, and the test was the thing at
+fault.** `overviewclickrelayout` transposes width and height inside the hit-test
+path, and `a_click_selects_the_window_whose_card_is_under_it` — the test written
+specifically to guard decision 1 — passed against it unchanged. The reason is
+worth recording, because it generalises: the test asked `overview_layout` where
+the middle card was and then clicked there. Transposing the screen inside that
+function moved the question and the answer together, so the assertion held just
+as well against a layout with no relationship to what was on the glass. A test
+that recomputes the layout it is checking cannot fail when the layout is wrong,
+however precisely its name states the property.
+
+It now reads the click coordinate back out of the **render tree** —
+`render_thumbnail_card` emits a card's background `FillRect` immediately before
+the `Text` holding its title, so the drawn geometry is recoverable from the
+output — and asks the question the user asks: I clicked the middle of the card I
+can see, did that select the window whose title is written on it? It fails
+against the marker now. *This is the second time on this task that a passing test
+turned out to be answering a question nobody asks; the first was the whole
+module.*
+
+**Three tests are honest additional coverage, not proved regression tests:**
+
+- `a_query_matching_no_title_matches_no_window` — guards the `app_name` deletion.
+  No stage-2 marker touches search, because search is internal to the overview
+  and the seam being wired is the one around it.
+- `escape_leaves_the_overview` — survives every marker because **two independent
+  paths close it**: `key_on_overview` turns `Esc` into `OverviewAction::Close`,
+  and `dismiss_popups` hides it regardless. That redundancy is deliberate (see
+  decision 2), so no single marker can break it, and a marker that broke both at
+  once would be testing my patch rather than the code.
+- `the_bottom_right_corner_is_not_a_button` — the click region **cannot be
+  reintroduced** without restoring the `screen_w`/`screen_h` parameters that
+  decision 3 deleted from `on_mouse_click`, which is a signature change across
+  every call site. That unrepresentability is a stronger guarantee than the test:
+  you cannot write this bug back without the compiler making you change the
+  function's contract first. (`nothing_draws_an_add_desktop_button` guards the
+  *drawing* half and is proved, by `overviewaddsdesktopbutton`.)
+
+## 521. The frame clock is a local, one-shot deadline on the loop's own park — not a compositor callback, not a fixed-rate timer
+
+**Date:** 2026-08-22
+**Decided by:** Claude (autonomous)
+
+**In short:** Nothing on the desktop could move by itself. A menu could not
+slide open, a caret could not blink, a progress spinner could not spin — not
+because that code was missing, but because there was no heartbeat to step it
+with. The shell woke only when the user did something. This adds the heartbeat:
+a window can ask the event loop to wake it once, at a time it names, and gets
+an `Event::Tick` carrying how long really passed. The four choices below are
+about *where* the heartbeat comes from, *how often* it beats, *who stops it*,
+and *what number* the tick carries.
+
+### What was actually missing
+
+The surprising part, and the reason this entry exists at all: **neither end of
+the mechanism was missing.** The bounded wait already existed —
+`Socket::set_wait_timeout(Option<Duration>)` (`gui/remote/src/socket.rs`)
+capped `park()`'s `set_read_timeout`, refused a zero duration with an
+explanation, and its own doc comment named the use case: *"Only useful to a
+client that has something to do on a timer — an animation, a blinking caret"*.
+The event already existed too — `guitk::event::Event::Tick { elapsed_ms }` is in
+the shared vocabulary, `gui/remote/src/input.rs` encodes and decodes it on the
+wire in both directions, and **50 references to it exist across the toolkit and
+the applications**: `modal.rs` (three), `grid.rs`, `asteroids`, `breakout`,
+`dots`, `benchmark`, `diskimager`, `credmanager` and more all had an
+`Event::Tick { elapsed_ms } =>` arm ready to receive one.
+
+A tree-wide search for anything that *constructed* one outside a test found
+nothing. So this was a **missing producer in the middle**, with a working
+consumer vocabulary on one side and a working bounded wait on the other, and no
+line of code joining them. Every one of those 50 arms was dead code its author
+had no way to notice was dead, because `handle_event(Event::Tick { elapsed_ms: 16 })`
+written by hand in a unit test passes perfectly. See `known-issues.md` →
+`TD-C-THE-SHELL-HAS-NO-FRAME-CLOCK`, and §520's closing note for the same shape
+one task earlier.
+
+### 1. The tick is synthesised locally, not requested from the compositor
+
+`EventLoop` reads its own clock, bounds its own park, and constructs the
+`Event::Tick` itself. The compositor is not involved and does not know an
+animation is running.
+
+*Alternative rejected:* a compositor frame callback — the client asks for a
+frame, the compositor answers at vsync, the client draws. This is what Wayland
+does and it is genuinely better for one thing: an animation that must be *in
+step with the display* cannot be, from a local clock. That option stays open —
+the wire can already carry a `Tick` in both directions, so adding
+`RequestBody::RequestFrame` later is additive and breaks nothing.
+
+*Why not now:* it would put the compositor in the middle of every blinking caret
+on the desktop. A text field asking "wake me in 500 ms" would become a socket
+round trip, a scheduling decision in another process, and a wake-up of the
+compositor — to obtain a number the asking process could have read from its own
+clock. The cost is paid per animation per frame, by every client, including the
+ones whose animation has nothing to do with the display's refresh.
+
+### 2. Wake-ups are one-shot, so an animation re-arms every frame
+
+`wake_at(window, deadline)` fires exactly once. An animation that wants a next
+frame calls `wake_after` again from inside its own tick handler.
+
+*Alternative rejected:* a repeating interval timer — `every(window, 16ms)`,
+cancelled when the animation ends. Fewer calls, and it reads more naturally.
+
+*Why not:* it inverts the default. With a repeating timer, *continuing* is free
+and *stopping* is the thing you must remember; a handler that returns early, an
+animation that finishes on a branch nobody tested, a window torn down by a path
+that forgets to cancel — each leaves a timer waking the process sixty times a
+second for ever, and none of them looks like a bug in code review. One-shot
+makes stopping the default and continuing the deliberate act, which is exactly
+the property that keeps an idle desktop idle. The cost is one extra call per
+frame in the handler that is already running.
+
+*Corollary made explicit:* arming a window that already has a wake-up
+**replaces** it rather than adding a second, so a handler that re-arms
+unconditionally cannot accumulate timers. And `close()` cancels — a destroyed
+window's wake-up would otherwise hold the process at a frame rate for a window
+nobody can see, with every tick landing in `unrouted`.
+
+### 3. Not a fixed-rate frame timer
+
+With no wake-ups registered, `next_wakeup()` is `None`, the park is unbounded,
+and the loop blocks for ever exactly as before. Nothing beats unless something
+asked.
+
+*Alternative rejected:* run the loop at 60 Hz and deliver a tick every pass,
+letting each window decide whether it has anything to do. That is how most game
+loops are written and it makes the API smaller — no `wake_at`, no `cancel_wake`.
+
+*Why not:* a shell that wakes sixty times a second to discover it has nothing to
+draw is `TD-COMPOSITOR-POLLS-INSTEAD-OF-WAITING` in a different place. That
+entry is already filed as debt against the compositor; introducing the same
+tradeoff, resolved the same wrong way, in the client library one directory over
+would be building the bug we are tracking.
+
+### 4. `elapsed_ms` is measured, and it partitions wall time
+
+The tick carries `now − since`, where `since` is the moment of the *previous
+tick for that window* — carried across the handler that re-armed — not the
+moment the wake-up was armed, and not the interval that was requested.
+
+*Alternative rejected (a): report the requested interval.* Simplest, and wrong
+in a way that hides itself: an animation would be told it is running at its
+nominal rate no matter how far behind it had actually fallen, so the symptom of
+a slow frame becomes a slow animation rather than a dropped one — visible to the
+user, invisible to every measurement.
+
+*Alternative rejected (b): measure from the moment of arming.* This is the
+tempting one, and it looks right. It loses the time the handler itself spent:
+arm for 16 ms, handler takes 4 ms, every tick reports 16 while 20 ms of wall
+time passed. That matters more than 25% because **every consumer in the tree
+accumulates `elapsed_ms`** — `benchmark` adds it to a progress total,
+`credmanager` adds it to a clock, `login` steps a timeout with it. A delta that
+omits the handler does not merely run slow; it drifts from the wall clock
+without bound, and a clock built that way loses minutes per hour.
+
+*The exception that is not an inconsistency:* when an animation **stops** — a
+tick is delivered and the handler does not re-arm — the reference point is
+dropped. Restarting later reports the length of the first new frame, not the
+length of the pause. Without that, a paused game would resume by advancing every
+object by however long it was paused. The rule is therefore "partition the time
+the animation was *running*", which is what a consumer accumulating dt actually
+wants, and cancelling is the explicit way to say so.
+
+### The trait default is sound, not lax
+
+`Transport::set_wait_timeout` defaults to `Ok(())`. That looks like a transport
+may ignore a deadline it was given, but the default `wait()` returns
+immediately, and a wait that never blocks trivially returns within any bound.
+The obligation is the one `wait` already carries: a transport that really blocks
+must implement this too. `Socket`'s inherent method became the trait
+impl, unchanged.
+
+### What made this testable without sleeping
+
+The policy — expiry, ordering, the elapsed arithmetic, the dropped reference
+point — lives in `EventLoop::due_at(&mut self, now: Instant)`, and `wake_at`'s
+cold-start reference comes from a private `arm(window, deadline, now)`. Both
+take the clock as a parameter, so every rule above is checked against synthetic
+instants derived from one `Instant::now()` base. A test that has to sleep to
+observe a deadline is a test that will eventually be flaky about it, and a
+flaky timing test is worse than none: it trains its reader to re-run rather than
+to look.
+
+The one thing a synthetic clock cannot check — that the park really is bounded
+and really is a park — is proved in `guiremote::socket` against a live, silent
+peer, with a lower bound as well as an upper one, so a `wait` that ignored the
+timeout by returning at once fails just as a `wait` that ignored it by blocking
+would.
+
+### Verification: every test was proved to be a regression test
+
+Seventeen tests were added. A test named after a defect is not evidence it
+catches that defect — the standing doctrine here (see §520) is that **a test
+which does not fail against a marker naming its own defect is not a regression
+test for it, whatever it is called.** So each defect was put *back* into the
+real tree, one at a time, the affected crates' suites were run, and the defect
+was taken straight back out. Each patch was guarded twice: the string being
+replaced had to occur exactly once, and the reversal had to restore the file
+byte for byte (SHA-256 against a baseline taken before the first patch).
+
+| Defect reintroduced | Tests that failed |
+|---|---|
+| the bounded wait exists, `Event::Tick` exists, nothing joins them | `a_tick_reaches_the_application_through_the_ordinary_event_path`, `a_tick_for_a_window_this_loop_does_not_own_is_counted_not_delivered` |
+| wake-ups repeat instead of being one-shot | `a_wake_up_fires_once_and_is_then_spent`, `an_animation_that_stopped_does_not_report_the_pause_when_it_starts_again` |
+| `elapsed_ms` reports the interval asked for, not the one that passed | `the_tick_reports_the_time_that_passed_not_the_time_that_was_asked_for`, `the_deltas_of_a_running_animation_partition_the_time_it_ran_for` |
+| the reference point is not carried across the handler | `the_deltas_of_a_running_animation_partition_the_time_it_ran_for` |
+| the reference point outlives the animation it belonged to | `an_animation_that_stopped_does_not_report_the_pause_when_it_starts_again` |
+| every deadline is due, always | `a_deadline_not_yet_reached_does_not_fire`, `a_registered_wake_up_bounds_the_park`, `the_shell_s_park_is_bounded_by_a_wake_up_it_registered` |
+| arming twice grows a second timer rather than replacing the first | `arming_a_window_twice_replaces_rather_than_accumulates` |
+| several deadlines due at once fire in registration order | `several_deadlines_due_at_once_fire_earliest_first` |
+| cancelling one window's wake-up cancels everybody's | `cancelling_a_wake_up_stops_that_window_and_no_other` |
+| the park is never bounded — the defect this whole entry is about | `an_idle_loop_parks_with_no_bound_at_all`, `a_registered_wake_up_bounds_the_park`, `a_deadline_already_past_still_bounds_the_park_by_something_nonzero`, `the_shell_s_park_is_bounded_by_a_wake_up_it_registered` |
+| a deadline already past yields a **zero** bound, which the platform reads as "never time out" | `a_deadline_already_past_still_bounds_the_park_by_something_nonzero` |
+| a destroyed window keeps its wake-up | `closing_a_window_withdraws_its_wake_up` |
+| the socket stores a token bound instead of the one it was given | `a_bounded_wait_parks_for_the_bound_and_then_comes_back` |
+| the shell parks through the connection, past every deadline it registered | `the_shell_s_park_is_bounded_by_a_wake_up_it_registered` |
+
+Fourteen defects, sixteen of the seventeen tests earned. **`an_idle_loop_has_no_deadline`
+is recorded honestly as additional coverage, not as a regression test** — no
+marker made it fail. It asserts that a loop nobody armed reports no deadline,
+which is the *absence* of a behaviour; the defect that would break it is the
+park-level one, and `an_idle_loop_parks_with_no_bound_at_all` is the test that
+actually catches that.
+
+Two of the markers were worth the exercise on their own. `shellparksunbounded`
+is not hypothetical: `ShellSession::run` really did call `Connection::wait`
+rather than `EventLoop::wait`, so the frame clock would have worked everywhere
+except in the shell — the one place this entry exists for — and the only symptom
+would have been an animation that stops. It was found by grepping for the bypass
+*because* the marker list demanded one, and fixing it is why `EventLoop::wait`
+is public and `ShellSession::events_mut` exists. And `everydeadlineisdue` shows
+why "does it fire?" is not enough on its own: a wake-up that is always due still
+delivers ticks, still animates, and only fails the *negative* tests.
+
+*Note on the tool, for whoever writes the next one.* The reversal lives in a
+`finally`, which covers an exception but not the process being killed — a run
+that was interrupted mid-marker left the defect in `lib.rs`, where it looks
+exactly like a hand edit. The prover now heals that on startup: a marker whose
+bad side is present exactly once and whose good side is absent is unambiguously
+one that was left applied, so no journal file is needed. A prover that damages
+the tree when interrupted is worse than no prover.

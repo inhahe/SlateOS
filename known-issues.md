@@ -50335,7 +50335,7 @@ commands that carry the colour in question, and assert the two renders agree.
 Candidates: anything drawn on the wallpaper, on a video surface, on a
 thumbnail, or on any other content the palette does not own.
 
-**Part 2 progress. 15 of 49 modules converted.**
+**Part 2 progress. 16 of 49 modules converted.**
 
 - [x] `security_dialog.rs` — 29 constants, done 2026-08-22. The method above
   survived contact: the sweep lives in `gui/desktop/src/palette_check.rs` as
@@ -50946,6 +50946,84 @@ thumbnail, or on any other content the palette does not own.
     the label alone carries the state, so it is `p.accent` directly and *does*
     move between accents (defect TTTTT). Two adjacent modules, two different
     correct answers; the shape of the widget decides, not the word "tab".
+- [x] `network_settings.rs` — 14 constants, done 2026-08-22. Harness defects
+  JJJJJJ–KKKKKKK (twenty-eight), and the first module whose conversion turned
+  up **two user-visible bugs that had nothing to do with colour**.
+  - **A picker that painted both of its options at the same place.** The DNS
+    mode row looped over `[Automatic, Manual]` and never advanced `x`, so
+    "Automatic" was drawn and then covered outright by "Manual". The option
+    existed in the state, the type system and the click handler, and could not
+    be seen or chosen. `draw_check`'s "drawn and never seen" rule is what
+    surfaced it — but only by the accident that the overlap was *exact*;
+    `draw_check` exempts partial overlap deliberately, so a one-pixel offset
+    would have hidden it. That is why the module also has a direct layout test
+    (`no_picker_segment_hides_another_or_leaves_the_row`) rather than leaning
+    on the erase sweep. **A generic invariant catching a specific bug is luck,
+    not coverage; write the specific test anyway.**
+  - **A picker that offered four of six variants.** The proxy type row listed
+    `None/Http/Socks5/Auto`, omitting `Https` and `Socks4` — both of which
+    `ProxyType` defines and `ProxyConfig::validate` accepts. A user already on
+    HTTPS saw a picker with *nothing* highlighted, and any touch could only
+    move them off a setting they could never get back to. It also sized its
+    segments as `(width - 12) / n` and then spaced them `btn_w + 4` apart,
+    which is self-consistent at exactly one `n`; at four it already ran ~4px
+    past the row's right edge and at six it would have run ~20px past. Both
+    pickers now go through one `segment_bounds(x, width, i, n)` helper that
+    takes the `n - 1` gaps out of the total *before* dividing. Two open-coded
+    copies of one layout had drifted in two different directions, which is the
+    same defect class as the 549 palette constants, one layer down.
+  - **Eight accent sites, split into eight assertions, and four of them are
+    loops.** Active tab label; the status tab's four quick toggles; both
+    segmented pickers; the DoH toggle; the proxy auth toggle; the three
+    firewall option toggles; "+ Add rule". The per-site rule from
+    `backup_settings` holds: n sites ⇒ n negative assertions, because one
+    `assert_ne!` over their union passes while any single site still moves.
+    Note that three of the eight are `if *enabled { p.accent }` on a `40x20`
+    pill and are geometrically identical to each other; they are separated by
+    which tab renders them, which is the only handle there is.
+  - **Five categorical scales, not four.** Connection state, Wi-Fi security
+    strength, signal quality, firewall action — and the firewall
+    enabled/disabled dot, which is easy to miss because it is a bare
+    green/red rather than a `.color()` method. The blue-state trap did *not*
+    appear here: none of the four scales uses blue, which is worth recording
+    because four consecutive modules had it and the pattern was starting to
+    look universal.
+  - **`p.crust` on a categorical badge is right only by coincidence, again —
+    and the coincidence is now understood.** The firewall action badge drew
+    its label in `CRUST`. Mocha's green/red/yellow are pale (dark text reads)
+    and Latte's are deep (light text reads), and `crust` flips lightness with
+    the mode alongside them, so a fixed `p.crust` stays legible on all six
+    values by accident of which two palettes we ship. It became
+    `readable_on(rule.action.color(p))` — not `p.on_accent()`, because the
+    fill under it is categorical, not the accent. Defect BBBBBBB puts
+    `p.crust` back and fails in light mode only. This is the third module with
+    this shape (`notification_settings`, `backup_settings`); the rule is now:
+    **any near-black or near-white drawn on a role that flips lightness
+    between modes must be `readable_on(that role)`, never a literal.**
+  - **The extractor collision arrived on schedule, and was a false negative.**
+    `segment_fills` matched every `height: 32.0` fill narrower than the row —
+    which is a picker segment *and* the active tab's own pill, since a padded
+    text width passes any width bound a segment passes. As in
+    `backup_settings`, the damage would not have been a spurious failure but a
+    silent one: the same pattern is subtracted in
+    `colors_apart_from_the_controls`, so the tab pill's colour would have
+    vanished from the frozen-union check. Fixed with a `y > 100.0` bound, the
+    tab strip being the only thing drawn above the content well. **Third
+    consecutive module with a geometric collision.** Treat the grep-and-count
+    step as mandatory, not as diligence.
+  - The half-alpha disabled-rule wash (`Color::rgba(49, 50, 68, 128)`) is the
+    same "alpha wash whose RGB is a role" as `backup_settings`, and the
+    content well is the same structural `readable_on` membership hole; both
+    have their own tests (`a_disabled_rule_is_the_enabled_row_made_translucent`
+    and `the_panels_own_surfaces_come_from_the_palette`) for the reasons
+    recorded above. Defect KKKKKK is the second confirmed case of a defect the
+    membership sweep is *obliged* to accept.
+  - **Deliberate non-change:** the switch knob is `p.text` on a `p.accent`
+    pill (~1.35:1 in Mocha). The correct fix is `readable_on(toggle_bg)`, but
+    the pattern is desktop-wide across all 49 modules and fixing it in one
+    would make the desktop inconsistent with itself. Tracked separately as
+    `TD-C-SWITCH-KNOBS-ARE-LOW-CONTRAST-ON-THE-ON-PILL`, to be done as one
+    sweep once the threading lands.
 
 **Trigger:** this is not blocked on anything. It is sequenced after the shell
 event loop (`TD-C-THE-SHELL-CAN-DRAW-ITSELF-AND-NOBODY-CAN-ASK-IT-TO`) only
@@ -50959,6 +51037,58 @@ defect observed from the settings end.
 picks Light gets a desktop that is light in five places and dark in every
 other, which reads as a broken theme rather than an unimplemented one — worse
 than having no setting at all.
+---
+
+### TD-C-SWITCH-KNOBS-ARE-LOW-CONTRAST-ON-THE-ON-PILL — 2026-08-22 — OPEN
+
+**In short.** Every on/off switch in the desktop settings panels draws a small
+round knob on a coloured pill. When the switch is **on**, the pill is the
+user's accent colour and the knob is drawn in the ordinary text colour — which
+on the stock dark theme is a light grey on a light blue, about **1.35:1**
+contrast. (Contrast ratio: how far apart two colours are in lightness; 1:1 is
+invisible, and readable text wants 4.5:1.) The knob is the part that tells you
+*which side the switch is on*, so a user glancing at a settings page cannot
+reliably tell an enabled row from a disabled one without reading the label.
+The question is not what the fix is — it is `readable_on(pill)`, the same
+helper already used for button labels — but that the wrong pattern is copied
+into all 49 shell modules, so it has to be fixed in all of them at once or the
+desktop ends up inconsistent with itself.
+
+**Where:** every `toggle_bg` / `*_toggle_bg` / `auth_bg` site in
+`gui/desktop/src/*_settings.rs` and friends. The shape is always:
+
+```rust
+let toggle_bg = if enabled { p.accent } else { p.surface2 };
+// ... pill filled with toggle_bg ...
+// ... knob filled with p.text        <-- this is the bug
+```
+
+`network_settings.rs` alone has four such sites; the pattern recurs in every
+settings panel that has a switch. The correct expression is
+`appearance::readable_on(toggle_bg)`, which yields near-black on a pale accent
+and near-white on a deep one, exactly as it already does for `p.on_accent()`
+on button labels.
+
+**Why it was not fixed when it was found.** It was noticed during the
+`network_settings.rs` palette conversion (module 16 of 49). Changing it there
+and nowhere else would have left one settings panel whose switches look
+different from every other panel's — a visible inconsistency introduced by a
+conversion that is supposed to be behaviour-preserving. A redesign hidden
+inside a mechanical substitution is a redesign nobody reviewed. It waits for
+`TD-C-FORTY-NINE-SHELL-MODULES-CARRY-THEIR-OWN-COPY-OF-THE-PALETTE` part 2 to
+finish, at which point every switch is reachable from one grep and the change
+is one sweep with one test.
+
+**Trigger:** when part 2 of the 49-module palette conversion is complete. Do
+it as a single commit across all modules, with a shared test asserting that
+every switch knob equals `readable_on` of the pill under it in both modes and
+under every selectable accent.
+
+**If never fixed:** the switches stay legible-but-mushy on the stock dark
+theme and get worse on a pale accent (Yellow, Peach, Rosewater), where knob
+and pill converge further. Nothing breaks; the settings pages are just harder
+to read at a glance than they should be, and the defect is duplicated once
+more every time a new panel is written.
 ---
 
 ### TD-C-THE-TOOLKIT-HOLDS-A-THIRD-COPY-OF-THE-PALETTE-AND-DISAGREES-WITH-ITSELF-ABOUT-IT — 2026-08-22 — OPEN

@@ -54882,3 +54882,65 @@ on the reaper being called from the right places.
 **Do not "fix" it by having the reaper skip recently-dead tasks on a timer.**
 That converts a correctness bug into a probabilistic one and makes the failure
 rarer and harder to attribute, which is strictly worse.
+
+### TD-A-LOCKDEP-VIOLATION-REPORT-NAMES-NO-ADDRESS. Two live AB/BA lock-order inversions are reported every boot and neither can be acted on, because the report identifies the locks only by a name that is `"?"` — found 2026-08-22
+
+**Owner: lane A** (`kernel/src/lockdep.rs`, plus whichever two subsystems the
+inversions turn out to be in).
+
+**In short.** The lock-order validator is doing its job: on every boot it
+prints two "potential deadlock" warnings for real inversions in real kernel
+code, not in its own self-test. But the warning identifies each lock by a
+short name, and most locks in this tree are created with `sync::Mutex::new`,
+whose default name is the single character `?`. So the report reads
+"holding lock `?`, acquiring lock `?`" and there is no way to tell which
+two locks it means. The bug being reported is invisible behind the report.
+
+**The two reports, from the 2026-08-22 boot** (`build/serial-test.txt`,
+verbatim):
+
+```
+20931:[lockdep] WARNING: potential deadlock detected on CPU 0!
+      [lockdep]   Holding lock "sysctl-reg" (class 12), acquiring lock "?" (class 9)
+      [lockdep]   But the reverse order was observed previously.
+
+37123:[lockdep] WARNING: potential deadlock detected on CPU 0!
+      [lockdep]   Holding lock "?" (class 18), acquiring lock "?" (class 110)
+      [lockdep]   But the reverse order was observed previously.
+```
+
+The second fires between `[vfs] Mounted overlay filesystem at
+'/mnt/ovl-cow-test' (rw)` and `[vfs] Unmounted overlay from …`, i.e. inside
+`overlay`'s VFS mount adapter. The first fires during a Path-Z ring-3 run
+while `sysctl-reg` is held. Both are *escalations of an edge recorded earlier
+in the same boot*, so the reverse-order acquire also happened at some earlier,
+un-reported point — the report names the second half of the inversion only.
+
+**Why the names are `?`.** `sync::Mutex::new` (`sync.rs:381`) sets
+`name: b"?"`; only `Mutex::named` supplies a real one. That default is
+reasonable — naming every lock is a per-site cost — but it means the *report*
+must carry something else that identifies the lock, and it does not.
+
+**The fix is already written down, one function away.** `dump_held_locks`
+(`lockdep.rs:781`) hit this exact wall and solved it by printing
+`{name} @ {addr:#x}`; its comment spells out the reasoning ("entries that
+cannot be told apart from each other"). `report_violation` (`lockdep.rs:979`)
+was not given the same treatment. `LockClass::id` *is* the lock address and is
+already in hand at both sites in that function, so this is a formatting
+change, not a plumbing one. With addresses in the log, the two locks can be
+resolved to their statics offline against the kernel ELF's symbol table
+(`scripts/symbolize.py`, which is reliable for *data* addresses — its known
+weakness, `TD-A-SYMBOLIZE-PY-RESOLVES-CODE-ADDRESSES-TO-DATA-SYMBOLS`, is the
+other direction).
+
+**Then fix the inversions themselves,** which is the actual point; this entry
+exists because that work cannot start until the locks can be named. Note that
+an inversion reported once may be benign in practice (the two orders may be
+unreachable concurrently on a uniprocessor boot) — but that judgement needs
+the call sites, and "we could not identify it" is not the same finding as "we
+looked and it was fine."
+
+**Do not fix this by naming every lock.** Renaming ~800 `Mutex::new` sites to
+`Mutex::named` is a large diff that would still leave the report unable to
+identify a lock whose name was mistyped or duplicated. The address is unique
+by construction and costs one format argument.

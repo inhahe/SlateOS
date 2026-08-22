@@ -1885,6 +1885,7 @@ dependencies = [
  "bignum",
  "charwidth",
  "ere",
+ "modechange",
  "sha2",
 ]
 

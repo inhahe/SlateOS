@@ -1466,10 +1466,8 @@ extern "C" fn kernel_main() -> ! {
                 }
                 // (io_ring's file-handle self-test is NOT here either — it needs
                 // /tmp, not a FAT root.  See the unconditional block below.)
-                // Buffer cache self-test (validates caching, write-back, LRU).
-                if let Err(e) = fs::cache::self_test() {
-                    serial_println!("WARNING: Buffer cache self-test failed: {:?}", e);
-                }
+                // (the buffer-cache self-test is NOT here either — it now brings
+                // its own scratch device.  See the unconditional block below.)
                 // Recycle bin self-test (trash, list, restore, empty).
                 if let Err(e) = fs::trash::self_test() {
                     serial_println!("WARNING: Recycle bin self-test failed: {:?}", e);
@@ -1553,6 +1551,21 @@ extern "C" fn kernel_main() -> ! {
             // for it.
             if let Err(e) = ipc::io_ring::self_test_fh() {
                 serial_println!("WARNING: io_ring file handle self-test failed: {:?}", e);
+            }
+            // Buffer cache: hit/miss accounting, write-back, flush, read-ahead.
+            //
+            // Third of the calls `if fat_ok` was skipping.  Moving it needed
+            // more than a change of scope: it ran against `"vda"`, writing
+            // sector 100 and sectors 200..205, on the stated reasoning that
+            // those were "unlikely to contain important data".  On this boot
+            // path `vda` is the disk swap backend (`base_sector = 0`, 512 slots
+            // × 32 sectors), so every one of those LBAs is live swap and the
+            // test would have corrupted a swapped-out page.  It now registers
+            // its own RAM disk, which makes it both harmless and independent of
+            // how the machine booted — nothing it checks was ever
+            // device-specific.
+            if let Err(e) = fs::cache::self_test() {
+                serial_println!("WARNING: Buffer cache self-test failed: {:?}", e);
             }
             // Path predicates: subtree matching and the `confine_under` jail
             // guard.  Pure (constants only, no disk), so it runs on every boot

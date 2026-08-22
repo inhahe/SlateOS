@@ -1472,10 +1472,10 @@ extern "C" fn kernel_main() -> ! {
                 // whether "/" is writable and skips itself if not, which is the
                 // precondition it actually has.  See the unconditional block
                 // below.)
-                // Change notification self-test (watch, emit, read, close).
-                if let Err(e) = fs::notify::self_test() {
-                    serial_println!("WARNING: Change notification self-test failed: {:?}", e);
-                }
+                // (the change-notification self-test is NOT here either — its
+                // synthetic cases need no filesystem at all, and its end-to-end
+                // VFS/handle hooks probe for a writable "/" and skip themselves
+                // if they do not get one.  See the unconditional block below.)
                 // Change journal self-test (persistent change tracking).
                 if let Err(e) = fs::journal::self_test() {
                     serial_println!("WARNING: Change journal self-test failed: {:?}", e);
@@ -1591,6 +1591,21 @@ extern "C" fn kernel_main() -> ! {
             // cannot be stranded by one again.
             if let Err(e) = fs::trash::self_test() {
                 serial_println!("WARNING: Recycle bin self-test failed: {:?}", e);
+            }
+            // Change notification self-test: `path_matches` subtree boundaries,
+            // watch create/emit/read/close, queue overflow, and the end-to-end
+            // VFS and file-handle hooks that emit ACCESS / OPEN / CLOSE_*.
+            //
+            // Sixth of the calls `if fat_ok` was skipping, and the one the gate
+            // cost the most: only the last two of its ten sections touch a file
+            // at all — the boundary-matching regression guard, the overflow
+            // detection and the watch-cleanup checks are pure in-memory work
+            // that never needed a disk, let alone a FAT one.  The two that do
+            // write (an ACCESS probe and an open/close probe at "/") now sit
+            // behind the same writable-root probe the recycle bin uses, so a
+            // read-only root costs those two sections and nothing else.
+            if let Err(e) = fs::notify::self_test() {
+                serial_println!("WARNING: Change notification self-test failed: {:?}", e);
             }
             // Path predicates: subtree matching and the `confine_under` jail
             // guard.  Pure (constants only, no disk), so it runs on every boot

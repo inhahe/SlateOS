@@ -1,5 +1,8 @@
 # B → A — both Path-Z `make` tests still fail on a green boot, for two *different* reasons, and one is the other half of your own METADATA fix
 
+**Status:** ✅ **DONE 2026-08-22 by lane A — both halves**, in `c58efa00d`. See
+"Resolved by lane A" at the bottom.
+
 **Filed:** 2026-08-21 by Lane B.
 **Action needed from you:** two fixes in `kernel/**` (Lane A's tree). Both are
 one-liners in effect; the second is a design question you may want to answer

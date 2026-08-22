@@ -1728,10 +1728,11 @@ _A theme is a declarative YAML file plus optional bundled assets. Themes are pur
 - [ ] Optional — many users run silent, but themes that pair colors with sounds are more cohesive
 
 ##### Tier 3 — Animation Tuning
-- [ ] `animation-duration-ms` (global default for window open/close, menu transitions)
-- [ ] `animation-easing` (ease-out, spring, linear)
-- [ ] `enable-animations` (bool — global kill switch)
+- [~] `animation-duration-ms` (global default for window open/close, menu transitions) — blocked by `TD-C-THE-SHELL-HAS-NO-FRAME-CLOCK`
+- [~] `animation-easing` (ease-out, spring, linear) — blocked by `TD-C-THE-SHELL-HAS-NO-FRAME-CLOCK`
+- [~] `enable-animations` (bool — global kill switch) — blocked by `TD-C-THE-SHELL-HAS-NO-FRAME-CLOCK`
 - [ ] Not full custom animations (that would be a compositor plugin). Just tuning built-in animation parameters.
+- **Blocked as a group, 2026-08-22:** there is nothing to tune. `oswindow::EventLoop::run` blocks in `Connection::wait()`, which takes no timeout, and there is no timer or frame callback anywhere in the stack — so no shell animation can advance, and `gui/desktop/src/animations.rs` (1036 lines, six `tick()` methods) has no caller anywhere in the tree. Discovered while wiring the desktop overview, whose own open fade was deleted for this reason (design-decisions.md §520). The prerequisite is a deadline-aware wait in `EventLoop`; see `known-issues.md` → `TD-C-THE-SHELL-HAS-NO-FRAME-CLOCK` for the proposed fix. Lane C owns it.
 
 ##### Tier 3 — Wallpaper Integration
 - [ ] Theme can bundle or recommend wallpapers

@@ -347,6 +347,14 @@ impl<T: Transport> ShellSession<T> {
             // Alt-Tab last: it is modal, and while it is up it belongs over
             // whatever was already open rather than under it.
             for part in [
+                // The overview first, because it is the only part that covers
+                // the whole screen and dims what is behind it: anything drawn
+                // under it would be dimmed twice and read as a smudge. It is
+                // mutually exclusive with the rest in practice (`dismiss_popups`
+                // closes it, and opening it closes them), so like the three
+                // below this ordering states an invariant rather than resolves
+                // a case that arises.
+                self.shell.render_overview(),
                 self.shell.render_start_menu(),
                 self.shell.render_calendar(),
                 // Over the menus, under Alt-Tab: opening the tiling overlay
@@ -378,6 +386,7 @@ impl<T: Transport> ShellSession<T> {
             || self.shell.calendar.visible
             || self.shell.alt_tab_active
             || self.shell.snap.is_overlay_visible()
+            || self.shell.overview.visible
     }
 
     /// Handle everything waiting, without blocking. Reports whether anything

@@ -730,6 +730,22 @@ pub struct DesktopShell {
     pub alt_tab_active: bool,
     /// Alt+Tab selection index.
     pub alt_tab_index: usize,
+    /// The Exposé overlay: every window on every desktop, laid out to scale.
+    ///
+    /// Its lanes are refreshed from the same `WindowList` that
+    /// [`apply_window_list`](Self::apply_window_list) folds into `windows`, in
+    /// that one call, so the two cannot disagree about which desktop is showing
+    /// or which windows exist. That is why the overlay's state lives on the
+    /// shell rather than beside it: a copy refreshed from somewhere else would
+    /// be refreshed at some other moment.
+    ///
+    /// Note what this does *not* put on `ManagedWindow`: the thumbnails carry
+    /// rectangles and `ManagedWindow` still does not. The shell has no opinion
+    /// about where a window sits (§506); the overlay is a picture drawn from the
+    /// last frame and thrown away on the next one.
+    pub overview: overview::OverviewState,
+    /// How the overview looks — cell padding, column cap, animation length.
+    pub overview_config: overview::OverviewConfig,
     /// What the user chose in the appearance panel.
     ///
     /// Kept whole rather than reduced to [`theme`](Self::theme) because it
@@ -993,6 +1009,8 @@ impl DesktopShell {
             apps: launcher::builtin_app_database(),
             alt_tab_active: false,
             alt_tab_index: 0,
+            overview: overview::OverviewState::new(),
+            overview_config: overview::OverviewConfig::default(),
             appearance: AppearanceSettings::default(),
             theme: DesktopTheme::default(),
             datetime: datetime_settings::DateTimeSettings::default(),
@@ -1532,6 +1550,15 @@ impl DesktopShell {
             // the one exception below; forwarding the rest is what keeps hover
             // states alive in clients.
             MouseEventKind::Move | MouseEventKind::Enter | MouseEventKind::Leave => {
+                // The overview covers the screen, so while it is up nothing
+                // behind it is reachable — including by a motion event, which is
+                // how a client keeps its own hover states alive. Forwarding one
+                // would light a button under an opaque overlay.
+                if self.overview.visible {
+                    let layouts = self.overview_layout();
+                    overview::on_mouse_move(&mut self.overview, event.x, event.y, &layouts);
+                    return ShellAction::Consumed;
+                }
                 // The tiling overlay is the shell's only hover-driven surface,
                 // and while it is up nothing behind it can be hovered anyway.
                 if self.snap.is_overlay_visible() {
@@ -1562,6 +1589,14 @@ impl DesktopShell {
     }
 
     fn handle_press(&mut self, x: f32, y: f32, button: MouseButton) -> ShellAction {
+        // Before `hit_test`, and before everything: the overview covers the
+        // whole screen, so a press while it is up landed on it whatever the
+        // taskbar geometry says. Asking `hit_test` first would let a press over
+        // the strip the taskbar occupies raise a window from behind the overlay.
+        if self.overview.visible {
+            return self.press_on_overview(x, y, button);
+        }
+
         self.sync_snap_area();
         let hit = self.hit_test(x, y);
 
@@ -1810,6 +1845,46 @@ impl DesktopShell {
         }
     }
 
+    /// One press while the overview is up.
+    ///
+    /// Modal, like the tiling overlay: every press either picks a window,
+    /// switches a desktop, closes a window, or abandons the overview, and none
+    /// of them reach what is behind it.
+    fn press_on_overview(&mut self, x: f32, y: f32, button: MouseButton) -> ShellAction {
+        // A non-primary press abandons rather than picks, matching
+        // `press_on_zone_overlay`. Right-clicking a thumbnail to get a menu is a
+        // gesture this overlay does not have, and inventing one here would be a
+        // second window menu that the taskbar's would then drift from.
+        if button != MouseButton::Left {
+            self.overview.hide();
+            return ShellAction::Consumed;
+        }
+        let layouts = self.overview_layout();
+        let action = overview::on_mouse_click(&mut self.overview, x, y, &layouts);
+        self.act_on_overview(action)
+    }
+
+    /// Turn what the overview decided into what the session should do.
+    ///
+    /// Every arm is `Consumed` or better: the overview covers the screen, so
+    /// there is no such thing as a press it saw and something behind it should
+    /// also see.
+    fn act_on_overview(&mut self, action: overview::OverviewAction) -> ShellAction {
+        match action {
+            overview::OverviewAction::Request(request) => ShellAction::Control(request),
+            overview::OverviewAction::Close => {
+                self.overview.hide();
+                ShellAction::Consumed
+            }
+            // A press on the backdrop, an arrow key, a typed character. The
+            // overlay has redrawn itself either way, which is what `Consumed`
+            // buys — the session repaints on it.
+            overview::OverviewAction::None
+            | overview::OverviewAction::NavigateSelection
+            | overview::OverviewAction::SearchChanged => ShellAction::Consumed,
+        }
+    }
+
     /// Ask for the focused window to be tiled into `zone_id` of the active
     /// layout.
     ///
@@ -1820,6 +1895,13 @@ impl DesktopShell {
     }
 
     fn handle_scroll(&mut self, x: f32, y: f32, dy: f32) -> ShellAction {
+        // Before the hit test, for the reason `handle_press` is: the overview
+        // covers the screen, so a wheel event while it is up is the overview's
+        // wherever the pointer happens to be.
+        if self.overview.visible {
+            let action = overview::on_mouse_scroll(&mut self.overview, dy);
+            return self.act_on_overview(action);
+        }
         // Asked of the hit test rather than of `start_menu_rect` directly, so
         // that a wheel over the power menu — which covers part of the list —
         // does not scroll the rows hidden behind it.
@@ -1937,6 +2019,13 @@ impl DesktopShell {
         // authority on focus too, and "no window is focused" is a state it can
         // genuinely be in — every window minimised, or the desktop empty.
         self.focused_window = focused;
+        // In the same call, from the same frame. The overview is a second view
+        // of exactly this data, and folding it here rather than at the moment
+        // the overlay opens is what makes "the overview and the taskbar
+        // disagree" unrepresentable: there is no second instant at which one of
+        // them could have been refreshed and the other not.
+        self.overview
+            .apply_window_list(list, self.num_desktops.max(1));
     }
 
     /// Get visible windows on current desktop, sorted by Z-order.
@@ -2104,10 +2193,83 @@ impl DesktopShell {
             return HotkeyOutcome::ignored();
         }
 
+        // The overview gets every press before the shortcut table does, and
+        // swallows the ones it does not recognise. It has a text field in it:
+        // if the table went first, typing "d" into the search bar would show the
+        // desktop out from under the overlay the user is typing into, and "e"
+        // would open a file manager behind it. A modal surface with a text field
+        // has to be modal about keys as well as clicks.
+        if self.overview.visible {
+            return self.key_on_overview(key);
+        }
+
         match DesktopAction::for_chord(key.modifiers, key.key) {
             Some(action) => self.run_desktop_action(action),
             None => HotkeyOutcome::ignored(),
         }
+    }
+
+    /// One press while the overview is up.
+    fn key_on_overview(&mut self, key: &KeyEvent) -> HotkeyOutcome {
+        // The one shortcut that still reaches the table: the chord that opened
+        // the overview closes it. Without this the binding would be one-way —
+        // Super+Tab would open the overlay and then, arriving as a bare Tab,
+        // cycle its mode — and a toggle you cannot press twice is a trap.
+        if DesktopAction::for_chord(key.modifiers, key.key) == Some(DesktopAction::ToggleOverview) {
+            return self.run_desktop_action(DesktopAction::ToggleOverview);
+        }
+        let Some(ok) = Self::overview_key(key) else {
+            // Not a key the overview has a meaning for — a bare modifier, a
+            // function key. Consumed rather than passed on, because the overlay
+            // is modal: a press it did not use is not therefore the desktop's.
+            return HotkeyOutcome::consumed();
+        };
+        let action = overview::on_key(&mut self.overview, ok);
+        match self.act_on_overview(action) {
+            ShellAction::Control(request) => HotkeyOutcome::ask(Some(request)),
+            // `act_on_overview` returns only `Control` or `Consumed`; the other
+            // two arms exist because `ShellAction` has them, not because this
+            // call can produce them.
+            _ => HotkeyOutcome::consumed(),
+        }
+    }
+
+    /// Translate a key press into the overview's own small vocabulary.
+    ///
+    /// `None` for a press the overview has no meaning for. The printable case
+    /// comes from [`KeyEvent::text`] rather than from mapping [`Key::A`] to
+    /// `'a'`: `text` is what the keyboard layout produced, so searching works on
+    /// a Dvorak or an AZERTY keyboard, and a `Key`-to-letter table would search
+    /// for the character printed on a US keycap the user does not have.
+    fn overview_key(key: &KeyEvent) -> Option<overview::OverviewKey> {
+        use overview::OverviewKey as K;
+        // Checked before `text`, because on many layouts Enter, Tab, Escape and
+        // Backspace all *have* a `text` value ('\r', '\t', '\x1b', '\x08'), and
+        // taking that branch first would type a control character into the
+        // search box instead of acting.
+        let named = match key.key {
+            Key::Escape => Some(K::Escape),
+            Key::Enter => Some(K::Enter),
+            Key::Up => Some(K::ArrowUp),
+            Key::Down => Some(K::ArrowDown),
+            Key::Left => Some(K::ArrowLeft),
+            Key::Right => Some(K::ArrowRight),
+            Key::Backspace => Some(K::Backspace),
+            Key::Tab => Some(K::Tab),
+            _ => None,
+        };
+        if named.is_some() {
+            return named;
+        }
+        // A held Ctrl or Alt makes the press a shortcut attempt, not typing.
+        // Ctrl+C is not the letter c, and putting it in the search box would
+        // both fail to copy and quietly filter the overview to nothing.
+        if key.modifiers.ctrl || key.modifiers.alt || key.modifiers.super_key {
+            return None;
+        }
+        key.text
+            .filter(|ch| !ch.is_control())
+            .map(overview::OverviewKey::Char)
     }
 
     /// Carry out a shortcut that has already been recognised.
@@ -2174,6 +2336,14 @@ impl DesktopShell {
             // shell's key in either case, and letting it through to the focused
             // window on an empty desktop would make a shortcut that sometimes
             // types a `z`.
+            // Consumed unconditionally, for the same reason as the zone
+            // overlay: Super+Tab is the shell's chord whether or not there is
+            // anything to show, and a shortcut that sometimes reaches the
+            // focused window is a shortcut that sometimes types a Tab into it.
+            DesktopAction::ToggleOverview => {
+                self.overview.toggle(overview::OverviewMode::AllDesktops);
+                HotkeyOutcome::consumed()
+            }
             DesktopAction::ToggleZoneOverlay => {
                 self.toggle_zone_overlay();
                 HotkeyOutcome::consumed()
@@ -2254,6 +2424,15 @@ enum DesktopAction {
     /// chooser, because there are twenty-two zones across the six layouts and
     /// no plausible set of chords for them.
     ToggleZoneOverlay,
+    /// Open (or close) the Exposé overlay — every window on every desktop.
+    ///
+    /// Distinct from [`CycleWindows`](Self::CycleWindows), which is the same
+    /// job for the common case: Alt-Tab is fast and blind, showing a strip of
+    /// titles you step through without looking. This shows all of them at once,
+    /// to scale, and is what you reach for when you do not remember how many
+    /// presses away the window is — or which desktop it is on, which Alt-Tab
+    /// cannot answer at all.
+    ToggleOverview,
     RestoreOrMinimize,
     PreviousDesktop,
     NextDesktop,
@@ -2294,6 +2473,10 @@ impl DesktopAction {
             // the four one-press placements above, and the chooser needs a key
             // that is not one of them.
             (false, false, false, true, Key::Z) => Some(Self::ToggleZoneOverlay),
+            // Super+Tab, which is the chord every other desktop uses for this
+            // and is not one of the four above. Alt+Tab is deliberately left
+            // alone: the two are complements, not alternatives.
+            (false, false, false, true, Key::Tab) => Some(Self::ToggleOverview),
             (false, true, false, true, Key::Left) => Some(Self::PreviousDesktop),
             (false, true, false, true, Key::Right) => Some(Self::NextDesktop),
             // Bare Escape. The shell had no binding for it at all, so the only
@@ -2888,11 +3071,19 @@ impl DesktopShell {
         let any = self.start_menu_open
             || self.power_menu_open
             || self.calendar.visible
-            || self.snap.is_overlay_visible();
+            || self.snap.is_overlay_visible()
+            || self.overview.visible;
         self.start_menu_open = false;
         self.power_menu_open = false;
         self.calendar.set_visible(false);
         self.snap.hide_overlay();
+        // Escape closes the overview along with everything else. It is a
+        // fullscreen overlay that covers the whole desktop, so it is the
+        // *most* important thing on this list to be able to get out of: with
+        // no binding for it, the only way back would be the same chord that
+        // opened it, and a user who does not remember what that was is left
+        // looking at a screen they cannot dismiss.
+        self.overview.hide();
         any
     }
 
@@ -2934,6 +3125,42 @@ impl DesktopShell {
         }
         tree.commands.extend(self.snap.render_picker());
         Some(tree)
+    }
+
+    /// Render the Exposé-style overview, if it is open.
+    ///
+    /// The thumbnails are proportioned from the rectangles that arrived in the
+    /// last window list (§519) — which is why this method exists now and could
+    /// not before: with no geometry on the wire every thumbnail was zero by
+    /// zero, and [`overview::compute_grid_layout`] would return a screen of
+    /// cards that rasterised to no pixels and matched no click.
+    #[must_use]
+    pub fn render_overview(&self) -> Option<RenderTree> {
+        if !self.overview.visible {
+            return None;
+        }
+        let mut tree = RenderTree::new();
+        tree.commands.extend(overview::render_overview(
+            &self.overview,
+            &self.overview_config,
+            self.screen_width as f32,
+            self.screen_height as f32,
+        ));
+        Some(tree)
+    }
+
+    /// Where each overview thumbnail is on screen, for hit-testing a click.
+    ///
+    /// Deliberately the same call [`Self::render_overview`] draws from, rather
+    /// than a second computation that agrees with it today.
+    #[must_use]
+    pub fn overview_layout(&self) -> Vec<overview::ThumbnailLayout> {
+        overview::overview_layout(
+            &self.overview,
+            &self.overview_config,
+            self.screen_width as f32,
+            self.screen_height as f32,
+        )
     }
 }
 
@@ -4281,5 +4508,340 @@ mod window_manager_tests {
                 "{t} rendered by the shell and by the shared clock"
             );
         }
+    }
+}
+
+/// The overview, as the rest of the shell sees it.
+///
+/// Everything here is about the *seams*: that the same window list refreshes
+/// the overview and the taskbar, that a rectangle survives the trip from the
+/// wire to a thumbnail, that a press while the overlay is up cannot reach past
+/// it, and that the layout a click is tested against is the layout that was
+/// drawn. The overview's own behaviour — grids, search, navigation — is tested
+/// in `overview.rs` beside the code that implements it.
+#[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects,
+    clippy::float_cmp
+)]
+mod overview_wiring_tests {
+    use super::{
+        DesktopShell, Key, KeyEvent, Modifiers, MouseButton, MouseEvent, MouseEventKind,
+        RenderTree, ShellAction, ShellControlAction, ShellRequest, WindowId, WindowInfo,
+        WindowList, overview,
+    };
+    use guitk::render::RenderCommand;
+
+    fn shell() -> DesktopShell {
+        DesktopShell::new(1920, 1080)
+    }
+
+    /// One window, placed, on desktop `workspace`.
+    fn placed(id: u64, title: &str, workspace: u32, rect: (i32, i32, u32, u32)) -> WindowInfo {
+        let mut info = WindowInfo::new(id, 1, title.to_string()).at(rect.0, rect.1, rect.2, rect.3);
+        info.workspace = workspace;
+        info
+    }
+
+    fn press(shell: &mut DesktopShell, x: f32, y: f32) -> ShellAction {
+        shell.handle_mouse(&MouseEvent {
+            x,
+            y,
+            kind: MouseEventKind::Press(MouseButton::Left),
+        })
+    }
+
+    fn key(k: Key, modifiers: Modifiers, text: Option<char>) -> KeyEvent {
+        KeyEvent {
+            key: k,
+            pressed: true,
+            modifiers,
+            text,
+        }
+    }
+
+    fn super_tab() -> KeyEvent {
+        key(
+            Key::Tab,
+            Modifiers {
+                super_key: true,
+                ..Modifiers::NONE
+            },
+            None,
+        )
+    }
+
+    // -- The seam between the window list and the overview -------------------
+
+    #[test]
+    fn the_list_that_refreshes_the_taskbar_refreshes_the_overview() {
+        // There is one call, in `apply_window_list`, and this is why: two
+        // refreshes at two instants is how the overview comes to show a window
+        // the taskbar has already dropped. The shell should not be able to hold
+        // one opinion about which windows exist.
+        let mut s = shell();
+        s.apply_window_list(&WindowList::new(
+            0,
+            vec![
+                placed(1, "Terminal", 0, (0, 0, 800, 600)),
+                placed(2, "Editor", 0, (100, 100, 640, 480)),
+            ],
+        ));
+        let titles: Vec<&str> = s.overview.lanes[0]
+            .thumbnails
+            .iter()
+            .map(|t| t.title.as_str())
+            .collect();
+        assert_eq!(titles, ["Terminal", "Editor"]);
+        assert_eq!(
+            titles.len(),
+            s.visible_windows().len(),
+            "the overview and the taskbar disagree about how many windows there are"
+        );
+    }
+
+    #[test]
+    fn a_thumbnail_carries_the_window_s_real_rectangle() {
+        // The whole reason §519 put geometry on the wire. If the projection
+        // dropped it, every thumbnail would be zero by zero, `fit_aspect` would
+        // return `(0.0, 0.0)`, and the overview would be a screen of cards that
+        // rasterise to no pixels and match no click.
+        let mut s = shell();
+        s.apply_window_list(&WindowList::new(
+            0,
+            vec![placed(1, "Placed", 0, (-100, 250, 1024, 768))],
+        ));
+        let thumb = &s.overview.lanes[0].thumbnails[0];
+        assert_eq!((thumb.x, thumb.y), (-100.0, 250.0));
+        assert_eq!((thumb.width, thumb.height), (1024.0, 768.0));
+    }
+
+    #[test]
+    fn a_thumbnail_with_a_real_rectangle_lays_out_to_real_pixels() {
+        // Stated separately from the field-by-field check above, because that
+        // one would still pass if `compute_grid_layout` threw the numbers away.
+        // This is the claim that actually matters on screen: something is drawn.
+        let mut s = shell();
+        s.apply_window_list(&WindowList::new(
+            0,
+            vec![placed(1, "Placed", 0, (0, 0, 1024, 768))],
+        ));
+        s.overview.show(overview::OverviewMode::AllWindows);
+        let layouts = s.overview_layout();
+        assert_eq!(layouts.len(), 1);
+        assert!(
+            layouts[0].render_width > 1.0 && layouts[0].render_height > 1.0,
+            "the thumbnail laid out to {}x{}",
+            layouts[0].render_width,
+            layouts[0].render_height
+        );
+        // The aspect ratio of the window it stands for, not the cell's.
+        let ratio = layouts[0].render_width / layouts[0].render_height;
+        assert!(
+            (ratio - 1024.0 / 768.0).abs() < 0.01,
+            "aspect ratio {ratio} is not the window's"
+        );
+    }
+
+    #[test]
+    fn every_desktop_gets_a_lane_even_the_empty_ones() {
+        // Lanes come from the shell's desktop count, not from the windows that
+        // happen to exist. Deriving them from the windows would make an empty
+        // desktop invisible in the very screen whose job is to show you where
+        // everything is — and there would be nothing to drag a window onto.
+        let mut s = shell();
+        s.num_desktops = 4;
+        s.apply_window_list(&WindowList::new(
+            0,
+            vec![placed(1, "Only", 2, (0, 0, 8, 8))],
+        ));
+        assert_eq!(s.overview.lanes.len(), 4);
+        assert_eq!(s.overview.lanes[2].thumbnails.len(), 1);
+        assert!(s.overview.lanes[0].thumbnails.is_empty());
+        assert!(s.overview.lanes[3].thumbnails.is_empty());
+    }
+
+    #[test]
+    fn a_window_hovered_in_the_overview_stops_being_hovered_when_it_closes() {
+        // The hover is a window id held across frames, which makes it the one
+        // piece of overview state that can outlive the window it names. Pressing
+        // Enter on a stale one would ask the compositor to raise a window that
+        // is gone — harmless — but it would also *draw* a highlight on a card
+        // that is no longer there, which is not.
+        let mut s = shell();
+        s.apply_window_list(&WindowList::new(
+            0,
+            vec![
+                placed(1, "Going", 0, (0, 0, 800, 600)),
+                placed(2, "Staying", 0, (0, 0, 800, 600)),
+            ],
+        ));
+        s.overview.hovered_window = Some(1);
+        s.apply_window_list(&WindowList::new(
+            0,
+            vec![placed(2, "Staying", 0, (0, 0, 800, 600))],
+        ));
+        assert_eq!(s.overview.hovered_window, None);
+    }
+
+    // -- Modality ------------------------------------------------------------
+
+    #[test]
+    fn a_press_over_the_taskbar_does_not_reach_it_while_the_overview_is_up() {
+        // The overview covers the whole screen, so the taskbar is behind it.
+        // `hit_test` answers from geometry alone and does not know that, which
+        // is why the overview is consulted first: ask it second and a click on
+        // the strip the taskbar occupies raises a window from behind an opaque
+        // overlay.
+        let mut s = shell();
+        s.apply_window_list(&WindowList::new(
+            0,
+            vec![placed(1, "Terminal", 0, (0, 0, 800, 600))],
+        ));
+        let button = s.taskbar_button_rect(0);
+        let (x, y) = (button.x + button.w / 2.0, button.y + button.h / 2.0);
+        // The control this is contrasted against: with the overview closed, the
+        // same press is the taskbar's and asks for something.
+        assert!(
+            matches!(press(&mut s, x, y), ShellAction::Control(_)),
+            "the test's premise is wrong: that press is not a taskbar button"
+        );
+
+        s.overview.show(overview::OverviewMode::AllWindows);
+        assert_eq!(press(&mut s, x, y), ShellAction::Consumed);
+    }
+
+    #[test]
+    fn typing_in_the_overview_search_does_not_run_a_desktop_shortcut() {
+        // The overview has a text field in it. If the shortcut table saw keys
+        // first, typing would fire whatever the letters happen to be bound to —
+        // behind the overlay the user is typing into, where they cannot see it.
+        let mut s = shell();
+        s.overview.show(overview::OverviewMode::AllWindows);
+        let outcome = s.handle_hotkey(&key(Key::E, Modifiers::NONE, Some('e')));
+        assert!(outcome.consumed);
+        assert!(outcome.requests.is_empty());
+        assert_eq!(s.overview.search_query, "e");
+    }
+
+    #[test]
+    fn the_chord_that_opens_the_overview_closes_it() {
+        // Super+Tab arrives at an open overview as a Tab, which the overview
+        // spends on cycling its own mode. Without the toggle being checked
+        // first the binding is one-way, and a toggle you cannot press twice is
+        // a trap: the only way out would be a key the user has to guess.
+        let mut s = shell();
+        assert!(s.handle_hotkey(&super_tab()).consumed);
+        assert!(s.overview.visible);
+        assert!(s.handle_hotkey(&super_tab()).consumed);
+        assert!(!s.overview.visible);
+    }
+
+    #[test]
+    fn escape_leaves_the_overview() {
+        let mut s = shell();
+        s.overview.show(overview::OverviewMode::AllWindows);
+        assert!(
+            s.handle_hotkey(&key(Key::Escape, Modifiers::NONE, None))
+                .consumed
+        );
+        assert!(!s.overview.visible);
+    }
+
+    // -- Drawing and hit-testing are one answer ------------------------------
+
+    #[test]
+    fn a_click_selects_the_window_whose_card_is_under_it() {
+        // The click point comes out of the *render tree*, not out of
+        // `overview_layout`. That distinction is the whole test. Asking
+        // `overview_layout` where a card is and then clicking there proves only
+        // that a function agrees with itself: transpose the screen inside it and
+        // both the question and the answer move together, so the assertion holds
+        // just as well against a layout that has nothing to do with what is on
+        // the glass. (Measured — the earlier version of this test passed
+        // unchanged against the `overviewclickrelayout` marker, which swaps
+        // width for height in the hit-test path.)
+        //
+        // Reading the coordinate back off the drawn commands is the only way to
+        // ask the question the user asks: I clicked the middle of the card I can
+        // see — did that select the window whose title is written on it?
+        let mut s = shell();
+        s.apply_window_list(&WindowList::new(
+            0,
+            vec![
+                placed(1, "First", 0, (0, 0, 800, 600)),
+                placed(2, "Second", 0, (0, 0, 800, 600)),
+                placed(3, "Third", 0, (0, 0, 800, 600)),
+            ],
+        ));
+        s.overview.show(overview::OverviewMode::AllWindows);
+
+        // The middle card, so that an off-by-one layout lands on a neighbour
+        // rather than off the edge where it would miss and be caught anyway.
+        let tree = s.render_overview().expect("the overview is open");
+        let (cx, cy) = drawn_card_centre(&tree, "Second");
+        assert_eq!(
+            press(&mut s, cx, cy),
+            ShellAction::Control(ShellRequest::window(
+                WindowId(2),
+                ShellControlAction::Activate
+            ))
+        );
+    }
+
+    /// The centre of the card `title` is written on, taken from the drawn
+    /// commands rather than from any layout function.
+    ///
+    /// `render_thumbnail_card` emits the card's background `FillRect` and then
+    /// the `Text` holding its title, so the nearest `FillRect` above a title is
+    /// that title's card. This is deliberately a reader of the output and not a
+    /// second caller of `overview_layout`: a test that recomputes the layout it
+    /// is checking cannot fail when the layout is wrong.
+    fn drawn_card_centre(tree: &RenderTree, title: &str) -> (f32, f32) {
+        let mut last_rect = None;
+        for cmd in &tree.commands {
+            match cmd {
+                RenderCommand::FillRect {
+                    x,
+                    y,
+                    width,
+                    height,
+                    ..
+                } => last_rect = Some((*x, *y, *width, *height)),
+                RenderCommand::Text { text, .. } if text == title => {
+                    let (x, y, w, h) = last_rect.expect("a card is drawn before its title");
+                    return (x + w / 2.0, y + h / 2.0);
+                }
+                _ => {}
+            }
+        }
+        panic!("no card drawn for {title}");
+    }
+
+    #[test]
+    fn the_overview_is_drawn_only_while_it_is_open() {
+        let mut s = shell();
+        assert!(s.render_overview().is_none());
+        s.overview.show(overview::OverviewMode::AllWindows);
+        let tree = s.render_overview().expect("an open overview draws");
+        assert!(
+            !tree.commands.is_empty(),
+            "an open overview drew no commands"
+        );
+    }
+
+    #[test]
+    fn dismissing_popups_dismisses_the_overview() {
+        // Anything that clears the shell's transient surfaces has to clear this
+        // one too, or the overlay survives a desktop switch and covers the
+        // desktop it switched to.
+        let mut s = shell();
+        s.overview.show(overview::OverviewMode::AllWindows);
+        s.dismiss_popups();
+        assert!(!s.overview.visible);
     }
 }

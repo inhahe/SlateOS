@@ -53183,6 +53183,24 @@ crate can reach:
 Each stage is its own commit with its own green test run, the way the three auth
 crates were.
 
+**Addendum 2026-08-22: `userspace/coreutils` is in the non-inheriting set, and
+it should be promoted out of stage 4.** It is one crate by the count above, but
+it is **86 binaries** — `wc`, `sed`, `sort`, `awk`, `tr`, `head`, `cut` and the
+rest — which is nearly every command a shell script runs, and every one of them
+parses attacker-shaped input in the ordinary course of its job (a file's bytes,
+a regular expression, a `--width` operand). Its `Cargo.toml` has no `[lints]`
+section and none of its bins carries a crate-level `#![deny]`, so the whole of
+it is unchecked. Weighed by "what a bug in the crate can reach", it belongs
+between stages 2 and 3, not at the end.
+
+It is also the one place where the cost is bounded by something better than an
+extrapolation: 27 of its utilities are already under differential harnesses
+(`scripts/*-diff.sh`), so a lint fix that changes behaviour is caught the same
+run rather than at the next boot test. Sequence it **after**
+`B-FORTY-TWO-BINARY-NAMES-ARE-BUILT-BY-TWO-PACKAGES` is resolved, not before:
+every utility moved in from a standalone crate arrives with its own warnings,
+and linting the crate twice is the avoidable half of the work.
+
 **If never fixed:** no regression — the exposure is exactly what it has been
 since the crates were written. But the lints exist because this codebase has no
 human reviewer, and a check that runs over 32 of 2762 crates is not the safety
@@ -54512,18 +54530,52 @@ So resolving it means a per-utility decision, and in the third row it means
 moving the real implementation *into* `coreutils` (or deciding `coreutils` is
 not the home). It is not a delete-41-directories change.
 
-**Fixed so far (2026-08-22).** The differential harnesses no longer depend on
-which copy won: `scripts/diff-subject.sh` builds the subject from a named
-package immediately before the comparison, and all 27 `*-diff.sh` harnesses use
-it. That removes the way this defect was actually hurting us.
+**Fixed so far (2026-08-22).**
 
-**Still open — the proper fix.** One name, one program. For each of the 42:
-pick the implementation that is under test and maintained, make sure nothing in
-the other is worth keeping (the standalone ones are older but not uniformly
-worse — `stat` is 2845 lines against a 343-line stub), fold in anything that
-is, and delete the loser so the name has exactly one producer. Verify with a
-build that asks for everything at once and emits no `output filename collision`
-warning:
+1. The differential harnesses no longer depend on which copy won:
+   `scripts/diff-subject.sh` builds the subject from a named package
+   immediately before the comparison, and all 27 `*-diff.sh` harnesses use it.
+   That removes the way this defect was actually hurting us.
+2. The direction of the fix is settled — **design-decisions.md §359**:
+   `coreutils` is the one home, but the surviving *code* is chosen per utility,
+   because for 24 of the 42 the standalone crate is the real implementation.
+3. **`bc` is consolidated** — the first of the 42, and the one that caused the
+   false bug report. `userspace/bc/src/main.rs` is now
+   `userspace/coreutils/src/bin/bc.rs`, replacing the June stub, and the
+   `userspace/bc` crate is gone. `calc-diff.sh` names `coreutils bc` and still
+   reports 200 passed, 0 differed. 41 to go.
+
+**A tool for the remaining 41: `scripts/dup-bins-survey.py`.** It lists every
+colliding name with both sides' line counts and the set of command-line options
+each side's source mentions, and ranks which side is ahead. It is triage, not a
+verdict — every pair is still read before either copy is deleted — but it turns
+"42 unknown pairs" into 12 where `coreutils` leads, 24 where the standalone
+does, and 6 that need reading.
+
+Its own history is a warning worth keeping. The first version scanned for
+`"--name"` string literals, which `coreutils`'s newer parsers do not contain —
+they hold long options in a table with the dashes already stripped
+(`("equal-width", Long::EqualWidth)`), because that is the form GNU's
+abbreviation rule compares against. So it credited every long option to the
+standalone side and called `nl`, `split`, `seq`, `comm` and `tr` "standalone
+ahead" — five utilities where `coreutils` implements a superset *and* is the
+side under a differential harness. Acting on that would have deleted the tested
+implementation: the same mistake as the `bc` bug report, one level up. A second
+pass over `b'X'` byte literals was needed for the same reason in reverse — a
+bare scan credited `tr` with `-A -F -X -Z`, which are `for b in b'A'..=b'Z'`
+expanding `[:upper:]`, not flags.
+
+**Still open — the proper fix.** One name, one program. For each of the
+remaining 41: pick the implementation that is under test and maintained, make
+sure nothing in the other is worth keeping (the standalone ones are older but
+not uniformly worse — `stat` is 2845 lines against a 343-line stub), fold in
+anything that is, and delete the loser so the name has exactly one producer.
+Three names — `sha1sum`, `sha512sum` and `w` — have *no* `coreutils` bin at all
+and exist only as extra personalities of the standalone `sha256sum` and `who`,
+so they are gained by the move rather than merely relocated; deleting those two
+crates without porting them first would remove three working commands. Verify
+with a build that asks for everything at once and emits no `output filename
+collision` warning:
 
 ```
 cargo build --workspace --target x86_64-pc-windows-gnu 2>&1 | grep -c collision   # must be 0

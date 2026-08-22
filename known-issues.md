@@ -53430,17 +53430,32 @@ component whose tests prove it correct with respect to inputs no one supplies.
 
 **Two things are missing, and they are not the same size.**
 
-1. *A data source.* `WindowThumbnail` needs `window_id`, `desktop_id`, `title`,
-   geometry, focus and minimized — every one of which is now a field of
-   `guiremote::window_list::WindowInfo`, and `DesktopLane::is_current` is the
-   header's `current_workspace`. Since `ed8d5eea2` a `DesktopShell` holds all of
-   it, so this is a projection function over `apply_window_list`'s input, not
-   new protocol. The one thing genuinely absent is the *thumbnail image*: the
-   module lays out rectangles and draws titles, and never asks the compositor
-   for window contents. Live thumbnails need a compositor verb that does not
-   exist (a scaled read of another client's buffer) and is a capability question
-   of the same shape as `TD-C-ANY-CLIENT-CAN-READ-EVERY-WINDOW-TITLE` — only
-   worse, because a title is text and a thumbnail is the screen.
+1. *A data source, and it needs a wire change first.* `WindowThumbnail` wants
+   `window_id`, `desktop_id`, `title`, focus, minimized — all of which
+   `guiremote::window_list::WindowInfo` now carries, with `DesktopLane::is_current`
+   being the header's `current_workspace` — **and geometry, which it does not
+   carry at all.** That is not a detail. `compute_grid_layout` calls
+   `fit_aspect(thumb.width, thumb.height, …)`, and `fit_aspect` returns
+   `(0.0, 0.0)` for a zero input, so wiring the overview to today's window list
+   gives every thumbnail a zero-by-zero rectangle: nothing drawn, and
+   `on_mouse_click` hit-tests against nothing. That is the exact failure
+   `Hit::WindowContent` had before §506 deleted it, for the exact same reason —
+   a rectangle nobody supplies. So the overview needs `WLST` v3 with `x`, `y`,
+   `width`, `height` on `WindowInfo` before any projection is worth writing.
+   Adding them is consistent with §506 rather than a reversal of it: what §506
+   removed was geometry the shell *wrote* and used to decide placement, whereas
+   this is geometry the shell only *reads*, replaced wholesale by every list,
+   with no verb that accepts a rectangle back (§505 deliberately sends a named
+   edge, not a rect). Uniform boxes are not an acceptable substitute — an Exposé
+   whose thumbnails do not have their windows' proportions is a list, which is
+   the taskbar.
+   The *thumbnail image* is separately absent and is the part that should stay
+   absent for now: the module lays out rectangles and draws titles, and never
+   asks the compositor for window contents. Live thumbnails need a verb that
+   does not exist (a scaled read of another client's buffer) and is a capability
+   question of the same shape as `TD-C-ANY-CLIENT-CAN-READ-EVERY-WINDOW-TITLE` —
+   only worse, because a title is text and a thumbnail is the screen. Titled
+   proportional rectangles are a usable Exposé without it.
 2. *An output path.* `OverviewAction` is a fourth spelling of verbs the shell
    already has: `SwitchToWindow(u64)` is `ShellControlAction::Activate`,
    `SwitchToDesktop(u32)` is `ShellRequest::SwitchDesktop`, `CloseWindow(u64)`

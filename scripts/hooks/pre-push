@@ -428,11 +428,26 @@ fi
 gopt="${repo_root:-.}/scripts/getopt-ambiguity-check.py"
 [ -f "$gopt" ] || skip_getopt=1
 
-# The bin files this push rewrites. `--name-only` over just the commits being
-# added keeps this to the push's own contents rather than the whole branch.
-changed=$(git log --name-only --pretty=format: HEAD --not --remotes="$remote_name" \
-              -- userspace/coreutils/src/bin/ userspace/coreutils/src/getopt.rs \
-              2>/dev/null | sort -u)
+# The bin files this push would newly publish.
+#
+# This is a *diff* across the whole range rather than `git log --name-only`,
+# because `--name-only` prints nothing for a merge commit: a bin change arriving
+# in this branch through a merge would be invisible to it, and merging is how
+# lanes integrate here. Take the oldest commit the remote does not have, and
+# diff its parent against HEAD.
+oldest_new=$(git rev-list HEAD --not --remotes="$remote_name" 2>/dev/null | tail -n 1)
+changed=""
+if [ -n "$oldest_new" ]; then
+    scope="userspace/coreutils/src/bin/ userspace/coreutils/src/getopt.rs"
+    if base=$(git rev-parse --verify -q "$oldest_new^" 2>/dev/null); then
+        # shellcheck disable=SC2086
+        changed=$(git diff --name-only "$base" HEAD -- $scope 2>/dev/null | sort -u)
+    else
+        # Pushing a root commit: everything in it is new.
+        # shellcheck disable=SC2086
+        changed=$(git ls-tree -r --name-only HEAD -- $scope 2>/dev/null | sort -u)
+    fi
+fi
 
 run_all=0
 bins=""

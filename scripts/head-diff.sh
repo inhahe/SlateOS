@@ -15,10 +15,13 @@
 # → `TD-COREUTILS-GETOPT-DIAGNOSTICS-USE-THE-WRONG-SHAPE`, and the identical
 # note at the top of `wc-diff.sh`.
 #
-# The locale is `C.UTF-8` for consistency with the other harnesses. Nothing
-# `head` does is locale-dependent — it never decodes a byte — except the quote
-# marks gnulib puts round a bad number, which is why the number diagnostics are
-# referenced under `LC_ALL=C` instead. See `open-questions.md` → B-Q2.
+# The locale is `C.UTF-8` throughout. Nothing `head` does is locale-dependent —
+# it never decodes a byte — and the quote marks gnulib puts round a bad number
+# agree here too: since §351 ours are U+2018/U+2019 in every locale, which is
+# what GNU prints under any UTF-8 one. The number diagnostics used to be
+# referenced under `LC_ALL=C`, back when ours stayed ASCII
+# (`open-questions.md` → B-Q2, since answered); `C` is now the setting in which
+# the reference would be wrong.
 set -u
 
 # Our head is a native Windows binary, so MSYS would rewrite an argument that
@@ -27,9 +30,6 @@ export MSYS2_ARG_CONV_EXCL='*'
 
 OURS=${OURS:-"target/x86_64-pc-windows-gnu/debug/head.exe"}
 GNU=${GNU:-"wsl -e env LC_ALL=C.UTF-8 head"}
-# The same reference under the C locale, for the cases whose only difference is
-# which quote marks gnulib chooses.
-GNU_C=${GNU_C:-"wsl -e env LC_ALL=C head"}
 export LC_ALL=${LC_ALL:-C.UTF-8}
 
 pass=0; fail=0; xfail=0; xpass=0
@@ -112,10 +112,6 @@ report() {
 }
 
 run_case()  { [ "$HAVE_GNU" = yes ] || return 0; compare - "$GNU" "$@"; report "head $*"; }
-# The number diagnostics, referenced under `LC_ALL=C` so that the quote marks
-# are ASCII on both sides. Under a UTF-8 locale gnulib switches to U+2018/U+2019
-# and ours does not — one open question, not one per case. See B-Q2.
-run_ascii() { [ "$HAVE_GNU" = yes ] || return 0; compare - "$GNU_C" "$@"; report "head $* [C]"; }
 run_stdin() {
   [ "$HAVE_GNU" = yes ] || return 0
   local input="$1"; shift
@@ -313,39 +309,39 @@ run_case --q -n1 five.txt w1.txt
 run_case --s -n1 five.txt w1.txt
 
 # --- the number, which is gnulib's xdectoumax --------------------------------
-run_ascii -n x five.txt
-run_ascii -c x five.txt
-run_ascii -n 1x five.txt
-run_ascii -n 0x10 five.txt
-run_ascii -n '' five.txt
-run_ascii -n - five.txt
-run_ascii -n -- -5 five.txt
-run_ascii -n '5 ' five.txt
-run_ascii -n ' ' five.txt
-run_ascii -n ' -5' five.txt
-run_ascii -n ' K' five.txt
-run_ascii -n '+K' five.txt
-run_ascii -n 99999999999999999999 five.txt
-run_ascii -n 18446744073709551616 five.txt
-run_ascii -n 18014398509481984K five.txt
-run_ascii -n 99999999999999999999X five.txt
-run_ascii -n 1Ki five.txt
-run_ascii -n 1KiBB five.txt
-run_ascii -n 5K5 five.txt
-run_ascii -n 1Z five.txt
-run_ascii -n 1Q five.txt
+run_case -n x five.txt
+run_case -c x five.txt
+run_case -n 1x five.txt
+run_case -n 0x10 five.txt
+run_case -n '' five.txt
+run_case -n - five.txt
+run_case -n -- -5 five.txt
+run_case -n '5 ' five.txt
+run_case -n ' ' five.txt
+run_case -n ' -5' five.txt
+run_case -n ' K' five.txt
+run_case -n '+K' five.txt
+run_case -n 99999999999999999999 five.txt
+run_case -n 18446744073709551616 five.txt
+run_case -n 18014398509481984K five.txt
+run_case -n 99999999999999999999X five.txt
+run_case -n 1Ki five.txt
+run_case -n 1KiBB five.txt
+run_case -n 5K5 five.txt
+run_case -n 1Z five.txt
+run_case -n 1Q five.txt
 # The offending text is echoed back through gnulib's `quote()`, which escapes
 # the way C does and not the way a shell would. The two styles agree on
 # everything that holds neither a quote nor a backslash, so only these cases
 # tell them apart: `quote()` gives 'a\'b' where shell-escaping gives "a'b".
-run_ascii -n "a'b" five.txt
-run_ascii -n 'a\b' five.txt
-run_ascii -n 'a"b' five.txt
-run_ascii -n 'a b' five.txt
-run_ascii -n "$(printf 'a\tb')" five.txt
-run_ascii -c "a'b" five.txt
+run_case -n "a'b" five.txt
+run_case -n 'a\b' five.txt
+run_case -n 'a"b' five.txt
+run_case -n 'a b' five.txt
+run_case -n "$(printf 'a\tb')" five.txt
+run_case -c "a'b" five.txt
 # The suffixes gnulib knows but `head`'s list does not include.
-for bad in 1w 1c 1B 1g 1t 1D; do run_ascii -n "$bad" five.txt; done
+for bad in 1w 1c 1B 1g 1t 1D; do run_case -n "$bad" five.txt; done
 # The ones it does, checked for value rather than validity: five.txt has five
 # lines, so any count of 5 or more prints all of it and a smaller one does not.
 run_case -n 1K five.txt

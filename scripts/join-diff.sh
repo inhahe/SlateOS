@@ -15,7 +15,7 @@
 # Run `OURS=/usr/bin/join ./scripts/join-diff.sh` to confirm the harness still
 # discriminates: it should report dozens of differences, not zero.
 #
-# ## Why the whole harness runs under `LC_ALL=C`, not just the diagnostics
+# ## Why the comparison cases run under `LC_ALL=C` and the diagnostics do not
 #
 # The same reason as `comm`: the locale decides *what the program computes*.
 #
@@ -34,6 +34,11 @@
 #
 # Note that `-i` is not affected: `memcasecmp` is used whatever the locale, and
 # it folds with `toupper`, so under `C` it folds ASCII and nothing else.
+#
+# None of that reaches the diagnostics — a message about an unpaired option
+# collates nothing — and since §351 they must be referenced under `C.UTF-8`,
+# because our `quote()` now prints U+2018/U+2019 in every locale and GNU prints
+# those only under a UTF-8 one. So they run through `run_diag`, not `run_case`.
 #
 # ## Why `od -An -c`
 #
@@ -205,16 +210,19 @@ report() {
 }
 
 run_case()  { [ "$HAVE_GNU" = yes ] || return 0; compare - C "$@"; report "join $*"; }
-# The diagnostics that pass an argument through gnulib's quoting. They are
-# already under `C` here — see the header — so this is a label, not a locale
-# change: it marks the rows whose agreement would be at issue under B-Q2 if the
-# rest of the harness ever moved to `C.UTF-8`.
-run_ascii() { [ "$HAVE_GNU" = yes ] || return 0; compare - C "$@"; report "join $* [C]"; }
 # The same case under a locale where GNU collates rather than compares bytes.
 # Not a synonym for `run_case`: it is the measurement behind the claim that the
 # divergence is confined to inputs whose collation order differs from their byte
 # order. See the header.
 run_utf8()  { [ "$HAVE_GNU" = yes ] || return 0; compare - C.UTF-8 "$@"; report "join $* [C.UTF-8]"; }
+# The diagnostics. They reach `C.UTF-8` by a different road than `run_utf8`
+# does, so they keep a name of their own even though the mechanism is the same:
+# they pair nothing and collate nothing, so the header's reason for `C` never
+# reaches them, and what does reach them is §351, which made our `quote()` print
+# U+2018/U+2019 in every locale. GNU prints those under a UTF-8 locale and ASCII
+# under `C`, so `C` is now the setting in which the reference would be wrong.
+# Spelled as a call rather than a copy so the two cannot silently drift apart.
+run_diag()  { run_utf8 "$@"; }
 run_stdin() {
   [ "$HAVE_GNU" = yes ] || return 0
   local input="$1"; shift
@@ -310,7 +318,7 @@ run_case -e X -o auto a.txt b.txt
 run_case -e X -o auto -a 1 wide.txt wide2.txt
 run_case -eX -o 1.9 a.txt b.txt
 run_case -e X -e X -o 1.9 a.txt b.txt
-run_ascii -e X -e Y -o 1.9 a.txt b.txt
+run_diag -e X -e Y -o 1.9 a.txt b.txt
 # Without -o it changes nothing: prfield only reaches the filler for fields the
 # output list named.
 run_case -e X a.txt b.txt
@@ -333,12 +341,18 @@ run_case -o 0 1.2 2.2 a.txt b.txt
 run_case -o 1.1 2.2 0 a.txt b.txt
 run_case -o 1.1 a.txt b.txt
 run_case -o 0 -a 1 1.2 a.txt b.txt
-run_ascii -o 1.1 2.2 a.txt
-run_ascii -o 1.1 a.txt b.txt c.txt
+run_diag -o 1.1 2.2 a.txt
+run_diag -o 1.1 a.txt b.txt c.txt
 # -o pending and -j1 pending at once: the reinterpretation walks the slots from
 # the front, so the *earlier* pending option claims the earlier name.
 run_case -o 1.1 -j1 2 key2.txt key1.txt
-run_case -j1 -o 1.1 2 key2.txt key1.txt
+# `run_diag`, out of step with its neighbours, because in this arrangement the
+# `2` is claimed by `-j1` and never reinterpreted, so the row's whole outcome is
+# `invalid field specifier: ‘2’` — a `quote()` diagnostic, which since §351 has
+# to be referenced under `C.UTF-8` like every other one. It sat on `run_case`
+# unnoticed for as long as our marks were ASCII, and the harness caught it the
+# moment they stopped being.
+run_diag -j1 -o 1.1 2 key2.txt key1.txt
 run_case -j1 2 -o 1.1 key2.txt key1.txt
 run_case -o 1.9 a.txt b.txt
 run_case -o 0,0,0 a.txt b.txt
@@ -364,9 +378,9 @@ run_case -o auto -e Q wide.txt wide2.txt
 run_case -o auto -t: colons.txt colons2.txt
 # `auto` is not an abbreviation and not a prefix: `aut` and `autoX` are field
 # specs, and bad ones.
-run_ascii -o aut a.txt b.txt
-run_ascii -o auto,1.1 a.txt b.txt
-run_ascii -o 1.1,auto a.txt b.txt
+run_diag -o aut a.txt b.txt
+run_diag -o auto,1.1 a.txt b.txt
+run_diag -o 1.1,auto a.txt b.txt
 
 # --- -t, which changes what a field is and how the output is spaced ------------
 run_case -t: colons.txt colons2.txt
@@ -386,9 +400,9 @@ run_case -t '' a.txt b.txt
 run_case -t '\0' plain.txt plain.txt
 run_case -t '\0' nul1.txt nul2.txt
 run_case -t: -t: colons.txt colons2.txt
-run_ascii -t: -t, colons.txt colons2.txt
-run_ascii -t xy a.txt b.txt
-run_ascii -t '\1' a.txt b.txt
+run_diag -t: -t, colons.txt colons2.txt
+run_diag -t xy a.txt b.txt
+run_diag -t '\1' a.txt b.txt
 # A -t that is a space is not the default: it splits on every single space
 # rather than on runs, so a doubled space makes an empty field.
 run_case -t ' ' blanks.txt plain.txt
@@ -418,21 +432,21 @@ run_case -j1 1 a.txt b.txt
 # Attached to a cluster it is not the ambiguous form, because the argument does
 # not start two bytes into the word.
 run_case -ij1 a.txt b.txt
-run_ascii -j 1 -1 2 a.txt b.txt
-run_ascii -1 2 -j 1 a.txt b.txt
-run_ascii -j1 2 -1 3 key2.txt key1.txt
-run_ascii -j 0 a.txt b.txt
-run_ascii -1 0 a.txt b.txt
-run_ascii -2 -1 a.txt b.txt
-run_ascii -1 x a.txt b.txt
-run_ascii -1 1x a.txt b.txt
-run_ascii -1 '' a.txt b.txt
+run_diag -j 1 -1 2 a.txt b.txt
+run_diag -1 2 -j 1 a.txt b.txt
+run_diag -j1 2 -1 3 key2.txt key1.txt
+run_diag -j 0 a.txt b.txt
+run_diag -1 0 a.txt b.txt
+run_diag -2 -1 a.txt b.txt
+run_diag -1 x a.txt b.txt
+run_diag -1 1x a.txt b.txt
+run_diag -1 '' a.txt b.txt
 # Overflow is clamped to PTRDIFF_MAX rather than refused, so a field number no
 # file could have is accepted and every key is empty.
 run_case -1 99999999999999999999 a.txt b.txt
 run_case -j 99999999999999999999 a.txt b.txt
-run_ascii -1 99999999999999999999x a.txt b.txt
-run_ascii -1 -9223372036854775808 a.txt b.txt
+run_diag -1 99999999999999999999x a.txt b.txt
+run_diag -1 -9223372036854775808 a.txt b.txt
 run_case -1 -9223372036854775809 a.txt b.txt
 
 # --- -i -----------------------------------------------------------------------
@@ -534,88 +548,88 @@ run_stdin 'a 1\nb 2\n' - -
 # --- operands are counted exactly ---------------------------------------------
 # Fewer than two is one of two sentences, and the one-operand sentence names the
 # operand — which, since join does not permute, is whatever came last.
-run_ascii
-run_ascii a.txt
-run_ascii -i a.txt
-run_ascii a.txt -i
-run_ascii nosuch.txt
-run_ascii -
-run_ascii a.txt b.txt empty.txt
-run_ascii a.txt b.txt empty.txt sorted.txt
-run_ascii -i a.txt b.txt empty.txt
+run_diag
+run_diag a.txt
+run_diag -i a.txt
+run_diag a.txt -i
+run_diag nosuch.txt
+run_diag -
+run_diag a.txt b.txt empty.txt
+run_diag a.txt b.txt empty.txt sorted.txt
+run_diag -i a.txt b.txt empty.txt
 # With the obsolescent -j1 in play the *last* operand may be reclaimed as an
 # argument, so the same number of words can be right or wrong depending on it.
-run_ascii -j1 2
-run_ascii -j1 2 a.txt
-run_ascii -j1 2 a.txt b.txt empty.txt
-run_ascii -o 1.1 a.txt b.txt empty.txt
+run_diag -j1 2
+run_diag -j1 2 a.txt
+run_diag -j1 2 a.txt b.txt empty.txt
+run_diag -o 1.1 a.txt b.txt empty.txt
 
 # --- operands that cannot be opened -------------------------------------------
 # The first file is opened first, so a pair of bad ones names only the first.
-run_ascii nosuch.txt nosuch2.txt
-run_ascii a.txt nosuch.txt
-run_ascii nosuch.txt a.txt
-run_ascii -a 1 nosuch.txt a.txt
+run_diag nosuch.txt nosuch2.txt
+run_diag a.txt nosuch.txt
+run_diag nosuch.txt a.txt
+run_diag -a 1 nosuch.txt a.txt
 # The parse is finished before anything is opened, so a bad option wins.
-run_ascii -Q nosuch.txt nosuch2.txt
-run_ascii -t: -t, nosuch.txt nosuch2.txt
+run_diag -Q nosuch.txt nosuch2.txt
+run_diag -t: -t, nosuch.txt nosuch2.txt
 
 # --- getopt diagnostics -------------------------------------------------------
-run_ascii -Q a.txt b.txt
-run_ascii -iQ a.txt b.txt
-run_ascii -Qi a.txt b.txt
-run_ascii -3 a.txt b.txt
-run_ascii -0 a.txt b.txt
-run_ascii --nope a.txt b.txt
-run_ascii --ignore-case=x a.txt b.txt
-run_ascii --check-order=x a.txt b.txt
-run_ascii --nocheck-order=x a.txt b.txt
-run_ascii --zero-terminated=x a.txt b.txt
-run_ascii --header=x a.txt b.txt
-run_ascii --help=x a.txt b.txt
-run_ascii --version=x a.txt b.txt
-run_ascii --=x a.txt b.txt
-run_ascii -a
-run_ascii -e
-run_ascii -o
-run_ascii -t
-run_ascii -1
-run_ascii -j
-run_ascii -a 3 a.txt b.txt
-run_ascii -a 0 a.txt b.txt
-run_ascii -a x a.txt b.txt
-run_ascii -v 3 a.txt b.txt
-run_ascii -a '' a.txt b.txt
-run_ascii -- -Q
+run_diag -Q a.txt b.txt
+run_diag -iQ a.txt b.txt
+run_diag -Qi a.txt b.txt
+run_diag -3 a.txt b.txt
+run_diag -0 a.txt b.txt
+run_diag --nope a.txt b.txt
+run_diag --ignore-case=x a.txt b.txt
+run_diag --check-order=x a.txt b.txt
+run_diag --nocheck-order=x a.txt b.txt
+run_diag --zero-terminated=x a.txt b.txt
+run_diag --header=x a.txt b.txt
+run_diag --help=x a.txt b.txt
+run_diag --version=x a.txt b.txt
+run_diag --=x a.txt b.txt
+run_diag -a
+run_diag -e
+run_diag -o
+run_diag -t
+run_diag -1
+run_diag -j
+run_diag -a 3 a.txt b.txt
+run_diag -a 0 a.txt b.txt
+run_diag -a x a.txt b.txt
+run_diag -v 3 a.txt b.txt
+run_diag -a '' a.txt b.txt
+run_diag -- -Q
 # The field-spec sentences: three of them, chosen by which part is wrong.
-run_ascii -o 3.1 a.txt b.txt
-run_ascii -o 0.1 a.txt b.txt
-run_ascii -o 1 a.txt b.txt
-run_ascii -o 1. a.txt b.txt
-run_ascii -o 1.0 a.txt b.txt
-run_ascii -o 1.x a.txt b.txt
-run_ascii -o x a.txt b.txt
-run_ascii -o '' a.txt b.txt
-run_ascii -o 1.1, a.txt b.txt
-run_ascii -o ,1.1 a.txt b.txt
-run_ascii -o '1.1 ' a.txt b.txt
-run_ascii -o 1.1,,2.2 a.txt b.txt
-run_ascii -o 00 a.txt b.txt
-run_ascii -o 0,x a.txt b.txt
+run_diag -o 3.1 a.txt b.txt
+run_diag -o 0.1 a.txt b.txt
+run_diag -o 1 a.txt b.txt
+run_diag -o 1. a.txt b.txt
+run_diag -o 1.0 a.txt b.txt
+run_diag -o 1.x a.txt b.txt
+run_diag -o x a.txt b.txt
+run_diag -o '' a.txt b.txt
+run_diag -o 1.1, a.txt b.txt
+run_diag -o ,1.1 a.txt b.txt
+run_diag -o '1.1 ' a.txt b.txt
+run_diag -o 1.1,,2.2 a.txt b.txt
+run_diag -o 00 a.txt b.txt
+run_diag -o 0,x a.txt b.txt
 # A getopt error beats a bad operand count, and both beat a missing file.
-run_ascii -Q
-run_ascii -Q a.txt
-run_ascii --nope
+run_diag -Q
+run_diag -Q a.txt
+run_diag --nope
 
 # --- abbreviations, which the shipped parser did not accept at all ------------
 run_case --i upper.txt mixed.txt
 run_case --z nul1.txt nul2.txt
 run_case --zero-t nul1.txt nul2.txt
 run_case --hea a.txt b.txt
-run_ascii --c dis.txt sorted.txt
-run_ascii --n dis.txt sorted.txt
-run_ascii --ch dis.txt sorted.txt
-run_ascii --he a.txt b.txt
+run_diag --c dis.txt sorted.txt
+run_diag --n dis.txt sorted.txt
+run_diag --ch dis.txt sorted.txt
+run_diag --he a.txt b.txt
 
 # --- options and operands interleave, and are not permuted --------------------
 run_case a.txt -i b.txt
@@ -658,7 +672,7 @@ xfail_case 'our --version names SlateOS' --version
 # actually for — that `--h` and `--v` resolve at all rather than being rejected
 # as ambiguous against `--header`. `--h` is in fact ambiguous, so it is an
 # ordinary case; only `--v` is unique.
-run_ascii --h a.txt b.txt
+run_diag --h a.txt b.txt
 xfail_case 'an abbreviation of --version reaches our version text' --v a.txt b.txt
 
 if [ "$HAVE_GNU" = yes ]; then

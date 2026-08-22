@@ -333,9 +333,8 @@ fn decode_format_string(s_orig: &[u8], specs: &mut Vec<Spec>) -> Result<(), Vec<
 /// `s_orig` is the whole `-t` argument, quoted into error messages exactly as
 /// upstream does — the diagnostic names the argument, not the offending tail.
 fn decode_one_format<'a>(s_orig: &[u8], s: &'a [u8]) -> Result<(Spec, &'a [u8]), Vec<u8>> {
-    let invalid_type_string = || -> Vec<u8> {
-        format!("invalid type string {}", quote(s_orig)).into_bytes()
-    };
+    let invalid_type_string =
+        || -> Vec<u8> { format!("invalid type string {}", quote(s_orig)).into_bytes() };
 
     let (&kind, mut rest) = s.split_first().ok_or_else(invalid_type_string)?;
 
@@ -1225,7 +1224,9 @@ fn print_fields<W: Write>(
     while i > blank {
         let next_pad = spec.pad_width * (i - 1) / fields;
         let adjusted = pad_remaining - next_pad + spec.field_width;
-        let datum = block.get(at..at.saturating_add(spec.size)).unwrap_or_default();
+        let datum = block
+            .get(at..at.saturating_add(spec.size))
+            .unwrap_or_default();
         sink.right(adjusted, render_datum(spec, datum, swap).as_bytes());
         at = at.saturating_add(spec.size);
         pad_remaining = next_pad;
@@ -1420,8 +1421,8 @@ impl Input {
     fn seek_forward(&mut self, n: u64) -> io::Result<()> {
         match self.stream.as_mut() {
             Some(Source::File(r)) => {
-                let offset = i64::try_from(n)
-                    .map_err(|_| io::Error::from(ErrorKind::InvalidInput))?;
+                let offset =
+                    i64::try_from(n).map_err(|_| io::Error::from(ErrorKind::InvalidInput))?;
                 r.seek(SeekFrom::Current(offset)).map(|_| ())
             }
             _ => Err(io::Error::from(ErrorKind::Unsupported)),
@@ -1776,7 +1777,9 @@ fn run(o: &Options) -> ExitCode {
     let l_c_m = get_lcm(&specs);
 
     let bytes_per_block = if o.width_specified {
-        if o.desired_width != 0 && o.desired_width.is_multiple_of(u64::try_from(l_c_m).unwrap_or(1))
+        if o.desired_width != 0
+            && o.desired_width
+                .is_multiple_of(u64::try_from(l_c_m).unwrap_or(1))
         {
             usize::try_from(o.desired_width).unwrap_or(l_c_m)
         } else {
@@ -2015,7 +2018,10 @@ mod tests {
         // Only one z is consumed, so a second is an unrelated (invalid) letter.
         assert_eq!(
             err("xzz"),
-            "invalid character 'z' in type string 'xzz'".to_owned()
+            // Both families in one line: the offending character is `%c` in
+            // od's own format string, so its marks stay straight, while the
+            // type string goes through `quote()` and is curly.
+            "invalid character 'z' in type string ‘xzz’".to_owned()
         );
     }
 
@@ -2023,22 +2029,23 @@ mod tests {
     fn unsupported_widths_name_the_missing_type() {
         assert_eq!(
             err("d3"),
-            "invalid type string 'd3';\nthis system doesn't provide a 3-byte integral type".to_owned()
+            "invalid type string ‘d3’;\nthis system doesn't provide a 3-byte integral type"
+                .to_owned()
         );
         assert_eq!(
             err("f3"),
-            "invalid type string 'f3';\nthis system doesn't provide a 3-byte floating point type"
+            "invalid type string ‘f3’;\nthis system doesn't provide a 3-byte floating point type"
                 .to_owned()
         );
         // The quoted string is always the *whole* original, not the tail.
-        assert!(err("cd9").starts_with("invalid type string 'cd9';"));
+        assert!(err("cd9").starts_with("invalid type string ‘cd9’;"));
     }
 
     #[test]
     fn overflowing_size_is_an_invalid_type_string() {
         // simple_strtoi overflows int rather than saturating, which upstream
         // reports as a bad type string with no second line.
-        assert_eq!(err("d99999999999"), "invalid type string 'd99999999999'");
+        assert_eq!(err("d99999999999"), "invalid type string ‘d99999999999’");
     }
 
     #[test]
@@ -2160,7 +2167,10 @@ mod tests {
         // 0.1 already round-trips at %.15g, so it stays short; the value one
         // ulp away from it does not, and widens to seventeen digits.
         assert_eq!(ftoastr_f64(0.1), "0.1");
-        assert_eq!(ftoastr_f64(f64::from_bits(0.1_f64.to_bits() + 1)), "0.10000000000000002");
+        assert_eq!(
+            ftoastr_f64(f64::from_bits(0.1_f64.to_bits() + 1)),
+            "0.10000000000000002"
+        );
         assert_eq!(ftoastr_f64(-0.0), "-0");
         assert_eq!(ftoastr_f64(f64::INFINITY), "inf");
         assert_eq!(ftoastr_f64(f64::NEG_INFINITY), "-inf");
@@ -2218,7 +2228,10 @@ mod tests {
         // the ones it does print are unchanged.
         let full = columns("x1", &[1, 2, 3, 4], 4, 0, 2);
         let short = columns("x1", &[1, 2], 4, 2, 2);
-        assert!(full.starts_with(&short), "{short:?} is not a prefix of {full:?}");
+        assert!(
+            full.starts_with(&short),
+            "{short:?} is not a prefix of {full:?}"
+        );
     }
 
     #[test]

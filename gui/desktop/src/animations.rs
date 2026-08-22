@@ -4,9 +4,24 @@
 //! and UI element state changes. All animations respect the `reduced_motion`
 //! accessibility setting.
 //!
-//! Uses a tick-based system (one tick = one frame, typically ~6.94ms at 144Hz
-//! or ~16.67ms at 60Hz). Animations complete in a fixed number of ticks
-//! regardless of frame rate (actual wall time varies with refresh rate).
+//! Durations are **wall-clock milliseconds**, and every animation is advanced
+//! by the elapsed time reported by the frame clock
+//! ([`oswindow::EventLoop`]'s `Event::Tick { elapsed_ms }`), not by counting
+//! frames.
+//!
+//! This module used to count ticks — "one tick = one frame", a fixed number of
+//! ticks per animation — which made every duration a function of how often the
+//! loop happened to wake. That is defensible only when the loop wakes at a
+//! fixed rate, and ours deliberately does not: it parks until the next deadline
+//! and a deadline can be late (see `design-decisions.md` §521). Under a
+//! frame-counted scheme a busy moment does not drop frames, it *slows the
+//! animation down* — the symptom is a menu that opens sluggishly exactly when
+//! the machine is loaded, and no measurement anywhere would show it. Counting
+//! milliseconds instead means a late frame is a bigger step, which is what
+//! every consumer of `elapsed_ms` in the tree already assumes.
+//!
+//! It is also what the settings design asks for: the Tier 3 theme knob is
+//! `animation-duration-ms`, which is not expressible in frames.
 
 use guitk::color::Color;
 use guitk::render::RenderCommand;
@@ -131,10 +146,10 @@ pub struct Animation {
     pub from: f32,
     /// End value.
     pub to: f32,
-    /// Duration in ticks.
-    pub duration_ticks: u32,
-    /// Current tick.
-    pub current_tick: u32,
+    /// Duration in milliseconds. Never zero — see [`Animation::new`].
+    pub duration_ms: u32,
+    /// Milliseconds elapsed within the current pass.
+    pub elapsed_ms: u32,
     /// Easing function.
     pub easing: Easing,
     /// Whether the animation is running.
@@ -148,13 +163,20 @@ pub struct Animation {
 }
 
 impl Animation {
-    /// Create a new animation.
-    pub fn new(from: f32, to: f32, duration_ticks: u32, easing: Easing) -> Self {
+    /// Create a new animation lasting `duration_ms` milliseconds.
+    ///
+    /// A zero duration is raised to 1 ms rather than rejected: the caller is
+    /// usually a settings value or an arithmetic result, and an animation that
+    /// finishes on its first frame is what "no duration" should mean. Zero
+    /// itself cannot be stored because it is the one value that makes
+    /// `progress` undefined.
+    #[must_use]
+    pub fn new(from: f32, to: f32, duration_ms: u32, easing: Easing) -> Self {
         Self {
             from,
             to,
-            duration_ticks: duration_ticks.max(1),
-            current_tick: 0,
+            duration_ms: duration_ms.max(1),
+            elapsed_ms: 0,
             easing,
             active: true,
             auto_reverse: false,
@@ -164,51 +186,55 @@ impl Animation {
     }
 
     /// Create a looping animation.
-    pub fn looping(from: f32, to: f32, duration_ticks: u32, easing: Easing) -> Self {
-        let mut anim = Self::new(from, to, duration_ticks, easing);
+    #[must_use]
+    pub fn looping(from: f32, to: f32, duration_ms: u32, easing: Easing) -> Self {
+        let mut anim = Self::new(from, to, duration_ms, easing);
         anim.looping = true;
         anim.auto_reverse = true;
         anim
     }
 
-    /// Advance by one tick. Returns the current interpolated value.
-    pub fn tick(&mut self) -> f32 {
+    /// Advance by `dt_ms` milliseconds of wall time. Returns the interpolated
+    /// value at the new position.
+    ///
+    /// `dt_ms` is whatever the frame clock measured, so it is neither constant
+    /// nor small: a frame that arrived late steps further, which is the whole
+    /// point of measuring rather than counting. A step long enough to cross the
+    /// end of a looping pass carries its remainder into the next one instead of
+    /// restarting from zero, so a loop cannot lose time by being interrupted.
+    pub fn tick(&mut self, dt_ms: u32) -> f32 {
         if !self.active {
-            return if self.reversing { self.from } else { self.to };
+            return self.value();
         }
 
-        self.current_tick = self.current_tick.saturating_add(1);
+        self.elapsed_ms = self.elapsed_ms.saturating_add(dt_ms);
 
-        if self.current_tick >= self.duration_ticks {
+        // A single step can span several passes if the loop was blocked for a
+        // long time. `duration_ms` is never zero, so this terminates; the
+        // `saturating_sub` is belt and braces rather than a real case.
+        while self.elapsed_ms >= self.duration_ms {
             if self.auto_reverse && !self.reversing {
                 self.reversing = true;
-                self.current_tick = 0;
             } else if self.looping {
                 self.reversing = false;
-                self.current_tick = 0;
             } else {
                 self.active = false;
-                return if self.reversing { self.from } else { self.to };
+                self.elapsed_ms = self.duration_ms;
+                return self.value();
             }
+            self.elapsed_ms = self.elapsed_ms.saturating_sub(self.duration_ms);
         }
 
-        let progress = self.current_tick as f32 / self.duration_ticks as f32;
-        let eased = self.easing.apply(progress);
-
-        if self.reversing {
-            self.to + (self.from - self.to) * eased
-        } else {
-            self.from + (self.to - self.from) * eased
-        }
+        self.value()
     }
 
     /// Get current value without advancing.
+    #[must_use]
     pub fn value(&self) -> f32 {
         if !self.active {
             return if self.reversing { self.from } else { self.to };
         }
-        let progress = self.current_tick as f32 / self.duration_ticks as f32;
-        let eased = self.easing.apply(progress);
+        let eased = self.easing.apply(self.progress());
         if self.reversing {
             self.to + (self.from - self.to) * eased
         } else {
@@ -217,23 +243,30 @@ impl Animation {
     }
 
     /// Whether the animation has completed.
-    pub fn is_done(&self) -> bool {
+    #[must_use]
+    pub const fn is_done(&self) -> bool {
         !self.active
     }
 
     /// Reset the animation to the beginning.
-    pub fn reset(&mut self) {
-        self.current_tick = 0;
+    pub const fn reset(&mut self) {
+        self.elapsed_ms = 0;
         self.active = true;
         self.reversing = false;
     }
 
-    /// Normalized progress (0.0 to 1.0).
+    /// Normalized progress (0.0 to 1.0) through the current pass.
+    #[must_use]
     pub fn progress(&self) -> f32 {
-        if self.duration_ticks == 0 {
+        if self.duration_ms == 0 {
             return 1.0;
         }
-        (self.current_tick as f32 / self.duration_ticks as f32).clamp(0.0, 1.0)
+        #[expect(
+            clippy::cast_precision_loss,
+            reason = "a duration large enough to lose f32 precision is 97 days"
+        )]
+        let p = self.elapsed_ms as f32 / self.duration_ms as f32;
+        p.clamp(0.0, 1.0)
     }
 }
 
@@ -250,29 +283,36 @@ pub struct ColorAnimation {
 }
 
 impl ColorAnimation {
-    pub fn new(from: Color, to: Color, duration_ticks: u32, easing: Easing) -> Self {
+    /// Create a colour animation lasting `duration_ms` milliseconds.
+    #[must_use]
+    pub fn new(from: Color, to: Color, duration_ms: u32, easing: Easing) -> Self {
         Self {
             from,
             to,
-            anim: Animation::new(0.0, 1.0, duration_ticks, easing),
+            anim: Animation::new(0.0, 1.0, duration_ms, easing),
         }
     }
 
-    /// Advance and return current color.
-    pub fn tick(&mut self) -> Color {
-        let t = self.anim.tick();
+    /// Advance by `dt_ms` milliseconds and return the current colour.
+    pub fn tick(&mut self, dt_ms: u32) -> Color {
+        let t = self.anim.tick(dt_ms);
         lerp_color(self.from, self.to, t)
     }
 
+    /// The current colour, without advancing.
+    #[must_use]
     pub fn value(&self) -> Color {
         lerp_color(self.from, self.to, self.anim.value())
     }
 
-    pub fn is_done(&self) -> bool {
+    /// Whether the animation has completed.
+    #[must_use]
+    pub const fn is_done(&self) -> bool {
         self.anim.is_done()
     }
 
-    pub fn reset(&mut self) {
+    /// Restart from the beginning.
+    pub const fn reset(&mut self) {
         self.anim.reset();
     }
 }
@@ -333,32 +373,32 @@ pub struct WindowAnimation {
 
 impl WindowAnimation {
     /// Create a window open animation.
-    pub fn open(window_id: u64, x: f32, y: f32, w: f32, h: f32, ticks: u32) -> Self {
+    pub fn open(window_id: u64, x: f32, y: f32, w: f32, h: f32, duration_ms: u32) -> Self {
         let cx = x + w / 2.0;
         let cy = y + h / 2.0;
         Self {
             window_id,
             transition: WindowTransition::Open,
-            x: Animation::new(cx - w * 0.4, x, ticks, Easing::EaseOut),
-            y: Animation::new(cy - h * 0.4, y, ticks, Easing::EaseOut),
-            width: Animation::new(w * 0.8, w, ticks, Easing::EaseOut),
-            height: Animation::new(h * 0.8, h, ticks, Easing::EaseOut),
-            opacity: Animation::new(0.0, 1.0, ticks, Easing::EaseOut),
+            x: Animation::new(cx - w * 0.4, x, duration_ms, Easing::EaseOut),
+            y: Animation::new(cy - h * 0.4, y, duration_ms, Easing::EaseOut),
+            width: Animation::new(w * 0.8, w, duration_ms, Easing::EaseOut),
+            height: Animation::new(h * 0.8, h, duration_ms, Easing::EaseOut),
+            opacity: Animation::new(0.0, 1.0, duration_ms, Easing::EaseOut),
         }
     }
 
     /// Create a window close animation.
-    pub fn close(window_id: u64, x: f32, y: f32, w: f32, h: f32, ticks: u32) -> Self {
+    pub fn close(window_id: u64, x: f32, y: f32, w: f32, h: f32, duration_ms: u32) -> Self {
         let cx = x + w / 2.0;
         let cy = y + h / 2.0;
         Self {
             window_id,
             transition: WindowTransition::Close,
-            x: Animation::new(x, cx - w * 0.4, ticks, Easing::EaseIn),
-            y: Animation::new(y, cy - h * 0.4, ticks, Easing::EaseIn),
-            width: Animation::new(w, w * 0.8, ticks, Easing::EaseIn),
-            height: Animation::new(h, h * 0.8, ticks, Easing::EaseIn),
-            opacity: Animation::new(1.0, 0.0, ticks, Easing::EaseIn),
+            x: Animation::new(x, cx - w * 0.4, duration_ms, Easing::EaseIn),
+            y: Animation::new(y, cy - h * 0.4, duration_ms, Easing::EaseIn),
+            width: Animation::new(w, w * 0.8, duration_ms, Easing::EaseIn),
+            height: Animation::new(h, h * 0.8, duration_ms, Easing::EaseIn),
+            opacity: Animation::new(1.0, 0.0, duration_ms, Easing::EaseIn),
         }
     }
 
@@ -371,16 +411,16 @@ impl WindowAnimation {
         h: f32,
         taskbar_x: f32,
         taskbar_y: f32,
-        ticks: u32,
+        duration_ms: u32,
     ) -> Self {
         Self {
             window_id,
             transition: WindowTransition::Minimize,
-            x: Animation::new(x, taskbar_x, ticks, Easing::EaseInOut),
-            y: Animation::new(y, taskbar_y, ticks, Easing::EaseInOut),
-            width: Animation::new(w, 48.0, ticks, Easing::EaseInOut),
-            height: Animation::new(h, 48.0, ticks, Easing::EaseInOut),
-            opacity: Animation::new(1.0, 0.0, ticks, Easing::EaseIn),
+            x: Animation::new(x, taskbar_x, duration_ms, Easing::EaseInOut),
+            y: Animation::new(y, taskbar_y, duration_ms, Easing::EaseInOut),
+            width: Animation::new(w, 48.0, duration_ms, Easing::EaseInOut),
+            height: Animation::new(h, 48.0, duration_ms, Easing::EaseInOut),
+            opacity: Animation::new(1.0, 0.0, duration_ms, Easing::EaseIn),
         }
     }
 
@@ -395,32 +435,34 @@ impl WindowAnimation {
         to_y: f32,
         to_w: f32,
         to_h: f32,
-        ticks: u32,
+        duration_ms: u32,
     ) -> Self {
         Self {
             window_id,
             transition: WindowTransition::Snap,
-            x: Animation::new(from_x, to_x, ticks, Easing::EaseOut),
-            y: Animation::new(from_y, to_y, ticks, Easing::EaseOut),
-            width: Animation::new(from_w, to_w, ticks, Easing::EaseOut),
-            height: Animation::new(from_h, to_h, ticks, Easing::EaseOut),
+            x: Animation::new(from_x, to_x, duration_ms, Easing::EaseOut),
+            y: Animation::new(from_y, to_y, duration_ms, Easing::EaseOut),
+            width: Animation::new(from_w, to_w, duration_ms, Easing::EaseOut),
+            height: Animation::new(from_h, to_h, duration_ms, Easing::EaseOut),
             opacity: Animation::new(1.0, 1.0, 1, Easing::Linear), // No opacity change.
         }
     }
 
-    /// Advance all sub-animations by one tick. Returns current state.
-    pub fn tick(&mut self) -> AnimatedRect {
+    /// Advance every sub-animation by `dt_ms` milliseconds. Returns the state
+    /// after the step.
+    pub fn tick(&mut self, dt_ms: u32) -> AnimatedRect {
         AnimatedRect {
-            x: self.x.tick(),
-            y: self.y.tick(),
-            width: self.width.tick(),
-            height: self.height.tick(),
-            opacity: self.opacity.tick(),
+            x: self.x.tick(dt_ms),
+            y: self.y.tick(dt_ms),
+            width: self.width.tick(dt_ms),
+            height: self.height.tick(dt_ms),
+            opacity: self.opacity.tick(dt_ms),
         }
     }
 
     /// Whether all sub-animations have completed.
-    pub fn is_done(&self) -> bool {
+    #[must_use]
+    pub const fn is_done(&self) -> bool {
         self.x.is_done()
             && self.y.is_done()
             && self.width.is_done()
@@ -459,25 +501,27 @@ pub struct DesktopTransition {
 impl DesktopTransition {
     /// Create a desktop switch animation.
     /// `direction`: -1.0 for left, 1.0 for right.
-    pub fn new(direction: f32, screen_width: f32, duration_ticks: u32) -> Self {
+    pub fn new(direction: f32, screen_width: f32, duration_ms: u32) -> Self {
         Self {
             direction,
-            anim: Animation::new(0.0, 1.0, duration_ticks, Easing::EaseInOut),
+            anim: Animation::new(0.0, 1.0, duration_ms, Easing::EaseInOut),
             screen_width,
             active: true,
         }
     }
 
-    /// Advance and return current slide offset.
-    pub fn tick(&mut self) -> f32 {
-        let progress = self.anim.tick();
+    /// Advance by `dt_ms` milliseconds and return the current slide offset.
+    pub fn tick(&mut self, dt_ms: u32) -> f32 {
+        let progress = self.anim.tick(dt_ms);
         if self.anim.is_done() {
             self.active = false;
         }
         self.direction * progress * self.screen_width
     }
 
-    pub fn is_done(&self) -> bool {
+    /// Whether the slide has finished.
+    #[must_use]
+    pub const fn is_done(&self) -> bool {
         !self.active
     }
 }
@@ -494,18 +538,24 @@ pub struct AnimationManager {
     desktop_transition: Option<DesktopTransition>,
     /// Whether animations are disabled (for accessibility).
     pub reduced_motion: bool,
-    /// Default animation duration in ticks.
-    pub default_duration: u32,
+    /// Default animation duration in milliseconds. This is the value the Tier 3
+    /// `animation-duration-ms` theme setting will set.
+    pub default_duration_ms: u32,
 }
+
+/// Default animation length. Long enough to read as a transition rather than a
+/// jump, short enough not to be in the way of the next thing the user does.
+pub const DEFAULT_DURATION_MS: u32 = 200;
 
 impl AnimationManager {
     /// Create a new animation manager.
+    #[must_use]
     pub fn new() -> Self {
         Self {
             window_anims: Vec::new(),
             desktop_transition: None,
             reduced_motion: false,
-            default_duration: 12, // ~200ms at 60Hz, ~83ms at 144Hz.
+            default_duration_ms: DEFAULT_DURATION_MS,
         }
     }
 
@@ -527,17 +577,21 @@ impl AnimationManager {
         self.desktop_transition = Some(DesktopTransition::new(
             direction,
             screen_width,
-            self.default_duration,
+            self.default_duration_ms,
         ));
     }
 
-    /// Advance all animations by one tick.
-    /// Returns list of (window_id, AnimatedRect) for each active window anim.
-    pub fn tick(&mut self) -> Vec<(u64, AnimatedRect)> {
+    /// Advance every animation by `dt_ms` milliseconds of wall time.
+    ///
+    /// Returns `(window_id, AnimatedRect)` for each window animation that was
+    /// stepped, **including the one that finished on this step** — the final
+    /// frame is the one that puts the window at its destination, so dropping it
+    /// would leave every animation ending one frame short of where it was going.
+    pub fn tick(&mut self, dt_ms: u32) -> Vec<(u64, AnimatedRect)> {
         let mut results = Vec::with_capacity(self.window_anims.len());
 
         for anim in &mut self.window_anims {
-            let rect = anim.tick();
+            let rect = anim.tick(dt_ms);
             results.push((anim.window_id, rect));
         }
 
@@ -545,8 +599,8 @@ impl AnimationManager {
         self.window_anims.retain(|a| !a.is_done());
 
         // Tick desktop transition.
-        if let Some(ref mut dt) = self.desktop_transition {
-            dt.tick();
+        if let Some(dt) = self.desktop_transition.as_mut() {
+            dt.tick(dt_ms);
             if dt.is_done() {
                 self.desktop_transition = None;
             }
@@ -556,6 +610,7 @@ impl AnimationManager {
     }
 
     /// Get the current desktop slide offset (0.0 if no transition).
+    #[must_use]
     pub fn desktop_offset(&self) -> f32 {
         self.desktop_transition
             .as_ref()
@@ -567,11 +622,18 @@ impl AnimationManager {
     }
 
     /// Whether any animations are active.
+    ///
+    /// This is what the shell asks after each tick to decide whether to arm the
+    /// next frame, so it is the single condition that keeps an idle desktop
+    /// idle: false here means no wake-up is registered and the loop parks with
+    /// no bound at all.
+    #[must_use]
     pub fn has_active(&self) -> bool {
         !self.window_anims.is_empty() || self.desktop_transition.is_some()
     }
 
     /// Get animation for a specific window.
+    #[must_use]
     pub fn window_animation(&self, window_id: u64) -> Option<AnimatedRect> {
         self.window_anims
             .iter()
@@ -597,6 +659,7 @@ impl AnimationManager {
     }
 
     /// Number of active window animations.
+    #[must_use]
     pub fn active_count(&self) -> usize {
         self.window_anims.len()
     }
@@ -620,27 +683,40 @@ pub struct FadeOverlay {
 
 impl FadeOverlay {
     /// Create a fade-in from black.
-    pub fn fade_in(duration_ticks: u32) -> Self {
+    #[must_use]
+    pub fn fade_in(duration_ms: u32) -> Self {
         Self {
-            anim: Animation::new(1.0, 0.0, duration_ticks, Easing::EaseOut),
+            anim: Animation::new(1.0, 0.0, duration_ms, Easing::EaseOut),
             color: Color::from_hex(0x000000),
         }
     }
 
     /// Create a fade-out to black.
-    pub fn fade_out(duration_ticks: u32) -> Self {
+    #[must_use]
+    pub fn fade_out(duration_ms: u32) -> Self {
         Self {
-            anim: Animation::new(0.0, 1.0, duration_ticks, Easing::EaseIn),
+            anim: Animation::new(0.0, 1.0, duration_ms, Easing::EaseIn),
             color: Color::from_hex(0x000000),
         }
     }
 
-    /// Advance and render.
-    pub fn tick_render(&mut self, screen_w: f32, screen_h: f32) -> Option<RenderCommand> {
-        let alpha = self.anim.tick();
+    /// Advance by `dt_ms` milliseconds and render the overlay at its new
+    /// opacity, or `None` once it is transparent enough to skip drawing.
+    pub fn tick_render(
+        &mut self,
+        dt_ms: u32,
+        screen_w: f32,
+        screen_h: f32,
+    ) -> Option<RenderCommand> {
+        let alpha = self.anim.tick(dt_ms);
         if alpha <= 0.001 {
             return None;
         }
+        #[expect(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            reason = "clamped to 0..=255 on the line above the cast"
+        )]
         let a = (alpha * 255.0).clamp(0.0, 255.0) as u8;
         Some(RenderCommand::FillRect {
             x: 0.0,
@@ -652,7 +728,9 @@ impl FadeOverlay {
         })
     }
 
-    pub fn is_done(&self) -> bool {
+    /// Whether the fade has finished.
+    #[must_use]
+    pub const fn is_done(&self) -> bool {
         self.anim.is_done()
     }
 }
@@ -740,86 +818,146 @@ mod tests {
     // -- Animation --
 
     #[test]
-    fn test_animation_basic() {
-        let mut anim = Animation::new(0.0, 100.0, 10, Easing::Linear);
-        assert!(!anim.is_done());
+    fn an_animation_lasts_the_number_of_milliseconds_it_was_given() {
+        // The property the whole rewrite exists for: the duration is wall time,
+        // not a frame count. Two loops that deliver wildly different numbers of
+        // frames must finish at the same instant, not after the same number of
+        // calls.
+        let mut fast = Animation::new(0.0, 100.0, 200, Easing::Linear);
+        let mut slow = Animation::new(0.0, 100.0, 200, Easing::Linear);
 
-        // Run through all ticks.
-        let mut last_val = 0.0;
-        for _ in 0..10 {
-            last_val = anim.tick();
+        for _ in 0..25 {
+            fast.tick(8); // ~125 Hz
         }
-        assert!((last_val - 100.0).abs() < 0.1);
+        for _ in 0..4 {
+            slow.tick(50); // ~20 Hz, a struggling machine
+        }
+
+        assert!(fast.is_done(), "200 ms of 8 ms frames did not finish");
+        assert!(slow.is_done(), "200 ms of 50 ms frames did not finish");
+        assert!((fast.value() - 100.0).abs() < 0.01);
+        assert!((slow.value() - 100.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn a_late_frame_advances_further_than_an_early_one() {
+        // The other half of the same property, stated so it fails against an
+        // implementation that ignores `dt_ms` and steps a fixed amount.
+        let mut early = Animation::new(0.0, 100.0, 1000, Easing::Linear);
+        let mut late = Animation::new(0.0, 100.0, 1000, Easing::Linear);
+        early.tick(10);
+        late.tick(100);
+        // Linear over 1000 ms: 1.0 against 10.0. Asserting the ratio rather
+        // than a threshold is what makes this fail against a fixed step, which
+        // would move both by the same amount whatever `dt_ms` said.
+        assert!(
+            late.value() > early.value() * 5.0,
+            "a 100 ms frame moved {} where a 10 ms frame moved {}",
+            late.value(),
+            early.value()
+        );
+    }
+
+    #[test]
+    fn an_animation_does_not_finish_before_its_time_however_many_frames_arrive() {
+        let mut anim = Animation::new(0.0, 100.0, 500, Easing::Linear);
+        for _ in 0..100 {
+            anim.tick(1);
+        }
+        assert!(
+            !anim.is_done(),
+            "100 frames finished a 500 ms animation after 100 ms"
+        );
+    }
+
+    #[test]
+    fn an_animation_starts_at_its_start_value_and_ends_at_its_end_value() {
+        let mut anim = Animation::new(50.0, 150.0, 100, Easing::Linear);
+        assert!((anim.value() - 50.0).abs() < f32::EPSILON);
+        assert!(anim.progress().abs() < f32::EPSILON);
+        anim.tick(100);
         assert!(anim.is_done());
+        assert!((anim.value() - 150.0).abs() < 0.01);
     }
 
     #[test]
-    fn test_animation_progress() {
-        let anim = Animation::new(0.0, 100.0, 10, Easing::Linear);
-        assert!((anim.progress()).abs() < f32::EPSILON);
+    fn a_step_past_the_end_lands_on_the_end_rather_than_overshooting() {
+        // A frame can be arbitrarily late — the loop may have been blocked for
+        // a second. A window must not be flung past where it was going.
+        let mut anim = Animation::new(0.0, 100.0, 100, Easing::Linear);
+        let v = anim.tick(5_000);
+        assert!(anim.is_done());
+        assert!((v - 100.0).abs() < 0.01, "overshot to {v}");
+        assert!((anim.progress() - 1.0).abs() < f32::EPSILON);
     }
 
     #[test]
-    fn test_animation_value_without_tick() {
-        let anim = Animation::new(50.0, 150.0, 10, Easing::Linear);
-        assert!((anim.value() - 50.0).abs() < f32::EPSILON); // At tick 0, should be start value.
-    }
-
-    #[test]
-    fn test_animation_reset() {
-        let mut anim = Animation::new(0.0, 100.0, 5, Easing::Linear);
-        for _ in 0..5 {
-            anim.tick();
+    fn ticking_a_finished_animation_leaves_it_where_it_ended() {
+        let mut anim = Animation::new(0.0, 100.0, 100, Easing::Linear);
+        anim.tick(100);
+        let settled = anim.value();
+        for _ in 0..10 {
+            anim.tick(100);
         }
+        assert!((anim.value() - settled).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn resetting_puts_an_animation_back_at_the_beginning() {
+        let mut anim = Animation::new(0.0, 100.0, 50, Easing::Linear);
+        anim.tick(50);
         assert!(anim.is_done());
         anim.reset();
         assert!(!anim.is_done());
-        assert!((anim.progress()).abs() < f32::EPSILON);
+        assert!(anim.progress().abs() < f32::EPSILON);
+        assert!((anim.value()).abs() < f32::EPSILON);
     }
 
     #[test]
-    fn test_animation_auto_reverse() {
-        let mut anim = Animation::new(0.0, 100.0, 5, Easing::Linear);
+    fn an_auto_reversing_animation_returns_to_its_start_and_then_stops() {
+        let mut anim = Animation::new(0.0, 100.0, 50, Easing::Linear);
         anim.auto_reverse = true;
 
-        // Forward phase.
-        for _ in 0..5 {
-            anim.tick();
-        }
-        assert!(!anim.is_done()); // Should now be reversing.
+        anim.tick(50);
+        assert!(!anim.is_done(), "should be reversing, not finished");
 
-        // Reverse phase.
-        let mut val = 0.0;
-        for _ in 0..5 {
-            val = anim.tick();
-        }
+        let val = anim.tick(50);
         assert!(anim.is_done());
-        assert!(val < 10.0); // Should be back near start.
+        assert!(val < 10.0, "came back to {val}, not near the start");
     }
 
     #[test]
-    fn test_animation_looping() {
-        let mut anim = Animation::looping(0.0, 100.0, 5, Easing::Linear);
-        // Run through two cycles.
+    fn a_looping_animation_never_finishes() {
+        let mut anim = Animation::looping(0.0, 100.0, 50, Easing::Linear);
         for _ in 0..20 {
-            anim.tick();
+            anim.tick(50);
         }
-        assert!(!anim.is_done()); // Should never be done if looping.
+        assert!(!anim.is_done());
+    }
+
+    #[test]
+    fn a_loop_carries_the_remainder_of_a_long_frame_into_the_next_pass() {
+        // A frame that arrives 1.5 passes late must leave the loop half a pass
+        // in, not back at zero. Restarting from zero silently discards time,
+        // which is how a looping caret drifts out of step with itself.
+        let mut anim = Animation::looping(0.0, 100.0, 100, Easing::Linear);
+        anim.tick(150);
+        assert!((anim.progress() - 0.5).abs() < 0.01, "{}", anim.progress());
     }
 
     // -- Color Animation --
 
     #[test]
-    fn test_color_animation() {
+    fn a_colour_animation_arrives_at_its_destination_colour() {
         let mut ca = ColorAnimation::new(
             Color::rgba(0, 0, 0, 255),
             Color::rgba(255, 255, 255, 255),
-            10,
+            100,
             Easing::Linear,
         );
         let mut last = Color::rgba(0, 0, 0, 255);
         for _ in 0..10 {
-            last = ca.tick();
+            last = ca.tick(10);
         }
         assert!(ca.is_done());
         assert_eq!(last.r, 255);
@@ -849,61 +987,68 @@ mod tests {
     // -- Window Animation --
 
     #[test]
-    fn test_window_open_animation() {
-        let mut wa = WindowAnimation::open(1, 100.0, 100.0, 400.0, 300.0, 10);
+    fn a_window_open_animation_finishes_after_its_duration() {
+        let mut wa = WindowAnimation::open(1, 100.0, 100.0, 400.0, 300.0, 100);
         assert!(!wa.is_done());
-        for _ in 0..10 {
-            wa.tick();
-        }
+        wa.tick(50);
+        assert!(!wa.is_done(), "finished at half its duration");
+        wa.tick(50);
         assert!(wa.is_done());
     }
 
     #[test]
-    fn test_window_close_animation() {
-        let mut wa = WindowAnimation::close(2, 100.0, 100.0, 400.0, 300.0, 10);
-        for _ in 0..10 {
-            wa.tick();
-        }
+    fn a_window_open_animation_ends_at_the_geometry_it_was_given() {
+        // The last frame is the one that puts the window where it belongs. If
+        // the final step were dropped the window would settle a few pixels
+        // short of its own position, for ever.
+        let mut wa = WindowAnimation::open(1, 100.0, 120.0, 400.0, 300.0, 100);
+        let rect = wa.tick(100);
+        assert!((rect.x - 100.0).abs() < 0.01, "x={}", rect.x);
+        assert!((rect.y - 120.0).abs() < 0.01, "y={}", rect.y);
+        assert!((rect.width - 400.0).abs() < 0.01, "w={}", rect.width);
+        assert!((rect.height - 300.0).abs() < 0.01, "h={}", rect.height);
+        assert!((rect.opacity - 1.0).abs() < 0.01, "a={}", rect.opacity);
+    }
+
+    #[test]
+    fn a_window_close_animation_finishes_after_its_duration() {
+        let mut wa = WindowAnimation::close(2, 100.0, 100.0, 400.0, 300.0, 100);
+        wa.tick(100);
         assert!(wa.is_done());
     }
 
     #[test]
-    fn test_window_minimize_animation() {
-        let mut wa = WindowAnimation::minimize(3, 100.0, 100.0, 400.0, 300.0, 500.0, 900.0, 8);
-        let mut rect = AnimatedRect {
-            x: 0.0,
-            y: 0.0,
-            width: 0.0,
-            height: 0.0,
-            opacity: 0.0,
-        };
-        for _ in 0..8 {
-            rect = wa.tick();
-        }
+    fn a_minimize_animation_shrinks_to_the_taskbar() {
+        let mut wa = WindowAnimation::minimize(3, 100.0, 100.0, 400.0, 300.0, 500.0, 900.0, 80);
+        let rect = wa.tick(80);
         assert!(wa.is_done());
         assert!((rect.width - 48.0).abs() < 1.0);
+        assert!((rect.x - 500.0).abs() < 1.0);
+        assert!((rect.y - 900.0).abs() < 1.0);
     }
 
     #[test]
-    fn test_window_snap_animation() {
+    fn a_snap_animation_finishes_at_the_zone_it_was_aimed_at() {
         let mut wa =
-            WindowAnimation::snap(4, 100.0, 100.0, 400.0, 300.0, 0.0, 0.0, 960.0, 1080.0, 10);
-        for _ in 0..10 {
-            wa.tick();
-        }
+            WindowAnimation::snap(4, 100.0, 100.0, 400.0, 300.0, 0.0, 0.0, 960.0, 1080.0, 100);
+        let rect = wa.tick(100);
         assert!(wa.is_done());
+        assert!((rect.width - 960.0).abs() < 0.01);
+        assert!((rect.height - 1080.0).abs() < 0.01);
+        assert!(
+            (rect.opacity - 1.0).abs() < 0.01,
+            "a snap must not fade the window: {}",
+            rect.opacity
+        );
     }
 
     // -- Desktop Transition --
 
     #[test]
-    fn test_desktop_transition() {
-        let mut dt = DesktopTransition::new(-1.0, 1920.0, 10);
+    fn a_desktop_slide_covers_the_whole_screen_width() {
+        let mut dt = DesktopTransition::new(-1.0, 1920.0, 100);
         assert!(!dt.is_done());
-        let mut last_offset = 0.0;
-        for _ in 0..10 {
-            last_offset = dt.tick();
-        }
+        let last_offset = dt.tick(100);
         assert!(dt.is_done());
         assert!((last_offset - (-1920.0)).abs() < 1.0);
     }
@@ -911,34 +1056,50 @@ mod tests {
     // -- Animation Manager --
 
     #[test]
-    fn test_animation_manager_basic() {
+    fn the_manager_reports_no_activity_once_every_animation_has_finished() {
+        // This is what the shell's re-arm decision reads, so it is the test
+        // that keeps an idle desktop idle.
         let mut mgr = AnimationManager::new();
         assert!(!mgr.has_active());
 
-        mgr.animate_window(WindowAnimation::open(1, 0.0, 0.0, 100.0, 100.0, 5));
+        mgr.animate_window(WindowAnimation::open(1, 0.0, 0.0, 100.0, 100.0, 50));
         assert!(mgr.has_active());
         assert_eq!(mgr.active_count(), 1);
 
-        for _ in 0..5 {
-            mgr.tick();
-        }
+        mgr.tick(25);
+        assert!(mgr.has_active(), "gave up half way through");
+        mgr.tick(25);
         assert!(!mgr.has_active());
     }
 
     #[test]
-    fn test_animation_manager_reduced_motion() {
+    fn the_final_frame_of_an_animation_is_still_reported() {
+        // The step that finishes an animation is the step that puts the window
+        // at its destination. Retiring it before reporting would leave every
+        // window one frame short of where it was going.
+        let mut mgr = AnimationManager::new();
+        mgr.animate_window(WindowAnimation::open(7, 10.0, 20.0, 100.0, 80.0, 50));
+        let stepped = mgr.tick(50);
+        assert_eq!(stepped.len(), 1, "the last frame was swallowed");
+        assert_eq!(stepped[0].0, 7);
+        assert!((stepped[0].1.x - 10.0).abs() < 0.01);
+        assert!(!mgr.has_active());
+    }
+
+    #[test]
+    fn reduced_motion_refuses_the_animation_rather_than_playing_it_fast() {
         let mut mgr = AnimationManager::new();
         mgr.reduced_motion = true;
 
-        mgr.animate_window(WindowAnimation::open(1, 0.0, 0.0, 100.0, 100.0, 10));
-        assert!(!mgr.has_active()); // Should not have added anything.
+        mgr.animate_window(WindowAnimation::open(1, 0.0, 0.0, 100.0, 100.0, 100));
+        assert!(!mgr.has_active());
     }
 
     #[test]
     fn test_animation_manager_cancel_window() {
         let mut mgr = AnimationManager::new();
-        mgr.animate_window(WindowAnimation::open(1, 0.0, 0.0, 100.0, 100.0, 10));
-        mgr.animate_window(WindowAnimation::open(2, 0.0, 0.0, 100.0, 100.0, 10));
+        mgr.animate_window(WindowAnimation::open(1, 0.0, 0.0, 100.0, 100.0, 100));
+        mgr.animate_window(WindowAnimation::open(2, 0.0, 0.0, 100.0, 100.0, 100));
         assert_eq!(mgr.active_count(), 2);
 
         mgr.cancel_window(1);
@@ -948,7 +1109,7 @@ mod tests {
     #[test]
     fn test_animation_manager_cancel_all() {
         let mut mgr = AnimationManager::new();
-        mgr.animate_window(WindowAnimation::open(1, 0.0, 0.0, 100.0, 100.0, 10));
+        mgr.animate_window(WindowAnimation::open(1, 0.0, 0.0, 100.0, 100.0, 100));
         mgr.animate_desktop_switch(-1.0, 1920.0);
         assert!(mgr.has_active());
 
@@ -962,7 +1123,7 @@ mod tests {
         assert!((mgr.desktop_offset()).abs() < f32::EPSILON);
 
         mgr.animate_desktop_switch(1.0, 1920.0);
-        mgr.tick();
+        mgr.tick(16);
         assert!(mgr.desktop_offset() > 0.0);
     }
 
@@ -971,36 +1132,53 @@ mod tests {
         let mut mgr = AnimationManager::new();
         assert!(mgr.window_animation(1).is_none());
 
-        mgr.animate_window(WindowAnimation::open(1, 50.0, 50.0, 200.0, 150.0, 10));
+        mgr.animate_window(WindowAnimation::open(1, 50.0, 50.0, 200.0, 150.0, 100));
         assert!(mgr.window_animation(1).is_some());
         assert!(mgr.window_animation(2).is_none());
+    }
+
+    #[test]
+    fn the_default_duration_is_expressed_in_milliseconds() {
+        // Guards the unit itself. A frame count that happens to be plausible as
+        // a duration is exactly the confusion this rewrite removes: 12 was a
+        // sensible number of frames and is a nonsensical number of
+        // milliseconds, and nothing but this assertion would notice.
+        let mgr = AnimationManager::new();
+        assert_eq!(mgr.default_duration_ms, DEFAULT_DURATION_MS);
+        assert!(
+            mgr.default_duration_ms >= 60,
+            "{} ms is too short to be a duration; it looks like a frame count",
+            mgr.default_duration_ms
+        );
+
+        let mut mgr = AnimationManager::new();
+        mgr.animate_desktop_switch(1.0, 1920.0);
+        mgr.tick(mgr.default_duration_ms.saturating_sub(1));
+        assert!(mgr.has_active(), "the switch was over before its duration");
+        mgr.tick(1);
+        assert!(!mgr.has_active(), "the switch outlasted its duration");
     }
 
     // -- Fade Overlay --
 
     #[test]
     fn test_fade_in() {
-        let mut fo = FadeOverlay::fade_in(10);
-        let cmd = fo.tick_render(1920.0, 1080.0);
+        let mut fo = FadeOverlay::fade_in(100);
+        let cmd = fo.tick_render(10, 1920.0, 1080.0);
         assert!(cmd.is_some()); // Should render overlay at start.
     }
 
     #[test]
     fn test_fade_out() {
-        let mut fo = FadeOverlay::fade_out(10);
-        for _ in 0..10 {
-            fo.tick_render(1920.0, 1080.0);
-        }
+        let mut fo = FadeOverlay::fade_out(100);
+        fo.tick_render(100, 1920.0, 1080.0);
         assert!(fo.is_done());
     }
 
     #[test]
     fn test_fade_in_transparent_at_end() {
-        let mut fo = FadeOverlay::fade_in(5);
-        let mut last_cmd = None;
-        for _ in 0..5 {
-            last_cmd = fo.tick_render(800.0, 600.0);
-        }
+        let mut fo = FadeOverlay::fade_in(50);
+        let last_cmd = fo.tick_render(50, 800.0, 600.0);
         // At the end of fade-in, the overlay should be nearly transparent.
         assert!(last_cmd.is_none() || fo.is_done());
     }
@@ -1029,8 +1207,8 @@ mod tests {
     #[test]
     fn test_animation_replaces_existing() {
         let mut mgr = AnimationManager::new();
-        mgr.animate_window(WindowAnimation::open(1, 0.0, 0.0, 100.0, 100.0, 10));
-        mgr.animate_window(WindowAnimation::close(1, 0.0, 0.0, 100.0, 100.0, 10));
+        mgr.animate_window(WindowAnimation::open(1, 0.0, 0.0, 100.0, 100.0, 100));
+        mgr.animate_window(WindowAnimation::close(1, 0.0, 0.0, 100.0, 100.0, 100));
         assert_eq!(mgr.active_count(), 1);
     }
 }

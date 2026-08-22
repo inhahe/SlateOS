@@ -34,9 +34,12 @@
 # `-bp'\(ab\)\1'` numbered nothing. It has a backtracking matcher for those
 # patterns now — `design-decisions.md` §333 — and the case agrees with GNU.)
 #
-# The locale is `C.UTF-8`, with the diagnostics that pass an argument through
-# gnulib's `quote()` referenced under `LC_ALL=C` so the quote marks are ASCII on
-# both sides. See `open-questions.md` → B-Q2.
+# The locale is `C.UTF-8` throughout, including for the diagnostics that pass
+# an argument through gnulib's `quote()`. Those used to be referenced under
+# `LC_ALL=C`, because that was the only locale in which GNU's quote marks were
+# ASCII like ours; §351 made ours U+2018/U+2019 in every locale, which is what
+# GNU prints under any UTF-8 locale, so `C` is now the setting in which the
+# reference would be wrong.
 set -u
 
 # Our nl is a native Windows binary, so MSYS would rewrite an argument that
@@ -145,11 +148,6 @@ report() {
 }
 
 run_case()  { [ "$HAVE_GNU" = yes ] || return 0; compare - C.UTF-8 "$@"; report "nl $*"; }
-# The diagnostics that pass an argument through gnulib's `quote()`. Under a
-# UTF-8 locale gnulib switches to U+2018/U+2019 and ours does not — one open
-# question, not one per case. See B-Q2. `nl`'s *number* diagnostics quote too,
-# so almost every error case here is `run_ascii`.
-run_ascii() { [ "$HAVE_GNU" = yes ] || return 0; compare - C "$@"; report "nl $* [C]"; }
 run_stdin() {
   [ "$HAVE_GNU" = yes ] || return 0
   local input="$1"; shift
@@ -201,12 +199,12 @@ for fmt in ln rn rz; do
   run_case -ba -w1 -n $fmt -v 1234 plain.txt
   run_case -ba -w4 -n $fmt -v -5 plain.txt
 done
-run_ascii -n l plain.txt
-run_ascii -n r plain.txt
-run_ascii -n LN plain.txt
-run_ascii -n rnx plain.txt
-run_ascii -n '' plain.txt
-run_ascii --number-format=RZ plain.txt
+run_case -n l plain.txt
+run_case -n r plain.txt
+run_case -n LN plain.txt
+run_case -n rnx plain.txt
+run_case -n '' plain.txt
+run_case --number-format=RZ plain.txt
 
 # --- -w, -s: the width of the field and what follows it ----------------------
 for w in 1 2 3 6 9; do run_case -ba -w $w plain.txt; done
@@ -221,11 +219,11 @@ run_case -ba -w3 --number-separator=@@ blanks.txt
 # separator widens it. A UTF-8 separator makes that a byte count, not a
 # character count.
 run_case -bt -w3 -s 'é' blanks.txt
-run_ascii -w 0 plain.txt
-run_ascii -w -1 plain.txt
-run_ascii -w abc plain.txt
-run_ascii -w '' plain.txt
-run_ascii -w 2147483648 plain.txt
+run_case -w 0 plain.txt
+run_case -w -1 plain.txt
+run_case -w abc plain.txt
+run_case -w '' plain.txt
+run_case -w 2147483648 plain.txt
 # Which of the two `strerror` sentences an out-of-range value gets is decided by
 # a heuristic on the *value* — `INT_MIN / 2 <= v <= INT_MAX / 2` — and not by
 # the limit that was violated. Every row above falls off a limit at a magnitude
@@ -234,11 +232,11 @@ run_ascii -w 2147483648 plain.txt
 # result out of range" for anything below the floor, and GNU says "Value too
 # large" once the value is past `INT_MIN / 2`. These are the rows that separate
 # them, and every harness for a utility with a *bounded* number needs them.
-run_ascii -w -3000000000 plain.txt
-run_ascii -l -3000000000 plain.txt
-run_ascii -l -5 plain.txt
-run_ascii -w -1073741824 plain.txt
-run_ascii -w -1073741825 plain.txt
+run_case -w -3000000000 plain.txt
+run_case -l -3000000000 plain.txt
+run_case -l -5 plain.txt
+run_case -w -1073741824 plain.txt
+run_case -w -1073741825 plain.txt
 
 # --- -v and -i: signed, and zero is legal ------------------------------------
 run_case -ba -w4 -v 10 plain.txt
@@ -254,16 +252,16 @@ run_case -ba -w4 --starting-line-number=7 --line-increment=2 plain.txt
 # suffixes no.
 run_case -ba -w4 -v ' 5' plain.txt
 run_case -ba -w4 -v '+5' plain.txt
-run_ascii -v 5x plain.txt
-run_ascii -v 0x10 plain.txt
-run_ascii -v 1K plain.txt
-run_ascii -v abc plain.txt
-run_ascii -v '' plain.txt
-run_ascii -i xyz plain.txt
+run_case -v 5x plain.txt
+run_case -v 0x10 plain.txt
+run_case -v 1K plain.txt
+run_case -v abc plain.txt
+run_case -v '' plain.txt
+run_case -i xyz plain.txt
 # The two out-of-range messages are different sentences.
-run_ascii -v 9223372036854775808 plain.txt
-run_ascii -v -9223372036854775809 plain.txt
-run_ascii -v 99999999999999999999999999999999 plain.txt
+run_case -v 9223372036854775808 plain.txt
+run_case -v -9223372036854775809 plain.txt
+run_case -v 99999999999999999999999999999999 plain.txt
 run_case -ba -w4 -v 9223372036854775807 plain.txt
 run_case -ba -w4 -v 9223372036854775806 plain.txt
 run_case -ba -w4 -v -9223372036854775808 plain.txt
@@ -279,9 +277,9 @@ run_case -bt -w3 -l 3 runs.txt
 run_case -bn -w3 -l 3 runs.txt
 run_case -bp. -w3 -l 3 runs.txt
 run_case -ba -w3 --join-blank-lines=2 runs.txt
-run_ascii -l 0 plain.txt
-run_ascii -l -1 plain.txt
-run_ascii -l abc plain.txt
+run_case -l 0 plain.txt
+run_case -l -1 plain.txt
+run_case -l abc plain.txt
 
 # --- sections ----------------------------------------------------------------
 run_case -w3 sec.txt
@@ -351,61 +349,61 @@ xfail_case 'the regex compile-error wording is ere::bre own, not glibc regcomp' 
   -w3 -bp'\(' words.txt
 
 # --- style diagnostics, and the fact that they accumulate --------------------
-run_ascii -b X plain.txt
-run_ascii -h X plain.txt
-run_ascii -f X plain.txt
-run_ascii -b '' plain.txt
-run_ascii -h '' plain.txt
-run_ascii --body-numbering=Q plain.txt
-run_ascii --header-numbering=Q plain.txt
-run_ascii --footer-numbering=Q plain.txt
-run_ascii -bX -nY plain.txt
-run_ascii -bX -nY -fQ plain.txt
-run_ascii -bX -hY -fZ -nW plain.txt
+run_case -b X plain.txt
+run_case -h X plain.txt
+run_case -f X plain.txt
+run_case -b '' plain.txt
+run_case -h '' plain.txt
+run_case --body-numbering=Q plain.txt
+run_case --header-numbering=Q plain.txt
+run_case --footer-numbering=Q plain.txt
+run_case -bX -nY plain.txt
+run_case -bX -nY -fQ plain.txt
+run_case -bX -hY -fZ -nW plain.txt
 # A deferred diagnostic followed by a fatal one prints both, and then no
 # referral: the fatal path exits without calling usage().
-run_ascii -bX -w0 plain.txt
-run_ascii -w0 -bX plain.txt
-run_ascii -bX -v abc plain.txt
+run_case -bX -w0 plain.txt
+run_case -w0 -bX plain.txt
+run_case -bX -v abc plain.txt
 # A getopt diagnostic mixes into the same batch, in argv order: getopt prints
 # the sentence and returns '?', and nl's `default:` only clears its `ok` flag,
 # so neither kind of message can hide the other and the pair swaps with argv.
-run_ascii -Z -bX plain.txt
-run_ascii -bX -Z plain.txt
+run_case -Z -bX plain.txt
+run_case -bX -Z plain.txt
 # Two of getopt's own, either side of an option that works: the rest of the
 # cluster still takes effect, so this numbers every line despite both errors.
-run_ascii -w3 -Zb a --zz plain.txt
-run_ascii -w3 -bZa plain.txt
+run_case -w3 -Zb a --zz plain.txt
+run_case -w3 -bZa plain.txt
 # A missing argument ends the cluster but not the parse.
-run_ascii -bX -w plain.txt
+run_case -bX -w plain.txt
 # A fatal number after a getopt sentence still prints it first, and still
 # refuses the referral.
-run_ascii -Z -w0 plain.txt
+run_case -Z -w0 plain.txt
 
 # --- getopt's five sentences -------------------------------------------------
-run_ascii -Z plain.txt
-run_ascii -b
-run_ascii -h
-run_ascii -d
-run_ascii -n
-run_ascii -w
-run_ascii --body-numbering
-run_ascii --section-delimiter
-run_ascii --zzz-bogus plain.txt
-run_ascii --no-renumber=x plain.txt
-run_ascii --help=x plain.txt
-run_ascii --version=x plain.txt
+run_case -Z plain.txt
+run_case -b
+run_case -h
+run_case -d
+run_case -n
+run_case -w
+run_case --body-numbering
+run_case --section-delimiter
+run_case --zzz-bogus plain.txt
+run_case --no-renumber=x plain.txt
+run_case --help=x plain.txt
+run_case --version=x plain.txt
 # Abbreviation: accepted when unambiguous, refused with the table's own order
 # when not. `--n` hits four options and `--num` three.
 run_case -w3 --body=a plain.txt
 run_case -w3 --number-f=ln -ba plain.txt
 run_case -w3 --sec=abc -ba abc.txt
 run_case -w3 --start=9 -ba plain.txt
-run_ascii --n=ln plain.txt
-run_ascii --num=ln plain.txt
-run_ascii --number=x plain.txt
-run_ascii --=x plain.txt
-run_ascii --no plain.txt
+run_case --n=ln plain.txt
+run_case --num=ln plain.txt
+run_case --number=x plain.txt
+run_case --=x plain.txt
+run_case --no plain.txt
 run_case -w3 --no-r -ba sec.txt
 
 # --- operands ----------------------------------------------------------------
@@ -449,14 +447,14 @@ run_stdin 'a\n\\:\\:' -w3 -ba
 # --- overflow ----------------------------------------------------------------
 # The check runs *before* the number is printed, so the last representable
 # number is printed and only the line after it is refused.
-run_ascii -ba -w1 -v 9223372036854775807 plain.txt
-run_ascii -ba -w1 -v 9223372036854775806 plain.txt
-run_ascii -ba -w1 -v 9223372036854775805 -i 2 plain.txt
-run_ascii -ba -w1 -v -9223372036854775808 -i -1 plain.txt
+run_case -ba -w1 -v 9223372036854775807 plain.txt
+run_case -ba -w1 -v 9223372036854775806 plain.txt
+run_case -ba -w1 -v 9223372036854775805 -i 2 plain.txt
+run_case -ba -w1 -v -9223372036854775808 -i -1 plain.txt
 # `-p` means the overflow is not cleared at a section boundary; without it, it
 # is.
-run_ascii -ba -w1 -v 9223372036854775807 sec.txt
-run_ascii -ba -w1 -v 9223372036854775807 -p sec.txt
+run_case -ba -w1 -v 9223372036854775807 sec.txt
+run_case -ba -w1 -v 9223372036854775807 -p sec.txt
 
 # --- --help and --version ----------------------------------------------------
 xfail_case 'our --help omits the GNU project ancillary block' --help

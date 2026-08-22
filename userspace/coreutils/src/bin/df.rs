@@ -11,7 +11,7 @@
 //! is not in mingw-w64; `stat_fs` falls back to a stub error so the
 //! crate still builds for `cargo test` on the dev machine.
 
-use coreutils::human::{human_readable, Opts};
+use coreutils::human::{Opts, human_readable};
 use coreutils::quote::quotef_os;
 use std::env;
 use std::io::{self, Write};
@@ -178,7 +178,12 @@ fn stat_fs(_path: &str) -> Result<FsInfo, String> {
 /// ten, and no prefix above `G`. On the machine this was written on, that last
 /// one alone made `df -h` report `1860.7G` where every other `df` says `1.9T`.
 fn human_size(bytes: u64) -> String {
-    human_readable(bytes, Opts::AUTOSCALE | Opts::CEILING | Opts::SI | Opts::BASE_1024, 1, 1)
+    human_readable(
+        bytes,
+        Opts::AUTOSCALE | Opts::CEILING | Opts::SI | Opts::BASE_1024,
+        1,
+        1,
+    )
 }
 
 #[cfg(test)]

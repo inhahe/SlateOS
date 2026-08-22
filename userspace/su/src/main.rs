@@ -1,8 +1,6 @@
-//! Slate OS User Switching Utility (`su` / `sudo`)
+//! Slate OS User Switching Utility (`su`)
 //!
 //! Switch to another user's identity and optionally run a command.
-//! When invoked as `sudo` (detected via `argv[0]`), runs a single command
-//! as root (or another user via `-u`).
 //!
 //! # su usage
 //!
@@ -16,21 +14,30 @@
 //! su -s /bin/shell [username]      Override target user's shell
 //! ```
 //!
-//! # sudo usage
+//! # This program is not `sudo`
 //!
-//! ```text
-//! sudo command [args...]           Run command as root
-//! sudo -u user command [args...]   Run command as user
-//! sudo -l                          List permissions
-//! ```
+//! It used to be, in part: invoked through an `argv[0]` of `sudo` it ran a
+//! second, much smaller command-runner whose entire policy was "root, or a
+//! member of `wheel`/`admin`, may run anything as anyone". That personality is
+//! gone. `userspace/sudo` is the real implementation — it parses
+//! `/etc/sudoers`, honours per-user and per-host rules, `Defaults`, `NOPASSWD`
+//! and `env_keep`, and ships `visudo`.
+//!
+//! Deleting it was a security fix, not tidying. The copy here never read
+//! `/etc/sudoers` at all, so on any system where both binaries existed an
+//! administrator who revoked a user's rights in `/etc/sudoers` had not revoked
+//! anything: the same user invoking the other binary still got `(ALL) ALL` on
+//! the strength of a `wheel` membership. Two programs answering "may this user
+//! run this command as root?" differently is a policy split, and the safe
+//! number of answers to that question is one. See `known-issues.md`
+//! (TD-B-TWO-PROGRAMS-BOTH-CLAIM-THE-NAME-`sudo`).
 //!
 //! # Authentication
 //!
 //! Reads `/etc/users.yaml` through the shared `userdb` crate. Passwords are
 //! `crypt(3)` entries — SHA-512-crypt — and are checked by re-running `crypt`
 //! on the stored entry, which is a valid setting for itself. Root (uid 0) can
-//! switch to any user without a password. For sudo, members of the `wheel` or
-//! `admin` group may run commands as root.
+//! switch to any user without a password.
 //!
 //! # Session tracking
 //!
@@ -61,7 +68,11 @@ const USER_DB_PATH: &str = userdb::DEFAULT_PATH;
 
 /// Load the user database, or print why it could not be loaded.
 ///
-/// `who` is the name the binary was invoked as, `su` or `sudo`.
+/// `who` is the name to report the failure under. It is always `"su"` now that
+/// this binary has one personality, but it stays a parameter because the
+/// messages below are the ones an administrator reads when the database is
+/// unavailable, and hard-coding the program name into them is how a message
+/// ends up naming the wrong program after a rename.
 ///
 /// A missing file and an unreadable one are reported differently on purpose:
 /// this program decides who may become root, so "there is no database" and "I
@@ -103,11 +114,6 @@ fn shell_of(record: &Record) -> String {
     record.shell().unwrap_or_else(|| "/bin/sh".to_string())
 }
 
-/// Whether `record` is a member of a group that confers administrator rights.
-fn in_admin_group(record: &Record) -> bool {
-    record.groups().iter().any(|g| g == "wheel" || g == "admin")
-}
-
 // ============================================================================
 // Authentication
 // ============================================================================
@@ -119,9 +125,49 @@ fn in_admin_group(record: &Record) -> bool {
 /// administrator's problem rather than a typing mistake, and reporting all of
 /// them as "authentication failure" is how an account with an unverifiable
 /// stored hash gets diagnosed as a forgotten password.
-fn authenticate(record: &Record, prompt: &str, who: &str) -> bool {
+///
+/// # The shared failed-attempt tally
+///
+/// Every guess here counts against the same `authlib` tally the console
+/// `login` prompt uses, and a delay earned at either one is honoured at both
+/// (`design-decisions.md` §354). A limit only one of them obeys is not a
+/// limit: an attacker slowed to one guess per five minutes at the login
+/// prompt would simply run `su` and guess at full speed.
+///
+/// **Only a *typed* password counts.** The three checks above the prompt —
+/// locked, no password set, unverifiable legacy hash — return without ever
+/// asking for one, and counting them would hand any local user a free denial
+/// of service: `su alice` against a locked account, run five times, would lock
+/// alice out of her own console without the attacker knowing anything at all.
+/// The tally exists to make *guessing* expensive, and a refusal that involved
+/// no guess is not an attempt.
+///
+/// A user already inside a delay is refused *before* the account-state checks,
+/// so the refusal cannot be used as an oracle for whether the account is
+/// locked or has a password set.
+fn authenticate(
+    auth: &mut authlib::Authenticator,
+    record: &Record,
+    prompt: &str,
+    who: &str,
+) -> bool {
+    let name = name_of(record);
+
+    if auth.rate_limited(&name).is_some() {
+        // `retry_after_secs` is not surfaced: telling the caller exactly how
+        // long is left tells them their guesses are landing on a real account.
+        eprintln!(
+            "{who}: {}",
+            authlib::Outcome::RateLimited {
+                retry_after_secs: 0,
+            }
+            .user_message()
+        );
+        return false;
+    }
+
     if record.is_locked() {
-        eprintln!("{who}: account '{}' is locked", name_of(record));
+        eprintln!("{who}: account '{name}' is locked");
         return false;
     }
 
@@ -129,12 +175,11 @@ fn authenticate(record: &Record, prompt: &str, who: &str) -> bool {
     // "the stored password is the empty string": the first answers
     // `NoPassword`, the second `Accepted`, and only the first is refused here.
     if record.check_password("") == Auth::NoPassword {
-        eprintln!("{who}: account '{}' has no password set", name_of(record));
+        eprintln!("{who}: account '{name}' has no password set");
         return false;
     }
 
     if record.has_legacy_password() {
-        let name = name_of(record);
         eprintln!(
             "{who}: account '{name}' has a password stored in a format this \
              system can no longer verify; run `useradm passwd {name}` as root"
@@ -145,19 +190,24 @@ fn authenticate(record: &Record, prompt: &str, who: &str) -> bool {
     let password = match read_password(prompt) {
         Ok(p) => p,
         Err(e) => {
+            // No guess was made — the terminal failed us, not the user.
             eprintln!("{who}: {e}");
             return false;
         }
     };
 
     match record.check_password(&password) {
-        Auth::Accepted => true,
+        Auth::Accepted => {
+            auth.reset(&name);
+            true
+        }
         Auth::Locked | Auth::Unusable | Auth::NoPassword | Auth::Rejected => {
             // The three non-`Rejected` cases were ruled out above and can only
             // arise from a change under our feet; they get the same message
             // because at this point the password has already been typed and a
             // detailed answer would say something about the account to whoever
             // typed it.
+            auth.note_failure(&name);
             eprintln!("{who}: authentication failure");
             false
         }
@@ -529,9 +579,12 @@ fn run_su(args: &[String]) -> i32 {
         return 1;
     }
 
-    // Authenticate unless the caller is root.
+    // Authenticate unless the caller is root. The tally is keyed by the
+    // account whose password is being guessed — here the *target*, since `su`
+    // asks for the password of the user you are becoming.
     let caller_uid = get_caller_uid(&users);
-    if caller_uid != 0 && !authenticate(target, "Password: ", "su") {
+    let mut auth = authlib::Authenticator::new();
+    if caller_uid != 0 && !authenticate(&mut auth, target, "Password: ", "su") {
         return 1;
     }
 
@@ -560,227 +613,19 @@ fn run_su(args: &[String]) -> i32 {
 }
 
 // ============================================================================
-// sudo mode
+// Entry point
 // ============================================================================
 
-/// Parsed options for `sudo`.
-#[derive(Debug)]
-struct SudoOptions {
-    /// Target username (default: "root").
-    target_user: String,
-    /// The command and its arguments.
-    command: Vec<String>,
-    /// List permissions mode (-l).
-    list_mode: bool,
-}
-
-/// Parse `sudo` command-line arguments.
-///
-/// Accepted forms:
-///   sudo command [args...]
-///   sudo -u user command [args...]
-///   sudo -l
-fn parse_sudo_args(args: &[String]) -> Result<SudoOptions, i32> {
-    let mut opts = SudoOptions {
-        target_user: "root".to_string(),
-        command: Vec::new(),
-        list_mode: false,
-    };
-
-    // See `parse_su_args`: driven by the iterator so that an option needing a
-    // value cannot read past the end of the slice.
-    let mut rest = args.iter().skip(1);
-
-    while let Some(arg) = rest.next() {
-        match arg.as_str() {
-            "-u" | "--user" => {
-                let Some(value) = rest.next() else {
-                    eprintln!("sudo: option '{arg}' requires an argument");
-                    return Err(1);
-                };
-                opts.target_user = value.clone();
-            }
-            "-l" | "--list" => {
-                opts.list_mode = true;
-            }
-            "-h" | "--help" => {
-                print_sudo_help();
-                return Err(0);
-            }
-            "-V" | "--version" => {
-                println!("sudo (Slate OS) 0.1.0");
-                return Err(0);
-            }
-            _ => {
-                // Everything from here on is the command and its args. The
-                // first word is the one already taken from the iterator.
-                opts.command = std::iter::once(arg).chain(rest).cloned().collect();
-                break;
-            }
-        }
-    }
-
-    if !opts.list_mode && opts.command.is_empty() {
-        eprintln!("sudo: no command specified");
-        eprintln!("Try 'sudo --help' for usage.");
-        return Err(1);
-    }
-
-    Ok(opts)
-}
-
-fn print_sudo_help() {
-    println!("Slate OS Sudo v0.1.0");
-    println!();
-    println!("Run a command as another user (default: root).");
-    println!();
-    println!("USAGE:");
-    println!("  sudo [options] command [args...]");
-    println!();
-    println!("OPTIONS:");
-    println!("  -u, --user <user>   Run as this user (default: root)");
-    println!("  -l, --list          List caller's permissions");
-    println!("  -h, --help          Show this help");
-    println!("  -V, --version       Show version");
-    println!();
-    println!("POLICY:");
-    println!("  root can run any command as any user.");
-    println!("  Members of the 'wheel' or 'admin' group can sudo to root.");
-}
-
-/// Check whether the caller is authorised to use sudo.
-///
-/// Policy: root (uid 0) can do anything. Members of `wheel` or `admin`
-/// groups can sudo to root. Other combinations are denied.
-/// `_target_uid` is unused: the policy grants an administrator the right to
-/// become *anyone*, so sudo-to-root and sudo-to-alice take the same test. The
-/// parameter is kept because that is a policy choice rather than an oversight,
-/// and a future policy that does distinguish them needs it back.
-fn sudo_authorised(caller: &Record, _target_uid: u32) -> bool {
-    // Root can always sudo.
-    if caller.uid() == Some(0) {
-        return true;
-    }
-    in_admin_group(caller) || caller.is_admin()
-}
-
-/// Print the caller's sudo permissions.
-fn sudo_list_permissions(caller: &Record) {
-    println!("User {} may run the following commands:", name_of(caller));
-    if caller.uid() == Some(0) {
-        println!("    (ALL) ALL");
-    } else if caller.is_admin() || in_admin_group(caller) {
-        println!("    (ALL) ALL  [via wheel/admin group membership]");
-    } else {
-        println!("    (NONE)");
-    }
-}
-
-/// Run the `sudo` command.
-fn run_sudo(args: &[String]) -> i32 {
-    let opts = match parse_sudo_args(args) {
-        Ok(o) => o,
-        Err(code) => return code,
-    };
-
-    let Some(users) = load_users("sudo") else {
-        return 1;
-    };
-
-    let caller_uid = get_caller_uid(&users);
-    let Some(caller) = users.find_uid(caller_uid) else {
-        eprintln!(
-            "sudo: unknown calling user (uid {caller_uid}); \
-             cannot determine permissions"
-        );
-        return 1;
-    };
-
-    if opts.list_mode {
-        sudo_list_permissions(caller);
-        return 0;
-    }
-
-    let Some(target) = users.find(&opts.target_user) else {
-        eprintln!("sudo: unknown user: {}", opts.target_user);
-        return 1;
-    };
-
-    if target.is_locked() {
-        eprintln!("sudo: account '{}' is locked", name_of(target));
-        return 1;
-    }
-
-    // Authorisation check.
-    if !sudo_authorised(caller, target.uid().unwrap_or(u32::MAX)) {
-        let caller_name = name_of(caller);
-        eprintln!(
-            "sudo: user '{caller_name}' is not in the sudoers file. \
-             This incident will be reported."
-        );
-        // Log the failed attempt.
-        log_sudo_failure(&caller_name, &opts.command);
-        return 1;
-    }
-
-    // Authenticate: require the caller's own password (sudo convention),
-    // unless the caller is root.
-    if caller_uid != 0 {
-        let prompt = format!("[sudo] password for {}: ", name_of(caller));
-        if !authenticate(caller, &prompt, "sudo") {
-            return 1;
-        }
-    }
-
-    // Execute the command as the target user.
-    let command_str = opts.command.join(" ");
-
-    exec_as_user(
-        target,
-        None,
-        Some(&command_str),
-        false, // not a login shell
-        false, // don't preserve env
-    )
-}
-
-/// Log a sudo authorisation failure to syslog or a fallback file.
-fn log_sudo_failure(username: &str, command: &[String]) {
-    let now = current_epoch_secs();
-    let cmd_str = command.join(" ");
-    let msg = format!("{now} sudo: DENIED user={username} command=\"{cmd_str}\"\n");
-    // Best-effort: append to the auth log.
-    if let Ok(mut file) = fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open("/var/log/auth.log")
-    {
-        let _ = file.write_all(msg.as_bytes());
-    }
-}
-
-// ============================================================================
-// Entry point: detect su vs sudo via argv[0]
-// ============================================================================
-
-/// Extract the base name from a path (everything after the last `/` or `\`).
-fn basename(path: &str) -> &str {
-    let after_slash = path.rsplit('/').next().unwrap_or(path);
-    after_slash.rsplit('\\').next().unwrap_or(after_slash)
-}
+// This used to dispatch on `basename(argv[0])`, running a built-in `sudo` when
+// the binary was invoked under that name. It does not any more, and the
+// `basename` helper went with it: there is exactly one program here now, so
+// consulting `argv[0]` to decide what to be could only ever pick wrong. A
+// symlink named `sudo` pointing at this binary now runs `su`, which is the
+// honest outcome — the `sudo` behaviour lives in `userspace/sudo`.
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-
-    let prog = args.first().map(|s| basename(s)).unwrap_or("su");
-
-    let exit_code = if prog == "sudo" || prog == "sudo.exe" {
-        run_sudo(&args)
-    } else {
-        run_su(&args)
-    };
-
-    process::exit(exit_code);
+    process::exit(run_su(&args));
 }
 
 // ============================================================================
@@ -977,40 +822,13 @@ users:
         assert_eq!(record.check_password("hunter2"), Auth::Locked);
     }
 
-    // --- sudo authorisation ---
-
-    #[test]
-    fn test_sudo_root_always_authorised() {
-        let users = parse_sample_users();
-        let root = users.find("root").unwrap();
-        assert!(sudo_authorised(root, 0));
-        assert!(sudo_authorised(root, 1000));
-        assert!(sudo_authorised(root, 1001));
-    }
-
-    #[test]
-    fn test_sudo_wheel_member_authorised_for_root() {
-        let users = parse_sample_users();
-        let alice = users.find("alice").unwrap();
-        // Alice is in wheel group -> can sudo to root.
-        assert!(sudo_authorised(alice, 0));
-    }
-
-    #[test]
-    fn test_sudo_wheel_member_authorised_for_other() {
-        let users = parse_sample_users();
-        let alice = users.find("alice").unwrap();
-        // Wheel members can sudo to any user.
-        assert!(sudo_authorised(alice, 1001));
-    }
-
-    #[test]
-    fn test_sudo_non_wheel_denied() {
-        let users = parse_sample_users();
-        let bob = users.find("bob").unwrap();
-        // Bob is only in 'users' group -- no sudo.
-        assert!(!sudo_authorised(bob, 0));
-    }
+    // The sudo-authorisation tests that used to sit here are gone with the
+    // policy they tested. They asserted this binary's own "root, wheel or
+    // admin may run anything" rule, which was never consulted by the real
+    // `sudo` and is not the rule `userspace/sudo` applies; keeping them would
+    // have pinned a second, contradictory answer to "who may run what as
+    // root". Authorisation coverage belongs to `userspace/sudo` and its
+    // `/etc/sudoers` parser.
 
     // --- su argument parsing ---
 
@@ -1121,84 +939,6 @@ users:
         assert_eq!(parse_su_args(&args).unwrap_err(), 0);
     }
 
-    // --- sudo argument parsing ---
-
-    #[test]
-    fn test_sudo_args_simple_command() {
-        let args = vec!["sudo".to_string(), "ls".to_string(), "-la".to_string()];
-        let opts = parse_sudo_args(&args).unwrap();
-        assert_eq!(opts.target_user, "root");
-        assert_eq!(opts.command, vec!["ls", "-la"]);
-        assert!(!opts.list_mode);
-    }
-
-    #[test]
-    fn test_sudo_args_user_flag() {
-        let args = vec![
-            "sudo".to_string(),
-            "-u".to_string(),
-            "alice".to_string(),
-            "whoami".to_string(),
-        ];
-        let opts = parse_sudo_args(&args).unwrap();
-        assert_eq!(opts.target_user, "alice");
-        assert_eq!(opts.command, vec!["whoami"]);
-    }
-
-    #[test]
-    fn test_sudo_args_list_mode() {
-        let args = vec!["sudo".to_string(), "-l".to_string()];
-        let opts = parse_sudo_args(&args).unwrap();
-        assert!(opts.list_mode);
-    }
-
-    #[test]
-    fn test_sudo_args_no_command() {
-        let args = vec!["sudo".to_string()];
-        assert_eq!(parse_sudo_args(&args).unwrap_err(), 1);
-    }
-
-    #[test]
-    fn test_sudo_args_user_missing_arg() {
-        let args = vec!["sudo".to_string(), "-u".to_string()];
-        assert_eq!(parse_sudo_args(&args).unwrap_err(), 1);
-    }
-
-    #[test]
-    fn test_sudo_args_help() {
-        let args = vec!["sudo".to_string(), "--help".to_string()];
-        assert_eq!(parse_sudo_args(&args).unwrap_err(), 0);
-    }
-
-    #[test]
-    fn test_sudo_args_version() {
-        let args = vec!["sudo".to_string(), "--version".to_string()];
-        assert_eq!(parse_sudo_args(&args).unwrap_err(), 0);
-    }
-
-    // --- Basename ---
-
-    #[test]
-    fn test_basename_simple() {
-        assert_eq!(basename("su"), "su");
-    }
-
-    #[test]
-    fn test_basename_with_slash() {
-        assert_eq!(basename("/usr/bin/su"), "su");
-        assert_eq!(basename("/usr/bin/sudo"), "sudo");
-    }
-
-    #[test]
-    fn test_basename_with_backslash() {
-        assert_eq!(basename("C:\\Windows\\sudo.exe"), "sudo.exe");
-    }
-
-    #[test]
-    fn test_basename_mixed() {
-        assert_eq!(basename("/usr/bin\\su"), "su");
-    }
-
     // --- Default path ---
 
     #[test]
@@ -1290,16 +1030,154 @@ users:
         assert_eq!(opts.target_user, "root");
     }
 
+    // --- The shared failed-attempt tally (§354) ---
+
+    /// A verifier that counts in memory and nowhere else.
+    ///
+    /// `Authenticator::with_stores` deliberately attaches no faillock file, so
+    /// running this suite cannot run up a delay against a real account on the
+    /// developer's machine — which a test that used `Authenticator::new()`
+    /// would do, silently, every time it ran.
+    fn scratch_authenticator() -> authlib::Authenticator {
+        let missing = std::path::Path::new("/nonexistent/su-tests");
+        authlib::Authenticator::with_stores(missing, missing)
+    }
+
+    /// A record with a real, verifiable password.
+    fn record_with_password(username: &str, password: &str) -> Record {
+        let mut record = Record::new();
+        record.set("username", username);
+        record
+            .set_password_with_salt(password, "0123456789abcdef")
+            .expect("a 16-character salt is storable");
+        record
+    }
+
+    /// A refusal that never asked for a password must not count against the
+    /// account, or `su` becomes a denial-of-service tool: five runs of
+    /// `su alice` against a locked account, costing the attacker nothing and
+    /// telling them nothing, would lock alice out of her own console.
     #[test]
-    fn test_sudo_command_with_flags() {
-        // Everything after the first non-option arg is the command.
-        let args = vec![
-            "sudo".to_string(),
-            "ls".to_string(),
-            "-la".to_string(),
-            "/tmp".to_string(),
-        ];
-        let opts = parse_sudo_args(&args).unwrap();
-        assert_eq!(opts.command, vec!["ls", "-la", "/tmp"]);
+    fn a_refusal_that_asked_for_no_password_is_not_an_attempt() {
+        let mut auth = scratch_authenticator();
+
+        let mut locked = record_with_password("erin", "hunter2");
+        locked.set_locked(true);
+        for _ in 0..(FREE_ATTEMPTS_HEADROOM) {
+            assert!(!authenticate(&mut auth, &locked, "Password: ", "su"));
+        }
+        assert_eq!(auth.failures("erin"), 0);
+        assert!(auth.rate_limited("erin").is_none());
+
+        // Same for an account with no password stored at all.
+        let mut passwordless = Record::new();
+        passwordless.set("username", "frank");
+        for _ in 0..(FREE_ATTEMPTS_HEADROOM) {
+            assert!(!authenticate(&mut auth, &passwordless, "Password: ", "su"));
+        }
+        assert_eq!(auth.failures("frank"), 0);
+
+        // And for an entry whose stored hash predates `posix::crypt`.
+        let mut legacy = Record::new();
+        legacy.set("username", "dave");
+        legacy.set(
+            "password_hash",
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        );
+        for _ in 0..(FREE_ATTEMPTS_HEADROOM) {
+            assert!(!authenticate(&mut auth, &legacy, "Password: ", "su"));
+        }
+        assert_eq!(auth.failures("dave"), 0);
+    }
+
+    /// Enough attempts to be well past [`authlib::FREE_ATTEMPTS`].
+    const FREE_ATTEMPTS_HEADROOM: u32 = authlib::FREE_ATTEMPTS + 3;
+
+    /// A user already inside a delay is turned away without the guess being
+    /// counted a second time. Counting it would let anyone hold a real user
+    /// out indefinitely by making refused attempts that each refresh the
+    /// clock — the delay would never expire.
+    #[test]
+    fn a_delayed_user_is_refused_and_the_refusal_is_not_counted() {
+        let mut auth = scratch_authenticator();
+        let record = record_with_password("grace", "hunter2");
+
+        for _ in 0..FREE_ATTEMPTS_HEADROOM {
+            auth.note_failure("grace");
+        }
+        let before = auth.failures("grace");
+        let delay_before = auth
+            .rate_limited("grace")
+            .expect("past the free attempts, grace is delayed");
+
+        // The refusal happens without stdin being touched, so this returns
+        // immediately whatever the harness has connected to it.
+        assert!(!authenticate(&mut auth, &record, "Password: ", "su"));
+
+        assert_eq!(auth.failures("grace"), before, "a refusal is not an attempt");
+        let delay_after = auth
+            .rate_limited("grace")
+            .expect("still delayed, but no further");
+        assert!(
+            delay_after <= delay_before,
+            "the wait must run down, not restart: {delay_before}s then {delay_after}s"
+        );
+    }
+
+    /// The delay is checked before the account-state messages, so that being
+    /// refused for guessing cannot be told apart from being refused because
+    /// the account is locked. Otherwise the rate limit itself becomes the
+    /// oracle it exists to close.
+    #[test]
+    fn the_delay_is_checked_before_any_account_state_is_disclosed() {
+        let mut auth = scratch_authenticator();
+        for _ in 0..FREE_ATTEMPTS_HEADROOM {
+            auth.note_failure("heidi");
+        }
+
+        // A locked account and a healthy one are both refused, and neither
+        // refusal moves the tally — the locked-account branch was never
+        // reached, so it cannot have printed "account is locked".
+        let mut locked = record_with_password("heidi", "hunter2");
+        locked.set_locked(true);
+        let before = auth.failures("heidi");
+        assert!(!authenticate(&mut auth, &locked, "Password: ", "su"));
+        assert_eq!(auth.failures("heidi"), before);
+    }
+
+    /// `su` and the console `login` prompt share one count, so a limit reached
+    /// at either is honoured at both. This is the whole point of §354: an
+    /// attacker slowed to one guess every five minutes at the login prompt
+    /// must not be able to walk over to `su` and resume at full speed.
+    #[test]
+    fn su_and_login_share_one_tally_through_the_faillock_file() {
+        let dir = std::env::temp_dir().join(format!(
+            "su-faillock-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::create_dir_all(&dir).expect("a scratch directory under the temp dir");
+        let faillock = dir.join("faillock");
+        let missing = std::path::Path::new("/nonexistent/su-tests");
+
+        // What `login` recorded.
+        let mut as_login = authlib::Authenticator::with_stores(missing, missing)
+            .with_faillock(&faillock);
+        for _ in 0..FREE_ATTEMPTS_HEADROOM {
+            as_login.note_failure("ivan");
+        }
+
+        // What `su` sees: a separate process, a fresh in-memory tally, the
+        // same file.
+        let mut as_su = authlib::Authenticator::with_stores(missing, missing)
+            .with_faillock(&faillock);
+        assert!(
+            as_su.rate_limited("ivan").is_some(),
+            "su must honour the delay login earned"
+        );
+        let record = record_with_password("ivan", "hunter2");
+        assert!(!authenticate(&mut as_su, &record, "Password: ", "su"));
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 }

@@ -25,11 +25,14 @@
 # `TD-COREUTILS-GETOPT-DIAGNOSTICS-USE-THE-WRONG-SHAPE`, and the identical
 # note at the top of `od-diff.sh`, `tr-diff.sh` and `wc-diff.sh`.
 #
-# ## Why LC_ALL=C
+# ## Why LC_ALL=C.UTF-8
 #
-# The diagnostics quote the offending pattern back at the caller through
-# gnulib's quoting, which picks its quote marks from the locale. `C` keeps
-# those ASCII on both sides, which sidesteps B-Q2 the same way od-diff.sh does.
+# The diagnostics quote the offending pattern back at the caller through gnulib's
+# `quote()`, which picks its quote marks from the locale. Since §351 ours
+# prints U+2018/U+2019 in every locale, and GNU prints those under a UTF-8
+# locale and ASCII under `C` — so `C.UTF-8` is the setting the two agree in.
+# This file ran under `C` for the mirror-image of that reason until B-Q2 was
+# answered; nothing else here reads the locale.
 set -u
 
 # Our csplit is a native Windows binary, so MSYS would rewrite an argument that
@@ -37,8 +40,8 @@ set -u
 export MSYS2_ARG_CONV_EXCL='*'
 
 OURS=${OURS:-"target/x86_64-pc-windows-gnu/debug/csplit.exe"}
-GNU=${GNU:-"wsl -e env LC_ALL=C csplit"}
-export LC_ALL=${LC_ALL:-C}
+GNU=${GNU:-"wsl -e env LC_ALL=C.UTF-8 csplit"}
+export LC_ALL=${LC_ALL:-C.UTF-8}
 
 pass=0; fail=0; xfail=0; xpass=0
 
@@ -55,7 +58,7 @@ cd "$fixtures" >/dev/null || exit 1
 # files, GNU has none" — which looks like a total divergence rather than a
 # broken harness.
 printf '1\n2\n' > .probe
-if wsl -e env LC_ALL=C csplit -s -f .p .probe 1 >/dev/null 2>&1 && [ -f .p00 ]; then
+if wsl -e env LC_ALL=C.UTF-8 csplit -s -f .p .probe 1 >/dev/null 2>&1 && [ -f .p00 ]; then
   HAVE_GNU=yes
 else
   HAVE_GNU=no
@@ -83,15 +86,26 @@ printf 'x\ny\nz' > nonl.txt
 # --- machinery ----------------------------------------------------------------
 
 run_ours() { ( cd "$1" && "$OURS_ABS" "${@:2}" ); }
-run_gnu()  { ( cd "$1" && wsl -e env LC_ALL=C csplit "${@:2}" ); }
+run_gnu()  { ( cd "$1" && wsl -e env LC_ALL=C.UTF-8 csplit "${@:2}" ); }
 
 # A manifest of everything the run left behind: each output file, in name
 # order, with its contents. `od -An -c` so that a stray CR or a missing final
 # newline shows up rather than being invisible in a diff of rendered text.
+#
+# Iterated with a glob rather than `for f in $(ls | sort)`, which was the
+# original and is quietly wrong: an unquoted command substitution is
+# word-split on IFS, so a name containing a space arrives in pieces and a name
+# ending in one loses it entirely. The manifest then reads a file that does not
+# exist, prints empty contents, and the case is scored as a divergence that
+# belongs to the harness. `-b '%-5d'` -- whose names end in four spaces -- is
+# what exposed it. A glob passes each name through whole and is already sorted.
 manifest() {
   local dir=$1 f
   ( cd "$dir" || return 0
-    for f in $(ls | grep -v '^in\.txt$' | sort); do
+    for f in *; do
+      # `*` with no matches expands to itself; and `in.txt` is the input we
+      # copied in, not something the run produced.
+      case $f in '*') [ -e "$f" ] || continue ;; in.txt) continue ;; esac
       printf '  %s: %s\n' "$f" "$(od -An -c < "$f" | tr -s ' \n' ' ')"
     done )
 }
@@ -280,6 +294,72 @@ run_case seq20.txt -n abc 4
 run_case seq20.txt -b '%s' 4
 run_case seq20.txt -b 'nopercent' 4
 run_case seq20.txt -b '%d%d' 4
+
+# The diagnostic for a bad conversion specifier has two branches -- name the
+# character, or print one octal escape -- and `%s` above only ever reaches the
+# first. These reach the second, which is the half where a byte-wise rule and a
+# character-wise one give different answers.
+#
+# This is the one diagnostic left in the tree that is deliberately *byte*-wise
+# after the §357 rewrite, and it is byte-wise because GNU is: `csplit.c` tests
+# `isprint` on the single byte `*p`, so under `C.UTF-8` a `%é` suffix reports
+# `\303` -- its lead byte -- and stops there. Our awk went the other way for
+# its syntax errors, because it counts characters everywhere else and would
+# otherwise contradict itself; csplit has no such obligation, so matching GNU
+# is worth more. Measuring both branches is what keeps that a decision rather
+# than an accident.
+run_case seq20.txt -b '%é' 4
+run_case seq20.txt -b "%$(printf '\001')" 4
+# A space is printable to both rules and takes the character branch: the
+# boundary case showing the test is `isprint` and not `isgraph`. It is also
+# how the flag-set bug below was found, since the space has to reach the
+# conversion slot at all before it can be printed from there.
+run_case seq20.txt -b '% ' 4
+
+# The flag set, which is *not* printf's. GNU takes `-`, `0`, `#` and `'` and
+# stops at anything else — so `+` and a space are read as the conversion
+# specifier and rejected. We accepted both and happily wrote files named `+0`
+# and `+1`. Every one of these was measured against GNU 9.4 before being
+# written down; see `known-issues.md`
+# → BUG-CSPLIT-ACCEPTS-TWO-SUFFIX-FLAGS-GNU-REJECTS.
+run_case seq20.txt -b '%+d' 4
+run_case seq20.txt -b '% 5d' 4
+# The flags GNU does take, so the fix is pinned from both sides: a narrower
+# parser that also dropped these would pass the two cases above and still be
+# wrong.
+run_case seq20.txt -b '%05d' 4
+run_case seq20.txt -b '%#o' 4
+run_case seq20.txt -b "%'d" 4
+#
+# `-b '%-5d'` is deliberately absent, and this is a property of the *host*
+# rather than of csplit. Left-justifying in width 5 names the files `xx0` and
+# `xx1` followed by four spaces, and **Win32 silently strips trailing spaces
+# from every path component**. Our csplit is a native Windows binary, so it
+# asks for `xx0    ` and the filesystem gives it `xx0`; GNU's runs under WSL,
+# whose Linux VFS keeps the spaces. The case therefore reports a divergence
+# that neither implementation has. Measured rather than reasoned: a plain
+# `python -c "open('zz1    ','w')"` in the same directory also produces `zz1`.
+#
+# `%-5d` is not left untested — `csplit.rs`'s
+# `the_suffix_flag_set_is_gnus_and_not_printfs` asserts in-process that it
+# renders `xx3    `, spaces included, which is the half a harness on this host
+# cannot ask. `%05d` above keeps a *width* in the harness, since zero padding
+# is leading and so survives the trip.
+#
+# Note this is a Windows-host artifact only: SlateOS allows every byte but `/`
+# and NUL in a name, so a trailing space is an ordinary character there and
+# the case would be honest if the harness were ever run natively.
+#
+# There is deliberately no `%<0xFF>` case, and it is worth saying why so that
+# nobody adds one: a byte that is not valid UTF-8 cannot survive the trip. An
+# argument reaches both sides through a Windows command line, which is UTF-16,
+# so MSYS and WSL each widen `0xFF` to U+00FF and hand it over as `ÿ` — the two
+# bytes `\303\277`. Measured: `-b "%$(printf '\xff')"` makes GNU report `\303`,
+# exactly what `%é` reports, because that is literally what it received. The
+# case would pass while testing something other than its name, which is worse
+# than not having it. A control byte is unaffected (`%\001` arrives as itself,
+# also measured), and the undecodable-byte question is covered where it can be
+# asked honestly — in-process, by `quote.rs`'s own tests.
 
 # An input file that is not there. This one needs the whole argv, because the
 # point is the operand *before* where the options go.

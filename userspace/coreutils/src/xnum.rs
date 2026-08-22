@@ -42,7 +42,7 @@
 //! `fold -w 99999999999999999999999x` prints no tail, while
 //! `fold -w 9999999999999999999999999999` prints the overflow one.
 
-use crate::quote::quote;
+use crate::quote::{quote, quote_glibc};
 
 /// gnulib's `strtol_error`.
 ///
@@ -374,7 +374,7 @@ pub fn xstrtoumax_base(text: &[u8], base: u32, valid_suffixes: Option<&[u8]>) ->
 /// including the quoted argument and the `strerror` tail when there is one:
 ///
 /// ```text
-/// invalid number of columns: '0': Numerical result out of range
+/// invalid number of columns: ‘0’: Numerical result out of range
 /// ```
 ///
 /// Upstream exits from inside this function, which is observable: a bad number
@@ -493,7 +493,7 @@ pub fn xstrtoimax(text: &[u8], valid_suffixes: Option<&[u8]>) -> (i64, Status) {
 /// [`xstrtoumax`] refused its argument.
 ///
 /// This is a *different* sentence shape from [`xdectoumax`]'s. That one names
-/// the quantity (`invalid number of columns: '0'`); this one names the **option
+/// the quantity (`invalid number of columns: ‘0’`); this one names the **option
 /// that carried it**, which is why upstream threads `long_options` and the short
 /// option character all the way down into it:
 ///
@@ -502,6 +502,22 @@ pub fn xstrtoimax(text: &[u8], valid_suffixes: Option<&[u8]>) -> (i64, Status) {
 /// invalid suffix in --read-bytes argument '4q'
 /// -w argument '99999999999999999999' too large
 /// ```
+///
+/// **The marks are straight, and stay straight in every locale.** That is worth
+/// stating because it is not what the file this lives beside would predict:
+/// `xstrtol-error.c` is gnulib's, and gnulib is where [`quote`] comes from, but
+/// this particular message spells its `'%s'` into the format string the way
+/// glibc's `getopt_long` does rather than calling `quote()`. Measured against
+/// GNU od 9.4 under `LC_ALL=C.UTF-8`:
+///
+/// ```text
+/// $ od -j x  f   ->  od: invalid -j argument 'x'          <- straight, here
+/// $ head -n x f  ->  head: invalid number of lines: ‘x’   <- curly, xdectoumax
+/// ```
+///
+/// So the sibling sentence shape and this one disagree about their marks, and
+/// which one a utility prints is a fact about upstream's source rather than
+/// about the message. `sort -S x` prints this shape too, and is straight.
 ///
 /// `option` is that name already rendered with its hyphens — `"-N"` or
 /// `"--read-bytes"` — rather than upstream's `(opt_idx, c, long_options)` triple,
@@ -515,14 +531,20 @@ pub fn xstrtoimax(text: &[u8], valid_suffixes: Option<&[u8]>) -> (i64, Status) {
 #[must_use]
 pub fn strtol_fatal(status: Status, option: &str, arg: &[u8]) -> Option<String> {
     // No `strerror` tail on any of the three: upstream passes 0 for errno.
+    //
+    // `quote_glibc`, not `quote` — see the straight-marks note above. Upstream
+    // interpolates the raw bytes between two literal apostrophes and escapes
+    // nothing at all (`od -j $'\xff'` prints the 0xFF byte itself); we escape,
+    // for the same reason `quote_glibc` escapes everywhere else, and the two
+    // agree byte for byte on every argument that is not an attack.
     match status {
         Status::Ok => None,
-        Status::Invalid => Some(format!("invalid {option} argument {}", quote(arg))),
+        Status::Invalid => Some(format!("invalid {option} argument {}", quote_glibc(arg))),
         Status::InvalidSuffix | Status::InvalidSuffixWithOverflow => Some(format!(
             "invalid suffix in {option} argument {}",
-            quote(arg)
+            quote_glibc(arg)
         )),
-        Status::Overflow => Some(format!("{option} argument {} too large", quote(arg))),
+        Status::Overflow => Some(format!("{option} argument {} too large", quote_glibc(arg))),
     }
 }
 
@@ -594,7 +616,7 @@ mod tests {
         assert_eq!(columns("+5"), Ok(5));
         assert_eq!(
             columns("5 "),
-            Err("invalid number of columns: '5 '".to_string())
+            Err("invalid number of columns: ‘5 ’".to_string())
         );
     }
 
@@ -604,11 +626,11 @@ mod tests {
         // was violated. Measured against GNU fold 9.4.
         assert_eq!(
             columns("0"),
-            Err("invalid number of columns: '0': Numerical result out of range".to_string())
+            Err("invalid number of columns: ‘0’: Numerical result out of range".to_string())
         );
         assert_eq!(
             columns("18446744073709551607"),
-            Err("invalid number of columns: '18446744073709551607': \
+            Err("invalid number of columns: ‘18446744073709551607’: \
                  Value too large for defined data type"
                 .to_string())
         );
@@ -621,7 +643,7 @@ mod tests {
         assert_eq!(
             columns("9999999999999999999999999999"),
             Err(
-                "invalid number of columns: '9999999999999999999999999999': \
+                "invalid number of columns: ‘9999999999999999999999999999’: \
                  Value too large for defined data type"
                     .to_string()
             )
@@ -633,7 +655,7 @@ mod tests {
         for text in ["bogus", "", "  ", "+", "-", "0x10", "1_000", "1,2"] {
             assert_eq!(
                 columns(text),
-                Err(format!("invalid number of columns: '{text}'")),
+                Err(format!("invalid number of columns: ‘{text}’")),
                 "for {text:?}"
             );
         }
@@ -644,7 +666,7 @@ mod tests {
         // Because gnulib refuses the sign before C's strtoumax can wrap it.
         assert_eq!(
             columns("-3"),
-            Err("invalid number of columns: '-3'".to_string())
+            Err("invalid number of columns: ‘-3’".to_string())
         );
     }
 
@@ -654,12 +676,12 @@ mod tests {
         // "don't show ERANGE errors for invalid numbers".
         assert_eq!(
             columns("99999999999999999999999x"),
-            Err("invalid number of columns: '99999999999999999999999x'".to_string())
+            Err("invalid number of columns: ‘99999999999999999999999x’".to_string())
         );
         // …while the same overflow with no trailing character keeps it.
         assert_eq!(
             columns("99999999999999999999999"),
-            Err("invalid number of columns: '99999999999999999999999': \
+            Err("invalid number of columns: ‘99999999999999999999999’: \
                  Value too large for defined data type"
                 .to_string())
         );
@@ -669,7 +691,7 @@ mod tests {
     fn a_suffix_list_of_none_rejects_every_suffix() {
         assert_eq!(
             columns("1K"),
-            Err("invalid number of columns: '1K'".to_string())
+            Err("invalid number of columns: ‘1K’".to_string())
         );
     }
 
@@ -727,23 +749,23 @@ mod tests {
         assert_eq!(xdectoimax(b"-1", -9, 9, NONE, what), Ok(-1));
         assert_eq!(
             xdectoimax(b"0", 1, 2_147_483_647, NONE, what),
-            Err(format!("{what}: '0': Numerical result out of range"))
+            Err(format!("{what}: ‘0’: Numerical result out of range"))
         );
         assert_eq!(
             xdectoimax(b"2147483648", 1, 2_147_483_647, NONE, what),
             Err(format!(
-                "{what}: '2147483648': Value too large for defined data type"
+                "{what}: ‘2147483648’: Value too large for defined data type"
             ))
         );
         assert_eq!(
             xdectoimax(b"99999999999999999999", 1, 2_147_483_647, NONE, what),
             Err(format!(
-                "{what}: '99999999999999999999': Value too large for defined data type"
+                "{what}: ‘99999999999999999999’: Value too large for defined data type"
             ))
         );
         assert_eq!(
             xdectoimax(b"abc", 1, 9, NONE, what),
-            Err(format!("{what}: 'abc'"))
+            Err(format!("{what}: ‘abc’"))
         );
     }
 

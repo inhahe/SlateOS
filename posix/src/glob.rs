@@ -59,7 +59,51 @@ pub struct GlobT {
     pub gl_pathv: *mut *mut u8,
     /// Slots reserved at the front of `gl_pathv`.
     pub gl_offs: usize,
+    /// The 48 bytes of musl's `glob_t` past the three POSIX-visible fields.
+    ///
+    /// Never read or written.  In musl and glibc this space holds `gl_flags`
+    /// and the six `GLOB_ALTDIRFUNC` replacement-function pointers
+    /// (`gl_closedir`, `gl_readdir`, `gl_opendir`, `gl_lstat`, `gl_stat`, and
+    /// glibc's `gl_readdir64`/`gl_stat64` variants), none of which we
+    /// implement.  Present so `size_of::<GlobT>()` equals what `<glob.h>`
+    /// declares — see the assertion below.
+    _reserved: [u8; 48],
 }
+
+impl GlobT {
+    /// An empty glob result: no matches, no vector, no reserved slots.
+    ///
+    /// Constructed through this rather than with a struct literal so the
+    /// `_reserved` tail can track its header without touching a call site.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self {
+            gl_pathc: 0,
+            gl_pathv: core::ptr::null_mut(),
+            gl_offs: 0,
+            _reserved: [0; 48],
+        }
+    }
+}
+
+impl Default for GlobT {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Our `glob_t` is exactly the one the caller's `<glob.h>` reserved.
+///
+/// See `pthread.rs`'s module note for why this is a `const` rather than a
+/// `#[test]`.  All three fields we implement are the POSIX-visible ones and
+/// sit at the offsets glibc puts them at (0, 8, 16), so a caller reading
+/// `gl_pathc`, `gl_pathv` or `gl_offs` reads ours; the `_reserved` tail brings
+/// the object to musl's 72 bytes so that `globfree`-style by-value handling —
+/// or a caller that `memcpy`s its `glob_t` — moves our bytes and only ours.
+const _: () = {
+    assert!(size_of::<GlobT>() == 72, "musl/glibc glob_t is 72 bytes");
+    assert!(align_of::<GlobT>() <= 8);
+};
 
 // SAFETY: GlobT contains a raw pointer to heap-allocated path arrays.
 // Only one thread accesses the glob result at a time per POSIX.
@@ -553,6 +597,31 @@ fn sort_paths(ptrs: &mut [*mut u8; MAX_MATCHES], count: usize) {
 mod tests {
     use super::*;
 
+    // -- ABI layout --
+
+    /// `glob_t` is 72 bytes and its three POSIX-visible members sit where
+    /// glibc puts them: `gl_pathc` at 0, `gl_pathv` at 8, `gl_offs` at 16.
+    ///
+    /// This is the field-order test the *existing* `test_glob_t_initial`
+    /// could not be: that one only proved the three fields read back as
+    /// zero, which would still hold if they were reordered.  A caller
+    /// compiled against `<glob.h>` reads by offset, not by name.
+    ///
+    /// The size is also a `const` assertion above; this adds the offsets.
+    #[test]
+    fn test_glob_t_matches_glibc_layout() {
+        use core::mem::{align_of, size_of};
+        assert_eq!(size_of::<GlobT>(), 72, "musl/glibc glob_t is 72 bytes");
+        assert_eq!(align_of::<GlobT>(), 8);
+        let g = GlobT::new();
+        let base = (&raw const g).cast::<u8>() as usize;
+        assert_eq!((&raw const g.gl_pathc).cast::<u8>() as usize - base, 0);
+        assert_eq!((&raw const g.gl_pathv).cast::<u8>() as usize - base, 8);
+        assert_eq!((&raw const g.gl_offs).cast::<u8>() as usize - base, 16);
+        assert_eq!((&raw const g._reserved).cast::<u8>() as usize - base, 24);
+        assert_eq!(g._reserved, [0u8; 48]);
+    }
+
     // -- Flag constants match glibc --
 
     #[test]
@@ -582,11 +651,7 @@ mod tests {
 
     #[test]
     fn test_glob_t_initial() {
-        let g = GlobT {
-            gl_pathc: 0,
-            gl_pathv: core::ptr::null_mut(),
-            gl_offs: 0,
-        };
+        let g = GlobT::new();
         assert_eq!(g.gl_pathc, 0);
         assert!(g.gl_pathv.is_null());
         assert_eq!(g.gl_offs, 0);
@@ -734,11 +799,7 @@ mod tests {
 
     #[test]
     fn test_glob_null_pattern() {
-        let mut g = GlobT {
-            gl_pathc: 0,
-            gl_pathv: core::ptr::null_mut(),
-            gl_offs: 0,
-        };
+        let mut g = GlobT::new();
         let ret = unsafe { glob(core::ptr::null(), 0, None, &raw mut g) };
         assert_eq!(ret, GLOB_ABORTED);
     }
@@ -761,11 +822,7 @@ mod tests {
 
     #[test]
     fn test_globfree_empty() {
-        let mut g = GlobT {
-            gl_pathc: 0,
-            gl_pathv: core::ptr::null_mut(),
-            gl_offs: 0,
-        };
+        let mut g = GlobT::new();
         unsafe {
             globfree(&raw mut g);
         }
@@ -862,13 +919,12 @@ mod tests {
         assert!(should_skip_dot(b".\0".as_ptr(), b"?\0".as_ptr()));
     }
 
-    // -- GlobT struct size --
-
-    #[test]
-    fn test_glob_t_size() {
-        // On x86_64: usize(8) + ptr(8) + usize(8) = 24 bytes.
-        assert_eq!(core::mem::size_of::<GlobT>(), 24);
-    }
+    // -- GlobT struct size: see `test_glob_t_matches_glibc_layout` at the top
+    // of this module.  The `test_glob_t_size` that used to sit here asserted
+    // 24 bytes — "usize(8) + ptr(8) + usize(8)", which is the size of *our*
+    // three fields rather than the size `<glob.h>` declares.  A test written
+    // from our own definition can only ever agree with it; the contract it
+    // needed to check was against the header.
 
     // -- Flag combinations --
 

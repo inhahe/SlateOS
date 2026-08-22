@@ -314,6 +314,11 @@ fn make_compositor(width: u32, height: u32, refresh_hz: u32) -> Compositor {
     // and reload cannot come to disagree about where the settings live or what
     // a missing file means — which on a fresh install is simply the defaults.
     compositor.reload_appearance();
+    // And the user's double-click speed, for the same reason and on the same
+    // terms. Without this a user who set it would have to change something in
+    // Settings once per session before the machine honoured a choice it had
+    // already saved.
+    compositor.reload_input();
     eprintln!("compositor: initialized ({width}x{height} @ {refresh_hz}Hz)");
     compositor
 }

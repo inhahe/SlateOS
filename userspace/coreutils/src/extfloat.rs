@@ -203,10 +203,7 @@ impl ExtF80 {
                     ..ExtF80::INFINITY
                 }
             } else {
-                ExtF80 {
-                    neg,
-                    ..ExtF80::NAN
-                }
+                ExtF80 { neg, ..ExtF80::NAN }
             };
         }
         if biased == 0 {
@@ -240,10 +237,7 @@ impl ExtF80 {
                     ..ExtF80::INFINITY
                 }
             } else {
-                ExtF80 {
-                    neg,
-                    ..ExtF80::NAN
-                }
+                ExtF80 { neg, ..ExtF80::NAN }
             };
         }
         if biased == 0 {

@@ -27,6 +27,44 @@
 //! - **Barriers**: arrival counter with generation-based release.
 //! - **Spinlocks**: pure atomic CAS busy-wait.
 //!
+//! ## Why each opaque type carries a `const` size assertion
+//!
+//! `pthread_mutex_t` and friends are *opaque but complete*: C code never
+//! reads their fields, but it does put them on the stack and pass their
+//! address in, so the header's size is a hard contract.  If our definition
+//! is **larger** than the header's, `pthread_mutex_init` writes past the
+//! end of the caller's object and corrupts its frame — and nothing on the
+//! Rust side can notice, because every Rust caller shares our definition
+//! and so agrees with itself.  The two halves are compiled from different
+//! headers in different languages; no single diff contains both.
+//!
+//! That is not hypothetical.  `posix_spawn_file_actions_t` was 4624 bytes
+//! against an 80-byte header, and it took a ring-3 crash in GNU make to
+//! find it (see `spawn.rs` and known-issues.md).  Its sibling
+//! `posix_spawnattr_t` had a size test and was correct.
+//!
+//! So the bound below is asserted at **compile** time, not in a `#[test]`
+//! that has to be run to help.
+//!
+//! ### `<=` here, `==` in semaphore.rs / regex.rs / glob.rs
+//!
+//! `<=` is the exact *safety* property: oversized always smashes the
+//! caller's frame, undersized never can — we simply use less of the slot
+//! than the caller reserved.  The four pthread types below are genuinely
+//! smaller than their headers (a futex word or two against musl's 40–56)
+//! and no `_reserved` tail is added, because unlike `sem_t` these are never
+//! copied: POSIX leaves it undefined to move an initialised
+//! `pthread_mutex_t`/`_cond_t`/`_rwlock_t`/`_barrier_t` at all, so a
+//! by-value copy is already wrong whatever the size.  `<=` states what
+//! matters for them and keeps firing if a field is ever added.
+//!
+//! Where an explicit `_reserved` tail *is* carried — `SemT`, `RegexT`,
+//! `GlobT`, and `PosixSpawnFileActionsT` — the assertion is tightened to
+//! `==`, which says strictly more: it catches a field *removal* as well as
+//! an addition, and a removal is what would silently shorten a by-value
+//! copy of one of those.  (See `TD-B-THREE-C-VISIBLE-TYPES-ARE-SMALLER-
+//! THAN-THEIR-HEADERS` in known-issues.md, now closed.)
+//!
 //! ## Features
 //!
 //! - Thread: `pthread_create`, `pthread_join`, `pthread_detach`,
@@ -123,6 +161,15 @@ pub struct PthreadMutexT {
     _pad: [u8; 24],
 }
 
+/// See the module note on why these are `const` and not `#[test]`.
+const _: () = {
+    assert!(
+        size_of::<PthreadMutexT>() <= 40,
+        "musl/glibc pthread_mutex_t"
+    );
+    assert!(align_of::<PthreadMutexT>() <= 8);
+};
+
 /// Pthread mutex attribute type (glibc x86_64: 4 bytes).
 pub type PthreadMutexattrT = [u8; 4];
 
@@ -137,6 +184,12 @@ pub struct PthreadCondT {
     // Padding to match typical libc struct size.
     _pad: [u8; 44],
 }
+
+/// See the module note on why these are `const` and not `#[test]`.
+const _: () = {
+    assert!(size_of::<PthreadCondT>() <= 48, "musl/glibc pthread_cond_t");
+    assert!(align_of::<PthreadCondT>() <= 8);
+};
 
 /// Pthread condition variable attribute type (glibc x86_64: 4 bytes).
 pub type PthreadCondattrT = [u8; 4];
@@ -1643,6 +1696,15 @@ pub struct PthreadRwlockT {
     _pad: [u8; 52],
 }
 
+/// See the module note on why these are `const` and not `#[test]`.
+const _: () = {
+    assert!(
+        size_of::<PthreadRwlockT>() <= 56,
+        "musl/glibc pthread_rwlock_t"
+    );
+    assert!(align_of::<PthreadRwlockT>() <= 8);
+};
+
 /// Pthread read-write lock attribute type.
 pub type PthreadRwlockattrT = [u8; 8];
 
@@ -2217,6 +2279,15 @@ pub struct PthreadBarrierT {
     /// Padding to reach glibc x86_64 size (32 bytes total).
     _pad: [u8; 20],
 }
+
+/// See the module note on why these are `const` and not `#[test]`.
+const _: () = {
+    assert!(
+        size_of::<PthreadBarrierT>() <= 32,
+        "musl/glibc pthread_barrier_t"
+    );
+    assert!(align_of::<PthreadBarrierT>() <= 8);
+};
 
 /// Pthread barrier attribute type (glibc x86_64: 4 bytes).
 pub type PthreadBarrierattrT = [u8; 4];

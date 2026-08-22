@@ -342,6 +342,7 @@ name = "appearance"
 version = "0.1.0"
 dependencies = [
  "guitk",
+ "settingsfile",
  "yamldoc",
 ]
 
@@ -1770,6 +1771,7 @@ dependencies = [
  "appearance",
  "guiremote",
  "guitk",
+ "inputsettings",
  "osfont",
 ]
 
@@ -2304,6 +2306,7 @@ dependencies = [
  "appearance",
  "guiremote",
  "guitk",
+ "inputsettings",
  "oswindow",
  "tzrules",
  "yamldoc",
@@ -4658,6 +4661,14 @@ name = "inotify"
 version = "0.1.0"
 
 [[package]]
+name = "inputsettings"
+version = "0.1.0"
+dependencies = [
+ "settingsfile",
+ "yamldoc",
+]
+
+[[package]]
 name = "insightly-cli"
 version = "0.1.0"
 
@@ -5666,6 +5677,7 @@ version = "0.1.0"
 name = "login"
 version = "0.1.0"
 dependencies = [
+ "authlib",
  "guitk",
  "userdb",
 ]
@@ -7744,6 +7756,7 @@ version = "0.1.0"
 name = "passwd"
 version = "0.1.0"
 dependencies = [
+ "authlib",
  "posix",
 ]
 
@@ -8142,6 +8155,7 @@ version = "0.1.0"
 name = "polkit"
 version = "0.1.0"
 dependencies = [
+ "authlib",
  "userdb",
 ]
 
@@ -9481,7 +9495,17 @@ name = "settings"
 version = "0.1.0"
 dependencies = [
  "appearance",
+ "compositor",
  "guitk",
+ "inputsettings",
+ "oswindow",
+]
+
+[[package]]
+name = "settingsfile"
+version = "0.1.0"
+dependencies = [
+ "yamldoc",
 ]
 
 [[package]]
@@ -10290,6 +10314,7 @@ version = "0.1.0"
 name = "su"
 version = "0.1.0"
 dependencies = [
+ "authlib",
  "userdb",
 ]
 
@@ -10305,6 +10330,7 @@ version = "0.1.0"
 name = "sudo"
 version = "0.1.0"
 dependencies = [
+ "authlib",
  "userdb",
 ]
 

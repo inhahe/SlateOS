@@ -1,80 +1,64 @@
 #!/usr/bin/env python3
-"""Build and verify the `services/ctest-*` ring-3 fixtures by *content*.
+"""Build the 70 ring-3 fixture ELFs on demand, and verify what the image ships.
 
-Each fixture is a small C program checked into git twice: once as `main.c`
-and once as the compiled `ctest-<name>.elf` that the boot test actually runs.
-Tracking the binary is deliberate — the boot test has to work on a machine
-with no zig/WSL toolchain to rebuild it — but it creates an invariant that git
-does not enforce: *this ELF was built from that source, against that libc*.
+Each fixture is a small program — a C one under `services/ctest-*`, a Python
+one under `services/fastpy-*` — compiled against `toolchain/sysroot/lib/libc.a`
+and run by the boot test in ring 3. The compiled ELF is a **build output**: it
+is gitignored, and this script rebuilds any that is missing or older than its
+inputs.
 
-Nothing enforced it, and it broke. On 2026-08-16 commit `6c89903d0` added 236
-lines to `services/ctest-jobctl/main.c` (33 new `waitid` checks) without the
-rebuilt ELF, and every boot test still passed, because each worktree happened
-to hold a locally-rebuilt binary that was never staged. All nine tracked ELFs
-were simultaneously ~19,400 bytes behind the current `libc.a`. See
-`known-issues.md` ->
-`B-THE-TRACKED-FIXTURE-BINARIES-DRIFT-FROM-THEIR-SOURCES`.
+Why the ELFs are not in git (design-decisions.md §355)
+------------------------------------------------------
+They were, until 2026-08-21, on the argument that the boot test must work on a
+machine with no toolchain. That created an invariant git cannot enforce —
+*this ELF was built from that source, against that libc* — because `libc.a` is
+itself a gitignored build output. Git could not see the dependency, so it never
+reported a binary as behind, and five separate incidents came from that.
 
-Why not timestamps
-------------------
-`scripts/create-ext4-rootfs.sh` already compares each ELF's **mtime** against
-`libc.a`'s. That is the right question for a build directory and the wrong one
-here, for two independent reasons:
+The measurement that ended it: the stamp machinery described below covered 9 of
+the 70 fixtures, and of the 61 unguarded ones **60 were stale in the tree at
+once**. The drift was not an occasional accident that a gate could catch, it was
+the steady state; the nine stamped fixtures were merely the only ones anybody
+could see. Meanwhile the stated cost of building on demand was not real — the
+kernel already `include_bytes!`s an untracked build output
+(`services/netstack/target/.../netstack`), so a toolchain was already mandatory
+— and rebuilding all 70 from cold takes about a minute.
 
-1. It reads the working tree, so rebuilding locally silences it permanently —
-   without anything reaching the index. Git stays exactly as stale as it was
-   while every local check reports green. That is how this drifted twice
-   before (`06d6d1f69`, `94d036ee2` are the same relink, done and undone).
-2. **A fresh checkout destroys the information it depends on.** `git clone`
-   stamps every file with the checkout time, so `main.c`, `libc.a` and the ELF
-   are all the same age and there is no ordering left to compare. In a clean
-   clone — CI, a new machine, the operator's next `git clone` — the mtime gate
-   is not merely weak, it is silent.
+What the guard became
+---------------------
+The old question was *provenance*: "does this stored binary still match its
+inputs?" That question needs a stored binary to be about, and there is not one.
+The replacement question is *completeness*, and it exists because of how a
+missing fixture fails: `load_test_elf()` returns `None` for a fixture that is
+not on the image and the self-test **self-skips**, so a short `/tests` runs
+fewer tests and still reports PASS. Under the old arrangement reaching that
+state took a deliberate deletion; now it takes a forgotten build. So
+`create-ext4-rootfs.sh` counts the tracked `build.py` recipes against the ELFs
+present and refuses to pack a short image.
 
-So the stamp is a content hash, which survives a checkout because it does not
-depend on the filesystem's opinion of time.
+`is_stale` uses mtime, which this script's own history argued at length against
+-------------------------------------------------------------------------------
+That argument was correct about committed files and does not survive them. It
+ran: (1) mtime reads the working tree, so a local rebuild nobody commits
+silences it permanently while git stays stale; and (2) a fresh checkout stamps
+every file with one time, leaving no ordering to compare, so in a clean clone
+the mtime gate is not weak but *silent*.
 
-What is hashed
---------------
-Inputs are `build.py`, `main.c`, and the `toolchain/sysroot/lib/libc.a` that
-was linked in. `build.py` is included because it *is* the compile and link
-flags — hashing it means a change to `-O2`, the code model, or the entry
-symbol invalidates the fixture exactly as a source edit does, with no separate
-list of flags to keep in sync. The output ELF is hashed too, so a corrupted or
-hand-substituted binary is caught even when every input matches.
+Both premises were about a **tracked** ELF. Point (1) needs an index the binary
+can be stale in; there is no longer one. Point (2) needs the ELF to be present
+in a fresh clone in order to be wrongly judged fresh; it is now absent, which
+`is_stale` detects perfectly. Git also no longer writes these files, which
+removes the other half of the problem — a `checkout` or `merge` used to reorder
+a committed ELF against its inputs with nothing having really changed, and that
+false STALE is what once blocked an image build across all three lanes.
 
-Text inputs are hashed with CRLF folded to LF (stamp format **v2**)
-------------------------------------------------------------------
-The same argument that rules out mtimes rules out hashing a *text* file's raw
-worktree bytes, and for a while this script did exactly that. A raw byte hash
-of `build.py` is a property of the worktree that produced it, not of the
-commit: this repo sets `core.autocrlf=input`, which normalises on commit but
-does not convert on checkout, so any Windows tool that rewrites the file in
-text mode leaves CRLF behind and git still reports it clean. Two worktrees of
-the *same commit* then hold byte-different sources, and the nine stamps written
-in one report all nine fixtures STALE in the other.
-
-That is not hypothetical — it is why v2 exists (2026-08-16): every fixture
-failed in the integration worktree immediately after a merge in which nothing
-about them had changed. Since `create-ext4-rootfs.sh` exits 1 on a stamp
-mismatch, a false STALE blocks the image build on every machine except the one
-that wrote the stamp, and its only escape hatch (`ALLOW_STALE_FIXTURES=1`)
-switches off the genuine check alongside it. See `sha256_text` for why folding
-is sound rather than merely convenient, and why `libc.a` and the ELF are still
-hashed byte-for-byte.
-
-A v1 stamp is reported as a **format** mismatch, not as drift, and there is no
-compatibility path: v1 and v2 hashes were computed under different rules, so
-comparing them could only produce an unfounded accusation.
-
-A missing stamp is a FAILURE, not a skip
-----------------------------------------
-`check` fails on a fixture that has no `.stamp`. This is the whole reason the
-driver globs `services/ctest-*/` instead of naming the nine directories: a
-tenth fixture is picked up automatically, and if it somehow is not stamped,
-the rootfs build fails loudly on its first run rather than quietly covering
-eight of nine. Defaulting an unrecognised artifact to "pass" is the failure
-mode `B-PATHZ-PREREQUISITE-SKIPS-ARE-SILENT` is named after.
+So the content hashes are gone for the fixtures and kept for the two artifacts
+that are still stored: the image manifest and the sysroot stamp. Both are below,
+and `sha256_text`'s CRLF-folding rule still applies to them for the reason it was
+introduced (2026-08-16): this repo sets `core.autocrlf=input`, which normalises
+on commit but does not convert on checkout, so a raw byte hash of a text file is
+a property of the worktree rather than of the commit, and two checkouts of the
+same commit would disagree.
 
 The image is the third place the same drift hides
 -------------------------------------------------
@@ -113,25 +97,28 @@ about a stale input. Three separate requests record this happening
 lane-c-and-wrong-on-main`, `a-b-ctest-fixture-elfs-and-stamps-are-stale-
 against-the-current-libc`), the third of them naming exactly this trap.
 
-So `check` now runs `sysroot_staleness()` first and fails on it, before any
-per-fixture verdict — the per-fixture `ok` lines would otherwise read as a
-clean bill of health for a set nobody can vouch for. This is the one guard
-here that uses mtime rather than a content hash, because the question is an
-ordering ("was this built after that was edited"), which a hash of a file the
-stamps do not track cannot answer.
+So `build` resolves the sysroot *first* and, since §355, **rebuilds it** rather
+than advising you to. That closes the sharpest edge of the old design, which
+lane A hit on 2026-08-21: the gate held one hash, could not tell which of the
+two sides had moved, and therefore printed "rebuild the fixture" in the case
+where the correct remedy was "rebuild the sysroot". Following it would have
+relinked all nine fixtures against a stale libc and recreated incident #2 by
+hand. A build step never faces that question — it rebuilds whatever is behind,
+in dependency order, and which side moved stops mattering.
 
 Usage
 -----
-    python scripts/ctest-fixtures.py check          # verify, exit 1 on drift
-    python scripts/ctest-fixtures.py build          # rebuild all, then stamp
+    python scripts/ctest-fixtures.py build          # build what is missing/stale
+    python scripts/ctest-fixtures.py build --force  # rebuild everything
     python scripts/ctest-fixtures.py build --only jobctl
-    python scripts/ctest-fixtures.py stamp          # re-stamp without building
     python scripts/ctest-fixtures.py image-stamp    # after building rootfs.ext4
     python scripts/ctest-fixtures.py image-check    # before booting it
+    python scripts/ctest-fixtures.py sysroot-check  # is libc.a behind posix/src?
 
 `build` needs zig and the fastpy `compiler` package importable (each fixture's
-own `build.py` documents this); `check` and `stamp` need neither, so the gate
-runs anywhere.
+own `build.py` documents this), so it must run from Windows rather than from
+inside WSL. The `image-*` and `sysroot-*` commands need neither and run anywhere
+the image is built.
 
 You do not normally have to arrange the import yourself: `build` looks for a
 fastpy checkout beside the repo root (and honours `$FASTPY_DIR`) and puts it on
@@ -163,8 +150,11 @@ from __future__ import annotations
 import argparse
 import hashlib
 import os
+import re
+import shutil
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 # Never let an un-encodable character eat the output.
@@ -205,13 +195,56 @@ LIBC = REPO / "toolchain" / "sysroot" / "lib" / "libc.a"
 # *that file*, so a libc.a built before it is wrong even with identical sources.
 #
 # Kept in step with the `SYSROOT_STALE` block in scripts/create-ext4-rootfs.sh,
-# which falls back to these same four roots when python is unavailable.
-SYSROOT_ROOTS = (
+# which falls back to these same roots when python is unavailable.
+#
+# `libc.a` is the `posix` crate's staticlib, so its sources are the crate *and
+# its path dependencies* — `tzrules` today, whatever is added tomorrow. Those
+# are read out of `posix/Cargo.toml` rather than listed here, because a listed
+# dependency is one a future `path = "../foo"` silently opts out of. This is the
+# same reasoning as globbing the fixture recipes instead of enumerating them
+# (design-decisions.md §355), applied to the one input that most recently proved
+# it: `tzrules` was missing from this tuple for as long as it existed, and could
+# have moved `libc.a` with nothing under `posix/src` being touched at all. The
+# only thing that had noticed was a comment in `scripts/stamp-ancestry.py`,
+# which listed it correctly and was the reason it was found.
+_STATIC_SYSROOT_ROOTS = (
     "posix/src",
     "posix/Cargo.toml",
     "toolchain/stubs",
     "toolchain/build-sysroot.ps1",
 )
+
+
+def _posix_path_deps() -> tuple[str, ...]:
+    """Repo-relative source dirs of every `path = "..."` dependency of `posix`.
+
+    Deliberately a regex over the manifest text rather than a TOML parse: this
+    module must run on a stock interpreter with no third-party packages, and
+    `tomllib` is 3.11+. A dependency this misses is a dependency the stamp does
+    not cover, so the pattern is kept broad — any `path = "…"` in the file,
+    whichever table it is under, since every table that can carry one
+    (`[dependencies]`, `[build-dependencies]`, `[target.…]`) can affect the
+    library that comes out.
+    """
+    manifest = REPO / "posix" / "Cargo.toml"
+    try:
+        text = manifest.read_text(encoding="utf-8")
+    except OSError:
+        return ()
+    found: list[str] = []
+    for raw in re.findall(r'path\s*=\s*"([^"]+)"', text):
+        dep = (manifest.parent / raw).resolve()
+        try:
+            rel = dep.relative_to(REPO).as_posix()
+        except ValueError:
+            continue  # outside the repo; not ours to hash
+        for sub in (f"{rel}/src", f"{rel}/Cargo.toml"):
+            if (REPO / sub).exists():
+                found.append(sub)
+    return tuple(sorted(set(found)))
+
+
+SYSROOT_ROOTS = _STATIC_SYSROOT_ROOTS + _posix_path_deps()
 SYSROOT_STAMP = REPO / "toolchain" / "sysroot" / ".sysroot.stamp"
 
 # Suffixes hashed with CRLF folded to LF. Anything else is hashed raw. The
@@ -252,29 +285,24 @@ STAGED_GLOBS = (
     "build/spike/*.zip",
 )
 
-STAMP_VERSION = 3
-_HEADER = (
-    "# ctest fixture input stamp - generated by scripts/ctest-fixtures.py\n"
-    "# Records the inputs that produced this ELF, so a source change committed\n"
-    "# without its rebuilt binary is detectable by content. Timestamps cannot\n"
-    "# do this: a fresh checkout gives every file the same mtime.\n"
-    "# Text inputs are hashed with CRLF folded to LF (version 2); binary ones\n"
-    "# byte-for-byte. See `sha256_text` for why.\n"
-    "# Version 3 adds `builder` lines: the out-of-tree compiler and linker,\n"
-    "# which decide the ELF's bytes but live in no commit. See `builder_record`.\n"
-    "# Regenerate with: scripts/ctest-fixtures.py build\n"
-    "#   (run it with `python` on Windows, `python3` under WSL/Linux)\n"
-)
-
-# The last format whose *in-tree* hashes are computed by the same rules as the
-# current one. A stamp at or above this version can be compared field-by-field
-# against a fresh `compute()`; below it, the two sides were never comparable and
-# a STALE verdict would be an unfounded accusation (see `cmd_check`).
-COMPARABLE_FROM = 2
-
-# The other two stamps this script writes have their own formats and their own
-# lifecycles, and must NOT ride on `STAMP_VERSION`. They did, and bumping it to
-# 3 broke both at once in a way that is worth recording, because the failure is
+# There used to be a third stamp here: a per-fixture record of the inputs that
+# produced each committed ELF, so that a source change committed without its
+# rebuilt binary was detectable by content. design-decisions.md §355 retired it
+# along with the committed binary it described — with the ELF built on demand
+# there is no artifact whose provenance needs asserting, and the question the
+# stamp answered ("does this stored binary match its inputs?") has no subject.
+#
+# What went with it is worth naming, because it was not dead weight: the stamp
+# could see a *content* change that mtime cannot, and the format-version dance
+# below exists because that precision was hard-won. The replacement is coarser
+# on purpose. `is_stale` asks only "is the output older than its inputs", which
+# is a weaker question — but it is asked about a file that git never writes and
+# that is absent rather than wrong in a fresh clone, which is exactly the
+# situation mtime handles well and the one the stamp was invented to survive.
+#
+# The two stamps that remain have their own formats and their own lifecycles,
+# and must NOT share a version constant. They once did, and bumping it broke
+# both at once in a way that is worth recording, because the failure is
 # invisible until you look:
 #
 #   * `sysroot_staleness()` diffs the on-disk sysroot stamp against a fresh
@@ -337,241 +365,93 @@ def sha256_text(path: Path) -> str:
 
 
 def fixtures() -> list[Path]:
-    """Every `services/ctest-*/` holding a `build.py`, sorted for stable output.
+    """Every fixture directory holding a `build.py`, sorted for stable output.
+
+    Both families: the nine `services/ctest-*` C fixtures and the 61
+    `services/fastpy-*` ones. They were separate populations only because the
+    C nine were the ones carrying stamps; with the ELFs no longer stored in git
+    (design-decisions.md §355) there is one job — build what is missing — and it
+    is the same job for both. Keeping them separate is what let 60 of the 61
+    fastpy fixtures sit stale with nothing able to notice.
 
     Globbed rather than listed so a new fixture is covered the day it lands.
     """
-    return sorted(d for d in SERVICES.glob("ctest-*") if (d / "build.py").is_file())
+    found = [d for d in SERVICES.glob("ctest-*") if (d / "build.py").is_file()]
+    found += [d for d in SERVICES.glob("fastpy-*") if (d / "build.py").is_file()]
+    return sorted(found)
 
 
 def elf_of(fixture: Path) -> Path:
     return fixture / f"{fixture.name}.elf"
 
 
-def stamp_of(fixture: Path) -> Path:
-    return fixture / f"{fixture.name}.stamp"
-
-
 def _inputs(fixture: Path) -> list[tuple[str, Path, bool]]:
-    """The files whose content determines the ELF, in stamp order.
+    """The files whose content determines the ELF.
 
     `build.py` stands in for the compile/link flags, which live nowhere else.
+    `main.c` exists only for the C fixtures — a fastpy fixture's source is
+    embedded in its `build.py` — so it is included only when present rather
+    than reported as a missing input. Headers beside it are *globbed* rather
+    than named: no fixture has one today, but `create-ext4-rootfs.sh` already
+    counts `*.h` as an input, and a builder blind to something its own gate
+    rejects would leave the first fixture to grow a header permanently red —
+    reported on every image build and not fixable by the command the report
+    names. Where a gate and a builder disagree about what an input is, the
+    builder must be the more inclusive of the two.
 
     The third element is "this is text": true for tracked sources, whose line
     endings differ between worktrees without differing between commits, and
     false for `libc.a`, which is a build product where every byte counts.
-    Getting this flag *wrong in the false direction* would make the stamp
-    unreproducible again; wrong in the true direction would let a real
-    single-byte change hide, but only if that byte were a `\\r` immediately
-    before a `\\n` in a binary — see `sha256_text`.
+    Getting this flag *wrong in the false direction* would make the comparison
+    unreproducible; wrong in the true direction would let a real single-byte
+    change hide, but only if that byte were a `\\r` immediately before a `\\n`
+    in a binary — see `sha256_text`.
     """
-    return [
-        ("build.py", fixture / "build.py", True),
-        ("main.c", fixture / "main.c", True),
-        ("toolchain/sysroot/lib/libc.a", LIBC, False),
-    ]
+    got: list[tuple[str, Path, bool]] = [("build.py", fixture / "build.py", True)]
+    main_c = fixture / "main.c"
+    if main_c.is_file():
+        got.append(("main.c", main_c, True))
+    for header in sorted(fixture.glob("*.h")):
+        got.append((header.name, header, True))
+    got.append(("toolchain/sysroot/lib/libc.a", LIBC, False))
+    return got
 
 
-def _tool_version(exe: Path, args: list[str]) -> str | None:
-    """A tool's self-reported version, as one whitespace-collapsed line.
+def is_stale(fixture: Path) -> str | None:
+    """Why `fixture` needs rebuilding, or `None` if its ELF is current.
 
-    Collapsed because `rust-lld --version` prints its LLVM banner with layout
-    that varies between hosts, and a stamp field that differs by whitespace is
-    a false STALE waiting to happen — the same failure `sha256_text` exists to
-    prevent, one level up.
-
-    Returns `None` on any failure. The caller treats an unanswerable version as
-    "the builder record could not be taken", which is reported, never silently
-    dropped.
+    An ordering test on mtime, which is the right instrument again now that the
+    ELFs are build outputs rather than committed files. The long-standing
+    objection to mtime here — recorded at length on `sysroot_staleness` — was
+    that git writes files it has not edited, so a `checkout` or `merge` could
+    make a *committed* ELF look stale or fresh at random. That objection dies
+    with the committed ELF: git no longer writes these files at all, and the
+    case mtime was genuinely blind to (a fresh clone, where every file shares
+    one timestamp) is now the case it detects best, because in a fresh clone
+    the ELF is simply absent.
     """
-    try:
-        result = subprocess.run(
-            [str(exe), *args], capture_output=True, text=True, timeout=60, check=False
-        )
-    except (OSError, subprocess.SubprocessError):
-        return None
-    if result.returncode != 0:
-        return None
-    out = (result.stdout or result.stderr or "").strip()
-    return " ".join(out.split()) or None
-
-
-def _fastpy_toolchain():
-    """fastpy's `compiler.toolchain` module, or `None` if it is not importable.
-
-    Deliberately soft. `check` and `stamp` are documented to run on a machine
-    with no zig and no fastpy — that is the point of tracking the ELFs in git at
-    all — so requiring the import here would turn the gate off exactly where it
-    is the only gate there is. What the absence must *not* do is pass quietly;
-    see `cmd_check`'s unverified notice.
-
-    Locating fastpy is `_fastpy_dir`'s job, not `PYTHONPATH`'s. Those were
-    written on different branches for the same problem and only met at a merge:
-    `cmd_build` already found the sibling checkout automatically while this
-    function still demanded the caller export `PYTHONPATH`, so `check` printed
-    "this machine cannot resolve them" on every worktree here — each of which
-    sits next to `fastpy` and could have resolved them all along. An unverified
-    notice that fires when verification was in fact available is worse than no
-    notice: it teaches its reader that the line means nothing.
-    """
-    try:
-        from compiler import toolchain  # noqa: PLC0415  (optional dependency)
-    except Exception:  # noqa: BLE001 - any import failure means "not available"
-        pass
-    else:
-        return toolchain
-
-    # Not on the path as launched. Ask the same finder `cmd_build` uses.
-    found = _fastpy_dir()
-    if found is None:
-        return None
-    sys.path.insert(0, str(found))
-    try:
-        from compiler import toolchain  # noqa: PLC0415  (optional dependency)
-    except Exception:  # noqa: BLE001 - any import failure means "not available"
-        return None
-    return toolchain
-
-
-def builder_record() -> tuple[list[str], str | None]:
-    """The out-of-tree tools that decide the ELF's bytes, as stamp lines.
-
-    Returns `(lines, unavailable_reason)`. Exactly one of the two is non-empty.
-
-    Why this exists
-    ---------------
-    Every input in `_inputs` is a file in this repository, and the stamp's claim
-    has always been "this ELF was built from those". It never was: `build.py`
-    shells out to `zig cc` and then to `compiler.toolchain._link_slateos`, and
-    *those* choose the entry symbol, the ELF flavor, the static/no-PIE link, the
-    target triple and the archive search order. Both live outside the tree, in a
-    separately developed project. Change `_link_slateos` and every committed ELF
-    silently stops being reproducible from the inputs its stamp names, while
-    every stamp still verifies — because the thing that moved was never
-    recorded. Lane C named this shape: a proof stated in terms of a set of
-    inputs it also chose, with nothing auditing the set
-    (`requests/c-a-the-staleness-detector-has-no-caller.md`, ask 3).
-
-    Why a hash of `toolchain.py` and not fastpy's version
-    -----------------------------------------------------
-    fastpy's own rule is that its version bumps on every observable change, so
-    the version *is* a stable identifier — but the rule is prose, enforced by
-    whoever remembers it, not by the build. A pin reading `0.1.0` proves that
-    somebody bumped, not that the file is unchanged. For a stamp whose entire
-    job is "prove this artifact matches its inputs", a hash is the honest
-    answer and a version string is a promise about a hash.
-
-    The accepted cost: the gate goes STALE when fastpy edits `toolchain.py` for
-    *any* reason, including ones nowhere near `_link_slateos`. That is correct
-    anyway. If the linker recipe changed, the committed ELF genuinely is no
-    longer reproducible from current inputs and "rebuild" genuinely is the
-    repair. The whole bug class this file documents exists because the tree kept
-    choosing silence over noise.
-
-    Why the two binaries are versions rather than hashes
-    ---------------------------------------------------
-    `rust-lld` and `zig` are ~50-100 MB each and are *installed*, not committed:
-    their bytes differ between machines that are running the same release, so
-    hashing them would report drift on every second worktree — the `sha256_text`
-    mistake again, at toolchain scale. Their self-reported versions are the
-    coarsest identifier that still changes when their behaviour does.
-    """
-    toolchain = _fastpy_toolchain()
-    if toolchain is None:
-        return [], "fastpy's `compiler` package is not importable here"
-
-    src = Path(getattr(toolchain, "__file__", "") or "")
-    if not src.is_file():
-        return [], "fastpy's `compiler.toolchain` has no readable source file"
-
-    lld = toolchain._find_rust_lld()
-    if lld is None:
-        return [], "rust-lld could not be located (fastpy's `_find_rust_lld` found nothing)"
-    lld_ver = _tool_version(lld, ["-flavor", "gnu", "--version"])
-    if lld_ver is None:
-        return [], f"rust-lld at {lld} would not report a version"
-
-    zig = toolchain._find_zig_cc()
-    if zig is None:
-        return [], "zig could not be located (fastpy's `_find_zig_cc` found nothing)"
-    zig_ver = _tool_version(zig, ["version"])
-    if zig_ver is None:
-        return [], f"zig at {zig} would not report a version"
-
-    # Sorted by label, like `_sysroot_inputs`, so the record is byte-identical
-    # for the same toolchain regardless of the order this function grew in.
-    return [
-        f"builder compiler.toolchain sha256 {sha256_text(src)}\n",
-        f"builder rust-lld version {lld_ver}\n",
-        f"builder zig version {zig_ver}\n",
-    ], None
-
-
-def compute(fixture: Path) -> tuple[str, list[str]]:
-    """Return (stamp text, missing-file descriptions) for `fixture`.
-
-    Missing files are reported rather than raising, so `check` can say *which*
-    piece is absent instead of dying on the first one.
-
-    The `version` field states what the stamp actually *contains*: v3 only when
-    the builder record was taken, v2 when it could not be. That is what keeps
-    the format unambiguous — a v3 stamp always carries the linker identity, so
-    `check` never has to guess whether an absent `builder` line means "old
-    format" or "written on a machine that could not look". A silently-incomplete
-    v3 would be the same silent pass this whole file is about.
-    """
-    missing: list[str] = []
-    builder, _why = builder_record()
-    version = STAMP_VERSION if builder else COMPARABLE_FROM
-    lines = [_HEADER, f"version {version}\n"]
-    for label, path, is_text in _inputs(fixture):
-        if not path.is_file():
-            missing.append(f"missing input {label} ({path})")
-            continue
-        digest = sha256_text(path) if is_text else sha256(path)
-        lines.append(f"input  {label} sha256 {digest}\n")
-    lines.extend(builder)
     elf = elf_of(fixture)
     if not elf.is_file():
-        missing.append(f"missing output {elf.name} ({elf})")
-    else:
-        lines.append(f"output {elf.name} sha256 {sha256(elf)} size {elf.stat().st_size}\n")
-    return "".join(lines), missing
+        return "no ELF"
+    try:
+        built = elf.stat().st_mtime
+    except OSError as exc:  # pragma: no cover - racing filesystem
+        return f"cannot stat ELF ({exc})"
+    behind = []
+    for label, path, _is_text in _inputs(fixture):
+        try:
+            if path.stat().st_mtime > built:
+                behind.append(label)
+        except OSError:
+            # A missing input is the build's problem to report, not ours; it
+            # is not evidence about the ELF's freshness either way.
+            continue
+    return f"older than {', '.join(behind)}" if behind else None
 
 
 def _body(text: str) -> list[str]:
     """Comment-stripped, blank-stripped lines — what actually gets compared."""
     return [ln for ln in text.splitlines() if ln.strip() and not ln.startswith("#")]
-
-
-def _without_builder(text: str) -> str:
-    """`text` with its `builder` lines and its `version` field removed.
-
-    Used to compare a v2 stamp against a v3 computation, or a v3 stamp against a
-    machine that cannot resolve the toolchain. The `version` line goes too: it
-    is the one field guaranteed to differ in exactly the case this is for, and
-    keeping it would turn every such comparison into a reported drift of the
-    field that says why the comparison was narrowed.
-    """
-    keep = [
-        ln for ln in text.splitlines()
-        if not ln.startswith("builder ") and not ln.startswith("version ")
-    ]
-    return "\n".join(keep) + "\n"
-
-
-def _stamp_version(text: str) -> int:
-    """The `version` field of a stamp, or 0 if it has none.
-
-    0 rather than an exception: a stamp too malformed to state its own format
-    still has to produce a message a reader can act on, and "format v0" routes
-    to the same repair as any other unreadable format.
-    """
-    for ln in _body(text):
-        parts = ln.split()
-        if len(parts) == 2 and parts[0] == "version" and parts[1].isdigit():
-            return int(parts[1])
-    return 0
 
 
 def _describe_drift(recorded: str, actual: str) -> list[str]:
@@ -786,99 +666,6 @@ def _report_sysroot_staleness(mode: str, findings: list[str]) -> None:
         print("[ctest]         build-sysroot.ps1 writes the stamp and makes this check exact.)")
 
 
-def cmd_stamp(only: str | None) -> int:
-    rc = 0
-    for fixture in fixtures():
-        if only and only not in fixture.name:
-            continue
-        text, missing = compute(fixture)
-        if missing:
-            for m in missing:
-                print(f"[ctest] ERROR {fixture.name}: {m}")
-            rc = 1
-            continue
-        stamp_of(fixture).write_text(text, encoding="utf-8", newline="\n")
-        print(f"[ctest] stamped {fixture.name}")
-    return rc
-
-
-def cmd_check(only: str | None) -> int:
-    found = fixtures()
-    if not found:
-        print(f"[ctest] ERROR: no ctest fixtures found under {SERVICES}")
-        return 1
-    rc = 0
-    unverified: list[str] = []
-    _builder_lines, builder_why = builder_record()
-    have_builder = builder_why is None
-    # Before any per-fixture verdict, because a stale libc.a invalidates all of
-    # them at once and the per-fixture lines would otherwise read as a clean
-    # bill of health. Fatal, on the same grounds as a missing stamp above:
-    # "cannot vouch for this" must not exit 0.
-    mode, stale = sysroot_staleness()
-    if stale:
-        _report_sysroot_staleness(mode, stale)
-        rc = 1
-    for fixture in found:
-        if only and only not in fixture.name:
-            continue
-        stamp = stamp_of(fixture)
-        if not stamp.is_file():
-            # Deliberately fatal. An unstamped fixture is one we cannot make
-            # any statement about, and "cannot verify" must not read as "fine".
-            print(f"[ctest] ERROR {fixture.name}: no {stamp.name} - cannot verify this fixture.")
-            print("[ctest]        Build it so it gets stamped:")
-            print(f"[ctest]          {_self_cmd()} build --only {fixture.name}")
-            rc = 1
-            continue
-        actual, missing = compute(fixture)
-        if missing:
-            for m in missing:
-                print(f"[ctest] ERROR {fixture.name}: {m}")
-            rc = 1
-            continue
-        recorded = stamp.read_text(encoding="utf-8")
-        was = _stamp_version(recorded)
-        if was < COMPARABLE_FROM or was > STAMP_VERSION:
-            # Distinguished from STALE on purpose. A version mismatch means the
-            # hashes were computed under different rules, so "the ELF does not
-            # match its inputs" would be an unfounded accusation - the two sides
-            # were never comparable. Rebuilding is the sound repair either way,
-            # because it is the only step that re-establishes the claim rather
-            # than restating it.
-            print(f"[ctest] ERROR {fixture.name}: stamp is format v{was}, this script writes v{STAMP_VERSION}.")
-            print("[ctest]        The hashes are not comparable across formats; this is not evidence of drift.")
-            print("[ctest]        Rebuild to re-establish the stamp under the current rules:")
-            print(f"[ctest]          {_self_cmd()} build --only {fixture.name}")
-            rc = 1
-            continue
-        if was < STAMP_VERSION or not have_builder:
-            # v2 <-> v3 is a *compatibility path*, unlike v1 <-> v2: the in-tree
-            # hashes are computed identically, and v3 only adds fields. So the
-            # honest verdict is "everything both stamps can talk about agrees",
-            # not a format error - failing here would red the gate in all three
-            # lanes for a record nobody has had a chance to write yet.
-            #
-            # The same elision applies when the stamp *is* v3 but this machine
-            # cannot resolve the toolchain: the recorded lines stay in the stamp,
-            # they simply cannot be checked. Either way it is tallied and
-            # reported once at the end, never passed over in silence.
-            unverified.append(fixture.name)
-            recorded, actual = _without_builder(recorded), _without_builder(actual)
-        if _body(recorded) != _body(actual):
-            print(f"[ctest] ERROR {fixture.name}: STALE - the ELF does not match its inputs.")
-            for line in _describe_drift(recorded, actual):
-                print(f"[ctest]          {line}")
-            print("[ctest]        Rebuild it (do NOT re-stamp - that only records the drift):")
-            print(f"[ctest]          {_self_cmd()} build --only {fixture.name}")
-            rc = 1
-            continue
-        print(f"[ctest] ok {fixture.name}")
-    if unverified:
-        _report_unverified_builder(unverified, builder_why)
-    return rc
-
-
 def _fastpy_dir() -> Path | None:
     """The fastpy checkout whose `compiler` package each build.py imports.
 
@@ -924,42 +711,58 @@ def _fastpy_dir() -> Path | None:
     return sibling if usable(sibling) else None
 
 
-def _report_unverified_builder(names: list[str], why: str | None) -> None:
-    """Say, once, that the linker was not part of the verdict above.
+def _build_sysroot() -> bool:
+    """Rebuild `libc.a` from `posix/src`. True if it now exists and is current.
 
-    Once per run rather than once per fixture: nine identical lines would be
-    skimmed, and the condition is a property of the machine or of the stamp
-    generation, never of an individual fixture.
-
-    Deliberately a NOTE and not a failure. The repair - rebuilding nine ELFs
-    under `services/**` - belongs to lane B, and
-    `requests/a-c-fixture-rebuild-was-correct-on-lane-c-and-wrong-on-main.md`
-    is the standing rule that the wrong lane must not do it. A gate that fails
-    the build for something its reader is forbidden to fix is the same defect as
-    no gate at all, one step over. The line is loud enough to be acted on and
-    quiet enough not to block the two lanes that cannot act on it.
+    §355 promotes the sysroot check from advice into an action. The old gate
+    printed "rebuild in this order: build-sysroot.ps1, then build" and left the
+    reader to do it, which is where lane A's wrong-remedy incident came from:
+    the gate held one hash, could not tell which side had moved, and so had to
+    guess which of the two rebuilds to recommend. A build step never has to
+    guess — it rebuilds whatever is behind, in dependency order, and the
+    question of "which side moved" stops being one anybody has to answer.
     """
-    print(f"[ctest] NOTE: the compiler/linker was NOT verified for {len(names)} fixture(s).")
-    if why is not None:
-        print(f"[ctest]       This machine cannot resolve them: {why}.")
-        print("[ctest]       The in-tree inputs above were checked in full; the out-of-tree")
-        print("[ctest]       ones were not, so an ELF built by a different linker would pass here.")
-        print("[ctest]       To close it, run `check` with fastpy importable:")
-        print('[ctest]         PYTHONPATH="D:/visual studio projects/fastpy" '
-              f"{_self_cmd()} check")
+    script = REPO / "toolchain" / "build-sysroot.ps1"
+    if not script.is_file():
+        print(f"[ctest] ERROR: no {script.relative_to(REPO).as_posix()} to rebuild the sysroot with")
+        return False
+    for exe in ("powershell.exe", "powershell", "pwsh"):
+        found = shutil.which(exe)
+        if found:
+            break
     else:
-        print(f"[ctest]       Their stamps are format v{COMPARABLE_FROM}, which predates the")
-        print("[ctest]       `builder` record, so there is nothing recorded to compare against.")
-        print("[ctest]       Everything both formats describe agrees - this is not drift.")
-        print("[ctest]       A rebuild upgrades them and closes the gap:")
-        print(f"[ctest]         {_self_cmd()} build")
-    print(f"[ctest]       Affected: {', '.join(names)}")
+        print("[ctest] ERROR: libc.a needs rebuilding but no PowerShell was found to run")
+        print(f"[ctest]        {script.relative_to(REPO).as_posix()}. Run it from Windows, then re-run this.")
+        return False
+    print(f"[ctest] sysroot: rebuilding libc.a via {script.relative_to(REPO).as_posix()} ...")
+    result = subprocess.run(
+        [found, "-NoProfile", "-File", str(script)],
+        cwd=str(REPO),
+        timeout=3600,
+        check=False,
+    )
+    if result.returncode != 0:
+        print(f"[ctest] ERROR: build-sysroot.ps1 exited {result.returncode}")
+        return False
+    return LIBC.is_file()
 
 
-def cmd_build(only: str | None) -> int:
-    if not LIBC.is_file():
-        print(f"[ctest] ERROR: missing {LIBC}; run toolchain/build-sysroot.ps1 first")
-        return 1
+def cmd_build(only: str | None, force: bool = False) -> int:
+    # A stale libc.a is not a warning any more. Every fixture links it, so
+    # building against one that is behind produces 70 binaries that test a
+    # system this tree cannot build -- which is the whole of B-Q5. Fix it
+    # first, then build on top of a sysroot that matches the source.
+    if not LIBC.is_file() or sysroot_staleness()[1]:
+        if LIBC.is_file():
+            mode, stale = sysroot_staleness()
+            print(f"[ctest] sysroot: libc.a is behind {len(stale)} input(s) ({mode}); rebuilding before the fixtures.")
+        if not _build_sysroot():
+            return 1
+        mode, stale = sysroot_staleness()
+        if stale:
+            _report_sysroot_staleness(mode, stale)
+            print("[ctest] ERROR: libc.a is still behind after a rebuild; not building fixtures against it.")
+            return 1
     # Resolve fastpy before building anything. Without it every fixture dies
     # with `ModuleNotFoundError: No module named 'compiler'`, which names
     # neither fastpy nor PYTHONPATH -- nine identical tracebacks that read like
@@ -979,20 +782,19 @@ def cmd_build(only: str | None) -> int:
         f"{fastpy}{os.pathsep}{existing}" if existing else str(fastpy)
     )
     print(f"[ctest] fastpy: {fastpy}")
-    # Warning, not fatal, unlike `check`. Building against a stale libc.a is a
-    # real defect, but refusing to build would leave no way to rebuild the
-    # fixtures at all on a tree whose sysroot is behind - and the rebuild is
-    # step two of the very repair this message asks for. So say it loudly and
-    # proceed; `check` is where it stops the line.
-    mode, stale = sysroot_staleness()
-    if stale:
-        _report_sysroot_staleness(mode, stale)
-        print("[ctest] WARNING: building anyway - the ELFs below will link the stale libc.a.")
-    rc = 0
-    for fixture in fixtures():
-        if only and only not in fixture.name:
+    selected = [f for f in fixtures() if not only or only in f.name]
+    if not selected:
+        print(f"[ctest] ERROR: no fixture matches --only {only!r}" if only
+              else f"[ctest] ERROR: no fixtures found under {SERVICES}")
+        return 1
+    rc, built, skipped = 0, 0, 0
+    started = time.monotonic()
+    for fixture in selected:
+        why = "forced" if force else is_stale(fixture)
+        if why is None:
+            skipped += 1
             continue
-        print(f"[ctest] building {fixture.name} ...")
+        print(f"[ctest] building {fixture.name} ({why}) ...")
         result = subprocess.run(
             [sys.executable, str(fixture / "build.py")],
             capture_output=True,
@@ -1006,13 +808,15 @@ def cmd_build(only: str | None) -> int:
             print(result.stderr)
             rc = 1
             continue
+        built += 1
         print(f"[ctest]   {result.stdout.strip().splitlines()[-1] if result.stdout.strip() else 'built'}")
+    print(
+        f"[ctest] {built} built, {skipped} already current, "
+        f"{len(selected)} total in {time.monotonic() - started:.0f}s"
+    )
     if rc:
-        # Stamping after a partial build would record a mix of fresh and stale
-        # binaries as if all were fresh, which is worse than not stamping.
-        print("[ctest] not stamping: at least one build failed")
-        return rc
-    return cmd_stamp(only)
+        print("[ctest] ERROR: at least one fixture failed to build; the image would be short.")
+    return rc
 
 
 def _staged_artifacts() -> list[Path]:
@@ -1142,23 +946,24 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument(
         "command",
-        choices=("check", "build", "stamp", "image-stamp", "image-check", "sysroot-stamp", "sysroot-check"),
+        choices=("build", "image-stamp", "image-check", "sysroot-stamp", "sysroot-check"),
     )
     parser.add_argument("--only", help="substring of a fixture directory name, e.g. jobctl")
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help="rebuild every selected fixture, not just the ones whose inputs moved",
+    )
     args = parser.parse_args()
-    if args.command == "check":
-        return cmd_check(args.only)
     if args.command == "build":
-        return cmd_build(args.only)
+        return cmd_build(args.only, args.force)
     if args.command == "image-stamp":
         return cmd_image_stamp()
     if args.command == "image-check":
         return cmd_image_check()
     if args.command == "sysroot-stamp":
         return cmd_sysroot_stamp()
-    if args.command == "sysroot-check":
-        return cmd_sysroot_check()
-    return cmd_stamp(args.only)
+    return cmd_sysroot_check()
 
 
 if __name__ == "__main__":

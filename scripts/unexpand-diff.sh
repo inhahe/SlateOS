@@ -35,10 +35,12 @@
 # A directory operand (a Windows-host artefact, see the note at the bottom),
 # `--help` and `--version`, whose text is ours rather than the GNU project's.
 #
-# The locale is `C.UTF-8`, with the diagnostics that pass an argument through
-# gnulib's `quote()` referenced under `LC_ALL=C` so the quote marks are ASCII on
-# both sides — which is every tab-stop diagnostic and every getopt one. See
-# `open-questions.md` → B-Q2.
+# The locale is `C.UTF-8` throughout, including for the diagnostics that pass
+# an argument through gnulib's `quote()`. Those used to be referenced under
+# `LC_ALL=C`, because that was the only locale in which GNU's quote marks were
+# ASCII like ours; §351 made ours U+2018/U+2019 in every locale, which is what
+# GNU prints under any UTF-8 locale, so `C` is now the setting in which the
+# reference would be wrong.
 set -u
 
 # Our unexpand is a native Windows binary, so MSYS would rewrite an argument
@@ -169,12 +171,6 @@ report() {
 }
 
 run_case()  { [ "$HAVE_GNU" = yes ] || return 0; compare - C.UTF-8 "$@"; report "unexpand $*"; }
-# The diagnostics that pass an argument through gnulib's `quote()`. Under a
-# UTF-8 locale gnulib switches to U+2018/U+2019 and ours does not — one open
-# question, not one per case. See B-Q2. Every diagnostic `unexpand` can print
-# quotes something except `tab stop value is too large`, and running that one
-# under `C` too costs nothing.
-run_ascii() { [ "$HAVE_GNU" = yes ] || return 0; compare - C "$@"; report "unexpand $* [C]"; }
 run_stdin() {
   [ "$HAVE_GNU" = yes ] || return 0
   local input="$1"; shift
@@ -369,76 +365,76 @@ run_stdin 'a\xff        b\n' -a
 # --- operands that cannot be opened ------------------------------------------
 # The run continues and the status is 1 at the end, so the good file is still
 # converted.
-run_ascii nosuch.txt
-run_ascii ramp.txt nosuch.txt
-run_ascii nosuch.txt ramp.txt
-run_ascii nosuch.txt nosuch2.txt
-run_ascii -t3 ramp.txt nosuch.txt ramp.txt
+run_case nosuch.txt
+run_case ramp.txt nosuch.txt
+run_case nosuch.txt ramp.txt
+run_case nosuch.txt nosuch2.txt
+run_case -t3 ramp.txt nosuch.txt ramp.txt
 
 # --- tab-stop diagnostics ----------------------------------------------------
-run_ascii -t 0 ramp.txt
-run_ascii -t0 ramp.txt
-run_ascii -0 ramp.txt
-run_ascii -t 0,4 ramp.txt
-run_ascii -t 4,0 ramp.txt
-run_ascii -t 4,4 ramp.txt
-run_ascii -t 4,2 ramp.txt
-run_ascii -t 4 -t 2 ramp.txt
-run_ascii -4 -t 2 ramp.txt
-run_ascii -t 2 -4 ramp.txt
-run_ascii -4,2 ramp.txt
-run_ascii -t x ramp.txt
-run_ascii -t oops ramp.txt
-run_ascii -t 4,5x ramp.txt
-run_ascii -t 1x2 ramp.txt
-run_ascii -t=4 ramp.txt
-run_ascii --tabs=x ramp.txt
-run_ascii -t 1/2 ramp.txt
-run_ascii -t 1/2/3 ramp.txt
-run_ascii -t 1+2+3 ramp.txt
-run_ascii -t /2,/4 ramp.txt
-run_ascii -t +2,+4 ramp.txt
-run_ascii -t /2,+4 ramp.txt
-run_ascii -t 99999999999999999999999 ramp.txt
-run_ascii -t 18446744073709551616 ramp.txt
+run_case -t 0 ramp.txt
+run_case -t0 ramp.txt
+run_case -0 ramp.txt
+run_case -t 0,4 ramp.txt
+run_case -t 4,0 ramp.txt
+run_case -t 4,4 ramp.txt
+run_case -t 4,2 ramp.txt
+run_case -t 4 -t 2 ramp.txt
+run_case -4 -t 2 ramp.txt
+run_case -t 2 -4 ramp.txt
+run_case -4,2 ramp.txt
+run_case -t x ramp.txt
+run_case -t oops ramp.txt
+run_case -t 4,5x ramp.txt
+run_case -t 1x2 ramp.txt
+run_case -t=4 ramp.txt
+run_case --tabs=x ramp.txt
+run_case -t 1/2 ramp.txt
+run_case -t 1/2/3 ramp.txt
+run_case -t 1+2+3 ramp.txt
+run_case -t /2,/4 ramp.txt
+run_case -t +2,+4 ramp.txt
+run_case -t /2,+4 ramp.txt
+run_case -t 99999999999999999999999 ramp.txt
+run_case -t 18446744073709551616 ramp.txt
 # The obsolete form has its own overflow message — `tab stop value is too
 # large`, from `unexpand.c` rather than from the shared list parser, and it is
 # reached one digit at a time so it fires on the digit that overflows.
-run_ascii -99999999999999999999999 ramp.txt
-run_ascii -18446744073709551616 ramp.txt
-run_ascii -1,99999999999999999999999 ramp.txt
+run_case -99999999999999999999999 ramp.txt
+run_case -18446744073709551616 ramp.txt
+run_case -1,99999999999999999999999 ramp.txt
 # The largest *accepted* value, which nonetheless converts nothing: upstream
 # sizes its pending-blank buffer at `max_column_width` with `xmalloc`, so a
 # stop 2**64-1 columns wide is answered `memory exhausted` and status 1. Safe
 # to run as-is — this is the one place `unexpand` differs usefully from
 # `expand`, which would happily start emitting 2**64-1 spaces instead.
-run_ascii -t 18446744073709551615 ramp.txt
-run_ascii -18446744073709551615 ramp.txt
+run_case -t 18446744073709551615 ramp.txt
+run_case -18446744073709551615 ramp.txt
 # …and the allocation happens *after* the first operand opens, so a command
 # line that opens nothing never reaches it.
-run_ascii -t 18446744073709551615 nosuch.txt
-run_ascii -t 18446744073709551615 empty.txt
+run_case -t 18446744073709551615 nosuch.txt
+run_case -t 18446744073709551615 empty.txt
 
 # --- getopt diagnostics ------------------------------------------------------
-run_ascii -q ramp.txt
-run_ascii -aq ramp.txt
-run_ascii -qa ramp.txt
-run_ascii -t ramp.txt
-run_ascii -at
-run_ascii --tabs
-run_ascii --zz ramp.txt
-run_ascii --all=x ramp.txt
-run_ascii --first-only=x ramp.txt
-run_ascii --help=x ramp.txt
-run_ascii --version=x ramp.txt
-run_ascii --=x ramp.txt
-run_ascii -- -q
+run_case -q ramp.txt
+run_case -aq ramp.txt
+run_case -qa ramp.txt
+run_case -t ramp.txt
+run_case -at
+run_case --tabs
+run_case --zz ramp.txt
+run_case --all=x ramp.txt
+run_case --first-only=x ramp.txt
+run_case --help=x ramp.txt
+run_case --version=x ramp.txt
+run_case --=x ramp.txt
+run_case -- -q
 # A tab-stop diagnostic exits where it is found, so which of two errors gets
 # reported depends only on argv order.
-run_ascii -t x -q ramp.txt
-run_ascii -q -t x ramp.txt
-run_ascii -t 0 -q ramp.txt
-run_ascii -q -t 0 ramp.txt
+run_case -t x -q ramp.txt
+run_case -q -t x ramp.txt
+run_case -t 0 -q ramp.txt
+run_case -q -t 0 ramp.txt
 # Abbreviations, which the shipped parser did not accept at all.
 run_case --al ramp.txt
 run_case --a inner.txt
@@ -446,15 +442,15 @@ run_case --ta=3 ramp.txt
 run_case --tab=3 ramp.txt
 run_case --first ramp.txt
 run_case --f inner.txt
-run_ascii --t=3 ramp.txt
-run_ascii --al=3 ramp.txt
+run_case --t=3 ramp.txt
+run_case --al=3 ramp.txt
 
 # --- operands and options interleave -----------------------------------------
 run_case ramp.txt -t3
 run_case ramp.txt -a inner.txt
 run_case -t3 ramp.txt -a
-run_ascii -- -t3
-run_ascii ramp.txt -- -t3
+run_case -- -t3
+run_case ramp.txt -- -t3
 
 # --- differ on purpose -------------------------------------------------------
 # On SlateOS, and on any POSIX host, opening a directory succeeds and the *read*

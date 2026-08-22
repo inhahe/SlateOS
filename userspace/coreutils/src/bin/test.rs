@@ -526,10 +526,7 @@ impl Ctx {
                 });
             }
 
-            return Err(Fail(format!(
-                "{}: unknown binary operator",
-                quote(&opname)
-            )));
+            return Err(Fail(format!("{}: unknown binary operator", quote(&opname))));
         }
 
         let left = self.at(self.pos).to_vec();
@@ -543,10 +540,7 @@ impl Ctx {
             return Ok(left != right);
         }
         // `binop` admitted it, so one of the branches above must have taken it.
-        Err(Fail(format!(
-            "{}: unknown binary operator",
-            quote(&opname)
-        )))
+        Err(Fail(format!("{}: unknown binary operator", quote(&opname))))
     }
 
     fn unary_operator(&mut self) -> Answer {
@@ -639,8 +633,17 @@ fn is_dash_letter(arg: &[u8]) -> bool {
 fn binop(s: &[u8]) -> bool {
     matches!(
         s,
-        b"=" | b"!=" | b"==" | b"-nt" | b"-ot" | b"-ef" | b"-eq" | b"-ne" | b"-lt" | b"-le"
-            | b"-gt" | b"-ge"
+        b"=" | b"!="
+            | b"=="
+            | b"-nt"
+            | b"-ot"
+            | b"-ef"
+            | b"-eq"
+            | b"-ne"
+            | b"-lt"
+            | b"-le"
+            | b"-gt"
+            | b"-ge"
     )
 }
 
@@ -650,7 +653,10 @@ fn is_numeric_op(op: &[u8]) -> bool {
     if op.len() != 3 {
         return false;
     }
-    let (a, b) = (op.get(1).copied().unwrap_or(0), op.get(2).copied().unwrap_or(0));
+    let (a, b) = (
+        op.get(1).copied().unwrap_or(0),
+        op.get(2).copied().unwrap_or(0),
+    );
     ((a == b'l' || a == b'g') && (b == b'e' || b == b't'))
         || (a == b'e' && b == b'q')
         || (a == b'n' && b == b'e')
@@ -729,7 +735,11 @@ fn int_cmp(a: &[u8], b: &[u8]) -> Ordering {
         .len()
         .cmp(&b_digits.len())
         .then_with(|| a_digits.cmp(b_digits));
-    if a_neg { magnitude.reverse() } else { magnitude }
+    if a_neg {
+        magnitude.reverse()
+    } else {
+        magnitude
+    }
 }
 
 /// Split off the sign and the leading zeros and the trailing blanks, leaving
@@ -737,7 +747,11 @@ fn int_cmp(a: &[u8], b: &[u8]) -> Ordering {
 /// makes `-0 == 0` fall out.
 fn split_sign(s: &[u8]) -> (bool, &[u8]) {
     let neg = s.first() == Some(&b'-');
-    let mut d = if neg { s.get(1..).unwrap_or_default() } else { s };
+    let mut d = if neg {
+        s.get(1..).unwrap_or_default()
+    } else {
+        s
+    };
     while d.last().is_some_and(|c| matches!(c, b' ' | b'\t')) {
         d = d.get(..d.len().saturating_sub(1)).unwrap_or_default();
     }
@@ -1077,7 +1091,7 @@ mod tests {
     fn a_non_numeric_integer_operand_is_an_error_not_a_zero() {
         assert_eq!(status(&["abc", "-eq", "0"]), SYNTAX);
         assert_eq!(status(&["0", "-eq", "abc"]), SYNTAX);
-        assert_eq!(message(&["abc", "-eq", "0"]), "invalid integer 'abc'");
+        assert_eq!(message(&["abc", "-eq", "0"]), "invalid integer ‘abc’");
     }
 
     /// The other half: an operand that *is* numeric still compares.
@@ -1102,7 +1116,10 @@ mod tests {
         assert_eq!(status(&["5", "-lt", big]), TRUE);
         let bigger = "99999999999999999999999999999999";
         assert_eq!(status(&[bigger, "-gt", big]), TRUE);
-        assert_eq!(status(&[&format!("-{bigger}"), "-lt", &format!("-{big}")]), TRUE);
+        assert_eq!(
+            status(&[&format!("-{bigger}"), "-lt", &format!("-{big}")]),
+            TRUE
+        );
     }
 
     /// What counts as an integer: blanks and a sign yes, other bases no.
@@ -1171,7 +1188,7 @@ mod tests {
     fn two_arguments_that_are_not_an_operator_are_an_error() {
         assert_eq!(status(&["x", "y"]), SYNTAX);
         assert_eq!(status(&["-q", "foo"]), SYNTAX);
-        assert_eq!(message(&["-q", "foo"]), "'-q': unary operator expected");
+        assert_eq!(message(&["-q", "foo"]), "‘-q’: unary operator expected");
         // `--` is two characters after the dash, so it is not a unary operator.
         assert_eq!(status(&["--", "x"]), SYNTAX);
     }
@@ -1197,8 +1214,14 @@ mod tests {
     /// `'' = z` is false and would drag the whole thing down.
     #[test]
     fn and_binds_tighter_than_or() {
-        assert_eq!(status(&["x", "=", "x", "-o", "y", "=", "y", "-a", "", "=", "z"]), TRUE);
-        assert_eq!(status(&["", "=", "x", "-a", "x", "=", "x", "-o", "y", "=", "y"]), TRUE);
+        assert_eq!(
+            status(&["x", "=", "x", "-o", "y", "=", "y", "-a", "", "=", "z"]),
+            TRUE
+        );
+        assert_eq!(
+            status(&["", "=", "x", "-a", "x", "=", "x", "-o", "y", "=", "y"]),
+            TRUE
+        );
     }
 
     /// Neither connective short-circuits, so an error on the far side of an
@@ -1212,7 +1235,10 @@ mod tests {
 
     #[test]
     fn parentheses_group_and_nest() {
-        assert_eq!(status(&["(", "x", "=", "y", "-o", "y", "=", "y", ")"]), TRUE);
+        assert_eq!(
+            status(&["(", "x", "=", "y", "-o", "y", "=", "y", ")"]),
+            TRUE
+        );
         assert_eq!(status(&["(", "(", "x", "=", "x", ")", ")"]), TRUE);
         assert_eq!(status(&["!", "(", "x", "=", "x", ")"]), FALSE);
         assert_eq!(status(&["!", "(", "x", "=", "y", ")"]), TRUE);
@@ -1253,17 +1279,26 @@ mod tests {
     #[test]
     fn dash_l_is_refused_by_the_file_comparisons() {
         assert_eq!(status(&["-l", "abc", "-ef", "x"]), SYNTAX);
-        assert_eq!(message(&["-l", "abc", "-ef", "x"]), "-ef does not accept -l");
-        assert_eq!(message(&["-l", "abc", "-nt", "x"]), "-nt does not accept -l");
-        assert_eq!(message(&["-l", "abc", "-ot", "x"]), "-ot does not accept -l");
+        assert_eq!(
+            message(&["-l", "abc", "-ef", "x"]),
+            "-ef does not accept -l"
+        );
+        assert_eq!(
+            message(&["-l", "abc", "-nt", "x"]),
+            "-nt does not accept -l"
+        );
+        assert_eq!(
+            message(&["-l", "abc", "-ot", "x"]),
+            "-ot does not accept -l"
+        );
     }
 
     // --- diagnostics --------------------------------------------------------
 
     #[test]
     fn running_out_of_arguments_names_the_last_one() {
-        assert_eq!(message(&["x", "-a"]), "missing argument after '-a'");
-        assert_eq!(message(&["1", "-eq"]), "missing argument after '-eq'");
+        assert_eq!(message(&["x", "-a"]), "missing argument after ‘-a’");
+        assert_eq!(message(&["1", "-eq"]), "missing argument after ‘-eq’");
         assert_eq!(message(&["-f"]), "");
         assert_eq!(status(&["-f"]), TRUE);
     }
@@ -1282,18 +1317,18 @@ mod tests {
     fn a_trailing_argument_is_an_extra_argument() {
         assert_eq!(status(&["x", "=", "x", "y"]), SYNTAX);
         // Parsed a whole expression, then found something after it.
-        assert_eq!(message(&["(", "x", ")", "x"]), "extra argument 'x'");
-        assert_eq!(message(&["x", "-a", "y", "z"]), "extra argument 'z'");
+        assert_eq!(message(&["(", "x", ")", "x"]), "extra argument ‘x’");
+        assert_eq!(message(&["x", "-a", "y", "z"]), "extra argument ‘z’");
         // Ran off the end mid-expression instead: `( x ) )` matches the
         // four-argument `( ... )` shape on its *outer* parens, so the inner
         // two arguments `x )` are handed to the two-argument rule, which wants
         // an operator and has none.
-        assert_eq!(message(&["(", "x", ")", ")"]), "missing argument after ')'");
+        assert_eq!(message(&["(", "x", ")", ")"]), "missing argument after ‘)’");
     }
 
     #[test]
     fn a_missing_binary_operator_is_named() {
-        assert_eq!(message(&["x", "y", "z"]), "'y': binary operator expected");
+        assert_eq!(message(&["x", "y", "z"]), "‘y’: binary operator expected");
     }
 
     /// `<` and `>` belong to bash's `[[ ]]`, not to `test`. Accepting them
@@ -1312,9 +1347,9 @@ mod tests {
     /// itself because the operand did not look like a number to me.
     #[test]
     fn dash_t_separates_a_malformed_descriptor_from_an_out_of_range_one() {
-        assert_eq!(message(&["-t", "x"]), "invalid integer 'x'");
-        assert_eq!(message(&["-t", ""]), "invalid integer ''");
-        assert_eq!(message(&["-t", " "]), "invalid integer ' '");
+        assert_eq!(message(&["-t", "x"]), "invalid integer ‘x’");
+        assert_eq!(message(&["-t", ""]), "invalid integer ‘’");
+        assert_eq!(message(&["-t", " "]), "invalid integer ‘ ’");
         // Well-formed but far past any descriptor: false, and silent.
         assert_eq!(status(&["-t", "99999999999999999999"]), FALSE);
         assert_eq!(message(&["-t", "99999999999999999999"]), "");
@@ -1371,7 +1406,7 @@ mod tests {
         // refused there by name. Verified against GNU 9.4: `test -- x` is
         // status 2 with this message, and `test --` alone is status 0.
         assert!(is_dash_letter(b"--"));
-        assert_eq!(message(&["--", "x"]), "'--': unary operator expected");
+        assert_eq!(message(&["--", "x"]), "‘--’: unary operator expected");
         assert_eq!(status(&["--"]), TRUE);
     }
 }

@@ -22,9 +22,12 @@
 //! (design-decisions.md, "osh's string layer is UTF-8, full stop").
 
 use charwidth::char_width;
+use coreutils::errmsg::strerror;
 use coreutils::filekind;
 use coreutils::getopt::{self, Program, Takes};
-use coreutils::quote::{quote, quotef_os};
+// No `quote` here: every diagnostic `wc` prints names its file with one of the
+// shell-escape styles, so none of them carry §351's curly marks.
+use coreutils::quote::{quoteaf, quoteaf_os, quotef_os};
 use std::ffi::OsString;
 use std::fs::File;
 use std::io::{self, Read, Write};
@@ -270,9 +273,16 @@ fn parse_args(args: &[OsString]) -> Result<Request, getopt::Error> {
             if let Some(extra) = files.first() {
                 // Measured: this one *does* carry the `Try 'wc --help'`
                 // referral, because upstream reaches it through `usage()`.
+                //
+                // `quoteaf`, not `quote`, and also measured (GNU wc 9.4,
+                // `LC_ALL=C.UTF-8`): it prints `extra operand 'w1'` with
+                // straight marks, where uniq/tr/comm/split's plain
+                // `extra operand ‘c’` is curly. Upstream spells the
+                // --files0-from clash with the always-quote flavour, which
+                // §351 keeps straight in every locale. sort does the same.
                 return Err(WC.usage_referring(format!(
                     "extra operand {}\nfile operands cannot be combined with --files0-from",
-                    quote(&arg_bytes(extra))
+                    quoteaf_os(extra)
                 )));
             }
             Source::Files0From(from)
@@ -797,13 +807,13 @@ fn read_stdin() -> io::Result<Vec<u8>> {
 fn read_input(name: Option<&[u8]>) -> Result<Vec<u8>, ReadFailure> {
     let Some(name) = name else {
         return read_stdin().map_err(|e| ReadFailure {
-            message: format!("-: {e}"),
+            message: format!("-: {}", strerror(&e)),
             zero_row: false,
         });
     };
     if name == b"-" {
         return read_stdin().map_err(|e| ReadFailure {
-            message: format!("-: {e}"),
+            message: format!("-: {}", strerror(&e)),
             zero_row: false,
         });
     }
@@ -821,12 +831,12 @@ fn read_input(name: Option<&[u8]>) -> Result<Vec<u8>, ReadFailure> {
         _ => {}
     }
     let mut file = File::open(&path).map_err(|e| ReadFailure {
-        message: format!("{}: {e}", quotef_os(&path)),
+        message: format!("{}: {}", quotef_os(&path), strerror(&e)),
         zero_row: false,
     })?;
     let mut data = Vec::new();
     file.read_to_end(&mut data).map_err(|e| ReadFailure {
-        message: format!("{}: {e}", quotef_os(&path)),
+        message: format!("{}: {}", quotef_os(&path), strerror(&e)),
         zero_row: false,
     })?;
     Ok(data)
@@ -885,14 +895,25 @@ fn read_files0(from: &OsString) -> Result<Inputs, getopt::Error> {
         Stat::Regular(size) if size <= FILES0_EAGER_LIMIT
     );
 
+    // Both of these name the list file inside a sentence, and upstream spells
+    // both with `quoteaf` — the shell-escape-always style, whose marks are
+    // straight in every locale — not with `quote()`, whose marks follow §351
+    // and are curly. Measured, GNU wc 9.4, `LC_ALL=C.UTF-8`:
+    // `wc: cannot open 'nosuch' for reading: No such file or directory`.
     let data = if from_stdin {
-        read_stdin()
-            .map_err(|e| WC.usage(format!("cannot read file names from {}: {e}", quote(b"-"))))?
+        read_stdin().map_err(|e| {
+            WC.usage(format!(
+                "cannot read file names from {}: {}",
+                quoteaf(b"-"),
+                strerror(&e)
+            ))
+        })?
     } else {
         std::fs::read(from).map_err(|e| {
             WC.usage(format!(
-                "cannot open {} for reading: {e}",
-                quote(&source_label)
+                "cannot open {} for reading: {}",
+                quoteaf(&source_label),
+                strerror(&e)
             ))
         })?
     };
@@ -1122,8 +1143,8 @@ mod tests {
         let e = parse_args(&args(&["--total=zzz"])).unwrap_err();
         assert_eq!(
             e.message(),
-            "invalid argument 'zzz' for '--total'\nValid arguments are:\n  \
-             - 'auto'\n  - 'always'\n  - 'only'\n  - 'never'\n\
+            "invalid argument ‘zzz’ for ‘--total’\nValid arguments are:\n  \
+             - ‘auto’\n  - ‘always’\n  - ‘only’\n  - ‘never’\n\
              Try 'wc --help' for more information."
         );
         assert_eq!(e.status, 1);
@@ -1133,7 +1154,7 @@ mod tests {
         let e = parse_args(&args(&["--total=a"])).unwrap_err();
         assert!(
             e.sentence
-                .starts_with("ambiguous argument 'a' for '--total'")
+                .starts_with("ambiguous argument ‘a’ for ‘--total’")
         );
     }
 
@@ -1144,6 +1165,8 @@ mod tests {
         let e = parse_args(&args(&["--files0-from=-", "w1"])).unwrap_err();
         assert_eq!(
             e.message(),
+            // Straight: measured against GNU wc 9.4 under `LC_ALL=C.UTF-8`,
+            // which spells this one with the always-quote flavour.
             "extra operand 'w1'\nfile operands cannot be combined with \
              --files0-from\nTry 'wc --help' for more information."
         );

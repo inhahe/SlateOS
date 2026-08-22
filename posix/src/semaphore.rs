@@ -47,11 +47,50 @@ use crate::perprocess::process_global;
 ///
 /// We use a simple i32 counter.  Positive means the resource is
 /// available; zero or negative means waiters are blocked.
+///
+/// The counter is 4 bytes and `<semaphore.h>` declares 32, so the rest is
+/// [`SemT::_reserved`] — see the size assertion below for why the padding is
+/// carried explicitly rather than left implicit.
 #[repr(C)]
 pub struct SemT {
     /// Semaphore value (atomic).
     value: core::sync::atomic::AtomicI32,
+    /// The 28 bytes of musl's `sem_t` that our counter does not use.
+    ///
+    /// Never read or written.  Present so that `size_of::<SemT>()` equals the
+    /// size the C header declares, which is what makes a by-value copy of a
+    /// `sem_t` — `sem_t a = b;`, a `memcpy`, a struct return — move our bytes
+    /// and only our bytes.  Without it such a copy moves 28 bytes of whatever
+    /// the caller's stack happened to hold.
+    _reserved: [u8; 28],
 }
+
+impl SemT {
+    /// A semaphore with the given count and a zeroed reserved tail.
+    ///
+    /// Callers construct through this rather than with a struct literal so
+    /// that `_reserved` stays an implementation detail: the padding may grow
+    /// or shrink with the header it mirrors without touching a call site.
+    #[must_use]
+    pub const fn new(value: i32) -> Self {
+        Self {
+            value: core::sync::atomic::AtomicI32::new(value),
+            _reserved: [0; 28],
+        }
+    }
+}
+
+/// Our `sem_t` is exactly the one the caller's `<semaphore.h>` reserved.
+///
+/// See `pthread.rs`'s module note for why this is a `const` rather than a
+/// `#[test]`.  This one is `==`, not `<=`: `SemT` carries an explicit
+/// `_reserved` tail to musl's 32 bytes, so equality is achievable here and
+/// says strictly more — it catches a field *removal* as well as an addition,
+/// and it is a field removal that silently shrinks a by-value copy.
+const _: () = {
+    assert!(size_of::<SemT>() == 32, "musl/glibc sem_t is 32 bytes");
+    assert!(align_of::<SemT>() <= 8);
+};
 
 /// Failed return value for sem_open.
 pub const SEM_FAILED: *mut SemT = core::ptr::null_mut();
@@ -409,9 +448,7 @@ process_global! {
             name: [0u8; MAX_SEM_NAME],
             name_len: 0,
             refcount: 0,
-            sem: SemT {
-                value: core::sync::atomic::AtomicI32::new(0),
-            },
+            sem: SemT::new(0),
         }
     }; MAX_NAMED_SEMS];
 
@@ -706,13 +743,53 @@ pub extern "C" fn sem_unlink(name: *const u8) -> i32 {
 mod tests {
     use super::*;
 
+    // -- ABI layout --
+
+    /// `sem_t` is 32 bytes with the counter first, as musl and glibc alike
+    /// declare it — musl as `struct { volatile int __val[8]; }`, glibc as
+    /// `union { char __size[32]; long int __align; }`.
+    ///
+    /// **Alignment is 4, and that is deliberate, not an oversight.** The two
+    /// headers disagree: musl's array-of-`int` is 4-aligned, glibc's union
+    /// with a `long` member is 8-aligned.  Ours must be no *stricter* than
+    /// the loosest caller, because the caller supplies the storage — if we
+    /// demanded 8 and a musl-compiled program handed us a `sem_t` its
+    /// compiler had put at a 4-aligned address, every access would be
+    /// misaligned.  4 is compatible with both; 8 would not be.  (The size is
+    /// the reverse: it must match exactly, since it is the caller's slot.)
+    ///
+    /// The size is also a `const` assertion above, so it cannot regress
+    /// unnoticed even if nobody runs the suite; the test adds the *offsets*,
+    /// which a `const` cannot check as readably.  It replaces the former
+    /// `test_sem_size`/`test_sem_alignment` pair, which asserted the old
+    /// 4-byte size — writing our undersizing down as the expected answer.
+    #[test]
+    fn test_sem_t_matches_musl_layout() {
+        use core::mem::{align_of, size_of};
+        assert_eq!(size_of::<SemT>(), 32, "musl/glibc sem_t is 32 bytes");
+        assert_eq!(align_of::<SemT>(), 4, "no stricter than musl's int[8]");
+        assert!(align_of::<SemT>() <= 8, "no stricter than glibc's long");
+        let s = SemT::new(0);
+        let base = (&raw const s).cast::<u8>() as usize;
+        assert_eq!((&raw const s.value).cast::<u8>() as usize - base, 0);
+        assert_eq!((&raw const s._reserved).cast::<u8>() as usize - base, 4);
+    }
+
+    /// The reserved tail is not merely present, it is *zeroed* — so a
+    /// `sem_t` we hand back reads as a well-defined 32 bytes rather than 28
+    /// bytes of whatever the stack held.
+    #[test]
+    fn test_sem_t_reserved_is_zeroed() {
+        let s = SemT::new(7);
+        assert_eq!(s._reserved, [0u8; 28]);
+        assert_eq!(s.value.load(core::sync::atomic::Ordering::Relaxed), 7);
+    }
+
     // -- sem_init --
 
     #[test]
     fn test_sem_init_zero() {
-        let mut sem = SemT {
-            value: core::sync::atomic::AtomicI32::new(-1),
-        };
+        let mut sem = SemT::new(-1);
         let ret = sem_init(&raw mut sem, 0, 0);
         assert_eq!(ret, 0);
         let mut val: i32 = -1;
@@ -722,9 +799,7 @@ mod tests {
 
     #[test]
     fn test_sem_init_positive() {
-        let mut sem = SemT {
-            value: core::sync::atomic::AtomicI32::new(0),
-        };
+        let mut sem = SemT::new(0);
         let ret = sem_init(&raw mut sem, 0, 5);
         assert_eq!(ret, 0);
         let mut val: i32 = 0;
@@ -734,9 +809,7 @@ mod tests {
 
     #[test]
     fn test_sem_init_max_valid() {
-        let mut sem = SemT {
-            value: core::sync::atomic::AtomicI32::new(0),
-        };
+        let mut sem = SemT::new(0);
         let ret = sem_init(&raw mut sem, 0, i32::MAX as u32);
         assert_eq!(ret, 0);
         let mut val: i32 = 0;
@@ -746,9 +819,7 @@ mod tests {
 
     #[test]
     fn test_sem_init_overflow_rejected() {
-        let mut sem = SemT {
-            value: core::sync::atomic::AtomicI32::new(0),
-        };
+        let mut sem = SemT::new(0);
         // i32::MAX + 1 = 2147483648 — should be rejected
         let ret = sem_init(&raw mut sem, 0, (i32::MAX as u32).wrapping_add(1));
         assert_eq!(ret, -1);
@@ -764,9 +835,7 @@ mod tests {
 
     #[test]
     fn test_sem_destroy_succeeds() {
-        let mut sem = SemT {
-            value: core::sync::atomic::AtomicI32::new(5),
-        };
+        let mut sem = SemT::new(5);
         assert_eq!(sem_destroy(&raw mut sem), 0);
     }
 
@@ -774,9 +843,7 @@ mod tests {
 
     #[test]
     fn test_sem_post_increments() {
-        let mut sem = SemT {
-            value: core::sync::atomic::AtomicI32::new(0),
-        };
+        let mut sem = SemT::new(0);
         sem_init(&raw mut sem, 0, 0);
 
         let ret = sem_post(&raw mut sem);
@@ -789,9 +856,7 @@ mod tests {
 
     #[test]
     fn test_sem_post_multiple() {
-        let mut sem = SemT {
-            value: core::sync::atomic::AtomicI32::new(0),
-        };
+        let mut sem = SemT::new(0);
         sem_init(&raw mut sem, 0, 0);
 
         for _ in 0..10 {
@@ -805,9 +870,7 @@ mod tests {
 
     #[test]
     fn test_sem_post_overflow_rejected() {
-        let mut sem = SemT {
-            value: core::sync::atomic::AtomicI32::new(i32::MAX),
-        };
+        let mut sem = SemT::new(i32::MAX);
         let ret = sem_post(&raw mut sem);
         assert_eq!(ret, -1);
         // Value should not have changed
@@ -826,9 +889,7 @@ mod tests {
 
     #[test]
     fn test_sem_trywait_decrements() {
-        let mut sem = SemT {
-            value: core::sync::atomic::AtomicI32::new(0),
-        };
+        let mut sem = SemT::new(0);
         sem_init(&raw mut sem, 0, 3);
 
         let ret = sem_trywait(&raw mut sem);
@@ -841,9 +902,7 @@ mod tests {
 
     #[test]
     fn test_sem_trywait_fails_at_zero() {
-        let mut sem = SemT {
-            value: core::sync::atomic::AtomicI32::new(0),
-        };
+        let mut sem = SemT::new(0);
         sem_init(&raw mut sem, 0, 0);
 
         let ret = sem_trywait(&raw mut sem);
@@ -858,9 +917,7 @@ mod tests {
 
     #[test]
     fn test_sem_trywait_drain() {
-        let mut sem = SemT {
-            value: core::sync::atomic::AtomicI32::new(0),
-        };
+        let mut sem = SemT::new(0);
         sem_init(&raw mut sem, 0, 3);
 
         assert_eq!(sem_trywait(&raw mut sem), 0);
@@ -874,9 +931,7 @@ mod tests {
 
     #[test]
     fn test_sem_getvalue_basic() {
-        let mut sem = SemT {
-            value: core::sync::atomic::AtomicI32::new(0),
-        };
+        let mut sem = SemT::new(0);
         sem_init(&raw mut sem, 0, 42);
 
         let mut val: i32 = 0;
@@ -894,9 +949,7 @@ mod tests {
 
     #[test]
     fn test_sem_getvalue_null_sval() {
-        let mut sem = SemT {
-            value: core::sync::atomic::AtomicI32::new(5),
-        };
+        let mut sem = SemT::new(5);
         let ret = sem_getvalue(&raw mut sem, core::ptr::null_mut());
         assert_eq!(ret, -1);
     }
@@ -905,9 +958,7 @@ mod tests {
 
     #[test]
     fn test_sem_post_trywait_round_trip() {
-        let mut sem = SemT {
-            value: core::sync::atomic::AtomicI32::new(0),
-        };
+        let mut sem = SemT::new(0);
         sem_init(&raw mut sem, 0, 0);
 
         // Can't trywait on empty
@@ -1096,9 +1147,7 @@ mod tests {
         // A pointer to an unnamed semaphore on the stack is not a named-
         // semaphore slot; closing it should EINVAL rather than corrupt
         // anything.
-        let mut sem = SemT {
-            value: core::sync::atomic::AtomicI32::new(0),
-        };
+        let mut sem = SemT::new(0);
         crate::errno::set_errno(0);
         assert_eq!(sem_close(&raw mut sem), -1);
         assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
@@ -1121,18 +1170,12 @@ mod tests {
         assert_eq!(sem_close(p3), 0);
     }
 
-    // -- SemT layout --
-
-    #[test]
-    fn test_sem_size() {
-        // AtomicI32 = 4 bytes
-        assert_eq!(core::mem::size_of::<SemT>(), 4);
-    }
-
-    #[test]
-    fn test_sem_alignment() {
-        assert_eq!(core::mem::align_of::<SemT>(), 4);
-    }
+    // -- SemT layout: see `test_sem_t_matches_musl_layout` at the top of this
+    // module.  The `test_sem_size`/`test_sem_alignment` pair that used to sit
+    // here asserted `size_of::<SemT>() == 4` — our own undersizing, recorded
+    // as the expected answer, so the one test that could have caught the gap
+    // instead certified it.  Same species as the three malloc tests that
+    // asserted a NULL return; see malloc.rs.
 
     // -- sem_init sets errno for null --
 
@@ -1147,9 +1190,7 @@ mod tests {
     #[test]
     fn test_sem_init_overflow_sets_einval() {
         crate::errno::set_errno(0);
-        let mut sem = SemT {
-            value: core::sync::atomic::AtomicI32::new(0),
-        };
+        let mut sem = SemT::new(0);
         let ret = sem_init(&raw mut sem, 0, u32::MAX);
         assert_eq!(ret, -1);
         assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
@@ -1170,9 +1211,7 @@ mod tests {
         // When the count is positive sem_wait takes the userspace CAS fast
         // path and never reaches the (host-stubbed) blocking helper.  Two
         // waits on a count-of-2 semaphore should both succeed and drain it.
-        let mut sem = SemT {
-            value: core::sync::atomic::AtomicI32::new(2),
-        };
+        let mut sem = SemT::new(2);
         assert_eq!(sem_wait(&raw mut sem), 0);
         assert_eq!(sem_wait(&raw mut sem), 0);
         let mut v: i32 = -1;
@@ -1185,9 +1224,7 @@ mod tests {
     #[test]
     fn test_sem_trywait_zero_sets_eagain() {
         crate::errno::set_errno(0);
-        let mut sem = SemT {
-            value: core::sync::atomic::AtomicI32::new(0),
-        };
+        let mut sem = SemT::new(0);
         sem_init(&raw mut sem, 0, 0);
         let ret = sem_trywait(&raw mut sem);
         assert_eq!(ret, -1);
@@ -1207,9 +1244,7 @@ mod tests {
     #[test]
     fn test_sem_post_overflow_sets_eoverflow() {
         crate::errno::set_errno(0);
-        let mut sem = SemT {
-            value: core::sync::atomic::AtomicI32::new(i32::MAX),
-        };
+        let mut sem = SemT::new(i32::MAX);
         let ret = sem_post(&raw mut sem);
         assert_eq!(ret, -1);
         assert_eq!(crate::errno::get_errno(), crate::errno::EOVERFLOW);
@@ -1243,9 +1278,7 @@ mod tests {
     #[test]
     fn test_sem_timedwait_null_abstime() {
         crate::errno::set_errno(0);
-        let mut sem = SemT {
-            value: core::sync::atomic::AtomicI32::new(0),
-        };
+        let mut sem = SemT::new(0);
         sem_init(&raw mut sem, 0, 0);
         let ret = sem_timedwait(&raw mut sem, core::ptr::null());
         assert_eq!(ret, -1);
@@ -1259,9 +1292,7 @@ mod tests {
     /// `pthread::tests::test_pthread_mutex_timedlock_uncontended_ignores_a_bad_deadline`.
     #[test]
     fn test_sem_timedwait_checks_the_deadline_before_the_fast_path() {
-        let mut sem = SemT {
-            value: core::sync::atomic::AtomicI32::new(0),
-        };
+        let mut sem = SemT::new(0);
         // Count 1: the wait would have succeeded immediately.
         sem_init(&raw mut sem, 0, 1);
         for bad in [-1i64, 1_000_000_000] {
@@ -1285,9 +1316,7 @@ mod tests {
     #[test]
     fn test_sem_timedwait_negative_tv_sec_is_etimedout_not_einval() {
         crate::errno::set_errno(0);
-        let mut sem = SemT {
-            value: core::sync::atomic::AtomicI32::new(0),
-        };
+        let mut sem = SemT::new(0);
         sem_init(&raw mut sem, 0, 0);
         let ts = crate::stat::Timespec {
             tv_sec: -1,
@@ -1301,9 +1330,7 @@ mod tests {
 
     #[test]
     fn test_sem_init_pshared_nonzero() {
-        let mut sem = SemT {
-            value: core::sync::atomic::AtomicI32::new(0),
-        };
+        let mut sem = SemT::new(0);
         // pshared=1 should still succeed (we ignore it)
         let ret = sem_init(&raw mut sem, 1, 10);
         assert_eq!(ret, 0);
@@ -1323,9 +1350,7 @@ mod tests {
 
     #[test]
     fn test_sem_multiple_cycles() {
-        let mut sem = SemT {
-            value: core::sync::atomic::AtomicI32::new(0),
-        };
+        let mut sem = SemT::new(0);
         sem_init(&raw mut sem, 0, 0);
 
         for _ in 0..5 {
@@ -1341,9 +1366,7 @@ mod tests {
 
     #[test]
     fn test_sem_getvalue_tracks_operations() {
-        let mut sem = SemT {
-            value: core::sync::atomic::AtomicI32::new(0),
-        };
+        let mut sem = SemT::new(0);
         sem_init(&raw mut sem, 0, 5);
         let mut val: i32 = 0;
 

@@ -916,10 +916,10 @@ mod tests {
     #[test]
     fn two_operands_name_the_second() {
         let e = parse_args(&args(&["a", "b", "c"])).unwrap_err();
-        assert_eq!(e.sentence, "extra operand 'b'");
+        assert_eq!(e.sentence, "extra operand ‘b’");
         assert_eq!(
             e.message(),
-            "extra operand 'b'\nTry 'tsort --help' for more information."
+            "extra operand ‘b’\nTry 'tsort --help' for more information."
         );
         assert_eq!(e.status, 1);
     }

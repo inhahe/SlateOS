@@ -486,6 +486,17 @@ run_getopt() {
   [ "$HAVE_GLIBC" = yes ] || return 0
   run_msg_against "$GLIBC" "$@"
 }
+# The same reference under `C.UTF-8`, for the `argmatch` rows. Those are the one
+# part of this file that is neither collation nor glibc: `argmatch` is gnulib's
+# and quotes with `quote()`, which since §351 prints U+2018/U+2019 in every
+# locale on our side and does so only under a UTF-8 locale on GNU's. Nothing in
+# these rows sorts anything, so the header's reason for pinning `C` — that
+# SlateOS has no collation tables to compare against — does not reach them.
+GLIBC_UTF8=${GLIBC_UTF8:-"wsl -e env LC_ALL=C.UTF-8 sort"}
+run_argmatch() {
+  [ "$HAVE_GLIBC" = yes ] || return 0
+  run_msg_against "$GLIBC_UTF8" "$@"
+}
 
 # The cases where differing from glibc is the point. `report` is bypassed so a
 # difference counts as expected and, more usefully, so agreement is reported as
@@ -566,12 +577,18 @@ xfail_getopt "glibc emits the raw byte; we escape it" -$'\x01'
 # is a prefix match like getopt's, and an ambiguous one is a different sentence
 # from an invalid one — but only when the candidates disagree, which is why
 # `--check=q` resolves while `--check=` does not.
-run_getopt --sort=bogus
-run_getopt --check=bogus
-run_getopt --check=
-run_getopt --sort=
-run_getopt --check=quiets
-run_getopt --sort=NUMERIC
+#
+# `run_argmatch`, not `run_getopt`: these are the only rows in this section that
+# do *not* come from glibc's getopt. `argmatch` is gnulib's and quotes with
+# `quote()`, so since §351 they are curly and must be referenced under a UTF-8
+# locale, where GNU's are curly too. The rest of the section stays at `C` with
+# everything else in this file — see the collation note in the header.
+run_argmatch --sort=bogus
+run_argmatch --check=bogus
+run_argmatch --check=
+run_argmatch --sort=
+run_argmatch --check=quiets
+run_argmatch --sort=NUMERIC
 run_stdin '10\n9\n' --sort=hum
 run_stdin '10\n9\n' --sort=n
 run_stdin 'b\na\n' --check=q

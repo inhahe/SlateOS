@@ -1,0 +1,13 @@
+[package]
+name = "settingsfile"
+version = "0.1.0"
+edition = "2024"
+description = "Where SlateOS settings files live, and how they are replaced without losing the user's copy"
+
+[dependencies]
+# Format-preserving YAML. A settings file a user has commented has to come back
+# with the comments intact. See yamldoc/src/lib.rs.
+yamldoc = { path = "../../yamldoc" }
+
+[lints]
+workspace = true

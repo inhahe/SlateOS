@@ -2,13 +2,22 @@
 name = "su"
 version = "0.1.0"
 edition = "2024"
-description = "SlateOS user switch and sudo"
+# Just `su`. This crate also used to be `sudo` when invoked under that name,
+# with a policy of its own that never read `/etc/sudoers`; that personality was
+# removed in favour of `userspace/sudo`, the real implementation.
+description = "SlateOS user switch"
 
 # `userdb` for `/etc/users.yaml`. This crate carried its own parser, which
 # looked for `home:` — a field neither writer of the file has ever written —
 # and its own `sha256(salt + password)`, which no writer has ever produced.
 # See `design-decisions.md` §330.
+#
+# `authlib` for the shared failed-attempt tally. `su` guesses at a password
+# just as `login` does, and a limit that only one of them honours is not a
+# limit: an attacker refused at the console simply runs `su` instead.
+# See `design-decisions.md` §354.
 [dependencies]
+authlib = { path = "../authlib" }
 userdb = { path = "../userdb" }
 
 [lints]

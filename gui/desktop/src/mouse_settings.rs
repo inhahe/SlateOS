@@ -1,9 +1,16 @@
-//! Mouse and keyboard settings panel.
+//! Mouse and keyboard settings panel: the rendering, not the model.
 //!
-//! Provides a settings UI for configuring mouse pointer speed, acceleration
-//! profiles, scroll behaviour, button mapping, double-click speed, and
-//! keyboard repeat rate / delay. Integrates with the desktop's Settings app
-//! as a sub-page.
+//! The types this panel edits — [`MouseConfig`], [`KeyboardRepeatConfig`] and
+//! the enums around them — live in the `inputsettings` crate and are
+//! re-exported here, because the compositor and the Settings application need
+//! exactly the same values and none of the three can depend on the other two.
+//! Until 2026-08-22 they lived *here*, with no persistence at all: a user
+//! could drag the double-click slider, watch the number change, and find that
+//! nothing behaved differently and the value was gone at the next login. See
+//! `known-issues.md` `TD-C-THE-MOUSE-SETTINGS-PANEL-REACHES-NOTHING`.
+//!
+//! What stays here is [`InputSettingsUI`]: the expand/collapse state, the
+//! dirty flag, the render commands and the hit-testing.
 
 use guitk::color::Color;
 use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
@@ -25,239 +32,16 @@ const YELLOW: Color = Color::from_hex(0xF9E2AF);
 const LAVENDER: Color = Color::from_hex(0xB4BEFE);
 
 // ============================================================================
-// Mouse acceleration profile
+// The model, which lives elsewhere
 // ============================================================================
 
-/// Pointer acceleration profile.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum AccelProfile {
-    /// No acceleration — raw pointer movement.
-    Flat,
-    /// Adaptive acceleration (faster movement = more acceleration).
-    Adaptive,
-    /// Custom curve defined by a gain/threshold pair.
-    Custom,
-}
-
-impl AccelProfile {
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::Flat => "Flat (no acceleration)",
-            Self::Adaptive => "Adaptive",
-            Self::Custom => "Custom curve",
-        }
-    }
-
-    pub const ALL: [Self; 3] = [Self::Flat, Self::Adaptive, Self::Custom];
-}
-
-// ============================================================================
-// Scroll mode
-// ============================================================================
-
-/// How scroll events are interpreted.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ScrollMode {
-    /// Scroll by a fixed number of lines per notch.
-    Lines,
-    /// Scroll by pages.
-    Pages,
-    /// Smooth pixel-level scrolling.
-    Smooth,
-}
-
-impl ScrollMode {
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::Lines => "Lines",
-            Self::Pages => "Pages",
-            Self::Smooth => "Smooth",
-        }
-    }
-
-    pub const ALL: [Self; 3] = [Self::Lines, Self::Pages, Self::Smooth];
-}
-
-// ============================================================================
-// Button mapping
-// ============================================================================
-
-/// Logical mouse button assignment.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ButtonMapping {
-    /// Standard right-handed layout: left=primary, right=secondary.
-    RightHanded,
-    /// Left-handed: swaps primary and secondary.
-    LeftHanded,
-}
-
-impl ButtonMapping {
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::RightHanded => "Right-handed",
-            Self::LeftHanded => "Left-handed",
-        }
-    }
-}
-
-// ============================================================================
-// Keyboard repeat settings
-// ============================================================================
-
-/// Keyboard repeat-rate configuration.
-#[derive(Clone, Debug)]
-pub struct KeyboardRepeatConfig {
-    /// Delay before repeat starts, in milliseconds (150–2000).
-    pub repeat_delay_ms: u32,
-    /// Interval between repeated keystrokes, in milliseconds (10–500).
-    pub repeat_interval_ms: u32,
-    /// Whether key repeat is enabled at all.
-    pub enabled: bool,
-}
-
-impl Default for KeyboardRepeatConfig {
-    fn default() -> Self {
-        Self {
-            repeat_delay_ms: 500,
-            repeat_interval_ms: 30,
-            enabled: true,
-        }
-    }
-}
-
-impl KeyboardRepeatConfig {
-    pub fn set_delay(&mut self, ms: u32) {
-        self.repeat_delay_ms = ms.clamp(150, 2000);
-    }
-
-    pub fn set_interval(&mut self, ms: u32) {
-        self.repeat_interval_ms = ms.clamp(10, 500);
-    }
-}
-
-// ============================================================================
-// Mouse settings
-// ============================================================================
-
-/// Full mouse configuration.
-#[derive(Clone, Debug)]
-pub struct MouseConfig {
-    /// Pointer speed factor. Range: -10 (slowest) to +10 (fastest). 0 = OS default.
-    pub speed: i32,
-    /// Acceleration profile.
-    pub accel_profile: AccelProfile,
-    /// Custom acceleration gain (only used when `accel_profile == Custom`). 0.1–10.0.
-    pub accel_gain: f32,
-    /// Custom acceleration threshold (only used when `accel_profile == Custom`). 0–50.
-    pub accel_threshold: u32,
-    /// Button mapping (left- or right-handed).
-    pub button_mapping: ButtonMapping,
-    /// Double-click speed in milliseconds (100–2000).
-    pub double_click_ms: u32,
-    /// Scroll mode.
-    pub scroll_mode: ScrollMode,
-    /// Lines per scroll notch when `scroll_mode == Lines`. 1–20.
-    pub scroll_lines: u32,
-    /// Scroll speed multiplier for smooth scrolling. 0.1–5.0.
-    pub scroll_speed: f32,
-    /// Whether to reverse (natural) scrolling direction.
-    pub natural_scroll: bool,
-    /// Cursor size in pixels (16–128).
-    pub cursor_size: u32,
-    /// Show a locate animation when Ctrl is pressed.
-    pub locate_on_ctrl: bool,
-    /// Hide the cursor while typing.
-    pub hide_while_typing: bool,
-    /// Show a cursor trail.
-    pub show_trail: bool,
-    /// Trail length (1–10).
-    pub trail_length: u32,
-}
-
-impl Default for MouseConfig {
-    fn default() -> Self {
-        Self {
-            speed: 0,
-            accel_profile: AccelProfile::Adaptive,
-            accel_gain: 1.0,
-            accel_threshold: 4,
-            button_mapping: ButtonMapping::RightHanded,
-            double_click_ms: 400,
-            scroll_mode: ScrollMode::Lines,
-            scroll_lines: 3,
-            scroll_speed: 1.0,
-            natural_scroll: false,
-            cursor_size: 24,
-            locate_on_ctrl: false,
-            hide_while_typing: false,
-            show_trail: false,
-            trail_length: 3,
-        }
-    }
-}
-
-impl MouseConfig {
-    pub fn set_speed(&mut self, speed: i32) {
-        self.speed = speed.clamp(-10, 10);
-    }
-
-    pub fn set_double_click_ms(&mut self, ms: u32) {
-        self.double_click_ms = ms.clamp(100, 2000);
-    }
-
-    pub fn set_scroll_lines(&mut self, lines: u32) {
-        self.scroll_lines = lines.clamp(1, 20);
-    }
-
-    pub fn set_scroll_speed(&mut self, speed: f32) {
-        self.scroll_speed = speed.clamp(0.1, 5.0);
-    }
-
-    pub fn set_cursor_size(&mut self, size: u32) {
-        self.cursor_size = size.clamp(16, 128);
-    }
-
-    pub fn set_trail_length(&mut self, len: u32) {
-        self.trail_length = len.clamp(1, 10);
-    }
-
-    pub fn set_accel_gain(&mut self, gain: f32) {
-        self.accel_gain = gain.clamp(0.1, 10.0);
-    }
-
-    pub fn set_accel_threshold(&mut self, thr: u32) {
-        self.accel_threshold = thr.min(50);
-    }
-}
-
-// ============================================================================
-// Combined input settings
-// ============================================================================
-
-/// Combined mouse + keyboard input settings.
-#[derive(Clone, Debug, Default)]
-pub struct InputSettings {
-    pub mouse: MouseConfig,
-    pub keyboard: KeyboardRepeatConfig,
-}
-
-impl InputSettings {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    pub fn reset_mouse(&mut self) {
-        self.mouse = MouseConfig::default();
-    }
-
-    pub fn reset_keyboard(&mut self) {
-        self.keyboard = KeyboardRepeatConfig::default();
-    }
-
-    pub fn reset_all(&mut self) {
-        *self = Self::default();
-    }
-}
+// Re-exported rather than merely `use`d so that every existing caller of
+// `desktop::mouse_settings::MouseConfig` keeps working, and so that the panel
+// and the model still read as one thing from the outside.
+pub use inputsettings::{
+    AccelProfile, ButtonMapping, InputFile, InputSettings, KeyboardRepeatConfig, MouseConfig,
+    ScrollMode,
+};
 
 // ============================================================================
 // Settings panel rendering
@@ -813,127 +597,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn default_mouse_config() {
-        let c = MouseConfig::default();
-        assert_eq!(c.speed, 0);
-        assert_eq!(c.accel_profile, AccelProfile::Adaptive);
-        assert_eq!(c.button_mapping, ButtonMapping::RightHanded);
-        assert_eq!(c.double_click_ms, 400);
-        assert_eq!(c.scroll_mode, ScrollMode::Lines);
-        assert_eq!(c.scroll_lines, 3);
-        assert!(!c.natural_scroll);
-        assert_eq!(c.cursor_size, 24);
-    }
-
-    #[test]
-    fn speed_clamped() {
-        let mut c = MouseConfig::default();
-        c.set_speed(-20);
-        assert_eq!(c.speed, -10);
-        c.set_speed(100);
-        assert_eq!(c.speed, 10);
-    }
-
-    #[test]
-    fn double_click_clamped() {
-        let mut c = MouseConfig::default();
-        c.set_double_click_ms(5);
-        assert_eq!(c.double_click_ms, 100);
-        c.set_double_click_ms(9999);
-        assert_eq!(c.double_click_ms, 2000);
-    }
-
-    #[test]
-    fn scroll_lines_clamped() {
-        let mut c = MouseConfig::default();
-        c.set_scroll_lines(0);
-        assert_eq!(c.scroll_lines, 1);
-        c.set_scroll_lines(100);
-        assert_eq!(c.scroll_lines, 20);
-    }
-
-    #[test]
-    fn scroll_speed_clamped() {
-        let mut c = MouseConfig::default();
-        c.set_scroll_speed(0.0);
-        assert!((c.scroll_speed - 0.1).abs() < 0.01);
-        c.set_scroll_speed(100.0);
-        assert!((c.scroll_speed - 5.0).abs() < 0.01);
-    }
-
-    #[test]
-    fn cursor_size_clamped() {
-        let mut c = MouseConfig::default();
-        c.set_cursor_size(5);
-        assert_eq!(c.cursor_size, 16);
-        c.set_cursor_size(500);
-        assert_eq!(c.cursor_size, 128);
-    }
-
-    #[test]
-    fn trail_length_clamped() {
-        let mut c = MouseConfig::default();
-        c.set_trail_length(0);
-        assert_eq!(c.trail_length, 1);
-        c.set_trail_length(99);
-        assert_eq!(c.trail_length, 10);
-    }
-
-    #[test]
-    fn accel_gain_clamped() {
-        let mut c = MouseConfig::default();
-        c.set_accel_gain(0.0);
-        assert!((c.accel_gain - 0.1).abs() < 0.01);
-        c.set_accel_gain(50.0);
-        assert!((c.accel_gain - 10.0).abs() < 0.01);
-    }
-
-    #[test]
-    fn accel_threshold_clamped() {
-        let mut c = MouseConfig::default();
-        c.set_accel_threshold(100);
-        assert_eq!(c.accel_threshold, 50);
-    }
-
-    #[test]
-    fn default_keyboard_config() {
-        let k = KeyboardRepeatConfig::default();
-        assert_eq!(k.repeat_delay_ms, 500);
-        assert_eq!(k.repeat_interval_ms, 30);
-        assert!(k.enabled);
-    }
-
-    #[test]
-    fn keyboard_delay_clamped() {
-        let mut k = KeyboardRepeatConfig::default();
-        k.set_delay(10);
-        assert_eq!(k.repeat_delay_ms, 150);
-        k.set_delay(9999);
-        assert_eq!(k.repeat_delay_ms, 2000);
-    }
-
-    #[test]
-    fn keyboard_interval_clamped() {
-        let mut k = KeyboardRepeatConfig::default();
-        k.set_interval(1);
-        assert_eq!(k.repeat_interval_ms, 10);
-        k.set_interval(9999);
-        assert_eq!(k.repeat_interval_ms, 500);
-    }
-
-    #[test]
-    fn input_settings_reset() {
-        let mut s = InputSettings::new();
-        s.mouse.set_speed(5);
-        s.keyboard.set_delay(1000);
-        s.reset_mouse();
-        assert_eq!(s.mouse.speed, 0);
-        assert_eq!(s.keyboard.repeat_delay_ms, 1000);
-        s.reset_all();
-        assert_eq!(s.keyboard.repeat_delay_ms, 500);
-    }
-
-    #[test]
     fn ui_dirty_tracking() {
         let mut ui = InputSettingsUI::new();
         assert!(!ui.is_dirty());
@@ -1005,26 +668,6 @@ mod tests {
     }
 
     #[test]
-    fn accel_profile_labels() {
-        for p in AccelProfile::ALL {
-            assert!(!p.label().is_empty());
-        }
-    }
-
-    #[test]
-    fn scroll_mode_labels() {
-        for m in ScrollMode::ALL {
-            assert!(!m.label().is_empty());
-        }
-    }
-
-    #[test]
-    fn button_mapping_labels() {
-        assert!(!ButtonMapping::RightHanded.label().is_empty());
-        assert!(!ButtonMapping::LeftHanded.label().is_empty());
-    }
-
-    #[test]
     fn ui_hit_section_before_title() {
         let ui = InputSettingsUI::new();
         assert!(ui.hit_section(10.0).is_none());
@@ -1036,14 +679,6 @@ mod tests {
         // First header starts at about y=48.
         let hit = ui.hit_section(50.0);
         assert_eq!(hit, Some(0));
-    }
-
-    #[test]
-    fn natural_scroll_toggle() {
-        let mut c = MouseConfig::default();
-        assert!(!c.natural_scroll);
-        c.natural_scroll = true;
-        assert!(c.natural_scroll);
     }
 
     #[test]

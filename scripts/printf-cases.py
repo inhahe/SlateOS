@@ -202,10 +202,20 @@ for fmt in ["\\101", "\\0101", "\\x41", "\\x4", "\\x41x", "\\xff", "\\a", "\\b",
             "\\", "\\0", "\\00", "\\000", "\\1", "\\7", "\\8", "\\400",
             "\\u0041", "\\u0001", "\\u0000", "\\u007f", "\\u0080", "\\u00ff",
             "\\u041", "\\U0001F600", "\\U00000041", "\\U0041", "\\ud800",
-            "\\udfff", "\\uD800", "a\\tb\\nc"]:
+            "\\udfff", "\\uD800", "a\\tb\\nc",
+            # One code point per arm of the encoder: two-, three- and four-byte
+            # UTF-8; the two non-characters glibc's iconv encodes anyway rather
+            # than refusing; the last code point that has an encoding; and two
+            # above it, which have none and so come back as the escape itself.
+            # These were added when `print_unicode_char` stopped implementing
+            # the C locale's ASCII charset -- until then every one of them came
+            # out as its own literal text, so none of them told the arms apart.
+            "\\u00e9", "\\u20ac", "\\ufffe", "\\uffff", "\\U0010FFFF",
+            "\\U00110000", "\\UFFFFFFFF"]:
     case(fmt + "|")
 case("\\xZ")
 case("\\x")
+case("[%b]\n", "\\u00e9")
 
 # ---- \c is an exit, not a break --------------------------------------------
 case("a\\cb")
@@ -221,6 +231,19 @@ for arg in ["'a", "'ab", "'abc", '"a', "'", '"', "''", "'0", "'-", "' ",
 case("%x\n", "'a")
 case("%f\n", "'a")
 case("%c\n", "'a")
+# A constant is a whole character, not its first byte.  Upstream picks between
+# those two on `MB_CUR_MAX > 1`, so these cases only say anything under a
+# UTF-8 locale -- which is the one this harness runs both sides in.  See
+# design-decisions.md 356.
+for arg in [b"'\xc3\xa9", b'"\xc3\xa9', b"'\xe2\x82\xac", b"'\xf0\x9f\x98\x80",
+            b"'\xc3\xa9z"]:
+    case(b"%d\n", arg)
+case(b"%x\n", b"'\xc3\xa9")
+case(b"%o\n", b"'\xc3\xa9")
+case(b"%f\n", b"'\xc3\xa9")
+# ...and a byte that decodes to no character at all is worth its own value.
+case(b"%d\n", b"'\xff")
+case(b"%d\n", b"'\xc3")
 
 # ---- invalid conversion specifications, which are fatal --------------------
 for fmt in ["%", "%z", "%'e", "%#d", "%0s", "%#s", "%.1c", "%-", "%.", "%5",
@@ -231,17 +254,21 @@ case("a%zb")                            # the text before a fatal spec is kept
 case("%d%z", "5")
 case("%s%", "a")
 
-# ...and where the byte that makes it invalid cannot be printed.  We escape it
-# as \ooo; GNU writes it raw, which lets a format string put a newline (or a
-# terminal escape sequence) into printf's own diagnostic.  See printf.rs.
+# ...and where what makes it invalid cannot be printed.  We escape it as \ooo;
+# GNU writes it raw, which lets a format string put a newline (or a terminal
+# escape sequence) into printf's own diagnostic.  See printf.rs.
 xcase("%\n")
 xcase("%\x01")
-xcase(b"%\xc3\xa9")
 xcase("%\x1b[31m")
-# The same divergence in the other sentence that echoes caller bytes: the tail
-# of a character constant.
-xcase("%d", b"'a\xc3\xa9")
-xcase("%d", b"'\xc3\xa9")
+# `%<e-acute>` stays a difference even though quote.rs now decodes, and the
+# reason is worth writing down: the directive a diagnostic echoes runs from the
+# `%` to the *conversion byte*, so what is quoted here is `%` plus 0xC3 alone --
+# the lead byte of a character whose tail was never part of the directive.  It
+# decodes to nothing, so it is escaped, and GNU writes it raw.
+xcase(b"%\xc3\xa9")
+# The other sentence that echoes caller bytes -- the tail of a character
+# constant -- is not truncated that way, so there the character does agree.
+case("%d", b"'a\xc3\xa9")
 xcase("%d", "'a\nb")
 
 # ---- format reuse -----------------------------------------------------------

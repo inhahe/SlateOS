@@ -22,12 +22,26 @@
 # cases to a file, copying the file, and having an identical probe script read
 # it on both sides removes every layer that could rewrite an argument.
 #
-# ## Why `LC_ALL=C`
+# ## Why `LC_ALL=C.UTF-8`
 #
-# GNU seq takes the decimal point from `LC_NUMERIC`, so under a comma-decimal
-# locale it prints `1,5`. `extfloat` implements the C locale only, which is
-# what the OS's own seq will run under. Pinning both sides to `C` measures that
-# claim instead of the development host's environment.
+# Two of seq's answers could move with the locale, and only one of them
+# actually does.
+#
+# The decimal point is the one that does not. GNU seq takes it from
+# `LC_NUMERIC`, so under a comma-decimal locale it prints `1,5` -- but
+# `C.UTF-8` has the same `LC_NUMERIC` as `C`, so `extfloat`'s `.` is the right
+# answer in both and this file's choice between them cannot move a number.
+#
+# The quote marks are the one that does. Every diagnostic seq prints about a
+# bad format or a bad operand wraps the offending text in gnulib's `quote()`,
+# which is U+2018/U+2019 under a UTF-8 locale and ASCII apostrophes under `C`.
+# Since §351 ours prints the curly pair in every locale, so `C` is now the
+# setting in which the *reference* would be wrong. This file pinned `C` for the
+# mirror-image of that reason, back when ours stayed ASCII
+# (`open-questions.md` -> B-Q2, since answered).
+#
+# seq reads the locale nowhere else. Unlike printf it expands no escapes, so it
+# has no `\uXXXX` whose conversion to the locale's charset could differ.
 #
 # ## `--help` and `--version` are not cases
 #
@@ -72,7 +86,7 @@ GNU=${GNU:-seq}
 # argument that looks like a path -- turning the format `[%05.2f]` or the
 # operand `-1` into something with a drive letter in it.
 export MSYS2_ARG_CONV_EXCL='*'
-export LC_ALL=C
+export LC_ALL=C.UTF-8
 
 # Built every run, not just when the binary is missing. `cargo build` is a
 # no-op on an unchanged tree, so the only thing the "is it there?" version
@@ -103,7 +117,7 @@ echo "running GNU's, in WSL..."
 wsl -e bash -c 'mkdir -p /tmp/seqdiff && cat > /tmp/seqdiff/probe.sh' \
   < scripts/seq-probe.sh || exit 1
 wsl -e bash -c 'cat > /tmp/seqdiff/cases' < "$WORK/cases" || exit 1
-wsl -e bash -c "cd /tmp/seqdiff && LC_ALL=C bash probe.sh '$GNU' cases" \
+wsl -e bash -c "cd /tmp/seqdiff && LC_ALL=C.UTF-8 bash probe.sh '$GNU' cases" \
   > "$WORK/theirs" || exit 1
 
 if [ "$FLIP" = 1 ]; then

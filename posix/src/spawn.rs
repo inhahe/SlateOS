@@ -211,22 +211,192 @@ enum FileAction {
     },
 }
 
-/// File actions object for `posix_spawn`.
+/// File actions object for `posix_spawn` — **exactly the 80 bytes every C
+/// header declares**, with the actions themselves on the heap.
 ///
-/// Stores up to `MAX_FILE_ACTIONS` actions that should be executed in
-/// the child process between fork and exec.  Actions are applied in the
-/// order they were added (POSIX requirement).
+/// # This type's size is its ABI, and getting it wrong is silent
 ///
-/// This struct is laid out at a fixed size so it can be embedded in
-/// C-visible structs without heap allocation.
+/// `posix_spawn_file_actions_t` is an *opaque* type, but it is not an
+/// incomplete one: every libc header defines it as a struct with a fixed
+/// size, and every C caller therefore allocates that many bytes — almost
+/// always on the stack, since the object is scoped to one spawn.  Both
+/// references agree on 80:
+///
+/// ```c
+/// /* musl, bits/spawn.h */          /* glibc, bits/spawn_faction.h */
+/// typedef struct {                  typedef struct {
+///   int __pad0[2];                    int __allocated;
+///   void *__actions;                  int __used;
+///   int __pad[16];                    struct __spawn_action *__actions;
+/// } posix_spawn_file_actions_t;       int __pad[16];
+///                                   } posix_spawn_file_actions_t;
+/// ```
+///
+/// This struct used to store its sixteen 288-byte action slots *inline*,
+/// making it 4624 bytes.  Nothing in Rust noticed, because every Rust caller
+/// used the same definition and agreed with itself.  What it broke was C:
+/// `posix_spawn_file_actions_init` wrote 4616 bytes into an 80-byte stack
+/// object, so the object's own frame — locals, saved registers, the return
+/// address — was overwritten with zeroes on the *first* call, in a function
+/// that had not done anything wrong.
+///
+/// GNU make hit this on every recipe (`child_execute_job`, job.c, which puts
+/// the attr and the file-actions objects side by side on the stack), and the
+/// symptom was a null-pointer read a hundred instructions later, of a
+/// perfectly ordinary local that a memset had quietly cleared.  See
+/// known-issues.md `B-POSIX-SPAWN-FILE-ACTIONS-WAS-4624-BYTES-OF-AN-80-BYTE-C-TYPE`.
+///
+/// The field names below are glibc's because glibc's are meaningful; the
+/// layout is byte-identical to musl's, whose first two `int`s are exactly
+/// these two.  Nothing outside this module interprets the bytes — a C caller
+/// only ever passes the object back to us — so matching the *size* is what
+/// is load-bearing and matching the *names* is documentation.
+///
+/// [`test_file_actions_matches_musl_layout`] asserts the size and every
+/// offset, so a future field addition cannot silently break the ABI again.
+/// [`PosixSpawnattrT`] had that guard from the start and was correct; this
+/// type did not, and was wrong by 4544 bytes for as long as it existed.
 #[repr(C)]
 pub struct PosixSpawnFileActionsT {
-    /// Number of actions stored.
-    count: usize,
-    /// Action storage (inline, no heap).
-    actions: [FileActionSlot; MAX_FILE_ACTIONS],
-    /// Padding to reach a consistent size for C ABI compatibility.
-    _pad: [u8; 8],
+    /// Slots behind `actions`.  Zero until the first `add*` allocates.
+    allocated: i32,
+    /// Slots in use; the count `posix_spawn` replays, in order.
+    used: i32,
+    /// Heap array of `allocated` slots, or null before the first `add*`.
+    ///
+    /// Heap rather than inline is not a preference: 16 × 288 bytes cannot be
+    /// made to fit in 80 no matter how the slot is packed, and 80 is not
+    /// ours to choose.  Both references do the same thing for the same
+    /// reason.
+    actions: *mut FileActionSlot,
+    /// glibc/musl `__pad[16]`.  Never read.  Present so that `size_of` is 80
+    /// and a C caller's stack frame is the size we think it is.
+    _pad: [i32; 16],
+}
+
+/// The 80 bytes, asserted at compile time rather than at test time.
+///
+/// Lane A asked for this specifically when it filed the bug, and the argument
+/// is `kernel/src/cap/rights.rs`'s: the two halves of this contract live in
+/// different languages compiled from different headers, so **no single diff
+/// ever contains both**. A `#[test]` can only catch the mistake on a run that
+/// someone remembers to do; a `const` block makes the mistake impossible to
+/// build. The `#[test]` below additionally pins the field offsets, which is
+/// the part a const block cannot express.
+const _: () = {
+    assert!(
+        size_of::<PosixSpawnFileActionsT>() == 80,
+        "posix_spawn_file_actions_t is 80 bytes in musl and glibc alike; a \
+         larger Rust definition makes posix_spawn_file_actions_init overrun \
+         the C caller's stack object"
+    );
+    assert!(align_of::<PosixSpawnFileActionsT>() == 8);
+};
+
+impl PosixSpawnFileActionsT {
+    /// Actions recorded so far.
+    ///
+    /// `used` is `i32` to match the C layout, so it is narrowed here once
+    /// rather than at each of the six call sites.  It is only ever advanced
+    /// from 0 by `push`, which caps it at `MAX_FILE_ACTIONS`, so the value
+    /// is non-negative by construction.
+    fn count(&self) -> usize {
+        usize::try_from(self.used).unwrap_or(0)
+    }
+
+    /// The recorded actions, in the order they were added.
+    ///
+    /// Empty — not a dangling slice — before the first `add*`, because
+    /// `actions` is null then and `used` is 0.
+    fn slots(&self) -> &[FileActionSlot] {
+        if self.actions.is_null() {
+            return &[];
+        }
+        // SAFETY: `actions` is non-null, so it came from `push`'s allocation
+        // of `MAX_FILE_ACTIONS` initialised slots, and `used <=
+        // MAX_FILE_ACTIONS` is `push`'s invariant.
+        unsafe { core::slice::from_raw_parts(self.actions, self.count()) }
+    }
+
+    /// Append one action, allocating the slot array on first use.
+    ///
+    /// Returns 0, or `ENOMEM` if the object is full or the allocation fails —
+    /// the two cases POSIX gives `posix_spawn_file_actions_add*` for running
+    /// out of room, which is why they are not distinguished here.
+    ///
+    /// # Why the cap stays, when glibc has none
+    ///
+    /// Lane A's report suggested dropping `MAX_FILE_ACTIONS` along with the
+    /// inline storage, since a growable array makes the `ENOMEM` a real one.
+    /// It is not local to this type: `MAX_FILE_ACTIONS` also sizes
+    /// [`OpenedHandles::handles`], and `MAX_FD_MAP >= 3 + MAX_FILE_ACTIONS` is
+    /// asserted against the **fd map handed to the kernel's spawn syscall**,
+    /// which is fixed-width. An uncapped action list would silently overrun
+    /// that map — or, via `OpenedHandles::push`'s bounds check, silently *leak*
+    /// the handles past the end. Lifting the cap therefore means widening a
+    /// kernel interface that lives in lane A's tree, so it is not this fix.
+    ///
+    /// The cap is also what makes one allocation right: with it, the array is
+    /// 4608 bytes and cannot grow, so there is no `realloc` path to get wrong.
+    ///
+    /// The slot comes in by reference rather than by value: it is 288 bytes,
+    /// most of it the inline path, and passing it in registers-plus-stack-copy
+    /// at each of the five call sites is a copy the callee only makes again.
+    fn push(&mut self, slot: &FileActionSlot) -> i32 {
+        if self.count() >= MAX_FILE_ACTIONS {
+            return errno::ENOMEM;
+        }
+        if self.actions.is_null() {
+            // The whole array at once rather than glibc's doubling: our
+            // `malloc` is one mmap per allocation (see malloc.rs), so any
+            // request under a 16 KiB region costs a whole region — the 4608
+            // bytes here and glibc's initial 8 slots are charged identically.
+            //
+            // This is also why the path stays inline at 256 bytes rather than
+            // being `strdup`ed as lane A suggested: under a page-granular
+            // allocator a `strdup` per action costs a 16 KiB region *each*, so
+            // 16 opens would take 256 KiB where one flat array takes 16.
+            let bytes = MAX_FILE_ACTIONS.saturating_mul(size_of::<FileActionSlot>());
+            let raw = crate::malloc::malloc(bytes);
+            if raw.is_null() {
+                return errno::ENOMEM;
+            }
+            let slots = raw.cast::<FileActionSlot>();
+            let mut i = 0usize;
+            while i < MAX_FILE_ACTIONS {
+                // SAFETY: `slots` points to `MAX_FILE_ACTIONS` slots' worth of
+                // fresh, writable, uninitialised bytes; `i` is in range.  The
+                // slots must be *written*, never read, until initialised —
+                // hence `write`, not a `&mut` reference to a live value.
+                unsafe { slots.add(i).write(FileActionSlot::empty()) };
+                i = i.wrapping_add(1);
+            }
+            self.actions = slots;
+            self.allocated = i32::try_from(MAX_FILE_ACTIONS).unwrap_or(i32::MAX);
+            self.used = 0;
+        }
+        let idx = self.count();
+        // SAFETY: `actions` is non-null and holds `MAX_FILE_ACTIONS`
+        // initialised slots; `idx < MAX_FILE_ACTIONS` from the cap above.
+        unsafe { *self.actions.add(idx) = *slot };
+        self.used = self.used.saturating_add(1);
+        0
+    }
+
+    /// Release the slot array and return to the just-initialised state.
+    ///
+    /// Idempotent, so a caller that destroys twice — or destroys an object it
+    /// only ever `init`ed — does not double-free.
+    fn release(&mut self) {
+        if !self.actions.is_null() {
+            // SAFETY: `actions` came from `crate::malloc::malloc` in `push`
+            // and is freed exactly once, because it is nulled immediately.
+            unsafe { crate::malloc::free(self.actions.cast::<u8>()) };
+        }
+        self.actions = core::ptr::null_mut();
+        self.allocated = 0;
+        self.used = 0;
+    }
 }
 
 /// Internal slot — wraps `Option<FileAction>` in a fixed-size repr.
@@ -299,31 +469,34 @@ pub extern "C" fn posix_spawn_file_actions_init(acts: *mut PosixSpawnFileActions
     if acts.is_null() {
         return errno::EFAULT;
     }
-    // SAFETY: `acts` is non-null and caller guarantees it points to
-    // writable memory of at least `size_of::<PosixSpawnFileActionsT>()`.
+    // Writes exactly the 80 bytes the C caller allocated, and no more.  Both
+    // references do the same: glibc's `__posix_spawn_file_actions_init` is a
+    // `memset (file_actions, '\0', sizeof (*file_actions))` and musl's is
+    // `*fa = (posix_spawn_file_actions_t){0}`.  Storage for the actions is
+    // deferred to the first `add*`, so this cannot fail.
+    //
+    // SAFETY: `acts` is non-null and the caller guarantees it points to
+    // writable memory of at least `size_of::<PosixSpawnFileActionsT>()`,
+    // which is now the 80 bytes their header declares.
     unsafe {
-        (*acts).count = 0;
-        let mut i: usize = 0;
-        while i < MAX_FILE_ACTIONS {
-            if let Some(slot) = (*acts).actions.get_mut(i) {
-                *slot = FileActionSlot::empty();
-            }
-            i = i.wrapping_add(1);
-        }
+        (*acts).allocated = 0;
+        (*acts).used = 0;
+        (*acts).actions = core::ptr::null_mut();
+        (*acts)._pad = [0; 16];
     }
     0
 }
 
 /// Destroy a file actions object.
 ///
-/// No heap resources to free — just zeroes the count.
+/// Frees the slot array allocated by the first `add*`.  A caller that
+/// `init`ed and never added anything frees nothing, and a caller that
+/// destroys twice is safe: `release` nulls the pointer as it frees it.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn posix_spawn_file_actions_destroy(acts: *mut PosixSpawnFileActionsT) -> i32 {
     if !acts.is_null() {
         // SAFETY: acts is non-null (checked above).
-        unsafe {
-            (*acts).count = 0;
-        }
+        unsafe { (*acts).release() };
     }
     0
 }
@@ -349,18 +522,11 @@ pub extern "C" fn posix_spawn_file_actions_addclose(
     }
     // SAFETY: acts is non-null (checked above).
     let a = unsafe { &mut *acts };
-    if a.count >= MAX_FILE_ACTIONS {
-        return errno::ENOMEM;
-    }
-    if let Some(slot) = a.actions.get_mut(a.count) {
-        *slot = FileActionSlot {
-            tag: 1,
-            fd,
-            ..FileActionSlot::empty()
-        };
-    }
-    a.count = a.count.wrapping_add(1);
-    0
+    a.push(&FileActionSlot {
+        tag: 1,
+        fd,
+        ..FileActionSlot::empty()
+    })
 }
 
 /// Add a dup2 action.
@@ -384,19 +550,12 @@ pub extern "C" fn posix_spawn_file_actions_adddup2(
     }
     // SAFETY: acts is non-null (checked above).
     let a = unsafe { &mut *acts };
-    if a.count >= MAX_FILE_ACTIONS {
-        return errno::ENOMEM;
-    }
-    if let Some(slot) = a.actions.get_mut(a.count) {
-        *slot = FileActionSlot {
-            tag: 2,
-            fd,
-            newfd,
-            ..FileActionSlot::empty()
-        };
-    }
-    a.count = a.count.wrapping_add(1);
-    0
+    a.push(&FileActionSlot {
+        tag: 2,
+        fd,
+        newfd,
+        ..FileActionSlot::empty()
+    })
 }
 
 /// Add an open action.
@@ -423,9 +582,6 @@ pub extern "C" fn posix_spawn_file_actions_addopen(
     }
     // SAFETY: acts and path are non-null (checked above).
     let a = unsafe { &mut *acts };
-    if a.count >= MAX_FILE_ACTIONS {
-        return errno::ENOMEM;
-    }
     let path_len = unsafe { crate::file::c_strlen_pub(path) };
     if path_len >= ACTION_PATH_MAX {
         return errno::ENAMETOOLONG;
@@ -435,19 +591,15 @@ pub extern "C" fn posix_spawn_file_actions_addopen(
     unsafe {
         core::ptr::copy_nonoverlapping(path, stored_path.as_mut_ptr(), path_len);
     }
-    if let Some(slot) = a.actions.get_mut(a.count) {
-        *slot = FileActionSlot {
-            tag: 3,
-            fd,
-            oflag,
-            mode,
-            path: stored_path,
-            path_len,
-            ..FileActionSlot::empty()
-        };
-    }
-    a.count = a.count.wrapping_add(1);
-    0
+    a.push(&FileActionSlot {
+        tag: 3,
+        fd,
+        oflag,
+        mode,
+        path: stored_path,
+        path_len,
+        ..FileActionSlot::empty()
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -473,9 +625,6 @@ pub extern "C" fn posix_spawn_file_actions_addchdir_np(
         return errno::EFAULT;
     }
     let a = unsafe { &mut *acts };
-    if a.count >= MAX_FILE_ACTIONS {
-        return errno::ENOMEM;
-    }
     let path_len = unsafe { crate::file::c_strlen_pub(path) };
     if path_len >= ACTION_PATH_MAX {
         return errno::ENAMETOOLONG;
@@ -485,18 +634,14 @@ pub extern "C" fn posix_spawn_file_actions_addchdir_np(
     unsafe {
         core::ptr::copy_nonoverlapping(path, stored_path.as_mut_ptr(), path_len);
     }
-    if let Some(slot) = a.actions.get_mut(a.count) {
-        // Tag 4 = Chdir action (not yet processed by spawn — forward-compatible).
-        *slot = FileActionSlot {
-            tag: 4,
-            fd: -1,
-            path: stored_path,
-            path_len,
-            ..FileActionSlot::empty()
-        };
-    }
-    a.count = a.count.wrapping_add(1);
-    0
+    // Tag 4 = Chdir action (not yet processed by spawn — forward-compatible).
+    a.push(&FileActionSlot {
+        tag: 4,
+        fd: -1,
+        path: stored_path,
+        path_len,
+        ..FileActionSlot::empty()
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -523,19 +668,12 @@ pub extern "C" fn posix_spawn_file_actions_addclosefrom_np(
         return errno::EFAULT;
     }
     let a = unsafe { &mut *acts };
-    if a.count >= MAX_FILE_ACTIONS {
-        return errno::ENOMEM;
-    }
-    if let Some(slot) = a.actions.get_mut(a.count) {
-        // Tag 5 = Closefrom action.
-        *slot = FileActionSlot {
-            tag: 5,
-            fd: lowfd,
-            ..FileActionSlot::empty()
-        };
-    }
-    a.count = a.count.wrapping_add(1);
-    0
+    // Tag 5 = Closefrom action.
+    a.push(&FileActionSlot {
+        tag: 5,
+        fd: lowfd,
+        ..FileActionSlot::empty()
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -642,6 +780,17 @@ pub struct PosixSpawnattrT {
     /// Padding out to musl's 336-byte object.  Never read.
     _reserved: [u8; 64],
 }
+
+/// This type was already correct and already had a layout *test*.  It gets the
+/// `const` too, because the test only helps on a run somebody makes; see the
+/// note on `PosixSpawnFileActionsT`'s assertion for the argument.
+const _: () = {
+    assert!(
+        size_of::<PosixSpawnattrT>() <= 336,
+        "musl posix_spawnattr_t"
+    );
+    assert!(align_of::<PosixSpawnattrT>() <= 8);
+};
 
 /// Initialize a spawn attributes object.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
@@ -1091,10 +1240,10 @@ fn build_fd_map(
         // SAFETY: file_actions is non-null (checked above).  The caller
         // guarantees it was initialized via posix_spawn_file_actions_init.
         let acts = unsafe { &*file_actions };
+        let slots = acts.slots();
         let mut action_idx = 0usize;
-        while action_idx < acts.count && action_idx < MAX_FILE_ACTIONS {
-            // SAFETY: action_idx < acts.count <= MAX_FILE_ACTIONS.
-            if let Some(slot) = acts.actions.get(action_idx) {
+        while action_idx < slots.len() {
+            if let Some(slot) = slots.get(action_idx) {
                 match slot.tag {
                     1 => {
                         // Close: remove this fd from the virtual table.
@@ -2079,6 +2228,52 @@ mod tests {
         assert_eq!(off((&raw const a.schedpolicy).cast::<u8>() as usize), 268);
     }
 
+    /// The same contract for the file-actions object — and the reason this
+    /// test exists at all is that its sibling above had it and this one did
+    /// not.
+    ///
+    /// `PosixSpawnattrT` was guarded, and was right.  `PosixSpawnFileActionsT`
+    /// sat beside it in this file, was reached by the same callers through the
+    /// same header, and was **4624 bytes where C says 80** — because it stored
+    /// its sixteen 288-byte action slots inline.  `posix_spawn_file_actions_init`
+    /// therefore wrote 4544 bytes past the end of the caller's stack object on
+    /// its first call.  GNU make hit it on every recipe and crashed a hundred
+    /// instructions later reading a local that the overrun had zeroed.
+    ///
+    /// Nothing in Rust could have caught that: every Rust caller shares this
+    /// definition, so the type is self-consistent and only disagrees with the
+    /// C header it is supposed to be implementing.  A hardcoded 80 is the only
+    /// thing that can state the other side of the contract, which is why the
+    /// number is written out here rather than derived from the fields.
+    ///
+    /// musl:  `{ int __pad0[2];               void *__actions; int __pad[16]; }`
+    /// glibc: `{ int __allocated; int __used; struct __spawn_action *__actions; int __pad[16]; }`
+    ///
+    /// Both are 80 bytes with the pointer at offset 8; we match glibc's naming
+    /// because we use both leading ints for what glibc uses them for.
+    #[test]
+    fn test_file_actions_matches_musl_layout() {
+        use core::mem::{align_of, size_of};
+        assert_eq!(
+            size_of::<PosixSpawnFileActionsT>(),
+            80,
+            "posix_spawn_file_actions_t is 80 bytes in every C header; a Rust \
+             definition that is larger overruns the caller's stack slot"
+        );
+        assert_eq!(align_of::<PosixSpawnFileActionsT>(), 8);
+        // SAFETY: the type is four plain-data fields (two i32, a raw pointer,
+        // and an i32 array); an all-zero bit pattern is the same value
+        // `posix_spawn_file_actions_init` writes, and a null `actions` is the
+        // documented "nothing allocated yet" state.
+        let a = unsafe { core::mem::zeroed::<PosixSpawnFileActionsT>() };
+        let base = (&raw const a).cast::<u8>() as usize;
+        let off = |p: usize| p - base;
+        assert_eq!(off((&raw const a.allocated).cast::<u8>() as usize), 0);
+        assert_eq!(off((&raw const a.used).cast::<u8>() as usize), 4);
+        assert_eq!(off((&raw const a.actions).cast::<u8>() as usize), 8);
+        assert_eq!(off((&raw const a._pad).cast::<u8>() as usize), 16);
+    }
+
     /// Every setter's value must come back out of its getter unchanged.
     /// A setter that silently dropped its argument would still let CPython
     /// link and would still let `os.posix_spawn` "succeed" — the failure
@@ -2374,7 +2569,7 @@ mod tests {
         let mut acts = unsafe { core::mem::zeroed::<PosixSpawnFileActionsT>() };
         let ret = posix_spawn_file_actions_init(&raw mut acts);
         assert_eq!(ret, 0);
-        assert_eq!(acts.count, 0);
+        assert_eq!(acts.count(), 0);
     }
 
     #[test]
@@ -2389,7 +2584,7 @@ mod tests {
         posix_spawn_file_actions_init(&raw mut acts);
         let ret = posix_spawn_file_actions_destroy(&raw mut acts);
         assert_eq!(ret, 0);
-        assert_eq!(acts.count, 0);
+        assert_eq!(acts.count(), 0);
     }
 
     #[test]
@@ -2407,9 +2602,9 @@ mod tests {
         posix_spawn_file_actions_init(&raw mut acts);
         let ret = posix_spawn_file_actions_addclose(&raw mut acts, 3);
         assert_eq!(ret, 0);
-        assert_eq!(acts.count, 1);
-        assert_eq!(acts.actions[0].tag, 1); // Close
-        assert_eq!(acts.actions[0].fd, 3);
+        assert_eq!(acts.count(), 1);
+        assert_eq!(acts.slots()[0].tag, 1); // Close
+        assert_eq!(acts.slots()[0].fd, 3);
     }
 
     #[test]
@@ -2459,7 +2654,7 @@ mod tests {
             let ret = posix_spawn_file_actions_addclose(&raw mut acts, i as Fd);
             assert_eq!(ret, 0);
         }
-        assert_eq!(acts.count, MAX_FILE_ACTIONS);
+        assert_eq!(acts.count(), MAX_FILE_ACTIONS);
         // One more should fail.
         let ret = posix_spawn_file_actions_addclose(&raw mut acts, 99);
         assert_eq!(ret, errno::ENOMEM);
@@ -2473,10 +2668,10 @@ mod tests {
         posix_spawn_file_actions_init(&raw mut acts);
         let ret = posix_spawn_file_actions_adddup2(&raw mut acts, 3, 1);
         assert_eq!(ret, 0);
-        assert_eq!(acts.count, 1);
-        assert_eq!(acts.actions[0].tag, 2); // Dup2
-        assert_eq!(acts.actions[0].fd, 3);
-        assert_eq!(acts.actions[0].newfd, 1);
+        assert_eq!(acts.count(), 1);
+        assert_eq!(acts.slots()[0].tag, 2); // Dup2
+        assert_eq!(acts.slots()[0].fd, 3);
+        assert_eq!(acts.slots()[0].newfd, 1);
     }
 
     #[test]
@@ -2525,12 +2720,12 @@ mod tests {
         let path = b"/dev/null\0";
         let ret = posix_spawn_file_actions_addopen(&raw mut acts, 0, path.as_ptr(), 0, 0o644);
         assert_eq!(ret, 0);
-        assert_eq!(acts.count, 1);
-        assert_eq!(acts.actions[0].tag, 3); // Open
-        assert_eq!(acts.actions[0].fd, 0);
-        assert_eq!(acts.actions[0].oflag, 0);
-        assert_eq!(acts.actions[0].mode, 0o644);
-        assert_eq!(acts.actions[0].path_len, 9); // "/dev/null"
+        assert_eq!(acts.count(), 1);
+        assert_eq!(acts.slots()[0].tag, 3); // Open
+        assert_eq!(acts.slots()[0].fd, 0);
+        assert_eq!(acts.slots()[0].oflag, 0);
+        assert_eq!(acts.slots()[0].mode, 0o644);
+        assert_eq!(acts.slots()[0].path_len, 9); // "/dev/null"
     }
 
     #[test]
@@ -2581,15 +2776,15 @@ mod tests {
         posix_spawn_file_actions_adddup2(&raw mut acts, 4, 1);
         posix_spawn_file_actions_addclose(&raw mut acts, 5);
 
-        assert_eq!(acts.count, 3);
+        assert_eq!(acts.count(), 3);
         // Verify order preserved.
-        assert_eq!(acts.actions[0].tag, 1); // Close(3)
-        assert_eq!(acts.actions[0].fd, 3);
-        assert_eq!(acts.actions[1].tag, 2); // Dup2(4, 1)
-        assert_eq!(acts.actions[1].fd, 4);
-        assert_eq!(acts.actions[1].newfd, 1);
-        assert_eq!(acts.actions[2].tag, 1); // Close(5)
-        assert_eq!(acts.actions[2].fd, 5);
+        assert_eq!(acts.slots()[0].tag, 1); // Close(3)
+        assert_eq!(acts.slots()[0].fd, 3);
+        assert_eq!(acts.slots()[1].tag, 2); // Dup2(4, 1)
+        assert_eq!(acts.slots()[1].fd, 4);
+        assert_eq!(acts.slots()[1].newfd, 1);
+        assert_eq!(acts.slots()[2].tag, 1); // Close(5)
+        assert_eq!(acts.slots()[2].fd, 5);
     }
 
     // -- posix_spawnattr_init/destroy --
@@ -3033,11 +3228,7 @@ mod tests {
     fn test_build_fd_map_with_close() {
         ensure_std_fds();
         // Create file_actions that close fd 1 (stdout).
-        let mut acts = PosixSpawnFileActionsT {
-            count: 0,
-            actions: [FileActionSlot::empty(); MAX_FILE_ACTIONS],
-            _pad: [0; 8],
-        };
+        let mut acts = unsafe { core::mem::zeroed::<PosixSpawnFileActionsT>() };
         posix_spawn_file_actions_init(&raw mut acts);
         posix_spawn_file_actions_addclose(&raw mut acts, 1);
 
@@ -3064,11 +3255,7 @@ mod tests {
     fn test_build_fd_map_with_dup2() {
         ensure_std_fds();
         // Create file_actions that dup2(2, 1) — redirect stdout to stderr.
-        let mut acts = PosixSpawnFileActionsT {
-            count: 0,
-            actions: [FileActionSlot::empty(); MAX_FILE_ACTIONS],
-            _pad: [0; 8],
-        };
+        let mut acts = unsafe { core::mem::zeroed::<PosixSpawnFileActionsT>() };
         posix_spawn_file_actions_init(&raw mut acts);
         posix_spawn_file_actions_adddup2(&raw mut acts, 2, 1);
 
@@ -3098,11 +3285,7 @@ mod tests {
         ensure_std_fds();
         // Close fd 1, then dup2(2, 1) — common shell pattern for
         // redirecting stdout to a pipe.
-        let mut acts = PosixSpawnFileActionsT {
-            count: 0,
-            actions: [FileActionSlot::empty(); MAX_FILE_ACTIONS],
-            _pad: [0; 8],
-        };
+        let mut acts = unsafe { core::mem::zeroed::<PosixSpawnFileActionsT>() };
         posix_spawn_file_actions_init(&raw mut acts);
         posix_spawn_file_actions_addclose(&raw mut acts, 1);
         posix_spawn_file_actions_adddup2(&raw mut acts, 2, 1);
@@ -3127,11 +3310,7 @@ mod tests {
     #[test]
     fn test_build_fd_map_close_all_standard() {
         // Close all three standard fds.
-        let mut acts = PosixSpawnFileActionsT {
-            count: 0,
-            actions: [FileActionSlot::empty(); MAX_FILE_ACTIONS],
-            _pad: [0; 8],
-        };
+        let mut acts = unsafe { core::mem::zeroed::<PosixSpawnFileActionsT>() };
         posix_spawn_file_actions_init(&raw mut acts);
         posix_spawn_file_actions_addclose(&raw mut acts, 0);
         posix_spawn_file_actions_addclose(&raw mut acts, 1);
@@ -3191,11 +3370,7 @@ mod tests {
 
     #[test]
     fn test_addchdir_np_null_path() {
-        let mut acts = PosixSpawnFileActionsT {
-            count: 0,
-            actions: [FileActionSlot::empty(); MAX_FILE_ACTIONS],
-            _pad: [0; 8],
-        };
+        let mut acts = unsafe { core::mem::zeroed::<PosixSpawnFileActionsT>() };
         posix_spawn_file_actions_init(&raw mut acts);
         let ret = posix_spawn_file_actions_addchdir_np(&raw mut acts, core::ptr::null());
         assert_eq!(ret, crate::errno::EFAULT);
@@ -3203,25 +3378,17 @@ mod tests {
 
     #[test]
     fn test_addchdir_np_success() {
-        let mut acts = PosixSpawnFileActionsT {
-            count: 0,
-            actions: [FileActionSlot::empty(); MAX_FILE_ACTIONS],
-            _pad: [0; 8],
-        };
+        let mut acts = unsafe { core::mem::zeroed::<PosixSpawnFileActionsT>() };
         posix_spawn_file_actions_init(&raw mut acts);
         let ret = posix_spawn_file_actions_addchdir_np(&raw mut acts, b"/tmp\0".as_ptr());
         assert_eq!(ret, 0);
-        assert_eq!(acts.count, 1);
-        assert_eq!(acts.actions[0].tag, 4, "chdir action tag should be 4");
+        assert_eq!(acts.count(), 1);
+        assert_eq!(acts.slots()[0].tag, 4, "chdir action tag should be 4");
     }
 
     #[test]
     fn test_addchdir_np_full() {
-        let mut acts = PosixSpawnFileActionsT {
-            count: 0,
-            actions: [FileActionSlot::empty(); MAX_FILE_ACTIONS],
-            _pad: [0; 8],
-        };
+        let mut acts = unsafe { core::mem::zeroed::<PosixSpawnFileActionsT>() };
         posix_spawn_file_actions_init(&raw mut acts);
         // Fill all slots.
         for _ in 0..MAX_FILE_ACTIONS {
@@ -3288,11 +3455,7 @@ mod tests {
 
     #[test]
     fn test_addclosefrom_np_negative_fd() {
-        let mut acts = PosixSpawnFileActionsT {
-            count: 0,
-            actions: [FileActionSlot::empty(); MAX_FILE_ACTIONS],
-            _pad: [0; 8],
-        };
+        let mut acts = unsafe { core::mem::zeroed::<PosixSpawnFileActionsT>() };
         posix_spawn_file_actions_init(&raw mut acts);
         let ret = posix_spawn_file_actions_addclosefrom_np(&raw mut acts, -1);
         assert_eq!(ret, crate::errno::EBADF);
@@ -3300,26 +3463,18 @@ mod tests {
 
     #[test]
     fn test_addclosefrom_np_success() {
-        let mut acts = PosixSpawnFileActionsT {
-            count: 0,
-            actions: [FileActionSlot::empty(); MAX_FILE_ACTIONS],
-            _pad: [0; 8],
-        };
+        let mut acts = unsafe { core::mem::zeroed::<PosixSpawnFileActionsT>() };
         posix_spawn_file_actions_init(&raw mut acts);
         let ret = posix_spawn_file_actions_addclosefrom_np(&raw mut acts, 3);
         assert_eq!(ret, 0);
-        assert_eq!(acts.count, 1);
-        assert_eq!(acts.actions[0].tag, 5, "closefrom action tag should be 5");
-        assert_eq!(acts.actions[0].fd, 3);
+        assert_eq!(acts.count(), 1);
+        assert_eq!(acts.slots()[0].tag, 5, "closefrom action tag should be 5");
+        assert_eq!(acts.slots()[0].fd, 3);
     }
 
     #[test]
     fn test_addclosefrom_np_full() {
-        let mut acts = PosixSpawnFileActionsT {
-            count: 0,
-            actions: [FileActionSlot::empty(); MAX_FILE_ACTIONS],
-            _pad: [0; 8],
-        };
+        let mut acts = unsafe { core::mem::zeroed::<PosixSpawnFileActionsT>() };
         posix_spawn_file_actions_init(&raw mut acts);
         for _ in 0..MAX_FILE_ACTIONS {
             posix_spawn_file_actions_addclose(&raw mut acts, 0);

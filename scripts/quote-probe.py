@@ -37,7 +37,25 @@ import subprocess
 import sys
 import tempfile
 
-ENV = dict(os.environ, LC_ALL="C")
+# `C.UTF-8`, not `C`. Only one of the three styles moves with the locale --
+# `locale_quoting_style`, the one behind `quote()` -- and it is the difference
+# between `'zzz'` and `'zzz'` with the curly marks. Measuring under `LC_ALL=C`
+# measured a locale SlateOS does not have and never will (design-decisions.md
+# §351, and Q38 for the premise that the string layer is UTF-8 full stop), and
+# so pinned the ASCII branch of GNU as if it were the only one.
+#
+# The choice also reaches the *file name* styles, though not through the quote
+# marks -- those stay straight in every locale. It reaches them through
+# printability. Under `C` a valid multi-byte character is not printable and
+# comes back escaped, as `'no such '$'\303\251'' file'`, while under `C.UTF-8`
+# it prints as itself: `'no such <e-acute> file'`.
+#
+# That difference used to be invisible here, because the corpus was built from
+# single bytes and from an alphabet whose high bytes (`\xff`, `\x80`) never
+# form a valid sequence. `MULTIBYTE` below exists to make it visible: every
+# character in it is a *valid* sequence, so every row it produces is one the
+# byte-only corpus could not have produced.
+ENV = dict(os.environ, LC_ALL="C.UTF-8")
 INVALID = re.compile(rb"^sort: (?:invalid|ambiguous) argument ")
 # Which failure `sort` hit does not matter here; all three render the name the
 # same way, and the corpus holds names that are directories as well as names
@@ -104,6 +122,61 @@ def quote(arg: bytes) -> bytes | None:
     return line[m.end():].rsplit(b" for ", 1)[0]
 
 
+# Sequences that are *valid* UTF-8, one per reason the answer could differ.
+# Under `C.UTF-8` the printability test GNU applies is `iswprint` on a decoded
+# wide character, so these are the rows that tell a character test from a byte
+# test -- the byte-only corpus below cannot, because every high byte in it is
+# a lone one.
+#
+# Four groups, and the third and fourth are the interesting ones:
+#
+#   * printable at each UTF-8 length (2, 3 and 4 bytes), so each arm of the
+#     decoder is exercised;
+#   * `quote()`'s own delimiters, U+2018 and U+2019, which it has to keep
+#     distinguishable from the marks it is adding;
+#   * characters glibc calls *unprintable* even though they decode -- the C1
+#     controls, and the line/paragraph separators;
+#   * characters whose printability is a property of glibc's Unicode tables
+#     rather than of anything the OS decides -- an unassigned code point, a
+#     private-use one, a format character. `design-decisions.md` §101 declined
+#     to model those tables, so these rows are expected to differ and
+#     `tests/quotearg.rs` names them.
+MULTIBYTE = [
+    "\u00e9",   # two bytes, printable  (LATIN SMALL LETTER E WITH ACUTE)
+    "\u20ac",   # three bytes, printable (EURO SIGN)
+    "\U0001f600",  # four bytes, printable (GRINNING FACE)
+    "\u4e00",   # three bytes, printable, double-width (CJK IDEOGRAPH ONE)
+    "\u00a0",   # NO-BREAK SPACE -- a space that is not `isspace`-ish here
+    "\u0301",   # COMBINING ACUTE ACCENT
+    "\u2018",   # quote()'s own opening mark
+    "\u2019",   # quote()'s own closing mark
+    "\u0080",   # C1 control, decodes, not printable
+    "\u009f",   # C1 control, the other end of the range
+    "\u00ad",   # SOFT HYPHEN (Cf)
+    "\u200b",   # ZERO WIDTH SPACE (Cf)
+    "\ufeff",   # ZERO WIDTH NO-BREAK SPACE (Cf)
+    "\u2028",   # LINE SEPARATOR (Zl)
+    "\u2029",   # PARAGRAPH SEPARATOR (Zp)
+    "\u0378",   # unassigned
+    "\ue000",   # private use
+]
+
+# Sequences that are *not* valid UTF-8, one per way a decode can fail. These
+# must stay byte-escaped whatever the printability test decides, and they are
+# what pins the boundary between "decoded a character" and "did not".
+UNDECODABLE = [
+    b"\xc3",              # two-byte lead, continuation missing
+    b"\xc3z",             # two-byte lead, followed by a non-continuation
+    b"\xe2\x82",          # three-byte sequence, truncated
+    b"\xf0\x9f\x98",      # four-byte sequence, truncated
+    b"\xc0\xaf",          # overlong encoding of `/`
+    b"\xed\xa0\x80",      # a surrogate, which UTF-8 may not encode
+    b"\xf4\x90\x80\x80",  # above U+10FFFF
+    b"\x80",              # a continuation byte with no lead
+    b"\xff",              # not a lead byte at all
+]
+
+
 def corpus() -> list[bytes]:
     """Adversarial names, then random ones over the bytes that matter."""
     fixed = [
@@ -120,7 +193,25 @@ def corpus() -> list[bytes]:
         b"a'z\n", b"'\n", b"\n'", b"'a\n", b"a\n'", b"'a'\n", b"\n'a",
         b"\n\n", b"a\nz\nb", b"a'b\tc'd", b"\xff'", b"'\xff", b"a'\xff",
         b"z'\n", b"nl\nsort: forged: line", b"a" * 40,
+        # A printable character, an undecodable byte and ASCII in one name.
+        # This is the row that shows how the two kinds of run are grouped:
+        # GNU prints `'a<e-acute>b'$'\377''c'`, so the printable character
+        # joins the *literal* run rather than starting an escape of its own.
+        "a\u00e9b".encode() + b"\xffc",
+        b"\xff" + "\u00e9".encode(),
+        "\u00e9".encode() + b"\xff",
+        # A decodable-but-unprintable character between two printable ones,
+        # which is the same grouping question with the roles swapped.
+        "a\u0080b".encode(),
+        "\u00e9\u0080\u00e9".encode(),
+        # Both of quote()'s marks inside the thing being quoted.
+        "\u2018a\u2019".encode(),
     ]
+    for s in MULTIBYTE:
+        fixed.append(s.encode())
+        fixed.append(("a" + s + "z").encode())
+        fixed.append(("a'z" + s).encode())
+    fixed.extend(UNDECODABLE)
     random.seed(20260816)
     alpha = b"a'\n\t \"$" + bytes([92]) + b"!#~%*z:;<>?[]{}|&()\x01\x7f\xff\x80"
     for _ in range(600):
@@ -146,7 +237,7 @@ def main() -> int:
         "# Produced by scripts/quote-probe.py under:",
         "#   " + subprocess.run(["sort", "--version"], capture_output=True,
                                 text=True).stdout.split("\n")[0],
-        "# Each row is <style> <input-hex> <output-hex>, LC_ALL=C.",
+        "# Each row is <style> <input-hex> <output-hex>, LC_ALL=C.UTF-8.",
     ]
     def row(style, fn, arg):
         rendered = fn(arg)
@@ -160,13 +251,24 @@ def main() -> int:
     # Every byte, in every position that has been observed to matter: alone,
     # leading, trailing and interior, and each of those again beside a single
     # quote -- because which outer quote gets chosen depends on both.
+    shapes = (b"%c", b"a%cz", b"%cz", b"a%c",
+              b"a'z%c", b"%ca'z", b"a%c'z", b"'%c", b"%c'")
     for b in range(1, 256):
-        for shape in (b"%c", b"a%cz", b"%cz", b"a%c",
-                      b"a'z%c", b"%ca'z", b"a%c'z", b"'%c", b"%c'"):
+        for shape in shapes:
             name = shape.replace(b"%c", bytes([b]))
             if b != 0x2F:
                 row("quotef", quotef, name)
                 row("quoteaf", quoteaf, name)
+            row("quote", quote, name)
+    # The same sweep for whole *characters* and for whole undecodable
+    # sequences, because position decides the outer quote here too -- and
+    # because a sequence that straddles the boundary between a literal run and
+    # an escaped one is exactly where a byte-at-a-time renderer goes wrong.
+    for seq in [s.encode() for s in MULTIBYTE] + UNDECODABLE:
+        for shape in shapes:
+            name = shape.replace(b"%c", seq)
+            row("quotef", quotef, name)
+            row("quoteaf", quoteaf, name)
             row("quote", quote, name)
     text = "\n".join(lines) + "\n"
     if dest == "-":

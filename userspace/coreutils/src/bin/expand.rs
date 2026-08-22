@@ -749,7 +749,7 @@ mod tests {
     fn a_bad_tab_list_is_refused_rather_than_defaulted() {
         assert_eq!(
             refuse(&["-t", "oops"]),
-            ["tab size contains invalid character(s): 'oops'"]
+            ["tab size contains invalid character(s): ‘oops’"]
         );
         assert_eq!(refuse(&["-t", "0"]), ["tab size cannot be 0"]);
         assert_eq!(
@@ -764,8 +764,8 @@ mod tests {
         assert_eq!(
             refuse(&["-t", "1/2/3"]),
             [
-                "'/' specifier not at start of number: '/2/3'",
-                "'/' specifier not at start of number: '/3'",
+                "'/' specifier not at start of number: ‘/2/3’",
+                "'/' specifier not at start of number: ‘/3’",
             ]
         );
         // A getopt error stops the parse, so the second problem is unreported.
@@ -778,7 +778,7 @@ mod tests {
         // came first, because each exits where it is found.
         assert_eq!(
             refuse(&["-t", "x", "-q"]),
-            ["tab size contains invalid character(s): 'x'"]
+            ["tab size contains invalid character(s): ‘x’"]
         );
         assert_eq!(refuse(&["-q", "-t", "x"]), ["invalid option -- 'q'"]);
     }

@@ -287,9 +287,9 @@ FORMAT is one of:
 ///
 /// ```text
 /// $ nl -bX -nY -fQ f
-/// nl: invalid body numbering style: 'X'
-/// nl: invalid line numbering format: 'Y'
-/// nl: invalid footer numbering style: 'Q'
+/// nl: invalid body numbering style: ‘X’
+/// nl: invalid line numbering format: ‘Y’
+/// nl: invalid footer numbering style: ‘Q’
 /// Try 'nl --help' for more information.
 /// ```
 ///
@@ -1136,10 +1136,10 @@ mod tests {
 
     #[test]
     fn an_unusable_style_names_which_of_the_three_it_was() {
-        assert!(err(&["-bX"]).starts_with("invalid body numbering style: 'X'"));
-        assert!(err(&["-hX"]).starts_with("invalid header numbering style: 'X'"));
-        assert!(err(&["-fX"]).starts_with("invalid footer numbering style: 'X'"));
-        assert!(err(&["-b", ""]).starts_with("invalid body numbering style: ''"));
+        assert!(err(&["-bX"]).starts_with("invalid body numbering style: ‘X’"));
+        assert!(err(&["-hX"]).starts_with("invalid header numbering style: ‘X’"));
+        assert!(err(&["-fX"]).starts_with("invalid footer numbering style: ‘X’"));
+        assert!(err(&["-b", ""]).starts_with("invalid body numbering style: ‘’"));
     }
 
     #[test]
@@ -1147,9 +1147,9 @@ mod tests {
         let e = err(&["-bX", "-nY", "-fQ"]);
         assert_eq!(
             e,
-            "invalid body numbering style: 'X'\n\
-             nl: invalid line numbering format: 'Y'\n\
-             nl: invalid footer numbering style: 'Q'\n\
+            "invalid body numbering style: ‘X’\n\
+             nl: invalid line numbering format: ‘Y’\n\
+             nl: invalid footer numbering style: ‘Q’\n\
              Try 'nl --help' for more information."
         );
     }
@@ -1164,12 +1164,12 @@ mod tests {
         assert_eq!(
             err(&["-Z", "-bX"]),
             "invalid option -- 'Z'\n\
-             nl: invalid body numbering style: 'X'\n\
+             nl: invalid body numbering style: ‘X’\n\
              Try 'nl --help' for more information."
         );
         assert_eq!(
             err(&["-bX", "-Z"]),
-            "invalid body numbering style: 'X'\n\
+            "invalid body numbering style: ‘X’\n\
              nl: invalid option -- 'Z'\n\
              Try 'nl --help' for more information."
         );
@@ -1194,8 +1194,8 @@ mod tests {
         let e = err(&["-bX", "-w0"]);
         assert_eq!(
             e,
-            "invalid body numbering style: 'X'\n\
-             nl: invalid line number field width: '0': Numerical result out of range"
+            "invalid body numbering style: ‘X’\n\
+             nl: invalid line number field width: ‘0’: Numerical result out of range"
         );
     }
 
@@ -1400,15 +1400,15 @@ mod tests {
         // fell off…
         assert_eq!(
             err(&["-w", "0"]),
-            "invalid line number field width: '0': Numerical result out of range"
+            "invalid line number field width: ‘0’: Numerical result out of range"
         );
         assert_eq!(
             err(&["-w", "-1"]),
-            "invalid line number field width: '-1': Numerical result out of range"
+            "invalid line number field width: ‘-1’: Numerical result out of range"
         );
         assert_eq!(
             err(&["-l", "-5"]),
-            "invalid line number of blank lines: '-5': Numerical result out of range"
+            "invalid line number of blank lines: ‘-5’: Numerical result out of range"
         );
         // …but a value past `INT_MIN / 2` says "value too large" even though it
         // fell off the *floor*, because gnulib picks the sentence by the value
@@ -1416,31 +1416,31 @@ mod tests {
         // replaced got wrong: it said "out of range" here, and GNU does not.
         assert_eq!(
             err(&["-l", "-3000000000"]),
-            "invalid line number of blank lines: '-3000000000': \
+            "invalid line number of blank lines: ‘-3000000000’: \
              Value too large for defined data type"
         );
         assert_eq!(
             err(&["-w", "-3000000000"]),
-            "invalid line number field width: '-3000000000': \
+            "invalid line number field width: ‘-3000000000’: \
              Value too large for defined data type"
         );
         // Above the ceiling says the same thing whether the ceiling is the
         // caller's `INT_MAX` or `intmax_t` itself.
         assert_eq!(
             err(&["-w", "2147483648"]),
-            "invalid line number field width: '2147483648': \
+            "invalid line number field width: ‘2147483648’: \
              Value too large for defined data type"
         );
         assert_eq!(
             err(&["-v", "9223372036854775808"]),
-            "invalid starting line number: '9223372036854775808': \
+            "invalid starting line number: ‘9223372036854775808’: \
              Value too large for defined data type"
         );
         // A magnitude past `intmax_t` overflows the same way in either
         // direction: it never reaches the floor comparison.
         assert_eq!(
             err(&["-v", "-9223372036854775809"]),
-            "invalid starting line number: '-9223372036854775809': \
+            "invalid starting line number: ‘-9223372036854775809’: \
              Value too large for defined data type"
         );
     }

@@ -40,10 +40,13 @@
 # before they start following, so a killed `-f` still has to have printed the
 # same bytes, and that is compared as strictly as any other case.
 #
-# The locale is `C.UTF-8` for consistency with the other harnesses. Nothing
-# `tail` does is locale-dependent — it never decodes a byte — except the quote
-# marks gnulib puts round a bad number, which is why the number diagnostics are
-# referenced under `LC_ALL=C` instead. See `open-questions.md` → B-Q2.
+# The locale is `C.UTF-8` throughout. Nothing `tail` does is locale-dependent —
+# it never decodes a byte — and the quote marks gnulib puts round a bad number
+# agree here too: since §351 ours are U+2018/U+2019 in every locale, which is
+# what GNU prints under any UTF-8 one. The number diagnostics used to be
+# referenced under `LC_ALL=C`, back when ours stayed ASCII
+# (`open-questions.md` → B-Q2, since answered); `C` is now the setting in which
+# the reference would be wrong.
 set -u
 
 # Our tail is a native Windows binary, so MSYS would rewrite an argument that
@@ -52,9 +55,6 @@ export MSYS2_ARG_CONV_EXCL='*'
 
 OURS=${OURS:-"target/x86_64-pc-windows-gnu/debug/tail.exe"}
 GNU=${GNU:-"wsl -e timeout -s KILL 3 env LC_ALL=C.UTF-8 tail"}
-# The same reference under the C locale, for the cases whose only difference is
-# which quote marks gnulib chooses.
-GNU_C=${GNU_C:-"wsl -e timeout -s KILL 3 env LC_ALL=C tail"}
 export LC_ALL=${LC_ALL:-C.UTF-8}
 
 # A case that had to be killed, however the two shells chose to say so.
@@ -150,10 +150,6 @@ report() {
 }
 
 run_case()  { [ "$HAVE_GNU" = yes ] || return 0; compare - "$GNU" "$@"; report "tail $*"; }
-# The number diagnostics, referenced under `LC_ALL=C` so that the quote marks
-# are ASCII on both sides. Under a UTF-8 locale gnulib switches to U+2018/U+2019
-# and ours does not — one open question, not one per case. See B-Q2.
-run_ascii() { [ "$HAVE_GNU" = yes ] || return 0; compare - "$GNU_C" "$@"; report "tail $* [C]"; }
 run_stdin() {
   [ "$HAVE_GNU" = yes ] || return 0
   local input="$1"; shift
@@ -329,13 +325,13 @@ run_stdin 'a\nb\nc\n' -
 run_case -c
 # `-c` with a following word takes it as the count, so this is a number
 # diagnostic and belongs under the C locale like the rest of them.
-run_ascii -c five.txt
+run_case -c five.txt
 # `f` inside the obsolete word means follow, which is why these time out.
 run_case -2f five.txt
 run_case -2lf five.txt
 run_case -f five.txt
-run_ascii -99999999999999999999999b big.txt
-run_ascii -99999999999999999999999 big.txt
+run_case -99999999999999999999999b big.txt
+run_case -99999999999999999999999 big.txt
 
 # --- getopt's sentences ------------------------------------------------------
 run_case -x five.txt
@@ -361,7 +357,7 @@ run_case --v five.txt
 run_case --s five.txt
 # `--p` resolves to `--pid`, so its operand is a PID and the diagnostic is a
 # number one — under the C locale with the others.
-run_ascii --p five.txt
+run_case --p five.txt
 # Abbreviations, every one of which the hand-written parser refused.
 run_case --li 2 five.txt
 run_case --by 4 five.txt
@@ -380,9 +376,9 @@ run_case --follow=descriptor -n1 five.txt
 run_case --follow=d -n1 five.txt
 run_case --follow=n -n1 five.txt
 # `argmatch`'s two sentences quote with gnulib's `quote()`, so like the number
-# diagnostics they are referenced under the C locale. See B-Q2.
-run_ascii --follow=x -n1 five.txt
-run_ascii --follow= -n1 five.txt
+# diagnostics they come out curly on both sides under this file's `C.UTF-8`.
+run_case --follow=x -n1 five.txt
+run_case --follow= -n1 five.txt
 run_case -F -n1 five.txt
 run_case --retry -n1 five.txt
 run_case --retry --follow=name -n1 five.txt
@@ -396,40 +392,40 @@ run_case --pid=2147483647 -f -n1 five.txt
 run_case --pid=2147483647 -F -n1 nope.txt
 
 # --- the number, which is gnulib's xdectoumax --------------------------------
-run_ascii -n x five.txt
-run_ascii -c x five.txt
-run_ascii -n 1x five.txt
-run_ascii -n 0x10 five.txt
-run_ascii -n '' five.txt
-run_ascii -n - five.txt
-run_ascii -n + five.txt
-run_ascii -n -- -2 five.txt
-run_ascii -n '2 ' five.txt
-run_ascii -n ' ' five.txt
-run_ascii -n ' -2' five.txt
-run_ascii -n ' +2' five.txt
-run_ascii -n ' K' five.txt
-run_ascii -n '+K' five.txt
-run_ascii -n K five.txt
-run_ascii -n +x five.txt
-run_ascii -n -x five.txt
-run_ascii -n 99999999999999999999 five.txt
-run_ascii -n 18446744073709551616 five.txt
-run_ascii -n 18014398509481984K five.txt
-run_ascii -n 99999999999999999999X five.txt
-run_ascii -n 1Ki five.txt
-run_ascii -n 1KiBB five.txt
-run_ascii -n 5K5 five.txt
-run_ascii -n 1Z five.txt
-run_ascii -n 1Q five.txt
+run_case -n x five.txt
+run_case -c x five.txt
+run_case -n 1x five.txt
+run_case -n 0x10 five.txt
+run_case -n '' five.txt
+run_case -n - five.txt
+run_case -n + five.txt
+run_case -n -- -2 five.txt
+run_case -n '2 ' five.txt
+run_case -n ' ' five.txt
+run_case -n ' -2' five.txt
+run_case -n ' +2' five.txt
+run_case -n ' K' five.txt
+run_case -n '+K' five.txt
+run_case -n K five.txt
+run_case -n +x five.txt
+run_case -n -x five.txt
+run_case -n 99999999999999999999 five.txt
+run_case -n 18446744073709551616 five.txt
+run_case -n 18014398509481984K five.txt
+run_case -n 99999999999999999999X five.txt
+run_case -n 1Ki five.txt
+run_case -n 1KiBB five.txt
+run_case -n 5K5 five.txt
+run_case -n 1Z five.txt
+run_case -n 1Q five.txt
 # The offending text is echoed back through gnulib's `quote()`, which escapes
 # the way C does and not the way a shell would.
-run_ascii -n "a'b" five.txt
-run_ascii -n 'a\b' five.txt
-run_ascii -n 'a"b' five.txt
-run_ascii -n 'a b' five.txt
+run_case -n "a'b" five.txt
+run_case -n 'a\b' five.txt
+run_case -n 'a"b' five.txt
+run_case -n 'a b' five.txt
 # The suffixes gnulib knows but `tail`'s list does not include.
-for bad in 1w 1c 1B 1g 1t 1D; do run_ascii -n "$bad" five.txt; done
+for bad in 1w 1c 1B 1g 1t 1D; do run_case -n "$bad" five.txt; done
 # The ones it does, checked for value rather than validity.
 run_case -c 1K big.txt
 run_case -c 1kB big.txt
@@ -439,28 +435,28 @@ run_case -n 1K big.txt
 run_case -c 1M big.txt
 
 # --- --pid and --max-unchanged-stats, which take a different parser ----------
-run_ascii --pid=x -f five.txt
-run_ascii --pid= -f five.txt
-run_ascii --pid=-1 -f five.txt
-run_ascii --pid=5k -f five.txt
-run_ascii --pid=1b -f five.txt
-run_ascii --pid=99999999999999999999 -f five.txt
-run_ascii --pid=2147483648 -f five.txt
-run_ascii '--pid= 5' -n1 five.txt
-run_ascii --max-unchanged-stats=x -f five.txt
-run_ascii --max-unchanged-stats=-1 -f five.txt
-run_ascii --max-unchanged-stats=1k -f five.txt
-run_ascii --max-unchanged-stats=99999999999999999999 -f five.txt
+run_case --pid=x -f five.txt
+run_case --pid= -f five.txt
+run_case --pid=-1 -f five.txt
+run_case --pid=5k -f five.txt
+run_case --pid=1b -f five.txt
+run_case --pid=99999999999999999999 -f five.txt
+run_case --pid=2147483648 -f five.txt
+run_case '--pid= 5' -n1 five.txt
+run_case --max-unchanged-stats=x -f five.txt
+run_case --max-unchanged-stats=-1 -f five.txt
+run_case --max-unchanged-stats=1k -f five.txt
+run_case --max-unchanged-stats=99999999999999999999 -f five.txt
 
 # --- -s, which is strtod rather than strtoumax -------------------------------
-run_ascii -s x -f five.txt
-run_ascii -s '' -f five.txt
-run_ascii -s -1 -f five.txt
-run_ascii -s nan -f five.txt
-run_ascii -s 1x -f five.txt
-run_ascii -s 1e -f five.txt
-run_ascii --sleep-interval=x -f five.txt
-run_ascii -s 0x -f five.txt
+run_case -s x -f five.txt
+run_case -s '' -f five.txt
+run_case -s -1 -f five.txt
+run_case -s nan -f five.txt
+run_case -s 1x -f five.txt
+run_case -s 1e -f five.txt
+run_case --sleep-interval=x -f five.txt
+run_case -s 0x -f five.txt
 
 # --- the warnings, which change nothing but are printed ----------------------
 run_case --retry -n1 five.txt

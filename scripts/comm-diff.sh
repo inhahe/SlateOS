@@ -14,12 +14,11 @@
 # Run `OURS=/usr/bin/comm ./scripts/comm-diff.sh` to confirm the harness still
 # discriminates: it should report dozens of differences, not zero.
 #
-# ## Why the whole harness runs under `LC_ALL=C`, not just the diagnostics
+# ## Why the comparison cases run under `LC_ALL=C` and the diagnostics do not
 #
-# Its siblings run under `C.UTF-8` and drop to `C` only for the diagnostics that
-# pass an argument through gnulib's quoting (B-Q2). `comm` needs `C` for a
-# second and much larger reason: the locale decides *what the program computes*,
-# not merely how it words a complaint.
+# Its siblings run wholly under `C.UTF-8`. `comm` cannot, because for the cases
+# that actually compare something the locale decides *what the program
+# computes*, not merely how it words a complaint.
 #
 #     hard_LC_COLLATE = hard_locale (LC_COLLATE);
 #     ...
@@ -38,6 +37,11 @@
 # entry in `known-issues.md` as the `oils` funmap listing. The last section here
 # re-runs a few comparison cases under `C.UTF-8` to record how far the agreement
 # actually extends.
+#
+# None of that reaches the diagnostics — a message about a missing operand
+# collates nothing — and since §351 they must be referenced under `C.UTF-8`,
+# because our `quote()` now prints U+2018/U+2019 in every locale and GNU prints
+# those only under a UTF-8 one. So they run through `run_diag`, not `run_case`.
 #
 # ## Why `od -An -c`
 #
@@ -198,16 +202,19 @@ report() {
 }
 
 run_case()  { [ "$HAVE_GNU" = yes ] || return 0; compare - C "$@"; report "comm $*"; }
-# The diagnostics that pass an argument through gnulib's quoting. They are
-# already under `C` here — see the header — so this is a label, not a locale
-# change: it marks the rows whose agreement would be at issue under B-Q2 if the
-# rest of the harness ever moved to `C.UTF-8`.
-run_ascii() { [ "$HAVE_GNU" = yes ] || return 0; compare - C "$@"; report "comm $* [C]"; }
 # The same case under a locale where GNU collates rather than compares bytes.
 # Not a synonym for `run_case`: it is the measurement behind the claim that the
 # divergence is confined to inputs whose collation order differs from their byte
 # order. See the header.
 run_utf8()  { [ "$HAVE_GNU" = yes ] || return 0; compare - C.UTF-8 "$@"; report "comm $* [C.UTF-8]"; }
+# The diagnostics. They reach `C.UTF-8` by a different road than `run_utf8`
+# does, so they keep a name of their own even though the mechanism is the same:
+# they pair nothing and collate nothing, so the header's reason for `C` never
+# reaches them, and what does reach them is §351, which made our `quote()` print
+# U+2018/U+2019 in every locale. GNU prints those under a UTF-8 locale and ASCII
+# under `C`, so `C` is now the setting in which the reference would be wrong.
+# Spelled as a call rather than a copy so the two cannot silently drift apart.
+run_diag()  { run_utf8 "$@"; }
 run_stdin() {
   [ "$HAVE_GNU" = yes ] || return 0
   local input="$1"; shift
@@ -341,7 +348,7 @@ run_case --output-delimiter=: --output-delimiter=:: a.txt b.txt
 # It is refused before the files are opened…
 run_case --output-delimiter=: --output-delimiter=';' nosuch.txt nosuch2.txt
 # …and after the whole command line is read, so a getopt error preempts it.
-run_ascii --output-delimiter=: --output-delimiter=';' -Q a.txt b.txt
+run_diag --output-delimiter=: --output-delimiter=';' -Q a.txt b.txt
 # Bytes that are not text, as separators.
 run_case --output-delimiter='é' a.txt b.txt
 run_case --output-delimiter='中' --total a.txt b.txt
@@ -410,48 +417,48 @@ run_stdin 'c\na\nb\n' - sorted.txt
 # Fewer than two and more than two are different sentences, and the one-operand
 # sentence names the operand — which after glibc's permutation is the last
 # argument, whichever position it was typed in.
-run_ascii
-run_ascii a.txt
-run_ascii -z a.txt
-run_ascii --total a.txt
-run_ascii a.txt -z
-run_ascii nosuch.txt
-run_ascii -
-run_ascii a.txt b.txt empty.txt
-run_ascii a.txt b.txt empty.txt sorted.txt
-run_ascii -12 a.txt b.txt empty.txt
-run_ascii a.txt empty.txt b.txt
+run_diag
+run_diag a.txt
+run_diag -z a.txt
+run_diag --total a.txt
+run_diag a.txt -z
+run_diag nosuch.txt
+run_diag -
+run_diag a.txt b.txt empty.txt
+run_diag a.txt b.txt empty.txt sorted.txt
+run_diag -12 a.txt b.txt empty.txt
+run_diag a.txt empty.txt b.txt
 
 # --- operands that cannot be opened -------------------------------------------
 # The first file is opened first, so a pair of bad ones names only the first.
-run_ascii nosuch.txt nosuch2.txt
-run_ascii a.txt nosuch.txt
-run_ascii nosuch.txt a.txt
-run_ascii --total nosuch.txt a.txt
-run_ascii -12 a.txt nosuch.txt
+run_diag nosuch.txt nosuch2.txt
+run_diag a.txt nosuch.txt
+run_diag nosuch.txt a.txt
+run_diag --total nosuch.txt a.txt
+run_diag -12 a.txt nosuch.txt
 
 # --- getopt diagnostics -------------------------------------------------------
-run_ascii -Q a.txt b.txt
-run_ascii -1Q a.txt b.txt
-run_ascii -Q1 a.txt b.txt
-run_ascii -0 a.txt b.txt
-run_ascii -4 a.txt b.txt
-run_ascii -9 a.txt b.txt
-run_ascii --nope a.txt b.txt
-run_ascii --total=x a.txt b.txt
-run_ascii --check-order=x a.txt b.txt
-run_ascii --nocheck-order=x a.txt b.txt
-run_ascii --zero-terminated=x a.txt b.txt
-run_ascii --help=x a.txt b.txt
-run_ascii --version=x a.txt b.txt
-run_ascii --output-delimiter
-run_ascii --output-delimiter a.txt
-run_ascii --=x a.txt b.txt
-run_ascii -- -Q
+run_diag -Q a.txt b.txt
+run_diag -1Q a.txt b.txt
+run_diag -Q1 a.txt b.txt
+run_diag -0 a.txt b.txt
+run_diag -4 a.txt b.txt
+run_diag -9 a.txt b.txt
+run_diag --nope a.txt b.txt
+run_diag --total=x a.txt b.txt
+run_diag --check-order=x a.txt b.txt
+run_diag --nocheck-order=x a.txt b.txt
+run_diag --zero-terminated=x a.txt b.txt
+run_diag --help=x a.txt b.txt
+run_diag --version=x a.txt b.txt
+run_diag --output-delimiter
+run_diag --output-delimiter a.txt
+run_diag --=x a.txt b.txt
+run_diag -- -Q
 # A getopt error beats a bad operand count, and both beat a missing file.
-run_ascii -Q
-run_ascii -Q a.txt
-run_ascii --nope
+run_diag -Q
+run_diag -Q a.txt
+run_diag --nope
 
 # --- abbreviations, which the shipped parser did not accept at all ------------
 run_case --t a.txt b.txt
@@ -459,9 +466,9 @@ run_case --z nul1.txt nul2.txt
 run_case --zero-t nul1.txt nul2.txt
 run_case --o : a.txt b.txt
 run_case --outp=: a.txt b.txt
-run_ascii --c dis.txt sorted.txt
-run_ascii --n dis.txt sorted.txt
-run_ascii --ch dis.txt sorted.txt
+run_diag --c dis.txt sorted.txt
+run_diag --n dis.txt sorted.txt
+run_diag --ch dis.txt sorted.txt
 
 # --- options and operands interleave ------------------------------------------
 run_case a.txt -1 b.txt

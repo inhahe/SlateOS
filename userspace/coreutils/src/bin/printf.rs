@@ -60,9 +60,17 @@
 //! echoes the format, and the character-constant warning echoes the tail of an
 //! argument. GNU writes those bytes raw, which lets a format string put a
 //! newline, or a whole forged line, into `printf`'s own error stream. Here they
-//! are escaped as `\ooo`, the same rule [`coreutils::getopt`] and `seq` use.
-//! `scripts/printf-diff.sh` carries these as expected differences rather than
-//! quietly passing them.
+//! go through [`coreutils::quote::escape_unprintable`], which prints text as
+//! itself and everything else as `\ooo`.
+//!
+//! Since that rule became character-wise the difference is smaller than it was,
+//! and where it survives it is worth knowing why. `printf '%é'` still differs,
+//! because a directive runs from the `%` to the **conversion byte** — so what
+//! the message echoes is `%` and 0xC3 alone, the lead byte of a character whose
+//! tail was never part of the directive. It decodes to nothing, so it is
+//! escaped. The character-constant warning is not truncated that way, and there
+//! the two agree. `scripts/printf-diff.sh` carries the remainder as expected
+//! differences rather than quietly passing them.
 //!
 //! # Checked against GNU
 //!
@@ -73,7 +81,7 @@ use coreutils::cfmt::{self, Value};
 use coreutils::errmsg::strerror;
 use coreutils::extfloat::{self, ExtF80, Spec};
 use coreutils::getopt::{self, Program};
-use coreutils::quote::{os_bytes, quote, quotef};
+use coreutils::quote::{self, os_bytes, quote, quotef};
 use std::env;
 use std::io::{self, Write};
 use std::process::ExitCode;
@@ -482,7 +490,7 @@ impl<W: Write> Printer<W> {
                         let text = format.get(direc_start..end).unwrap_or(b"");
                         return Err(Stop::Fatal(format!(
                             "{}: invalid conversion specification",
-                            escaped(text)
+                            quote::escape_unprintable(text)
                         )));
                     }
                     spec.conv = conversion;
@@ -661,25 +669,46 @@ impl<W: Write> Printer<W> {
         self.put(byte)
     }
 
-    /// gnulib's `print_unicode_char (stream, code, 0)` in the C locale.
+    /// gnulib's `print_unicode_char (stream, code, 0)` under a UTF-8 locale.
     ///
     /// gnulib converts the code point to UTF-8 and then through `iconv` to the
     /// locale's charset, falling back to printing the escape back when that
-    /// fails. In the C locale the charset is ASCII, so the conversion succeeds
-    /// for exactly the code points below 0x80 — including the control
-    /// characters, so `\u0001` really is one byte 0x01 — and fails for
-    /// everything else.
+    /// fails. Under a UTF-8 charset the second step is the identity, so the
+    /// conversion succeeds for every code point UTF-8 can represent and fails
+    /// only above U+10FFFF. Surrogates never arrive here — the caller refuses
+    /// them with a diagnostic, which is upstream's order too.
     ///
-    /// The fallback's hex is **upper** case (`\u00FF`), while the surrogate
+    /// **This used to implement the C locale**, where the charset is ASCII and
+    /// so everything from U+0080 up came back out as the literal text
+    /// `\u00E9`. That was the same mistake §351 fixed in `quote()`, in a second
+    /// place: Q38 settled that SlateOS's charset is UTF-8 and nothing else, so
+    /// the ASCII branch was implementing a locale that cannot occur here, and
+    /// `printf '\u00e9'` printed seven bytes of backslash-escape where every
+    /// modern system prints the two bytes of `é`. Measured against GNU printf
+    /// 9.4 under `LC_ALL=C.UTF-8`, which is the reference `printf-diff.sh` now
+    /// uses.
+    ///
+    /// The fallback's hex is **upper** case (`\U00110000`), while the surrogate
     /// diagnostic's is lower (`\ud800`). That is not a transcription slip: the
     /// two are different format strings in different files.
     fn print_unicode_char(&mut self, code: u32) -> Result<(), Stop> {
         if code < 0x80 {
-            self.put(truncate(code))
-        } else if code < 0x1_0000 {
-            self.emit(format!("\\u{code:04X}").as_bytes())
-        } else {
-            self.emit(format!("\\U{code:08X}").as_bytes())
+            return self.put(truncate(code));
+        }
+        match char::from_u32(code) {
+            Some(c) => {
+                let mut buf = [0u8; 4];
+                self.emit(c.encode_utf8(&mut buf).as_bytes())
+            }
+            // Above U+10FFFF, so no UTF-8 encoding exists and gnulib's failure
+            // callback prints the escape back. gnulib's callback also has a
+            // `\u%04X` arm for codes below U+10000; it is unreachable under a
+            // UTF-8 charset, because every such code point encodes, so it is
+            // not written out here. (`char::from_u32` also rejects surrogates,
+            // which the caller has already turned into a fatal diagnostic —
+            // reaching this arm with one would be a bug there, and printing
+            // the escape back is the same thing gnulib would do.)
+            None => self.emit(format!("\\U{code:08X}").as_bytes()),
         }
     }
 
@@ -687,28 +716,50 @@ impl<W: Write> Printer<W> {
 
     /// The `'x` / `"x` extension shared by all three converters: an argument
     /// that begins with a quote and has something after it is a character
-    /// constant whose value is that byte.
+    /// constant whose value is that **character's code point**.
     ///
     /// Returns `None` when the argument is not one, so the caller falls through
     /// to the numeric parse.
+    ///
+    /// ## Why a code point and not a byte
+    ///
+    /// Upstream has two branches here and picks between them on `MB_CUR_MAX >
+    /// 1` — one byte under the `C` locale, one whole multibyte character under
+    /// any other. `design-decisions.md` §356, resting on Q38, settles that the
+    /// string layer here is UTF-8 full stop, so the multibyte branch is the
+    /// only one that can be reached and the byte branch would be dead code
+    /// dressed as a choice. Measured, GNU 9.4 under `LC_ALL=C.UTF-8`:
+    ///
+    /// ```text
+    /// printf '%d\n' "'é"    ->  233        (U+00E9, not 195)
+    /// printf '%d\n' "'€"    ->  8364
+    /// printf '%d\n' "'😀"   ->  128512
+    /// printf '%d\n' "'\xff" ->  255        (decodes to nothing: the raw byte)
+    /// ```
+    ///
+    /// The last line is why the fallback is the byte rather than an error:
+    /// there is no character to name, and refusing to answer would turn a
+    /// printable question into a fatal one.
     fn char_constant(&mut self, s: &[u8]) -> Option<u64> {
         if !matches!(s.first(), Some(b'"' | b'\'')) {
             return None;
         }
-        let value = s.get(1).copied()?;
-        // The multibyte branch upstream is guarded by `MB_CUR_MAX > 1`, which
-        // is false in the C locale -- the only locale these utilities
-        // implement -- so a character constant is always exactly one byte.
-        let rest = s.get(2..).unwrap_or(b"");
+        let body = s.get(1..)?;
+        let &first = body.first()?;
+        let (value, width) = match quote::first_char(body) {
+            Some((c, n)) => (u64::from(u32::from(c)), n),
+            None => (u64::from(first), 1),
+        };
+        let rest = body.get(width..).unwrap_or(b"");
         if !rest.is_empty() && !self.posixly_correct {
             // Escaped, not raw: see the module header. GNU prints `rest`
             // verbatim, which lets an argument put a newline in this sentence.
             self.warn(&format!(
                 "warning: {}: character(s) following character constant have been ignored",
-                escaped(rest)
+                quote::escape_unprintable(rest)
             ));
         }
-        Some(u64::from(value))
+        Some(value)
     }
 
     /// `strtoimax (s, &end, 0)` plus upstream's checking.
@@ -913,25 +964,6 @@ fn truncate(value: u32) -> u8 {
 /// Remove a set of conversions from the still-legal list.
 fn forbid(allowed: &mut Vec<u8>, remove: &[u8]) {
     allowed.retain(|c| !remove.contains(c));
-}
-
-/// Render caller-chosen bytes for a diagnostic, escaping anything that is not
-/// printable ASCII as `\ooo`.
-///
-/// GNU prints these raw. That is the deliberate difference described in the
-/// module header: both sentences that reach here echo bytes the caller wrote,
-/// and a raw newline in one of them is a forged line in `printf`'s error
-/// stream.
-fn escaped(text: &[u8]) -> String {
-    let mut out = String::with_capacity(text.len());
-    for &b in text {
-        if (0x20..0x7f).contains(&b) {
-            out.push(char::from(b));
-        } else {
-            out.push_str(&format!("\\{b:03o}"));
-        }
-    }
-    out
 }
 
 // ---------------------------------------------------------------------- tests
@@ -1253,17 +1285,34 @@ mod tests {
         assert_eq!(run(&["a\\"]).out, b"a\\");
     }
 
-    /// The C locale's charset is ASCII, so a universal character name is a
-    /// byte below 0x80 and the escape written back above it.
+    /// The charset is UTF-8, so a universal character name is the UTF-8
+    /// encoding of its code point — including the control characters, so
+    /// `\u0001` really is the one byte 0x01 and `\u0000` really is a NUL.
+    /// Every value below is a measurement of GNU printf 9.4 under
+    /// `LC_ALL=C.UTF-8`, not a derivation.
     #[test]
-    fn universal_character_names_fall_back_above_ascii() {
+    fn universal_character_names_encode_as_utf8() {
         assert_eq!(run(&["\\u0041"]).out, b"A");
         assert_eq!(run(&["\\u0001|"]).out, b"\x01|");
         assert_eq!(run(&["\\u0000|"]).out, b"\0|");
         assert_eq!(run(&["\\u007f|"]).out, b"\x7f|");
-        assert_eq!(run(&["\\u0080"]).out, b"\\u0080");
-        assert_eq!(run(&["\\u00ff"]).out, b"\\u00FF");
-        assert_eq!(run(&["\\U0001F600"]).out, b"\\U0001F600");
+        assert_eq!(run(&["\\u0080"]).out, b"\xc2\x80");
+        assert_eq!(run(&["\\u00e9"]).out, "é".as_bytes());
+        assert_eq!(run(&["\\u00ff"]).out, "ÿ".as_bytes());
+        assert_eq!(run(&["\\u20ac"]).out, "€".as_bytes());
+        // Non-characters, which glibc's iconv encodes rather than refusing.
+        assert_eq!(run(&["\\ufffe"]).out, b"\xef\xbf\xbe");
+        assert_eq!(run(&["\\uffff"]).out, b"\xef\xbf\xbf");
+        assert_eq!(run(&["\\U0001F600"]).out, "😀".as_bytes());
+        assert_eq!(run(&["\\U0010FFFF"]).out, b"\xf4\x8f\xbf\xbf");
+    }
+
+    /// Above U+10FFFF there is no UTF-8 encoding, so gnulib's failure callback
+    /// writes the escape back — upper-case hex, eight digits.
+    #[test]
+    fn a_code_point_beyond_utf8_writes_the_escape_back() {
+        assert_eq!(run(&["\\U00110000|"]).out, b"\\U00110000|");
+        assert_eq!(run(&["\\UFFFFFFFF|"]).out, b"\\UFFFFFFFF|");
     }
 
     #[test]
@@ -1297,7 +1346,7 @@ mod tests {
     /// An argument that begins with a quote is a character constant, and its
     /// value is the byte after the quote.
     #[test]
-    fn a_character_constant_is_the_byte_after_the_quote() {
+    fn a_character_constant_is_the_character_after_the_quote() {
         assert_eq!(out(&["%d", "'a"]), "97");
         assert_eq!(out(&["%d", "\"a"]), "97");
         assert_eq!(out(&["%d", "'ab"]), "97");
@@ -1358,13 +1407,56 @@ mod tests {
     /// in both sentences that echo caller-chosen bytes.
     #[test]
     fn caller_bytes_in_a_diagnostic_are_escaped() {
-        assert_eq!(escaped(b"abc"), "abc");
-        assert_eq!(escaped(b"a\nb"), "a\\012b");
-        assert_eq!(escaped("é".as_bytes()), "\\303\\251");
+        assert_eq!(quote::escape_unprintable(b"abc"), "abc");
+        assert_eq!(quote::escape_unprintable(b"a\nb"), "a\\012b");
+        // A *character* is not caller-chosen bytes -- it is text, and printing
+        // it in octal would make the sentence unmatchable against the argument
+        // it is about. Only what cannot be read as text is escaped.
+        assert_eq!(quote::escape_unprintable("é".as_bytes()), "é");
+        assert_eq!(quote::escape_unprintable(b"\xc3"), "\\303");
         assert_eq!(
             run(&["%\n"]).stop.as_deref(),
             Some("%\\012: invalid conversion specification")
         );
+    }
+
+    /// The character constant is a whole character, not its first byte.
+    ///
+    /// Measured, GNU 9.4 under `LC_ALL=C.UTF-8` — the locale matters, because
+    /// upstream picks the byte branch when `MB_CUR_MAX == 1` and `C` is the one
+    /// locale where that holds. §356 settles that ours is always UTF-8.
+    #[test]
+    fn a_character_constant_is_a_code_point() {
+        assert_eq!(out(&["%d", "'A"]), "65");
+        assert_eq!(out(&["%d", "'é"]), "233");
+        assert_eq!(out(&["%d", "'€"]), "8364");
+        assert_eq!(out(&["%d", "'😀"]), "128512");
+        assert_eq!(out(&["%d", "\"é"]), "233");
+        // Every converter shares the extension, so every one must share the
+        // decode: a `%d` that said 233 next to a `%x` that said c3 would be
+        // two answers to one question.
+        assert_eq!(out(&["%x", "'é"]), "e9");
+        assert_eq!(out(&["%o", "'é"]), "351");
+        assert_eq!(out(&["%f", "'é"]), "233.000000");
+        // A byte that decodes to no character is worth its own value: there is
+        // nothing else it could be, and refusing to answer would turn a
+        // printable question into a fatal one.
+        assert_eq!(out(&["%d", "'\u{fffd}"]), "65533");
+        assert_eq!(
+            {
+                let mut printer = Printer {
+                    out: Vec::new(),
+                    status: 0,
+                    stream_failed: false,
+                    posixly_correct: true,
+                };
+                printer.strtoimax(b"'\xff")
+            },
+            255
+        );
+        // The trailing text a warning names starts *after* the whole
+        // character, not after its first byte.
+        assert_eq!(out(&["%d", "'éz"]), "233");
     }
 
     #[test]

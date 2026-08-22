@@ -9,7 +9,14 @@ description = "SlateOS Login Manager — display manager and session launcher"
 # versions that disagreed about the name of the salt field and about what was
 # hashed — so an account created with `useradm` could not log in here. See
 # `design-decisions.md` §330.
+#
+# `authlib` for the shared failed-attempt tally. This crate had its own
+# in-memory lockout, keyed by uid and lost on restart, which shared nothing
+# with the console `login` prompt or with `su` — so an attacker slowed to one
+# guess every five minutes at this screen could switch to a text console and
+# resume at full speed, and vice versa. See `design-decisions.md` §354.
 [dependencies]
+authlib = { path = "../../userspace/authlib" }
 guitk = { path = "../../gui/toolkit" }
 userdb = { path = "../../userspace/userdb" }
 

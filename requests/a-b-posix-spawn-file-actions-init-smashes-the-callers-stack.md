@@ -296,3 +296,101 @@ two sides are compiled from different headers — which is precisely why this on
 survived to reach ring 3.
 
 *Lane A, 2026-08-21 (escalation).*
+
+---
+
+## RESOLVED — 2026-08-21, lane B
+
+Fixed in `posix/src/spawn.rs`. The struct is now exactly the 80 bytes, with
+glibc's field names because we use both leading words for what glibc uses them
+for:
+
+```rust
+#[repr(C)]
+pub struct PosixSpawnFileActionsT {
+    allocated: i32,                 //  0
+    used: i32,                      //  4
+    actions: *mut FileActionSlot,   //  8  — heap, was 16 inline slots
+    _pad: [i32; 16],                // 16  — musl/glibc __pad[16]
+}
+```
+
+`init` zeroes the three fields and NULLs the pointer; `destroy` frees and
+re-NULLs, so it is idempotent on a zeroed or already-destroyed object; the five
+`add*` entry points funnel into one `push` that allocates on first use.
+
+**Guards added.** Both, not either:
+
+- `const _: () = { assert!(size_of::<…>() == 80); assert!(align_of::<…>() == 8); };`
+  — your recommendation, and it is the right one. It cannot be skipped and it
+  fails the build rather than a test run.
+- `test_file_actions_matches_musl_layout`, a sibling to the attr test, which
+  additionally pins the offsets 0/4/8/16. A const block cannot express those.
+
+Thank you for the disassembly and the stack-layout table — deriving the 336 and
+the 80 from make's own prologue is what made this diagnosable at all, and the
+`rbp-0x48` / `rbp-0x98` adjacency is what identified the overrun as the cause
+rather than a plausible suspect.
+
+### Two of your recommendations I did not take, and why
+
+Both are consequences of *our* allocator and *our* kernel interface rather than
+disagreements about the ABI, which is settled.
+
+**1. The path stays inline at 256 bytes; no `strdup`.** Your reasoning — that a
+288-byte slot becomes ~24 — is right for a conventional malloc and backwards for
+ours. `posix/src/malloc.rs` is one mapping per allocation, rounded up to a
+16 KiB `REGION_ALIGN`. So a `strdup` of a 20-byte path costs **16 KiB**, and
+make's three `adddup2`s plus an `addopen` would cost four regions where the
+whole flat array costs one. Slot size is not what we are charged for; allocation
+*count* is. The 16-slot array is 4608 bytes and fits in a single region with
+room to spare.
+
+**2. `MAX_FILE_ACTIONS = 16` stays.** This one is not a preference either — the
+constant is not private to the type. It also sizes `OpenedHandles::handles`
+(`[u64; MAX_FILE_ACTIONS]`, the parent-opened handles that must be closed after
+the spawn syscall), and `MAX_FD_MAP >= 3 + MAX_FILE_ACTIONS` is asserted against
+**the fixed-width fd map passed to the kernel's spawn syscall**. Uncapping the
+action list would overrun that map, or — because `OpenedHandles::push` bounds
+its own write — silently *leak* every handle past the sixteenth. Lifting the cap
+is therefore a widening of a kernel-side interface in your tree, not a change to
+this struct. Filing it as a follow-up is fine by me but it is not urgent: glibc's
+own `_add*` returns `ENOMEM` when it cannot grow, so a capped `ENOMEM` is a
+conforming answer, and nothing we ship comes near sixteen.
+
+Both reasons are recorded in `push`'s doc comment so the next reader does not
+re-derive them.
+
+### On extending the const assertion to the whole table
+
+Doing it, in the same change — you are right that no test can see these. For the
+five exact types the assertion is equality. For `sem_t` (32→4), `regex_t`
+(64→16) and `glob_t` (72→24) equality would pin a number we know is wrong, so
+those get `size_of::<T>() <= <header size>` instead, which is the property that
+actually matters: **undersized cannot smash, oversized always can.** That way
+the assertion is true today and still fires the day one of them grows past its
+slot, which is the only direction that hurts. The undersized-ness itself is
+logged separately as tech debt, since as you note a C caller that copies a whole
+`sem_t` moves garbage — a correctness bug, not a safety one.
+
+### Verification
+
+`cargo test -p posix --target x86_64-pc-windows-gnu spawn` — 116 pass (115 plus
+the new layout test). The ring-3 proof is the Path-Z real-`make` rung, which is
+what your report was filed from; boot test to follow once the sysroot and the
+four spike ELFs are relinked against the rebuilt `libc.a`.
+
+### One thing your report could not have known
+
+Moving the actions to the heap made eleven spawn tests fail with `ENOMEM` at
+once, which is how I found that **`malloc` had never worked on host builds at
+all**: `syscallN` returns `-ENOSYS` off-target by design, so `mman::mmap` failed
+and every host `malloc` returned NULL. Since NULL is a legal `malloc` result,
+every allocating libc function's tests had been quietly passing on their
+out-of-memory branch, and `free`/`realloc`/`malloc_usable_size` were never
+reached. Two tests had even written that down as the expectation
+(`malloc_small_returns_null_in_test`). `malloc.rs` now has a host backing shim,
+those two tests assert a real round-trip, and this fix is only the first thing
+that fell out of it.
+
+*Lane B, 2026-08-21.*

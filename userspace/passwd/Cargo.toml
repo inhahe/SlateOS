@@ -10,5 +10,13 @@ description = "SlateOS password management utility"
 # has exactly one implementation, and this dependency is what makes that true
 # rather than aspirational. See
 # `requests/c-b-passwd-and-login-disagree-about-etc-shadow.md`.
+#
+# `authlib` for the one definition of "is this the password?", and for the
+# shared failed-attempt tally. This program answered the question with its own
+# call to `crypt` — right, but a second copy of a policy — and it counted
+# nothing, so the `Current password:` prompt was the one place in the system
+# where guessing was free. See `design-decisions.md` §354 and
+# `known-issues.md` -> `B-PASSWD-VERIFIES-WITHOUT-AUTHLIB`.
 [dependencies]
+authlib = { path = "../authlib" }
 posix = { path = "../../posix" }

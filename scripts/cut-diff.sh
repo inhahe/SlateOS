@@ -16,11 +16,13 @@
 # → `TD-COREUTILS-GETOPT-DIAGNOSTICS-USE-THE-WRONG-SHAPE`, and the identical
 # note at the top of `head-diff.sh` and `wc-diff.sh`.
 #
-# The locale is `C.UTF-8` for consistency with the other harnesses. Nothing
-# `cut` does is locale-dependent — GNU 9.4 falls `-c` through to `-b`, so even
-# "characters" are bytes — except the quote marks gnulib puts round a bad LIST,
-# which is why those cases are referenced under `LC_ALL=C`. See
-# `open-questions.md` → B-Q2.
+# The locale is `C.UTF-8` throughout. Nothing `cut` does is locale-dependent —
+# GNU 9.4 falls `-c` through to `-b`, so even "characters" are bytes — and the
+# quote marks gnulib puts round a bad LIST agree here too: since §351 ours are
+# U+2018/U+2019 in every locale, which is what GNU prints under any UTF-8 one.
+# Those cases used to be referenced under `LC_ALL=C`, back when ours stayed
+# ASCII (`open-questions.md` → B-Q2, since answered). `C` is now the setting in
+# which the reference would be wrong.
 set -u
 
 # Our cut is a native Windows binary, so MSYS would rewrite an argument that
@@ -29,9 +31,6 @@ export MSYS2_ARG_CONV_EXCL='*'
 
 OURS=${OURS:-"target/x86_64-pc-windows-gnu/debug/cut.exe"}
 GNU=${GNU:-"wsl -e env LC_ALL=C.UTF-8 cut"}
-# The same reference under the C locale, for the cases whose only difference is
-# which quote marks gnulib chooses.
-GNU_C=${GNU_C:-"wsl -e env LC_ALL=C cut"}
 export LC_ALL=${LC_ALL:-C.UTF-8}
 
 pass=0; fail=0; xfail=0; xpass=0
@@ -121,10 +120,6 @@ report() {
 }
 
 run_case()  { [ "$HAVE_GNU" = yes ] || return 0; compare - "$GNU" "$@"; report "cut $*"; }
-# The LIST diagnostics, referenced under `LC_ALL=C` so that the quote marks are
-# ASCII on both sides. Under a UTF-8 locale gnulib switches to U+2018/U+2019
-# and ours does not — one open question, not one per case. See B-Q2.
-run_ascii() { [ "$HAVE_GNU" = yes ] || return 0; compare - "$GNU_C" "$@"; report "cut $* [C]"; }
 run_stdin() {
   [ "$HAVE_GNU" = yes ] || return 0
   local input="$1"; shift
@@ -399,61 +394,61 @@ run_case --z --by=1 nul.txt
 run_case --com --by=1 bytes.txt
 
 # --- the LIST grammar, which is gnulib's set_fields ---------------------------
-run_ascii -f0 colon.txt
-run_ascii -b0 colon.txt
-run_ascii -c0 colon.txt
-run_ascii -f'' colon.txt
-run_ascii -b'' colon.txt
-run_ascii -f- colon.txt
-run_ascii -b- colon.txt
-run_ascii -f, colon.txt
-run_ascii -fx colon.txt
-run_ascii -bx colon.txt
-run_ascii -cx colon.txt
-run_ascii -f1x colon.txt
-run_ascii -f'1 2x' colon.txt
-run_ascii -f1-2-3 colon.txt
-run_ascii -b1-2-3 colon.txt
-run_ascii -c1-2-3 colon.txt
-run_ascii -f2-1 colon.txt
-run_ascii -b9-1 colon.txt
-run_ascii -f1-0 colon.txt
-run_ascii -f0-1 colon.txt
-run_ascii -f'1,' colon.txt
-run_ascii -f',1' colon.txt
-run_ascii -f'1,,2' colon.txt
-run_ascii -f' ' colon.txt
-run_ascii -f'-1-' colon.txt
-run_ascii -f'1--2' colon.txt
-run_ascii -f+1 colon.txt
-run_ascii -f' 1' colon.txt
-run_ascii -f'1 ' colon.txt
-run_ascii -f'1  2' colon.txt
+run_case -f0 colon.txt
+run_case -b0 colon.txt
+run_case -c0 colon.txt
+run_case -f'' colon.txt
+run_case -b'' colon.txt
+run_case -f- colon.txt
+run_case -b- colon.txt
+run_case -f, colon.txt
+run_case -fx colon.txt
+run_case -bx colon.txt
+run_case -cx colon.txt
+run_case -f1x colon.txt
+run_case -f'1 2x' colon.txt
+run_case -f1-2-3 colon.txt
+run_case -b1-2-3 colon.txt
+run_case -c1-2-3 colon.txt
+run_case -f2-1 colon.txt
+run_case -b9-1 colon.txt
+run_case -f1-0 colon.txt
+run_case -f0-1 colon.txt
+run_case -f'1,' colon.txt
+run_case -f',1' colon.txt
+run_case -f'1,,2' colon.txt
+run_case -f' ' colon.txt
+run_case -f'-1-' colon.txt
+run_case -f'1--2' colon.txt
+run_case -f+1 colon.txt
+run_case -f' 1' colon.txt
+run_case -f'1 ' colon.txt
+run_case -f'1  2' colon.txt
 # A number that will not fit names the whole run of digits, and only the first
 # such run — the scan stops there.
-run_ascii -f99999999999999999999 colon.txt
-run_ascii -b99999999999999999999 colon.txt
-run_ascii -f18446744073709551615 colon.txt
-run_ascii -f18446744073709551616 colon.txt
-run_ascii -f1,99999999999999999999 colon.txt
-run_ascii -f99999999999999999999,88888888888888888888 colon.txt
-run_ascii -f1-99999999999999999999 colon.txt
-run_ascii -f99999999999999999999- colon.txt
-run_ascii -f0009 colon.txt
-run_ascii -f00000000000000000000009 colon.txt
+run_case -f99999999999999999999 colon.txt
+run_case -b99999999999999999999 colon.txt
+run_case -f18446744073709551615 colon.txt
+run_case -f18446744073709551616 colon.txt
+run_case -f1,99999999999999999999 colon.txt
+run_case -f99999999999999999999,88888888888888888888 colon.txt
+run_case -f1-99999999999999999999 colon.txt
+run_case -f99999999999999999999- colon.txt
+run_case -f0009 colon.txt
+run_case -f00000000000000000000009 colon.txt
 # The offending text is echoed back through gnulib's `quote()`, which escapes
 # the way C does and not the way a shell would. The two styles agree on
 # everything that holds neither a quote nor a backslash, so only these cases
 # tell them apart: `quote()` gives 'a\'b' where shell-escaping gives "a'b".
-run_ascii -f"a'b" colon.txt
-run_ascii -f'a\b' colon.txt
-run_ascii -f'a"b' colon.txt
-run_ascii -c"a'b" colon.txt
-run_ascii -b'a\b' colon.txt
+run_case -f"a'b" colon.txt
+run_case -f'a\b' colon.txt
+run_case -f'a"b' colon.txt
+run_case -c"a'b" colon.txt
+run_case -b'a\b' colon.txt
 # The delimiter is one byte, and the sentence says so.
-run_ascii -f1 -d:: colon.txt
-run_ascii -f1 -dab colon.txt
-run_ascii -f1 --delimiter=xy colon.txt
+run_case -f1 -d:: colon.txt
+run_case -f1 -dab colon.txt
+run_case -f1 --delimiter=xy colon.txt
 
 # --- values large enough to be open-ended but not too large -------------------
 run_case -f18446744073709551614 colon.txt

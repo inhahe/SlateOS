@@ -7,7 +7,13 @@ description = "SlateOS sudo utility"
 # `userdb` for `/etc/users.yaml`. This crate's `authenticate` ignored the
 # password it was given and admitted anyone named anywhere in the file — and
 # admitted *everyone* if the file was absent. See `design-decisions.md` §330.
+#
+# `authlib` for the shared failed-attempt tally. Guessing at this prompt was
+# free and unlimited, which is worth more to an attacker here than anywhere
+# else on the system: it is the prompt that grants root. See
+# `design-decisions.md` §354.
 [dependencies]
+authlib = { path = "../authlib" }
 userdb = { path = "../userdb" }
 
 # The defensive lint set from `CLAUDE.md`. The crate that grants root is the

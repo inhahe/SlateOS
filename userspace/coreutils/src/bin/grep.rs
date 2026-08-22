@@ -984,9 +984,11 @@ mod tests {
         // then declines to answer. `line_selected` must report that as an error
         // and not as "did not match" — `-v` would otherwise print the line.
         let o = Options::default();
-        let pats =
-            compile_patterns(&[b"\\(a*\\)\\(a*\\)\\(a*\\)\\(a*\\)\\(a*\\)\\1\\2\\3\\4\\5b".to_vec()], &o)
-                .unwrap();
+        let pats = compile_patterns(
+            &[b"\\(a*\\)\\(a*\\)\\(a*\\)\\(a*\\)\\(a*\\)\\1\\2\\3\\4\\5b".to_vec()],
+            &o,
+        )
+        .unwrap();
         let line = vec![b'a'; 300];
         assert!(line_selected(&line, &pats, &o).is_err());
     }

@@ -1258,11 +1258,11 @@ mod tests {
         let e = fail(&["--group=zz"]);
         assert_eq!(
             body(&e),
-            "invalid argument 'zz' for '--group'\nValid arguments are:\n  \
-             - 'prepend'\n  - 'append'\n  - 'separate'\n  - 'both'"
+            "invalid argument ‘zz’ for ‘--group’\nValid arguments are:\n  \
+             - ‘prepend’\n  - ‘append’\n  - ‘separate’\n  - ‘both’"
         );
         // The empty word matches all four, which disagree.
-        assert!(body(&fail(&["--group="])).starts_with("ambiguous argument '' for '--group'"));
+        assert!(body(&fail(&["--group="])).starts_with("ambiguous argument ‘’ for ‘--group’"));
         assert_eq!(fail(&["--group=zz"]).status, 1);
     }
 
@@ -1410,7 +1410,7 @@ mod tests {
         // A lone `-` is an operand, not an option.
         assert_eq!(operands(&["-", "b"]), ("-".to_string(), "b".to_string()));
         let e = fail(&["a", "b", "c"]);
-        assert_eq!(body(&e), "extra operand 'c'");
+        assert_eq!(body(&e), "extra operand ‘c’");
         // This one *does* refer to --help: upstream reports it and then calls
         // usage(), where the number diagnostics exit on the spot.
         assert_eq!(e.referral, Some("uniq"));

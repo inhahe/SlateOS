@@ -4,8 +4,10 @@
 //!
 //! The shipped `seq` had no option parser: `-w`, `-f`, `-s`, `--help` and
 //! `--version` were all read as operands, so `seq --help` answered `invalid
-//! number: '--help'`. Past the command line it was `f64` throughout and
-//! disagreed with GNU in ways that changed *output*, not just diagnostics:
+//! number: '--help'`. (Straight marks on purpose: that is what the code of
+//! the day printed. Everything current in this file is curly, per §351.)
+//! Past the command line it was `f64` throughout and disagreed with GNU in
+//! ways that changed *output*, not just diagnostics:
 //!
 //! - The stopping test was `val <= last + f64::EPSILON`, on a value
 //!   **accumulated** by repeated `val += increment`. Both halves are wrong.
@@ -62,7 +64,7 @@
 //!
 //! The optstring is `+f:s:w`, so `seq 1 --version` prints no version: `1` ends
 //! option parsing and `--version` becomes an operand, which is then refused as
-//! `invalid floating point argument: '--version'`. On top of that, each argument
+//! `invalid floating point argument: ‘--version’`. On top of that, each argument
 //! is checked *before* getopt sees it for `-` followed by `.` or a digit, so
 //! `seq -3 -1 -5` is a descending sequence rather than three bad options.
 //!
@@ -1220,21 +1222,21 @@ mod tests {
         for (line, message) in [
             (
                 &["-f", "abc", "1", "3"][..],
-                "format 'abc' has no % directive",
+                "format ‘abc’ has no % directive",
             ),
-            (&["-f", "%", "3"][..], "format '%' ends in %"),
-            (&["-f", "%L", "3"][..], "format '%L' ends in %"),
+            (&["-f", "%", "3"][..], "format ‘%’ ends in %"),
+            (&["-f", "%L", "3"][..], "format ‘%L’ ends in %"),
             (
                 &["-f", "%d", "1", "3"][..],
-                "format '%d' has unknown %d directive",
+                "format ‘%d’ has unknown %d directive",
             ),
             (
                 &["-f", "%f%f", "1", "3"][..],
-                "format '%f%f' has too many % directives",
+                "format ‘%f%f’ has too many % directives",
             ),
             (
                 &["-f", "%%", "1", "3"][..],
-                "format '%%' has no % directive",
+                "format ‘%%’ has no % directive",
             ),
         ] {
             assert_eq!(refusal(line), message, "{line:?}");
@@ -1246,7 +1248,7 @@ mod tests {
     #[test]
     fn a_directive_character_cannot_forge_a_second_line() {
         let e = long_double_format(b"%\n").unwrap_err();
-        assert_eq!(e.sentence, r"format '%\n' has unknown %\012 directive");
+        assert_eq!(e.sentence, r"format ‘%\n’ has unknown %\012 directive");
         assert_eq!(e.sentence.lines().count(), 1);
         assert_eq!(e.referral, None);
         assert_eq!(e.status, 1);
@@ -1260,19 +1262,19 @@ mod tests {
         assert_eq!(refusal(&[]), format!("missing operand{referral}"));
         assert_eq!(
             refusal(&["1", "2", "3", "4"]),
-            format!("extra operand '4'{referral}")
+            format!("extra operand ‘4’{referral}")
         );
         assert_eq!(
             refusal(&["1", "0", "5"]),
-            format!("invalid Zero increment value: '0'{referral}")
+            format!("invalid Zero increment value: ‘0’{referral}")
         );
         assert_eq!(
             refusal(&["abc"]),
-            format!("invalid floating point argument: 'abc'{referral}")
+            format!("invalid floating point argument: ‘abc’{referral}")
         );
         assert_eq!(
             refusal(&["nan"]),
-            format!("invalid 'not-a-number' argument: 'nan'{referral}")
+            format!("invalid ‘not-a-number’ argument: ‘nan’{referral}")
         );
         assert_eq!(
             refusal(&["-w", "-f", "%f", "1", "3"]),
@@ -1329,7 +1331,7 @@ mod tests {
         // A lone `-` is an operand, and a bad one.
         assert_eq!(
             refusal(&["-"]),
-            "invalid floating point argument: '-'\nTry 'seq --help' for more information."
+            "invalid floating point argument: ‘-’\nTry 'seq --help' for more information."
         );
     }
 

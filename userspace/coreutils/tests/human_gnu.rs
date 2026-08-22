@@ -19,7 +19,7 @@
 //! `scripts/gen-human-fixture.sh` for how it is produced and why it takes
 //! three different GNU utilities to produce it.
 
-use coreutils::human::{human_readable, Opts};
+use coreutils::human::{Opts, human_readable};
 
 /// The measured table, embedded at compile time so the test does not care
 /// what the working directory is and does not need GNU coreutils present.
@@ -96,7 +96,14 @@ fn parse(line: &'static str) -> Option<Case> {
         _ => return None,
     };
 
-    Some(Case { raw: line, style, n, opts, to_block_size, expected })
+    Some(Case {
+        raw: line,
+        style,
+        n,
+        opts,
+        to_block_size,
+        expected,
+    })
 }
 
 #[test]
@@ -140,7 +147,9 @@ fn matches_gnu_on_every_measured_row() {
     assert!(
         styles[0] > 0 && styles[1] > 0 && styles[2] > 0,
         "fixture is missing a whole style: ceil={} ceilblk={} near={}",
-        styles[0], styles[1], styles[2]
+        styles[0],
+        styles[1],
+        styles[2]
     );
 
     assert!(

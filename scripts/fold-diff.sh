@@ -33,10 +33,12 @@
 # `--help` and `--version`, whose text is ours rather than the GNU project's,
 # plus a directory operand, which a Windows host refuses to open at all.
 #
-# The locale is `C.UTF-8`, with the diagnostics that pass an argument through
-# gnulib's `quote()` referenced under `LC_ALL=C` so the quote marks are ASCII on
-# both sides — which is every width diagnostic and every getopt one. See
-# `open-questions.md` → B-Q2.
+# The locale is `C.UTF-8` throughout, including for the diagnostics that pass
+# an argument through gnulib's `quote()`. Those used to be referenced under
+# `LC_ALL=C`, because that was the only locale in which GNU's quote marks were
+# ASCII like ours; §351 made ours U+2018/U+2019 in every locale, which is what
+# GNU prints under any UTF-8 locale, so `C` is now the setting in which the
+# reference would be wrong.
 #
 # The locale matters for a second reason here, and it is the reason every
 # *output* case is `C.UTF-8` on both sides rather than left to the environment:
@@ -167,11 +169,6 @@ report() {
 }
 
 run_case()  { [ "$HAVE_GNU" = yes ] || return 0; compare - C.UTF-8 "$@"; report "fold $*"; }
-# The diagnostics that pass an argument through gnulib's `quote()`. Under a
-# UTF-8 locale gnulib switches to U+2018/U+2019 and ours does not — one open
-# question, not one per case. See B-Q2. Every diagnostic `fold` can print quotes
-# something, so every error case here is `run_ascii`.
-run_ascii() { [ "$HAVE_GNU" = yes ] || return 0; compare - C "$@"; report "fold $* [C]"; }
 run_stdin() {
   [ "$HAVE_GNU" = yes ] || return 0
   local input="$1"; shift
@@ -324,72 +321,72 @@ run_stdin 'a\xff\xfe\n' -w 2
 # --- operands that cannot be opened ------------------------------------------
 # The run continues and the status is 1 at the end, so the good file is still
 # folded.
-run_ascii nosuch.txt
-run_ascii plain.txt nosuch.txt
-run_ascii nosuch.txt plain.txt
-run_ascii nosuch.txt nosuch2.txt
-run_ascii -w 3 plain.txt nosuch.txt plain.txt
+run_case nosuch.txt
+run_case plain.txt nosuch.txt
+run_case nosuch.txt plain.txt
+run_case nosuch.txt nosuch2.txt
+run_case -w 3 plain.txt nosuch.txt plain.txt
 
 # --- width diagnostics -------------------------------------------------------
 # The floor is 1 and the ceiling is `SIZE_MAX - 9`; which of the two `strerror`
 # sentences comes out is decided by the *value* against `INT_MAX / 2`, not by
 # the bound that was violated, so `0` and a huge number word differently.
-run_ascii -w 0 plain.txt
-run_ascii -w0 plain.txt
-run_ascii -0 plain.txt
-run_ascii --width=0 plain.txt
-run_ascii -w -1 plain.txt
-run_ascii -w x plain.txt
-run_ascii -w '' plain.txt
-run_ascii -w ' ' plain.txt
-run_ascii -w ' 4' plain.txt
-run_ascii -w '4 ' plain.txt
-run_ascii -w +4 plain.txt
-run_ascii -w 4x plain.txt
-run_ascii -w 4.5 plain.txt
-run_ascii -w oops plain.txt
-run_ascii -w=4 plain.txt
-run_ascii --width=x plain.txt
+run_case -w 0 plain.txt
+run_case -w0 plain.txt
+run_case -0 plain.txt
+run_case --width=0 plain.txt
+run_case -w -1 plain.txt
+run_case -w x plain.txt
+run_case -w '' plain.txt
+run_case -w ' ' plain.txt
+run_case -w ' 4' plain.txt
+run_case -w '4 ' plain.txt
+run_case -w +4 plain.txt
+run_case -w 4x plain.txt
+run_case -w 4.5 plain.txt
+run_case -w oops plain.txt
+run_case -w=4 plain.txt
+run_case --width=x plain.txt
 # No suffixes at all, which is what makes `fold -w 1K` an error though
 # `head -c 1K` is not: the two pass different suffix lists to one function.
-run_ascii -w 1K plain.txt
-run_ascii -w 1k plain.txt
-run_ascii -w 1b plain.txt
-run_ascii -w 1M plain.txt
-run_ascii -w 1KiB plain.txt
+run_case -w 1K plain.txt
+run_case -w 1k plain.txt
+run_case -w 1b plain.txt
+run_case -w 1M plain.txt
+run_case -w 1KiB plain.txt
 # Out of range, both sides of the heuristic.
-run_ascii -w 2147483647 plain.txt
-run_ascii -w 4294967295 plain.txt
-run_ascii -w 18446744073709551615 plain.txt
-run_ascii -w 18446744073709551616 plain.txt
-run_ascii -w 99999999999999999999999 plain.txt
-run_ascii -w -18446744073709551616 plain.txt
-run_ascii -99999999999999999999999 plain.txt
+run_case -w 2147483647 plain.txt
+run_case -w 4294967295 plain.txt
+run_case -w 18446744073709551615 plain.txt
+run_case -w 18446744073709551616 plain.txt
+run_case -w 99999999999999999999999 plain.txt
+run_case -w -18446744073709551616 plain.txt
+run_case -99999999999999999999999 plain.txt
 # The largest *accepted* width, which simply never wraps.
 run_case -w 18446744073709551606 ramp.txt
 run_case -w 1000000 ramp.txt
 
 # --- getopt diagnostics ------------------------------------------------------
-run_ascii -q plain.txt
-run_ascii -bq plain.txt
-run_ascii -qb plain.txt
-run_ascii -w plain.txt
-run_ascii -bw
-run_ascii --width
-run_ascii --zz plain.txt
-run_ascii --bytes=4 plain.txt
-run_ascii --spaces=4 plain.txt
-run_ascii --help=x plain.txt
-run_ascii --version=x plain.txt
-run_ascii --=x plain.txt
-run_ascii -- -q
+run_case -q plain.txt
+run_case -bq plain.txt
+run_case -qb plain.txt
+run_case -w plain.txt
+run_case -bw
+run_case --width
+run_case --zz plain.txt
+run_case --bytes=4 plain.txt
+run_case --spaces=4 plain.txt
+run_case --help=x plain.txt
+run_case --version=x plain.txt
+run_case --=x plain.txt
+run_case -- -q
 # A bad width is an `error (EXIT_FAILURE, …)` inside the option loop, so it
 # preempts every option after it and is preempted by every one before it.
-run_ascii -w 0 -q plain.txt
-run_ascii -q -w 0 plain.txt
-run_ascii -w x -q plain.txt
-run_ascii -q -w x plain.txt
-run_ascii -w 0 --zz plain.txt
+run_case -w 0 -q plain.txt
+run_case -q -w 0 plain.txt
+run_case -w x -q plain.txt
+run_case -q -w x plain.txt
+run_case -w 0 --zz plain.txt
 # Abbreviations, which the shipped parser did not accept at all.
 run_case --byt plain.txt
 run_case --b plain.txt
@@ -402,8 +399,8 @@ run_case --w=3 plain.txt
 run_case plain.txt -w 3
 run_case plain.txt -b words.txt
 run_case -w 3 plain.txt -s
-run_ascii -- -w3
-run_ascii plain.txt -- -w3
+run_case -- -w3
+run_case plain.txt -- -w3
 
 # --- differ on purpose -------------------------------------------------------
 # On SlateOS, and on any POSIX host, opening a directory succeeds and the *read*

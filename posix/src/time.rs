@@ -2309,7 +2309,9 @@ mod gnu_strptime {
                     }
                     b'n' | b't' => {
                         // Skip any whitespace.
-                        while (unsafe { *buf.add(bi) }) == b' ' || (unsafe { *buf.add(bi) }) == b'\t' {
+                        while (unsafe { *buf.add(bi) }) == b' '
+                            || (unsafe { *buf.add(bi) }) == b'\t'
+                        {
                             bi = bi.wrapping_add(1);
                         }
                     }

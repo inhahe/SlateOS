@@ -26,9 +26,12 @@
 # unterminated final line comes back terminated. A whitespace-trimming
 # comparison would agree with everything.
 #
-# The locale is `C.UTF-8`, with the two `argmatch` cases referenced under
-# `LC_ALL=C` so the quote marks are ASCII on both sides. See
-# `open-questions.md` → B-Q2.
+# The locale is `C.UTF-8` throughout, including for the diagnostics that pass
+# an argument through gnulib's `quote()`. Those used to be referenced under
+# `LC_ALL=C`, because that was the only locale in which GNU's quote marks were
+# ASCII like ours; §351 made ours U+2018/U+2019 in every locale, which is what
+# GNU prints under any UTF-8 locale, so `C` is now the setting in which the
+# reference would be wrong.
 set -u
 
 # Our uniq is a native Windows binary, so MSYS would rewrite an argument that
@@ -144,13 +147,6 @@ report() {
 }
 
 run_case()  { [ "$HAVE_GNU" = yes ] || return 0; compare - C.UTF-8 "$@"; report "uniq $*"; }
-# The diagnostics that pass an argument through gnulib's `quote()` — the
-# `argmatch` ones and `extra operand` — referenced under `LC_ALL=C` so that the
-# quote marks are ASCII on both sides. Under a UTF-8 locale gnulib switches to
-# U+2018/U+2019 and ours does not — one open question, not one per case. See
-# B-Q2. `uniq`'s three *number* diagnostics quote nothing at all, so they stay
-# in `run_case`, and that is itself worth certifying.
-run_ascii() { [ "$HAVE_GNU" = yes ] || return 0; compare - C "$@"; report "uniq $* [C]"; }
 run_stdin() {
   [ "$HAVE_GNU" = yes ] || return 0
   local input="$1"; shift
@@ -375,9 +371,10 @@ run_case --ignore-case mixedcase.txt
 run_case --ign mixedcase.txt
 run_case -i -c mixedcase.txt
 run_case -i -d mixedcase.txt
-# Above ASCII nothing folds, on either side, under either locale.
+# Above ASCII nothing folds, on either side. This used to be run twice, once
+# per locale, back when the second run also served to pin the quote marks;
+# `C` is no longer a locale this project references (§351), so once is enough.
 run_case -i utf8case.txt
-run_ascii -i utf8case.txt
 run_case -i badbytes.txt
 
 # --- bytes that are not text ----------------------------------------------------
@@ -467,8 +464,8 @@ run_outfile -x runs.txt
 run_case runs.txt -
 run_case - runs.txt
 run_stdin 'a\na\n' -
-run_ascii runs.txt alldiff.txt extra.txt
-run_ascii runs.txt alldiff.txt one.txt two.txt
+run_case runs.txt alldiff.txt extra.txt
+run_case runs.txt alldiff.txt one.txt two.txt
 run_case nope.txt
 run_case -c nope.txt
 run_case ''
@@ -530,12 +527,12 @@ run_case -s 18446744073709551616 prefixes.txt
 run_case -w 18446744073709551616 prefixes.txt
 
 # --- argmatch's two diagnostics --------------------------------------------------
-run_ascii --group=zz
-run_ascii --group=
-run_ascii --all-repeated=zz
-run_ascii --all-repeated=
-run_ascii --group=x
-run_ascii "--all-repeated=a'b"
+run_case --group=zz
+run_case --group=
+run_case --all-repeated=zz
+run_case --all-repeated=
+run_case --group=x
+run_case "--all-repeated=a'b"
 
 # --- the cross-checks, in upstream's order ----------------------------------------
 run_case --group -c runs.txt

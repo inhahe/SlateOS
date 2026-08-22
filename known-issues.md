@@ -24458,6 +24458,10 @@ less than no test at all.
 
 ## B-THE-TRACKED-FIXTURE-BINARIES-DRIFT-FROM-THEIR-SOURCES, AND THE STALENESS GATE CANNOT SEE IT
 
+**Status: CLOSED 2026-08-21 by removing the arrangement** (`53571a004`, design-decisions.md §355).
+The binaries are no longer stored in git at all, so there is no second copy left
+to drift. Superseded — see "How this was actually closed" at the very end.
+
 **Status: FIXED 2026-08-16** (binaries re-committed in `169d3a242`; the
 content-based gate — the part that actually matters — landed as
 `scripts/ctest-fixtures.py`, wired into `scripts/create-ext4-rootfs.sh`, and is
@@ -24591,6 +24595,160 @@ check did not run" wearing the costume of "the check passed". Now probes
 `python3` before `python`, and the remediation hint it prints uses
 `sys.executable`, so a command printed inside WSL is a command that works
 inside WSL.
+
+### How this was actually closed — 2026-08-21, `53571a004` (design-decisions.md §355)
+
+The 2026-08-16 fix above was real, and every claim it makes about the nine
+stamped fixtures is still true. It was also **partial in a way nobody measured
+at the time**, and the measurement is the whole story:
+
+| | fixtures | guarded by the stamp gate |
+|---|---|---|
+| `services/ctest-*` | 9 | 9 |
+| `services/fastpy-*` | 61 | **0** |
+| | **70** | **9** |
+
+When that coverage was finally measured on 2026-08-21, **60 of the 61
+unguarded fixtures were stale in the working tree at that moment** — the ring-3
+self-tests had been proving that binaries ran against a `libc.a` that no longer
+existed, and reporting PASS, for as long as the fastpy family had existed.
+
+The gate was built for the population that had already failed. Every fixture it
+covered was a fixture whose failure is what caused it to be written; the 61 that
+had never visibly failed were never added, and nothing about the gate's design
+would have made anyone notice. **The gate was measuring the population it was
+made from.** That is the part worth carrying forward: "verified in both
+directions" (which it was) says nothing about *how many things* were verified,
+and a coverage number is a different measurement from a correctness one.
+
+So the fix is no longer to widen the gate to 70. The second copy is gone: the
+ELFs are gitignored and built on demand from the tracked `build.py` beside each
+one, the nine `.stamp` files are deleted along with the `compute`/`stamp`/`check`
+machinery that maintained them, and `create-ext4-rootfs.sh` no longer asks "was
+this built from that?" — it asks "is any of the 70 missing?" and refuses to pack
+a short image, naming what is absent. A compiled artifact that is not stored
+cannot drift from its source, and the "which side moved?" ambiguity that made
+the old gate's remediation advice a coin flip does not arise for a build step,
+which simply rebuilds whatever is behind.
+
+The two supporting sub-bugs are closed by the same commit, without needing to be
+fixed on their own terms:
+
+- the gate's *wrong-advice* failure (it told you to relink when the correct
+  action was to rebuild the sysroot, or the reverse) — `build` now rebuilds the
+  sysroot itself rather than printing which rebuild to run;
+- mtime being uninformative on a fresh checkout — no longer relevant, because
+  git no longer writes these files at all. On a fresh clone the ELF is simply
+  *absent*, which is both the truth and the signal, and absence is exactly what
+  the new gate is built to catch.
+
+## TD-B-THE-FOUR-SPIKE-ELFS-STILL-MAKE-YOU-RUN-THE-REBUILD-BY-HAND
+
+**Status: FIXED 2026-08-21** — logged and fixed the same day, after being hit a
+second time. See the Resolution at the end of this entry.
+
+**In short:** four large programs on the disk image (bash, GNU make, pkgconf,
+CPython) are compiled against our own C library. When that library is rebuilt,
+those four are out of date, and the image build refuses to run until they are
+recompiled. It refuses by *printing the command you should type* rather than
+running it — so a purely mechanical fix costs a full build cycle and a human
+round-trip. The 70 test fixtures used to work exactly this way and no longer do
+(design-decisions.md §355); these four are what is left of the old pattern.
+
+**Where it lives.** `scripts/create-ext4-rootfs.sh`, the four blocks guarded by
+`BASH_STALE` / `PKGCONF_STALE` / `MAKE_STALE` / `PYTHON_STALE`. Each prints an
+`ERROR:` naming one of:
+
+| artifact | rebuild command | cost |
+|---|---|---|
+| `build/spike/bash-slateos.elf` | `bash scripts/bash-spike/slatelink.sh` | relink only, seconds |
+| `build/spike/pkgconf-slateos.elf` | `bash scripts/pkgconf-spike/run.sh` | configure + build |
+| `build/spike/make-slateos.elf` | `bash scripts/make-spike/run.sh` | configure + build |
+| `build/spike/python-slateos.elf` | `bash scripts/cpython-spike/slatelink.sh` | relink only, seconds |
+
+Measured 2026-08-21: **all four, end to end, took 83 s** — against an image
+build that takes minutes. The cost argument for not doing it automatically does
+not survive the measurement.
+
+**How to reproduce.** Rebuild the sysroot (`toolchain/build-sysroot.ps1`, or let
+`scripts/ctest-fixtures.py build` do it), then run
+`wsl -d Ubuntu -- bash scripts/create-ext4-rootfs.sh`. It stages everything,
+reaches the bash gate, prints the relink command and exits 1 without writing an
+image. This happened while verifying §355 and cost one full cycle for a fix the
+script already knew how to perform.
+
+**Why this is the same bug §355 closed, not a separate one.** §355's finding was
+that a *gate* has to answer "which side moved?" and cannot, whereas a *build
+step* never faces the question because it rebuilds whatever is behind in
+dependency order. These four are gates. They are also, unlike the fixtures,
+buildable from exactly where the check runs: the spike scripts are WSL bash
+scripts and `create-ext4-rootfs.sh` is already running under WSL. The reason the
+fixtures are *not* built by the rootfs script — they need Windows-side fastpy and
+`zig.exe`, which do not resolve from inside WSL — does not apply here.
+
+**The proper fix.** Have `create-ext4-rootfs.sh` run the rebuild instead of
+printing it, in dependency order (sysroot first, then the four), keeping the
+`ERROR:` path only for a rebuild that *fails*. Keep an opt-out for the host that
+cannot build them, which is what `ALLOW_STALE_FIXTURES=1` already means; consider
+a separate `NO_SPIKE_REBUILD=1` so "I know these are stale, pack anyway" stays
+distinct from "do not spend the 83 s".
+
+**Why it is not urgent.** The current behaviour is *safe* — it fails closed, and
+no stale spike can reach an image. The cost is a wasted cycle per sysroot
+rebuild, not a false green. That is why this is debt rather than a bug.
+
+### Resolution — 2026-08-21, lane B
+
+Fixed as described, after the "wasted cycle per sysroot rebuild" was paid a
+second time within the hour: the same verification run that logged this entry
+hit it again as soon as a `posix/src` edit forced another sysroot rebuild.
+
+`scripts/create-ext4-rootfs.sh` gained a rebuild pass (`spike_rebuild_if_behind`)
+that runs *before* the staging blocks, since staging `cp`s each artifact onto
+the image tree and only then compares mtimes — rebuilding at the gate would
+produce a fresh ELF that never reached the image. For each of the four it
+compares against `toolchain/sysroot/lib/libc.a` and, if behind, runs the spike
+script, capturing output to `/tmp/spike-rebuild-<name>.log` and printing the
+last 20 lines only on failure.
+
+**A missing artifact is deliberately left alone.** Absent is the documented
+best-effort case — the self-test self-skips and says so — and a checkout that
+has never run a spike should not have a multi-minute configure+build silently
+appended to its first image build. Stale is the case that lies, and stale is the
+case this fixes.
+
+**Two opt-outs, because they mean different things:**
+
+| variable | meaning | effect |
+|---|---|---|
+| `NO_SPIKE_REBUILD=1` | "don't spend the 83 s" | skips the pass; the gates below behave exactly as before, so nothing stale ships |
+| `ALLOW_STALE_FIXTURES=1` | "I know they're stale, pack anyway" | already downgrades the gates to warnings, so rebuilding first would be wasted work — the pass skips too |
+
+**The four gates stay** as the backstop for a rebuild that was skipped or that
+ran and did not clear the staleness. Their messages now say so, so a reader who
+reaches one knows the automatic path did not help them and why.
+
+**Only the CPython *interpreter* is rebuilt automatically**, not the stdlib zip:
+the interpreter is a libc link, but the zip's staleness is content-based (a
+missing `encodings` package, or a deflated member we cannot inflate), which a
+relink cannot fix. The gate still names `stdlib.sh` and now explains the split.
+
+**shellcheck caught a live bug in the new code** and is worth noting because the
+bug was in an error path nobody exercises. The CPython gate message contained a
+literal `` `encodings` `` inside a double-quoted `echo` — which is command
+substitution, so it would have tried to run `encodings` and printed "no
+package". SC2006. shellcheck was not installed on this machine; it now is, as a
+static binary at `~/.local/bin/shellcheck` **inside WSL** (v0.10.0, no admin
+required), which is the right place for it since these scripts run under WSL.
+`shellcheck -S warning` is clean across `create-ext4-rootfs.sh` and all four
+spike scripts; at `-S style` the only remaining note is a pre-existing SC2013 at
+line 975.
+
+**Verified** by the run that motivated it: a fresh `libc.a` left all four spikes
+behind, and the image build relinked all four and wrote the image without a
+human round-trip.
+
+---
 
 ## B-THE-BASH-RELINK-SCRIPT-HARD-CODED-ONE-WORKTREE-SO-ONLY-`main`-EVER-RAN-BASH
 
@@ -32031,6 +32189,31 @@ appearance setting still requires restarting the compositor, and the fix is
 step (e) applied to Settings — an `oswindow` event loop, a window, and one
 `appearance_changed()` call after `AppearanceFile::save()` in
 `save_appearance` (`apps/settings/src/main.rs`, ~line 880).
+
+**Update 2026-08-22 — Settings is wired; 136 to go.** `apps/settings` now has a
+real `main()` that dials the compositor with `oswindow::connect()`/`connect_to()`,
+a real window, and a real event loop (`run`), and the `appearance_changed()`
+call this paragraph asked for is in place — with one correction to the recipe
+above. It is *not* "one `appearance_changed()` call after `AppearanceFile::save()`
+in `save_appearance`": `save_appearance` has no access to the event loop, and
+putting the notification there would either thread the loop into the model or
+notify from a function that cannot report a transport failure. Instead
+`save_appearance` sets a private `appearance_dirty` flag and the loop drains it
+with `take_appearance_change()`, which also makes the notification track *the
+file changing* rather than *an event being consumed* — the two are not the same,
+and both mistakes are pinned by tests. `design-decisions.md` §523 has the
+reasoning.
+
+Fifteen new tests, all proved regression tests by reintroducing the defect each
+names (eighteen markers, every test earned at least one). Four of them are
+`mod against_the_real_compositor`, which puts the shipped `Compositor` on one end
+of a real socket and Settings' shipped `run` on the other: a physical mouse click
+at a theme card changes the appearance the compositor draws with, end to end,
+with no stand-in on either side.
+
+Settings was the application this entry singled out because it had something
+specific it could not call. That is closed. The entry stays open for the other
+136 unwired applications.
 
 ## TD-ONLY-ONE-KEYBOARD-LAYOUT (lane C, 2026-08-17)
 
@@ -50851,10 +51034,92 @@ about where input transformation belongs and should not be bundled in.
 **Trigger:** do this when `apps/settings` gains a compositor connection — the
 same moment `ReloadAppearance` gets its first real caller. Both are lane C's.
 
+**Update 2026-08-22 — the trigger is met, and the job is bigger than this entry
+said.** `apps/settings` now has a compositor connection and a real event loop,
+and `ReloadAppearance` has its first real caller (see
+`TD-NO-APP-CONNECTS-TO-THE-COMPOSITOR` and `design-decisions.md` §523). So the
+blocker named above is gone. Two corrections to this entry's own description
+turned up on checking it, and both make the remaining work larger:
+
+1. **There is no file.** This entry says the slider "changes a number in a file".
+   It does not. `gui/desktop/src/mouse_settings.rs` has **no persistence
+   whatsoever** — no save, no load, no path, no serialisation. It is an
+   in-memory struct with clamps. So the mouse settings do not survive a logout,
+   never mind reach the compositor. The appearance settings had
+   `appearance::AppearanceFile` to build on; this has nothing equivalent.
+2. **It is in the wrong crate for the panel that would edit it.**
+   `mouse_settings` lives in `gui/desktop` (the shell), and the settings
+   application is `apps/settings`. Nothing outside its own module references it
+   — the only two mentions in the tree are its `pub mod` line and a comment in
+   the compositor saying nothing wires it through. `apps/settings` has a
+   "Mouse & Pointer" *section*, but it is on the Accessibility page and holds
+   one toggle (Mouse Keys); there is no double-click-speed control in the
+   settings application at all.
+
+**So the proper fix is now four pieces, not one call:**
+
+- **(a) A shared `gui/inputsettings` crate**, the counterpart of `appearance` —
+  the struct, the YAML file, load/save, and the clamps, owned by neither the
+  shell nor the compositor. It must be a third crate for the same reason
+  `appearance` is: the shell, the compositor and the settings application all
+  need to read it, and any two of them depending on the third is a cycle waiting
+  to happen. Note that `gui/*` is globbed in the workspace manifest, so a new
+  crate there needs **no** edit to the workspace-root `Cargo.toml` — which lane
+  C may not touch. `gui/desktop`'s `mouse_settings` then becomes a re-export or
+  is deleted.
+- **(b) A `ReloadInput` control verb**, as this entry already recommended —
+  same shape as `ReloadAppearance` (no payload, no `link.resolve`), and the
+  reasoning against folding pointer behaviour into `AppearanceSettings` stands
+  unchanged.
+- **(c) A real mouse page in `apps/settings`** with the double-click-speed
+  control, writing (a) and notifying (b) — exactly the pattern §523 established
+  for appearance, including the "the change is in force before anyone is told"
+  rule and the dirty flag drained by the loop.
+- **(d) The compositor reads (a) on `ReloadInput`** and calls its existing
+  `set_double_click_ms`.
+
+Only double-click is in scope; the pointer-speed/acceleration question in
+"Scope beyond double-click" above is unchanged and still deferred.
+
 **If never fixed:** a slider that lies. The user moves it, the panel writes the
 file, and the double-click speed is whatever the compositor's constant says.
 Worse than an absent setting, because an absent one cannot be misread as tried
 and rejected.
+
+### Update 2026-08-22 — FIXED. All four pieces are in.
+
+| | What landed |
+|---|---|
+| **(a)** | `gui/inputsettings` — the model, the YAML format, load/save, the clamps. It also became the **single owner of the double-click numbers**: `MIN_DOUBLE_CLICK_MS`, `MAX_DOUBLE_CLICK_MS` and `DEFAULT_DOUBLE_CLICK_MS` are `pub` there, and the compositor's private copies were deleted. |
+| **(b)** | `RequestBody::ReloadInput`, tag `0x14`, no payload — a second verb, as this entry recommended. `oswindow` exposes it as `EventLoop::input_changed`. |
+| **(c)** | A Mouse page in `apps/settings`, between Sound and Notifications, with the double-click slider. It saves `input.yaml` and notifies (b). |
+| **(d)** | `Compositor::reload_input` re-reads the file and applies the double-click window. |
+
+Rationale for the three judgement calls — who owns the range, why `ReloadInput`
+is its own verb rather than a payload or a shared one, and why the page shows
+one control — is `design-decisions.md` §524.
+
+**One correction to this entry's own "Where" table:** it said the two clamp
+ranges "were deliberately made to match". They did match, but nothing enforced
+it — three processes each held a private copy and any one could have moved
+without a single test failing. That is now impossible by construction rather
+than by care: `SliderId::DoubleClickMs::range()`, `MouseConfig::set_double_click_ms`
+and `Compositor::set_double_click_ms` all read the same three constants.
+
+**Still deferred, unchanged:** pointer speed, acceleration, button mapping,
+scroll direction and cursor size. The compositor reads them and drops them on
+purpose — it has no local input source to apply them to
+(`TD-COMPOSITOR-HAS-NO-LOCAL-INPUT`) — and the Mouse page deliberately draws no
+control for them, because a control that saves a value nothing applies is the
+same defect this entry was filed about. Each gets its slider in the commit that
+gives it a consumer.
+
+**Verification.** 21 reintroduction proofs across the four pieces —
+`scripts/reintro-mouse-page.py` (11) and `scripts/reintro-reload-input.py` (10)
+— each reintroducing one defect and confirming the suite goes red and names it
+back, restoring by byte snapshot verified with SHA-256. Workspace gate green
+(46,443 passed) apart from lane B's `posix`, filed separately as
+`B-POSIX-HSEARCH-TESTS-RACE-ONE-GLOBAL-TABLE-AND-SEGFAULT`.
 
 ## B-SSHD-EXEC-REPLIED-WITH-THE-COMMAND-INSTEAD-OF-RUNNING-IT — 2026-08-21 — FIXED
 
@@ -51886,9 +52151,10 @@ shell, whose signals arrive from keypresses. It becomes a genuine hang the
 moment a second terminal exists and something on it kills a job on the console —
 which is the state the pty work creates.
 
-## BUG-POSIX-SPAWN-FILE-ACTIONS-IS-4624-BYTES-IN-AN-80-BYTE-SLOT (found by lane A, 2026-08-21)
+## BUG-POSIX-SPAWN-FILE-ACTIONS-IS-4624-BYTES-IN-AN-80-BYTE-SLOT (found by lane A, 2026-08-21) — FIXED 2026-08-21 by lane B
 
-**Status:** OPEN. **Owner: lane B** (`posix/src/spawn.rs`). Filed as
+**Status:** FIXED — see "Resolution" at the end of this entry. **Owner: lane B**
+(`posix/src/spawn.rs`). Filed as
 `requests/a-b-posix-spawn-file-actions-init-smashes-the-callers-stack.md`,
 which carries the disassembly, the layout table and the recommended fix.
 
@@ -51947,6 +52213,113 @@ all exact. `sem_t` (32→4), `regex_t` (64→16) and `glob_t` (72→24) are
 *undersized*, which does not smash anything; noted in the request as a
 lower-priority correctness point, not a safety one. `posix_spawn_file_actions_t`
 is the only one in the dangerous direction.
+
+### Resolution — 2026-08-21, lane B
+
+The struct is now the 80 bytes, with the actions out of line behind the pointer
+at offset 8 exactly as musl and glibc do it:
+
+```rust
+#[repr(C)]
+pub struct PosixSpawnFileActionsT {
+    allocated: i32,                 //  0
+    used: i32,                      //  4
+    actions: *mut FileActionSlot,   //  8
+    _pad: [i32; 16],                // 16
+}
+```
+
+`init` zeroes and NULLs; `destroy` frees and re-NULLs so it is idempotent; the
+five `add*` entry points share one `push` that allocates on first use.
+
+**Both guards, not either.** A `const _: () = { assert!(size_of::<…>() == 80); … }`
+so the mistake cannot be *built*, which is what lane A asked for and is the
+right call — plus `test_file_actions_matches_musl_layout` pinning the offsets
+0/4/8/16, which a const block cannot express.
+
+**Extended to the whole table lane A audited**, since its point was that no
+Rust-side test can ever see these mismatches. `posix_spawnattr_t`,
+`pthread_mutex_t`, `pthread_cond_t`, `pthread_rwlock_t`, `pthread_barrier_t`,
+`sem_t`, `regex_t` and `glob_t` all now carry a `const` assertion. The bound is
+`size_of::<T>() <= <header size>` rather than `==`, because that is the actual
+safety property — **undersized cannot smash, oversized always can** — so it is
+true today for the three undersized types *and* still fires the day one of them
+grows past its slot. `pthread.rs`'s module doc carries the reasoning once and
+the other files point at it.
+
+**Two of lane A's suggestions were not taken**, both because of local facts its
+report could not have known; the reasoning is in `push`'s doc comment and in the
+reply appended to the request file.
+
+- *The path stays inline at 256 bytes rather than being `strdup`ed.* Shrinking
+  the slot from 288 to ~24 bytes is right for a conventional malloc and
+  backwards for ours: `posix/src/malloc.rs` is one mapping per allocation
+  rounded up to a 16 KiB `REGION_ALIGN`, so a `strdup`ed path costs a **whole
+  16 KiB region each**. Sixteen opens would take 256 KiB where the flat array
+  takes one region. We are charged for allocation *count*, not slot size.
+- *`MAX_FILE_ACTIONS = 16` stays.* The constant is not private to this type: it
+  also sizes `OpenedHandles::handles` and backs the assertion
+  `MAX_FD_MAP >= 3 + MAX_FILE_ACTIONS` against the **fixed-width fd map passed
+  to the kernel's spawn syscall**. Uncapping the list would overrun that map or,
+  via `OpenedHandles::push`'s own bounds check, silently *leak* every handle past
+  the sixteenth. Lifting the cap is a widening of a kernel interface in lane A's
+  tree. Not urgent: glibc's `_add*` also returns `ENOMEM` when it cannot grow, so
+  a capped `ENOMEM` conforms, and nothing we ship approaches sixteen.
+
+**Verified** by `cargo test -p posix --target x86_64-pc-windows-gnu` (20 490
+tests). The ring-3 proof is the Path-Z real-`make` rung the bug was reported
+from, once the sysroot and the four spike ELFs are relinked.
+
+**What fixing it uncovered.** Moving the actions to the heap turned eleven spawn
+tests into `ENOMEM` simultaneously, which is how
+`B-HOST-MALLOC-NEVER-WORKED-SO-EVERY-ALLOCATING-TEST-PASSED-ON-ITS-OOM-PATH`
+below was found. That is a much larger hole than this one and it was invisible
+until an allocation was added to a path that had not needed one.
+
+## B-HOST-MALLOC-NEVER-WORKED-SO-EVERY-ALLOCATING-TEST-PASSED-ON-ITS-OOM-PATH — 2026-08-21 — lane B — FIXED
+
+**In short:** on host builds (`cargo test`), our `malloc` returned NULL for
+every single call, always, and had done for as long as it existed. NULL is a
+*legal* `malloc` result, so nothing looked broken: every libc function that
+allocates quietly took its out-of-memory branch, returned the error POSIX says
+it should, and its test asserted that error and passed. `free`, `realloc` and
+`malloc_usable_size` were never reached at all on the host. The test suite was
+green and was testing the wrong half of every allocating function.
+
+**Where.** `posix/src/malloc.rs`; root cause in `posix/src/syscall.rs` ~line 414.
+
+**Why.** `syscallN()` deliberately returns `HOST_ENOSYS` (-38) on
+`not(target_os = "none")` — see its "Host-build safety gate" comment, and it is
+correct to do so: a raw `SYSCALL` instruction on a Windows host dispatches into
+NT and would do something arbitrary. But `malloc` is built directly on
+`mman::mmap`, so the gate made every `malloc` fail rather than making it
+unavailable. The gate was doing its job; the allocator had no host path.
+
+**How it stayed hidden for so long.** Three tests had written the failure down
+as the *expected* result — `malloc_small_returns_null_in_test`,
+`malloc_page_size_returns_null_in_test` and `reallocarray_one_one_null`, the
+last two even carrying comments explaining that mmap fails in test mode. A test
+that asserts a component does not work will never report that the component does
+not work. This is the same shape as §355's stamp gate and as the per-directory
+`.gitignore` rules: a rule that documents its own exception stops being a rule.
+
+**Found by.** Not by anything looking for it. Fixing
+`BUG-POSIX-SPAWN-FILE-ACTIONS-IS-4624-BYTES-IN-AN-80-BYTE-SLOT` above moved the
+file-actions array onto the heap, and eleven spawn tests failed with `ENOMEM` at
+once. It took adding an allocation to a path that previously had none to make
+the allocator's absence observable.
+
+**Fix.** `map_region`/`unmap_region` now abstract the backing store, `mman::mmap`
+on target and `std::alloc::alloc_zeroed` at `REGION_ALIGN` on the host — the
+same host-shim shape already used by `host_clock` in syscall.rs and
+`host_eventfd_sim` in epoll.rs. The three tests now assert real round-trips
+(allocate, write both ends, `malloc_usable_size`, `free`).
+
+**Consequence to keep in mind.** Every allocating function in `posix/` is now
+being tested on a code path it had never executed on the host. The full suite
+passes, but "passed before and passes now" means something different for these
+than for the rest of the tree: before, most of them never got past the first
+`malloc`.
 
 ## B-THE-SSH-STACK-AUTHENTICATED-NOBODY — 2026-08-21 — FIXED
 
@@ -52229,7 +52602,7 @@ having had root. That is the operator's call, not mine: it is queued as
 `design-decisions.md` §347 records it as the open half.
 
 
-## B-PASSWD-VERIFIES-WITHOUT-AUTHLIB — 2026-08-21 — OPEN (tech debt, small)
+## B-PASSWD-VERIFIES-WITHOUT-AUTHLIB — 2026-08-21 — **FIXED 2026-08-21**, see Resolution at the end
 
 **In short:** every program on this system that asks "is this your password?"
 routes through one of two shared verifiers, which count failed attempts and
@@ -52322,6 +52695,53 @@ into the ability to pass a `doas` prompt. So: real, bounded, not urgent.
 `requests/c-b-passwd-and-login-disagree-about-etc-shadow.md` —
 `grep -rn 'crypt::verify' posix/src userspace/*/src services init`, which
 returns exactly three production call sites and requires each to be justified.
+
+### Resolution — 2026-08-21, and the tradeoff was split rather than picked
+
+B-Q6 was answered as `design-decisions.md` **§354**, and this followed from it
+exactly as the entry above said it would. The answer to the table's tradeoff is
+**neither column**: `passwd` **contributes to the tally and is never delayed by
+it**. Guessing at `Current password:` is no longer free — it costs the guesser
+time at `login`, `su` and `doas` afterwards — but no delay earned anywhere can
+stop you changing your password. That is the whole of the counter-argument the
+entry raised ("a password change is the one action you most want available to a
+user who suspects their password is compromised") granted in full, at no cost
+to the thing the rate limit was for.
+
+What changed in `userspace/passwd/src/main.rs`:
+
+| Before | After |
+|---|---|
+| `verify_password` → `posix::crypt::verify` | the prompt asks `authlib::check_stored`, the same function every other program asks |
+| a second `posix::crypt::stored_method` probe to tell "unverifiable" from "wrong" | `Outcome::needs_administrator()` — the classification comes back *with* the verdict |
+| nothing counted | `judge_old_password` does the bookkeeping, and is a plain function so the policy is testable without a terminal |
+| — | a verified current password **clears** the run of failures, as a successful login does |
+
+Three failures are deliberately *not* counted, each for its own reason:
+
+- **An unverifiable entry** (`Outcome::Unusable`). No answer can ever match it,
+  so a wrong one teaches an attacker nothing and taxing it would lock a user
+  out of `login` for an administrator's mistake.
+- **A locked account.** Refused before the prompt exists, so nothing was typed.
+- **Root changing another user's password.** Skips the old-password check
+  entirely; there is no guess to charge.
+
+`verify_password` is gone from production code and now lives in the test
+module, because it had stopped being the program's verifier and a production
+function kept alive only for its tests is the same duplicate-policy problem in
+a quieter form. What it asserts there is the property that *is* this crate's to
+keep, and the one
+`requests/c-b-passwd-and-login-disagree-about-etc-shadow.md` was filed over: a
+password this program **writes** is one the system's verifier **accepts**.
+
+**Tests:** `cargo test -p passwd` — 73 passed, up from 69. The four new ones:
+`a_wrong_current_password_is_charged_to_the_shared_tally`,
+`passwd_is_never_delayed_by_the_tally_it_contributes_to`,
+`an_unverifiable_entry_is_reported_not_counted`,
+`verification_agrees_with_authlib_for_every_shape_of_entry`. Each uses
+`Authenticator::with_stores`, which counts in memory and attaches no faillock
+file — a suite that used `Authenticator::new()` would run up a real delay
+against a real account on the developer's machine every time it ran.
 
 ---
 
@@ -53366,6 +53786,861 @@ that a rewrite cannot be argued out of: every other finding from the lint sweep
 was fixed in place, and this one was left because the correct fix is a new
 primitive rather than an edit.
 
+## TD-B-THREE-C-VISIBLE-TYPES-ARE-SMALLER-THAN-THEIR-HEADERS (lane B, 2026-08-21) — FIXED 2026-08-21
+
+**In short:** three of our opaque libc types are *smaller* than the type the C
+header declares — `sem_t` is 4 bytes where `<semaphore.h>` says 32, `regex_t` is
+16 where `<regex.h>` says 64, `glob_t` is 24 where `<glob.h>` says 72. This is
+safe today and is not the bug that
+`BUG-POSIX-SPAWN-FILE-ACTIONS-IS-4624-BYTES-IN-AN-80-BYTE-SLOT` was; it is the
+opposite direction. A C caller reserves more room than we use, and we simply
+leave the tail untouched. Logged because "safe" is not the same as "right".
+
+**Where.** `posix/src/semaphore.rs` (`SemT`), `posix/src/regex.rs` (`RegexT`),
+`posix/src/glob.rs` (`GlobT`). Each now carries a `const` assertion of the form
+`size_of::<T>() <= <header size>`, which is the property that actually matters
+and which will fire if one ever grows past its slot.
+
+**When it would bite.** Undersizing is invisible as long as the caller only ever
+passes us the *address* of its object. It stops being invisible if the caller
+**copies the object by value** — `sem_t a = b;` moves 28 bytes of whatever the
+caller's stack happened to hold along with our counter, and a `memcpy` or a
+struct-return does the same. Nothing we ship does that today, and POSIX does not
+promise these types are copyable, so no conforming program will. A ported one
+might.
+
+**`glob_t` is the least exposed of the three** despite the largest gap: its
+three POSIX-visible members (`gl_pathc`, `gl_pathv`, `gl_offs`) sit at 0, 8 and
+16, which is where glibc puts them, so a caller reading any documented field
+reads ours. The 48 missing bytes are `gl_flags` and the six replacement-function
+pointers (`gl_closedir`, `gl_readdir`, …) that `GLOB_ALTDIRFUNC` uses, which we
+do not implement.
+
+**Proper fix.** Pad each to its header's size with a `_reserved` tail, the way
+`PosixSpawnattrT` already does to reach musl's 336, and tighten the `const`
+assertions from `<=` to `==`. That is a few lines per type and costs only stack
+bytes. It is deliberately *not* bundled into the file-actions fix, which was a
+memory-safety bug on a boot-blocking path; this one changes no behaviour and
+should land on its own so that it is separately revertible.
+
+**Credit.** Found by lane A's sweep of every C-visible opaque struct in
+`posix/src`, done while filing the file-actions bug — the same table that
+confirmed `posix_spawn_file_actions_t` was the only one in the dangerous
+direction.
+
+### Resolution — 2026-08-21, lane B
+
+Done as described: each of the three grew a `_reserved` tail to its header's
+size, each gained a `const fn new()` so the tail is not a call-site concern,
+and each `const` assertion tightened from `<=` to `==`.
+
+| type | was | now | tail |
+|---|---|---|---|
+| `SemT` | 4 | 32 | `_reserved: [u8; 28]` |
+| `RegexT` | 16 | 64 | `_reserved: [u8; 48]` |
+| `GlobT` | 24 | 72 | `_reserved: [u8; 48]` |
+
+`==` says strictly more than `<=`: it fires on a field *removal* as well as an
+addition, and a removal is exactly what would silently shorten the by-value
+copy this entry was about. The four pthread types keep `<=` — they have no
+`_reserved` tail because POSIX leaves it undefined to move an initialised
+`pthread_mutex_t` at all, so their by-value copy is already wrong whatever the
+size. `posix/src/pthread.rs`'s module note now records that split.
+
+**`sem_t`'s alignment is 4, and that is the correct answer, not a leftover.**
+The two headers disagree — musl's `sem_t` is `struct { volatile int __val[8]; }`
+(align 4), glibc's is `union { char __size[32]; long int __align; }` (align 8).
+Ours must be no *stricter* than the loosest caller, because the caller supplies
+the storage: had we forced 8 and a musl-compiled program handed us a `sem_t`
+its compiler had placed at a 4-aligned address, every access would be
+misaligned. Size must match exactly (it is the caller's slot); alignment must
+only be no stricter. The first draft of the new test asserted 8 and failed,
+which is how this got noticed.
+
+**Two more tests were asserting the bug.** Fixing the sizes broke
+`semaphore::tests::test_sem_size` (`assert_eq!(size_of::<SemT>(), 4)`) and
+`glob::tests::test_glob_t_size` (`assert_eq!(size_of::<GlobT>(), 24)`). Both
+had written our own undersizing down as the expected answer, so the one test
+that could have caught each gap instead certified it. Both were derived from
+our struct definition rather than from the header, which is why they could only
+ever agree with whatever we had written. This is the third instance of the
+species today — the other two were the three `malloc` tests that asserted a
+NULL return (see `B-HOST-MALLOC-NEVER-WORKED-…` above). Replaced by
+`test_sem_t_matches_musl_layout` and `test_glob_t_matches_glibc_layout`, which
+assert size *and* every field offset against the header, plus
+`test_regex_t_matches_musl_layout` for the third type, which had no size test
+at all.
+
+**Verified:** `cargo test -p posix --target x86_64-pc-windows-gnu` →
+20,491 passed, 0 failed; `cargo clippy -p posix --target x86_64-pc-windows-gnu
+--all-targets` → clean.
+
+## TD-B-REGCOMP-HAS-NO-TEST-THROUGH-THE-PUBLIC-API (lane B, 2026-08-21)
+
+**In short:** every one of `regex.rs`'s ~200 match tests calls the *internal*
+`compile_pattern`/`try_match` on a stack-allocated `RegexProgram`. Not one goes
+through `regcomp`/`regexec`/`regfree`, which is the only path a C caller can
+use. So the public API's own error mapping, its `regex_t` handling and its
+`malloc`/`free` pairing are untested.
+
+**Why it was like that, and why that reason is gone.** The test module said
+plainly: "Because the POSIX API allocates memory via our custom `malloc`
+(which calls `mmap` → `syscall`), it cannot run on the host test target." That
+was true and is no longer — `malloc` gained a host backing store today (see
+`B-HOST-MALLOC-NEVER-WORKED-…` above), so the public path is now reachable from
+`cargo test`. The comment has been updated in place so nobody re-derives the
+old conclusion.
+
+**Where.** `posix/src/regex.rs`, the `tests` module's "Helpers" preamble and
+the `new_program`-based tests below it.
+
+**Proper fix.** Add regcomp-level tests alongside the existing ones — they are
+an addition, not a replacement, since the internal helpers usefully isolate the
+matcher from allocator behaviour. At minimum: compile-then-exec round trip,
+`regfree` leaves `re_nsub == 0` and a null `program`, double `regfree` is safe,
+`regcomp` of a bad pattern returns the right `REG_*` code and leaves nothing
+allocated, and `regexec` on an unfreed-but-never-compiled `regex_t` does not
+dereference a wild pointer.
+
+**Related.** The same "it cannot run on the host" reasoning may be load-bearing
+in other modules' test preambles for the same now-false reason. Worth a grep
+for `mmap`/`syscall`/`host` in `#[cfg(test)]` comments across `posix/src`.
+
+## TD-B-POSIX-TEST-BINARY-CRASHED-WITH-0xC0000005-ONCE (lane B, 2026-08-21)
+
+**Status:** OPEN — observed once, not reproduced.
+
+**In short:** one run of `cargo test -p posix --target x86_64-pc-windows-gnu`
+exited with `0xC0000005` (a Windows access violation — the process read or
+wrote memory it does not own) and printed *no test output at all*: not a
+`running N tests` banner, not a single dot. An immediate re-run of the exact
+same command passed 20,500 tests. Nothing else in the tree changed between the
+two runs.
+
+**Why zero output matters.** A crash inside a test would still have printed the
+banner and the tests that ran before it. Printing nothing means the process
+died before the harness got going — during process start-up, static
+initialisation, or while the loader was still mapping the image. That points
+away from a bug in any particular test and towards something about the binary
+or its environment at launch.
+
+**The untested hypothesis: a concurrent build against the shared `target/`.**
+Lane B's worktree has one `target/` directory, and at the time of the crash a
+second cargo invocation was running against it. Cargo relinks test binaries in
+place; a process launched from a path that is being rewritten underneath it is
+exactly the shape of a load-time access violation, and exactly the shape of a
+failure that vanishes on re-run. This is a hypothesis, not a diagnosis — it was
+not instrumented.
+
+**How to act on it.** If it recurs, capture it under `cdb` rather than
+re-running: `cdb -g -G -o cargo test -p posix ...` will stop on the first-chance
+AV and give the faulting module and address, which distinguishes "the loader
+was reading a half-written image" from "a static initialiser dereferenced
+null". Until then, avoid running two cargo commands against the same `target/`
+concurrently, which is good practice for unrelated reasons (it also invalidates
+the fingerprint cache and forces rebuilds).
+
+**Not a blocker.** The suite is green on every other run, and this has been seen
+exactly once. It is logged so that a *second* sighting is recognised as a
+pattern rather than re-diagnosed from scratch.
+
+## TD-B-TWO-PROGRAMS-BOTH-CLAIM-THE-NAME-`sudo` (lane B, 2026-08-21) — **RESOLVED 2026-08-21**
+
+**Resolved** by deleting the `sudo` personality from `userspace/su`, as the
+"proper fix" below prescribed. Removed: the `sudo mode` section entire
+(`SudoOptions`, `parse_sudo_args`, `print_sudo_help`, `sudo_authorised`,
+`sudo_list_permissions`, `run_sudo`, `log_sudo_failure`), the now-unused
+`in_admin_group`, the `basename` helper and the `argv[0]` dispatch in `main`,
+and the 13 tests that pinned the deleted policy — 296 lines. `su`'s remaining
+34 tests pass and clippy is clean. `userspace/sudo` is now the only program in
+the tree that answers "may this user run this command as root?", and it answers
+it from `/etc/sudoers`.
+
+Two corrections to what this entry originally said:
+
+- **Step 3 below is wrong: there is no `runuser` personality.** The dispatch
+  was two-way (`prog == "sudo"` → `run_sudo`, everything else → `run_su`), so
+  removing `sudo` left nothing for `argv[0]` to select between and `basename`
+  became dead with it. The claim of a third personality was written from the
+  `su`/`runuser` upstream pairing rather than from this file.
+- **It was a latent security hole, not only a naming collision.** The entry
+  files this under "not biting yet" because neither binary is staged. That is
+  true of the *conflict*, but understates the shape of it: `su`'s copy never
+  opened `/etc/sudoers`, so on any system carrying both, revoking a user's
+  rights in that file would have revoked nothing from a `wheel` member who
+  invoked the other binary. A configuration file that some enforcement points
+  ignore is not a configuration file.
+
+The original entry follows unchanged.
+
+**In short:** the tree contains two complete, independent implementations of
+`sudo`, written to two different security policies, and nothing yet decides
+which one becomes `/usr/bin/sudo`. Whichever is installed last wins, and the
+answer to "may this user run this command as root?" changes with it.
+
+**Where.**
+
+| | `userspace/sudo` | `userspace/su` |
+|---|---|---|
+| binary | `sudo` | `su`, which runs `run_sudo` when `argv[0]` is `sudo` (`src/main.rs:827`) |
+| policy source | `/etc/sudoers`, with a real parser: aliases, `Defaults`, per-command rules, `NOPASSWD`, includes | hardcoded: `sudo_authorised` (`src/main.rs:706`) grants everything to root, to `is_admin`, and to members of `wheel`/`admin` |
+| `-l` output | derived from the matching sudoers rules | `(ALL) ALL` or `(NONE)` |
+| authenticates | the caller, against `/etc/users.yaml` | the caller, against `/etc/users.yaml` |
+
+Both are real, both are tested (242 and 50 tests respectively), and both now
+share the system-wide failed-attempt tally, so the *authentication* halves
+agree. It is the **authorization** halves that do not, and that is the half
+that matters: a site that writes a restrictive `/etc/sudoers` granting one user
+one command gets exactly that from `userspace/sudo`, and gets unrestricted root
+for every member of `wheel` from `su`'s `run_sudo` — silently, because the
+second never reads the file.
+
+**How it happened.** `su`'s multi-call personality dispatch is modelled on the
+real `su`/`runuser` pair, and `sudo` was added to it as a third personality
+before `userspace/sudo` existed. Neither crate references the other, so nothing
+made the overlap visible; it was found by grepping for password prompts, not by
+a failing test.
+
+**Why it is not biting yet.** Neither binary is staged into `rootfs.ext4` — see
+the open task "stage coreutils binaries on rootfs.ext4 and run them under ring
+3". The conflict is latent, and the right time to resolve it is *before* that
+staging work picks one by accident.
+
+**The proper fix.** Delete the `sudo` personality from `userspace/su` and keep
+`userspace/sudo` as the only implementation. The reasoning is one-sided:
+`userspace/sudo` reads the configuration file `sudo` is defined by, and
+`su`'s copy cannot be made to agree with a sudoers file without becoming
+`userspace/sudo`. Concretely:
+
+1. Remove `run_sudo`, `parse_sudo_args`, `sudo_authorised`,
+   `sudo_list_permissions` and the `prog == "sudo"` arm at `su/src/main.rs:827`,
+   along with their tests.
+2. Check that nothing invokes `su` under the name `sudo` — at the time of
+   writing nothing installs either binary, so this should be vacuous.
+3. Leave `su`'s `runuser` personality alone: that one has no competitor, and
+   the `su`/`runuser` split is genuine upstream behaviour rather than an
+   accident.
+
+Not done in the change that found it because that change was scoped to the
+shared failed-attempt tally (`design-decisions.md` §354), and deleting a
+program's authorization model is not a rate-limiting change. It should be its
+own commit, with its own reasoning, so that it is reviewable as the policy
+decision it is.
+
+---
+
+## BUG-QUOTE-ESCAPES-VALID-MULTI-BYTE-CHARACTERS — every quoting style mangles non-ASCII text (lane B)
+
+**Status:** FIXED 2026-08-21. `quote.rs` now escapes *characters*, not bytes:
+a `Piece` is either a decoded `char` or a byte at a position where UTF-8 does
+not decode, and every style's loop walks pieces. `sort --sort=café` now says
+`invalid argument ‘café’`, matching GNU.
+
+The open question in step 5 below — *which* printability table — was answered
+without adding a table at all. `design-decisions.md` §357 records the rule
+(printable = not a Unicode control `Cc`, and not `U+2028`/`U+2029`), which is
+§101/§104's existing osh rule extended by exactly two code points. That was not
+the "accept divergence on exotic categories" option 5(b) resigned itself to:
+`scripts/printable-audit.py` compared the rule against glibc 2.39's own
+`iswprint` over all 1,112,064 code points and found it agrees on **every
+assigned character without exception**. The 824,718 that differ are precisely
+the unassigned ones (`Cn`), which glibc escapes and we print — a code point no
+font can draw and no standard has given a meaning, so neither answer is wrong.
+
+Step 6 was done first as advised, and it is what made the rest measurable:
+`scripts/quote-probe.py` and `scripts/c-maybe-probe.py` both moved to
+`LC_ALL=C.UTF-8` and gained whole multi-byte characters chosen to straddle every
+edge of "printable", growing the fixtures to 8,719 and 1,828 rows. Both fixture
+tests carry an `EXPECTED_DIVERGENCE` list naming `U+0378` and its reason, and
+fail in *both* directions — a listed character no row exercises is a claim with
+no evidence, and one whose rows have started agreeing is a stale note.
+
+The second divergence recorded below (an embedded U+2019) is fixed too: `quote`
+emits `\’` — backslash then the character — so the closing mark stays
+unambiguous. Also fixed in the same change: `printf`'s `char_constant` now
+yields a code point rather than a lead byte (`printf '%d' "'é"` → 233), sharing
+`quote::first_char` and `quote::escape_unprintable` rather than keeping its own
+copy of the question.
+
+The original report follows, unchanged.
+
+**Status:** ~~OPEN~~ — see above.
+
+**In short:** when a utility prints a piece of text back at you inside an error
+message, any character outside plain ASCII comes out as a row of backslash
+numbers instead of as itself. Type `sort --sort=café` and the complaint reads
+`invalid argument ‘caf\303\251’` where GNU on the same input says
+`invalid argument ‘café’`. Nothing is unsafe about it — the escaping is
+conservative, not wrong — but it is ugly, it is not what GNU does on the only
+kind of system SlateOS will ever be, and it makes any non-English file name
+unreadable in a diagnostic.
+
+**Where:** `userspace/coreutils/src/quote.rs`, the `printable` helper:
+
+```rust
+/// Whether a byte prints as itself in the C locale.
+const fn printable(b: u8) -> bool {
+    b >= 0x20 && b < 0x7f
+}
+```
+
+That is a *byte* test, and it is the printability test used by all three
+styles — `quote`, `quotef` and `quoteaf` — so all three mangle non-ASCII alike.
+GNU's is a *character* test (`iswprint` on a decoded wide character), so the
+question it answers is "is this character printable", not "is this byte ASCII".
+
+**Reproduce.** Under a GNU userland (`wsl`), with `LC_ALL=C.UTF-8`:
+
+| Input | GNU prints | We print |
+|---|---|---|
+| `café` | `‘café’` | `‘caf\303\251’` |
+| `€` | `‘€’` | `‘\342\202\254’` |
+| U+00A0 (no-break space) | itself | `\302\240` |
+| U+200B (zero-width space) | itself | `\342\200\213` |
+| U+0080 (valid UTF-8, not printable) | `‘\302\200’` | `‘\302\200’` — agrees |
+| `\xff` (not valid UTF-8 at all) | `‘\377’` | `‘\377’` — agrees |
+
+So the two agree on exactly the cases where the bytes are *not* a printable
+character, and disagree on every case where they are.
+
+**A second, smaller divergence in the same place.** GNU escapes an embedded
+U+2019 — `a’b` renders `‘a\’b’` — so it cannot be mistaken for the closing
+mark. It does *not* escape U+2018, the opening one. We do neither, because we
+never decode the character in the first place. Fixing printability without also
+fixing this would be worse than the current state: we would start printing a
+bare `’` in the middle of a `‘…’`, which is genuinely ambiguous, where today we
+print an unambiguous if ugly escape.
+
+**Not covered by the fixture, which is why it did not fail anything.**
+`userspace/coreutils/tests/quotearg-gnu.txt` is generated by
+`scripts/quote-probe.py`, whose corpus is built from single bytes and from an
+alphabet whose high bytes (`\xff`, `\x80`) never form a valid UTF-8 sequence.
+So no row exercises a valid multi-byte character, all 8333 pass, and the gap is
+invisible. The probe carries a comment saying exactly this, so that whoever
+widens the corpus is not misled by the unchanged rows.
+
+**Not a regression from §351.** It predates the curly-quote change and is
+orthogonal to it: §351 moved the *delimiters* to U+2018/U+2019 and was scoped
+deliberately to that. This is about the *contents*.
+
+**The proper fix.** Make the styles decode UTF-8 and test characters, not
+bytes:
+
+1. Iterate `arg` as a sequence of *decode attempts* rather than bytes. A valid
+   sequence yields a `char`; an invalid byte yields itself. `str::from_utf8`'s
+   error carries `valid_up_to` and `error_len`, which is enough to write this
+   without a dependency.
+2. A decoded `char` that is printable is emitted as itself; one that is not is
+   emitted as one octal escape **per byte** of its original encoding — which is
+   what GNU does, and is why U+0080 comes out `\302\200` and not `\200`.
+3. An invalid byte keeps today's behaviour: three octal digits.
+4. In `quote` only, a decoded U+2019 is emitted as `\’` — backslash then the
+   character itself, not an escape of its bytes.
+5. `printable` for a `char` needs a Unicode general-category table, which we do
+   not have. The honest options are (a) vendor a small table generated from
+   `UnicodeData.txt` at build time, (b) approximate with "not a control, not a
+   surrogate, not unassigned" and accept divergence on exotic categories, or
+   (c) take a dependency. Decide before starting; (a) is the only one that can
+   actually match GNU, since GNU is reading glibc's tables.
+6. **Widen `scripts/quote-probe.py`'s corpus first**, so the fix is measured
+   rather than reasoned about, exactly as the original rows were. Add valid
+   sequences at each UTF-8 length, characters from several general categories,
+   combining marks, U+2018/U+2019 themselves in leading/interior/trailing
+   position, and truncated sequences (a lead byte with its continuation
+   removed) to pin the boundary between "valid" and "invalid".
+
+Step 6 is the one to do first: it turns this entry from a description into a
+failing test, and the current 8333 rows stay green throughout, since none of
+them contains a valid multi-byte sequence.
+
+
+## BUG-AWK-NAMES-AN-OPTION-NOBODY-TYPED — `awk -é` reports `unknown option -Ã` (lane B)
+
+**Status:** FIXED 2026-08-21, in the same sweep that closed
+`BUG-QUOTE-ESCAPES-VALID-MULTI-BYTE-CHARACTERS`.
+
+**What it was.** `src/bin/awk/main.rs`'s option loop ended with
+
+```rust
+other => return Err(format!("unknown option -{}", other as char)),
+```
+
+`other` is a `u8` and `other as char` is a *numeric* conversion: it reads the
+byte as a code point. `-é` is the two bytes `0xC3 0xA9`, so the loop rejected
+`0xC3`, converted it to `U+00C3`, and printed `unknown option -Ã` — a letter
+that is not on the command line, is not on the keyboard the user typed `é`
+with, and re-encodes as two different bytes on the way out. Verified against
+the built binary before the fix.
+
+`sort`'s option loop carries a comment warning about this exact conversion
+(`src/bin/sort/main.rs`, the `other =>` arm) and calls
+`Program::invalid_option` instead. awk's loop is hand-rolled — it uses the
+POSIX `unknown option -x` wording rather than glibc's `invalid option -- 'x'`,
+so it never adopted the helper — and so kept the bug.
+
+**The fix.** Render the byte with `coreutils::quote::escape_unprintable`,
+which gives one three-digit octal escape for anything that is not a printable
+character: `unknown option -\303`. That is the same answer `seq`'s
+`directive_char`, `tr`'s `printable_char` and `csplit`'s conversion-specifier
+diagnostic already give, and it now comes from the shared helper rather than a
+fourth private copy of the rule.
+
+**Why octal and not the whole character**, when `lex.rs` was changed in the
+opposite direction in the same commit: the option loop walks *bytes*, and from
+inside it a continuation byte and the next flag in a bundle are
+indistinguishable — `-\xc3\xa9` could be one character or two bad flags, and
+the loop has no way to tell. The lexer has the whole program text and can tell,
+so it names the character. The two are not inconsistent; they are two different
+amounts of information. Both are written down at their call sites.
+
+**Test:** `an_unknown_option_byte_is_escaped_rather_than_cast_to_a_character`
+in `src/bin/awk/main.rs`, which pins `-é`, `-\xff`, `-\x01` and the unchanged
+ASCII answers.
+
+**Not covered by a harness, and it cannot be.** Measured: `gawk -é 'BEGIN{}'`
+under `LC_ALL=C.UTF-8` exits 1 and prints its own multi-line usage text,
+**never naming the offending option at all** (`grep -c 'invalid option'` = 0).
+Ours exits 1 too, so the statuses agree, but there is no GNU sentence to
+compare our sentence against — a diff case here would be asserting that two
+unrelated usage texts differ, which is true and says nothing. `awk-diff.sh`
+tests no option errors for this reason; its ten on-purpose divergences are all
+about language semantics (`length` counting characters, `\1` as a
+backreference, and so on). The unit test is the whole guard here, which is why
+it pins the unchanged ASCII answers as well as the fixed ones.
+
+**Where else this class was looked for.** The same sweep checked every `as
+char` on a `u8` and every hand-rolled printability test in the tree:
+`awk/main.rs:212` (`flag` is provably `F|v|f`), `sed.rs:1707` (`c` is provably
+`e|f`), `csplit.rs:573` (the delimiter is `/` or `%`, enforced at both call
+sites) and `ed.rs:323` (never reaches a message — ed answers `?`) are all
+safe. `od.rs`, `tr.rs`, `strings.rs` and `csplit.rs:874` are byte-wise on
+purpose and match glibc's single-byte `isprint` under `C.UTF-8`; the csplit one
+had only its printable branch measured (`%s`), so `csplit-diff.sh` gained three
+rows — `%é`, `%\001` and `% ` — that exercise the other branch and the
+`isprint`/`isgraph` boundary.
+
+A fourth row, `%<0xFF>`, was written and then deliberately removed: arguments
+reach both sides through a Windows command line, which is UTF-16, so MSYS and
+WSL each widen `0xFF` to U+00FF and deliver `ÿ` (`\303\277`). Measured — GNU
+reports `\303` for it, identical to `%é`, because that is what it received. The
+row would have passed while testing something other than its name. The
+harness now carries that finding as a comment so the case is not re-added; the
+undecodable-byte question is asked in-process instead, by `quote.rs`'s tests,
+where no command line is involved.
+
+
+## BUG-CSPLIT-ACCEPTS-TWO-SUFFIX-FLAGS-GNU-REJECTS — `csplit -b '%+d'` wrote files GNU refuses to create (lane B)
+
+**Status:** FIXED 2026-08-21.
+
+**What it was.** `SuffixFormat::parse_spec` in `src/bin/csplit.rs` accepted
+printf's full flag set — `-`, `0`, `#`, `'`, `+` and space — for `-b`'s suffix
+format. GNU accepts only the first four. Its parser stops at anything else and
+reads that byte as the conversion specifier, so `+` and space are not merely
+ignored, they are *errors*.
+
+Measured against GNU 9.4 under `LC_ALL=C.UTF-8`:
+
+| `-b` format | GNU | ours (before) |
+|---|---|---|
+| `%+d` | `invalid conversion specifier in suffix: +`, exit 1 | wrote `+0`, `+1` |
+| `% d` | `invalid conversion specifier in suffix: ` (a literal space), exit 1 | `missing conversion specifier in suffix`, exit 1 |
+| `% 5d` | `invalid conversion specifier in suffix: `, exit 1 | wrote `    0`, `    1` |
+| `%-5d`, `%#o`, `%'d`, `%05d` | accepted | accepted |
+
+**Why this shape of bug is the bad one.** `%+d` did not fail loudly — it
+*succeeded*, producing a set of output files named `+0`, `+1`, … for a command
+line GNU rejects outright. A script that works here and dies on GNU (or the
+reverse) is worse than one that fails on both, because nothing points at the
+cause. The `% d` row is milder: both sides fail and exit 1, but with different
+sentences, so only the wording was wrong.
+
+**The fix.** Drop `+` and space from the flag loop, and delete `flag_plus` /
+`flag_space` from `SuffixFormat` along with the sign-column branch in
+`render()` that consumed them. That branch was dead weight regardless: the
+values being formatted are section indices, which are never negative, so a
+sign column could only ever have emitted a constant `+` or space.
+
+**How it was found**, which is the part worth keeping. It was not looked for.
+The `% ` case was added to `csplit-diff.sh` for an unrelated reason — to
+exercise the `isprint`-vs-`isgraph` boundary of the *diagnostic* rule while
+auditing `BUG-AWK-NAMES-AN-OPTION-NOBODY-TYPED` — and the space only reaches
+the conversion slot, where it can be printed from, if the parser declines to
+eat it as a flag. Ours ate it, so the case came back with a different sentence
+and the flag set was measured properly for the first time. A test written for
+one branch found a bug in another.
+
+**Coverage.** `csplit-diff.sh` now pins the fix from both sides: `%+d` and
+`% 5d` (must be rejected) and `%05d`, `%#o`, `%'d` (must still be accepted).
+Pinning only the rejections would pass for a parser that had no flags at all.
+
+**Why `%-5d` is covered by a unit test and not by the harness**, since the
+asymmetry looks like an oversight. Left-justifying in width 5 names the output
+files `xx0` and `xx1` followed by four spaces, and **Win32 silently strips
+trailing spaces from every path component**. Our csplit is a native Windows
+binary, so it asks for `xx0    ` and the filesystem hands back `xx0`; GNU's
+runs under WSL, whose Linux VFS keeps them. The harness would therefore report
+a divergence neither implementation has. Measured, not reasoned: `python -c
+"open('zz1    ','w')"` in the same directory also produces `zz1`. The case is
+asserted in-process instead, by `the_suffix_flag_set_is_gnus_and_not_printfs`,
+which checks the rendered name is `xx3    ` with the spaces present. `%05d` is
+in the harness in its place so that a *width* is still exercised there — zero
+padding is leading, so it survives the trip. On SlateOS itself, where every
+byte but `/` and NUL is legal in a name, the case would be honest.
+
+**A harness bug found underneath this one.** `manifest()` in both
+`csplit-diff.sh` and `split-diff.sh` iterated `for f in $(ls | grep -v … |
+sort)`. An unquoted command substitution is word-split on IFS, so a file name
+containing a space arrives in pieces and one *ending* in a space loses it
+outright — the manifest then reads a nonexistent file, prints empty contents,
+and scores a harness defect as a divergence. That is exactly how the `%-5d`
+result presented itself, and it would have mis-scored any future case with a
+space in an output name (`split --additional-suffix=' x'` reaches it too).
+Both now iterate a glob, which passes each name through whole and is already
+in sort order. `split-diff.sh` had no case that reached it yet; it was fixed
+anyway rather than left as a trap.
+
+
+## BUG-SPAWNED-CHILDREN-INHERIT-NO-CAPABILITIES — a ring-3 process cannot spawn a child that can open a file (lane B found; lane A owns the fix)
+
+**In short:** When a program already running on SlateOS starts another program,
+the new program is given *no permission to open any file at all*. It can be
+loaded and it can run, but the very first file it tries to read fails with
+"Permission denied". For a dynamically-linked program that first file is its C
+library, so it dies before reaching `main`. This is why the boot test's `make`
+self-tests have been failing: `make` starts `/bin/sh`, and `/bin/sh` cannot
+load `libc.so.6`.
+
+**Found 2026-08-22** by lane B while diagnosing the boot test on `92501b295`.
+**Not fixed** — the code is `kernel/src/syscall/handlers.rs` and
+`kernel/src/proc/spawn.rs`, which is lane A's tree. Filed as
+`requests/b-a-spawned-children-inherit-no-capabilities.md`.
+
+### The evidence, in the order it was found
+
+Two of the three self-test failures on that boot are this one bug:
+
+```
+34403  /bin/sh: error while loading shared libraries: libc.so.6: cannot open shared object file: Permission denied
+34407  make: /bin/sh: Permission denied
+34408  make: *** [/Makefile:2: all] Error 127
+34424  [spawn]   FAIL: real make — exit code=Some(2), expected 0
+
+36775  /bin/tcc: error while loading shared libraries: libm.so.6: cannot open shared object file: Permission denied
+36778  make: /bin/tcc: Permission denied
+36779  make: *** [/cap.mk:5: /cap-a.o] Error 127
+36796  [spawn]   FAIL: make+tcc — make exit code=Some(2), expected 0
+```
+
+(line numbers in `build/serial-test.txt` from that run).
+
+The failure is *not* "dynamic linking is broken" and *not* "fork/exec is
+broken". Both work fine elsewhere in the same boot:
+
+| Case | How the child was created | Result |
+|---|---|---|
+| 95 programs incl. `/bin/sh`, `/bin/tcc`, `/bin/emit` | kernel self-test calls `spawn_process` directly | ld.so opens `libc.so.6` fine |
+| dash forks and execs `/bin/emit` (itself dynamic) | ring-3 `fork()` + `execve()` | fine |
+| make starts `/bin/sh` | ring-3 `posix_spawn()` → `SYS_PROCESS_SPAWN` | **EACCES on `libc.so.6`** |
+
+So the discriminator is exactly *which* process-creation path was used, and
+the reason is a one-line asymmetry between them:
+
+- **`fork` clones the parent's capability table.** `kernel/src/proc/fork.rs`
+  line 8: "clone of the parent's capability table". The child therefore
+  inherits the parent's `File` capability and can open files.
+- **`SYS_PROCESS_SPAWN` grants the child nothing.**
+  `kernel/src/syscall/handlers.rs` ~line 3427 builds
+
+  ```rust
+  let options = SpawnOptions::new(name)
+      .parent(caller_pid().unwrap_or(0))
+      .fd_map(&fd_pairs)
+      .argv(&argv_slices)
+      .envp(&envp_slices);
+  ```
+
+  with no `.capabilities(…)`, and `spawn_process`'s Step 5
+  (`kernel/src/proc/spawn.rs` ~line 994) grants exactly `options.capabilities`
+  — an empty slice. The child is born with an empty capability table.
+
+- The Linux-ABI `openat` then refuses it:
+  `kernel/src/syscall/linux.rs` ~line 5948,
+  `require_cap_type(ResourceType::File, Rights::READ)` → `PermissionDenied` →
+  `EACCES`. The native-ABI open path gates the same way.
+
+Every kernel-side self-test grants its process a `File` capability explicitly
+(there are ~60 `let caps = [(ResourceType::File, …)]` sites in `spawn.rs`),
+which is precisely why the hole never showed up until a *ring-3* program became
+the one doing the spawning.
+
+### Why it surfaced now, and why it is `make` that found it
+
+`make` is the first program on the image that both (a) runs in ring 3 and
+(b) starts other programs via `posix_spawn` rather than `fork`+`exec`. GNU make
+4.3+ prefers `posix_spawn`, and the `make` we stage is
+`build/spike/make-slateos.elf` — GNU make 4.4.1 linked against our own
+`libc.a`, so it speaks the native syscall ABI and its `posix_spawn` lands on
+`SYS_PROCESS_SPAWN`. Nothing before it exercised that path from userspace.
+
+Note that this is the *second* capability-shaped failure in the same self-test.
+The first (stat of `/Makefile` returning `EACCES` because the test granted
+`READ|WRITE` but the native `stat` needs `METADATA`) is written up on
+`self_test_linux_real_glibc_make` in `spawn.rs` and in
+`requests/b-a-path-z-real-make-fails-because-stat-of-Makefile-returns-eacces.md`.
+That one was a too-narrow grant *to the parent*; this one is no grant at all
+*to the child*. They are separate bugs with the same symptom shape, which is
+worth remembering the next time a Path-Z test reports something implausible
+like "file does not exist".
+
+### What the fix has to decide (this is why it is a request, not a patch)
+
+The naive fix — clone the parent's capability table into the child, exactly as
+`fork` does — is almost certainly right, because `posix_spawn` is specified to
+be equivalent to `fork`+`exec`, and any difference between them is a POSIX
+conformance bug on its face. But it is a *security* change, so it belongs to
+whoever owns the capability model:
+
+1. **Clone the parent's table** (matches `fork`; smallest surprise).
+2. **Let the caller pass an explicit capability list, intersected with what it
+   already holds.** More in the spirit of "no ambient authority" — a spawner
+   could hand a child strictly less than itself — but it needs an ABI change to
+   `SYS_PROCESS_SPAWN` and would break every existing caller until they are
+   updated.
+3. **Both**: clone by default, allow an explicit narrower set.
+
+Option 1 is what lane B recommends as the immediate fix, with option 3 as the
+eventual shape. Whichever is chosen, the regression test is the one that found
+it: `self_test_linux_real_glibc_make` must go green, and a smaller in-kernel
+test should assert directly that a child of `SYS_PROCESS_SPAWN` holds a `File`
+capability.
+
+### Until it is fixed
+
+Two boot self-tests are red on every branch (`real make`, `make-drives-tcc`),
+so the whole boot test scores `SELFTEST_FAIL` and cannot be used as a
+pass/fail gate — you have to read the failure list and compare it against the
+known three. That is the actual cost: a red suite that everyone learns to
+ignore. It does not block lane B's userland work, and it is not a regression
+from any recent lane-B change (see the timeline note below).
+
+
+## BUG-FASTPY-MINISHELL-EXITS-0-WITHOUT-FORKING (lane B)
+
+**In short:** `minishell` is a tiny shell written in Python and compiled to a
+native SlateOS binary; the boot test hands it the command line
+`cat /tmp/minishell-in.txt > /tmp/minishell-out.txt` and expects it to run
+`cat`. Instead it exits immediately, reporting success, having started nothing.
+The boot log proves it never even forked.
+
+**Found 2026-08-22** by lane B on `92501b295`. **Not fixed yet.** This one *is*
+lane B's own — `services/fastpy-minishell/`.
+
+**The symptom.**
+
+```
+[spawn]   FAIL: fastpy-minishell (test 1, `cat > out`) — shell exit Some(0),
+          expected 32 (cat's byte count, propagated as $?)
+```
+
+**Why the exit code 0 is the interesting part.** `services/fastpy-minishell/build.py`
+gives every failure path its own distinctive exit code — 90 (empty command),
+100 (argv[0] resolved to nothing), 101 (execv returned), 110 (fork failed),
+111/112 (waitpid), 120/122 (redirect open failed), 130 (pipe failed). `0` is
+none of them. The only way out of the program with status 0 is to fall off the
+end with an empty `pids` list, i.e. **the `'|'` branch of the main loop never
+ran even once** — and it is written to always run at least once, because the
+program appends a sentinel `'|'` to the token list precisely so the final stage
+is flushed by the same code path as an internal pipe boundary.
+
+An empty `pids` therefore means `toks2` was empty, which means `toks` was
+empty, which means `sys.argv[1].split()` produced nothing.
+
+**The boot log corroborates it independently:** a successful `os.fork()` prints
+`[cow] Cloned address space: parent=… -> child=…`. That line appears for the
+`redirect`, `inredirect`, `forkexec`, `capture` and `pipeline` fixtures, which
+all pass in the same boot and all do the same fork→dup2→execv dance. It does
+**not** appear anywhere between `[spawn] Created process 190
+("fastpy-minishell")` and `[sched] Task 157 exiting`. The shell really did run
+to completion without forking.
+
+**So the suspect is argv delivery or `str.split()` in the compiled program**,
+not the shell logic and not the kernel's fork/exec/redirect plumbing — all of
+which are proven green by the five sibling fixtures in the same run. The kernel
+passes `argv = ["fastpy-minishell", "<the command line>"]` and the log confirms
+`[spawn] Stored 2 argv, 0 envp entries for process 190`, so the argv reaches the
+kernel side intact; the loss is on the fastpy/`crt` side or in `split()`.
+
+**Next step:** rebuild `services/fastpy-minishell/fastpy-minishell.elf` from
+`build.py` against the current fastpy and re-run. The `.elf` and `prog.o` in the
+tree are dated 2026-08-21 16:05 while `build.py` is dated 2026-08-16, so the
+binary is *newer* than its recipe — it was rebuilt against some fastpy revision,
+and a fastpy regression in argv handling or `str.split()` would produce exactly
+this. Bisect by compiling a two-line probe (`print(len(sys.argv))`,
+`print(len(sys.argv[1]))`) through the same toolchain before touching the shell
+source.
+
+**Cost while unfixed:** one red boot self-test. The primitives it composes are
+each covered by a passing fixture, so nothing is *untested* — only the
+composition is.
+
+
+## Timeline note — the three boot self-test failures are older than any lane-B coreutils change
+
+Recorded 2026-08-22 because the question "did my merge break the boot test?"
+comes up every time, and answering it took long enough to be worth writing down.
+
+`bench/boot-history.jsonl` shows `SELFTEST_FAIL` on **every** full-length boot
+back through 2026-08-21 14:35 (`2b8b1a536`), across both lane A and lane B,
+dirty and clean trees alike. The two `PASS` rows in that stretch are not
+counter-examples:
+
+| Row | Serial lines | Wall | What it actually is |
+|---|---|---|---|
+| `0e4e927de` 17:17 PASS | 7,041 | 88 s | a short run that never reached the Path-Z tests |
+| `558d5fc1e` 19:12 PASS | 31,286 | — | the *same* serial log as the `SELFTEST_FAIL` row 33 s earlier, re-scored |
+
+A full-length boot is ~31k–42k serial lines and 380–850 s. Anything much
+shorter did not get far enough to fail these tests, so it must not be read as
+evidence that they once passed.
+
+Second, independent check that lane B's coreutils work is not implicated: the
+three failing tests are `fastpy-minishell` (a fastpy fixture ELF), `real make`
+and `make-drives-tcc` (staged `/bin/make`, `/bin/sh`, `/bin/tcc` from the Debian
+rootfs plus `build/spike/make-slateos.elf`). None of them loads anything built
+from `userspace/coreutils/`, which is not staged on `rootfs.ext4` at all yet.
+The artifact sets are disjoint.
+
+
+## BUG-TR-CURLED-TWO-QUOTES-GNU-LEAVES-STRAIGHT — §351 applied one level too broadly (lane B)
+
+**Found 2026-08-21** by `scripts/tr-diff.sh`, the only red harness in a
+26-harness sweep. **Fixed 2026-08-21** in `userspace/coreutils/src/bin/tr.rs`.
+
+**What it was.** Two diagnostics differed from GNU in nothing but their quote
+marks:
+
+| command | ours | GNU 9.4 |
+|---|---|---|
+| `tr -d '[::]'` | `missing character class name ‘[::]’` | `missing character class name '[::]'` |
+| `tr -d '[==]'` | `missing equivalence class character ‘[==]’` | `missing equivalence class character '[==]'` |
+
+Both sides exit 1, so this is cosmetic — but the harnesses compare stderr
+byte-for-byte on purpose, and a divergence nobody can explain is how a real one
+gets waved through later.
+
+**Cause, and why the obvious suspect was wrong.** The first hypothesis was the
+character-wise `quote.rs` rewrite (§357), since that was the change in flight.
+It is falsifiable and false: `tr-diff.sh` contains no non-ASCII case at all, so
+nothing in it can reach a code path the rewrite touched. The actual cause is
+**§351** — the operator's decision that our `quote()` emits U+2018/U+2019 in
+*every* locale, where GNU emits them only under a UTF-8 one. That decision is
+right, and is not what was wrong. What was wrong is that we routed these two
+strings through `quote()` at all: they are compile-time constants that GNU
+bakes into the translatable literal with ASCII apostrophes already inside it —
+`tr.c` reads `_("missing character class name '[::]'")`. GNU's text is
+therefore not locale-sensitive, and §351 has nothing to apply to. Making
+`quote()` unconditionally curly turned a latent mismatch into a visible one.
+
+**The trap this leaves behind, stated so nobody falls into it.** It is tempting
+to conclude "constants are not quoted, runtime values are" and to go correct
+every `quote()` of a literal in the tree. That rule is false, and it was
+measured false before this entry was written: GNU's `test` puts its constant
+`]` through `quote()` and *does* come out curly —
+
+```
+$ /usr/bin/[ a          # LC_ALL=C.UTF-8
+/usr/bin/[: missing ‘]’
+```
+
+so `test.rs`'s three `quote(b"]")` / `quote(b")")` call sites are **correct and
+must not be changed**. Nor is `tr` the odd one out for being a message *about*
+syntax: `seq` quotes a constant too, and it is a whole English word rather than
+a punctuation mark —
+
+```
+$ /usr/bin/seq nan          # LC_ALL=C.UTF-8
+/usr/bin/seq: invalid ‘not-a-number’ argument: ‘nan’
+```
+
+— which is `seq.c`'s `quote_n (0, "not-a-number")`, and is why `seq.rs` line
+469 is right to do the same. Whether a message quotes is a per-message choice
+made upstream, message by message, with no principle behind it. Measurement
+against the real GNU binary is the only oracle; both `tr` call sites now carry
+a comment saying so, and each names the other.
+
+The complete inventory of `quote()`-on-a-literal in the tree, all measured:
+`test.rs` ×3 (`]`, `)` ×2 — curly, correct), `seq.rs` ×1 (`not-a-number` —
+curly, correct), `tr.rs` ×2 (`[::]`, `[==]` — straight, fixed here). There is
+no fourth case waiting to be found.
+
+In the same file, `invalid character class ‘foo’` stays curly, because `foo`
+came off the command line and GNU does route it through `quote()`. Two
+conventions in three adjacent messages of one tool is exactly the shape of
+thing that gets "tidied up" by a future reader, which is why the unit test
+`an_unknown_class_and_an_empty_one_are_told_apart` asserts all three together
+with the reason written above them.
+
+**Coverage.** `tr-diff.sh` (the two cases that caught it, now green) plus that
+unit test.
+
+
+## BUG-BC-PRINTS-A-BANNER-A-LEADING-ZERO-AND-NEVER-WRAPS (lane B)
+
+**Found 2026-08-21** by `scripts/calc-diff.sh`, which reports 95 passed and
+105 differed. All 105 are one or more of the three defects below, none of them
+related to the quoting migration that turned them up — the harness has been red
+at roughly this number since it was written, and nobody had read the rows.
+
+Reproduce: `bash scripts/calc-diff.sh`. Every case is `printf '<expr>\n' | bc`
+against GNU bc 1.07 in WSL.
+
+### 1. The welcome banner is printed even when stdin is not a terminal
+
+```text
+ours   stdout `5`   stderr `bc 1.0 (slateos coreutils)` + `Type "quit" to exit.`
+gnu    stdout `5`   stderr empty
+```
+
+GNU prints the banner only on an interactive session, so `echo 2+3 | bc` is
+exactly one line. Ours prints it unconditionally, which means every pipeline
+that uses `bc` gets two lines of noise on stderr. This alone accounts for most
+of the 105 rows. The fix is to gate the banner on `stdin.is_terminal()` — and
+to check whether `-q`/`--quiet` is accepted, since that is the other way GNU
+suppresses it.
+
+### 2. A value below 1 is printed with a leading zero
+
+```text
+$ printf 'scale=10; 1/3\n' | bc
+ours   0.3333333333
+gnu     .3333333333
+```
+
+POSIX bc prints no integer part when it is zero. Ours emits `0`. Affects every
+scaled division in the harness. The fix is in whatever formats a `Number` back
+to decimal; note the sign case too (`-0.5` is `-.5` in GNU).
+
+### 3. Long output is never wrapped
+
+GNU bc breaks a number longer than 70 characters with a `\` and a newline:
+
+```text
+gnu    10715086071862673209484250490600018105614048117055336074437503883703\
+       51051124936122493198378815695858127594672917553146825187145285692314\
+       ...
+ours   (one 302-character line)
+```
+
+The width is bc's `BC_LINE_LENGTH`, 70 by default, and GNU honours the
+environment variable of that name (0 disables wrapping). Ours has no concept of
+it. The fix is a small output filter applied to every line bc writes, plus
+reading `BC_LINE_LENGTH`; do not apply it to the *input* echo or to
+diagnostics, which GNU does not wrap.
+
+**The proper fix is all three, measured against the harness** — `calc-diff.sh`
+already covers them, so the work is done when it reports 0 differed rather than
+when the three changes are written.
 ---
 
 ## TD-C-COMPOSITOR-TILES-UNDER-THE-TASKBAR (lane C, 2026-08-21) — MOSTLY RESOLVED 2026-08-21, step 4 blocked
@@ -54385,19 +55660,331 @@ coverage rather than a regression test — no marker made it fail. Full table in
 
 **What this does NOT close.**
 
-1. **`gui/desktop/src/animations.rs` still has no caller.** Cost 1 above is
-   unchanged: the 1036 lines are still dead. They are now dead for a fixable
-   reason — there is something to wire them to — rather than an unfixable one.
-   That wiring is the next task, and it is where the fix is actually cashed in;
-   until then this entry has built a heartbeat nothing listens to.
-2. **Rendering is still driven from input, not from the loop.** `paint_chrome`
-   is called in response to something the user did. An animation stepped by a
-   tick must be able to repaint from the tick, which is the re-entrancy note in
-   the fix above and is part of task 1, not of this one.
-3. **Nothing is vsync-locked.** Deliberate — see §521 §1. An animation that must
-   be in step with the display still cannot be; the wire can already carry a
-   `Tick`, so a compositor frame callback remains additive later.
+1. ~~**`gui/desktop/src/animations.rs` still has no caller.**~~ **Closed
+   2026-08-22**, in the follow-on task this entry named as "where the fix is
+   actually cashed in". `ShellSession::step_frame` steps the manager and the
+   overview's backdrop fade from `Event::Tick`, and arms the next one-shot
+   wake-up only while `anything_moving()`. `animations.rs` was changed first:
+   it counted *frames* (`duration_ticks`/`current_tick`, "one tick = one
+   frame"), which under a clock that is allowed to be late makes a busy moment
+   silently *lengthen* every animation rather than drop frames — it now counts
+   milliseconds (`duration_ms`/`elapsed_ms`, `tick(dt_ms)`). The overview's
+   fade came back with the shape that makes §520 structurally impossible:
+   `Option<Animation>` where `None` means *fully open*, so a caller that never
+   ticks sees a finished overlay rather than a blank one. See
+   `design-decisions.md` §522.
+2. ~~**Rendering is still driven from input, not from the loop.**~~ **Closed
+   2026-08-22** by the same change: a tick reaches `pump`'s repaint through
+   `self.dirty`, and the decision to repaint is taken *before* the step so the
+   frame that finishes the last animation is still painted
+   (`the_frame_that_finishes_the_fade_is_still_painted`).
+3. **Nothing is vsync-locked.** Still open, and deliberate — see §521 §1. An
+   animation that must be in step with the display still cannot be; the wire
+   can already carry a `Tick`, so a compositor frame callback remains additive
+   later.
+4. **Most of the shell's chrome is still not animated.** Only the overview's
+   backdrop fade is wired. The start menu, calendar, Alt-Tab, notification pane
+   and login screen are all drawn by the shell and so *could* be, and are not
+   yet. `animate_window` and `animate_desktop_switch` are a different case and
+   are not blocked on the shell at all: a window's geometry belongs to the
+   compositor (§519), so the shell throws the stepped rectangles away and those
+   two are for callers that render the result themselves.
 
+
+## TD-C-A-TEST-BINARY-CAN-BE-BROKEN-WITHOUT-ANYONE-NOTICING (lane C, 2026-08-22)
+
+**What.** A crate whose test binary fails to *compile* reports no test
+failures. It reports nothing at all — no `test result` line — and in a filtered
+build log that is indistinguishable from a crate with no problems. Because the
+per-task gate on this lane has usually been `cargo test -p <the crate I edited>`,
+a change in one crate can break a *sibling* crate's tests and nobody finds out
+until something else happens to build the workspace.
+
+**It already happened, and it lasted a day.** `apps/editor`'s
+`mod against_the_real_compositor` — the four tests that put the shipped editor
+on one end of a real socket and the shipped compositor on the other, i.e. the
+most valuable tests in that crate — **had not compiled since commit
+`7d1667856` (2026-08-21, the frame clock, `design-decisions.md` §521)**. That
+change moved `set_wait_timeout` from an inherent method on
+`guiremote::socket::Socket` onto the `Transport` trait, so every transport could
+park with a deadline. `apps/editor`'s test module calls it and does not
+otherwise name the trait, so it stopped resolving:
+
+```
+error[E0599]: no method named `set_wait_timeout` found for struct
+              `guiremote::socket::Socket` in the current scope
+```
+
+§521's own gate was `cargo test -p oswindow -p guiremote -p desktop`, which is a
+perfectly reasonable-looking set, and `apps/editor` is not in it. It was found
+on 2026-08-22 only because the Settings event-loop task happened to run
+`cargo test --workspace` at the end.
+
+**The one-line fix is in** (`use oswindow::ConnectionTransport as _;` in
+`apps/editor/src/main.rs`, with a comment pointing here). This entry is about
+the *process hole*, which is still open.
+
+**Why it is worse than an ordinary silent failure.** A test that fails is loud.
+A test that does not exist is at least visibly absent from the count. A test
+binary that does not compile *claims nothing* — and the crates most likely to
+break this way are exactly the ones whose tests reach across crate boundaries,
+which is to say the integration tests that are the whole reason
+`TD-NO-APP-CONNECTS-TO-THE-COMPOSITOR` was worth closing. The tests that
+protect the seams are the tests most exposed to a change on the other side of a
+seam.
+
+**Reproducing it.** Delete the `use oswindow::ConnectionTransport as _;` line
+from `apps/editor/src/main.rs`, then run
+`cargo test -p oswindow -p guiremote -p desktop --target x86_64-pc-windows-gnu`.
+It is green. `cargo test --workspace` is not.
+
+**The proper fix**, in the order the cost forces:
+
+1. **Make the workspace the gate, not the crate.** Done as practice from
+   2026-08-22: `cargo test --workspace --target x86_64-pc-windows-gnu` before
+   any commit that touches a crate other crates depend on — which, for anything
+   in `gui/`, is all of them. It costs a few minutes and it is the only check
+   that actually covers this.
+   **Use `--no-fail-fast`.** Found the same day, and it is the second half of
+   the same hazard: `cargo test --workspace` stops at the *first* failing test
+   binary, so every crate scheduled after it is never run and reports nothing —
+   which reads, once again, exactly like "no problems". A flaky test in
+   `userspace/polkit` aborted the run before `apps/settings` was reached; the
+   re-run with `--no-fail-fast` then found two *more* flaky tests, in
+   `userspace/ftpd` and `posix`, that the first run had never got far enough to
+   reach. All three are lane B's and are filed as
+   `requests/c-b-three-flaky-tests-fail-the-workspace-gate.md`. A gate that can
+   be silenced by an unrelated crate's unrelated failure is not a gate.
+2. **Do not filter a build log in a way that can hide a compile error.**
+   Grepping for `test result|FAILED` is exactly the filter that made this
+   invisible, because a crate that did not build produces neither. Any filter
+   must include `^error` and the runner's exit status must be checked; a
+   `test result` tally with no `error` line and a zero exit is the only green.
+3. **A `cargo check --workspace --all-targets` in CI** would catch it in a
+   fraction of the time of a full test run, since it is a compile problem and
+   not a behavioural one. There is no CI on this project yet; when there is,
+   this is the cheapest possible guard and should be the first job.
+
+**Severity.** Medium, and it is a *meta*-defect: it does not itself break
+anything a user can see, it removes the evidence that something else did. The
+specific instance is closed; the hole that let it persist for a day is only
+closed by (1) being kept up, which is a habit rather than a mechanism until (3)
+exists.
+
+**Where.** Not a location in the code — a property of how this lane runs its
+gate. The instance was `apps/editor/src/main.rs`'s
+`mod against_the_real_compositor`; the cause was `gui/remote/src/client.rs:143`
+(`Transport::set_wait_timeout`).
+
+## B-POLKIT-FAILLOCK-TEST-RACES-ITS-OWN-ONE-SECOND-DELAY (found by lane C, 2026-08-22 — lane B's crates)
+
+**In short:** One test in `userspace/polkit` earns a rate-limit delay of exactly
+one second and then does a deliberately-slow password hash inside that second
+before checking the delay is still in force. On a busy machine the hash outlasts
+the delay and the test fails. It passes every time when run alone.
+
+**Where.** `userspace/polkit/src/main.rs:1806`,
+`tests::polkit_honours_a_delay_earned_at_another_prompt`. The delay arithmetic is
+`authlib::delay_for` (`userspace/authlib/src/lib.rs:413`) and the clock is
+`wall_clock_secs` (`:429`), both lane B's.
+
+**Why one second.** The test's loop is
+`while elsewhere.rate_limited("alice").is_none() { elsewhere.note_failure("alice") }`,
+which stops at the *first* iteration that produces a delay — `FREE_ATTEMPTS + 1`
+failures, so `delay_for` computes `1 << 0` = 1 s. The clock has whole-second
+granularity, so the real window is 0–1 s depending on where in the current second
+the loop landed. `admin_with_password` → `set_password_with_salt` then runs a real
+KDF inside it.
+
+**How it was found, and why it mattered to lane C.** `cargo test --workspace`
+stops at the first failing binary, so this failure meant `apps/settings` — the
+crate under test in the task that ran the gate — was never run at all. See
+`TD-C-A-TEST-BINARY-CAN-BE-BROKEN-WITHOUT-ANYONE-NOTICING`; this is a second,
+independent way for a workspace gate to report nothing and look green-ish.
+
+**The same bug is in `ftpd`.** `ftpd::tests::repeated_guesses_are_rate_limited`
+(`userspace/ftpd/src/main.rs:3230`) writes the same count out longhand —
+`for _ in 0..=authlib::FREE_ATTEMPTS` — and so also earns exactly one second,
+then spends it on `FREE_ATTEMPTS + 1` real shadow verifications before asserting
+the limit is still in force. It failed on the run where `polkit` passed, which is
+how the family was identified rather than the instance.
+
+**Filed to the owning lane** as
+`requests/c-b-three-flaky-tests-fail-the-workspace-gate.md`, with three suggested
+fixes — the right one being to inject a frozen clock, since the property under
+test in both crates ("a delay earned at another prompt is honoured here", "the
+limit is daemon-wide and survives reconnecting") has nothing to do with wall
+time. Lane C has not touched either file.
+
+**Also noted there, not the cause:** the test's scratch directory is a *fixed*
+path, `temp_dir()/polkit-faillock-share-test`, which it opens by deleting. Two
+concurrent `polkit` runs would delete each other's fixture mid-test.
+
+**Workaround until fixed:** run the gate as
+`cargo test --workspace --no-fail-fast --target x86_64-pc-windows-gnu`.
+
+## B-TWO-POSIX-TDESTROY-TESTS-SHARE-ONE-COUNTER (found by lane C, 2026-08-22 — lane B's crate)
+
+**In short:** Two tests in `posix/src/search.rs` reset and read the same
+process-wide counter, and `cargo test` runs them on different threads at the
+same time. When one's reset lands in the middle of the other's measurement, the
+other reads zero and fails. Nothing is wrong with `tdestroy`.
+
+**Where.** `posix/src/search.rs:919` declares
+`static DESTROY_COUNT: AtomicI32`; `test_tdestroy_empty` (`:929`) and
+`test_tdestroy_calls_free_fn` (`:944`) both `store(0)` into it and both read it.
+
+**The observed failure is exactly the predicted interleaving:**
+
+```
+thread 'search::tests::test_tdestroy_calls_free_fn' panicked at posix\src\search.rs:946:9:
+assertion `left == right` failed: tdestroy should call free_fn for each node
+  left: 0
+ right: 5
+```
+
+`left: 0` is what you get when `test_tdestroy_empty`'s `store(0)` lands *after*
+the five `fetch_add`s and before the `load`.
+
+**Fix.** One static and one `extern "C"` callback per test — two lines, no
+synchronisation and no ordering assumption. A `Mutex` around both would also
+work and is worse, because it makes each test depend on its relationship to the
+other, which is the thing that just bit. `test_tdestroy_empty` in fact needs no
+counter at all: it asserts *no* calls, so a callback that panics on entry is a
+stronger assertion.
+
+**Filed to the owning lane** in
+`requests/c-b-three-flaky-tests-fail-the-workspace-gate.md`. Lane C has not
+touched the file.
+
+**How it was found.** The same `cargo test --workspace --no-fail-fast` run that
+turned up the `ftpd` half of
+`B-POLKIT-FAILLOCK-TEST-RACES-ITS-OWN-ONE-SECOND-DELAY`. Two consecutive full
+runs failed on *different* subsets of the three, which is what identified all of
+them as load-sensitive races rather than regressions.
+
+## B-POSIX-HSEARCH-TESTS-RACE-ONE-GLOBAL-TABLE-AND-SEGFAULT (found by lane C, 2026-08-22 — lane B's crate)
+
+**In short:** Seven tests in `posix/src/search.rs` all drive one process-wide
+hash table at the same time, on different threads. One test frees the table
+while another is reading it, so the reader dereferences freed memory and the
+whole test process dies. Because it dies rather than failing, all 20,500 test
+results in that binary are lost, not just the one.
+
+**Where.** `posix/src/search.rs:370` — `static mut HTAB: HashTable`. `hcreate`
+(`:465`) allocates `HTAB.buckets`, `hdestroy` (`:495`) frees it and nulls the
+pointer, `hsearch` (`:513`) checks it for null and then dereferences it at
+`:520`. Those last two are not one atomic step. The seven concurrent tests are
+`test_hcreate_basic` (`:1042`), `test_hdestroy_no_table` (`:1053`),
+`test_hsearch_no_table` (`:1059`), `test_hsearch_enter_and_find` (`:1071`),
+`test_hsearch_find_nonexistent` (`:1104`), `test_hsearch_enter_multiple`
+(`:1121`) and `test_hsearch_enter_duplicate_returns_existing` (`:1159`).
+
+**Observed:**
+
+```
+error: test failed, to rerun pass `-p posix --lib`
+Caused by:
+  process didn't exit successfully: ...\deps\posix-9b221ba97ec3f918.exe
+  (exit code: 0xc0000005, STATUS_ACCESS_VIOLATION)
+```
+
+The last test to print before the process died was `search::tests::test_fnv1a_empty`.
+
+**Why this matters more than its sibling above.** A panicking test costs one
+result; a segfault costs the whole binary. `cargo test` reports the crate as
+failed and can say nothing about the other 20,499 tests, so a green-looking
+workspace run and a crashed one are equally uninformative about `posix`.
+
+**Ruled out.** Not the truncated-artifact phantom described under *"A full disk
+does not fail the build — it corrupts it silently"*: D: had 218 GB free and the
+binary had been relinked the same day. Three isolated reruns of `-p posix --lib`
+gave one `test_tdestroy_calls_free_fn` failure and two clean passes, which is
+the signature of a load-sensitive race.
+
+**Fix.** A `static HTAB_LOCK: Mutex<()>` in the test module, held for the whole
+body of each of the seven tests — taken before `hcreate` and held past
+`hdestroy`, so no test can observe a half-built or half-freed table. Use
+`lock().unwrap_or_else(PoisonError::into_inner)` so one panicking test does not
+cascade into six poisoned-lock failures.
+
+Note this is deliberately the *opposite* prescription from
+`B-TWO-POSIX-TDESTROY-TESTS-SHARE-ONE-COUNTER` directly above, and the
+difference is the point: those counters are *incidentally* shared and should
+simply stop being shared, whereas `HTAB` is *deliberately* shared because the
+POSIX `hsearch` API it implements genuinely has one table per process. You
+cannot give each test its own, so the only thing left to fix is the concurrency.
+
+**Also worth doing in the same pass.** `WALK_COUNT` (`:867`) has the same shape
+and exposure as `DESTROY_COUNT` — `test_twalk_multiple` (`:900`) resets and
+reads it, and any sibling `twalk` test that does the same will race it. It has
+not been seen to fail yet.
+
+**Filed to the owning lane** as item 4 of
+`requests/c-b-three-flaky-tests-fail-the-workspace-gate.md`. Lane C has not
+touched the file.
+
+## TD-C-A-ZONE-BUILD-FAILS-UNLESS-YOU-KNOW-TO-SAY-NIGHTLY (lane C, 2026-08-22)
+
+**In short:** Every zone's `.cargo/config.toml` tells you to build by running
+`cargo build` from inside the zone directory. Do exactly that and you get
+`error: `.json` target specs require -Zjson-target-spec` — a message naming a
+flag that, per `CLAUDE.md`, you are specifically told *not* to pass. The missing
+word is `+nightly`. Nothing is misconfigured; the instructions are incomplete.
+
+**Reproduce** (any zone — checked in `apps/`, `gui/` and `userspace/`):
+
+```
+cd gui/window && cargo build -p oswindow
+error: `.json` target specs require -Zjson-target-spec
+
+cd gui/window && cargo +nightly build -p oswindow
+    Finished `dev` profile ... in 5.38s
+```
+
+**Why.** The workspace-root `.cargo/config.toml` sets
+`[unstable] json-target-spec = true` (`:54`), which is what makes
+`build.target = "../toolchain/x86_64-slateos.json"` in each zone config legal.
+But **cargo on a stable toolchain ignores the entire `[unstable]` table**, without
+warning. The default toolchain in this checkout is
+`stable-x86_64-pc-windows-gnu`, so `json-target-spec` never takes effect and the
+`.json` spec is rejected. `build-std` in the same table is silently dropped for
+the same reason — the `.json` error just happens to fire first.
+
+**Why the error message is actively misleading.** It says the spec "requires
+-Zjson-target-spec", so the obvious next move is to pass `-Zjson-target-spec` on
+the command line. `CLAUDE.md` line 41 says in as many words that this is *not*
+how it is set ("NOT via env var or CLI flag"). Both statements are true and
+neither mentions the toolchain, so the reader is left with a contradiction and no
+route out. The route out is one word.
+
+**What was fixed.** The header comments of `apps/.cargo/config.toml` and
+`gui/.cargo/config.toml` — the two zones lane C owns — now state the `+nightly`
+requirement, quote the exact error, and say plainly that the fix is not a `-Z`
+flag. `gui/`'s header also said *"Zone config for apps/"*, copied verbatim from
+`apps/`, and now names its own zone.
+
+**Still open, and why lane C did not do it:**
+
+- `userspace/.cargo/config.toml`, `net/.cargo/config.toml` and
+  `init/.cargo/config.toml` carry the identical incomplete header. Those are
+  lanes A and B's trees.
+- `CLAUDE.md` line 41 should gain "and only on a nightly toolchain", and the
+  `build-slateos` alias comment at `.cargo/config.toml:62` already shows
+  `cargo +nightly build-slateos` in its example but does not say why the
+  `+nightly` is load-bearing. `CLAUDE.md` may only be edited on an explicit
+  operator instruction, and the workspace-root `.cargo/` is not lane C's.
+
+**Alternative fix not taken:** adding `json-target-spec = true` to each zone
+config would not help — it is the *toolchain*, not the config location, that
+ignores it. A `rust-toolchain.toml` pinning nightly at the workspace root
+**would** fix it properly and for every zone at once, and is the right answer if
+the operator wants one; it is a workspace-root file and a decision with
+consequences for every lane, so it is not lane C's to make unilaterally.
+
+**Severity.** Low as a defect — nothing is broken and the workaround is one
+word — but it costs every newcomer (human or session) the same ten minutes, and
+it cost this one, which is why it is written down rather than remembered.
 
 ---
 

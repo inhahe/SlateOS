@@ -1277,8 +1277,8 @@ mod tests {
             body(&fail(&["-c0"])),
             "byte/character positions are numbered from 1"
         );
-        assert_eq!(body(&fail(&["-fx"])), "invalid field value 'x'");
-        assert_eq!(body(&fail(&["-cx"])), "invalid byte/character position 'x'");
+        assert_eq!(body(&fail(&["-fx"])), "invalid field value ‘x’");
+        assert_eq!(body(&fail(&["-cx"])), "invalid byte/character position ‘x’");
         assert_eq!(body(&fail(&["-f", "1-2-3"])), "invalid field range");
         assert_eq!(
             body(&fail(&["-c", "1-2-3"])),
@@ -1297,16 +1297,16 @@ mod tests {
     fn a_number_too_large_names_the_whole_run_and_only_the_first() {
         assert_eq!(
             body(&fail(&["-f", "99999999999999999999999"])),
-            "field number '99999999999999999999999' is too large"
+            "field number ‘99999999999999999999999’ is too large"
         );
         assert_eq!(
             body(&fail(&["-c", "99999999999999999999999,22"])),
-            "byte/character offset '99999999999999999999999' is too large"
+            "byte/character offset ‘99999999999999999999999’ is too large"
         );
         // `u64::MAX` itself is refused: that value means "to end of line".
         assert_eq!(
             body(&fail(&["-f", "18446744073709551615"])),
-            "field number '18446744073709551615' is too large"
+            "field number ‘18446744073709551615’ is too large"
         );
         // One less is fine.
         assert_eq!(
@@ -1317,11 +1317,12 @@ mod tests {
 
     #[test]
     fn the_offending_text_is_echoed_with_gnulib_quote_not_shell_escaping() {
-        // `quote()` escapes the way C does: a single quote inside becomes
-        // `\'` and the whole stays in single quotes, where shell-escaping
-        // would switch to double quotes.
-        assert_eq!(body(&fail(&["-f", "a'b"])), "invalid field value 'a\\'b'");
-        assert_eq!(body(&fail(&["-f", "a\\b"])), "invalid field value 'a\\\\b'");
+        // `quote()` escapes the way C does — a backslash inside becomes `\\`
+        // — where shell-escaping would switch to double quotes. A single
+        // quote needs no escape at all, because the marks around the value
+        // are curly and a straight `'` cannot be mistaken for one of them.
+        assert_eq!(body(&fail(&["-f", "a'b"])), "invalid field value ‘a'b’");
+        assert_eq!(body(&fail(&["-f", "a\\b"])), "invalid field value ‘a\\\\b’");
     }
 
     // ---------------- the cross-checks ----------------

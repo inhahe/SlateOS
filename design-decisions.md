@@ -32314,6 +32314,107 @@ which is the correct order to do it in. Three `xfail` cases in
 `scripts/wc-diff.sh` marked `quote-marks-under-a-utf8-locale` become passes and
 lose their annotation.
 
+**Implemented 2026-08-21**, exactly as scoped above. Three things the
+implementation turned up that the decision did not anticipate:
+
+- **The ASCII `'` stops being escaped.** It was escaped only because it *was*
+  the delimiter; against a `’` delimiter it cannot be mistaken for one, and GNU
+  leaves it bare. So `it's` renders `‘it's’`, not `‘it\'s’`. The backslash is
+  still doubled, since it still introduces the escapes. Measured, not inferred.
+- **The change is provably confined to `quote`.** Regenerating the fixture
+  under `C.UTF-8` moved 2781 of its 8333 rows, and *every one of them* is a
+  `quote` row: zero `quotef`, zero `quoteaf`. That is the table above turned
+  into an assertion, and it is what made the change safe to do wholesale rather
+  than utility by utility.
+- **A latent bug fell out: six diagnostics were quoting through the wrong
+  library.** This is the one worth reading. GNU does not have one family of
+  quoted diagnostic, it has two, and only one of them follows the locale:
+
+  | Written by | Reached via | Under `C.UTF-8` |
+  |---|---|---|
+  | gnulib `quotearg.c` | `quote()` — argmatch, `xdectoumax`, every "invalid N" | `invalid argument ‘zzz’ for ‘--sort’` — **curly** |
+  | glibc `getopt_long` | `'%s'` spelled into the C format string | `unrecognized option '--nope'` — **straight** |
+
+  glibc never consults the locale, so one command line can print one of each:
+  `sort --key` gives `option '--key' requires an argument` while `sort
+  --sort=zzz` gives `invalid argument ‘zzz’ for ‘--sort’`. Our `getopt.rs`
+  routed *both* families through `quote()`, which was invisible while `quote()`
+  was straight and became six wrong messages the moment it went curly —
+  `invalid option`, `option requires an argument` (short), `unrecognized
+  option`, `requires an argument` (long), `doesn't allow an argument`, and the
+  ambiguous-prefix list. Fixed by splitting out `quote::quote_glibc`, so the
+  two families are distinguished by which function a call site names rather
+  than by anyone remembering. Note the fixture could not have caught this: it
+  measures quoting *styles* against `sort`/`head`, and glibc's inline quotes
+  are not a style.
+
+  A footnote worth keeping, because it looks like a bug of ours and is not:
+  `sort --check=` prints four curly lines and then `Try 'sort --help' for more
+  information.` in straight marks, because the referral comes from coreutils'
+  own `usage()`, which also spells its quotes literally. Mixed marks inside a
+  single message is GNU's real output.
+
+- **And a *third* family, which the two-family table above does not cover:
+  gnulib's own `quotef`/`quoteaf`.** Those are `shell_escape` styles, not
+  `locale_quoting_style`, so they stay straight in every locale — the table
+  entry §351 already had. What the implementation turned up is that *which*
+  family a given message uses is a per-utility fact of upstream's source, not
+  something derivable from the message text. Measured against GNU 9.4 under
+  `LC_ALL=C.UTF-8`:
+
+  | Command | Prints |
+  |---|---|
+  | `uniq a b c`, `tr a b c`, `comm a b c`, `split a b c`, `tsort a b`, `seq 1 2 3 4` | `extra operand ‘c’` — curly |
+  | `join A B C` | `extra operand 'C'` — **straight** |
+  | `sort -c a b` | `extra operand 'b' not allowed with -c` — **straight** |
+  | `wc --files0-from=f w1`, `sort --files0-from=f w1` | `extra operand 'w1'` — **straight** |
+  | `join A -z` | `missing operand after ‘-z’` — curly |
+
+  Same six words, two different families, and join prints one of each depending
+  on which operand is wrong. So a migration that rewrites test expectations by
+  matching message *text* will over-reach across utilities, and did: it
+  curlified join's and sort's, which are `quoteaf`. Both were caught by the
+  test suite and reverted. `wc`'s was the reverse — a genuine bug of ours,
+  since our `wc` reached for `quote()` where upstream reaches for `quoteaf` —
+  and is fixed here, bringing the wrong-family count from six to seven.
+
+- **A *fifth* family, and the one that breaks the mental model the other four
+  fit into.** The obvious rule after the table above is "gnulib quotes curly,
+  glibc quotes straight, except the shell-escape styles". That rule is wrong,
+  because gnulib's own `xstrtol-error.c` spells `'%s'` into its format string
+  exactly the way glibc's `getopt_long` does — no `quote()` call, no locale, and
+  **no escaping of any kind** (`od -j $'\xff'` emits the raw 0xFF byte; a tab
+  passes through as a tab). So *which library wrote the message* is not the
+  test either. Measured, GNU 9.4, `LC_ALL=C.UTF-8`:
+
+  | Command | Prints | Via |
+  |---|---|---|
+  | `od -j x f`, `od -N x f`, `od -S x f`, `sort -S x f` | `invalid -j argument 'x'` — **straight** | `xstrtol-error.c` |
+  | `od -j 1Q f` | `-j argument '1Q' too large` — **straight** | same |
+  | `head -n x f`, `tail -n x f`, `split -b x f`, `fold -w x f` | `invalid number of lines: ‘x’` — **curly** | `xdectoumax` → `quote()` |
+
+  Both halves reject the same argument for the same reason and differ only in
+  which upstream helper the caller happened to reach for. Ours routed the
+  `xstrtol-error` shape through `quote()`, so `od -j x` and `sort -S x` printed
+  curly where GNU prints straight — sixteen wrong rows in `od-diff.sh` and six
+  in `sort-diff.sh`, all of them invisible until those harnesses moved off
+  their `LC_ALL=C` reference. Fixed by routing `xnum::strtol_fatal` through
+  `quote_glibc`, which brings the wrong-family count from seven to eight. The
+  standing lesson is in `quote.rs`'s module doc: the family is a fact about
+  upstream's source at each call site, and the only way to know it is to
+  measure that call site.
+
+**What it deliberately did not fix:** the *contents* between the marks are
+still rendered ASCII-only, so `café` comes out `‘caf\303\251’` where GNU prints
+`‘café’`. That is a separate defect in a separate helper — `printable`, a
+*byte* test where GNU uses a *character* test — and it affects all three
+styles, not just this one, so folding it in here would have widened a scoped
+decision into an unscoped one. It is logged as
+`BUG-QUOTE-ESCAPES-VALID-MULTI-BYTE-CHARACTERS` in `known-issues.md` with the
+measurements, along with the reason the 8333-row fixture cannot catch it: the
+probe's corpus is built from single bytes and from an alphabet whose high bytes
+never form a valid UTF-8 sequence, so no row exercises a multi-byte character.
+
 **No fallback for non-UTF-8 locales is implemented, on purpose.** GNU needs the
 ASCII branch because it runs where `LC_ALL=C` is real; we decided in Q38 that it
 is not real here. Adding a branch on a locale that cannot occur would be dead
@@ -32549,6 +32650,431 @@ terms.
 
 ---
 
+## §355 — The 70 fixture binaries stop being stored in git and are built on demand; the guard moves from "detect drift" to "refuse to ship a gap"
+
+**Date:** 2026-08-21
+**Decided by:** Claude (autonomous) — lane B. Lane A supplied the reproducibility
+measurement the operator asked for and argued for option C; the measurements
+below were taken afterwards and point elsewhere.
+**Answers:** `open-questions.md` B-Q5 (now removed).
+
+**In short:** This project keeps 70 compiled test programs inside git, next to
+the source they were compiled from. The library they are compiled against is
+*not* in git, so nothing was comparing the two, and the saved programs kept
+quietly becoming tests of a system that no longer existed — five times in six
+days. I had added a checker and recommended keeping the arrangement. Measuring
+it today showed the checker covers 9 of the 70, and that **60 of the remaining
+61 are stale right now** and have been for an unknown period with nothing in the
+repository able to notice. So the arrangement goes: the binaries stop being
+stored, and are rebuilt from their recipes when the boot image is assembled.
+
+### What changed my mind was four measurements, not an argument
+
+My own recommendation in B-Q5 was *"A for now, B once every lane has the
+toolchain"* — keep storing them, move to building on demand once the blocking
+premise was gone. Lane A's update argued for C (store them, plus commit a
+checksum of the library they were built against) on the strength of proving the
+library builds byte-reproducibly. Both positions were reasoned from the entry's
+options table. The table turns out to be wrong about the size and the shape of
+the problem.
+
+| # | Measurement | Result |
+|---|---|---|
+| 1 | How many of the 70 are actually guarded? `git ls-files "*.stamp"` | **9.** The nine `services/ctest-*` fixtures. The 61 `services/fastpy-*` ELFs carry no stamp, no checksum and no gate of any kind. |
+| 2 | Is the fastpy build deterministic, so that a mismatch means staleness rather than noise? | **Yes.** Two consecutive builds of `fastpy-hello` from unchanged source: `c57c8719…` both times. |
+| 3 | Then how many of the unguarded 61 disagree with what their own `build.py` produces today? | **60 of 61** (the 61st being the one I had already rebuilt by hand while measuring #2). Every unguarded fixture in the tree is stale. |
+| 4 | What does rebuilding all of them cost? | **55 seconds** for all 61, plus 10 s for the nine C ones. Zero build failures. |
+| 5 | What does B cost a clone with no toolchain? | Less than the status quo already costs it — see below. |
+
+Measurement 3 is the one that decides it. The premise under option A is that the
+drift is an occasional accident that a gate can catch. It is not occasional: it
+is the steady state, it is the *whole* unguarded population, and the reason the
+five recorded incidents all involve the nine stamped fixtures is not that the
+nine are the problem — it is that the nine are the only ones anybody can see.
+The ring-3 fastpy self-tests have been proving that binaries run on-target
+against a `libc.a` that has not existed for some time, and reporting PASS.
+
+### Why option C cannot work here, despite being verified
+
+C's mechanism is: record the identity of the build input in git, so the gate has
+a second reference point and can tell which side moved. That is a genuinely good
+idea, and lane A's reproducibility result establishes the property it needs.
+
+It cannot reach the 61, and not for want of effort. Those fixtures are compiled
+by **fastpy, which is a different repository** — `services/fastpy-*/build.py`
+imports `compiler` from `D:\visual studio projects\fastpy` through `PYTHONPATH`,
+a path that appears in this tree only as prose in a docstring. Nothing here
+records which revision of that compiler produced a committed ELF, and nothing
+here can: it is not a build output of this tree, it is a peer. Recording its
+version string would not help either — fastpy's `pyproject.toml` has read
+`0.1.0` across every commit in its history, so the version cannot distinguish
+two builds.
+
+So C guards `libc.a` — one of the two inputs — for all 70, and leaves the other
+input unguardable *in principle* for the 61 where it applies. That is not a
+smaller version of the fix; it is a gate that reports "ok" on a stale artifact,
+which is precisely the failure the entry is about ("being diligent makes it
+quieter"). A guard that cannot see one of its inputs is worse than no guard,
+because people believe it.
+
+### Why B's headline cost is not real
+
+The table costs B at *"every lane needs the full toolchain to run a boot test"*.
+That is already true, and more strictly than B would make it:
+
+- `kernel/src/proc/spawn.rs:2952` does
+  `include_bytes!("../../../services/netstack/target/…/netstack")`. That path is
+  gitignored (`.gitignore:3`, `**/target/`) and untracked, and the embed is
+  unconditional. **The kernel crate does not compile from a fresh clone until
+  netstack has been built.** The tree already requires a toolchain to get as far
+  as a kernel binary, let alone a boot test.
+- `libc.a` is the same: gitignored, built from `posix/src`, required.
+- By contrast the fixture ELFs are read at *runtime*, from `/mnt/tests/`, by
+  `load_test_elf()` — which returns `None` when a fixture is absent so the
+  self-test **self-skips**. A missing fixture is the mildest of the three
+  failures the tree already contains.
+
+And the blocking premise I had named is satisfied: `zig` 0.16.0 lives at
+`D:\utils\zig-x86_64-windows-0.16.0` and is found machine-wide by
+`_find_zig_cc()` (fastpy `compiler/toolchain.py:123`), so it resolves identically
+for lanes A, B and C; `scripts/ctest-fixtures.py` self-locates fastpy (verified
+by running it under `env -u PYTHONPATH`); and the nine C fixtures rebuild in
+**10 seconds**.
+
+Rebuild cost, measured: **55 seconds for all 61**, plus 10 s for the nine C
+fixtures — call it a minute and a bit for the entire set, with zero build
+failures. (Timing a *single* fixture gives 8.3 s and would imply 8.5 minutes;
+that is wrong, because almost all of it is one-time LLVM start-up cost. The
+amortised figure is ~0.9 s per fixture. I nearly shipped the 8.5-minute number
+in this entry, which is a reminder that a per-item cost measured once is not a
+per-item cost.) Against a boot test that already runs about eight minutes, a
+full cold rebuild of every fixture in the tree is noise — and it is paid by the
+machine, only when an input actually changed, and by *the lane that changed the
+input*, which is the injury lane A identified and which no amount of
+gate-improvement under A or C addresses.
+
+### The part of B that is not in the table, and that this decision adds
+
+`load_test_elf` self-skipping is what makes B cheap, and it is also B's one real
+danger. Under A, a broken toolchain gives you 70 stale tests — each of which at
+least tests the *previous* version of the system. Under naive B it gives you
+**zero tests and a green boot test**, silently. That is a worse outcome than the
+one being fixed.
+
+So B ships with the guard inverted. The old guard's job was *detect drift between
+a committed artifact and its inputs*; with no committed artifact that job no
+longer exists. The new job is *refuse to produce a boot image with fewer fixtures
+than the tree defines*:
+
+- `scripts/create-ext4-rootfs.sh` enumerates `services/{ctest,fastpy}-*/build.py`
+  — the recipes are tracked, so the expected set is a fact of the checkout, not a
+  hand-maintained list that can drift on its own — builds any whose ELF is
+  missing or older than its inputs, and **fails the image build** if any recipe
+  fails or any expected ELF is absent at staging time.
+- `scripts/ctest-fixtures.py` keeps its `build` half and loses `check`/`stamp`,
+  which become meaningless. Its `libc.a`-versus-`posix/src` freshness test is
+  kept and promoted from a warning into an action: build the sysroot when it is
+  behind, rather than advising the reader to.
+
+That last point retires lane A's wrong-advice bug without needing C. The gate
+printed the wrong remedy because it held one hash and could not tell which side
+had moved; a build step does not have to tell, because it rebuilds whatever is
+behind in dependency order.
+
+### What is given up
+
+- **Binaries in history stay.** Dropping the files from the working tree does not
+  shrink what is already committed, and rewriting that history would need a
+  force-push, which is forbidden outright here. B stops the growth (~2 MB a
+  rebuild); it does not undo it.
+- **Bisect changes character.** The entry counted "bisect against a known-good
+  binary" as a loss. Honestly stated it is a swap: today you can bisect a binary
+  built against a `libc.a` nobody still has — which is the incident class itself —
+  and afterwards you bisect a tracked recipe rebuilt against the libc of the
+  commit you landed on. Since `build.py` is tracked and both builds are
+  deterministic (measurement 2, and lane A's for `libc.a`), the second is the
+  more trustworthy of the two.
+- **A clone with no `zig` gets fewer self-tests.** It gets a loud message and a
+  failed image build rather than a quiet pass, which is the intended trade.
+
+Lane A's reproducibility measurement was not wasted by this going to B rather
+than C: rebuild-on-demand is only safe *because* the builds are deterministic. If
+they were not, every boot test would produce different binaries and no one could
+separate a real change from build noise. C's evidence is B's foundation.
+
+**Related:** `known-issues.md` → the ctest fixture drift entries;
+`requests/a-b-nine-ctest-fixtures-on-main-…`,
+`requests/a-c-fixture-rebuild-was-correct-on-lane-c-and-wrong-on-main.md`;
+design-decisions.md #86 (TD-KERNEL-EMBED-BLOAT — why these ELFs moved out of the
+kernel image and onto the rootfs in the first place, which is what makes them
+skippable and therefore what makes this decision cheap).
+
+**As implemented — the gate was itself an instance of this.** Landing the decision
+turned up one thing the analysis had not: the *existing* mtime staleness check
+in `create-ext4-rootfs.sh` lived inside the ctest staging loop and so covered
+the 9 C fixtures, while the 61 fastpy ELFs were staged by a different loop, a
+few hundred lines away, that checked nothing at all.
+
+So the coverage number that condemned the content stamps — 9 of 70 — was not the
+stamps' number. It was the number for *every* guard this tree had over these
+files, arrived at twice independently, because both guards were written inside
+the loop that handled the family that had visibly failed and neither was ever
+carried to the family beside it. That is the more general lesson and it is worth
+stating separately from the storage decision: **a per-family check written inside
+a per-family loop produces a per-family blind spot, and nothing about it looks
+wrong when you read it.** Both guards were correct code. Both were tested in both
+directions. Neither had any way to notice that eight times as many fixtures sat
+outside them.
+
+The implementation therefore has one loop, over the tracked `build.py` recipes,
+answering both questions for both families: is the ELF there, and is it behind
+its inputs. The set it iterates is a fact of the checkout rather than a list
+anybody maintains, which is the property that makes a 71st fixture — or a third
+family — covered on the day it lands rather than on the day it first fails.
+
+Two smaller findings from the same pass:
+
+- **`_inputs()` did not glob `*.h` and the shell gate did.** No fixture has a
+  header today, so nothing was wrong; but the *builder* was the less inclusive
+  of the two, which is the wrong way round. The first fixture to grow a header
+  would have been reported stale on every image build and not fixable by the
+  command the report names. Where a gate and a builder disagree about what an
+  input is, the builder must be the more inclusive.
+- **The four spike ELFs are what is left of the old pattern.** bash, GNU make,
+  pkgconf and CPython still print a rebuild command instead of running it, and
+  that cost a full cycle during this very verification. Measured: 83 s to
+  rebuild all four, against an image build of minutes — so the cost argument for
+  leaving them manual does not survive being measured either. Logged as
+  `TD-B-THE-FOUR-SPIKE-ELFS-STILL-MAKE-YOU-RUN-THE-REBUILD-BY-HAND`; not folded
+  into this change because it fails *closed* (no stale spike can reach an image),
+  which makes it debt rather than a hazard.
+
+**Revisit if:** fastpy is ever vendored into this tree or pinned to a recorded
+revision, which would make its identity expressible in git and reopen C as a way
+to keep the binaries; or if the cold rebuild grows past the boot test itself, at
+which point the fixture set — not the storage policy — is what wants trimming.
+
+
+## §356 — `printf`'s `\uXXXX` encodes as UTF-8, for the same reason §351's quote marks are curly
+
+**Date:** 2026-08-21
+**Decided by:** Claude (autonomous) — applying the premise the operator settled
+in §351/Q38 to a second helper that had branched on the same locale.
+
+**In short:** `printf '\u00e9'` is supposed to print `é`. Ours printed the seven
+literal characters `\u00E9` instead, because it was implementing what GNU does
+on an ASCII-only system — where the character does not exist so the escape is
+written back unchanged. SlateOS is never an ASCII-only system, so that branch
+was implementing a machine that cannot exist. It now prints `é`, which is what
+every modern system prints.
+
+**Related:** §351 (diagnostics quote with the curly marks), Q38 (osh's string
+layer is UTF-8, full stop). This is the same premise a third time.
+
+### Why this is not a new decision so much as a missed one
+
+GNU's `\uXXXX` goes through gnulib's `unicode_to_mb`: encode the code point as
+UTF-8, then `iconv` it to the locale's charset, and if that fails hand it to a
+callback that writes the escape back. Under `C` the charset is ASCII, so the
+conversion succeeds for exactly the code points below U+0080 and fails for
+every other one. Measured, GNU printf 9.4:
+
+| | `LC_ALL=C` | `LC_ALL=C.UTF-8` |
+|---|---|---|
+| `printf '\u00e9'` | `\u00E9` — seven bytes | `\303\251` — the character |
+| `printf '\u20ac'` | `\u20AC` | `\342\202\254` |
+| `printf '\U0001F600'` | `\U0001F600` | `\360\237\230\200` |
+| `printf '\U00110000'` | `\U00110000` | `\U00110000` — no encoding exists |
+
+Our `print_unicode_char` implemented the left-hand column, and said so in its
+doc comment: *"In the C locale the charset is ASCII, so the conversion succeeds
+for exactly the code points below 0x80."* That was an accurate description of
+the wrong locale. §351 had already answered the general question — Q38 settled
+that there is no non-UTF-8 locale on this target, so a branch on an ASCII
+charset is dead code that looks load-bearing — but §351 was scoped to
+diagnostics, and this is stdout, so nothing swept it up.
+
+It was found by the harness migration that followed §351: `printf-diff.sh` had
+pinned `LC_ALL=C` on the strength of a header paragraph saying *"`extfloat` and
+`coreutils::quote` implement the C locale, which is what the OS's own printf
+will run under."* Half of that sentence stopped being true at §351, and moving
+the reference to `C.UTF-8` to fix the other half is what exposed this.
+
+### What changes, exactly
+
+- U+0000–U+007F: one byte. **Unchanged** — `\u0001` was and is the byte 0x01,
+  and `\u0000` was and is a NUL.
+- U+0080–U+10FFFF: the UTF-8 encoding, one to four bytes. **This is the
+  change.** Includes the non-characters U+FFFE and U+FFFF, which glibc's iconv
+  encodes rather than refusing — measured, not assumed.
+- Above U+10FFFF: `\U%08X`, the escape written back. **Unchanged in spelling**,
+  though it used to be reached by everything above U+007F and is now reached
+  only here.
+- Surrogates: still a fatal `invalid universal character name \ud800`, refused
+  before the encoder is consulted, which is upstream's order too.
+
+gnulib's failure callback also has a `\u%04X` arm for code points below
+U+10000. It is unreachable under a UTF-8 charset — every such code point
+encodes — so it is not written out, per §351's "no dead code that looks
+load-bearing".
+
+### The argument against, and why it does not hold
+
+The literal-passthrough behaviour is *predictable*: `printf '\u00e9' | wc -c`
+answers 7 on every machine, where the new behaviour makes it depend on the
+charset. That is a real property and it is the wrong one to want, because it is
+predictable in the way a broken clock is: it is the answer for a configuration
+this OS does not have, and a script that relied on it would break the moment it
+was run on the Linux it was written against.
+
+**Revisit if:** SlateOS ever gains a non-UTF-8 locale — the same trigger §351
+carries, and it would restore the same branch in both places.
+
+### Where it lands
+
+`userspace/coreutils/src/bin/printf.rs` → `print_unicode_char`, with
+`universal_character_names_encode_as_utf8` and
+`a_code_point_beyond_utf8_writes_the_escape_back` pinning both arms.
+`scripts/printf-diff.sh` moves to `LC_ALL=C.UTF-8` and
+`scripts/printf-cases.py` gains one case per arm of the encoder — before this,
+every code point above U+007F came out as its own literal text, so no case
+could tell the arms apart.
+
+## §357 — "Printable" is a one-line rule, not a copy of glibc's Unicode table
+
+**Date:** 2026-08-21
+**Decided by:** Claude (autonomous) — extending §101/§104's existing rule by two
+code points, and measuring the result against glibc rather than asserting it.
+
+**In short:** When a coreutils program mentions a file name in an error message,
+it hides characters that would garble the terminal — a raw newline could forge a
+whole fake line of output. It has to decide which characters are safe to show.
+GNU asks the C library, which answers from a big table of every character
+Unicode has ever assigned; that table changes with each Unicode release, so the
+same file name can print differently after a system update. We answer with a
+one-line rule instead — show anything that is not a *control* character and not
+one of the two characters that mean "line break" — which never changes. Checked
+against the C library's table over all 1.1 million characters, the two answers
+are **identical for every character that exists**; they differ only on code
+points Unicode has not assigned to anything, where no font can draw a shape
+anyway.
+
+**Related:** §101/§104 (osh's `%q` uses the same rule, minus the two-code-point
+extension), §351 (diagnostics quote with the curly marks), §356 (`printf`'s
+`\u`), Q38 (osh's string layer is UTF-8, full stop). This is that premise a
+fourth time.
+
+### The problem this closed
+
+`quote.rs` escaped *bytes*, with the predicate
+
+```rust
+const fn printable(b: u8) -> bool { b >= 0x20 && b < 0x7f }
+```
+
+so every byte of a multi-byte character was unprintable by construction. A file
+named `café` was reported as `‘caf\303\251’`. That is
+`BUG-QUOTE-ESCAPES-VALID-MULTI-BYTE-CHARACTERS`, and it was not a small
+cosmetic wart: a user whose language is not English saw every diagnostic about
+every one of their files rendered in octal. The fix is to escape *characters*,
+which forces the question this section answers — which characters?
+
+### The rule
+
+A character prints as itself unless it is
+
+* a Unicode **control** (`Cc`): the C0 range, DEL, and the C1 range
+  `U+0080..=U+009F`; or
+* one of the two **line/paragraph separators**, `U+2028` and `U+2029`.
+
+A sequence of bytes that decodes to no character is never printable and is
+escaped byte by byte, which is what keeps the answer defined for the arbitrary
+bytes a SlateOS path may hold.
+
+### Why not just copy `iswprint`
+
+GNU asks glibc's `iswprint`. Under `C.UTF-8` that is 709 ranges generated from
+the `UnicodeData.txt` of whichever glibc release you happen to have. Copying it
+would mean:
+
+* **carrying a table that drifts.** Unicode assigns thousands of code points per
+  release. A name that printed as itself last year prints in octal this year, or
+  the reverse, for no reason the user did anything about — and our table and the
+  host's would drift *apart*, so the same name would render differently
+  depending on which one you asked.
+* **contradicting §101 for no gain.** §104 already declined to model a libc
+  printability table for osh's `%q`, on the grounds that "there is no single
+  table to copy". Adding one here would leave the two halves of the same
+  userland answering the same question from different sources.
+
+### The claim that makes the one-liner safe, and how it is checked
+
+The reason the short rule is not a compromise is empirical:
+
+    $ wsl -e python3 scripts/printable-audit.py
+    unicodedata 15.0.0
+    824718 code points diverge:
+       824718  Cn (ours-only prints it)  e.g. U+0378, U+0379, U+0380, U+0381
+
+Every one of the 1,112,064 code points was compared against glibc 2.39's own
+`iswprint`. The divergence is **exactly** the unassigned ones — not "mostly",
+not "except for a handful": no assigned character diverges at all. An
+unassigned code point is one no font can draw and no standard has given a
+meaning, so neither answer to it is wrong, and ours is the one that needs no
+table.
+
+That is a claim which could rot, so it is not left as prose. `scripts/`
+`printable-audit.py` exits non-zero if a *non*-`Cn` code point ever diverges,
+and both fixture tests (`tests/quotearg.rs`, `tests/c_maybe.rs`) carry an
+`EXPECTED_DIVERGENCE` list that fails **in both directions**: a listed character
+that no fixture row exercises is a claim with no evidence behind it, and one
+whose rows have started *agreeing* with GNU is a recorded reason that has gone
+stale. A note that has quietly stopped being true is worse than a difference,
+because it trains the next reader to trust it.
+
+### Why the two separators are added, and why osh keeps them
+
+`Zl`/`Zp` is a set of exactly two characters, so naming them costs nothing and
+needs no table. glibc happens to escape them too, but that is not the reason:
+a terminal, a log reader and most `2>&1 | grep` pipelines treat U+2028 as ending
+a line, which is precisely the line-forgery this module exists to prevent —
+arriving in a character that is not `Cc`. Escaping them would be right even if
+glibc printed them.
+
+This makes **coreutils stricter than osh**, whose `needs_ansi_c_quote` (§101)
+leaves U+2028 raw, and the two are allowed to differ because they are quoting
+for different readers:
+
+| | osh `%q` / `@Q` | coreutils `quote()` |
+|---|---|---|
+| Quoting for | re-execution by a shell | a human reading a line-oriented stream |
+| A separator is | an ordinary character the shell will pass through | a line break that can forge output |
+| So U+2028 is | left raw | escaped |
+
+### Alternatives weighed
+
+| Option | Why not |
+|---|---|
+| Copy glibc's 709 ranges | A table that drifts with Unicode, disagrees with the host's copy, and contradicts §104. |
+| Call the host's `iswprint` | There is no host: this is the OS. SlateOS's own libc would need the table anyway, so this only moves the problem. |
+| Printable = "not `Cc`", with no separator exception | Leaves the line-forgery hole open in the one module whose whole purpose is closing it. |
+| Printable = "not `C*` and not `Z*`" (all controls, formats, separators) | Escapes ordinary text: a plain space is `Zs`, and `Cf` covers the bidi and joining marks that Arabic, Hebrew and Devanagari names legitimately contain. Measured, glibc prints those. |
+
+### Where it lands
+
+`userspace/coreutils/src/quote.rs` → `printable_char`, and the `Piece`
+enum/`pieces` iterator that made every escaping loop character-wise rather than
+byte-wise. `first_char` and `escape_unprintable` are exported so `printf.rs`
+answers the same question from the same place rather than keeping its own copy.
+Fixtures were re-measured under `C.UTF-8` by `scripts/quote-probe.py` (8,719
+rows) and `scripts/c-maybe-probe.py` (1,828 rows), both widened with whole
+multi-byte characters chosen to straddle every edge of "printable" —
+before that, every high byte in either corpus was a lone one, so no row could
+tell a character test from a byte test.
+
+**Revisit if:** glibc's table ever diverges from this rule on an *assigned*
+character — `scripts/printable-audit.py` is what would report it, and the answer
+then would be to look at what moved before changing anything.
 ## 507. The zone *shapes* move into the protocol crate; the shell keeps only the chooser, and pulls its work area on use
 
 **Date:** 2026-08-21
@@ -34883,6 +35409,547 @@ exactly like a hand edit. The prover now heals that on startup: a marker whose
 bad side is present exactly once and whose good side is absent is unambiguously
 one that was left applied, so no journal file is needed. A prover that damages
 the tree when interrupted is worse than no prover.
+
+## 522. An animation counts milliseconds, and its resting state is *finished* — so a caller with no clock still gets a working screen
+
+**Date:** 2026-08-22
+**Decided by:** Claude (autonomous)
+
+**In short:** The desktop shell had an animation module (fades, slides, window
+open/close) that nothing called, because until §521 there was no clock to step
+it. Wiring it up turned out to need two changes to the animation code itself
+before a single line of wiring was written. First, animations were counting
+*frames* rather than *time*, which under a clock that is allowed to be late
+means a busy moment silently makes every animation slower rather than dropping
+frames. Second, an animation's "not started" state was its *invisible* state, so
+any part of the program that drew an animated thing without running a clock drew
+nothing — which is exactly the bug §520 had to delete the overview's fade over.
+Both are now inverted: animations count milliseconds, and "no animation running"
+means *fully drawn*.
+
+### What was wrong with counting frames
+
+`animations.rs` was written with `duration_ticks` and `current_tick`, and a
+`tick()` that took no argument. Its module doc said "one tick = one frame". That
+is a coherent model only under a fixed-rate clock that never misses — and §521
+deliberately does not provide one. The shell's clock is a one-shot deadline on
+the loop's own park, so a frame arrives *at least* 16 ms after the last one and
+possibly much later, whenever the shell was busy answering input.
+
+Under a frame count, a late frame does not drop anything. It makes the animation
+*take longer*. A 200 ms fade on an idle machine is a 200 ms fade; the same fade
+while the shell is answering a burst of window-list updates is a 300 ms fade,
+and nothing anywhere reports that. It is a defect with no symptom other than
+"the desktop feels inconsistent", which is the hardest kind to ever find.
+
+It was also inexpressible. `roadmap-detailed.md`'s Tier 3 appearance settings
+include an `animation-duration-ms` knob. There is no honest conversion from
+milliseconds to ticks without knowing the frame rate, and the frame rate is by
+construction not a constant.
+
+So `Animation` now holds `duration_ms` and `elapsed_ms`, and `tick(dt_ms)` takes
+the wall time the frame clock measured. A step that lands past the end lands
+*on* the end rather than overshooting, and a step long enough to span several
+passes of a looping animation carries the remainder through rather than losing
+it. The property the tests assert is the one that matters: an animation driven
+at 125 Hz and the same animation driven at 20 Hz finish at the same *time*, with
+different numbers of frames.
+
+### The rule that keeps §520 from happening again
+
+§520 deleted the overview's open fade. The reason is worth restating because it
+is a general trap, not an overview one: the fade had an `animation_progress`
+that `show()` set to `0.0`, a `tick_animation(dt)` that the caller was supposed
+to run every frame, and draw paths that began `if progress <= 0.0 { return }`.
+Nothing called `tick_animation`, and at the time nothing could. The result was a
+fullscreen overlay that was blank, took every click, and stayed that way.
+
+The tempting reading is "the bug was the missing clock". It was not. The bug was
+that **the state an animation starts in was the state in which the feature does
+not work**, so the clock was load-bearing for correctness rather than for
+polish. Any caller that does not run a clock — a layout test, a headless render
+pass, an embedder driving the shell by hand, a future code path nobody has
+thought of — gets a broken screen rather than a still one.
+
+The rule adopted here, and applied to the restored fade:
+
+1. **The resting state of an animation is its *finished* state.** The overview's
+   fade is `Option<Animation>`, and `None` means fully open. `show()` sets it to
+   `None`. A caller that never ticks sees the completed overlay.
+2. **Starting an animation is the deliberate act, and only a caller that owns a
+   clock does it.** `begin_fade` is separate from `show`, and its only caller is
+   `ShellSession`, which is the thing that has the frame clock. Everything else
+   that opens the overview gets the working version for free by doing nothing.
+3. **Nothing gates drawing or hit-testing on progress.** The fade scales the
+   backdrop's alpha and touches nothing else, so even a fade begun and then
+   frozen at zero leaves every card drawn at full strength and every click
+   landing where it should. This is asserted directly:
+   `an_overview_whose_fade_never_runs_is_still_drawn_and_still_clickable`
+   begins a fade, never advances it, and requires both a drawn overlay and an
+   answered click.
+4. **A finished animation is indistinguishable from one that never ran.**
+   `tick_fade` sets the field back to `None` on completion, so no downstream
+   reader can come to depend on "has faded" versus "was never faded".
+
+The alternative — keep a single `progress: f32` and simply start it at `1.0`
+unless someone asks otherwise — was rejected because it makes the safe state a
+*value* rather than a *shape*. A future edit that resets progress in the wrong
+place reintroduces §520 silently. With `Option`, "no animation" and "an
+animation at zero" are different kinds of thing, and the kind that means
+"nothing is running" is the one that draws correctly.
+
+### What the shell can and cannot animate
+
+`AnimationManager::tick` returns a rectangle per animated window, and the shell
+throws them away. That is not an oversight: **a window's geometry belongs to the
+compositor**, which owns the scene, the z-stack and the surfaces. The shell
+cannot move a window by drawing it somewhere else, because it does not draw
+other clients' windows at all (§519 — the window list *reports* rectangles and
+nothing lets a shell set one). `animate_window` is therefore for a caller that
+renders the result itself, and is documented as such; the same is true of
+`animate_desktop_switch`'s slide offset.
+
+What the shell genuinely draws, and so can genuinely animate, is its own chrome:
+the overview overlay, the start menu, the calendar, Alt-Tab, the notification
+pane, the login screen. The overview's backdrop fade is the first of these to be
+wired, and it is the one §520 removed, so the loop opened there is now closed.
+
+`ShellRequest::SwitchDesktop` deliberately does **not** start the slide. The
+offset it produces has no reader today, and starting it would repaint the whole
+chrome sixty times a second for a fifth of a second to change nothing on screen
+— a heartbeat nobody listens to, which is the exact failure this entry exists to
+avoid repeating.
+
+### Verification: every test was proved to be a regression test
+
+Seventeen tests were added. Each was proved by reintroducing, one at a time, the
+defect it names — as a guarded reversible source patch — and requiring a
+deterministic failure that names the test back. Nineteen markers, all caught:
+
+| Marker (the defect reintroduced) | Test that caught it |
+|---|---|
+| `showstartsthefade` — `show()` starts the fade, so an un-ticked overview is invisible | `an_overview_that_is_never_ticked_is_fully_open` |
+| `fadegatesdrawing` — `render_overview` returns nothing at zero progress (§520 verbatim) | `a_fade_that_has_begun_still_leaves_every_card_drawn` |
+| `fadegateshittesting` — `on_mouse_click` refuses input at zero progress | `an_overview_whose_fade_never_runs_is_still_drawn_and_still_clickable` |
+| `thefadeisnotdrawn` — backdrop alpha ignores the fade | `the_backdrop_is_dimmer_part_way_through_the_fade` |
+| `afinishedfadelingers` — a completed fade is not cleared | `a_finished_fade_is_indistinguishable_from_one_that_never_ran`, `a_frame_advances_the_fade_and_the_last_one_stops_asking_for_more` |
+| `thefadenevergivesup` — `tick_fade` always asks for another frame | `a_fade_reports_when_it_wants_another_frame_and_when_it_does_not` |
+| `zerofadeisaonemsfade` — `begin_fade(0)` makes a 1 ms fade | `a_zero_length_fade_is_no_fade_rather_than_a_one_millisecond_one` |
+| `hidekeepsthefade` — `hide()` leaves the fade running | `hiding_drops_the_fade_so_the_next_opening_does_not_inherit_it`, `closing_the_overview_takes_its_fade_with_it` |
+| `endingafadedoesnothing` — `end_fade` is a no-op | `turning_reduced_motion_on_mid_fade_lands_on_fully_open` |
+| `openingstartsnofade` — the session arms a frame but starts no fade | `opening_the_overview_asks_for_a_frame` |
+| `thefadeisnotmovement` — `anything_moving` forgets the overview | `opening_the_overview_asks_for_a_frame` |
+| `animationsarenotmovement` — `anything_moving` forgets the manager | `a_window_animation_runs_off_the_same_clock` |
+| `startingananimationdoesnotarm` — `animate_window` leaves the clock unarmed | `a_window_animation_runs_off_the_same_clock` |
+| `ticksarenothandled` — `Event::Tick` falls through to the catch-all arm | `a_frame_advances_the_fade_and_the_last_one_stops_asking_for_more` |
+| `thefadeisnotstepped` — the frame steps the manager but not the fade | `a_frame_advances_the_fade_and_the_last_one_stops_asking_for_more` |
+| `armunconditionally` — every frame arms the next, moving or not | `a_frame_with_nothing_moving_asks_for_no_more_frames` |
+| `afixedratetimerinstead` — the shell arms a wake-up at start-up | `an_idle_desktop_asks_for_no_frames` |
+| `paintdecidedafterthestep` — repaint decided after the step, dropping the last frame | `the_frame_that_finishes_the_fade_is_still_painted` |
+| `reducedmotionstillfades` — reduced motion reaches the paint but not the clock | `reduced_motion_opens_the_overview_without_a_fade_and_without_a_clock` |
+
+Every one of the seventeen tests earned at least one marker; none had to be
+recorded as merely additional coverage. Both patched files were verified
+restored byte-for-byte by SHA-256 after each batch.
+
+**A note on the tool, again.** §521 recorded that the prover's reversal lives in
+a `finally`, which does not cover the process being killed, and added a `heal()`
+pass that undoes a marker left applied. This run found the *next* hole in the
+same tool: the reversal was a reverse search-and-replace, and one marker's
+patched text (`return false;`) occurred twice in the file afterwards, so the
+undo silently did nothing and left the defect in the tree. Worse, the guard
+added to detect exactly that threw *inside* the block whose `finally` was the
+thing that could not undo it. The reversal is now a **byte snapshot of the file
+taken before patching**, written back unconditionally — which cannot fail on
+non-uniqueness because it does not search for anything. The general lesson: an
+undo that has to *find* what it is undoing is a guess; an undo that restores
+what it saved is not.
+
+## 523. Settings tells the compositor the *file changed*, not that an *event was consumed* — and the change is in force before anyone is told
+
+**Date:** 2026-08-22
+**Decided by:** Claude (autonomous)
+
+**In short:** Settings had a complete user interface and no way to run: no
+`main` that opened a window, no event loop, no connection to the compositor. It
+now has all three. The design question that took the thought was not the loop —
+that is twenty lines — but *when the compositor gets told the appearance
+changed*. The answer is: when `appearance.yaml` is actually written, which is
+not the same moment as "the user clicked something", and not the same moment as
+"an event was consumed". Getting that distinction wrong produces a setting that
+appears to work and does not, which is worse than one that plainly does nothing.
+
+### Why Settings has to tell the compositor anything at all
+
+Settings is the one application that edits `appearance.yaml`. Window corner
+radius, drop shadows, title-bar colours and the accent are drawn by the
+*compositor*, from that same file. Settings drawing its own preview correctly
+proves nothing about the screen.
+
+Without a notification the user would change the corner radius, watch the
+preview in the Settings window update immediately, and see every *real* window
+on the desktop keep its old corners until the next login. The preview would be
+telling the truth about the file and a lie about the desktop.
+
+`oswindow::EventLoop::appearance_changed()` already existed for this
+(`gui/window/src/lib.rs`), sending `ReloadAppearance`. It is a **notification,
+not a setter**: it carries no payload, and the compositor answers it by
+re-reading the user's own file. That matters for what follows — the compositor
+never learns *what* changed from Settings, so Settings can never desynchronise
+it by describing a change wrongly. The worst a bad notification can do is cost a
+file read.
+
+### The flag is a message to the driver, not a precondition for the change
+
+`SettingsState` grew one private `bool`, `appearance_dirty`, set by
+`save_appearance` and drained by `take_appearance_change`. The rule governing it
+is a direct application of §522's resting-state doctrine, transplanted from
+animations to a different subsystem:
+
+> **The change is saved and in force before the flag is read. A caller that
+> never drains the flag still gets a correct file and a correct Settings
+> window; all it loses is the *liveness* of the update on other windows.**
+
+Concretely: `handle_event` writes `appearance.yaml` itself and updates the
+in-process model itself. `appearance_dirty` is set *afterwards*, as a message to
+whoever is driving the loop, and nothing downstream of it is load-bearing for
+correctness. This is the same shape as §522's "an animation that nobody ticks is
+*finished*, not *invisible*": the no-clock, no-driver, nobody-is-listening path
+must land on the working state, not the broken one.
+
+Two consequences were written down as tests rather than left as intentions
+(`a_change_is_saved_and_in_force_whether_or_not_anyone_drains_the_flag`, and
+`taking_the_appearance_change_clears_it`).
+
+There is a third, subtler one. `save_appearance` sets the flag **even when the
+write failed**. That looks wrong for about a second. It is right: the compositor
+responds to the notification by re-reading the file, so "look again" is an
+honest and harmless thing to say after a failed write — the compositor will read
+whatever is actually on disk, which is the truth. Suppressing the notification
+on failure would instead leave the compositor showing state that may not match
+the file at all, if the write failed *partway*.
+
+### Why the notification tracks the file, not the event
+
+The obvious implementation is to notify whenever `handle_event` returns
+`Consumed`. It is wrong in both directions, and the two failure modes are the
+reason the flag exists at all rather than the loop just reading the return
+value:
+
+| | What actually happens |
+|---|---|
+| Notify on `Consumed` | Every scroll, every dropdown open, every keystroke in a text field asks the compositor to re-read and re-apply a file that did not change. A drag across a slider becomes hundreds of file reads. |
+| Notify only on `Consumed` | A control that writes the file but reports `Ignored` loses its notification entirely. |
+
+The second is hypothetical *today* — there is no such control. It is exactly the
+kind of thing a future control will do by accident, and the ordering that
+protects against it costs nothing, so the loop drains the flag **before** the
+redraw check and independently of `result`:
+
+```rust
+let result = state.handle_event(&event);
+if state.take_appearance_change()
+    && let Err(e) = events.appearance_changed()
+{ … }
+if result == EventResult::Consumed { … submit … }
+```
+
+Both directions are pinned:
+`an_event_that_changes_no_appearance_setting_asks_for_no_reload` and
+`one_change_produces_one_notification_and_not_one_per_later_event`.
+
+### The loop draws once at start-up, and thereafter only on change
+
+`run` submits a frame before entering `EventLoop::run`, because nothing has
+happened yet and so no event is going to ask for the first one. After that a
+frame is submitted only when the event was consumed. The alternative — repaint
+every event — was rejected for the reason a compositor exists: an idle
+application that submits frames costs the compositor a composite pass per mouse
+move across its own window.
+
+A resize is a special case worth stating: it must be *applied to the model*
+before the frame that answers it, or the answering frame is drawn to the old
+size and the window shows a stale layout for one frame at every drag step.
+`Event::Resize` therefore updates `window_width`/`window_height` **and** returns
+`Consumed`, and the test
+`a_resize_is_applied_before_the_frame_that_answers_it` pins both halves — the
+two ways to break it (apply without repainting, repaint without applying) each
+have their own marker.
+
+### Errors out of a handler that cannot return one
+
+`EventLoop::run`'s handler returns `EventResponse`, not `Result`. A failed
+`submit` or a failed `appearance_changed` therefore has nowhere to be reported
+from inside it. Swallowing them was not acceptable — it leaves a Settings window
+that runs on happily while the screen no longer changes, the single most
+confusing failure an application can have.
+
+So `run` keeps a `failure: Option<Error<T>>` outside the closure, the handler
+stores into it and returns `EventResponse::Exit`, and `run` returns it after
+the loop. The loop stops on the first transport error rather than continuing
+blind.
+
+### `TestDesktop::asked()` returns names, not `RequestBody`
+
+The tests need to assert *that* Settings asked the desktop to reload, once, and
+not once per mouse move. `TestDesktop` already exposed `seen: Vec<Request>`,
+which would do it — by making `apps/settings`' test code match on
+`guiremote::RequestBody`.
+
+That is the exact coupling `oswindow` exists to prevent. The crate deliberately
+does not re-export `RequestBody`: an application should no more name the display
+protocol in its tests than in its `main`, any more than a Unix program names the
+socket layer. Adding a `guiremote` dev-dependency to `apps/settings` to get
+around that would have been a hole in the abstraction opened for the
+convenience of a test.
+
+So `TestDesktop` grew `asked(&mut self) -> Vec<&'static str>` — the wire names
+of the requests, in order. Two deliberate details:
+
+- **General, not single-purpose.** A `reload_count()` would have been shorter
+  and would have had to be joined by a `title_count()` the next time. A list of
+  names answers every question of this shape.
+- **Spelled out, not derived from `Debug`.** `Debug` prints the payload too, so
+  a test asserting `"SetTitle"` would have to know the title, and would start
+  failing when a field was added. The `match` is exhaustive with no wildcard, so
+  a new request variant fails to compile there and gets a name deliberately.
+
+### The end-to-end test uses an undecorated, pinned window — on purpose
+
+`mod against_the_real_compositor` runs the shipped `Compositor` on a thread
+behind a real socket and drives Settings' shipped `run` against it. The click
+test's chain is: a hardware mouse event → the compositor's hit test → the wire
+encoder → `oswindow`'s event loop → `SettingsState::handle_event` → the YAML
+writer → the `ReloadAppearance` notification → the compositor re-reading the
+file. No stand-in anywhere.
+
+For that to assert anything exact, the test has to know where in *desktop*
+coordinates a control drawn at *page* coordinates lands. Three ways to get that:
+
+1. Read `WindowInfo.x/y` from the window list. **Wrong** — that is the *outer*
+   rect, decorations included, so it is off by the frame inset.
+2. Hard-code the frame inset. Fragile: it is a compositor detail the test has no
+   business knowing, and it changes when the title bar does.
+3. Open the window with `.position(AT).decorations(false).resizable(false)`.
+
+Option 3 was taken. With no frame, `client_rect` *is* the window rect,
+`title_bar_rect` and `close_button_rect` are `None` so a press falls straight
+through to the client area, `detect_border_drag` returns `None` for a
+non-resizable window, and desktop coordinates become page coordinates by
+subtracting `AT` and nothing else. The translation is then a fact of the
+geometry rather than a number the test hopes is still right.
+
+The click target itself comes from `center_of(…)` over the page's own hit
+bands, not a literal coordinate — `hit_bands` and `center_of` were widened to
+`pub(super)` for this. Reaching a control *by name* is the only way a test of
+the loop can be a test of the loop: one that clicked a hard-coded coordinate
+would start passing for the wrong reason the day the layout moved.
+
+### Two drafted tests were deleted rather than kept
+
+Both are recorded because "we wrote a test and threw it away" is the kind of
+decision that gets silently re-made:
+
+- **`a_click_that_changes_nothing_leaves_the_compositors_appearance_alone.`**
+  The defect it named — a spurious `reload_appearance()` — is genuinely
+  *unobservable at the compositor*, because `set_appearance` no-ops when the
+  file is unchanged. The test would have asserted something it could not see,
+  and would have passed with the bug present. The property it was reaching for
+  is real and *is* covered, one layer down, by
+  `an_event_that_changes_no_appearance_setting_asks_for_no_reload`, which
+  observes the request rather than its effect.
+- **`the_translation_is_a_translation_and_not_a_coincidence.`** It duplicated a
+  loop test, and it would have written to the real `$HOME`.
+
+A test that cannot fail for the reason it names is worse than no test: it is a
+claim of coverage that is not there.
+
+### Proof
+
+All fifteen new tests were proved regression tests by the usual method —
+reintroduce the defect the test names, confirm a deterministic failure that
+names it back, restore the file from a byte snapshot, verify by SHA-256.
+Eighteen markers over `apps/settings/src/main.rs` and `gui/window/src/lib.rs`;
+all eighteen produced a failure, and every one of the fifteen tests earned at
+least one marker. None had to be recorded as merely additional coverage.
+
+Two pre-existing tests were caught as collateral, which is its own small
+confirmation that the markers are real defects and not test-shaped ones:
+`tests::test_resize_event` (by `resizeisnotapplied` and `resizedrawsnothing`)
+and `tests::test_a_click_that_changes_an_accent_reaches_the_file` (by
+`nothingissaved`).
+
+### A process finding, not a code one
+
+Running `cargo test --workspace` rather than `cargo test -p settings` at the end
+of this task revealed that `apps/editor`'s **test binary had not compiled since
+§521** — the frame clock moved `set_wait_timeout` from an inherent method on
+`Socket` onto the `Transport` trait, and `apps/editor`'s real-compositor test
+module, which does not otherwise name the trait, stopped building. Nothing
+noticed for a day, because every task in between gated on the crate it was
+editing.
+
+A crate whose test binary does not compile reports no failures. It reports
+nothing at all, which reads identically to "no problems" in a filtered log. The
+gate is now the workspace, not the crate; the fix (one `use` line) is in, and
+the underlying process hazard is logged as
+`TD-C-A-TEST-BINARY-CAN-BE-BROKEN-WITHOUT-ANYONE-NOTICING`.
+
+## 524. One crate owns the double-click numbers, `ReloadInput` is its own verb, and the Mouse page offers exactly the settings something consumes
+
+**Date:** 2026-08-22
+**Decided by:** Claude (autonomous)
+
+**In short:** The desktop had a Mouse settings panel whose double-click slider
+moved, showed a number, saved nothing and reached nothing — the value was gone
+at the next login and had never been seen by the compositor at any point in
+between. Fixing it needed four pieces, and three of them turned on judgement
+calls rather than mechanics: which process *owns* the range of legal values,
+whether the compositor should be told "input changed" or just "something
+changed", and how much of the mouse configuration the new page is allowed to
+show. This records those.
+
+Terms used below, once each: *the compositor* is the display server — the
+process that draws window frames and decides whether two clicks on a title bar
+are one double click. *`input.yaml`* is the user's mouse and keyboard
+preferences file. A *verb* here is one of the fixed set of request kinds a
+client may send the compositor over its socket.
+
+### The problem, concretely
+
+`gui/desktop/src/mouse_settings.rs` drew a double-click slider bound to a
+`MouseConfig` that existed only in the shell's memory. Nothing wrote it to disk
+and nothing read it back. Meanwhile the compositor timed double clicks against a
+private constant of its own. Two numbers, no connection.
+
+Four pieces were needed: **(a)** a shared `gui/inputsettings` crate holding the
+model and the file format; **(b)** a `ReloadInput` control verb; **(c)** a real
+Mouse page in `apps/settings`; **(d)** the compositor re-reading (a) when it
+receives (b).
+
+### Decision 1: `inputsettings` owns the range, and the other two read it
+
+**What was true before.** Three processes each held their own copy of the
+double-click bounds. `inputsettings` clamped a value being stored; the
+compositor clamped the value it had been handed before timing anything against
+it; the Settings slider's two ends *were* that range, written as literals. The
+three copies did agree.
+
+**Why that was still wrong.** Nothing anywhere would have failed if one of them
+had moved. A slider whose track runs wider than the setter's clamp has a dead
+zone at each end — the handle slides, the number stops — and no test on either
+side of the boundary can see it, because each side is individually correct. The
+whole point of the reload path being added alongside was that the number the
+user chose, the number the file clamps to, and the number the compositor
+compares two timestamps against are *one* number.
+
+**What was decided.** `MIN_DOUBLE_CLICK_MS`, `MAX_DOUBLE_CLICK_MS` and
+`DEFAULT_DOUBLE_CLICK_MS` became `pub` in `inputsettings`, the crate that owns
+the file. The compositor's private copies were deleted, and
+`SliderId::DoubleClickMs::range()` returns the constants rather than literals.
+The ordering invariant (`MIN < DEFAULT < MAX`) is a `const _: () = assert!(…)`
+rather than a test, because there is no run in which it could hold here and fail
+somewhere else.
+
+*The alternative was* leaving the literals in place and adding a test that
+compares them. Rejected: that is a test which exists only to detect a
+duplication that need not exist, and it fires *after* the divergence rather than
+preventing it.
+
+*The cost:* `inputsettings` is now a dependency of the compositor. That is not
+free — a display server linking a settings crate is a real coupling — but the
+crate depends only on `guitk`, `settingsfile` and `yamldoc`, so there is no
+cycle, and the compositor was already reading the file's *contents*. It was
+reading them with its own private idea of what they mean, which is the worse
+coupling of the two: an undeclared one.
+
+### Decision 2: `ReloadInput` is a second verb, not a payload and not a shared one
+
+Two sub-decisions, pulling in opposite directions.
+
+**Why not a payload.** `ReloadAppearance` and `ReloadInput` carry no data, and
+that is the entire security argument for both. A verb that *set* the values
+would let any process able to open the display socket restyle the machine or
+swap the user's mouse buttons — or make a double click a two-second affair. A
+verb that merely *notifies* makes the compositor re-read the *user's own file*,
+so the worst a hostile client achieves is making it read a file it already
+trusts, at some rate. `control.rs` asserts the emptiness on the encoded bytes
+rather than trusting the enum's shape, so the day someone adds "just a corner
+radius, to save a file read", that assertion fails and says why.
+
+**Why not one shared verb.** A single `ReloadSettings` would be less code. It
+was rejected because the two reloads have very different costs: an appearance
+reload sets `full_recomposite`, repainting every window on screen, while an
+input reload changes a `Duration` that no pixel depends on. Sharing the verb
+means a user dragging the double-click slider repaints the entire desktop on
+every motion event, and a user picking an accent colour makes the compositor
+re-read its pointer configuration. Both are invisible in ordinary testing and
+both are wrong.
+
+The tests therefore assert the *negative* in each direction — a double-click
+change must produce no `ReloadAppearance`, and a colour change no `ReloadInput`
+— because a `ReloadInput` accidentally wired to the appearance path passes every
+positive test anyone would think to write.
+
+### Decision 3: the compositor applies only what it consumes
+
+`reload_input` reads the *whole* file — the model has one owner, and parsing
+half of it is how two readers begin to disagree — and applies the one setting
+the compositor is actually the consumer of: the double-click window.
+
+Pointer speed, acceleration, button mapping and scroll mode are deliberately
+read and dropped. They have to be applied where raw device deltas arrive, and
+the compositor has no local input source yet (`known-issues.md`
+`TD-COMPOSITOR-HAS-NO-LOCAL-INPUT`); cursor size and scroll mode belong to the
+toolkit.
+
+*The alternative was* storing them in the compositor now, ready for later.
+Rejected as strictly worse than ignoring them: a stored value invites a getter,
+and a getter would report that a preference was in force while the pointer went
+on behaving the old way. Ignoring a setting is a gap; reporting an unapplied one
+is a lie — and it is the same lie this whole task was filed to remove.
+
+### Decision 4: the Mouse page shows one control, and that is a finished state
+
+`input.yaml` holds fifteen mouse fields and three keyboard ones. The new page
+offers one.
+
+That is not an unfinished page — it is the page refusing to repeat the defect it
+was written to fix. A pointer-speed slider today would save a value to a file,
+look exactly as though it had worked, and change nothing: precisely the bug
+described at the top of this entry. Each setting gets its control when it gets a
+consumer, and not before.
+
+This is asserted rather than merely commented.
+`the_mouse_page_offers_only_settings_that_reach_something` checks the page's hit
+bands as an *exact set*, not as "contains the double-click slider" — because a
+control added without a consumer is the same bug, and a containment check cannot
+see it.
+
+*The tension worth naming:* a settings panel exposing one of eighteen settings
+looks broken to a user who came looking for pointer speed, and "looks broken" is
+a real cost. It was accepted because the alternative is not "looks complete" but
+"looks complete and lies", and because the fix — wiring a consumer — is work
+that was going to be needed anyway.
+
+### How this was verified
+
+Every test added across the four pieces was put through a reintroduction proof:
+`scripts/reintro-mouse-page.py` (11 defects) and
+`scripts/reintro-reload-input.py` (10 defects) each reintroduce, one at a time,
+the exact bug some test claims to guard, then check that the suite goes red and
+names it back. Both restore by unconditional byte-snapshot write-back verified
+by SHA-256, per §522.
+
+That found one thing worth recording.
+`a_hand_edited_input_file_cannot_make_a_double_click_impossible` carried a
+comment saying the value was clamped "twice over", by `InputSettings::read_from`
+and again by `set_double_click_ms` — but its assertion could not distinguish the
+two, because the first clamp alone satisfies it. Deleting the compositor's clamp
+left that test green. The clamp *is* guarded, by
+`the_double_click_interval_is_clamped_to_a_performable_range`; the comment now
+says which layer each test proves. A test whose comment claims more than its
+assertion is how a defence quietly stops being defended.
 
 ## §273 — A self-test the build cannot reach is a build failure, and "reachable from the kernel shell" is a third answer, not a pass
 

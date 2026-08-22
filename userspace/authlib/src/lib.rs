@@ -373,6 +373,36 @@ fn combine(mine: Option<Tally>, shared: Option<Tally>) -> Option<Tally> {
     }
 }
 
+/// How much longer a user with this tally is refused for, at `now`.
+///
+/// `None` for a user who may attempt — including one with failures recorded
+/// whose delay has elapsed. Shared by [`Authenticator::authenticate`], which
+/// applies the delay itself, and [`Authenticator::rate_limited`], which reports
+/// it to a caller that applies its own: two implementations of "how long" would
+/// be two rate limits, and the point of §354 is that there is one.
+#[must_use]
+fn retry_after(tally: Option<Tally>, now: u64) -> Option<u64> {
+    let tally = tally?;
+    let ready = tally
+        .last_failure_secs
+        .saturating_add(delay_for(tally.failures));
+    (now < ready).then(|| ready.saturating_sub(now))
+}
+
+/// The tally one failure after `base`, stamped at `now`.
+///
+/// `base` is the *combined* count rather than either half alone, so a program
+/// that starts with an empty memory does not restart the escalation at one when
+/// the shared table already says five.
+#[must_use]
+fn advance(base: Option<Tally>, now: u64) -> Tally {
+    let base = base.unwrap_or_default();
+    Tally {
+        failures: base.failures.saturating_add(1),
+        last_failure_secs: now,
+    }
+}
+
 /// How long a user with `failures` failures is refused for.
 ///
 /// Doubling from one second once the free attempts are spent, capped at
@@ -519,17 +549,10 @@ impl Authenticator {
             Self::shared_get(shared.as_ref(), username),
         );
 
-        if let Some(tally) = combined {
-            let ready = tally
-                .last_failure_secs
-                .saturating_add(delay_for(tally.failures));
-            if now < ready {
-                // Not counted: an attacker who keeps calling must not be able
-                // to hold a real user out by refreshing their own refusal.
-                return Outcome::RateLimited {
-                    retry_after_secs: ready.saturating_sub(now),
-                };
-            }
+        if let Some(retry_after_secs) = retry_after(combined, now) {
+            // Not counted: an attacker who keeps calling must not be able
+            // to hold a real user out by refreshing their own refusal.
+            return Outcome::RateLimited { retry_after_secs };
         }
 
         let outcome = match self.resolve(username) {
@@ -553,11 +576,7 @@ impl Authenticator {
             // Both halves are advanced from the *combined* count, so a program
             // that starts with an empty memory does not restart the escalation
             // at one when the shared table already says five.
-            let base = combined.unwrap_or_default();
-            let next = Tally {
-                failures: base.failures.saturating_add(1),
-                last_failure_secs: now,
-            };
+            let next = advance(combined, now);
             self.tally.insert(username.to_string(), next);
             if let Some(table) = shared.as_mut() {
                 table.set(username, next);
@@ -567,8 +586,67 @@ impl Authenticator {
         outcome
     }
 
+    /// Is `username` currently being made to wait, and for how much longer?
+    ///
+    /// `Some(secs)` means the next attempt would be refused unlooked-at;
+    /// `None` means an attempt would be verified. Read-only — asking does not
+    /// count against anyone, so a caller may ask before deciding whether to
+    /// even prompt.
+    ///
+    /// # Why this is public
+    ///
+    /// [`Authenticator::authenticate`] applies the delay itself, and a caller
+    /// that hands it the whole decision needs none of this. `login` cannot: it
+    /// owns the console's empty-password policy (§346 — an account with no
+    /// password may log in at the console but may not become root), so it calls
+    /// [`check_stored`] directly and reaches its own verdict. Without this pair
+    /// the only way for such a caller to share the system's tally would be to
+    /// re-implement it, and a rate limit implemented twice is a rate limit that
+    /// disagrees with itself. §354.
+    ///
+    /// Pair with [`Authenticator::note_failure`] on a wrong password and
+    /// [`Authenticator::reset`] on a right one; a caller that does the first and
+    /// not the second leaves a correct user delayed by their own success.
+    #[must_use]
+    pub fn rate_limited(&self, username: &str) -> Option<u64> {
+        let shared = self.shared_table();
+        let combined = combine(
+            self.tally.get(username).copied(),
+            Self::shared_get(shared.as_ref(), username),
+        );
+        retry_after(combined, (self.now)())
+    }
+
+    /// Count one failed attempt for `username` against the shared tally.
+    ///
+    /// For a caller that reached its own verdict — see
+    /// [`Authenticator::rate_limited`] for why one exists. The count advances
+    /// from the *combined* view, so a program that has just started does not
+    /// restart the escalation at one when the shared table already says five.
+    ///
+    /// Deliberately takes no outcome: "this attempt was wrong" is the only
+    /// thing the tally records, and a caller that distinguishes
+    /// [`Outcome::Locked`] from [`Outcome::Rejected`] toward its user must
+    /// still not distinguish them here — which of the two it was is exactly
+    /// what an attacker would learn from a tally that skipped one of them.
+    pub fn note_failure(&mut self, username: &str) {
+        let now = (self.now)();
+        let mut shared = self.shared_table();
+        let combined = combine(
+            self.tally.get(username).copied(),
+            Self::shared_get(shared.as_ref(), username),
+        );
+        let next = advance(combined, now);
+        self.tally.insert(username.to_string(), next);
+        if let Some(table) = shared.as_mut() {
+            table.set(username, next);
+        }
+        self.write_shared(shared.as_ref());
+    }
+
     /// Forget `username`'s failures — the administrative reset behind
-    /// `faillock --reset`.
+    /// `faillock --reset`, and the success half of the
+    /// [`Authenticator::rate_limited`] / [`Authenticator::note_failure`] pair.
     pub fn reset(&mut self, username: &str) {
         self.tally.remove(username);
         let mut shared = self.shared_table();
@@ -1051,6 +1129,13 @@ mod tests {
         FAKE_NOW_ISOLATED.load(std::sync::atomic::Ordering::Relaxed)
     }
 
+    static FAKE_NOW_PAIR: std::sync::atomic::AtomicU64 =
+        std::sync::atomic::AtomicU64::new(13_000);
+
+    fn fake_now_pair() -> u64 {
+        FAKE_NOW_PAIR.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
     /// A shadow file holding `alice` with the password `correct horse`, plus a
     /// scratch path for the shared tally. Both are the caller's to delete.
     fn shared_fixture(tag: &str) -> (PathBuf, PathBuf) {
@@ -1152,6 +1237,91 @@ mod tests {
         assert!(!lock.exists(), "a memory-only verifier wrote a tally file");
 
         let _ = std::fs::remove_file(shadow);
+    }
+
+    /// §354: a caller that owns its own verdict — `login`, because of the
+    /// console's empty-password policy — must be able to share the one tally
+    /// rather than keep a second one. Failures it records must delay
+    /// `authenticate`, and failures `authenticate` records must delay it.
+    #[test]
+    fn a_caller_that_owns_its_verdict_shares_the_one_tally_both_ways() {
+        let (shadow, lock) = shared_fixture("pair");
+        FAKE_NOW_PAIR.store(13_000, std::sync::atomic::Ordering::Relaxed);
+
+        // Direction 1: note_failure delays authenticate.
+        for _ in 0..=FREE_ATTEMPTS {
+            let mut once = Authenticator::with_stores(&tmp("absent.yaml"), &shadow)
+                .with_faillock(&lock)
+                .with_clock(fake_now_pair);
+            once.note_failure("alice");
+        }
+        let mut victim = Authenticator::with_stores(&tmp("absent.yaml"), &shadow)
+            .with_faillock(&lock)
+            .with_clock(fake_now_pair);
+        assert!(
+            matches!(
+                victim.authenticate("alice", b"correct horse"),
+                Outcome::RateLimited { .. }
+            ),
+            "failures noted by a caller that owns its verdict must delay authenticate"
+        );
+
+        // The reset half clears it for both.
+        victim.reset("alice");
+        let fresh = Authenticator::with_stores(&tmp("absent.yaml"), &shadow)
+            .with_faillock(&lock)
+            .with_clock(fake_now_pair);
+        assert_eq!(fresh.rate_limited("alice"), None);
+
+        // Direction 2: authenticate delays rate_limited.
+        for _ in 0..=FREE_ATTEMPTS {
+            let mut once = Authenticator::with_stores(&tmp("absent.yaml"), &shadow)
+                .with_faillock(&lock)
+                .with_clock(fake_now_pair);
+            assert_eq!(once.authenticate("alice", b"wrong"), Outcome::Rejected);
+        }
+        let owner = Authenticator::with_stores(&tmp("absent.yaml"), &shadow)
+            .with_faillock(&lock)
+            .with_clock(fake_now_pair);
+        let wait = owner
+            .rate_limited("alice")
+            .expect("a caller asking must see the delay authenticate imposed");
+        assert!(wait > 0);
+
+        // Waiting it out clears the refusal without clearing the count — the
+        // next failure must escalate from where it left off, not from one.
+        FAKE_NOW_PAIR.store(13_000 + wait, std::sync::atomic::Ordering::Relaxed);
+        let after = Authenticator::with_stores(&tmp("absent.yaml"), &shadow)
+            .with_faillock(&lock)
+            .with_clock(fake_now_pair);
+        assert_eq!(after.rate_limited("alice"), None);
+        assert_eq!(after.failures("alice"), FREE_ATTEMPTS + 1);
+
+        let _ = std::fs::remove_file(shadow);
+        let _ = std::fs::remove_file(lock);
+    }
+
+    /// Asking must be free. A caller that checks the delay before deciding
+    /// whether to prompt would otherwise extend its own refusal every time it
+    /// looked — which is the same "attacker refreshes the victim's lockout"
+    /// bug `authenticate` avoids by not counting a rate-limited attempt.
+    #[test]
+    fn asking_whether_a_user_is_delayed_does_not_count_against_them() {
+        let (shadow, lock) = shared_fixture("askfree");
+        FAKE_NOW_PAIR.store(13_000, std::sync::atomic::Ordering::Relaxed);
+
+        let mut auth = Authenticator::with_stores(&tmp("absent.yaml"), &shadow)
+            .with_faillock(&lock)
+            .with_clock(fake_now_pair);
+        auth.note_failure("alice");
+        let before = auth.failures("alice");
+        for _ in 0..10 {
+            let _ = auth.rate_limited("alice");
+        }
+        assert_eq!(auth.failures("alice"), before, "asking counted a failure");
+
+        let _ = std::fs::remove_file(shadow);
+        let _ = std::fs::remove_file(lock);
     }
 
     #[test]

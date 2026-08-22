@@ -271,7 +271,10 @@ enum Refusal {
     Plain(String),
     /// `missing operand` / `extra operand` and their explanatory second line,
     /// which *does* carry the referral.
-    Operands { first: String, second: Option<String> },
+    Operands {
+        first: String,
+        second: Option<String>,
+    },
 }
 
 impl Refusal {
@@ -504,7 +507,7 @@ fn transform(job: &Job, chunk: &[u8], squeezer: &mut Squeezer, out: &mut Vec<u8>
 ///
 /// `which` only selects the wording of the two diagnostics that name a side.
 #[allow(clippy::too_many_lines)] // One `match` over the grammar; splitting it
-                                 // would scatter the literal-fallback rule.
+// would scatter the literal-fallback rule.
 fn parse_set(s: &[u8], which: Which) -> Result<Vec<Spec>, Refusal> {
     let mut specs: Vec<Spec> = Vec::new();
     // The decoded bytes, each flagged with whether an escape produced it: an
@@ -569,12 +572,27 @@ fn bracketed(
             let Some(close) = find_closing(decoded, escaped, after.saturating_add(1), b':') else {
                 return Ok(None);
             };
-            let name = decoded.get(after.saturating_add(1)..close).unwrap_or_default();
+            let name = decoded
+                .get(after.saturating_add(1)..close)
+                .unwrap_or_default();
             if name.is_empty() {
-                return Err(Refusal::Plain(format!(
-                    "missing character class name {}",
-                    quote(b"[::]")
-                )));
+                // `'[::]'` is spelled out with ASCII apostrophes rather than
+                // run through `quote`, because upstream baked it into the
+                // translatable string — `tr.c` says
+                // `_("missing character class name '[::]'")` — instead of
+                // quoting a runtime value. That text is therefore *not* locale
+                // sensitive in GNU, and stays straight even where §351's marks
+                // are curly.
+                //
+                // This is a per-message choice upstream made, not a rule about
+                // constants: GNU's `test` puts its constant `]` through
+                // `quote` and does come out curly, which is why `test.rs` is
+                // right to keep doing so. Measurement is the only oracle here.
+                // Measured against GNU 9.4 under `LC_ALL=C.UTF-8`, and pinned
+                // by `tr-diff.sh` and the unit test below.
+                return Err(Refusal::Plain(
+                    "missing character class name '[::]'".to_string(),
+                ));
             }
             let Some(class) = Class::from_name(name) else {
                 // Both renderers, in this order: upstream passes the name
@@ -592,12 +610,16 @@ fn bracketed(
             let Some(close) = find_closing(decoded, escaped, after.saturating_add(1), b'=') else {
                 return Ok(None);
             };
-            let body = decoded.get(after.saturating_add(1)..close).unwrap_or_default();
+            let body = decoded
+                .get(after.saturating_add(1)..close)
+                .unwrap_or_default();
             match body {
-                [] => Err(Refusal::Plain(format!(
-                    "missing equivalence class character {}",
-                    quote(b"[==]")
-                ))),
+                // Straight apostrophes, for the same reason as `'[::]'` above:
+                // upstream's string is `_("missing equivalence class
+                // character '[==]'")`, quotes included.
+                [] => Err(Refusal::Plain(
+                    "missing equivalence class character '[==]'".to_string(),
+                )),
                 [one] => Ok(Some((Spec::Equiv(*one), close.saturating_add(2)))),
                 // This one is `make_printable_str` *alone* — no `quote`, so an
                 // apostrophe operand reports as a bare `''`.
@@ -919,9 +941,10 @@ fn case_class_offsets(specs: &[Spec]) -> Vec<usize> {
 
 /// The two rules SET2 obeys only while translating.
 fn validate_set2_classes(set1: &[Spec], set2: &[Spec]) -> Result<(), Refusal> {
-    if set2.iter().any(|s| {
-        matches!(*s, Spec::Class(c) if c != Class::Upper && c != Class::Lower)
-    }) {
+    if set2
+        .iter()
+        .any(|s| matches!(*s, Spec::Class(c) if c != Class::Upper && c != Class::Lower))
+    {
         return Err(Refusal::Plain(
             "when translating, the only character classes that may appear in\nstring2 are 'upper' and 'lower'"
                 .to_string(),
@@ -948,15 +971,16 @@ fn validate_set2_classes(set1: &[Spec], set2: &[Spec]) -> Result<(), Refusal> {
 fn build_job(flags: Flags, operands: &[Vec<u8>]) -> Result<Job, Refusal> {
     let translating = !flags.delete && operands.len() == 2;
 
-    let specs1 = parse_set(operands.first().map(Vec::as_slice).unwrap_or_default(), Which::One)?;
+    let specs1 = parse_set(
+        operands.first().map(Vec::as_slice).unwrap_or_default(),
+        Which::One,
+    )?;
     let specs2 = match operands.get(1) {
         Some(s) => Some(parse_set(s, Which::Two)?),
         None => None,
     };
 
-    if translating
-        && let Some(specs2) = specs2.as_deref()
-    {
+    if translating && let Some(specs2) = specs2.as_deref() {
         validate_set2_classes(&specs1, specs2)?;
     }
 
@@ -1276,22 +1300,25 @@ mod tests {
 
         // `make_printable_str` *then* `quote`: the backslash the first pass
         // wrote is escaped by the second, so one unprintable byte reads
-        // `\\377` and an apostrophe reads `\'`.
+        // `\\377`. An apostrophe, by contrast, passes through untouched —
+        // `quote` wraps its value in curly marks, which no straight `'` in
+        // the value can be mistaken for, so there is nothing to escape. (Only
+        // `quote_glibc`, whose marks *are* straight, has to escape one.)
         assert_eq!(
             text(&refuse(&["-d", "[:no\\377such:]"])),
-            "invalid character class 'no\\\\377such'"
+            "invalid character class ‘no\\\\377such’"
         );
         assert_eq!(
             text(&refuse(&["-d", "[:a\\012b:]"])),
-            "invalid character class 'a\\\\nb'"
+            "invalid character class ‘a\\\\nb’"
         );
         assert_eq!(
             text(&refuse(&["-d", "[:a'b:]"])),
-            "invalid character class 'a\\'b'"
+            "invalid character class ‘a'b’"
         );
         assert_eq!(
             text(&refuse(&["a", "[x*a'b]"])),
-            "invalid repeat count 'a\\'b' in [c*n] construct"
+            "invalid repeat count ‘a'b’ in [c*n] construct"
         );
     }
 
@@ -1307,28 +1334,40 @@ mod tests {
         // ...but the sign may not precede the space.
         assert_eq!(
             text(&refuse(&["a", "[x*+ 1]"])),
-            "invalid repeat count '+ 1' in [c*n] construct"
+            "invalid repeat count ‘+ 1’ in [c*n] construct"
         );
         // The base comes from the raw first byte, which need not be a digit:
         // `010` is octal 8, ` 010` is decimal 10, and `08` is an error while
         // ` 08` is eight. `a-m` is thirteen bytes so the two are visibly apart.
-        assert_eq!(run(&["a-m", "[x*010]y"], b"abcdefghijklm"), b"xxxxxxxxyyyyy");
-        assert_eq!(run(&["a-m", "[x* 010]y"], b"abcdefghijklm"), b"xxxxxxxxxxyyy");
-        assert_eq!(run(&["a-m", "[x*+010]y"], b"abcdefghijklm"), b"xxxxxxxxxxyyy");
-        assert_eq!(run(&["a-m", "[x* 08]y"], b"abcdefghijklm"), b"xxxxxxxxyyyyy");
+        assert_eq!(
+            run(&["a-m", "[x*010]y"], b"abcdefghijklm"),
+            b"xxxxxxxxyyyyy"
+        );
+        assert_eq!(
+            run(&["a-m", "[x* 010]y"], b"abcdefghijklm"),
+            b"xxxxxxxxxxyyy"
+        );
+        assert_eq!(
+            run(&["a-m", "[x*+010]y"], b"abcdefghijklm"),
+            b"xxxxxxxxxxyyy"
+        );
+        assert_eq!(
+            run(&["a-m", "[x* 08]y"], b"abcdefghijklm"),
+            b"xxxxxxxxyyyyy"
+        );
         assert_eq!(
             text(&refuse(&["a", "[x*08]"])),
-            "invalid repeat count '08' in [c*n] construct"
+            "invalid repeat count ‘08’ in [c*n] construct"
         );
         // A field of nothing but whitespace has no digits at all.
         assert_eq!(
             text(&refuse(&["a", "[x* ]"])),
-            "invalid repeat count ' ' in [c*n] construct"
+            "invalid repeat count ‘ ’ in [c*n] construct"
         );
         // A negative count is refused before `strtoumax` could wrap it.
         assert_eq!(
             text(&refuse(&["a", "[x*-1]"])),
-            "invalid repeat count '-1' in [c*n] construct"
+            "invalid repeat count ‘-1’ in [c*n] construct"
         );
     }
 
@@ -1468,8 +1507,14 @@ mod tests {
 
     #[test]
     fn a_repeat_count_is_octal_when_it_starts_with_zero() {
-        assert_eq!(expand(&parse_set(b"[a*012]", Which::Two).unwrap(), None).len(), 10);
-        assert_eq!(expand(&parse_set(b"[a*12]", Which::Two).unwrap(), None).len(), 12);
+        assert_eq!(
+            expand(&parse_set(b"[a*012]", Which::Two).unwrap(), None).len(),
+            10
+        );
+        assert_eq!(
+            expand(&parse_set(b"[a*12]", Which::Two).unwrap(), None).len(),
+            12
+        );
     }
 
     #[test]
@@ -1494,11 +1539,11 @@ mod tests {
     fn a_repeat_count_that_is_not_a_number_is_reported() {
         assert_eq!(
             text(&refuse(&["ab", "[b*x]"])),
-            "invalid repeat count 'x' in [c*n] construct"
+            "invalid repeat count ‘x’ in [c*n] construct"
         );
         assert_eq!(
             text(&refuse(&["ab", "[b*3x]"])),
-            "invalid repeat count '3x' in [c*n] construct"
+            "invalid repeat count ‘3x’ in [c*n] construct"
         );
     }
 
@@ -1513,9 +1558,16 @@ mod tests {
 
     #[test]
     fn an_unknown_class_and_an_empty_one_are_told_apart() {
+        // Three messages, two quoting conventions, and the split is upstream's
+        // rather than ours. `foo` is runtime data — it came off the command line
+        // — and GNU runs it through `quote`, so it picks up §351's curly marks.
+        // The other two are spelled out with ASCII apostrophes inside GNU's own
+        // translatable literal, so they stay straight in every locale. See the
+        // comments at the two call sites; measurement is the only oracle here,
+        // and both were measured against GNU 9.4 under `LC_ALL=C.UTF-8`.
         assert_eq!(
             text(&refuse(&["[:foo:]", "b"])),
-            "invalid character class 'foo'"
+            "invalid character class ‘foo’"
         );
         assert_eq!(
             text(&refuse(&["[::]", "b"])),
@@ -1578,27 +1630,30 @@ mod tests {
         assert_eq!(text(&refuse(&[])), "missing operand");
         assert_eq!(
             text(&refuse(&["abc"])),
-            "missing operand after 'abc'\nTwo strings must be given when translating."
+            "missing operand after ‘abc’\nTwo strings must be given when translating."
         );
         assert_eq!(
             text(&refuse(&["-ds", "a"])),
-            "missing operand after 'a'\nTwo strings must be given when both deleting and squeezing repeats."
+            "missing operand after ‘a’\nTwo strings must be given when both deleting and squeezing repeats."
         );
         assert_eq!(
             text(&refuse(&["-d", "a", "b"])),
-            "extra operand 'b'\nOnly one string may be given when deleting without squeezing repeats."
+            "extra operand ‘b’\nOnly one string may be given when deleting without squeezing repeats."
         );
-        assert_eq!(text(&refuse(&["a", "b", "c"])), "extra operand 'c'");
+        assert_eq!(text(&refuse(&["a", "b", "c"])), "extra operand ‘c’");
         // The excess operand is the first one past what the *mode* allows, not
         // simply the third: deleting without squeezing allows one set, so `b`
         // is already one too many however many follow it. And the explanation
         // is dropped once more than one operand is excess, because "only one
         // string may be given" does not answer a four-operand mistake.
-        assert_eq!(text(&refuse(&["-d", "a", "b", "c"])), "extra operand 'b'");
-        assert_eq!(text(&refuse(&["-d", "a", "b", "c", "d"])), "extra operand 'b'");
-        assert_eq!(text(&refuse(&["-ds", "a", "b", "c"])), "extra operand 'c'");
-        assert_eq!(text(&refuse(&["-s", "a", "b", "c"])), "extra operand 'c'");
-        assert_eq!(text(&refuse(&["a", "b", "c", "d"])), "extra operand 'c'");
+        assert_eq!(text(&refuse(&["-d", "a", "b", "c"])), "extra operand ‘b’");
+        assert_eq!(
+            text(&refuse(&["-d", "a", "b", "c", "d"])),
+            "extra operand ‘b’"
+        );
+        assert_eq!(text(&refuse(&["-ds", "a", "b", "c"])), "extra operand ‘c’");
+        assert_eq!(text(&refuse(&["-s", "a", "b", "c"])), "extra operand ‘c’");
+        assert_eq!(text(&refuse(&["a", "b", "c", "d"])), "extra operand ‘c’");
         // Squeezing alone is content with a single set.
         assert_eq!(run(&["-s", "ab"], b"aabb"), b"ab");
     }
@@ -1637,7 +1692,10 @@ mod tests {
             "alnum", "alpha", "blank", "cntrl", "digit", "graph", "lower", "print", "punct",
             "space", "upper", "xdigit",
         ] {
-            assert!(help.contains(&format!("  [:{class}:]")), "undocumented: {class}");
+            assert!(
+                help.contains(&format!("  [:{class}:]")),
+                "undocumented: {class}"
+            );
         }
         // GNU's own referrals name a project this is not; they stay out.
         assert!(!help.contains("gnu.org"));

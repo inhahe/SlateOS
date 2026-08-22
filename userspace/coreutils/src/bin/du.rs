@@ -15,7 +15,7 @@
 
 #![cfg_attr(not(unix), allow(dead_code))]
 
-use coreutils::human::{human_readable, Opts};
+use coreutils::human::{Opts, human_readable};
 
 #[derive(Default)]
 #[cfg_attr(test, derive(Debug, PartialEq, Eq))]
@@ -67,7 +67,12 @@ fn parse_args(args: &[String]) -> Result<(DuFlags, Vec<String>), String> {
 /// terabyte disks the old code printed a four-digit gigabyte figure that no
 /// other `du` on earth produces.
 fn human_size(bytes: u64) -> String {
-    human_readable(bytes, Opts::AUTOSCALE | Opts::CEILING | Opts::SI | Opts::BASE_1024, 1, 1)
+    human_readable(
+        bytes,
+        Opts::AUTOSCALE | Opts::CEILING | Opts::SI | Opts::BASE_1024,
+        1,
+        1,
+    )
 }
 
 /// Format a single output line: size, tab, path. In non-human mode, sizes

@@ -4,6 +4,7 @@
 //! and handled — including per-app notification preferences, banner style,
 //! sound settings, and notification history retention.
 
+use appearance::Palette;
 use guitk::color::Color;
 use guitk::idseq::IdSeq;
 use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
@@ -15,23 +16,32 @@ use guitk::text;
 const BODY_INSET: f32 = 48.0;
 
 // ============================================================================
-// Catppuccin Mocha palette
+// Colour
 // ============================================================================
-
-const BASE: Color = Color::from_hex(0x1E1E2E);
-const CRUST: Color = Color::from_hex(0x11111B);
-const SURFACE0: Color = Color::from_hex(0x313244);
-const SURFACE1: Color = Color::from_hex(0x45475A);
-const SURFACE2: Color = Color::from_hex(0x585B70);
-const TEXT: Color = Color::from_hex(0xCDD6F4);
-const SUBTEXT0: Color = Color::from_hex(0xA6ADC8);
-const SUBTEXT1: Color = Color::from_hex(0xBAC2DE);
-const BLUE: Color = Color::from_hex(0x89B4FA);
-const GREEN: Color = Color::from_hex(0xA6E3A1);
-const RED: Color = Color::from_hex(0xF38BA8);
-const YELLOW: Color = Color::from_hex(0xF9E2AF);
-const LAVENDER: Color = Color::from_hex(0xB4BEFE);
-const OVERLAY0: Color = Color::from_hex(0x6C7086);
+//
+// Every colour below is a role read from the resolved [`Palette`], so the panel
+// follows the user's light/dark mode and accent instead of the fourteen Mocha
+// literals it used to hold. Three judgements are worth stating, because the
+// membership sweep in the tests cannot make them for you -- it proves a colour
+// is *in* the palette, never that it is the *right* member.
+//
+// **The active tab is the one accent site.** A tab bar marks where you are and
+// invites you elsewhere, which is exactly what the accent is for. Its label is
+// then chosen *for* the tab rather than fixed: [`Palette::on_accent`] is
+// near-black on a pale accent and near-white on a deep one.
+//
+// **The priority stripe is a scale, and stays frozen.** Low, Normal, High and
+// Urgent are a measurement, drawn four abreast down a scrollable list, and the
+// accent never marks measurement -- an accented one would read as *selected*
+// next to its neighbours, and would collide with whichever of the four already
+// carries that hue. The volume bar's fill is the same argument: a bar's length
+// is the measurement, and its colour is not free to mean something else.
+//
+// **The ON/OFF badge takes its label from its own fill.** Green and red swap
+// from pale (Mocha) to deep (Latte) between modes, so a fixed label colour is
+// legible in one mode and not the other. [`appearance::readable_on`] answers
+// the question the badge is actually asking, which a constant only ever
+// answers by coincidence.
 
 // ============================================================================
 // Banner style — how notifications appear on screen
@@ -137,12 +147,12 @@ impl NotificationPriority {
         }
     }
 
-    fn color(self) -> Color {
+    fn color(self, p: &Palette) -> Color {
         match self {
-            Self::Low => OVERLAY0,
-            Self::Normal => SUBTEXT0,
-            Self::High => YELLOW,
-            Self::Urgent => RED,
+            Self::Low => p.overlay0,
+            Self::Normal => p.subtext0,
+            Self::High => p.yellow,
+            Self::Urgent => p.red,
         }
     }
 }
@@ -714,7 +724,7 @@ impl NotificationSettingsUI {
     }
 
     /// Render the notification settings panel.
-    pub fn render(&self, width: f32, height: f32) -> Vec<RenderCommand> {
+    pub fn render(&self, p: &Palette, width: f32, height: f32) -> Vec<RenderCommand> {
         let mut cmds = Vec::new();
 
         // Panel background
@@ -723,7 +733,7 @@ impl NotificationSettingsUI {
             y: 0.0,
             width,
             height,
-            color: BASE,
+            color: p.base,
             corner_radii: CornerRadii::all(8.0),
         });
 
@@ -733,7 +743,7 @@ impl NotificationSettingsUI {
             y: 24.0,
             text: "Notifications".into(),
             font_size: 22.0,
-            color: TEXT,
+            color: p.text,
             font_weight: FontWeightHint::Bold,
             max_width: Some(width - 48.0),
             overflow: TextOverflow::Ellipsis,
@@ -757,7 +767,7 @@ impl NotificationSettingsUI {
                 y: tab_y,
                 width: tab_width,
                 height: 32.0,
-                color: if active { BLUE } else { SURFACE0 },
+                color: if active { p.accent } else { p.surface0 },
                 corner_radii: CornerRadii::all(6.0),
             });
 
@@ -766,7 +776,7 @@ impl NotificationSettingsUI {
                 y: tab_y + 8.0,
                 text: tab.label().into(),
                 font_size: 13.0,
-                color: if active { CRUST } else { SUBTEXT0 },
+                color: if active { p.on_accent() } else { p.subtext0 },
                 font_weight: if active {
                     FontWeightHint::Bold
                 } else {
@@ -782,13 +792,27 @@ impl NotificationSettingsUI {
 
         match self.active_tab {
             NotificationSettingsTab::General => {
-                self.render_general_tab(&mut cmds, 24.0, content_y, width - 48.0, content_height);
+                self.render_general_tab(
+                    p,
+                    &mut cmds,
+                    24.0,
+                    content_y,
+                    width - 48.0,
+                    content_height,
+                );
             }
             NotificationSettingsTab::Apps => {
-                self.render_apps_tab(&mut cmds, 24.0, content_y, width - 48.0, content_height);
+                self.render_apps_tab(p, &mut cmds, 24.0, content_y, width - 48.0, content_height);
             }
             NotificationSettingsTab::History => {
-                self.render_history_tab(&mut cmds, 24.0, content_y, width - 48.0, content_height);
+                self.render_history_tab(
+                    p,
+                    &mut cmds,
+                    24.0,
+                    content_y,
+                    width - 48.0,
+                    content_height,
+                );
             }
         }
 
@@ -797,6 +821,7 @@ impl NotificationSettingsUI {
 
     fn render_general_tab(
         &self,
+        p: &Palette,
         cmds: &mut Vec<RenderCommand>,
         x: f32,
         y: f32,
@@ -807,11 +832,12 @@ impl NotificationSettingsUI {
         let mut cy = y;
 
         // Master toggle
-        self.render_toggle_row(cmds, x, cy, width, "Notifications", cfg.enabled);
+        self.render_toggle_row(p, cmds, x, cy, width, "Notifications", cfg.enabled);
         cy += 44.0;
 
         // Banner position
         self.render_label_value(
+            p,
             cmds,
             x,
             cy,
@@ -823,6 +849,7 @@ impl NotificationSettingsUI {
 
         // Default banner style
         self.render_label_value(
+            p,
             cmds,
             x,
             cy,
@@ -835,11 +862,19 @@ impl NotificationSettingsUI {
         // "Compact" says nothing about *what* it leaves out. Each variant
         // carries a `description` written for exactly this, and it had no
         // caller — so the answer was in the crate and not on the screen.
-        self.render_hint(cmds, x, cy, width, cfg.default_banner_style.description());
+        self.render_hint(
+            p,
+            cmds,
+            x,
+            cy,
+            width,
+            cfg.default_banner_style.description(),
+        );
         cy += 26.0;
 
         // Auto-dismiss delay
         self.render_label_value(
+            p,
             cmds,
             x,
             cy,
@@ -851,6 +886,7 @@ impl NotificationSettingsUI {
 
         // Max simultaneous
         self.render_label_value(
+            p,
             cmds,
             x,
             cy,
@@ -861,7 +897,7 @@ impl NotificationSettingsUI {
         cy += 36.0;
 
         // Grouping
-        self.render_label_value(cmds, x, cy, width, "Grouping", cfg.grouping.label());
+        self.render_label_value(p, cmds, x, cy, width, "Grouping", cfg.grouping.label());
         cy += 44.0;
 
         // Sound section
@@ -870,7 +906,7 @@ impl NotificationSettingsUI {
             y: cy,
             text: "Sound".into(),
             font_size: 15.0,
-            color: LAVENDER,
+            color: p.lavender,
             font_weight: FontWeightHint::Bold,
             max_width: Some(width),
             overflow: TextOverflow::Ellipsis,
@@ -878,6 +914,7 @@ impl NotificationSettingsUI {
         cy += 28.0;
 
         self.render_toggle_row(
+            p,
             cmds,
             x,
             cy,
@@ -889,6 +926,7 @@ impl NotificationSettingsUI {
 
         // Volume bar
         self.render_label_value(
+            p,
             cmds,
             x,
             cy,
@@ -898,22 +936,27 @@ impl NotificationSettingsUI {
         );
         let bar_x = x + 160.0;
         let bar_w = width - 220.0;
-        cmds.push(RenderCommand::FillRect {
-            x: bar_x,
-            y: cy + 6.0,
-            width: bar_w,
-            height: 6.0,
-            color: SURFACE0,
-            corner_radii: CornerRadii::all(3.0),
-        });
         let fill_w = bar_w * (cfg.sound_volume as f32 / 100.0);
+        // At full volume the fill is the same rectangle with the same corners,
+        // and it is opaque, so a track drawn under it is a rectangle nobody can
+        // ever see — the shape `draw_check` exists to catch.
+        if fill_w < bar_w {
+            cmds.push(RenderCommand::FillRect {
+                x: bar_x,
+                y: cy + 6.0,
+                width: bar_w,
+                height: 6.0,
+                color: p.surface0,
+                corner_radii: CornerRadii::all(3.0),
+            });
+        }
         if fill_w > 0.5 {
             cmds.push(RenderCommand::FillRect {
                 x: bar_x,
                 y: cy + 6.0,
                 width: fill_w,
                 height: 6.0,
-                color: BLUE,
+                color: p.blue,
                 corner_radii: CornerRadii::all(3.0),
             });
         }
@@ -925,7 +968,7 @@ impl NotificationSettingsUI {
             y: cy,
             text: "Lock Screen".into(),
             font_size: 15.0,
-            color: LAVENDER,
+            color: p.lavender,
             font_weight: FontWeightHint::Bold,
             max_width: Some(width),
             overflow: TextOverflow::Ellipsis,
@@ -933,6 +976,7 @@ impl NotificationSettingsUI {
         cy += 28.0;
 
         self.render_toggle_row(
+            p,
             cmds,
             x,
             cy,
@@ -942,7 +986,15 @@ impl NotificationSettingsUI {
         );
         cy += 36.0;
 
-        self.render_toggle_row(cmds, x, cy, width, "Show Preview", cfg.lock_screen_preview);
+        self.render_toggle_row(
+            p,
+            cmds,
+            x,
+            cy,
+            width,
+            "Show Preview",
+            cfg.lock_screen_preview,
+        );
         cy += 44.0;
 
         // History section
@@ -951,7 +1003,7 @@ impl NotificationSettingsUI {
             y: cy,
             text: "History".into(),
             font_size: 15.0,
-            color: LAVENDER,
+            color: p.lavender,
             font_weight: FontWeightHint::Bold,
             max_width: Some(width),
             overflow: TextOverflow::Ellipsis,
@@ -959,6 +1011,7 @@ impl NotificationSettingsUI {
         cy += 28.0;
 
         self.render_label_value(
+            p,
             cmds,
             x,
             cy,
@@ -969,6 +1022,7 @@ impl NotificationSettingsUI {
         cy += 36.0;
 
         self.render_label_value(
+            p,
             cmds,
             x,
             cy,
@@ -979,15 +1033,24 @@ impl NotificationSettingsUI {
         cy += 36.0;
 
         // Other toggles
-        self.render_toggle_row(cmds, x, cy, width, "Taskbar Badge", cfg.show_taskbar_badge);
+        self.render_toggle_row(
+            p,
+            cmds,
+            x,
+            cy,
+            width,
+            "Taskbar Badge",
+            cfg.show_taskbar_badge,
+        );
         cy += 36.0;
 
-        self.render_toggle_row(cmds, x, cy, width, "Animate Bell Icon", cfg.animate_bell);
+        self.render_toggle_row(p, cmds, x, cy, width, "Animate Bell Icon", cfg.animate_bell);
         let _ = cy;
     }
 
     fn render_apps_tab(
         &self,
+        p: &Palette,
         cmds: &mut Vec<RenderCommand>,
         x: f32,
         y: f32,
@@ -1002,7 +1065,7 @@ impl NotificationSettingsUI {
             y: cy,
             width,
             height: 30.0,
-            color: SURFACE0,
+            color: p.surface0,
             corner_radii: CornerRadii::all(6.0),
         });
         let search_text = if self.app_filter.is_empty() {
@@ -1016,9 +1079,9 @@ impl NotificationSettingsUI {
             text: search_text,
             font_size: 13.0,
             color: if self.app_filter.is_empty() {
-                OVERLAY0
+                p.overlay0
             } else {
-                TEXT
+                p.text
             },
             font_weight: FontWeightHint::Regular,
             max_width: Some(width - 20.0),
@@ -1033,7 +1096,7 @@ impl NotificationSettingsUI {
                 y: cy + 10.0,
                 text: "No registered apps".into(),
                 font_size: 13.0,
-                color: OVERLAY0,
+                color: p.overlay0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(width - 20.0),
                 overflow: TextOverflow::Ellipsis,
@@ -1055,7 +1118,7 @@ impl NotificationSettingsUI {
                 y: cy,
                 width,
                 height: row_h,
-                color: if is_selected { SURFACE1 } else { SURFACE0 },
+                color: if is_selected { p.surface1 } else { p.surface0 },
                 corner_radii: CornerRadii::all(6.0),
             });
 
@@ -1065,7 +1128,7 @@ impl NotificationSettingsUI {
                 y: cy + 8.0,
                 text: prefs.display_name.clone(),
                 font_size: 14.0,
-                color: TEXT,
+                color: p.text,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(width * 0.5),
                 overflow: TextOverflow::Ellipsis,
@@ -1073,7 +1136,7 @@ impl NotificationSettingsUI {
 
             // Enabled/disabled badge
             let badge_text = if prefs.enabled { "ON" } else { "OFF" };
-            let badge_color = if prefs.enabled { GREEN } else { RED };
+            let badge_color = if prefs.enabled { p.green } else { p.red };
             cmds.push(RenderCommand::FillRect {
                 x: width - 50.0,
                 y: cy + 8.0,
@@ -1087,7 +1150,7 @@ impl NotificationSettingsUI {
                 y: cy + 10.0,
                 text: badge_text.into(),
                 font_size: 11.0,
-                color: CRUST,
+                color: appearance::readable_on(badge_color),
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(30.0),
                 overflow: TextOverflow::Ellipsis,
@@ -1103,7 +1166,7 @@ impl NotificationSettingsUI {
                     prefs.interaction_rate() as u32,
                 ),
                 font_size: 11.0,
-                color: SUBTEXT0,
+                color: p.subtext0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(width - 80.0),
                 overflow: TextOverflow::Ellipsis,
@@ -1113,6 +1176,7 @@ impl NotificationSettingsUI {
             if is_selected && self.app_detail_expanded {
                 let dy = cy + 52.0;
                 self.render_label_value(
+                    p,
                     cmds,
                     x + 12.0,
                     dy,
@@ -1121,6 +1185,7 @@ impl NotificationSettingsUI {
                     prefs.banner_style.label(),
                 );
                 self.render_label_value(
+                    p,
                     cmds,
                     x + 12.0,
                     dy + 24.0,
@@ -1129,6 +1194,7 @@ impl NotificationSettingsUI {
                     if prefs.play_sound { "On" } else { "Off" },
                 );
                 self.render_label_value(
+                    p,
                     cmds,
                     x + 12.0,
                     dy + 48.0,
@@ -1137,6 +1203,7 @@ impl NotificationSettingsUI {
                     if prefs.show_badge { "On" } else { "Off" },
                 );
                 self.render_label_value(
+                    p,
                     cmds,
                     x + 12.0,
                     dy + 72.0,
@@ -1149,6 +1216,7 @@ impl NotificationSettingsUI {
                     },
                 );
                 self.render_label_value(
+                    p,
                     cmds,
                     x + 12.0,
                     dy + 96.0,
@@ -1164,6 +1232,7 @@ impl NotificationSettingsUI {
 
     fn render_history_tab(
         &self,
+        p: &Palette,
         cmds: &mut Vec<RenderCommand>,
         x: f32,
         y: f32,
@@ -1180,7 +1249,7 @@ impl NotificationSettingsUI {
             y: cy,
             text: format!("{} notifications ({} unread)", total, unread),
             font_size: 13.0,
-            color: SUBTEXT1,
+            color: p.subtext1,
             font_weight: FontWeightHint::Regular,
             max_width: Some(width),
             overflow: TextOverflow::Ellipsis,
@@ -1194,7 +1263,7 @@ impl NotificationSettingsUI {
                 y: cy,
                 width: 200.0,
                 height: 22.0,
-                color: SURFACE1,
+                color: p.surface1,
                 corner_radii: CornerRadii::all(11.0),
             });
             cmds.push(RenderCommand::Text {
@@ -1202,7 +1271,7 @@ impl NotificationSettingsUI {
                 y: cy + 4.0,
                 text: format!("Filtered: {}", filter_app),
                 font_size: 11.0,
-                color: BLUE,
+                color: p.blue,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(180.0),
                 overflow: TextOverflow::Ellipsis,
@@ -1227,7 +1296,7 @@ impl NotificationSettingsUI {
 
         for entry in visible_entries {
             // Entry background
-            let bg = if entry.read { SURFACE0 } else { SURFACE1 };
+            let bg = if entry.read { p.surface0 } else { p.surface1 };
             cmds.push(RenderCommand::FillRect {
                 x,
                 y: cy,
@@ -1243,7 +1312,7 @@ impl NotificationSettingsUI {
                 y: cy + 4.0,
                 width: 4.0,
                 height: 44.0,
-                color: entry.priority.color(),
+                color: entry.priority.color(p),
                 corner_radii: CornerRadii::all(2.0),
             });
 
@@ -1254,7 +1323,7 @@ impl NotificationSettingsUI {
                     y: cy + 6.0,
                     width: 8.0,
                     height: 8.0,
-                    color: BLUE,
+                    color: p.blue,
                     corner_radii: CornerRadii::all(4.0),
                 });
             }
@@ -1265,7 +1334,7 @@ impl NotificationSettingsUI {
                 y: cy + 6.0,
                 text: entry.app_id.clone(),
                 font_size: 11.0,
-                color: SUBTEXT0,
+                color: p.subtext0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(width * 0.4),
                 overflow: TextOverflow::Ellipsis,
@@ -1277,7 +1346,7 @@ impl NotificationSettingsUI {
                 y: cy + 22.0,
                 text: entry.title.clone(),
                 font_size: 13.0,
-                color: TEXT,
+                color: p.text,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(width - 48.0),
                 overflow: TextOverflow::Ellipsis,
@@ -1298,7 +1367,7 @@ impl NotificationSettingsUI {
                     FontWeightHint::Regular,
                 ),
                 font_size: 11.0,
-                color: SUBTEXT0,
+                color: p.subtext0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(width - BODY_INSET),
                 overflow: TextOverflow::Ellipsis,
@@ -1319,7 +1388,7 @@ impl NotificationSettingsUI {
                     entries.len(),
                 ),
                 font_size: 11.0,
-                color: OVERLAY0,
+                color: p.overlay0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(120.0),
                 overflow: TextOverflow::Ellipsis,
@@ -1331,6 +1400,7 @@ impl NotificationSettingsUI {
 
     fn render_toggle_row(
         &self,
+        p: &Palette,
         cmds: &mut Vec<RenderCommand>,
         x: f32,
         y: f32,
@@ -1343,7 +1413,7 @@ impl NotificationSettingsUI {
             y: y + 4.0,
             text: label.into(),
             font_size: 14.0,
-            color: TEXT,
+            color: p.text,
             font_weight: FontWeightHint::Regular,
             max_width: Some(width - 80.0),
             overflow: TextOverflow::Ellipsis,
@@ -1356,7 +1426,7 @@ impl NotificationSettingsUI {
             y: y + 2.0,
             width: 40.0,
             height: 22.0,
-            color: if enabled { GREEN } else { SURFACE2 },
+            color: if enabled { p.green } else { p.surface2 },
             corner_radii: CornerRadii::all(11.0),
         });
         let knob_x = if enabled { sw_x + 20.0 } else { sw_x + 2.0 };
@@ -1365,7 +1435,7 @@ impl NotificationSettingsUI {
             y: y + 4.0,
             width: 18.0,
             height: 18.0,
-            color: TEXT,
+            color: p.text,
             corner_radii: CornerRadii::all(9.0),
         });
     }
@@ -1375,13 +1445,21 @@ impl NotificationSettingsUI {
     /// Smaller than the setting itself, and elided against the full width
     /// rather than the half a value gets: a hint cut off mid-word explains less
     /// than no hint at all.
-    fn render_hint(&self, cmds: &mut Vec<RenderCommand>, x: f32, y: f32, width: f32, hint: &str) {
+    fn render_hint(
+        &self,
+        p: &Palette,
+        cmds: &mut Vec<RenderCommand>,
+        x: f32,
+        y: f32,
+        width: f32,
+        hint: &str,
+    ) {
         cmds.push(RenderCommand::Text {
             x,
             y,
             text: hint.into(),
             font_size: 11.0,
-            color: SUBTEXT0,
+            color: p.subtext0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(width),
             overflow: TextOverflow::Ellipsis,
@@ -1390,6 +1468,7 @@ impl NotificationSettingsUI {
 
     fn render_label_value(
         &self,
+        p: &Palette,
         cmds: &mut Vec<RenderCommand>,
         x: f32,
         y: f32,
@@ -1402,7 +1481,7 @@ impl NotificationSettingsUI {
             y,
             text: label.into(),
             font_size: 13.0,
-            color: SUBTEXT0,
+            color: p.subtext0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(width * 0.5),
             overflow: TextOverflow::Ellipsis,
@@ -1412,7 +1491,7 @@ impl NotificationSettingsUI {
             y,
             text: value.into(),
             font_size: 13.0,
-            color: TEXT,
+            color: p.text,
             font_weight: FontWeightHint::Regular,
             max_width: Some(width * 0.45),
             overflow: TextOverflow::Ellipsis,
@@ -1430,7 +1509,7 @@ impl Default for NotificationSettingsUI {
 // `text.len()` (bytes) against a character budget, and whose budget was
 // chosen independently of the box the text was drawn in. Replaced by
 // `text::elide`, which measures both the text and the ellipsis against the
-// actual width. See known-issues.md TD-APPS-ESTIMATE-TEXT-WIDTH.
+// actual width. See known-issues.md TD-APPS-ESTIMATE-p.text-WIDTH.
 
 // ============================================================================
 // Tests
@@ -1454,6 +1533,14 @@ mod tests {
     #![allow(clippy::float_cmp)]
 
     use super::*;
+    use crate::draw_check::assert_nothing_is_drawn_and_never_seen;
+    use crate::palette_check::assert_drawn_from;
+
+    /// The palette the older tests were written against: dark mode, stock
+    /// accent, which is what the deleted constants spelled out by hand.
+    fn test_palette() -> Palette {
+        Palette::for_mode(false)
+    }
 
     // ---- NotificationPriority ----
 
@@ -1472,8 +1559,9 @@ mod tests {
 
     #[test]
     fn test_priority_colors() {
-        let c = NotificationPriority::Urgent.color();
-        assert_eq!(c.r, RED.r);
+        let p = test_palette();
+        let c = NotificationPriority::Urgent.color(&p);
+        assert_eq!(c.r, p.red.r);
     }
 
     // ---- BannerStyle ----
@@ -1904,7 +1992,7 @@ mod tests {
     #[test]
     fn test_ui_render_general_produces_commands() {
         let ui = NotificationSettingsUI::new();
-        let cmds = ui.render(600.0, 800.0);
+        let cmds = ui.render(&test_palette(), 600.0, 800.0);
         assert!(!cmds.is_empty());
     }
 
@@ -1913,7 +2001,7 @@ mod tests {
         let mut ui = NotificationSettingsUI::new();
         ui.set_tab(NotificationSettingsTab::Apps);
         ui.settings.register_app("app1", "Test App");
-        let cmds = ui.render(600.0, 800.0);
+        let cmds = ui.render(&test_palette(), 600.0, 800.0);
         assert!(!cmds.is_empty());
     }
 
@@ -1928,7 +2016,7 @@ mod tests {
             NotificationPriority::Normal,
             1000,
         );
-        let cmds = ui.render(600.0, 800.0);
+        let cmds = ui.render(&test_palette(), 600.0, 800.0);
         assert!(!cmds.is_empty());
     }
 
@@ -1939,7 +2027,7 @@ mod tests {
         ui.settings.register_app("app1", "Test App");
         ui.selected_app_index = Some(0);
         ui.app_detail_expanded = true;
-        let cmds = ui.render(600.0, 800.0);
+        let cmds = ui.render(&test_palette(), 600.0, 800.0);
         // Should have more commands than collapsed view
         assert!(cmds.len() > 10);
     }
@@ -1953,7 +2041,7 @@ mod tests {
         ui.settings
             .record_notification("b", "T2", "B", NotificationPriority::Normal, 2);
         ui.history_app_filter = Some("a".to_string());
-        let cmds = ui.render(600.0, 800.0);
+        let cmds = ui.render(&test_palette(), 600.0, 800.0);
         assert!(!cmds.is_empty());
     }
 
@@ -1985,7 +2073,7 @@ mod tests {
             );
         }
         let width = 600.0_f32;
-        let cmds = ui.render(width, 800.0);
+        let cmds = ui.render(&test_palette(), width, 800.0);
         let mut checked = 0;
         for cmd in &cmds {
             if let RenderCommand::Text {
@@ -2024,7 +2112,7 @@ mod tests {
             NotificationPriority::Normal,
             1,
         );
-        let cmds = ui.render(600.0, 800.0);
+        let cmds = ui.render(&test_palette(), 600.0, 800.0);
         assert!(
             cmds.iter().any(|c| matches!(
                 c,
@@ -2073,5 +2161,381 @@ mod tests {
         let id3 = s.record_notification("a", "T", "B", NotificationPriority::Normal, 3);
         assert_ne!(id1, id2);
         assert_ne!(id2, id3);
+    }
+
+    // ---- Colour ----
+
+    /// A panel wound up so that every colour-bearing branch actually draws.
+    ///
+    /// Three apps with one of them switched off, so both halves of the ON/OFF
+    /// badge appear; all four rungs of the priority scale, so no stripe colour
+    /// hides behind a fixture that only ever files Normal; and one entry marked
+    /// read, so the read and unread row backgrounds are both on screen. A
+    /// branch nobody renders is a branch the sweep cannot see.
+    fn wound(
+        tab: NotificationSettingsTab,
+        app_filter: &str,
+        selected: Option<usize>,
+        expanded: bool,
+        history_filter: Option<&str>,
+    ) -> NotificationSettingsUI {
+        let mut ui = NotificationSettingsUI::new();
+        ui.settings.register_app("mail", "Mail Client");
+        ui.settings.register_app("chat", "Chat");
+        ui.settings.register_app("build", "Build Server");
+        ui.settings.app_prefs[1].enabled = false;
+        for (i, prio) in [
+            NotificationPriority::Low,
+            NotificationPriority::Normal,
+            NotificationPriority::High,
+            NotificationPriority::Urgent,
+        ]
+        .iter()
+        .enumerate()
+        {
+            ui.settings.record_notification(
+                "mail",
+                "A title",
+                "A body long enough that the preview has to be cut somewhere",
+                *prio,
+                1000 + i as u64,
+            );
+        }
+        ui.settings.record_notification(
+            "chat",
+            "Other",
+            "Body",
+            NotificationPriority::Normal,
+            2000,
+        );
+        let first = ui.settings.history[0].id;
+        assert!(ui.settings.mark_read(first));
+        ui.active_tab = tab;
+        ui.app_filter = app_filter.to_string();
+        ui.selected_app_index = selected;
+        ui.app_detail_expanded = expanded;
+        ui.history_app_filter = history_filter.map(str::to_string);
+        ui
+    }
+
+    /// Every state the panel can be in, so no branch escapes the sweep below.
+    fn every_state() -> Vec<(NotificationSettingsUI, String)> {
+        let mut out = Vec::new();
+        for tab in [
+            NotificationSettingsTab::General,
+            NotificationSettingsTab::Apps,
+            NotificationSettingsTab::History,
+        ] {
+            // "" lists every app, "mail" narrows it, and the third matches
+            // nothing — that last one is the only way the "No registered apps"
+            // caption is ever drawn.
+            for filter in ["", "mail", "matches-nothing-at-all"] {
+                for (sel, exp) in [(None, false), (Some(0), false), (Some(0), true)] {
+                    for hist in [None, Some("mail")] {
+                        out.push((
+                            wound(tab, filter, sel, exp, hist),
+                            format!(
+                                "notification settings (tab={tab:?}, filter={filter:?}, \
+                                 selected={sel:?}, expanded={exp}, history_filter={hist:?})"
+                            ),
+                        ));
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    /// The membership sweep: nothing the panel draws is outside its palette.
+    ///
+    /// Every constant this module used to hold was a Catppuccin *Mocha* value,
+    /// so the light render is where a survivor gives itself away — Latte does
+    /// not contain it, and the failure names the colour back.
+    #[test]
+    fn every_colour_the_panel_draws_comes_from_its_palette() {
+        for light in [false, true] {
+            let p = Palette::for_mode(light);
+            for (ui, what) in every_state() {
+                assert_drawn_from(
+                    &p,
+                    &ui.render(&p, 600.0, 800.0),
+                    &[],
+                    &format!("{what}, light={light}"),
+                );
+            }
+        }
+    }
+
+    /// Nothing is painted and then erased before anyone could see it.
+    ///
+    /// The volume bar is why this is here: its track and its fill are the same
+    /// rectangle with the same corners at full volume, so drawing both would
+    /// cost a blend for a rectangle that is never on screen — and a screenshot
+    /// could not tell you, because the picture is identical either way.
+    #[test]
+    fn the_panel_draws_nothing_that_is_immediately_erased() {
+        for light in [false, true] {
+            let p = Palette::for_mode(light);
+            for (mut ui, what) in every_state() {
+                // Silent, half, and full: the last is the one that coincides.
+                for volume in [0, 45, 100] {
+                    ui.settings.config.sound_volume = volume;
+                    assert_nothing_is_drawn_and_never_seen(
+                        &ui.render(&p, 600.0, 800.0),
+                        &format!("{what}, light={light}, volume={volume}"),
+                    );
+                }
+            }
+        }
+    }
+
+    /// The three tab fills, in the order they are drawn.
+    fn tab_backgrounds(cmds: &[RenderCommand]) -> Vec<Color> {
+        cmds.iter()
+            .filter_map(|c| match c {
+                RenderCommand::FillRect {
+                    y: 60.0,
+                    height: 32.0,
+                    color,
+                    ..
+                } => Some(*color),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The three tab labels, in the order they are drawn.
+    fn tab_labels(cmds: &[RenderCommand]) -> Vec<Color> {
+        cmds.iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text {
+                    y: 68.0,
+                    font_size: 13.0,
+                    color,
+                    ..
+                } => Some(*color),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn is_tab(c: &RenderCommand) -> bool {
+        matches!(
+            c,
+            RenderCommand::FillRect {
+                y: 60.0,
+                height: 32.0,
+                ..
+            } | RenderCommand::Text {
+                y: 68.0,
+                font_size: 13.0,
+                ..
+            }
+        )
+    }
+
+    /// Every colour the panel draws except the tab strip's own.
+    fn colors_apart_from_the_tabs(cmds: &[RenderCommand]) -> Vec<Color> {
+        cmds.iter()
+            .filter(|c| !is_tab(c))
+            .filter_map(|c| match c {
+                RenderCommand::FillRect { color, .. } | RenderCommand::Text { color, .. } => {
+                    Some(*color)
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Exactly one thing here follows the accent: the tab you are on.
+    ///
+    /// The membership sweep is blind to this. `p.blue` and `p.accent` are both
+    /// legal roles, so writing one where the other belongs still draws a colour
+    /// the light palette contains; only varying the accent separates them.
+    ///
+    /// The active tab's fill is chosen by a boolean, and a fixture pinned to
+    /// one tab would leave the other two unproven, so all three take a turn.
+    /// Each turn gets its own `assert_ne!`: over the union of the three fills,
+    /// one moving tab would hide two frozen ones.
+    #[test]
+    fn only_the_tab_you_are_on_follows_the_accent() {
+        let mut blue = Palette::for_mode(false);
+        blue.accent = appearance::BLUE;
+        let mut mauve = Palette::for_mode(false);
+        mauve.accent = appearance::MAUVE;
+
+        for tab in [
+            NotificationSettingsTab::General,
+            NotificationSettingsTab::Apps,
+            NotificationSettingsTab::History,
+        ] {
+            let ui = wound(tab, "", Some(0), true, None);
+            let a = ui.render(&blue, 600.0, 800.0);
+            let b = ui.render(&mauve, 600.0, 800.0);
+
+            assert_eq!(tab_backgrounds(&a).len(), 3, "three tabs are drawn");
+            assert_ne!(
+                tab_backgrounds(&a),
+                tab_backgrounds(&b),
+                "the {tab:?} tab's fill did not move with the accent"
+            );
+
+            // The frozen half may be one equality over everything else:
+            // `assert_eq!` fails if *any* member moves, so it costs nothing and
+            // covers sites nobody thought to name.
+            assert_eq!(
+                colors_apart_from_the_tabs(&a),
+                colors_apart_from_the_tabs(&b),
+                "something outside the tab strip moved with the accent \
+                 (tab={tab:?}) — the priority stripe is a scale, the volume \
+                 bar is a measurement, and ON/OFF is a state"
+            );
+        }
+    }
+
+    /// The active tab's label is picked for its own fill, not fixed.
+    ///
+    /// The accent test above cannot reach this. Every accent on offer is pale,
+    /// so [`appearance::readable_on`] answers the same near-black for all of
+    /// them and an `assert_ne!` between two accents would fail on correct code.
+    /// What separates `p.on_accent()` from a hard-coded `p.crust` is the
+    /// *mode*: Latte's `crust` is near-white, which on a pale accent is
+    /// illegible.
+    #[test]
+    fn the_active_tabs_label_is_legible_on_it() {
+        for light in [false, true] {
+            for accent in [
+                appearance::BLUE,
+                appearance::GREEN,
+                appearance::RED,
+                appearance::YELLOW,
+                appearance::MAUVE,
+            ] {
+                let mut p = Palette::for_mode(light);
+                p.accent = accent;
+                // Apps is the second of General / Apps / History.
+                let ui = wound(NotificationSettingsTab::Apps, "", None, false, None);
+                let cmds = ui.render(&p, 600.0, 800.0);
+                let bgs = tab_backgrounds(&cmds);
+                let labels = tab_labels(&cmds);
+                assert_eq!(bgs.len(), 3, "three tabs are drawn");
+                assert_eq!(labels.len(), 3, "three tabs are labelled");
+                assert_eq!(
+                    (bgs[1].r, bgs[1].g, bgs[1].b),
+                    (accent.r, accent.g, accent.b),
+                    "the active tab is not filled with the accent (light={light})"
+                );
+                let want = appearance::readable_on(accent);
+                assert_eq!(
+                    (labels[1].r, labels[1].g, labels[1].b),
+                    (want.r, want.g, want.b),
+                    "the active tab's label is not chosen for its own fill \
+                     (light={light}); a fixed colour is legible on one mode's \
+                     accents and not the other's"
+                );
+            }
+        }
+    }
+
+    /// Each ON/OFF badge paired with the label drawn on it.
+    fn badges(cmds: &[RenderCommand]) -> Vec<(Color, Color)> {
+        let mut out = Vec::new();
+        let mut fill: Option<Color> = None;
+        for c in cmds {
+            match c {
+                RenderCommand::FillRect {
+                    width: 36.0,
+                    height: 18.0,
+                    color,
+                    ..
+                } => fill = Some(*color),
+                RenderCommand::Text { text, color, .. } if text == "ON" || text == "OFF" => {
+                    if let Some(bg) = fill.take() {
+                        out.push((bg, *color));
+                    }
+                }
+                _ => {}
+            }
+        }
+        out
+    }
+
+    /// The ON/OFF badge's label is legible on the badge, in both modes.
+    ///
+    /// Green and red swap from pale (Mocha) to deep (Latte), so a fixed label
+    /// colour is right in one mode by luck and wrong in the other. Both halves
+    /// of the badge are checked: a fixture with every app enabled would prove
+    /// nothing about OFF.
+    #[test]
+    fn the_on_off_badges_label_is_legible_on_the_badge() {
+        for light in [false, true] {
+            let p = Palette::for_mode(light);
+            let ui = wound(NotificationSettingsTab::Apps, "", None, false, None);
+            let found = badges(&ui.render(&p, 600.0, 800.0));
+            assert_eq!(
+                found.len(),
+                3,
+                "one badge per registered app (light={light})"
+            );
+            // The second app is the one switched off, so both fills appear.
+            assert_ne!(
+                (found[0].0.r, found[0].0.g, found[0].0.b),
+                (found[1].0.r, found[1].0.g, found[1].0.b),
+                "ON and OFF are drawn the same colour (light={light})"
+            );
+            for (bg, fg) in found {
+                let want = appearance::readable_on(bg);
+                assert_eq!(
+                    (fg.r, fg.g, fg.b),
+                    (want.r, want.g, want.b),
+                    "a badge's label is not chosen for its own fill (light={light})"
+                );
+            }
+        }
+    }
+
+    /// The four rungs of the priority scale stay tellable apart, under every
+    /// accent and in both modes.
+    ///
+    /// They are drawn as stripes down one scrollable list, four abreast, so two
+    /// rungs sharing a colour do not merely confuse a learnt code — they make
+    /// an urgent notification look exactly like a routine one in the same
+    /// glance. Two of the four rungs are hues that are also selectable accents,
+    /// which is why the accent has to be varied and not merely defaulted.
+    #[test]
+    fn the_priority_scale_stays_distinct_under_every_accent() {
+        for light in [false, true] {
+            for accent in [
+                appearance::BLUE,
+                appearance::GREEN,
+                appearance::RED,
+                appearance::YELLOW,
+                appearance::MAUVE,
+            ] {
+                let mut p = Palette::for_mode(light);
+                p.accent = accent;
+
+                let mut seen: Vec<(NotificationPriority, Color)> = Vec::new();
+                for prio in [
+                    NotificationPriority::Low,
+                    NotificationPriority::Normal,
+                    NotificationPriority::High,
+                    NotificationPriority::Urgent,
+                ] {
+                    let c = prio.color(&p);
+                    if let Some((other, _)) = seen
+                        .iter()
+                        .find(|(_, o)| o.r == c.r && o.g == c.g && o.b == c.b)
+                    {
+                        panic!(
+                            "a {prio:?} stripe is drawn exactly like a {other:?} one \
+                             (light={light}, accent={accent:?}), so an urgent \
+                             notification looks routine in the same list"
+                        );
+                    }
+                    seen.push((prio, c));
+                }
+            }
+        }
     }
 }

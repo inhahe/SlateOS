@@ -62,6 +62,7 @@ STOR = "gui/desktop/src/storage_settings.rs"
 POW = "gui/desktop/src/power_settings.rs"
 NET = "gui/desktop/src/network_indicator.rs"
 CLIP = "gui/desktop/src/clipboard_viewer.rs"
+NOTIF = "gui/desktop/src/notification_settings.rs"
 
 # (name, file, [(old, new), ...], [packages], [tests expected to fail])
 DEFECTS = [
@@ -1177,6 +1178,132 @@ DEFECTS = [
         )],
         ["desktop"],
         ["the_popup_draws_nothing_that_is_immediately_erased"],
+    ),
+    # ---- notification_settings.rs -------------------------------------------
+    (
+        "DDDDD: the notification panel's own background is left as a Mocha literal",
+        NOTIF,
+        [(
+            "            width,\n            height,\n            color: p.base,",
+            "            width,\n            height,\n            color: Color::from_hex(0x1E1E2E),",
+        )],
+        ["desktop"],
+        ["every_colour_the_panel_draws_comes_from_its_palette"],
+    ),
+    (
+        "EEEEE: the \"no apps\" caption keeps its old grey (only drawn when the "
+        "search matches nothing)",
+        NOTIF,
+        [(
+            '                text: "No registered apps".into(),\n'
+            "                font_size: 13.0,\n"
+            "                color: p.overlay0,",
+            '                text: "No registered apps".into(),\n'
+            "                font_size: 13.0,\n"
+            "                color: Color::from_hex(0x6C7086),",
+        )],
+        ["desktop"],
+        ["every_colour_the_panel_draws_comes_from_its_palette"],
+    ),
+    (
+        "FFFFF: the High rung of the priority scale keeps its old yellow (only "
+        "drawn for a High notification, on the History tab)",
+        NOTIF,
+        [(
+            "            Self::High => p.yellow,",
+            "            Self::High => Color::from_hex(0xF9E2AF),",
+        )],
+        ["desktop"],
+        ["every_colour_the_panel_draws_comes_from_its_palette"],
+    ),
+    (
+        "GGGGG: the history filter badge's caption keeps its old blue (only "
+        "drawn while a per-app history filter is set)",
+        NOTIF,
+        [(
+            '                text: format!("Filtered: {}", filter_app),\n'
+            "                font_size: 11.0,\n"
+            "                color: p.blue,",
+            '                text: format!("Filtered: {}", filter_app),\n'
+            "                font_size: 11.0,\n"
+            "                color: Color::from_hex(0x89B4FA),",
+        )],
+        ["desktop"],
+        ["every_colour_the_panel_draws_comes_from_its_palette"],
+    ),
+    (
+        "HHHHH: the active tab is frozen to blue, so it stops tracking the accent",
+        NOTIF,
+        [(
+            "                color: if active { p.accent } else { p.surface0 },",
+            "                color: if active { p.blue } else { p.surface0 },",
+        )],
+        ["desktop"],
+        [
+            "only_the_tab_you_are_on_follows_the_accent",
+            "the_active_tabs_label_is_legible_on_it",
+        ],
+    ),
+    (
+        "IIIII: the active tab's label is fixed instead of chosen for its own fill",
+        NOTIF,
+        [(
+            "                color: if active { p.on_accent() } else { p.subtext0 },",
+            "                color: if active { p.crust } else { p.subtext0 },",
+        )],
+        ["desktop"],
+        ["the_active_tabs_label_is_legible_on_it"],
+    ),
+    (
+        "JJJJJ: the ON/OFF badge's label is fixed, which is legible on Mocha's "
+        "pale green by luck and not on Latte's deep green",
+        NOTIF,
+        [(
+            "                color: appearance::readable_on(badge_color),",
+            "                color: p.crust,",
+        )],
+        ["desktop"],
+        ["the_on_off_badges_label_is_legible_on_the_badge"],
+    ),
+    (
+        "KKKKK: the Urgent stripe is repainted the user's accent, so a scale "
+        "starts meaning selection",
+        NOTIF,
+        [("            Self::Urgent => p.red,", "            Self::Urgent => p.accent,")],
+        ["desktop"],
+        [
+            "only_the_tab_you_are_on_follows_the_accent",
+            "the_priority_scale_stays_distinct_under_every_accent",
+        ],
+    ),
+    (
+        "LLLLL: the volume bar's fill is repainted the user's accent, so a "
+        "measurement starts meaning selection",
+        NOTIF,
+        [(
+            "                width: fill_w,\n                height: 6.0,\n                color: p.blue,",
+            "                width: fill_w,\n                height: 6.0,\n                color: p.accent,",
+        )],
+        ["desktop"],
+        ["only_the_tab_you_are_on_follows_the_accent"],
+    ),
+    (
+        "MMMMM: the volume bar's track is drawn even at full volume, where the "
+        "fill covers it exactly",
+        NOTIF,
+        [("        if fill_w < bar_w {", "        if fill_w <= bar_w {")],
+        ["desktop"],
+        ["the_panel_draws_nothing_that_is_immediately_erased"],
+    ),
+    (
+        "NNNNN: the unread dot is emitted with zero height",
+        NOTIF,
+        [(
+            "                    width: 8.0,\n                    height: 8.0,\n                    color: p.blue,",
+            "                    width: 8.0,\n                    height: 0.0,\n                    color: p.blue,",
+        )],
+        ["desktop"],
+        ["the_panel_draws_nothing_that_is_immediately_erased"],
     ),
 ]
 

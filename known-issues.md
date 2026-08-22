@@ -50335,7 +50335,7 @@ commands that carry the colour in question, and assert the two renders agree.
 Candidates: anything drawn on the wallpaper, on a video surface, on a
 thumbnail, or on any other content the palette does not own.
 
-**Part 2 progress. 13 of 49 modules converted.**
+**Part 2 progress. 14 of 49 modules converted.**
 
 - [x] `security_dialog.rs` — 29 constants, done 2026-08-22. The method above
   survived contact: the sweep lives in `gui/desktop/src/palette_check.rs` as
@@ -50828,6 +50828,39 @@ thumbnail, or on any other content the palette does not own.
     the default accent, so `p.accent` there looks right until the user picks
     Green and Text becomes Image (defect WWWW, caught by both the accent test
     and the distinctness test).
+- [x] `notification_settings.rs` — 14 constants, done 2026-08-22. Harness
+  defects DDDDD–NNNNN (eleven).
+  - **A colour can be right by coincidence, and that is not the same as being
+    right.** The ON/OFF badge drew its label in `CRUST`. That happens to work in
+    both stock modes — Mocha's `crust` is near-black and Mocha's `green` is
+    pale; Latte's `crust` is near-white and Latte's `green` is deep — so the
+    two track each other by accident, and a reader of `p.crust` cannot tell
+    whether anyone checked. It became `appearance::readable_on(badge_color)`,
+    which is the question the badge is actually asking. Defect JJJJJ (put
+    `p.crust` back) fails only in the light render, which is exactly the shape
+    of a coincidence that holds in one mode and not the other. Expect more of
+    these: any near-black or near-white drawn on a role that flips lightness
+    between modes is one.
+  - **A wasted draw found by conversion, not by the eye.** The volume bar
+    pushed an opaque track and then the fill over it. At 100% the fill is the
+    same rectangle with the same corner radii, so the track is a rectangle
+    nobody can ever see — and the *rendered image is identical either way*, so
+    only the command list says so. The track is now pushed only when
+    `fill_w < bar_w`. This is the second module to find this class (the first
+    was `power_settings`'s charge bar) and the reason `draw_check.rs` exists;
+    the erase sweep here walks volume 0/45/100 because only the last one
+    coincides. Defect MMMMM (`<` → `<=`) proves the guard is load-bearing.
+  - **A measurement is not an invitation, and a scale is not a selection.** The
+    four-rung priority stripe (Low/Normal/High/Urgent) and the volume bar's
+    fill both stay frozen. An accented Urgent stripe would read as *selected*
+    beside its neighbours in the same list, and would collide outright with
+    whichever rung already carries that hue — defect KKKKK is caught both by
+    the frozen-union equality and by the distinctness ladder, because with a
+    Yellow accent Urgent becomes High.
+  - **Three tabs, three `assert_ne!`s.** Same shape as the clipboard popup: the
+    active tab is the one accent site, its fill is chosen by a boolean, so the
+    test walks all three tabs as the active one rather than trusting whichever
+    the fixture happened to open on.
 
 **Trigger:** this is not blocked on anything. It is sequenced after the shell
 event loop (`TD-C-THE-SHELL-CAN-DRAW-ITSELF-AND-NOBODY-CAN-ASK-IT-TO`) only

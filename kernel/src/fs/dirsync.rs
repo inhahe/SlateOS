@@ -436,11 +436,50 @@ fn collect_tree(
     Ok(())
 }
 
-/// Copy a single file from src to dst.
+/// Copy a single file from src to dst, carrying the source's timestamps over.
+///
+/// The timestamps are not a nicety — they are what makes `sync` converge.
+/// [`compare`] calls a file modified when its size *or* its `modified_ns`
+/// differs, so a copy that leaves the destination stamped "now" is still
+/// unequal to a source stamped whenever it was really written. The next `sync`
+/// would copy it again, and so would every one after that: a sync that has
+/// nothing to do would re-copy the entire tree, forever, and `compare` would
+/// never report a single file as unchanged.
+///
+/// The stamp is applied after the write, because writing sets `modified_ns` to
+/// the current time as a matter of course.
+///
+/// A failure to stamp is reported, not swallowed: the copy itself succeeded and
+/// the data is correct, so this is not worth failing the sync over, but it does
+/// mean the file will be copied again next time and the caller deserves to know
+/// why their sync is not settling.
 fn copy_file(src: &Path, dst: &Path) -> KernelResult<u64> {
     let data = Vfs::read_file(src)?;
     let len = data.len() as u64;
+    // Read the source metadata *before* the write: if src and dst are the same
+    // file, the write would otherwise be stamping it with its own new time.
+    let times = Vfs::metadata(src).map(|m| (m.accessed_ns, m.modified_ns));
     Vfs::write_file(dst, &data)?;
+    match times {
+        Ok((accessed_ns, modified_ns)) => {
+            if let Err(e) = Vfs::set_times(dst, accessed_ns, modified_ns) {
+                serial_println!(
+                    "[dirsync] WARNING: copied {} but could not carry its timestamps: {:?} \
+                     — it will be re-copied on every sync",
+                    dst.display(),
+                    e,
+                );
+            }
+        }
+        Err(e) => {
+            serial_println!(
+                "[dirsync] WARNING: copied {} but could not read its source timestamps: {:?} \
+                 — it will be re-copied on every sync",
+                dst.display(),
+                e,
+            );
+        }
+    }
     Ok(len)
 }
 
@@ -471,9 +510,29 @@ fn test_compare_identical() {
     let diff = compare("/tmp/ds_a", "/tmp/ds_b").expect("compare");
     assert!(diff.new_files.is_empty(), "no new files");
     assert!(diff.deleted_files.is_empty(), "no deleted files");
-    // Modified check depends on timestamps; they may differ.
     assert_eq!(diff.src_file_count, 1);
     assert_eq!(diff.dst_file_count, 1);
+
+    // Two separately-written files legitimately differ in mtime, so this pair
+    // *is* "modified" and the assertion below is deliberately not that it is
+    // unchanged. What matters is the case one line down: after a `sync`, the
+    // trees must actually compare equal. This test used to stop here with the
+    // comment "Modified check depends on timestamps; they may differ", which
+    // is true of the pair above and quietly excused the bug below.
+    let synced = sync("/tmp/ds_a", "/tmp/ds_b", &SyncOptions::default()).expect("sync");
+    assert_eq!(synced.errors.len(), 0, "sync should not error");
+    let after = compare("/tmp/ds_a", "/tmp/ds_b").expect("compare after sync");
+    assert!(
+        after.modified_files.is_empty(),
+        "a sync must converge: {} file(s) still modified afterwards, so every \
+         future sync would copy them again",
+        after.modified_files.len(),
+    );
+    assert_eq!(
+        after.unchanged_files.len(),
+        1,
+        "the synced file must compare unchanged"
+    );
 
     let _ = Vfs::remove("/tmp/ds_a/f.txt");
     let _ = Vfs::remove("/tmp/ds_b/f.txt");

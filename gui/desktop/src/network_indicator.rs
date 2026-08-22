@@ -4,28 +4,32 @@
 //! signal strength, and data transfer rates. Clicking opens a quick-connect
 //! flyout listing available WiFi networks.
 
+use appearance::Palette;
 use guitk::color::Color;
 use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::step;
 use guitk::style::CornerRadii;
 
-// ============================================================================
-// Catppuccin Mocha palette
-// ============================================================================
-
-const BASE: Color = Color::from_hex(0x1E1E2E);
-const MANTLE: Color = Color::from_hex(0x181825);
-const SURFACE0: Color = Color::from_hex(0x313244);
-const SURFACE1: Color = Color::from_hex(0x45475A);
-const TEXT: Color = Color::from_hex(0xCDD6F4);
-const SUBTEXT0: Color = Color::from_hex(0xA6ADC8);
-const BLUE: Color = Color::from_hex(0x89B4FA);
-const GREEN: Color = Color::from_hex(0xA6E3A1);
-const RED: Color = Color::from_hex(0xF38BA8);
-const YELLOW: Color = Color::from_hex(0xF9E2AF);
-const PEACH: Color = Color::from_hex(0xFAB387);
-const LAVENDER: Color = Color::from_hex(0xB4BEFE);
-const OVERLAY0: Color = Color::from_hex(0x6C7086);
+// Colour
+// ------
+//
+// Every colour here is read out of the resolved [`Palette`] the shell hands
+// down, so this indicator follows the light/dark mode and the accent the user
+// chose. Two judgements are baked into which role each site takes.
+//
+// 1. **Exactly one site follows the accent:** the SSID of the network you are
+//    currently on, in the flyout's list. That is the "which of these am I on"
+//    question the accent exists to answer -- the same role the selected power
+//    plan takes in [`crate::power_settings`].
+//
+// 2. **Signal strength is a ladder and stays fixed.** [`SignalStrength::color`]
+//    runs red -> yellow -> green -> blue, and the blue rung is a trap: blue is
+//    also the *default* accent, so `Excellent => p.accent` would look right on
+//    a fresh install and collapse onto the "Good" green the moment a user
+//    picked Green. A ladder whose rungs can collide has stopped measuring. The
+//    five connection types (none red, ethernet green, wifi by signal, VPN
+//    lavender, cellular peach) are categorical for the same reason, and the
+//    airplane-mode peach is a status rather than an invitation.
 
 // ============================================================================
 // Connection type
@@ -114,12 +118,12 @@ impl SignalStrength {
         }
     }
 
-    pub fn color(self) -> Color {
+    pub fn color(self, p: &Palette) -> Color {
         match self {
-            Self::None | Self::Weak => RED,
-            Self::Fair => YELLOW,
-            Self::Good => GREEN,
-            Self::Excellent => BLUE,
+            Self::None | Self::Weak => p.red,
+            Self::Fair => p.yellow,
+            Self::Good => p.green,
+            Self::Excellent => p.blue,
         }
     }
 }
@@ -464,17 +468,17 @@ impl NetworkIndicator {
     // ------------------------------------------------------------------
 
     /// Render the tray icon (compact, ~24x24).
-    pub fn render_icon(&self, x: f32, y: f32) -> Vec<RenderCommand> {
+    pub fn render_icon(&self, p: &Palette, x: f32, y: f32) -> Vec<RenderCommand> {
         let mut cmds = Vec::new();
         let icon_color = if self.state.airplane_mode {
-            OVERLAY0
+            p.overlay0
         } else {
             match self.state.connection_type {
-                ConnectionType::None => RED,
-                ConnectionType::Ethernet => GREEN,
-                ConnectionType::Wifi => self.state.signal.color(),
-                ConnectionType::VPN => LAVENDER,
-                ConnectionType::Cellular => PEACH,
+                ConnectionType::None => p.red,
+                ConnectionType::Ethernet => p.green,
+                ConnectionType::Wifi => self.state.signal.color(p),
+                ConnectionType::VPN => p.lavender,
+                ConnectionType::Cellular => p.peach,
             }
         };
 
@@ -484,7 +488,7 @@ impl NetworkIndicator {
             y,
             width: 24.0,
             height: 24.0,
-            color: SURFACE0,
+            color: p.surface0,
             corner_radii: CornerRadii::all(12.0),
         });
 
@@ -509,7 +513,7 @@ impl NetworkIndicator {
     }
 
     /// Render the WiFi network flyout popup.
-    pub fn render_flyout(&self, x: f32, y: f32, width: f32) -> Vec<RenderCommand> {
+    pub fn render_flyout(&self, p: &Palette, x: f32, y: f32, width: f32) -> Vec<RenderCommand> {
         if !self.flyout_open {
             return Vec::new();
         }
@@ -526,7 +530,7 @@ impl NetworkIndicator {
             y,
             width,
             height,
-            color: BASE,
+            color: p.base,
             corner_radii: CornerRadii::all(8.0),
         });
 
@@ -537,7 +541,7 @@ impl NetworkIndicator {
             y: cy,
             text: self.state.tooltip(),
             font_size: 13.0,
-            color: TEXT,
+            color: p.text,
             font_weight: FontWeightHint::Bold,
             max_width: Some(inner),
             overflow: TextOverflow::Ellipsis,
@@ -554,7 +558,7 @@ impl NetworkIndicator {
                 self.state.rates.tx_formatted()
             ),
             font_size: 11.0,
-            color: SUBTEXT0,
+            color: p.subtext0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(inner),
             overflow: TextOverflow::Ellipsis,
@@ -569,16 +573,16 @@ impl NetworkIndicator {
             "✈ Airplane OFF"
         };
         let airplane_color = if self.state.airplane_mode {
-            PEACH
+            p.peach
         } else {
-            OVERLAY0
+            p.overlay0
         };
         cmds.push(RenderCommand::FillRect {
             x: x + pad,
             y: cy,
             width: inner * 0.48,
             height: 28.0,
-            color: SURFACE0,
+            color: p.surface0,
             corner_radii: CornerRadii::all(6.0),
         });
         cmds.push(RenderCommand::Text {
@@ -598,13 +602,17 @@ impl NetworkIndicator {
         } else {
             "Wi-Fi OFF"
         };
-        let wifi_color = if self.wifi_enabled { GREEN } else { OVERLAY0 };
+        let wifi_color = if self.wifi_enabled {
+            p.green
+        } else {
+            p.overlay0
+        };
         cmds.push(RenderCommand::FillRect {
             x: x + pad + inner * 0.52,
             y: cy,
             width: inner * 0.48,
             height: 28.0,
-            color: SURFACE0,
+            color: p.surface0,
             corner_radii: CornerRadii::all(6.0),
         });
         cmds.push(RenderCommand::Text {
@@ -624,11 +632,11 @@ impl NetworkIndicator {
             for (i, net) in self.wifi_networks.iter().enumerate() {
                 let selected = self.selected_index == Some(i);
                 let bg = if net.connected {
-                    SURFACE0
+                    p.surface0
                 } else if selected {
-                    SURFACE1
+                    p.surface1
                 } else {
-                    MANTLE
+                    p.mantle
                 };
 
                 cmds.push(RenderCommand::FillRect {
@@ -652,7 +660,7 @@ impl NetworkIndicator {
                     y: cy + 4.0,
                     text: format!("{}{}{}", net.ssid, connected_marker, saved_marker),
                     font_size: 13.0,
-                    color: if net.connected { BLUE } else { TEXT },
+                    color: if net.connected { p.accent } else { p.text },
                     font_weight: if net.connected {
                         FontWeightHint::Bold
                     } else {
@@ -671,7 +679,7 @@ impl NetworkIndicator {
                     y: cy + 22.0,
                     text: format!("{} {} ch{}", bars_str, net.security.label(), net.channel),
                     font_size: 11.0,
-                    color: SUBTEXT0,
+                    color: p.subtext0,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(inner - 16.0),
                     overflow: TextOverflow::Ellipsis,
@@ -683,7 +691,7 @@ impl NetworkIndicator {
                     y: cy + 8.0,
                     width: 20.0,
                     height: 20.0,
-                    color: net.signal.color(),
+                    color: net.signal.color(p),
                     corner_radii: CornerRadii::all(10.0),
                 });
 
@@ -719,6 +727,12 @@ mod tests {
     )]
 
     use super::*;
+    use crate::palette_check::assert_drawn_from;
+
+    /// The palette these tests render against: the shell's own dark answer.
+    fn test_palette() -> Palette {
+        Palette::for_mode(false)
+    }
 
     #[test]
     fn connection_type_labels() {
@@ -762,7 +776,7 @@ mod tests {
             SignalStrength::Excellent,
         ] {
             assert!(!s.label().is_empty());
-            let _ = s.color();
+            let _ = s.color(&test_palette());
         }
     }
 
@@ -947,14 +961,14 @@ mod tests {
     #[test]
     fn indicator_render_icon() {
         let ind = NetworkIndicator::new();
-        let cmds = ind.render_icon(0.0, 0.0);
+        let cmds = ind.render_icon(&test_palette(), 0.0, 0.0);
         assert!(!cmds.is_empty());
     }
 
     #[test]
     fn indicator_render_flyout_closed() {
         let ind = NetworkIndicator::new();
-        let cmds = ind.render_flyout(0.0, 0.0, 300.0);
+        let cmds = ind.render_flyout(&test_palette(), 0.0, 0.0, 300.0);
         assert!(cmds.is_empty());
     }
 
@@ -967,7 +981,7 @@ mod tests {
             WifiSecurity::WPA2,
         )]);
         ind.toggle_flyout();
-        let cmds = ind.render_flyout(0.0, 0.0, 300.0);
+        let cmds = ind.render_flyout(&test_palette(), 0.0, 0.0, 300.0);
         assert!(!cmds.is_empty());
     }
 
@@ -1007,5 +1021,317 @@ mod tests {
         assert!(ind.selected_index().is_some());
         ind.toggle_flyout(); // opens, resets selection
         assert!(ind.selected_index().is_none());
+    }
+
+    // --- Palette conversion --------------------------------------------------
+
+    /// An indicator wound to one state, with a scan list to draw.
+    ///
+    /// The list carries a connected network, a saved-but-not-connected one and
+    /// a stranger, because the SSID row colours all three differently and the
+    /// row background distinguishes connected from merely selected.
+    fn wound(state: NetworkState, wifi_on: bool, selected: Option<usize>) -> NetworkIndicator {
+        let mut ind = NetworkIndicator::new();
+        ind.update_state(state);
+        ind.set_wifi_enabled(wifi_on);
+        let mut here = WifiNetwork::new("here", SignalStrength::Excellent, WifiSecurity::WPA3);
+        here.connected = true;
+        here.saved = true;
+        here.channel = 44;
+        let mut known = WifiNetwork::new("known", SignalStrength::Fair, WifiSecurity::WPA2);
+        known.saved = true;
+        known.channel = 6;
+        let stranger = WifiNetwork::new("stranger", SignalStrength::Weak, WifiSecurity::Open);
+        ind.set_wifi_networks(vec![here, known, stranger]);
+        ind.toggle_flyout();
+        for _ in 0..selected.map_or(0, |i| i + 1) {
+            ind.select_next();
+        }
+        ind
+    }
+
+    /// Every state either render can be in, walked in both modes.
+    ///
+    /// A leftover constant is a Mocha value the Latte palette does not contain,
+    /// so the light render names it. Airplane mode and a disabled radio are
+    /// walked because each *removes* rather than recolours: airplane mode
+    /// replaces the tray icon's hue with one grey and the flyout's list with
+    /// nothing, and a disabled radio drops the list alone. A fixture that was
+    /// always connected with the radio on would render neither branch.
+    #[test]
+    fn every_colour_either_render_draws_comes_from_its_palette() {
+        for light in [false, true] {
+            let p = Palette::for_mode(light);
+            for signal in [
+                SignalStrength::None,
+                SignalStrength::Weak,
+                SignalStrength::Fair,
+                SignalStrength::Good,
+                SignalStrength::Excellent,
+            ] {
+                for ct in [
+                    ConnectionType::None,
+                    ConnectionType::Ethernet,
+                    ConnectionType::Wifi,
+                    ConnectionType::VPN,
+                    ConnectionType::Cellular,
+                ] {
+                    for airplane in [false, true] {
+                        for wifi_on in [false, true] {
+                            for selected in [None, Some(0), Some(1)] {
+                                let mut state = NetworkState::wifi("here", "10.0.0.2", signal);
+                                state.connection_type = ct;
+                                state.airplane_mode = airplane;
+                                state.rates.rx_bytes_per_sec = 1_500_000;
+                                state.rates.tx_bytes_per_sec = 96_000;
+                                state.connected_secs = 90_061;
+                                let ind = wound(state, wifi_on, selected);
+                                assert_drawn_from(
+                                    &p,
+                                    &ind.render_icon(&p, 0.0, 0.0),
+                                    &[],
+                                    "network tray icon",
+                                );
+                                for width in [240.0_f32, 300.0, 420.0] {
+                                    let cmds = ind.render_flyout(&p, 0.0, 0.0, width);
+                                    assert_drawn_from(&p, &cmds, &[], "network flyout");
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// The SSID of the network you are on — 13pt, bold, carrying the ✓ marker.
+    fn connected_ssid_colors(cmds: &[RenderCommand]) -> Vec<Color> {
+        cmds.iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text {
+                    text,
+                    color,
+                    font_size: 13.0,
+                    font_weight: FontWeightHint::Bold,
+                    ..
+                } if text.contains('\u{2713}') => Some(*color),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The round signal swatch at the right of every row in the scan list.
+    fn signal_swatch_colors(cmds: &[RenderCommand]) -> Vec<Color> {
+        cmds.iter()
+            .filter_map(|c| match c {
+                RenderCommand::FillRect {
+                    width: 20.0,
+                    height: 20.0,
+                    color,
+                    ..
+                } => Some(*color),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The tray icon's glyph — the only text `render_icon` emits.
+    fn tray_glyph_color(cmds: &[RenderCommand]) -> Vec<Color> {
+        cmds.iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { color, .. } => Some(*color),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The two toggle labels in the flyout — 12pt, regular.
+    fn toggle_label_colors(cmds: &[RenderCommand]) -> Vec<Color> {
+        cmds.iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text {
+                    color,
+                    font_size: 12.0,
+                    font_weight: FontWeightHint::Regular,
+                    ..
+                } => Some(*color),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Exactly one thing here follows the accent, and it is not the signal.
+    ///
+    /// The membership sweep is blind to this: `p.blue` and `p.accent` are both
+    /// legal palette roles, so writing one where the other belongs still draws
+    /// a colour the light palette contains. Only varying the accent separates
+    /// them.
+    #[test]
+    fn only_the_network_you_are_on_follows_the_accent() {
+        let mut blue = Palette::for_mode(false);
+        blue.accent = appearance::BLUE;
+        let mut mauve = Palette::for_mode(false);
+        mauve.accent = appearance::MAUVE;
+
+        let state = NetworkState::wifi("here", "10.0.0.2", SignalStrength::Excellent);
+        let ind = wound(state, true, Some(1));
+        let a = ind.render_flyout(&blue, 0.0, 0.0, 300.0);
+        let b = ind.render_flyout(&mauve, 0.0, 0.0, 300.0);
+
+        // The negative half. Without it every assertion below would also pass
+        // on an indicator that ignored the accent entirely.
+        let ssid = connected_ssid_colors(&a);
+        assert_eq!(
+            ssid.len(),
+            1,
+            "exactly one network is connected in this fixture"
+        );
+        assert_ne!(
+            ssid,
+            connected_ssid_colors(&b),
+            "the connected network's name did not move with the accent"
+        );
+
+        // The positive half, one assertion per site that must not move.
+        let swatches = signal_swatch_colors(&a);
+        assert_eq!(swatches.len(), 3, "one swatch per network in the scan list");
+        assert_eq!(
+            swatches,
+            signal_swatch_colors(&b),
+            "a signal-strength swatch moved with the accent; signal is a \
+             measurement, and its ladder has to stay legible under every accent"
+        );
+
+        // Both toggles have an on colour and an off colour, and only one of
+        // the two is on screen at a time, so *both settings have to be walked*.
+        // A fixture that left airplane mode off renders the off grey twice and
+        // compares it with itself: harness defect PPPP repainted the airplane
+        // *on* peach with the accent and no test noticed, which is what put
+        // this loop here. Whenever a colour is chosen by a boolean, the test
+        // needs the boolean, not just the render.
+        for airplane in [false, true] {
+            for wifi_on in [false, true] {
+                let mut state = NetworkState::wifi("here", "10.0.0.2", SignalStrength::Excellent);
+                state.airplane_mode = airplane;
+                let ind = wound(state, wifi_on, None);
+                let toggles = toggle_label_colors(&ind.render_flyout(&blue, 0.0, 0.0, 300.0));
+                assert_eq!(toggles.len(), 2, "the airplane and Wi-Fi toggles");
+                assert_eq!(
+                    toggles,
+                    toggle_label_colors(&ind.render_flyout(&mauve, 0.0, 0.0, 300.0)),
+                    "a toggle label moved with the accent (airplane={airplane}, \
+                     wifi={wifi_on}); airplane-on and radio-on are statuses, not \
+                     invitations"
+                );
+            }
+        }
+
+        for ct in [
+            ConnectionType::None,
+            ConnectionType::Ethernet,
+            ConnectionType::Wifi,
+            ConnectionType::VPN,
+            ConnectionType::Cellular,
+        ] {
+            let mut state = NetworkState::wifi("here", "10.0.0.2", SignalStrength::Excellent);
+            state.connection_type = ct;
+            let ind = wound(state, true, None);
+            assert_eq!(
+                tray_glyph_color(&ind.render_icon(&blue, 0.0, 0.0)),
+                tray_glyph_color(&ind.render_icon(&mauve, 0.0, 0.0)),
+                "the tray icon for {ct:?} moved with the accent; which kind of \
+                 link you have is a category, not a selection"
+            );
+        }
+    }
+
+    /// Signal strength is a ladder, and its rungs may not collide.
+    ///
+    /// This is the strongest form of the distinctness argument so far: the
+    /// flyout lists *every* visible network with its own swatch, so two rungs
+    /// sharing a colour do not merely confuse a user's memory — they make two
+    /// networks of different strength look identical side by side in one
+    /// glance. The blue rung is the trap: blue is also the default accent, so
+    /// `Excellent => p.accent` looks correct on a fresh install and collapses
+    /// onto the green "Good" rung the moment a user picks Green.
+    #[test]
+    fn signal_strength_stays_a_ladder_under_every_accent() {
+        for light in [false, true] {
+            for accent in [
+                appearance::BLUE,
+                appearance::GREEN,
+                appearance::RED,
+                appearance::YELLOW,
+                appearance::MAUVE,
+            ] {
+                let mut p = Palette::for_mode(light);
+                p.accent = accent;
+
+                let mut seen: Vec<(SignalStrength, Color)> = Vec::new();
+                for s in [
+                    SignalStrength::Weak,
+                    SignalStrength::Fair,
+                    SignalStrength::Good,
+                    SignalStrength::Excellent,
+                ] {
+                    let c = s.color(&p);
+                    if let Some((other, _)) = seen
+                        .iter()
+                        .find(|(_, o)| o.r == c.r && o.g == c.g && o.b == c.b)
+                    {
+                        panic!(
+                            "a {s:?} signal is drawn exactly like a {other:?} one \
+                             (light={light}), so the scan list cannot say which \
+                             network is stronger"
+                        );
+                    }
+                    seen.push((s, c));
+                }
+            }
+        }
+    }
+
+    /// The five kinds of link stay tellable apart in the tray.
+    ///
+    /// Weaker than the ladder above — only one icon is on screen at a time, so
+    /// this is about a code the user has learnt rather than a side-by-side
+    /// comparison. It still has to hold: an icon that is green for Ethernet and
+    /// green for a VPN has stopped saying anything. `Wifi` is excluded because
+    /// it has no colour of its own; it delegates to the signal ladder, which
+    /// legitimately overlaps the other four.
+    #[test]
+    fn the_five_kinds_of_link_stay_distinct_in_both_modes() {
+        for light in [false, true] {
+            for accent in [appearance::BLUE, appearance::GREEN, appearance::MAUVE] {
+                let mut p = Palette::for_mode(light);
+                p.accent = accent;
+
+                let mut seen: Vec<(ConnectionType, Color)> = Vec::new();
+                for ct in [
+                    ConnectionType::None,
+                    ConnectionType::Ethernet,
+                    ConnectionType::VPN,
+                    ConnectionType::Cellular,
+                ] {
+                    let mut state = NetworkState::wifi("here", "10.0.0.2", SignalStrength::Good);
+                    state.connection_type = ct;
+                    let ind = wound(state, true, None);
+                    let cmds = ind.render_icon(&p, 0.0, 0.0);
+                    let c = *tray_glyph_color(&cmds)
+                        .first()
+                        .expect("the tray icon draws exactly one glyph");
+                    if let Some((other, _)) = seen
+                        .iter()
+                        .find(|(_, o)| o.r == c.r && o.g == c.g && o.b == c.b)
+                    {
+                        panic!(
+                            "the tray icon for {ct:?} is drawn exactly like the \
+                             one for {other:?} (light={light})"
+                        );
+                    }
+                    seen.push((ct, c));
+                }
+            }
+        }
     }
 }

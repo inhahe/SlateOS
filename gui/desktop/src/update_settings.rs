@@ -4,27 +4,43 @@
 //! automatic updates, update history, rollback, and active hours during
 //! which the system should not restart.
 
+use appearance::Palette;
 use guitk::color::Color;
 use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::style::CornerRadii;
 
 // ============================================================================
-// Catppuccin Mocha palette
+// Colour
 // ============================================================================
-
-const BASE: Color = Color::from_hex(0x1E1E2E);
-const MANTLE: Color = Color::from_hex(0x181825);
-const SURFACE0: Color = Color::from_hex(0x313244);
-const SURFACE1: Color = Color::from_hex(0x45475A);
-const TEXT: Color = Color::from_hex(0xCDD6F4);
-const SUBTEXT0: Color = Color::from_hex(0xA6ADC8);
-const BLUE: Color = Color::from_hex(0x89B4FA);
-const GREEN: Color = Color::from_hex(0xA6E3A1);
-const RED: Color = Color::from_hex(0xF38BA8);
-const YELLOW: Color = Color::from_hex(0xF9E2AF);
-const PEACH: Color = Color::from_hex(0xFAB387);
-const LAVENDER: Color = Color::from_hex(0xB4BEFE);
-const OVERLAY0: Color = Color::from_hex(0x6C7086);
+//
+// Thirteen Mocha constants used to live here. They are gone; every colour below
+// is a role of the [`Palette`] the caller resolved.
+//
+// **Two accent sites, and they are the same site twice: "you are here".** The
+// active tab's label and the selected schedule's label both mark the one
+// option out of a row that the user is currently on, which is what the accent
+// is for everywhere else in the shell (`notif_pane.rs` states the doctrine).
+// Both were `BLUE`, and blue being the default accent is why they look like
+// they were never converted; the test is what says otherwise.
+//
+// **`UpdateStatus::color` stays categorical, and it is the widest such row in
+// the shell so far** — up-to-date green, checking/downloading blue, available
+// yellow, pending-restart peach, error red. Five kinds of *fact about the
+// system*, not five degrees of interactivity. The blue is the usual trap and
+// its four siblings settle it: an accent that moved "Downloading updates…" and
+// left "Error checking for updates" alone would be saying the two differ in
+// importance rather than in kind. Same for the history ledger's green tick and
+// red cross, and for the peach "some updates require a restart" warning.
+//
+// **The lavender captions are not a role decision so much as a faithful
+// copy.** "Update schedule", "N updates can be rolled back" and the "↩
+// rollback" tag were all lavender; lavender is a palette role in both modes,
+// so they convert directly and keep their meaning as a quiet secondary accent
+// the user did not choose.
+//
+// The "on" toggle stays green rather than becoming the accent — see
+// `known-issues.md`; the shell disagrees with itself about which an on-switch
+// uses, and a conversion is not the place to settle it.
 
 // ============================================================================
 // Update status
@@ -59,13 +75,13 @@ impl UpdateStatus {
         }
     }
 
-    pub fn color(self) -> Color {
+    pub fn color(self, p: &Palette) -> Color {
         match self {
-            Self::UpToDate => GREEN,
-            Self::Checking | Self::Downloading => BLUE,
-            Self::Available => YELLOW,
-            Self::PendingRestart => PEACH,
-            Self::Error => RED,
+            Self::UpToDate => p.green,
+            Self::Checking | Self::Downloading => p.blue,
+            Self::Available => p.yellow,
+            Self::PendingRestart => p.peach,
+            Self::Error => p.red,
         }
     }
 }
@@ -415,7 +431,7 @@ impl UpdateSettingsUI {
 
     const TAB_LABELS: [&'static str; 3] = ["Status", "Schedule", "History"];
 
-    pub fn render(&self, x: f32, y: f32, width: f32) -> Vec<RenderCommand> {
+    pub fn render(&self, p: &Palette, x: f32, y: f32, width: f32) -> Vec<RenderCommand> {
         let mut cmds = Vec::new();
         let pad = 16.0_f32;
         let inner = width - 2.0 * pad;
@@ -426,7 +442,7 @@ impl UpdateSettingsUI {
             y,
             width,
             height: 800.0,
-            color: BASE,
+            color: p.base,
             corner_radii: CornerRadii::all(8.0),
         });
 
@@ -436,7 +452,7 @@ impl UpdateSettingsUI {
             y: cy,
             text: "System Updates".into(),
             font_size: 20.0,
-            color: TEXT,
+            color: p.text,
             font_weight: FontWeightHint::Bold,
             max_width: Some(inner),
             overflow: TextOverflow::Ellipsis,
@@ -452,7 +468,7 @@ impl UpdateSettingsUI {
                 self.settings.os_version, self.settings.os_build
             ),
             font_size: 12.0,
-            color: OVERLAY0,
+            color: p.overlay0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(inner),
             overflow: TextOverflow::Ellipsis,
@@ -466,7 +482,7 @@ impl UpdateSettingsUI {
             y: cy,
             width: inner,
             height: 36.0,
-            color: MANTLE,
+            color: p.mantle,
             corner_radii: CornerRadii::all(6.0),
         });
         cmds.push(RenderCommand::Text {
@@ -474,7 +490,7 @@ impl UpdateSettingsUI {
             y: cy + 10.0,
             text: status.label().into(),
             font_size: 14.0,
-            color: status.color(),
+            color: status.color(p),
             font_weight: FontWeightHint::Bold,
             max_width: Some(inner - 24.0),
             overflow: TextOverflow::Ellipsis,
@@ -488,7 +504,7 @@ impl UpdateSettingsUI {
                 y: cy,
                 text: "⏸ Updates are paused".into(),
                 font_size: 12.0,
-                color: YELLOW,
+                color: p.yellow,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(inner),
                 overflow: TextOverflow::Ellipsis,
@@ -506,7 +522,7 @@ impl UpdateSettingsUI {
                 y: cy,
                 width: tab_w - 2.0,
                 height: 30.0,
-                color: if active { SURFACE0 } else { MANTLE },
+                color: if active { p.surface0 } else { p.mantle },
                 corner_radii: CornerRadii::all(6.0),
             });
             cmds.push(RenderCommand::Text {
@@ -514,7 +530,7 @@ impl UpdateSettingsUI {
                 y: cy + 8.0,
                 text: (*label).into(),
                 font_size: 12.0,
-                color: if active { BLUE } else { SUBTEXT0 },
+                color: if active { p.accent } else { p.subtext0 },
                 font_weight: if active {
                     FontWeightHint::Bold
                 } else {
@@ -527,23 +543,30 @@ impl UpdateSettingsUI {
         cy += 38.0;
 
         match self.active_tab {
-            0 => self.render_status_tab(&mut cmds, x + pad, cy, inner),
-            1 => self.render_schedule_tab(&mut cmds, x + pad, cy, inner),
-            2 => self.render_history_tab(&mut cmds, x + pad, cy, inner),
+            0 => self.render_status_tab(p, &mut cmds, x + pad, cy, inner),
+            1 => self.render_schedule_tab(p, &mut cmds, x + pad, cy, inner),
+            2 => self.render_history_tab(p, &mut cmds, x + pad, cy, inner),
             _ => {}
         }
 
         cmds
     }
 
-    fn render_status_tab(&self, cmds: &mut Vec<RenderCommand>, x: f32, mut y: f32, width: f32) {
+    fn render_status_tab(
+        &self,
+        p: &Palette,
+        cmds: &mut Vec<RenderCommand>,
+        x: f32,
+        mut y: f32,
+        width: f32,
+    ) {
         if self.settings.available.is_empty() {
             cmds.push(RenderCommand::Text {
                 x,
                 y,
                 text: "No updates available.".into(),
                 font_size: 13.0,
-                color: OVERLAY0,
+                color: p.overlay0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(width),
                 overflow: TextOverflow::Ellipsis,
@@ -561,7 +584,7 @@ impl UpdateSettingsUI {
                 format_size(self.settings.selected_size())
             ),
             font_size: 13.0,
-            color: TEXT,
+            color: p.text,
             font_weight: FontWeightHint::Bold,
             max_width: Some(width),
             overflow: TextOverflow::Ellipsis,
@@ -569,7 +592,7 @@ impl UpdateSettingsUI {
         y += 24.0;
 
         for upd in &self.settings.available {
-            let bg = if upd.selected { SURFACE0 } else { MANTLE };
+            let bg = if upd.selected { p.surface0 } else { p.mantle };
             cmds.push(RenderCommand::FillRect {
                 x,
                 y,
@@ -590,7 +613,7 @@ impl UpdateSettingsUI {
                     upd.version
                 ),
                 font_size: 13.0,
-                color: TEXT,
+                color: p.text,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(width - 16.0),
                 overflow: TextOverflow::Ellipsis,
@@ -610,7 +633,7 @@ impl UpdateSettingsUI {
                     restart_tag
                 ),
                 font_size: 11.0,
-                color: SUBTEXT0,
+                color: p.subtext0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(width - 36.0),
                 overflow: TextOverflow::Ellipsis,
@@ -625,7 +648,7 @@ impl UpdateSettingsUI {
                 y,
                 text: "⚠ Some updates require a restart to complete".into(),
                 font_size: 12.0,
-                color: PEACH,
+                color: p.peach,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(width),
                 overflow: TextOverflow::Ellipsis,
@@ -633,7 +656,14 @@ impl UpdateSettingsUI {
         }
     }
 
-    fn render_schedule_tab(&self, cmds: &mut Vec<RenderCommand>, x: f32, mut y: f32, width: f32) {
+    fn render_schedule_tab(
+        &self,
+        p: &Palette,
+        cmds: &mut Vec<RenderCommand>,
+        x: f32,
+        mut y: f32,
+        width: f32,
+    ) {
         let cfg = &self.settings.config;
 
         cmds.push(RenderCommand::Text {
@@ -641,7 +671,7 @@ impl UpdateSettingsUI {
             y,
             text: "Update schedule".into(),
             font_size: 14.0,
-            color: LAVENDER,
+            color: p.lavender,
             font_weight: FontWeightHint::Bold,
             max_width: Some(width),
             overflow: TextOverflow::Ellipsis,
@@ -655,7 +685,7 @@ impl UpdateSettingsUI {
                 y,
                 width,
                 height: 28.0,
-                color: if active { SURFACE0 } else { MANTLE },
+                color: if active { p.surface0 } else { p.mantle },
                 corner_radii: CornerRadii::all(4.0),
             });
             let indicator = if active { "● " } else { "○ " };
@@ -664,7 +694,7 @@ impl UpdateSettingsUI {
                 y: y + 6.0,
                 text: format!("{}{}", indicator, sched.label()),
                 font_size: 13.0,
-                color: if active { BLUE } else { TEXT },
+                color: if active { p.accent } else { p.text },
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(width - 16.0),
                 overflow: TextOverflow::Ellipsis,
@@ -674,6 +704,7 @@ impl UpdateSettingsUI {
 
         y += 8.0;
         Self::render_kv(
+            p,
             cmds,
             x,
             y,
@@ -686,6 +717,7 @@ impl UpdateSettingsUI {
         );
         y += 24.0;
         Self::render_toggle(
+            p,
             cmds,
             x,
             y,
@@ -695,6 +727,7 @@ impl UpdateSettingsUI {
         );
         y += 28.0;
         Self::render_toggle(
+            p,
             cmds,
             x,
             y,
@@ -704,6 +737,7 @@ impl UpdateSettingsUI {
         );
         y += 28.0;
         Self::render_toggle(
+            p,
             cmds,
             x,
             y,
@@ -713,6 +747,7 @@ impl UpdateSettingsUI {
         );
         y += 28.0;
         Self::render_toggle(
+            p,
             cmds,
             x,
             y,
@@ -724,6 +759,7 @@ impl UpdateSettingsUI {
 
         if cfg.defer_features_weeks > 0 {
             Self::render_kv(
+                p,
                 cmds,
                 x,
                 y,
@@ -735,6 +771,7 @@ impl UpdateSettingsUI {
         }
         if cfg.defer_security_days > 0 {
             Self::render_kv(
+                p,
                 cmds,
                 x,
                 y,
@@ -745,14 +782,21 @@ impl UpdateSettingsUI {
         }
     }
 
-    fn render_history_tab(&self, cmds: &mut Vec<RenderCommand>, x: f32, mut y: f32, width: f32) {
+    fn render_history_tab(
+        &self,
+        p: &Palette,
+        cmds: &mut Vec<RenderCommand>,
+        x: f32,
+        mut y: f32,
+        width: f32,
+    ) {
         if self.settings.history.is_empty() {
             cmds.push(RenderCommand::Text {
                 x,
                 y,
                 text: "No update history.".into(),
                 font_size: 13.0,
-                color: OVERLAY0,
+                color: p.overlay0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(width),
                 overflow: TextOverflow::Ellipsis,
@@ -767,7 +811,7 @@ impl UpdateSettingsUI {
                 y,
                 text: format!("{} updates can be rolled back", rollbacks),
                 font_size: 12.0,
-                color: LAVENDER,
+                color: p.lavender,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(width),
                 overflow: TextOverflow::Ellipsis,
@@ -777,13 +821,13 @@ impl UpdateSettingsUI {
 
         for entry in self.settings.history.iter().rev().take(20) {
             let status_icon = if entry.success { "✓" } else { "✕" };
-            let color = if entry.success { GREEN } else { RED };
+            let color = if entry.success { p.green } else { p.red };
             cmds.push(RenderCommand::FillRect {
                 x,
                 y,
                 width,
                 height: 32.0,
-                color: MANTLE,
+                color: p.mantle,
                 corner_radii: CornerRadii::all(4.0),
             });
             cmds.push(RenderCommand::Text {
@@ -812,7 +856,7 @@ impl UpdateSettingsUI {
                 y: y + 4.0,
                 text: rollback_tag.into(),
                 font_size: 11.0,
-                color: LAVENDER,
+                color: p.lavender,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(width * 0.25),
                 overflow: TextOverflow::Ellipsis,
@@ -823,7 +867,7 @@ impl UpdateSettingsUI {
                     y: y + 18.0,
                     text: err.clone(),
                     font_size: 10.0,
-                    color: RED,
+                    color: p.red,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(width - 36.0),
                     overflow: TextOverflow::Ellipsis,
@@ -833,13 +877,21 @@ impl UpdateSettingsUI {
         }
     }
 
-    fn render_kv(cmds: &mut Vec<RenderCommand>, x: f32, y: f32, width: f32, key: &str, val: &str) {
+    fn render_kv(
+        p: &Palette,
+        cmds: &mut Vec<RenderCommand>,
+        x: f32,
+        y: f32,
+        width: f32,
+        key: &str,
+        val: &str,
+    ) {
         cmds.push(RenderCommand::Text {
             x: x + 8.0,
             y,
             text: key.into(),
             font_size: 13.0,
-            color: SUBTEXT0,
+            color: p.subtext0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(width * 0.5),
             overflow: TextOverflow::Ellipsis,
@@ -849,7 +901,7 @@ impl UpdateSettingsUI {
             y,
             text: val.into(),
             font_size: 13.0,
-            color: TEXT,
+            color: p.text,
             font_weight: FontWeightHint::Regular,
             max_width: Some(width * 0.4),
             overflow: TextOverflow::Ellipsis,
@@ -857,6 +909,7 @@ impl UpdateSettingsUI {
     }
 
     fn render_toggle(
+        p: &Palette,
         cmds: &mut Vec<RenderCommand>,
         x: f32,
         y: f32,
@@ -869,13 +922,13 @@ impl UpdateSettingsUI {
             y,
             text: label.into(),
             font_size: 13.0,
-            color: SUBTEXT0,
+            color: p.subtext0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(width * 0.65),
             overflow: TextOverflow::Ellipsis,
         });
         let tx = x + width - 48.0;
-        let bg = if on { GREEN } else { SURFACE1 };
+        let bg = if on { p.green } else { p.surface1 };
         cmds.push(RenderCommand::FillRect {
             x: tx,
             y,
@@ -890,7 +943,7 @@ impl UpdateSettingsUI {
             y: y + 2.0,
             width: 16.0,
             height: 16.0,
-            color: TEXT,
+            color: p.text,
             corner_radii: CornerRadii::all(8.0),
         });
     }
@@ -920,6 +973,12 @@ mod tests {
     )]
 
     use super::*;
+    use crate::palette_check;
+
+    /// The dark palette, which is what every deleted constant used to hold.
+    fn test_palette() -> Palette {
+        Palette::for_mode(false)
+    }
 
     #[test]
     fn update_status_labels() {
@@ -932,7 +991,7 @@ mod tests {
             UpdateStatus::Error,
         ] {
             assert!(!s.label().is_empty());
-            let _ = s.color();
+            let _ = s.color(&test_palette());
         }
     }
 
@@ -1140,7 +1199,7 @@ mod tests {
     #[test]
     fn ui_render_produces_commands() {
         let ui = UpdateSettingsUI::new();
-        let cmds = ui.render(0.0, 0.0, 500.0);
+        let cmds = ui.render(&test_palette(), 0.0, 0.0, 500.0);
         assert!(!cmds.is_empty());
     }
 
@@ -1149,7 +1208,7 @@ mod tests {
         let mut ui = UpdateSettingsUI::new();
         for i in 0..3 {
             ui.set_active_tab(i);
-            let cmds = ui.render(0.0, 0.0, 500.0);
+            let cmds = ui.render(&test_palette(), 0.0, 0.0, 500.0);
             assert!(!cmds.is_empty());
         }
     }
@@ -1164,7 +1223,7 @@ mod tests {
             5_000_000,
             "1.0.1",
         ));
-        let cmds = ui.render(0.0, 0.0, 500.0);
+        let cmds = ui.render(&test_palette(), 0.0, 0.0, 500.0);
         let has_update = cmds.iter().any(
             |c| matches!(c, RenderCommand::Text { text, .. } if text.contains("Security Patch")),
         );
@@ -1175,7 +1234,7 @@ mod tests {
     fn ui_render_paused() {
         let mut ui = UpdateSettingsUI::new();
         ui.settings_mut().config.paused_until_secs = 99999;
-        let cmds = ui.render(0.0, 0.0, 500.0);
+        let cmds = ui.render(&test_palette(), 0.0, 0.0, 500.0);
         let has_paused = cmds
             .iter()
             .any(|c| matches!(c, RenderCommand::Text { text, .. } if text.contains("paused")));
@@ -1195,7 +1254,7 @@ mod tests {
             rollback_available: false,
         });
         ui.set_active_tab(2);
-        let cmds = ui.render(0.0, 0.0, 500.0);
+        let cmds = ui.render(&test_palette(), 0.0, 0.0, 500.0);
         let has_hist = cmds
             .iter()
             .any(|c| matches!(c, RenderCommand::Text { text, .. } if text.contains("Old Patch")));
@@ -1214,5 +1273,284 @@ mod tests {
         assert!(u.requires_restart);
         let u2 = AvailableUpdate::new("u2", "App", UpdateKind::Application, 100, "1.0");
         assert!(!u2.requires_restart);
+    }
+
+    // --- Palette conversion --------------------------------------------------
+
+    const ALL_STATUSES: [UpdateStatus; 6] = [
+        UpdateStatus::UpToDate,
+        UpdateStatus::Checking,
+        UpdateStatus::Available,
+        UpdateStatus::Downloading,
+        UpdateStatus::PendingRestart,
+        UpdateStatus::Error,
+    ];
+
+    /// A panel wound into a state that reaches every colour branch at once.
+    ///
+    /// The three tabs draw disjoint sets of colours and only one is rendered
+    /// per call, so the sweep below iterates tabs rather than this fixture
+    /// covering them. What the fixture covers is everything *within* a tab:
+    /// five update kinds with the selection alternating (so both the selected
+    /// and unselected row backgrounds appear), a selected update that requires
+    /// a restart (the peach warning), and a history holding both a success and
+    /// a failure, the failure carrying an error message and the success
+    /// offering a rollback (the red caption and the two lavender captions).
+    fn wound_ui(
+        status: UpdateStatus,
+        tab: usize,
+        paused: bool,
+        populated: bool,
+    ) -> UpdateSettingsUI {
+        let mut ui = UpdateSettingsUI::new();
+        ui.set_active_tab(tab);
+        {
+            let s = ui.settings_mut();
+            s.status = status;
+            s.config.paused_until_secs = u64::from(paused);
+            s.config.defer_features_weeks = 2;
+            s.config.defer_security_days = 3;
+            s.config.auto_restart = true;
+            s.config.include_drivers = false;
+            s.config.include_features = true;
+            s.config.defer_on_metered = false;
+        }
+        if !populated {
+            return ui;
+        }
+        let kinds = [
+            UpdateKind::System,
+            UpdateKind::Security,
+            UpdateKind::Application,
+            UpdateKind::Driver,
+            UpdateKind::Feature,
+        ];
+        for (i, kind) in kinds.iter().enumerate() {
+            let mut u = AvailableUpdate::new(
+                &format!("u{i}"),
+                &format!("Update {i}"),
+                *kind,
+                1024 * (i as u64 + 1),
+                "1.0",
+            );
+            u.selected = i % 2 == 0;
+            u.requires_restart = i == 0;
+            ui.settings_mut().add_available(u);
+        }
+        // `add_available` forces the status to `Available`; put back the one the
+        // caller asked for, or five of the six statuses would go untested on the
+        // Status tab.
+        ui.settings_mut().status = status;
+        for (i, success) in [true, false, true].iter().enumerate() {
+            ui.settings_mut().add_history(UpdateHistoryEntry {
+                title: format!("Installed {i}"),
+                kind: kinds[i],
+                version: "1.0".into(),
+                installed_at_secs: 1000 + i as u64,
+                success: *success,
+                error_msg: if *success {
+                    None
+                } else {
+                    Some("disk full".into())
+                },
+                rollback_available: i == 0,
+            });
+        }
+        ui
+    }
+
+    /// Every colour this panel draws is a role of the palette it was handed.
+    ///
+    /// Thirteen Mocha constants used to live at the top of this file. The way
+    /// their deletion fails is that one substitution is missed, which still
+    /// compiles and still draws the colour it always drew. Rendering under the
+    /// *light* palette is what makes that visible: a leftover constant is a
+    /// dark value Latte does not contain, so it names itself.
+    #[test]
+    fn every_colour_the_panel_draws_comes_from_its_palette() {
+        for light in [false, true] {
+            let p = Palette::for_mode(light);
+            for status in ALL_STATUSES {
+                for tab in 0..3_usize {
+                    for paused in [false, true] {
+                        // The empty branches are separate colours: each tab
+                        // draws an `overlay0` "nothing here" caption instead of
+                        // its list, and a fixture that always has data would
+                        // never render one.
+                        for populated in [false, true] {
+                            let ui = wound_ui(status, tab, paused, populated);
+                            let cmds = ui.render(&p, 0.0, 0.0, 500.0);
+                            palette_check::assert_drawn_from(&p, &cmds, &[], "update_settings");
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Every colour that says *what state the machine or an update is in*.
+    ///
+    /// The status banner's caption (14pt bold), the history ledger's tick and
+    /// cross rows (12pt) and a failure's error message (10pt) — all
+    /// categorical, none of them the accent's to move.
+    fn status_colors(cmds: &[RenderCommand]) -> Vec<Color> {
+        cmds.iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text {
+                    font_size: 14.0,
+                    font_weight: FontWeightHint::Bold,
+                    text,
+                    color,
+                    ..
+                } if ALL_STATUSES.iter().any(|s| s.label() == text) => Some(*color),
+                RenderCommand::Text {
+                    font_size: 10.0,
+                    color,
+                    ..
+                } => Some(*color),
+                RenderCommand::Text {
+                    font_size: 12.0,
+                    text,
+                    color,
+                    ..
+                } if text.starts_with('\u{2713}') || text.starts_with('\u{2715}') => Some(*color),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The active tab's label — the only bold 12pt text carrying a tab name.
+    fn active_tab_label_colors(cmds: &[RenderCommand]) -> Vec<Color> {
+        cmds.iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text {
+                    font_size: 12.0,
+                    font_weight: FontWeightHint::Bold,
+                    text,
+                    color,
+                    ..
+                } if UpdateSettingsUI::TAB_LABELS.contains(&text.as_str()) => Some(*color),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The chosen schedule's label — the 13pt row whose bullet is filled.
+    fn selected_schedule_label_colors(cmds: &[RenderCommand]) -> Vec<Color> {
+        cmds.iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text {
+                    font_size: 13.0,
+                    text,
+                    color,
+                    ..
+                } if text.starts_with('\u{25CF}') => Some(*color),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// What an update is doing is not the accent's to repaint.
+    ///
+    /// The membership sweep above cannot see this. A wrong *role* is a member
+    /// of both palettes, so writing `p.accent` where `p.blue` belongs passes in
+    /// light mode exactly as in dark; only a second render under a different
+    /// accent separates the two.
+    ///
+    /// **There is one `assert_ne!` per accent site, and that is not a stylistic
+    /// choice.** An `assert_ne!` over a *combined* vector of accent sites
+    /// proves only that *at least one* of them moved, so a still-moving site
+    /// masks a frozen one — which is exactly how `bluetooth.rs`'s first draft
+    /// missed harness defect FFF. This panel has two accent sites and therefore
+    /// two negative assertions.
+    #[test]
+    fn an_updates_status_colours_do_not_follow_the_accent() {
+        let mut blue = Palette::for_mode(false);
+        blue.accent = appearance::BLUE;
+        let mut mauve = Palette::for_mode(false);
+        mauve.accent = appearance::MAUVE;
+
+        // Negative half, site 1: the active tab label, drawn on every tab.
+        for tab in 0..3_usize {
+            let ui = wound_ui(UpdateStatus::Available, tab, false, true);
+            let label_blue = active_tab_label_colors(&ui.render(&blue, 0.0, 0.0, 500.0));
+            assert_eq!(label_blue.len(), 1, "tab {tab} has no single active label");
+            assert_ne!(
+                label_blue,
+                active_tab_label_colors(&ui.render(&mauve, 0.0, 0.0, 500.0)),
+                "the active tab's label did not move with the accent, so the \
+                 rest of this test would pass on a panel that ignored the accent"
+            );
+        }
+
+        // Negative half, site 2: the chosen schedule's label, Schedule tab only.
+        let sched = wound_ui(UpdateStatus::Available, 1, false, true);
+        let sched_blue = selected_schedule_label_colors(&sched.render(&blue, 0.0, 0.0, 500.0));
+        assert_eq!(
+            sched_blue.len(),
+            1,
+            "exactly one schedule should be marked chosen"
+        );
+        assert_ne!(
+            sched_blue,
+            selected_schedule_label_colors(&sched.render(&mauve, 0.0, 0.0, 500.0)),
+            "the chosen schedule's label did not move with the accent"
+        );
+
+        // Positive half: nothing categorical moved, on any tab, in any status.
+        for status in ALL_STATUSES {
+            for tab in 0..3_usize {
+                let ui = wound_ui(status, tab, false, true);
+                let under_blue = status_colors(&ui.render(&blue, 0.0, 0.0, 500.0));
+                let under_mauve = status_colors(&ui.render(&mauve, 0.0, 0.0, 500.0));
+                assert!(
+                    !under_blue.is_empty(),
+                    "tab {tab} drew no status colours, so nothing was checked"
+                );
+                assert_eq!(
+                    under_blue, under_mauve,
+                    "an update status, a history outcome or an error message \
+                     moved with the accent on tab {tab}. Those say what the \
+                     machine is doing, the way a risk level does; a mauve \
+                     accent says nothing about what \"downloading\" means."
+                );
+            }
+        }
+    }
+
+    /// The six update statuses have to stay tellable apart under every accent.
+    ///
+    /// Same argument as `bluetooth.rs`'s scan button: were any of these written
+    /// as `p.accent` it would collide with whichever sibling the user's accent
+    /// happens to equal — and green, blue, yellow, peach and red are all among
+    /// the fourteen accents that can be picked.
+    #[test]
+    fn the_update_statuses_stay_distinct_in_both_modes() {
+        for light in [false, true] {
+            for accent in [
+                appearance::BLUE,
+                appearance::GREEN,
+                appearance::PEACH,
+                appearance::MAUVE,
+            ] {
+                let mut p = Palette::for_mode(light);
+                p.accent = accent;
+                let mut seen: Vec<Color> = Vec::new();
+                for status in ALL_STATUSES {
+                    // Checking and Downloading share a colour by design; every
+                    // other pair must differ.
+                    if status == UpdateStatus::Downloading {
+                        continue;
+                    }
+                    let c = status.color(&p);
+                    assert!(
+                        !seen.iter().any(|s| s.r == c.r && s.g == c.g && s.b == c.b),
+                        "{status:?} repeats a colour already used by another \
+                         status (light={light})"
+                    );
+                    seen.push(c);
+                }
+            }
+        }
     }
 }

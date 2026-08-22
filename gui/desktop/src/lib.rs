@@ -91,6 +91,12 @@ pub mod datetime_settings;
 pub mod default_apps;
 pub mod device_settings;
 pub mod display_settings;
+/// The sweep that proves a module draws nothing that is immediately erased.
+///
+/// Test-only, like [`palette_check`]: it exists to check the other modules'
+/// render output, and a release build has nothing to check.
+#[cfg(test)]
+pub mod draw_check;
 pub mod file_drop;
 pub mod focus_assist;
 pub mod hotkeys;

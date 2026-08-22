@@ -3,6 +3,7 @@
 //! Manages applications that run automatically at login, including
 //! startup delay, impact assessment, and per-app enable/disable control.
 
+use appearance::{Palette, readable_on};
 use guitk::color::Color;
 use guitk::idseq::IdSeq;
 use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
@@ -10,22 +11,54 @@ use guitk::style::CornerRadii;
 use guitk::text;
 
 // ============================================================================
-// Catppuccin Mocha palette
+// Colour
 // ============================================================================
-
-const BASE: Color = Color::from_hex(0x1E1E2E);
-const CRUST: Color = Color::from_hex(0x11111B);
-const SURFACE0: Color = Color::from_hex(0x313244);
-const SURFACE1: Color = Color::from_hex(0x45475A);
-const SURFACE2: Color = Color::from_hex(0x585B70);
-const TEXT: Color = Color::from_hex(0xCDD6F4);
-const SUBTEXT0: Color = Color::from_hex(0xA6ADC8);
-const BLUE: Color = Color::from_hex(0x89B4FA);
-const GREEN: Color = Color::from_hex(0xA6E3A1);
-const RED: Color = Color::from_hex(0xF38BA8);
-const YELLOW: Color = Color::from_hex(0xF9E2AF);
-const LAVENDER: Color = Color::from_hex(0xB4BEFE);
-const OVERLAY0: Color = Color::from_hex(0x6C7086);
+//
+// This panel draws no colour of its own: every one comes from the `Palette`
+// threaded through `render`. Three judgements decide which role each site got.
+//
+// **Five sites follow the user's accent**, because each marks a position you
+// can move or an invitation you can take: the active tab's pill, the per-entry
+// enable switch in the apps list, and the three switches on the boot tab
+// (measure boot time, fast startup, auto-disable failing apps).
+//
+// The three boot-tab switches and the per-entry switch were a hardcoded green
+// before the conversion, which made this module the only one of the shell's
+// settings panels whose switches did not follow the accent. Note that mapping
+// them to `p.green` would have been just as much of a choice as mapping them to
+// `p.accent` — a hardcoded Mocha hex has no role until someone assigns one, so
+// there is no "leave it alone" option here. `p.accent` is the answer the rest
+// of the desktop already gives, and it is also the safer one *within this
+// module*: the apps list draws the enable switch and the impact badge on the
+// same row, and the impact scale's lowest rung is green, so a green switch
+// collides with a "None" badge on a stock install. Following the accent moves
+// that collision from "always" to "only for a user who picks Green".
+//
+// **Three scales stay put under every accent**, because each reports a fact
+// about the machine rather than a choice the user made:
+//
+//   * `StartupImpact::color` — green/yellow/red/grey. Note it is five variants
+//     over four colours: `None` and `Low` are both green, deliberately, since
+//     the colour is a three-band traffic light laid over a five-value label.
+//     Distinctness is therefore a claim about the bands, not the variants.
+//   * `boot_time_color` — the last boot reading, banded at 10s and 30s. A
+//     measurement is never an invitation.
+//   * The failure badge and the high-impact banner, both red: an error is a
+//     category, and on a Red desktop an accented error would be unreadable as
+//     an error.
+//
+// **Three labels are chosen from the fill beneath them**, not fixed: the
+// active tab's label is `p.on_accent()`, and the impact badge's and failure
+// badge's labels are `readable_on` of their own categorical fills. The impact
+// badge is the one that was actually *wrong* rather than merely fragile — its
+// label was a hardcoded near-black, which on the grey `NotMeasured` fill is
+// poor contrast in dark mode and does not improve in light.
+//
+// The switch knobs remain `p.text` on the pill. That is low contrast when the
+// pill is a pale accent, but it is the convention in all forty-nine shell
+// modules and is tracked as a single cross-module sweep in `known-issues.md`
+// (`TD-C-SWITCH-KNOBS-ARE-LOW-CONTRAST-ON-THE-ON-PILL`); fixing it here alone
+// would make this panel inconsistent with every other one.
 
 // ============================================================================
 // Startup impact
@@ -57,13 +90,18 @@ impl StartupImpact {
         }
     }
 
-    fn color(self) -> Color {
+    /// The badge colour for this impact level.
+    ///
+    /// Five variants, four colours: `None` and `Low` share green because the
+    /// colour is a three-band traffic light (fine / slow / bad, plus grey for
+    /// unmeasured) laid over a finer-grained label. Any test asserting these
+    /// stay distinct must therefore compare the bands and not the variants.
+    fn color(self, p: &Palette) -> Color {
         match self {
-            Self::None => GREEN,
-            Self::Low => GREEN,
-            Self::Medium => YELLOW,
-            Self::High => RED,
-            Self::NotMeasured => OVERLAY0,
+            Self::None | Self::Low => p.green,
+            Self::Medium => p.yellow,
+            Self::High => p.red,
+            Self::NotMeasured => p.overlay0,
         }
     }
 
@@ -432,6 +470,21 @@ impl Default for StartupSettings {
 // UI
 // ============================================================================
 
+/// The colour a last-boot reading of `ms` is drawn in.
+///
+/// A measurement, not a choice, so it does not follow the accent: a boot that
+/// took forty seconds is red on a red desktop and red on a green one. The
+/// bands are ten and thirty seconds.
+fn boot_time_color(ms: u64, p: &Palette) -> Color {
+    if ms < 10_000 {
+        p.green
+    } else if ms < 30_000 {
+        p.yellow
+    } else {
+        p.red
+    }
+}
+
 /// Active tab in the startup settings UI.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum StartupTab {
@@ -514,7 +567,7 @@ impl StartupSettingsUI {
         entries
     }
 
-    pub fn render(&self, width: f32, height: f32) -> Vec<RenderCommand> {
+    pub fn render(&self, p: &Palette, width: f32, height: f32) -> Vec<RenderCommand> {
         let mut cmds = Vec::new();
 
         // Background
@@ -523,7 +576,7 @@ impl StartupSettingsUI {
             y: 0.0,
             width,
             height,
-            color: BASE,
+            color: p.base,
             corner_radii: CornerRadii::all(8.0),
         });
 
@@ -533,7 +586,7 @@ impl StartupSettingsUI {
             y: 24.0,
             text: "Startup Apps".into(),
             font_size: 22.0,
-            color: TEXT,
+            color: p.text,
             font_weight: FontWeightHint::Bold,
             max_width: Some(width - 48.0),
             overflow: TextOverflow::Ellipsis,
@@ -550,7 +603,7 @@ impl StartupSettingsUI {
                 self.settings.disabled_count(),
             ),
             font_size: 12.0,
-            color: SUBTEXT0,
+            color: p.subtext0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(width - 48.0),
             overflow: TextOverflow::Ellipsis,
@@ -568,7 +621,7 @@ impl StartupSettingsUI {
                 y: tab_y,
                 width: tw,
                 height: 32.0,
-                color: if active { BLUE } else { SURFACE0 },
+                color: if active { p.accent } else { p.surface0 },
                 corner_radii: CornerRadii::all(6.0),
             });
             cmds.push(RenderCommand::Text {
@@ -576,7 +629,7 @@ impl StartupSettingsUI {
                 y: tab_y + 8.0,
                 text: tab.label().into(),
                 font_size: 13.0,
-                color: if active { CRUST } else { SUBTEXT0 },
+                color: if active { p.on_accent() } else { p.subtext0 },
                 font_weight: if active {
                     FontWeightHint::Bold
                 } else {
@@ -592,8 +645,10 @@ impl StartupSettingsUI {
         let cw = width - 48.0;
 
         match self.active_tab {
-            StartupTab::Apps => self.render_apps_tab(&mut cmds, 24.0, cy, cw, height - cy - 16.0),
-            StartupTab::Boot => self.render_boot_tab(&mut cmds, 24.0, cy, cw),
+            StartupTab::Apps => {
+                self.render_apps_tab(p, &mut cmds, 24.0, cy, cw, height - cy - 16.0);
+            }
+            StartupTab::Boot => self.render_boot_tab(p, &mut cmds, 24.0, cy, cw),
         }
 
         cmds
@@ -601,6 +656,7 @@ impl StartupSettingsUI {
 
     fn render_apps_tab(
         &self,
+        p: &Palette,
         cmds: &mut Vec<RenderCommand>,
         x: f32,
         y: f32,
@@ -615,7 +671,7 @@ impl StartupSettingsUI {
             y: cy,
             width,
             height: 30.0,
-            color: SURFACE0,
+            color: p.surface0,
             corner_radii: CornerRadii::all(6.0),
         });
         let filter_text = if self.filter.is_empty() {
@@ -629,9 +685,9 @@ impl StartupSettingsUI {
             text: filter_text,
             font_size: 13.0,
             color: if self.filter.is_empty() {
-                OVERLAY0
+                p.overlay0
             } else {
-                TEXT
+                p.text
             },
             font_weight: FontWeightHint::Regular,
             max_width: Some(width - 20.0),
@@ -645,7 +701,7 @@ impl StartupSettingsUI {
             y: cy,
             text: format!("Sort: {}", self.sort.label()),
             font_size: 11.0,
-            color: OVERLAY0,
+            color: p.overlay0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(200.0),
             overflow: TextOverflow::Ellipsis,
@@ -660,7 +716,7 @@ impl StartupSettingsUI {
                 y: cy,
                 width,
                 height: 28.0,
-                color: Color::rgba(RED.r, RED.g, RED.b, 40),
+                color: Color::rgba(p.red.r, p.red.g, p.red.b, 40),
                 corner_radii: CornerRadii::all(6.0),
             });
             cmds.push(RenderCommand::Text {
@@ -671,7 +727,7 @@ impl StartupSettingsUI {
                     high_impact.len()
                 ),
                 font_size: 12.0,
-                color: RED,
+                color: p.red,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(width - 20.0),
                 overflow: TextOverflow::Ellipsis,
@@ -687,7 +743,7 @@ impl StartupSettingsUI {
                 y: cy + 20.0,
                 text: "No startup apps".into(),
                 font_size: 13.0,
-                color: OVERLAY0,
+                color: p.overlay0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(width - 20.0),
                 overflow: TextOverflow::Ellipsis,
@@ -703,12 +759,12 @@ impl StartupSettingsUI {
                 y: cy,
                 width,
                 height: 56.0,
-                color: if is_selected { SURFACE1 } else { SURFACE0 },
+                color: if is_selected { p.surface1 } else { p.surface0 },
                 corner_radii: CornerRadii::all(6.0),
             });
 
             // Enable/disable toggle
-            let toggle_color = if entry.enabled { GREEN } else { SURFACE2 };
+            let toggle_color = if entry.enabled { p.accent } else { p.surface2 };
             cmds.push(RenderCommand::FillRect {
                 x: x + 8.0,
                 y: cy + 18.0,
@@ -723,7 +779,7 @@ impl StartupSettingsUI {
                 y: cy + 20.0,
                 width: 16.0,
                 height: 16.0,
-                color: TEXT,
+                color: p.text,
                 corner_radii: CornerRadii::all(8.0),
             });
 
@@ -733,7 +789,7 @@ impl StartupSettingsUI {
                 y: cy + 6.0,
                 text: entry.name.clone(),
                 font_size: 14.0,
-                color: if entry.enabled { TEXT } else { OVERLAY0 },
+                color: if entry.enabled { p.text } else { p.overlay0 },
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(width * 0.5),
                 overflow: TextOverflow::Ellipsis,
@@ -745,7 +801,7 @@ impl StartupSettingsUI {
                 y: cy + 24.0,
                 text: format!("{} - {}", entry.publisher, entry.startup_type.label()),
                 font_size: 11.0,
-                color: SUBTEXT0,
+                color: p.subtext0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(width * 0.5),
                 overflow: TextOverflow::Ellipsis,
@@ -758,7 +814,7 @@ impl StartupSettingsUI {
                     y: cy + 40.0,
                     text: format!("Delay: {}", entry.delay_text()),
                     font_size: 10.0,
-                    color: OVERLAY0,
+                    color: p.overlay0,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(200.0),
                     overflow: TextOverflow::Ellipsis,
@@ -766,7 +822,7 @@ impl StartupSettingsUI {
             }
 
             // Impact badge
-            let impact_color = entry.impact.color();
+            let impact_color = entry.impact.color(p);
             let impact_label = entry.impact.label();
             cmds.push(RenderCommand::FillRect {
                 x: x + width - 90.0,
@@ -781,7 +837,7 @@ impl StartupSettingsUI {
                 y: cy + 11.0,
                 text: impact_label.into(),
                 font_size: 11.0,
-                color: CRUST,
+                color: readable_on(impact_color),
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(64.0),
                 overflow: TextOverflow::Ellipsis,
@@ -794,7 +850,7 @@ impl StartupSettingsUI {
                     y: cy + 34.0,
                     width: 74.0,
                     height: 16.0,
-                    color: RED,
+                    color: p.red,
                     corner_radii: CornerRadii::all(8.0),
                 });
                 cmds.push(RenderCommand::Text {
@@ -802,7 +858,7 @@ impl StartupSettingsUI {
                     y: cy + 36.0,
                     text: format!("{} fails", entry.failure_count),
                     font_size: 10.0,
-                    color: CRUST,
+                    color: readable_on(p.red),
                     font_weight: FontWeightHint::Bold,
                     max_width: Some(64.0),
                     overflow: TextOverflow::Ellipsis,
@@ -813,7 +869,14 @@ impl StartupSettingsUI {
         }
     }
 
-    fn render_boot_tab(&self, cmds: &mut Vec<RenderCommand>, x: f32, y: f32, width: f32) {
+    fn render_boot_tab(
+        &self,
+        p: &Palette,
+        cmds: &mut Vec<RenderCommand>,
+        x: f32,
+        y: f32,
+        width: f32,
+    ) {
         let mut cy = y;
         let cfg = &self.settings.boot_config;
 
@@ -822,7 +885,7 @@ impl StartupSettingsUI {
             y: cy,
             text: "Boot Performance".into(),
             font_size: 15.0,
-            color: LAVENDER,
+            color: p.lavender,
             font_weight: FontWeightHint::Bold,
             max_width: Some(width),
             overflow: TextOverflow::Ellipsis,
@@ -836,7 +899,7 @@ impl StartupSettingsUI {
                 y: cy,
                 width,
                 height: 48.0,
-                color: SURFACE0,
+                color: p.surface0,
                 corner_radii: CornerRadii::all(8.0),
             });
             cmds.push(RenderCommand::Text {
@@ -844,7 +907,7 @@ impl StartupSettingsUI {
                 y: cy + 6.0,
                 text: "Last Boot Time".into(),
                 font_size: 12.0,
-                color: SUBTEXT0,
+                color: p.subtext0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(width - 24.0),
                 overflow: TextOverflow::Ellipsis,
@@ -854,13 +917,7 @@ impl StartupSettingsUI {
                 y: cy + 24.0,
                 text: format!("{:.1}s", ms as f64 / 1000.0),
                 font_size: 18.0,
-                color: if ms < 10000 {
-                    GREEN
-                } else if ms < 30000 {
-                    YELLOW
-                } else {
-                    RED
-                },
+                color: boot_time_color(ms, p),
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(width - 24.0),
                 overflow: TextOverflow::Ellipsis,
@@ -875,7 +932,7 @@ impl StartupSettingsUI {
             y: cy,
             text: format!("Total startup app impact: {:.1}s", total_ms as f64 / 1000.0),
             font_size: 13.0,
-            color: TEXT,
+            color: p.text,
             font_weight: FontWeightHint::Regular,
             max_width: Some(width),
             overflow: TextOverflow::Ellipsis,
@@ -884,6 +941,7 @@ impl StartupSettingsUI {
 
         // Toggle rows
         self.render_toggle_row(
+            p,
             cmds,
             x,
             cy,
@@ -893,10 +951,11 @@ impl StartupSettingsUI {
         );
         cy += 36.0;
 
-        self.render_toggle_row(cmds, x, cy, width, "Fast Startup", cfg.fast_startup);
+        self.render_toggle_row(p, cmds, x, cy, width, "Fast Startup", cfg.fast_startup);
         cy += 36.0;
 
         self.render_toggle_row(
+            p,
             cmds,
             x,
             cy,
@@ -912,7 +971,7 @@ impl StartupSettingsUI {
             y: cy,
             text: "Thresholds".into(),
             font_size: 15.0,
-            color: LAVENDER,
+            color: p.lavender,
             font_weight: FontWeightHint::Bold,
             max_width: Some(width),
             overflow: TextOverflow::Ellipsis,
@@ -920,6 +979,7 @@ impl StartupSettingsUI {
         cy += 26.0;
 
         self.render_label_value(
+            p,
             cmds,
             x,
             cy,
@@ -930,6 +990,7 @@ impl StartupSettingsUI {
         cy += 28.0;
 
         self.render_label_value(
+            p,
             cmds,
             x,
             cy,
@@ -942,6 +1003,7 @@ impl StartupSettingsUI {
 
     fn render_toggle_row(
         &self,
+        p: &Palette,
         cmds: &mut Vec<RenderCommand>,
         x: f32,
         y: f32,
@@ -954,7 +1016,7 @@ impl StartupSettingsUI {
             y: y + 4.0,
             text: label.into(),
             font_size: 14.0,
-            color: TEXT,
+            color: p.text,
             font_weight: FontWeightHint::Regular,
             max_width: Some(width - 80.0),
             overflow: TextOverflow::Ellipsis,
@@ -965,7 +1027,7 @@ impl StartupSettingsUI {
             y: y + 2.0,
             width: 40.0,
             height: 22.0,
-            color: if enabled { GREEN } else { SURFACE2 },
+            color: if enabled { p.accent } else { p.surface2 },
             corner_radii: CornerRadii::all(11.0),
         });
         let knob_x = if enabled { sw_x + 20.0 } else { sw_x + 2.0 };
@@ -974,13 +1036,14 @@ impl StartupSettingsUI {
             y: y + 4.0,
             width: 18.0,
             height: 18.0,
-            color: TEXT,
+            color: p.text,
             corner_radii: CornerRadii::all(9.0),
         });
     }
 
     fn render_label_value(
         &self,
+        p: &Palette,
         cmds: &mut Vec<RenderCommand>,
         x: f32,
         y: f32,
@@ -993,7 +1056,7 @@ impl StartupSettingsUI {
             y,
             text: label.into(),
             font_size: 13.0,
-            color: SUBTEXT0,
+            color: p.subtext0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(width * 0.5),
             overflow: TextOverflow::Ellipsis,
@@ -1003,7 +1066,7 @@ impl StartupSettingsUI {
             y,
             text: value.into(),
             font_size: 13.0,
-            color: TEXT,
+            color: p.text,
             font_weight: FontWeightHint::Regular,
             max_width: Some(width * 0.45),
             overflow: TextOverflow::Ellipsis,
@@ -1033,8 +1096,14 @@ mod tests {
         clippy::indexing_slicing,
         clippy::arithmetic_side_effects
     )]
+    // These tests assert a float equals the exact literal the code under test was
+    // handed. That is the assertion meant: a tolerance would let a value that has
+    // drifted pass as one that has not.
+    #![allow(clippy::float_cmp)]
 
     use super::*;
+    use crate::draw_check::assert_nothing_is_drawn_and_never_seen;
+    use crate::palette_check::assert_drawn_from;
 
     // ---- StartupImpact ----
 
@@ -1318,7 +1387,7 @@ mod tests {
     fn test_ui_render_apps_tab() {
         let mut ui = StartupSettingsUI::new();
         ui.settings.add_entry("App", "Publisher", "/app");
-        let cmds = ui.render(600.0, 800.0);
+        let cmds = ui.render(&Palette::for_mode(false), 600.0, 800.0);
         assert!(!cmds.is_empty());
     }
 
@@ -1327,7 +1396,7 @@ mod tests {
         let mut ui = StartupSettingsUI::new();
         ui.set_tab(StartupTab::Boot);
         ui.settings.boot_config.last_boot_time_ms = Some(8500);
-        let cmds = ui.render(600.0, 800.0);
+        let cmds = ui.render(&Palette::for_mode(false), 600.0, 800.0);
         assert!(!cmds.is_empty());
     }
 
@@ -1338,14 +1407,14 @@ mod tests {
         if let Some(e) = ui.settings.get_entry_mut(id) {
             e.impact = StartupImpact::High;
         }
-        let cmds = ui.render(600.0, 800.0);
+        let cmds = ui.render(&Palette::for_mode(false), 600.0, 800.0);
         assert!(!cmds.is_empty());
     }
 
     #[test]
     fn test_ui_render_empty() {
         let ui = StartupSettingsUI::new();
-        let cmds = ui.render(600.0, 800.0);
+        let cmds = ui.render(&Palette::for_mode(false), 600.0, 800.0);
         assert!(!cmds.is_empty());
     }
 
@@ -1375,5 +1444,702 @@ mod tests {
         let id3 = s.add_entry("C", "P", "/c");
         assert_ne!(id1, id2);
         assert_ne!(id2, id3);
+    }
+
+    // ========================================================================
+    // The palette conversion
+    // ========================================================================
+
+    /// A panel with one of everything on screen.
+    ///
+    /// `up` flips the boot toggles against each other and turns the selection
+    /// on, so no `if` in the module keeps one arm unrendered across the two
+    /// calls.
+    fn wound(tab: StartupTab, up: bool) -> StartupSettingsUI {
+        let mut ui = StartupSettingsUI::new();
+        ui.active_tab = tab;
+        ui.sort = StartupSort::Name;
+
+        // One entry per impact band. `NotMeasured` has to be assigned by hand:
+        // `from_millis` classifies a measurement and so can never return it —
+        // but `StartupEntry::new` starts every entry there, which is what a
+        // freshly-added app actually shows, so the grey badge is not a
+        // hypothetical state.
+        for (name, impact) in [
+            ("Anvil", StartupImpact::None),
+            ("Bellows", StartupImpact::Low),
+            ("Crucible", StartupImpact::Medium),
+            ("Drophammer", StartupImpact::High),
+            ("Emery", StartupImpact::NotMeasured),
+        ] {
+            let id = ui.settings.add_entry(name, "Forge Ltd", "/bin/tool");
+            if let Some(e) = ui.settings.get_entry_mut(id) {
+                e.impact = impact;
+                e.startup_time_ms = Some(1234);
+            }
+        }
+        // Failing, so the failure badge is drawn.
+        let bad = ui.settings.add_entry("Flux", "Forge Ltd", "/bin/flux");
+        if let Some(e) = ui.settings.get_entry_mut(bad) {
+            e.failure_count = 5;
+        }
+        // Delayed, so the delay line is drawn.
+        let slow = ui.settings.add_entry("Grinder", "Forge Ltd", "/bin/grind");
+        if let Some(e) = ui.settings.get_entry_mut(slow) {
+            e.delay_ms = 300_000;
+        }
+        // Disabled, so the switch's off arm and the dimmed name are drawn.
+        let off = ui.settings.add_entry("Hone", "Forge Ltd", "/bin/hone");
+        ui.settings.disable(off);
+
+        ui.selected_id = if up { Some(bad) } else { None };
+
+        let cfg = &mut ui.settings.boot_config;
+        // Deliberately disagreeing, so one render covers both switch arms.
+        cfg.measure_boot_time = up;
+        cfg.fast_startup = !up;
+        cfg.auto_disable_failing = up;
+        cfg.last_boot_time_ms = Some(if up { 40_000 } else { 5_000 });
+        ui
+    }
+
+    /// Every state the panel can be in, so no branch escapes the sweep.
+    fn every_state() -> Vec<(StartupSettingsUI, String)> {
+        let mut out = Vec::new();
+        for tab in [StartupTab::Apps, StartupTab::Boot] {
+            for up in [false, true] {
+                out.push((wound(tab, up), format!("startup panel ({tab:?}, up={up})")));
+                // No high-impact app: the warning banner's other arm.
+                let mut calm = wound(tab, up);
+                for e in &mut calm.settings.entries {
+                    if e.impact == StartupImpact::High {
+                        e.impact = StartupImpact::Low;
+                    }
+                }
+                out.push((calm, format!("startup panel ({tab:?}, up={up}, calm)")));
+            }
+            // Nothing registered at all: the "No startup apps" caption.
+            let mut bare = StartupSettingsUI::new();
+            bare.active_tab = tab;
+            out.push((bare, format!("startup panel ({tab:?}, nothing registered)")));
+        }
+        // A filter that matches nothing draws the same caption over a *typed*
+        // filter field, which is a different colour from the placeholder.
+        let mut filtered = wound(StartupTab::Apps, true);
+        filtered.filter = "no-such-app".to_string();
+        out.push((
+            filtered,
+            "startup panel (Apps, filtered to nothing)".to_string(),
+        ));
+        // Enabled-only with everything off is a third route to the caption.
+        let mut hidden = wound(StartupTab::Apps, false);
+        for e in &mut hidden.settings.entries {
+            e.enabled = false;
+        }
+        hidden.show_enabled_only = true;
+        out.push((hidden, "startup panel (Apps, all hidden)".to_string()));
+        // Every boot-time band, plus the reading being absent entirely.
+        for ms in [None, Some(5_000), Some(20_000), Some(40_000)] {
+            let mut boot = wound(StartupTab::Boot, true);
+            boot.settings.boot_config.last_boot_time_ms = ms;
+            out.push((boot, format!("startup panel (Boot, last={ms:?})")));
+        }
+        out
+    }
+
+    fn render(ui: &StartupSettingsUI, p: &Palette) -> Vec<RenderCommand> {
+        ui.render(p, 600.0, 800.0)
+    }
+
+    /// The membership sweep: nothing the panel draws is outside its palette.
+    ///
+    /// Every constant this module used to hold was a Catppuccin *Mocha* value,
+    /// so the light render is where a survivor gives itself away — Latte does
+    /// not contain it, and the failure names the colour back.
+    #[test]
+    fn every_colour_the_panel_draws_comes_from_its_palette() {
+        for light in [false, true] {
+            let p = Palette::for_mode(light);
+            for (ui, what) in every_state() {
+                assert_drawn_from(&p, &render(&ui, &p), &[], &format!("{what}, light={light}"));
+            }
+        }
+    }
+
+    /// Nothing is painted and then erased before anyone could see it.
+    #[test]
+    fn the_panel_draws_nothing_that_is_immediately_erased() {
+        for light in [false, true] {
+            let p = Palette::for_mode(light);
+            for (ui, what) in every_state() {
+                assert_nothing_is_drawn_and_never_seen(
+                    &render(&ui, &p),
+                    &format!("{what}, light={light}"),
+                );
+            }
+        }
+    }
+
+    // ---- Extractors, one per class of control the accent is meant to reach --
+
+    /// The tab strip's pills, in draw order.
+    ///
+    /// Keyed on geometry and not on the label, because the panel *title* is
+    /// also the string `"Startup Apps"`: a "last fill before this text" helper
+    /// would have returned the backdrop and the title, and would have done so
+    /// silently. The strip is the only thing 32 tall in the module (grepped:
+    /// one `height: 32.0` in the whole file), and its labels are the only text
+    /// at y 80 — every tab body starts at y 120.
+    fn tab_pills(cmds: &[RenderCommand]) -> Vec<Color> {
+        cmds.iter()
+            .filter_map(|c| match c {
+                RenderCommand::FillRect {
+                    height: 32.0,
+                    color,
+                    ..
+                } => Some(*color),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The tab strip's labels, in the same order as [`tab_pills`].
+    fn tab_labels(cmds: &[RenderCommand]) -> Vec<Color> {
+        cmds.iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text {
+                    y: 80.0,
+                    font_size: 13.0,
+                    color,
+                    ..
+                } => Some(*color),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The per-entry enable switches: the only 36x20 fills in the module.
+    ///
+    /// The knob is 16x16 and the impact badge is 74x20, so neither the width
+    /// nor the height alone would do — both bounds are load-bearing.
+    fn entry_switches(cmds: &[RenderCommand]) -> Vec<Color> {
+        cmds.iter()
+            .filter_map(|c| match c {
+                RenderCommand::FillRect {
+                    width: 36.0,
+                    height: 20.0,
+                    color,
+                    ..
+                } => Some(*color),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The boot tab's toggle switches: the only 40x22 fills in the module.
+    fn boot_switches(cmds: &[RenderCommand]) -> Vec<Color> {
+        cmds.iter()
+            .filter_map(|c| match c {
+                RenderCommand::FillRect {
+                    width: 40.0,
+                    height: 22.0,
+                    color,
+                    ..
+                } => Some(*color),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Every `(fill, label)` pair among the fills that are exactly `w` by `h`.
+    ///
+    /// Both badges draw their label as the very next command after their own
+    /// fill, so the pair is well defined. Resetting `pending` on a
+    /// *non-matching* fill is what stops an unrelated caption being paired
+    /// with a badge drawn earlier in the row.
+    fn badges(cmds: &[RenderCommand], w: f32, h: f32) -> Vec<(Color, Color)> {
+        let mut out = Vec::new();
+        let mut pending: Option<Color> = None;
+        for c in cmds {
+            match c {
+                RenderCommand::FillRect {
+                    width,
+                    height,
+                    color,
+                    ..
+                } => {
+                    pending = if *width == w && *height == h {
+                        Some(*color)
+                    } else {
+                        None
+                    };
+                }
+                RenderCommand::Text { color, .. } => {
+                    if let Some(fill) = pending.take() {
+                        out.push((fill, *color));
+                    }
+                }
+                _ => {}
+            }
+        }
+        out
+    }
+
+    /// Every colour the panel draws that no control above claimed.
+    ///
+    /// This is the frozen half: an `assert_eq!` over it fails if *anything*
+    /// that is not one of the three named controls moves with the accent,
+    /// including sites nobody thought to name.
+    ///
+    /// The tab strip's *labels* are deliberately kept. They are
+    /// `p.on_accent()`, which is `readable_on` of the accent, and both accents
+    /// the test below uses are pale enough to resolve to the same near-black —
+    /// so a correct label is frozen between them and a label wrongly painted
+    /// with the accent itself is caught here. That is real coverage, but it
+    /// does rest on the two accents sharing a lightness band: if a dark accent
+    /// is ever added to that pair, the labels must move into this exclusion
+    /// list, and the check that separates `p.on_accent()` from a hard-coded
+    /// near-black is [`each_label_is_legible_on_the_fill_beneath_it`], not
+    /// this one.
+    fn colors_apart_from_the_controls(cmds: &[RenderCommand]) -> Vec<Color> {
+        cmds.iter()
+            .filter(|c| {
+                !matches!(
+                    c,
+                    RenderCommand::FillRect { height: 32.0, .. }
+                        | RenderCommand::FillRect {
+                            width: 36.0,
+                            height: 20.0,
+                            ..
+                        }
+                        | RenderCommand::FillRect {
+                            width: 40.0,
+                            height: 22.0,
+                            ..
+                        }
+                )
+            })
+            .filter_map(|c| match c {
+                RenderCommand::FillRect { color, .. }
+                | RenderCommand::StrokeRect { color, .. }
+                | RenderCommand::Text { color, .. } => Some(*color),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Every control that offers something follows the accent — each proved
+    /// separately.
+    ///
+    /// Three source sites means three `assert_ne!`s. Over their union one
+    /// moving control would hide the other two, which is the failure the
+    /// earlier modules in this conversion established. (The boot tab's three
+    /// switches are three *rendered* controls but one call site,
+    /// [`StartupSettingsUI::render_toggle_row`], so they are one assertion —
+    /// and the length check beside it is what proves all three were found.)
+    #[test]
+    fn every_control_that_offers_something_follows_the_accent() {
+        let mut a = Palette::for_mode(false);
+        a.accent = appearance::MAUVE;
+        let mut b = Palette::for_mode(false);
+        b.accent = appearance::TEAL;
+
+        // Walk both tabs as the active one: the pill's colour is chosen by a
+        // boolean, so a fixture pinned to one tab leaves the other unproven.
+        for tab in [StartupTab::Apps, StartupTab::Boot] {
+            let ui = wound(tab, true);
+            let x = render(&ui, &a);
+            let y = render(&ui, &b);
+
+            assert_eq!(tab_pills(&x).len(), 2, "two tabs have pills");
+            assert_ne!(
+                tab_pills(&x),
+                tab_pills(&y),
+                "the active tab's pill did not move with the accent (tab={tab:?})"
+            );
+
+            match tab {
+                StartupTab::Apps => {
+                    assert_eq!(entry_switches(&x).len(), 8, "eight entries are listed");
+                    assert_ne!(
+                        entry_switches(&x),
+                        entry_switches(&y),
+                        "an entry's enable switch did not move with the accent"
+                    );
+                    assert!(boot_switches(&x).is_empty(), "the boot tab is not drawn");
+                }
+                StartupTab::Boot => {
+                    assert_eq!(boot_switches(&x).len(), 3, "three boot toggles");
+                    assert_ne!(
+                        boot_switches(&x),
+                        boot_switches(&y),
+                        "a boot-tab switch did not move with the accent"
+                    );
+                    assert!(entry_switches(&x).is_empty(), "the apps list is not drawn");
+                }
+            }
+
+            assert_eq!(
+                colors_apart_from_the_controls(&x),
+                colors_apart_from_the_controls(&y),
+                "something that is not a control moved with the accent \
+                 (tab={tab:?}) — an app's impact, a boot-time reading and a \
+                 failure count are all facts about the machine, and a fact \
+                 read against its neighbours down a list must not be the \
+                 accent"
+            );
+        }
+    }
+
+    /// The panel's own surfaces are the palette's, in both modes.
+    ///
+    /// This is what the membership sweep structurally cannot check.
+    /// `assert_drawn_from` allows `0x11111B` and `0xEFF1F5` at any alpha,
+    /// because those are the two answers [`appearance::readable_on`] can give
+    /// and a legitimately-converted foreground will be one of them — but
+    /// `0x11111B` is *also* Mocha's `crust`, so a literal put back where a
+    /// role belongs can produce a render the sweep is obliged to accept.
+    ///
+    /// Membership is the wrong question for a surface anyway. These are not
+    /// "some palette colour", they are one specific role each, so the test
+    /// names the role and asserts equality — which also fails in *dark* mode
+    /// if the role is wrong, where a membership check could only ever fail in
+    /// light.
+    #[test]
+    fn the_panels_own_surfaces_come_from_the_palette() {
+        for light in [false, true] {
+            let p = Palette::for_mode(light);
+
+            let apps = render(&wound(StartupTab::Apps, true), &p);
+            let backdrop = apps.iter().find_map(|c| match c {
+                RenderCommand::FillRect {
+                    x: 0.0,
+                    y: 0.0,
+                    width: 600.0,
+                    height: 800.0,
+                    color,
+                    ..
+                } => Some(*color),
+                _ => None,
+            });
+            assert_eq!(
+                backdrop,
+                Some(p.base),
+                "the panel's backdrop is not p.base (light={light})"
+            );
+
+            let filter_bar = apps.iter().find_map(|c| match c {
+                RenderCommand::FillRect {
+                    height: 30.0,
+                    color,
+                    ..
+                } => Some(*color),
+                _ => None,
+            });
+            assert_eq!(
+                filter_bar,
+                Some(p.surface0),
+                "the filter field is not p.surface0 (light={light})"
+            );
+
+            // The entry rows: `Flux` is selected in this fixture, and the list
+            // is sorted by name, so it is the sixth of eight.
+            let rows: Vec<Color> = apps
+                .iter()
+                .filter_map(|c| match c {
+                    RenderCommand::FillRect {
+                        height: 56.0,
+                        color,
+                        ..
+                    } => Some(*color),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(rows.len(), 8, "eight entry rows (light={light})");
+            assert_eq!(
+                rows[5], p.surface1,
+                "the selected entry's row is not p.surface1 (light={light})"
+            );
+            for (i, row) in rows.iter().enumerate().filter(|(i, _)| *i != 5) {
+                assert_eq!(
+                    *row, p.surface0,
+                    "entry row {i} is not p.surface0 (light={light})"
+                );
+            }
+
+            let boot = render(&wound(StartupTab::Boot, true), &p);
+            let card = boot.iter().find_map(|c| match c {
+                RenderCommand::FillRect {
+                    height: 48.0,
+                    color,
+                    ..
+                } => Some(*color),
+                _ => None,
+            });
+            assert_eq!(
+                card,
+                Some(p.surface0),
+                "the last-boot-time card is not p.surface0 (light={light})"
+            );
+        }
+    }
+
+    /// Each label that sits on a coloured fill is picked *for that fill*.
+    ///
+    /// The accent test above cannot reach this. Every accent on offer is pale,
+    /// so [`appearance::readable_on`] answers the same near-black for all of
+    /// them, and an `assert_ne!` between two accents would fail on correct
+    /// code. What separates a chosen label from a hard-coded `p.crust` is the
+    /// *mode*: Latte's `crust` is near-white, which on a pale accent is
+    /// illegible.
+    ///
+    /// The impact badge is here for a stronger reason than the tab label: its
+    /// label was a hard-coded near-black *and that was already wrong*, not
+    /// merely fragile. `NotMeasured` fills the badge with `overlay0`, a mid
+    /// grey, and near-black on mid grey is poor contrast in dark mode and no
+    /// better in light. The other four arms were legible only by coincidence
+    /// of the two palettes — Mocha's green/yellow/red are pale and Latte's are
+    /// deep, so a fixed dark label happens to read on both. Nobody maintains
+    /// that coincidence; `readable_on` of the badge's own fill makes it a
+    /// property.
+    #[test]
+    fn each_label_is_legible_on_the_fill_beneath_it() {
+        for light in [false, true] {
+            for accent in [
+                appearance::BLUE,
+                appearance::GREEN,
+                appearance::RED,
+                appearance::YELLOW,
+                appearance::MAUVE,
+            ] {
+                let mut p = Palette::for_mode(light);
+                p.accent = accent;
+                let what = format!("light={light}, accent={accent:?}");
+
+                // The active tab's pill is the accent, its label chosen for it.
+                let cmds = render(&wound(StartupTab::Apps, true), &p);
+                let pills = tab_pills(&cmds);
+                let labels = tab_labels(&cmds);
+                assert_eq!(labels.len(), 2, "two tabs are labelled ({what})");
+                let want = readable_on(accent);
+                assert_eq!(
+                    (pills[0].r, pills[0].g, pills[0].b),
+                    (accent.r, accent.g, accent.b),
+                    "the active tab's pill is not the accent ({what})"
+                );
+                assert_eq!(
+                    (labels[0].r, labels[0].g, labels[0].b),
+                    (want.r, want.g, want.b),
+                    "the active tab's label is not chosen for its own fill \
+                     ({what}); a fixed colour is legible on one mode's \
+                     accents and not the other's"
+                );
+
+                // Every impact badge, including the grey one.
+                let impacts = badges(&cmds, 74.0, 20.0);
+                assert_eq!(impacts.len(), 8, "eight impact badges ({what})");
+                for (fill, label) in &impacts {
+                    let want_badge = readable_on(*fill);
+                    assert_eq!(
+                        (label.r, label.g, label.b),
+                        (want_badge.r, want_badge.g, want_badge.b),
+                        "an impact badge's label is not chosen for its own \
+                         fill ({what})"
+                    );
+                }
+                // Named explicitly, because the grey arm is the one a fixed
+                // near-black label was actually illegible on.
+                assert!(
+                    impacts.iter().any(|(fill, _)| (fill.r, fill.g, fill.b)
+                        == (p.overlay0.r, p.overlay0.g, p.overlay0.b)),
+                    "no unmeasured entry drew a grey badge ({what})"
+                );
+
+                // The failure badge: a categorical red fill, same rule.
+                let fails = badges(&cmds, 74.0, 16.0);
+                assert_eq!(fails.len(), 1, "one failing entry ({what})");
+                let (fill, label) = fails[0];
+                assert_eq!(
+                    (fill.r, fill.g, fill.b),
+                    (p.red.r, p.red.g, p.red.b),
+                    "the failure badge is not p.red ({what})"
+                );
+                let want_red = readable_on(p.red);
+                assert_eq!(
+                    (label.r, label.g, label.b),
+                    (want_red.r, want_red.g, want_red.b),
+                    "the failure badge's label is not chosen for its own fill \
+                     ({what})"
+                );
+            }
+        }
+    }
+
+    /// A measurement is not the accent — proved by moving the accent onto it.
+    ///
+    /// The distinctness test below is necessary but not sufficient: a scale
+    /// whose values were *all* rewritten to `p.accent` would collapse and be
+    /// caught, but a scale where only one value became the accent would still
+    /// be pairwise-distinct under most accents. This asserts the stronger
+    /// property directly — every one of these is the same under two different
+    /// accents, because none of them is the accent.
+    #[test]
+    fn no_category_follows_the_accent() {
+        let mut a = Palette::for_mode(false);
+        a.accent = appearance::MAUVE;
+        let mut b = Palette::for_mode(false);
+        b.accent = appearance::TEAL;
+
+        for i in [
+            StartupImpact::None,
+            StartupImpact::Low,
+            StartupImpact::Medium,
+            StartupImpact::High,
+            StartupImpact::NotMeasured,
+        ] {
+            assert_eq!(i.color(&a), i.color(&b), "{i:?} impact follows the accent");
+        }
+        for ms in [0, 5_000, 20_000, 40_000, 600_000] {
+            assert_eq!(
+                boot_time_color(ms, &a),
+                boot_time_color(ms, &b),
+                "a {ms}ms boot reading follows the accent"
+            );
+        }
+    }
+
+    /// Every categorical scale stays tellable apart, under every accent and in
+    /// both modes.
+    ///
+    /// The impact badges are drawn down a list, one per row, so two values
+    /// sharing a colour do not merely confuse a learnt code — they make a
+    /// high-impact app look like a harmless one in the same glance. Several of
+    /// the hues involved are themselves selectable accents, which is why the
+    /// accent has to be varied and not merely defaulted.
+    ///
+    /// Asserted over **bands, not variants**: `None` and `Low` are one band
+    /// and deliberately share green. Walking the variants pairwise would fail
+    /// on correct code.
+    #[test]
+    fn every_category_stays_distinct_under_every_accent() {
+        for light in [false, true] {
+            for accent in [
+                appearance::BLUE,
+                appearance::GREEN,
+                appearance::RED,
+                appearance::YELLOW,
+                appearance::PEACH,
+                appearance::MAUVE,
+                appearance::TEAL,
+            ] {
+                let mut p = Palette::for_mode(light);
+                p.accent = accent;
+                let what = format!("light={light}, accent={accent:?}");
+
+                // One member of each impact band.
+                let bands = [
+                    StartupImpact::Low,
+                    StartupImpact::Medium,
+                    StartupImpact::High,
+                    StartupImpact::NotMeasured,
+                ];
+                for (i, b1) in bands.iter().enumerate() {
+                    for b2 in bands.iter().skip(i + 1) {
+                        assert_ne!(
+                            b1.color(&p),
+                            b2.color(&p),
+                            "{b1:?} and {b2:?} impact are the same colour ({what})"
+                        );
+                    }
+                }
+
+                // The boot-time ladder's three bands.
+                let readings = [5_000, 20_000, 40_000];
+                for (i, m1) in readings.iter().enumerate() {
+                    for m2 in readings.iter().skip(i + 1) {
+                        assert_ne!(
+                            boot_time_color(*m1, &p),
+                            boot_time_color(*m2, &p),
+                            "{m1}ms and {m2}ms boots are the same colour ({what})"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// `None` and `Low` share a colour on purpose.
+    ///
+    /// Written down so that a future reader who notices five labels over four
+    /// colours does not "fix" it. The badge is a three-band traffic light —
+    /// fine, slow, bad — plus grey for a reading that does not exist yet; the
+    /// label is finer-grained than the light because "None" and "Low" are both
+    /// answers a user does not need to act on.
+    #[test]
+    fn the_impact_light_has_fewer_bands_than_the_impact_label() {
+        for light in [false, true] {
+            let p = Palette::for_mode(light);
+            assert_eq!(
+                StartupImpact::None.color(&p),
+                StartupImpact::Low.color(&p),
+                "None and Low are deliberately one band (light={light})"
+            );
+            assert_ne!(
+                StartupImpact::None.label(),
+                StartupImpact::Low.label(),
+                "…but they are still two labels"
+            );
+        }
+    }
+
+    /// The boot-time bands are exactly where the doc comment says.
+    ///
+    /// The ladder used to be three arms of an `if` buried inside a
+    /// `RenderCommand::Text`, unreachable from a test without rendering the
+    /// whole tab and hunting for a string. A measurement scale is precisely
+    /// the kind of thing that needs a boundary test, which is why it now has a
+    /// name.
+    #[test]
+    fn the_boot_time_bands_are_where_they_say_they_are() {
+        let p = Palette::for_mode(false);
+        assert_eq!(boot_time_color(0, &p), p.green);
+        assert_eq!(boot_time_color(9_999, &p), p.green);
+        assert_eq!(boot_time_color(10_000, &p), p.yellow);
+        assert_eq!(boot_time_color(29_999, &p), p.yellow);
+        assert_eq!(boot_time_color(30_000, &p), p.red);
+        assert_eq!(boot_time_color(u64::MAX, &p), p.red);
+    }
+
+    /// The high-impact warning is the red it warns about, made translucent.
+    ///
+    /// The banner was `Color::rgba(RED.r, RED.g, RED.b, 40)` — a Mocha hex
+    /// destructured by hand. The membership sweep compares RGB and ignores
+    /// alpha by design, so this is the test that says the RGB is a *role* and
+    /// the alpha is not.
+    #[test]
+    fn the_high_impact_warning_is_the_red_it_warns_about() {
+        for light in [false, true] {
+            let p = Palette::for_mode(light);
+            let cmds = render(&wound(StartupTab::Apps, true), &p);
+            let wash = cmds.iter().find_map(|c| match c {
+                RenderCommand::FillRect {
+                    height: 28.0,
+                    color,
+                    ..
+                } => Some(*color),
+                _ => None,
+            });
+            let wash = wash.expect("a high-impact app draws the warning banner");
+            assert_eq!(
+                (wash.r, wash.g, wash.b),
+                (p.red.r, p.red.g, p.red.b),
+                "the warning banner is not p.red underneath its alpha \
+                 (light={light})"
+            );
+            assert_eq!(
+                wash.a, 40,
+                "the warning banner is not a wash (light={light})"
+            );
+        }
     }
 }

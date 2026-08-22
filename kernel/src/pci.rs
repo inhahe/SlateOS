@@ -690,6 +690,58 @@ pub fn report_intx_asserting_on_irq(irq: u8) {
     });
 }
 
+/// Report every function on `irq` whose INTx pin is disabled, and return how
+/// many there were.
+///
+/// This exists because [`quiesce_unclaimed_intx`] and `sys_irq_register` can
+/// combine into a silent hang.  Registration unmasks the IOAPIC line and
+/// records the task, and both succeed — but if the sweep already silenced the
+/// functions routed to that line, INTx is off *at the device*, no interrupt is
+/// ever raised, and the driver blocks in `sys_irq_wait` forever with nothing
+/// in the log tying the hang back to a sweep that ran during boot.  Naming the
+/// functions at registration time is what makes that diagnosable.
+///
+/// Deliberately reports rather than re-enables, even though [`claim_intx`]
+/// un-silences itself in exactly this situation.  The asymmetry is forced:
+/// `claim_intx` is called by a driver that owns a specific function and passes
+/// its [`PciAddress`], whereas `sys_irq_register` receives only an IRQ number.
+/// On a shared line that number can name several functions, and the caller
+/// owns at most one of them — so re-enabling all of them would re-arm pins the
+/// caller has no claim to, including whatever storm source the sweep was
+/// quieting.  The syscall lacks the information needed to do this safely; the
+/// fix is an interface that names the function, not a bolder guess here.  See
+/// `known-issues.md` `TD-A-IRQ-REGISTER-CANNOT-NAME-THE-PCI-FUNCTION`.
+///
+/// Allocation-free via [`for_each_function`]: this runs from a syscall, and
+/// mirrors [`report_intx_asserting_on_irq`] next door.
+pub fn report_intx_silenced_on_irq(irq: u8) -> usize {
+    let mut silenced = 0usize;
+    for_each_function(|addr| {
+        if config_read8(addr.bus, addr.device, addr.function, CFG_INTERRUPT_LINE) != irq {
+            return;
+        }
+        if intx_is_enabled(addr) {
+            return;
+        }
+        silenced = silenced.saturating_add(1);
+        crate::serial_println!(
+            "[pci]   irq {} has INTx disabled on {:02x}:{:02x}.{} ({:04x}:{:04x}){}",
+            irq,
+            addr.bus,
+            addr.device,
+            addr.function,
+            config_read16(addr.bus, addr.device, addr.function, CFG_VENDOR_ID),
+            config_read16(addr.bus, addr.device, addr.function, CFG_DEVICE_ID),
+            if intx_is_claimed(addr) {
+                " [claimed by an in-kernel driver]"
+            } else {
+                " [silenced by the unclaimed-INTx sweep]"
+            }
+        );
+    });
+    silenced
+}
+
 // ---------------------------------------------------------------------------
 // PCI Capabilities
 // ---------------------------------------------------------------------------

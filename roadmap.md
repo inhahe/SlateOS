@@ -625,11 +625,25 @@ Known-issues (open, kernel-owned):
   can no longer let the child run the glibc clone entry with an unseeded `%fs`.
   Corroborated by a 20/20 clean soak. (defect 2 fixed 2026-08-13 `315a7e0ca`.)
 - `B-PTHREAD-TEARDOWN-PF` — kernel `#PF` @ 0x97 during clone-thread teardown.
-  **Blocked on a repro**: 20 boots produced zero occurrences (vs. the stale
+  ~~**Blocked on a repro**~~: 20 boots produced zero occurrences (vs. the stale
   1-in-5 historical rate), and the recorded mechanism does not fit the capture
   (assumed a write, but error=0x0 is a read — RIP was likely mis-attributed to
   the nearest preceding symbol). A bytes-at-RIP dump is now emitted on kernel
   `#PF` (`5431facbd`) so the next occurrence settles it.
+  **Update 2026-08-21 — it recurred, in ring 3, and none of that fired.** The
+  capture was `RIP == CR2 == 0x6000066370`, `CS=0x23` — a control-flow hijack
+  into an address holding no code, i.e. the same *shape* as the historical
+  ring-0 capture but on the other side of the privilege boundary, where all the
+  instrumentation added above was absent. It produced three lines. RSP was
+  intact, which is what makes a single wild write into the task's **kernel**
+  stack the unifying hypothesis for both manifestations: hit the saved kernel
+  return address and you get the ring-0 jump into `.data`; hit the saved user
+  RIP in the same stack's interrupt frame and you get this one. The ring-3
+  diagnostics entry in §2.x closes that asymmetry, so the next occurrence is a
+  two-way decision rather than another round of inference — a user-stack scan
+  showing plausible frames means the corruption is in the kernel interrupt
+  frame (hunt the writer), garbage or the hijack value on the stack means
+  glibc/TLS teardown (hunt the freed object). Full writeup in `known-issues.md`.
 - `B-FORKEXEC-BOOT-HANG` — intermittent hang at the glibc fork+exec self-test
 - ~~`B-KASAN-INSTRUMENTED-BOOT-WEDGES-MID-PRINT-ON-A-PAGE-FAULT`~~ — **NOT A
   KERNEL BUG, closed 2026-08-19.** The "wedge" was never real: the instrumented
@@ -1543,6 +1557,7 @@ _Define scheduler trait interface first, implement one scheduler behind it._
     inherited; vfork aliases fork).
 - [x] exec equivalent
 - [x] Hardware exception → language-level exception (SEH-style, not Unix signals)
+  - [x] `[A]` Ring-3 fatal-fault diagnostics (2026-08-21) — a fatal *user* fault now reports as much as a fatal *kernel* one. Until this, `kill_userspace_task_with_info` printed only the vector, the faulting address and the segment registers, while the ring-0 path had a bytes-at-RIP dump, a stack scan and symbolisation; the 2026-08-21 recurrence of `B-PTHREAD-TEARDOWN-PF` landed in ring 3, so five weeks of waiting for a repro bought three lines that could not answer "what is mapped at the address we jumped to?". Added: `describe_user_addr` (PTE flags via `translate_flags` + the owning VMA, or — for a hole — both bracketing VMAs and the gap sizes) applied to RIP, RSP and the faulting address; a 16-byte bytes-at-RIP dump; and `dump_user_stack`, the ring-3 counterpart of `backtrace::dump_stack_scan`, which flags slots pointing into mapped executable user pages as return-address candidates. Backed by a new `pcb::classify_user_addr` that is deliberately `try_lock`-based and allocation-free — `list_vmas` is unusable on this path twice over, since it takes the process-table lock unconditionally (a fault raised while that lock is held would deadlock instead of printing) and clones a `Vec` (a heap allocation on the very path that reports heap corruption). Every read is preceded by a page-table check on that exact address, so the diagnostic cannot itself fault. **Mistake worth keeping:** the first version killed the boot it was added on with `error = 0x1` (present, read, kernel) — SMAP means a ring-0 read of a user page needs STAC/CLAC, so both read sites now go through `smep_smap::with_user_access`, with a `// SAFETY:` comment saying why it is required rather than defensive. Exercised on every boot by the deliberate exception self-tests, so it cannot rot unnoticed the way the ring-0 dump did.
 - [x] Structured shutdown via IPC message, not Unix signals
 - [x] Process credential / capability management
 - [x] File descriptor inheritance across spawn (SYS_PROCESS_SPAWN_EX / SYS_PROCESS_GET_INITIAL_FDS)

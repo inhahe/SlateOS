@@ -4719,6 +4719,72 @@ pub fn list_vmas(pid: ProcessId) -> Option<Vec<Vma>> {
     table.get(&pid).map(|proc| proc.vmas.clone())
 }
 
+/// Where a user virtual address falls in a process's address space.
+///
+/// Returned by [`classify_user_addr`].  Deliberately `Copy` and free of any
+/// heap allocation so it can be produced from a fault handler.
+#[derive(Debug, Clone, Copy)]
+pub enum UserAddrClass {
+    /// The address lies inside a live mapping.
+    InVma(Vma),
+    /// The address lies in a hole, bracketed by the nearest mappings on
+    /// either side (either may be `None` at the ends of the address space).
+    ///
+    /// This is the interesting case for a control-flow hijack: the *gap* is
+    /// what tells you whether a wild jump landed in a region that used to be
+    /// something (a freed thread stack sits between two live thread stacks)
+    /// or in address space that was never mapped at all.
+    Hole {
+        /// Nearest mapping ending at or below `addr`.
+        below: Option<Vma>,
+        /// Nearest mapping starting above `addr`.
+        above: Option<Vma>,
+    },
+    /// No live record for the pid.
+    NoProcess,
+    /// The process table was locked by someone else.  A diagnostic must never
+    /// block on it, so this is reported rather than waited for.
+    TableBusy,
+}
+
+/// Classify `addr` against `pid`'s VMA list without allocating or blocking.
+///
+/// Written for use from the page-fault / exception path, where
+/// [`list_vmas`] is unusable twice over: it takes the process-table lock
+/// unconditionally (a fault raised *while that lock is held* would deadlock
+/// the machine rather than print a diagnostic) and it clones a `Vec` (a heap
+/// allocation on the path that reports heap corruption).  This uses
+/// `try_lock`, copies out at most three `Vma` values, and reports
+/// [`UserAddrClass::TableBusy`] rather than waiting.
+///
+/// The VMA list is kept sorted by `start`, so the scan below is a single
+/// forward pass that stops as soon as it is past `addr`.
+#[must_use]
+pub fn classify_user_addr(pid: ProcessId, addr: u64) -> UserAddrClass {
+    let Some(table) = PROCESS_TABLE.try_lock() else {
+        return UserAddrClass::TableBusy;
+    };
+    let Some(proc) = table.get(&pid) else {
+        return UserAddrClass::NoProcess;
+    };
+    let mut below: Option<Vma> = None;
+    for vma in &proc.vmas {
+        if vma.contains(addr) {
+            return UserAddrClass::InVma(*vma);
+        }
+        if vma.end <= addr {
+            below = Some(*vma);
+        } else {
+            // Sorted by start, so this is the first mapping above `addr`.
+            return UserAddrClass::Hole {
+                below,
+                above: Some(*vma),
+            };
+        }
+    }
+    UserAddrClass::Hole { below, above: None }
+}
+
 /// Atomically find the lowest free gap of `size` bytes inside
 /// `[region_start, region_end)` of `pid`'s address space **and** register a
 /// VMA of the given `kind`/`flags` covering `[base, base + size)`, returning

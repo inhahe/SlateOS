@@ -839,8 +839,8 @@ DEFECTS = [
         "AAAA: the charge bar's track keeps its own grey",
         POW,
         [(
-            "            height: 6.0,\n            color: p.surface1,",
-            "            height: 6.0,\n            color: Color::from_hex(0x45475A),",
+            "                height: 6.0,\n                color: p.surface1,",
+            "                height: 6.0,\n                color: Color::from_hex(0x45475A),",
         )],
         ["desktop"],
         ["every_colour_the_panel_draws_comes_from_its_palette"],
@@ -915,6 +915,39 @@ DEFECTS = [
         [("            11..=20 => p.peach,", "            11..=20 => p.green,")],
         ["desktop"],
         ["the_battery_ladders_stay_distinct_in_both_modes"],
+    ),
+    # Not a palette defect at all, and included because the palette conversion
+    # is what put a reader in front of this code. The charge bar really did push
+    # fill, track, then the same fill again; the track is opaque and covers the
+    # fill exactly, so the first of the three could not be seen by anyone. A
+    # hidden draw is invisible in a screenshot too, so nothing but a test on the
+    # command list can find it.
+    (
+        "HHHH: the charge bar draws its fill under its own opaque track",
+        POW,
+        [(
+            "        if bar_w < track_w {\n            cmds.push(RenderCommand::FillRect {",
+            "        cmds.push(RenderCommand::FillRect {\n"
+            "            x: x + 8.0,\n"
+            "            y: y + 28.0,\n"
+            "            width: bar_w,\n"
+            "            height: 6.0,\n"
+            "            color: charge_color,\n"
+            "            corner_radii: CornerRadii::all(3.0),\n"
+            "        });\n"
+            "        if bar_w < track_w {\n            cmds.push(RenderCommand::FillRect {",
+        )],
+        ["desktop"],
+        ["the_panel_draws_nothing_that_is_immediately_erased"],
+    ),
+    # The other way to draw nothing, and the one the coverage rule is blind to:
+    # an empty battery pushing a zero-width fill that no later command covers.
+    (
+        "IIII: an empty battery still pushes a zero-width charge fill",
+        POW,
+        [("        if bar_w > 0.0 {", "        if bar_w >= 0.0 {")],
+        ["desktop"],
+        ["the_panel_draws_nothing_that_is_immediately_erased"],
     ),
 ]
 

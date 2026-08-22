@@ -575,32 +575,35 @@ impl PowerSettingsUI {
             21..=50 => p.yellow,
             _ => p.green,
         };
-        let bar_w = (width - 16.0) * self.battery.charge_pct as f32 / 100.0;
-        cmds.push(RenderCommand::FillRect {
-            x: x + 8.0,
-            y: y + 28.0,
-            width: bar_w,
-            height: 6.0,
-            color: charge_color,
-            corner_radii: CornerRadii::all(3.0),
-        });
-        cmds.push(RenderCommand::FillRect {
-            x: x + 8.0,
-            y: y + 28.0,
-            width: width - 16.0,
-            height: 6.0,
-            color: p.surface1,
-            corner_radii: CornerRadii::all(3.0),
-        });
-        // Redraw fill on top (stacking order)
-        cmds.push(RenderCommand::FillRect {
-            x: x + 8.0,
-            y: y + 28.0,
-            width: bar_w,
-            height: 6.0,
-            color: charge_color,
-            corner_radii: CornerRadii::all(3.0),
-        });
+        // Track first, then the fill over it, and neither is emitted when the
+        // other has already accounted for every pixel. The track is opaque and
+        // covers the fill's rectangle exactly, so a fill pushed *before* it is
+        // not a faint underlay -- it is erased. This used to push fill, track,
+        // then the same fill again "on top (stacking order)", so a third of the
+        // charge bar's draw calls could not be seen by anyone. An empty battery
+        // needs no fill and a full one needs no track, for the same reason.
+        let track_w = width - 16.0;
+        let bar_w = track_w * self.battery.charge_pct as f32 / 100.0;
+        if bar_w < track_w {
+            cmds.push(RenderCommand::FillRect {
+                x: x + 8.0,
+                y: y + 28.0,
+                width: track_w,
+                height: 6.0,
+                color: p.surface1,
+                corner_radii: CornerRadii::all(3.0),
+            });
+        }
+        if bar_w > 0.0 {
+            cmds.push(RenderCommand::FillRect {
+                x: x + 8.0,
+                y: y + 28.0,
+                width: bar_w,
+                height: 6.0,
+                color: charge_color,
+                corner_radii: CornerRadii::all(3.0),
+            });
+        }
 
         // Text
         let status_text = format!(
@@ -1416,6 +1419,93 @@ mod tests {
         b.cycle_count = 312;
         b.temperature_dc = Some(348);
         b
+    }
+
+    /// No fill this panel emits is erased by a later one.
+    ///
+    /// The charge bar used to push fill, then its full-width opaque track, then
+    /// the same fill again "on top (stacking order)". The first fill could not
+    /// be seen by anyone: the track covers its rectangle exactly and is opaque,
+    /// so the only thing that draw ever did was cost the compositor a blend. A
+    /// hidden command is invisible in every screenshot too, which is why this
+    /// wants a test rather than an eye.
+    ///
+    /// The rule is deliberately conservative — it only reports a fill that a
+    /// *later* fill contains outright, while being opaque and no more rounded
+    /// at the corners. Containment plus equal-or-smaller radii is enough to
+    /// make coverage total: where the two outlines touch they are the same
+    /// curve, and everywhere else the earlier rect is in the later one's
+    /// interior. Anything a partial overlap could hide is left alone, because
+    /// partial overlap is how every panel on the desktop draws a border.
+    #[test]
+    fn the_panel_draws_nothing_that_is_immediately_erased() {
+        /// `(x, y, w, h, radii, opaque)` for a fill, or `None` for any other
+        /// command — text and images are never treated as coverers.
+        fn fill(c: &RenderCommand) -> Option<(f32, f32, f32, f32, CornerRadii, bool)> {
+            match c {
+                RenderCommand::FillRect {
+                    x,
+                    y,
+                    width,
+                    height,
+                    color,
+                    corner_radii,
+                } => Some((*x, *y, *width, *height, *corner_radii, color.a == 255)),
+                _ => None,
+            }
+        }
+
+        for light in [false, true] {
+            let p = Palette::for_mode(light);
+            for charge in [0_u32, 5, 15, 35, 80, 100] {
+                for tab in 0..4 {
+                    let mut ui = PowerSettingsUI::with_battery(wound_battery(
+                        charge,
+                        BatteryHealth::Good,
+                        ChargeState::Discharging,
+                    ));
+                    ui.set_active_tab(tab);
+                    let cmds = ui.render(&p, 0.0, 0.0, 500.0);
+
+                    for (i, under) in cmds.iter().enumerate() {
+                        let Some((ux, uy, uw, uh, ur, _)) = fill(under) else {
+                            continue;
+                        };
+                        // The other way to draw nothing: an empty rectangle.
+                        // An empty battery used to push a zero-width charge
+                        // fill, which no later command covers -- the rule below
+                        // would never have found it.
+                        assert!(
+                            uw > 0.0 && uh > 0.0,
+                            "command {i} is a {uw}x{uh} fill at {ux},{uy}, which \
+                             covers no pixels (charge={charge}%, tab={tab}, \
+                             light={light})"
+                        );
+                        for over in cmds.iter().skip(i + 1) {
+                            let Some((ox, oy, ow, oh, or, opaque)) = fill(over) else {
+                                continue;
+                            };
+                            let contains = opaque
+                                && ox <= ux
+                                && oy <= uy
+                                && ox + ow >= ux + uw
+                                && oy + oh >= uy + uh;
+                            let no_rounder = or.top_left <= ur.top_left
+                                && or.top_right <= ur.top_right
+                                && or.bottom_right <= ur.bottom_right
+                                && or.bottom_left <= ur.bottom_left;
+                            assert!(
+                                !(contains && no_rounder),
+                                "command {i} ({uw}x{uh} at {ux},{uy}) is covered \
+                                 outright by a later opaque fill ({ow}x{oh} at \
+                                 {ox},{oy}) — it is drawn and never seen \
+                                 (charge={charge}%, tab={tab}, light={light})"
+                            );
+                        }
+                    }
+                }
+            }
+        }
     }
 
     /// The sweep: in light mode a colour this panel still holds privately is a

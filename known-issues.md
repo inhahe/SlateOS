@@ -50724,6 +50724,30 @@ thumbnail, or on any other content the palette does not own.
     own grey) is reachable through no other state — the same lesson
     `storage_settings.rs` learned about empty fixtures, arriving here as an
     enum arm rather than as an empty `Vec`.
+  - **The conversion turned up a bug that has nothing to do with colour, and
+    the fix generalises past this module.** `render_battery_summary` pushed the
+    charge fill, then the bar's *opaque, full-width* track over it, then the
+    same fill again with the comment `// Redraw fill on top (stacking order)`.
+    The track covers the fill's rectangle exactly, so the first of those three
+    draws could not be seen by anyone: a third of the charge bar's draw calls
+    were pure blend cost. **A hidden draw is invisible in a screenshot too**,
+    which is precisely why it survived — there is no way to look at it. It now
+    draws the track only when the fill does not already cover it and the fill
+    only when it has width, guarded by
+    `the_panel_draws_nothing_that_is_immediately_erased`: no `FillRect` may be
+    contained outright by a later opaque one no more rounded at the corners,
+    and none may be empty. The containment rule is conservative on purpose —
+    partial overlap is how every panel on the desktop draws a border, so only
+    total coverage is reported. Writing the test found a **second** instance
+    the eye had missed: at 100% charge the *track* was the dead command rather
+    than the fill. Harness defects HHHH (the original three-push order) and
+    IIII (the zero-width fill an empty battery emits, which the coverage half
+    of the rule is blind to and the emptiness half catches).
+    - Worth lifting into `palette_check.rs` — or a sibling `draw_check.rs` —
+      once a second module wants it, since every converted module already
+      renders to a `Vec<RenderCommand>` the rule can be run over. Left local
+      for now: one instance is not yet a shared helper, and the rule's
+      conservatism may need adjusting against a panel that layers differently.
 
 **Trigger:** this is not blocked on anything. It is sequenced after the shell
 event loop (`TD-C-THE-SHELL-CAN-DRAW-ITSELF-AND-NOBODY-CAN-ASK-IT-TO`) only

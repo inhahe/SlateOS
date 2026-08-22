@@ -60204,12 +60204,16 @@ The conversion is not mechanical, and three constraints keep recurring:
 - **Re-read each test against the current API.** They have never been
   type-checked, so treat compilation as an open question per file.
 
-### Progress (19 of 54)
+### Progress (25 of 54)
 
 | Date | Files | Result |
 |---|---|---|
-| 2026-08-22 | `pathutil.rs` (10), `raw.rs` (2) | boot PASS 1674s; both print `Self-test PASSED` |
-| 2026-08-22 | `frag.rs` (7) | found `A-FRAG-REJECTED-FRAGMENTS-STILL-CLAIM-A-REASSEMBLY-SLOT` |
+| 2026-08-22 | `pathutil.rs` (10), `raw.rs` (2) | converted; boot PASS 1674 s, both print `Self-test PASSED` |
+| 2026-08-22 | `frag.rs` (7) | converted; found `A-FRAG-REJECTED-FRAGMENTS-STILL-CLAIM-A-REASSEMBLY-SLOT` |
+| 2026-08-22 | `tty/mod.rs` (6) | **removed, not converted** — genuinely redundant |
+
+Remaining: `ext4/vfs_impl.rs` (13), `httpd.rs` (7), `ext4/driver.rs` (6),
+`ext4/balloc.rs` (3).
 
 The `frag.rs` conversion is the argument for doing the rest. Its seven dead
 tests all drove the module-level `add_fragment`, i.e. the global reassembly
@@ -60218,6 +60222,22 @@ to stay hermetic. Porting them therefore meant reading a code path nothing
 covered, and a remotely-triggerable table-exhaustion DoS was sitting in it. The
 value here is not only "the tests run now"; it is that porting a test forces
 someone to read the path it covers.
+
+`tty/mod.rs` is the counter-example, and worth knowing about before starting the
+next file. Its `self_test()` already carried a doc comment saying the unit tests
+below "do not run on the bare-metal custom target, so this mirrors their
+assertions" — the problem was known *there*, and handled, long before this issue
+was filed. All six properties really are checked by the running self-test, which
+also covers a good deal more (erase/kill/EOF, all three ISIG signals and the
+line flush each performs, `NOISIG`, echo rendering, chunked delivery, pgrp
+ownership). Verified case by case rather than taken on the comment's word; the
+six were deleted and the comment corrected.
+
+So: **check what the existing `self_test()` already covers before porting.**
+Duplicated coverage is not free — it is more code to keep correct, and it makes
+the real gaps harder to see. The two useful outcomes per file are "ported,
+because it covered something nothing else did" and "deleted, because it did
+not"; the one to avoid is "ported without checking".
 
 Two things to get right while converting:
 
@@ -60378,3 +60398,68 @@ baseline unchanged. The serial log shows `[frag] table: rejected fragments free
 their slot (8 empty + 8 oversized): OK` and **zero** occurrences of `[frag]
 Evicting reassembly entry`, which is the observable the fix is about — the
 sixteen junk fragments forced no eviction at all.
+
+## `TD-A-MOST-BOOT-SELF-TESTS-PANIC-THE-KERNEL-INSTEAD-OF-REPORTING` — open, found 2026-08-22 (lane A)
+
+**In short:** The kernel runs its own test suite on every single boot, and most
+of those tests are written so that a failure **halts the machine** rather than
+printing "this test failed" and carrying on. On a developer's boot test that is
+fine and arguably better — you get an exact file and line. On a user's computer
+it means that one wrong flag byte in, say, the terminal layer turns into a
+machine that will not start. Nothing is broken today; this is about what happens
+the first time one of these checks is wrong on real hardware.
+
+### Scale
+
+`567` files under `kernel/src/` contain both a `self_test` function and
+`assert!`/`assert_eq!`/`assert_ne!`, totalling **12 674** assertion sites. The
+largest concentrations:
+
+| File | assert sites |
+|---|---|
+| `kernel/src/syscall/linux.rs` | 400 |
+| `kernel/src/container.rs` | 334 |
+| `kernel/src/oci.rs` | 217 |
+| `kernel/src/net/dashboard.rs` | 151 |
+| `kernel/src/net/httpd.rs` | 140 |
+| `kernel/src/ipc/namespace.rs` | 116 |
+
+Against roughly 299 sites that use the `KernelResult<()>` + `serial_println!`
+FAIL form instead. So the panicking style is the *majority* convention, not the
+exception, and the two have coexisted for a long time.
+
+### Why this is being written down rather than fixed
+
+Three separate questions are tangled here, and only the first is a bug:
+
+1. **Should self-tests run on a production boot at all?** They currently run
+   unconditionally from `kernel_main` — `tty::self_test()` at `main.rs:5972` is
+   typical. If the answer is "no, gate them behind a boot flag", then the
+   assertion style stops mattering for users and the whole issue shrinks to a
+   one-line change. This is the question to settle first.
+2. **Is `assert!` the wrong tool for a check that does run in production?** Yes,
+   for the same reason `unwrap` is (`CLAUDE.md`: no panics in non-test code) —
+   but only if (1) says they run.
+3. **Is it worth converting 12 674 sites?** Almost certainly not as a bulk
+   mechanical edit, and definitely not before (1) is answered. Converting them
+   also *loses* something: an assertion carries file, line and the compared
+   values for free, while the `KernelResult` form only reports what its author
+   remembered to log.
+
+Because (1) is a user-visible policy question with a real tradeoff — a
+production boot that self-tests is slower but catches a corrupt build, one that
+does not is faster but ships unverified — it is the operator's call rather than
+mine.
+
+### What was done instead
+
+New self-test code written under `A-KERNEL-UNIT-TESTS-NEVER-RUN` uses the
+`KernelResult<()>` form (`pathutil`, `net::raw`, `net::frag`), which is the safe
+side of the question whichever way it is decided. Existing assertion-based
+self-tests were left alone.
+
+### Provenance
+
+Noticed while converting `tty/mod.rs`, whose `self_test()` is a good example:
+74 assert sites, called unconditionally at boot, covering things as ordinary as
+whether `VERASE` is 127.

@@ -59,14 +59,29 @@
 //! things a point belongs to, and that comparison is only meaningful while they
 //! are all in one space.
 
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use guitk::event::{Event, MouseEvent};
 use guitk::render::RenderTree;
 use oswindow::{ConnectionError, ConnectionTransport as Transport, Error, EventLoop, Layer, Spec};
 
+use crate::animations::{AnimationManager, WindowAnimation};
 use crate::wallpaper::WallpaperManager;
 use crate::{DesktopShell, ShellAction, ShellRequest, WindowRequest};
+
+/// How long the shell asks to be woken for the next animation frame.
+///
+/// A target, not a promise: the wake-up is a *deadline*, so a loaded machine
+/// delivers the frame late and the animation takes a correspondingly bigger
+/// step. Nothing in the shell counts frames, so a late one costs smoothness and
+/// never correctness.
+///
+/// 16 ms rather than 7 (144 Hz) because the shell is not composited in step with
+/// the display: a client-side clock cannot align with vsync however fast it
+/// runs, so a faster one buys extra wake-ups and no extra smoothness. The
+/// vsync-locked version is a compositor frame callback and stays open — see
+/// `design-decisions.md` §521 §1.
+const FRAME_INTERVAL: Duration = Duration::from_millis(16);
 
 /// One window the shell draws on, and where it sits on screen.
 ///
@@ -160,6 +175,10 @@ pub struct ShellSession<T: Transport> {
     dirty: bool,
     running: bool,
     launches: Vec<String>,
+    /// Everything currently moving. Empty means no wake-up is registered and
+    /// the loop parks with no bound at all, which is what keeps an idle desktop
+    /// idle.
+    animations: AnimationManager,
 }
 
 impl<T: Transport> ShellSession<T> {
@@ -235,6 +254,7 @@ impl<T: Transport> ShellSession<T> {
             dirty: false,
             running: false,
             launches: Vec::new(),
+            animations: AnimationManager::new(),
         };
         session.repaint()?;
         Ok(session)
@@ -461,6 +481,50 @@ impl<T: Transport> ShellSession<T> {
         &mut self.events
     }
 
+    /// Everything currently moving.
+    #[must_use]
+    pub const fn animations(&self) -> &AnimationManager {
+        &self.animations
+    }
+
+    /// Start a window animation and ask the frame clock for the first frame.
+    ///
+    /// Arming here rather than leaving it to the caller is the point: an
+    /// animation that is registered but never woken is the defect this whole
+    /// path exists to remove, and it is invisible in a unit test because a
+    /// `tick` called by hand advances exactly as designed.
+    ///
+    /// Refused silently when reduced motion is on — see
+    /// [`AnimationManager::animate_window`]. The wake-up follows the same
+    /// answer, so reduced motion really is an idle desktop rather than an
+    /// invisible animation still costing a wake-up every frame.
+    pub fn animate_window(&mut self, anim: WindowAnimation) {
+        self.animations.animate_window(anim);
+        self.arm_next_frame();
+    }
+
+    /// Slide the desktop, as [`AnimationManager::animate_desktop_switch`], and
+    /// ask for the first frame.
+    pub fn animate_desktop_switch(&mut self, direction: f32) {
+        let width = f32::from(u16::try_from(self.shell.screen_width).unwrap_or(u16::MAX));
+        self.animations.animate_desktop_switch(direction, width);
+        self.arm_next_frame();
+    }
+
+    /// Turn animations off, or back on, for accessibility.
+    ///
+    /// Turning them off cancels what is already running rather than letting it
+    /// finish: a user who has just asked for less motion is asking about the
+    /// motion on screen now, not about the next one.
+    pub fn set_reduced_motion(&mut self, reduced: bool) {
+        self.animations.reduced_motion = reduced;
+        if reduced {
+            self.animations.cancel_all();
+            self.shell.overview.end_fade();
+            self.dirty = true;
+        }
+    }
+
     /// Stop [`run`](Self::run) at the end of the current batch.
     pub const fn quit(&mut self) {
         self.running = false;
@@ -494,6 +558,12 @@ impl<T: Transport> ShellSession<T> {
         let Some(surface) = self.surface_for(window) else {
             return Ok(());
         };
+        // Sampled around the whole handler rather than at the one call that
+        // opens the overview, because there is no such call: `show` is reached
+        // from a hotkey, from a taskbar click and from inside the overview's own
+        // action table, and a fade armed at two of those three is a fade that
+        // works until someone uses the third.
+        let overview_was_visible = self.shell.overview.visible;
         match event {
             Event::Mouse(mouse) => self.pointer(&surface.to_screen(&mouse))?,
             Event::Key(key) => {
@@ -516,9 +586,89 @@ impl<T: Transport> ShellSession<T> {
             Event::Resize { width, height } if window == self.background.window => {
                 self.resize_display(width, height)?;
             }
+            // The frame clock. `elapsed_ms` is measured wall time since the
+            // previous frame of this animation, not the interval that was
+            // asked for, so a late frame steps further rather than slowing the
+            // animation down.
+            Event::Tick { elapsed_ms } => self.step_frame(elapsed_ms),
             _ => {}
         }
+        if !overview_was_visible && self.shell.overview.visible {
+            self.begin_overview_fade();
+        }
         Ok(())
+    }
+
+    /// Start the overview's backdrop fade, now that something has opened it.
+    ///
+    /// This session is the caller that owns a clock, and
+    /// [`OverviewState::begin_fade`] is documented as only for such a caller:
+    /// the fade is deliberately *not* started by `show`, so that every other
+    /// caller of `show` — a test, a layout pass, an embedder driving the shell
+    /// by hand — gets a fully-open overview instead of one waiting for a frame
+    /// that never comes. See `design-decisions.md` §520.
+    fn begin_overview_fade(&mut self) {
+        if self.animations.reduced_motion {
+            return;
+        }
+        self.shell
+            .overview
+            .begin_fade(self.shell.overview_config.fade_ms);
+        self.arm_next_frame();
+    }
+
+    /// Advance every animation by the time the frame clock measured, and decide
+    /// whether to ask for another frame.
+    ///
+    /// The re-arm is here rather than at the call sites that *start* animations
+    /// because it is the only place that knows whether anything is still
+    /// moving. Wake-ups are one-shot (`design-decisions.md` §521 §2), so
+    /// "stop" is what happens by not doing this — a handler that returns early
+    /// leaves the desktop idle rather than leaving a timer running for ever.
+    fn step_frame(&mut self, elapsed_ms: u64) {
+        // A `u64` of milliseconds that does not fit in a `u32` is 49 days, so
+        // this is the loop having been stopped in a debugger rather than a real
+        // frame. Saturating puts every animation at its end, which is where a
+        // user returning after 49 days expects to find them.
+        let dt = u32::try_from(elapsed_ms).unwrap_or(u32::MAX);
+        // Asked *before* the step, not after: the step that finishes the last
+        // animation is still a step that changed what is on screen, and reading
+        // this afterwards would drop exactly the frame that puts everything at
+        // its destination.
+        let moved = self.anything_moving();
+        // Stepped whatever the manager says, because the overview's fade is not
+        // the manager's — it lives on the overview so that the overview can be
+        // drawn correctly by a caller that has no manager at all.
+        self.shell.overview.tick_fade(dt);
+        // The stepped rectangles are deliberately not used here. A window's
+        // geometry belongs to the compositor, not to the shell — the shell
+        // cannot move a window by drawing it somewhere else — so a window
+        // animation run in this process can only be read back through
+        // `animations()` by whatever asked for it. Until the compositor grows
+        // its own animation path, `animate_window` is for callers that render
+        // the result themselves.
+        drop(self.animations.tick(dt));
+        if moved {
+            self.dirty = true;
+        }
+        self.arm_next_frame();
+    }
+
+    /// Ask for the next frame if anything is still moving.
+    fn arm_next_frame(&mut self) {
+        if self.anything_moving() {
+            self.events.wake_after(self.panel.window, FRAME_INTERVAL);
+        }
+    }
+
+    /// Whether anything on screen is mid-animation.
+    ///
+    /// The single condition that keeps an idle desktop idle: false here means
+    /// no wake-up is registered and the loop parks with no bound at all. Every
+    /// animated thing the shell owns must be named here — one that is not is a
+    /// thing that stops moving the moment nothing else is.
+    fn anything_moving(&self) -> bool {
+        self.animations.has_active() || self.shell.overview.is_fading()
     }
 
     /// One pointer event, already in screen coordinates.

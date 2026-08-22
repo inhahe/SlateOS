@@ -810,3 +810,307 @@ fn the_shell_s_park_is_bounded_by_a_wake_up_it_registered() {
         "the shell parked with no bound at all: {asked:?}"
     );
 }
+
+// ---- what the frame clock actually drives ----
+
+/// Super+Tab — the chord that opens the overview.
+fn super_tab() -> guitk::event::Event {
+    chord(
+        Key::Tab,
+        Modifiers {
+            super_key: true,
+            ..Modifiers::NONE
+        },
+    )
+}
+
+/// Push one frame at the shell, as the loop's own clock would.
+///
+/// The pending wake-up is cancelled first so that what is asserted afterwards
+/// is whether *this frame* armed the next one, rather than the leftover of the
+/// frame before. A real tick consumes its wake-up on the way out — wake-ups are
+/// one-shot — and delivering one by hand does not, so without this every
+/// assertion about re-arming would pass whatever the shell did.
+fn frame(session: &mut Session, desktop: &Desktop, elapsed_ms: u64) {
+    let panel = session.panel().window();
+    session.events_mut().cancel_wake(panel);
+    desktop.borrow_mut().send_input(&[InputEvent::new(
+        panel,
+        guitk::event::Event::Tick { elapsed_ms },
+    )]);
+    session.pump().expect("pump");
+}
+
+#[test]
+fn an_idle_desktop_asks_for_no_frames() {
+    // The property that makes a frame clock affordable. A shell that armed a
+    // wake-up unconditionally would work exactly as well and cost a wake-up
+    // every 16 ms for ever, on a desktop where nothing is moving — invisible in
+    // every test that only checks what is drawn.
+    let (mut session, _desktop) = session();
+    let panel = session.panel().window();
+    assert!(!session.events_mut().is_waking(panel));
+    assert_eq!(session.events_mut().next_wakeup(), None);
+}
+
+#[test]
+fn opening_the_overview_asks_for_a_frame() {
+    let (mut session, desktop) = session();
+    let panel = session.panel().window();
+    desktop
+        .borrow_mut()
+        .send_input(&[InputEvent::new(panel, super_tab())]);
+    session.pump().expect("pump");
+
+    assert!(session.shell().overview.visible, "Super+Tab did nothing");
+    assert!(
+        session.shell().overview.is_fading(),
+        "the overview opened without starting its fade"
+    );
+    assert!(
+        session.events_mut().is_waking(panel),
+        "the fade was started and no frame was asked for — it would sit at its \
+         dimmest for ever, which is the defect design-decisions.md §520 is about"
+    );
+}
+
+#[test]
+fn an_overview_whose_fade_never_runs_is_still_drawn_and_still_clickable() {
+    // The §520 regression, at the level it actually bit: the first fade gated
+    // every draw path on progress, so an overlay whose clock never ran was
+    // blank *and* took every click. Nothing here may depend on a frame having
+    // arrived — the fade is begun below and deliberately never advanced.
+    let (mut session, desktop) = session();
+    let panel = session.panel().window();
+    let popups = session.popups().window();
+    desktop
+        .borrow_mut()
+        .send_window_list(&[app(1, "Terminal"), app(2, "Editor")]);
+    session.pump().expect("pump");
+    desktop
+        .borrow_mut()
+        .send_input(&[InputEvent::new(panel, super_tab())]);
+    session.pump().expect("pump");
+    assert!(
+        session.shell().overview.is_fading(),
+        "the test's premise is wrong: no fade was started, so nothing is being \
+         held at zero progress"
+    );
+
+    // Drawn: the overlay reached the surface with more than its translation
+    // wrapper on it.
+    let frame = desktop
+        .borrow_mut()
+        .drawn()
+        .into_iter()
+        .rfind(|(w, _)| *w == popups)
+        .expect("the overview opened and nothing was drawn on its surface");
+    assert!(
+        frame.1 > 2,
+        "the overview surface got only its translation wrapper — a blank \
+         fullscreen overlay, which is exactly what §520 shipped"
+    );
+
+    // Clickable: a press inside a card is answered, rather than swallowed by an
+    // overlay that has not faded in yet.
+    let card = session
+        .shell()
+        .overview_layout()
+        .into_iter()
+        .next()
+        .expect("no cards laid out");
+    let (x, y) = (
+        card.render_x + card.render_width / 2.0,
+        card.render_y + card.render_height / 2.0,
+    );
+    press_at(&desktop, session.popups(), x, y);
+    session.pump().expect("pump");
+    assert!(
+        !controls(&desktop).is_empty(),
+        "a click on a card in an un-ticked overview did nothing"
+    );
+}
+
+#[test]
+fn a_frame_advances_the_fade_and_the_last_one_stops_asking_for_more() {
+    let (mut session, desktop) = session();
+    let panel = session.panel().window();
+    let fade_ms = session.shell().overview_config.fade_ms;
+    assert!(fade_ms > 0, "the default overview has no fade to advance");
+
+    desktop
+        .borrow_mut()
+        .send_input(&[InputEvent::new(panel, super_tab())]);
+    session.pump().expect("pump");
+    let opening = session.shell().overview.fade_opacity();
+    assert!(opening < 1.0, "the fade began already finished: {opening}");
+
+    // Half way: further on than it was, and still asking for frames.
+    frame(&mut session, &desktop, u64::from(fade_ms) / 2);
+    let midway = session.shell().overview.fade_opacity();
+    assert!(midway > opening, "a frame did not advance the fade");
+    assert!(midway < 1.0, "half a fade's worth of time finished it");
+    assert!(
+        session.events_mut().is_waking(panel),
+        "the shell stopped asking for frames with the fade half done"
+    );
+
+    // Past the end: fully open, and — the point of the whole design — no
+    // wake-up left registered, so the loop parks unbounded again.
+    frame(&mut session, &desktop, u64::from(fade_ms));
+    assert!(!session.shell().overview.is_fading());
+    assert!(
+        (session.shell().overview.fade_opacity() - 1.0).abs() < f32::EPSILON,
+        "a finished fade did not land on fully open"
+    );
+    assert!(
+        !session.events_mut().is_waking(panel),
+        "the fade finished and the shell kept the clock running — an idle \
+         desktop waking 60 times a second for nothing"
+    );
+}
+
+#[test]
+fn the_frame_that_finishes_the_fade_is_still_painted() {
+    // Off-by-one bait. `has_active` is false *after* the step that finishes the
+    // last animation, so a shell that decided whether to repaint by asking
+    // afterwards would drop precisely the frame that puts the overlay at its
+    // final opacity, and the fade would visibly stop one frame short.
+    let (mut session, desktop) = session();
+    let panel = session.panel().window();
+    let fade_ms = session.shell().overview_config.fade_ms;
+    desktop
+        .borrow_mut()
+        .send_input(&[InputEvent::new(panel, super_tab())]);
+    session.pump().expect("pump");
+
+    let popups = session.popups().window();
+    let before = desktop
+        .borrow_mut()
+        .drawn()
+        .iter()
+        .filter(|(w, _)| *w == popups)
+        .count();
+    // One frame, long enough to run the fade past its end in a single step.
+    frame(&mut session, &desktop, u64::from(fade_ms) * 2);
+    let after = desktop
+        .borrow_mut()
+        .drawn()
+        .iter()
+        .filter(|(w, _)| *w == popups)
+        .count();
+    assert!(
+        after > before,
+        "the frame that finished the fade drew nothing"
+    );
+}
+
+#[test]
+fn a_frame_with_nothing_moving_asks_for_no_more_frames() {
+    let (mut session, desktop) = session();
+    let panel = session.panel().window();
+    // A tick can arrive with nothing to advance — the last frame of one
+    // animation and a stray wake-up can race. It must not re-arm.
+    frame(&mut session, &desktop, 16);
+    assert!(!session.events_mut().is_waking(panel));
+}
+
+#[test]
+fn reduced_motion_opens_the_overview_without_a_fade_and_without_a_clock() {
+    // Reduced motion is not "the same animation, faster". An animation that
+    // still runs but is invisible costs the same wake-ups and is the same
+    // motion sickness; the setting has to reach the clock, not just the paint.
+    let (mut session, desktop) = session();
+    let panel = session.panel().window();
+    session.set_reduced_motion(true);
+    desktop
+        .borrow_mut()
+        .send_input(&[InputEvent::new(panel, super_tab())]);
+    session.pump().expect("pump");
+
+    assert!(session.shell().overview.visible, "Super+Tab did nothing");
+    assert!(!session.shell().overview.is_fading());
+    assert!(
+        (session.shell().overview.fade_opacity() - 1.0).abs() < f32::EPSILON,
+        "reduced motion left the overview part-way through a fade it will \
+         never finish"
+    );
+    assert!(
+        !session.events_mut().is_waking(panel),
+        "reduced motion still armed the frame clock"
+    );
+}
+
+#[test]
+fn turning_reduced_motion_on_mid_fade_lands_on_fully_open() {
+    let (mut session, desktop) = session();
+    let panel = session.panel().window();
+    desktop
+        .borrow_mut()
+        .send_input(&[InputEvent::new(panel, super_tab())]);
+    session.pump().expect("pump");
+    assert!(session.shell().overview.is_fading());
+
+    session.set_reduced_motion(true);
+    assert!(!session.shell().overview.is_fading());
+    assert!((session.shell().overview.fade_opacity() - 1.0).abs() < f32::EPSILON);
+}
+
+#[test]
+fn closing_the_overview_takes_its_fade_with_it() {
+    // Otherwise the next `show` inherits a part-finished fade, and — worse —
+    // the shell keeps asking for frames to advance an overlay that is not on
+    // screen.
+    let (mut session, desktop) = session();
+    let panel = session.panel().window();
+    desktop
+        .borrow_mut()
+        .send_input(&[InputEvent::new(panel, super_tab())]);
+    session.pump().expect("pump");
+    assert!(session.shell().overview.is_fading());
+
+    session.events_mut().cancel_wake(panel);
+    desktop
+        .borrow_mut()
+        .send_input(&[InputEvent::new(panel, super_tab())]);
+    session.pump().expect("pump");
+    assert!(
+        !session.shell().overview.visible,
+        "Super+Tab did not close it"
+    );
+    assert!(!session.shell().overview.is_fading());
+    assert!(
+        !session.events_mut().is_waking(panel),
+        "the shell is still clocking a fade for an overlay that is gone"
+    );
+}
+
+#[test]
+fn a_window_animation_runs_off_the_same_clock() {
+    // The manager's animations and the overview's fade are separate things —
+    // the fade lives on the overview so the overview can be drawn without a
+    // manager — and a shell that armed the clock for one but not the other
+    // would work until they were used apart.
+    use crate::animations::WindowAnimation;
+    let (mut session, desktop) = session();
+    let panel = session.panel().window();
+    assert!(!session.events_mut().is_waking(panel));
+
+    session.animate_window(WindowAnimation::open(7, 0.0, 0.0, 800.0, 600.0, 100));
+    assert_eq!(session.animations().active_count(), 1);
+    assert!(
+        session.events_mut().is_waking(panel),
+        "an animation was started and no frame was asked for"
+    );
+
+    frame(&mut session, &desktop, 200);
+    assert_eq!(
+        session.animations().active_count(),
+        0,
+        "a frame twice the animation's length did not finish it"
+    );
+    assert!(
+        !session.events_mut().is_waking(panel),
+        "the animation finished and the clock kept running"
+    );
+}

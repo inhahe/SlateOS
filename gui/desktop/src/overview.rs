@@ -29,14 +29,31 @@
 //! and would have to come from package metadata keyed by executable. Search
 //! matches titles for the same reason.
 //!
-//! # Nothing here moves
+//! # The one thing that moves, and the shape that keeps it safe
 //!
-//! There is no fade, slide or scale, and the absence is deliberate: the shell
-//! has no clock. `oswindow::EventLoop::run` blocks in `Connection::wait()`,
-//! which takes no timeout, so nothing can step an animation between input
-//! events. Code here must therefore draw its *final* state on the first frame —
-//! a draw path gated on progress that nothing advances renders nothing at all.
-//! See `known-issues.md`, `TD-C-THE-SHELL-HAS-NO-FRAME-CLOCK`.
+//! The backdrop fades in when the overview opens. It is the only animation
+//! here, and it is arranged so that a caller with no clock still gets a working
+//! overview rather than a blank one.
+//!
+//! The first attempt did the opposite. It had an `animation_progress` that
+//! [`show`](OverviewState::show) set to `0.0` and a `tick_animation(dt)` the
+//! caller was to run every frame, and every draw path began `if progress <= 0.0
+//! { return }`. Nothing ever called `tick_animation`, and at the time nothing
+//! *could* — the shell's event loop blocked in `Connection::wait()`, which takes
+//! no timeout. So opening the overview produced a fullscreen overlay that was
+//! blank, un-clickable, and permanently so: not a missing polish detail, the
+//! feature not working. It was deleted rather than left in (see
+//! `design-decisions.md` §520), and comes back now that
+//! [`oswindow::EventLoop`] has a frame clock.
+//!
+//! What is different this time is which state is the default. The fade is
+//! `Option<Animation>` and `None` means **fully open**, so a caller that never
+//! ticks — a test, a headless layout pass, an embedder with no clock — sees the
+//! finished overlay. Starting the fade is the deliberate act, and only
+//! [`OverviewState::begin_fade`] does it; only a caller that owns a clock calls
+//! it. Nothing here gates *drawing* or *hit-testing* on the fade: it scales the
+//! backdrop's alpha and touches nothing else, so even a fade frozen at zero
+//! leaves every card drawn and every click landing where it should.
 //!
 //! # One layout, two readers
 //!
@@ -46,6 +63,7 @@
 //! one layout is how a click comes to select the window next to the one that
 //! was lit. See `design-decisions.md` §520.
 
+use crate::animations::{Animation, DEFAULT_DURATION_MS, Easing};
 use crate::{Layer, ShellControlAction, ShellRequest, WindowId};
 use guiremote::window_list::WindowList;
 use guitk::color::Color;
@@ -133,6 +151,14 @@ pub struct OverviewState {
     pub selected_desktop: Option<u32>,
     pub search_query: String,
     pub search_results: Vec<u64>,
+    /// The backdrop fade, or `None` for **fully open**.
+    ///
+    /// Private, and `None` by default, because that is what makes an un-ticked
+    /// overview a working one: see this module's header. Read it through
+    /// [`OverviewState::fade_opacity`], start it with
+    /// [`OverviewState::begin_fade`], advance it with
+    /// [`OverviewState::tick_fade`].
+    fade: Option<Animation>,
 }
 
 impl OverviewState {
@@ -146,6 +172,7 @@ impl OverviewState {
             selected_desktop: None,
             search_query: String::new(),
             search_results: Vec::new(),
+            fade: None,
         }
     }
 
@@ -154,17 +181,28 @@ impl OverviewState {
     /// The search box starts empty every time rather than remembering the last
     /// query: an overview that opens already filtered is one that opens looking
     /// like most of the desktop has closed.
+    /// Opening does **not** start the fade. `show` is called from the input
+    /// path, which has no idea whether anything will ever tick; leaving the
+    /// fade at `None` means the overview is fully open the instant it is shown,
+    /// and a caller that does own a clock follows this with
+    /// [`begin_fade`](Self::begin_fade). The animation is therefore something
+    /// added to a working overlay, never something the overlay waits for.
     pub fn show(&mut self, mode: OverviewMode) {
         self.mode = mode;
         self.visible = true;
         self.search_query.clear();
         self.search_results.clear();
         self.hovered_window = None;
+        self.fade = None;
     }
 
     /// Hide the overview.
     pub fn hide(&mut self) {
         self.visible = false;
+        // Dropped rather than left part-way: the next `show` must not inherit a
+        // fade from the last one, and an overview that is not on screen has no
+        // business keeping the shell's frame clock awake.
+        self.fade = None;
     }
 
     /// Toggle visibility using the given mode.
@@ -176,23 +214,71 @@ impl OverviewState {
         }
     }
 
-    // There was a fade here: `animation_progress`, stepped from 0 to 1 by a
-    // `tick_animation(dt)` the caller was to run every frame, with the backdrop
-    // opacity scaled by it.
-    //
-    // Nothing ever called it, and nothing could. This shell's event loop
-    // (`oswindow::EventLoop::run`) blocks in `wait()` when there is no input —
-    // it is event-driven, not frame-driven, and there is no timer source and no
-    // frame callback anywhere in the stack. So `animation_progress` stayed at
-    // the 0.0 that `show` set, and every draw path began `if progress <= 0.0 {
-    // return }`: opening the overview produced an overlay that was blank,
-    // un-clickable, and permanently so.
-    //
-    // That is not a missing polish detail, it is the feature not working, and
-    // keeping the field to preserve the *possibility* of a fade would have
-    // meant shipping the blank version to protect the animated one that does
-    // not exist. The fade comes back when the shell has a clock to run it from;
-    // see `known-issues.md`, TD-C-THE-SHELL-HAS-NO-FRAME-CLOCK.
+    /// Start the backdrop fading in over `duration_ms`.
+    ///
+    /// **Only call this if you are going to call [`tick_fade`](Self::tick_fade)
+    /// until it returns `false`.** A fade begun and never advanced holds the
+    /// backdrop at its dimmest, which is the one state this design otherwise
+    /// makes unreachable. The caller that starts it is the caller that owns the
+    /// clock, which is why this is separate from [`show`](Self::show) rather
+    /// than part of it.
+    ///
+    /// A zero `duration_ms` is treated as "no fade" rather than as a division
+    /// by zero — [`Animation::new`] floors the duration at 1 ms, but a caller
+    /// asking for zero is asking for the overview to be open now, and giving it
+    /// a one-millisecond fade would make that depend on when the next frame
+    /// happens to land.
+    pub fn begin_fade(&mut self, duration_ms: u32) {
+        self.fade = (duration_ms > 0).then(|| {
+            // Ease-out: the backdrop arrives quickly and settles, so the
+            // overlay reads as already there for most of the fade rather than
+            // as still on its way.
+            Animation::new(0.0, 1.0, duration_ms, Easing::EaseOut)
+        });
+    }
+
+    /// Jump straight to fully open, abandoning any fade in progress.
+    ///
+    /// What a reduced-motion setting turns on mid-fade should do: the user has
+    /// just asked for less motion, and finishing the fade they asked to stop is
+    /// a stranger answer than being where it was going.
+    pub fn end_fade(&mut self) {
+        self.fade = None;
+    }
+
+    /// Advance the fade by `dt_ms` of wall time. Returns whether it is still
+    /// running — i.e. whether another frame is wanted.
+    ///
+    /// Cheap and safe to call when nothing is fading; it answers `false`.
+    pub fn tick_fade(&mut self, dt_ms: u32) -> bool {
+        let Some(anim) = self.fade.as_mut() else {
+            return false;
+        };
+        anim.tick(dt_ms);
+        if anim.is_done() {
+            // Back to `None`, the fully-open resting state, so a later reader
+            // cannot tell a finished fade from one that never ran.
+            self.fade = None;
+            return false;
+        }
+        true
+    }
+
+    /// Whether a fade is running, and so whether a frame is wanted.
+    #[must_use]
+    pub const fn is_fading(&self) -> bool {
+        self.fade.is_some()
+    }
+
+    /// How much of the backdrop to draw, in `0.0..=1.0`.
+    ///
+    /// `1.0` whenever no fade is running, which includes both "never started
+    /// one" and "finished". Only the backdrop's alpha is scaled by this; see
+    /// the module header for why nothing else is.
+    #[must_use]
+    pub fn fade_opacity(&self) -> f32 {
+        self.fade.as_ref().map_or(1.0, Animation::value)
+    }
 
     /// Rebuild the lanes from a window list.
     ///
@@ -353,6 +439,10 @@ pub struct OverviewConfig {
     pub show_desktop_labels: bool,
     /// Opacity of the dark overlay background (0.0 – 1.0).
     pub background_opacity: f32,
+    /// How long the backdrop takes to fade in, in milliseconds. `0` disables
+    /// the fade, which is what an accessibility setting for reduced motion sets
+    /// it to — see [`OverviewState::begin_fade`].
+    pub fade_ms: u32,
 }
 
 impl Default for OverviewConfig {
@@ -362,6 +452,7 @@ impl Default for OverviewConfig {
             max_columns: 5,
             show_desktop_labels: true,
             background_opacity: 0.85,
+            fade_ms: DEFAULT_DURATION_MS,
         }
     }
 }
@@ -377,6 +468,7 @@ impl OverviewConfig {
             self.show_desktop_labels
         ));
         out.push_str(&format!("background_opacity={}\n", self.background_opacity));
+        out.push_str(&format!("fade_ms={}\n", self.fade_ms));
         out
     }
 
@@ -409,6 +501,11 @@ impl OverviewConfig {
                     "background_opacity" => {
                         if let Ok(v) = val.parse::<f32>() {
                             cfg.background_opacity = v;
+                        }
+                    }
+                    "fade_ms" => {
+                        if let Ok(v) = val.parse::<u32>() {
+                            cfg.fade_ms = v;
                         }
                     }
                     _ => {} // unknown key — ignore
@@ -631,7 +728,11 @@ pub fn render_overview(
         return Vec::new();
     }
 
-    let alpha = (config.background_opacity * 255.0) as u8;
+    // Scaled by the fade, and by nothing else in this function: the cards, the
+    // labels and the search bar are drawn at full strength from the first frame
+    // so that an overview whose fade is never advanced is still a *usable*
+    // overview rather than an invisible one. See the module header.
+    let alpha = (config.background_opacity * state.fade_opacity() * 255.0) as u8;
     let mut cmds = Vec::with_capacity(128);
 
     // Dark overlay background.
@@ -1946,6 +2047,7 @@ mod tests {
             max_columns: 3,
             show_desktop_labels: false,
             background_opacity: 0.9,
+            fade_ms: 120,
         };
         let text = cfg.to_text();
         let parsed = OverviewConfig::from_text(&text);
@@ -1953,6 +2055,7 @@ mod tests {
         assert_eq!(parsed.max_columns, 3);
         assert!(!parsed.show_desktop_labels);
         assert!((parsed.background_opacity - 0.9).abs() < 0.001);
+        assert_eq!(parsed.fade_ms, 120);
     }
 
     #[test]
@@ -2013,5 +2116,137 @@ mod tests {
         // AllDesktops mode uses lane layout, not grid — so this helper returns empty.
         let thumbs = collect_thumbs_for_mode(&s);
         assert!(thumbs.is_empty());
+    }
+
+    // -- The backdrop fade ---------------------------------------------------
+
+    /// The alpha of the first `FillRect`, which is the backdrop.
+    fn backdrop_alpha(state: &OverviewState, config: &OverviewConfig) -> u8 {
+        match render_overview(state, config, 1920.0, 1080.0).first() {
+            Some(&RenderCommand::FillRect { color, .. }) => color.a,
+            other => panic!("the first command was not the backdrop: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn an_overview_that_is_never_ticked_is_fully_open() {
+        // §520's defect, stated as a property rather than as a story. `show` is
+        // reached from three call sites, none of which knows whether a clock
+        // exists, so the state it leaves behind has to be the *working* one. A
+        // fade that `show` started would make this overlay invisible for a
+        // caller that never ticks — which is every caller in this file, in the
+        // layout tests, and in any embedder driving the shell by hand.
+        let mut s = OverviewState::new();
+        s.show(OverviewMode::AllWindows);
+        assert!(!s.is_fading());
+        assert!((s.fade_opacity() - 1.0).abs() < f32::EPSILON);
+
+        let cfg = default_config();
+        assert_eq!(
+            backdrop_alpha(&s, &cfg),
+            (cfg.background_opacity * 255.0) as u8,
+            "an un-ticked overview drew a backdrop dimmer than the one asked for"
+        );
+    }
+
+    #[test]
+    fn a_fade_that_has_begun_still_leaves_every_card_drawn() {
+        // The fade scales the backdrop and nothing else. The original gated
+        // *every* draw path on progress, so a fade held at zero drew nothing at
+        // all; this asserts the cards do not depend on it.
+        let mut s = OverviewState::new();
+        s.show(OverviewMode::AllWindows);
+        s.lanes = sample_lanes();
+        s.begin_fade(200);
+        let cfg = default_config();
+
+        let cards = render_overview(&s, &cfg, 1920.0, 1080.0)
+            .iter()
+            .filter(|c| matches!(c, RenderCommand::Text { .. }))
+            .count();
+        assert!(
+            cards > 1,
+            "a fade at zero progress erased the overview's contents"
+        );
+    }
+
+    #[test]
+    fn the_backdrop_is_dimmer_part_way_through_the_fade() {
+        let mut s = OverviewState::new();
+        s.show(OverviewMode::AllWindows);
+        let cfg = default_config();
+        let full = backdrop_alpha(&s, &cfg);
+
+        s.begin_fade(200);
+        assert!(
+            backdrop_alpha(&s, &cfg) < full,
+            "the fade was begun and the backdrop was drawn at full strength — \
+             there is no fade"
+        );
+        s.tick_fade(60);
+        let midway = backdrop_alpha(&s, &cfg);
+        assert!(midway < full, "60 ms of a 200 ms fade finished it");
+        assert!(midway > 0, "the fade drew no backdrop at all");
+    }
+
+    #[test]
+    fn a_finished_fade_is_indistinguishable_from_one_that_never_ran() {
+        // So that nothing downstream can accidentally depend on "has faded"
+        // versus "was never faded" — the two must be the same overlay.
+        let mut faded = OverviewState::new();
+        faded.show(OverviewMode::AllWindows);
+        faded.begin_fade(200);
+        while faded.tick_fade(16) {}
+
+        let mut fresh = OverviewState::new();
+        fresh.show(OverviewMode::AllWindows);
+
+        let cfg = default_config();
+        assert!(!faded.is_fading());
+        assert_eq!(backdrop_alpha(&faded, &cfg), backdrop_alpha(&fresh, &cfg));
+    }
+
+    #[test]
+    fn a_fade_reports_when_it_wants_another_frame_and_when_it_does_not() {
+        let mut s = OverviewState::new();
+        s.show(OverviewMode::AllWindows);
+        assert!(
+            !s.tick_fade(16),
+            "an overview with no fade asked for another frame — an idle \
+             desktop that never parks"
+        );
+
+        s.begin_fade(100);
+        assert!(s.tick_fade(50), "the fade gave up half way through");
+        assert!(!s.tick_fade(50), "the fade asked for a frame past its end");
+        assert!(!s.is_fading());
+    }
+
+    #[test]
+    fn a_zero_length_fade_is_no_fade_rather_than_a_one_millisecond_one() {
+        // `Animation::new` floors a duration at 1 ms, so without this a
+        // reduced-motion setting of zero would produce a fade whose visibility
+        // depended on when the next frame happened to land.
+        let mut s = OverviewState::new();
+        s.show(OverviewMode::AllWindows);
+        s.begin_fade(0);
+        assert!(!s.is_fading());
+        assert!((s.fade_opacity() - 1.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn hiding_drops_the_fade_so_the_next_opening_does_not_inherit_it() {
+        let mut s = OverviewState::new();
+        s.show(OverviewMode::AllWindows);
+        s.begin_fade(200);
+        s.tick_fade(100);
+        s.hide();
+        assert!(
+            !s.is_fading(),
+            "a hidden overview is still asking to be clocked"
+        );
+
+        s.show(OverviewMode::AllWindows);
+        assert!((s.fade_opacity() - 1.0).abs() < f32::EPSILON);
     }
 }

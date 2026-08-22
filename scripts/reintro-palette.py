@@ -52,6 +52,7 @@ DESK = "gui/desktop/src/lib.rs"
 SEC = "gui/desktop/src/security_dialog.rs"
 RUN = "gui/desktop/src/run_dialog.rs"
 ICON = "gui/desktop/src/icons.rs"
+NOTIF = "gui/desktop/src/notif_pane.rs"
 
 # (name, file, [(old, new), ...], [packages], [tests expected to fail])
 DEFECTS = [
@@ -390,6 +391,69 @@ DEFECTS = [
           "    pub fn on_wallpaper(&self) -> Color {\n        self.text")],
         ["appearance"],
         ["a_label_on_the_wallpaper_does_not_follow_the_mode"],
+    ),
+    (
+        # The pane's own background, drawn on every frame it is open. The
+        # cheapest possible miss, and the one a sweep must obviously catch.
+        "GG: the notification pane keeps its own Mocha base",
+        NOTIF,
+        [("            height: screen_height,\n            color: p.base,",
+          "            height: screen_height,\n"
+          "            color: Color::from_hex(0x1E1E2E),")],
+        ["desktop"],
+        ["every_colour_the_pane_draws_comes_from_its_palette"],
+    ),
+    (
+        # Only drawn while the pointer is over a card. If `wound_pane`'s
+        # `hovered` axis were dropped the sweep would still pass, and this
+        # constant would ship.
+        "HH: the dismiss button, which only exists on hover, keeps Mocha surface2",
+        NOTIF,
+        [("                height: DISMISS_BTN_SIZE,\n                color: p.surface2,",
+          "                height: DISMISS_BTN_SIZE,\n"
+          "                color: Color::from_hex(0x585B70),")],
+        ["desktop"],
+        ["every_colour_the_pane_draws_comes_from_its_palette"],
+    ),
+    (
+        # Only drawn on the per-app settings page, behind the "Settings" link.
+        "II: the per-app enabled pill, behind the settings view, keeps Mocha green",
+        NOTIF,
+        [("            let pill_bg = if app.enabled { p.green } else { p.surface2 };",
+          "            let pill_bg = if app.enabled {\n"
+          "                Color::from_hex(0xA6E3A1)\n"
+          "            } else {\n"
+          "                p.surface2\n"
+          "            };")],
+        ["desktop"],
+        ["every_colour_the_pane_draws_comes_from_its_palette"],
+    ),
+    (
+        # Only drawn when there is nothing to draw. A state matrix that only
+        # ever renders a populated pane never reaches this line at all.
+        "JJ: the empty-list caption, drawn only when there are no notifications",
+        NOTIF,
+        [('                text: "No notifications".to_string(),\n'
+          "                color: p.overlay0,",
+          '                text: "No notifications".to_string(),\n'
+          "                color: Color::from_hex(0x6C7086),")],
+        ["desktop"],
+        ["every_colour_the_pane_draws_comes_from_its_palette"],
+    ),
+    (
+        # The part-2 lesson from defect EE, applied to this module. A priority
+        # painted in the user's accent is a *wrong role*, not a leftover
+        # constant: `p.accent` is a member of both palettes, so the two-mode
+        # sweep passes it in light exactly as in dark. Only a test that renders
+        # with two different accents and compares can see it, which is why
+        # `a_notification_priority_does_not_follow_the_accent` exists.
+        #
+        # Expect this one to be caught by the accent test and NOT by the sweep.
+        "KK: an urgent notification is painted in the accent instead of red",
+        NOTIF,
+        [("            Self::Urgent => p.red,", "            Self::Urgent => p.accent,")],
+        ["desktop"],
+        ["a_notification_priority_does_not_follow_the_accent"],
     ),
 ]
 

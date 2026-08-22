@@ -50335,7 +50335,7 @@ commands that carry the colour in question, and assert the two renders agree.
 Candidates: anything drawn on the wallpaper, on a video surface, on a
 thumbnail, or on any other content the palette does not own.
 
-**Part 2 progress. 3 of 49 modules converted.**
+**Part 2 progress. 4 of 49 modules converted.**
 
 - [x] `security_dialog.rs` — 29 constants, done 2026-08-22. The method above
   survived contact: the sweep lives in `gui/desktop/src/palette_check.rs` as
@@ -50409,6 +50409,49 @@ thumbnail, or on any other content the palette does not own.
   - **The sweep's blind spot showed up here** — see the paragraph above this
     list. `icons.rs` therefore carries a second test,
     `an_icon_label_does_not_change_colour_with_the_mode`.
+- [x] `notif_pane.rs` — 15 constants plus 1 written inline, done 2026-08-22.
+  Harness defects GG/HH/II/JJ/KK.
+  - **The wrong-role lesson from `icons.rs` was applied up front rather than
+    discovered again.** This module has a categorical axis of its own — four
+    notification priorities — so it was converted *with* the second test
+    (`a_notification_priority_does_not_follow_the_accent`) instead of waiting
+    for a defect to prove the sweep could not see one. The shape differs from
+    `icons.rs`'s: there the invariant was "does not follow the **mode**" and
+    the test renders light and dark; here it is "does not follow the
+    **accent**", so the test renders the same mode twice with two different
+    accents and compares. Defect KK confirms the split — it is caught by the
+    accent test and *not* by the sweep, which is the second independent
+    measurement of that hole.
+    - The test also asserts the *negative*: that something in the same render
+      did move with the accent (the quick-settings toggle pill). Without that
+      half, a bug which made the whole pane ignore the accent would satisfy
+      "the priorities did not move" and the test would pass while measuring
+      nothing.
+  - **Six sites were `BLUE` meaning "interactive", and all six became
+    `p.accent`** — the unread badge, "Clear all", "Back", a toggle that is on,
+    a slider's filled portion, and the settings link. The text drawn on the
+    first two became `readable_on(...)` of what it sits on rather than the
+    fixed near-black `CRUST` it was, because with a user-chosen accent
+    underneath there is no longer one legible answer. Same judgement as
+    `run_dialog.rs`'s four blues.
+  - **A pre-existing inconsistency, recorded rather than silently fixed:** the
+    quick-settings toggle paints "on" in blue and the per-app toggle paints
+    "on" in green, for the same meaning. Converted faithfully (`p.accent` and
+    `p.green`), because unifying them is a design change and this task is a
+    conversion. Worth revisiting when the shell gets a real control style.
+  - **`PANE_BG` stayed `p.base` rather than becoming `p.panel_bg()`.** The
+    helper is arguably the right role for a slide-out panel and would pick up
+    the user's transparency setting, but it changes what the pane looks like.
+    Same reasoning that kept `p.surface0` in `run_dialog.rs`; noted here as a
+    candidate for the pass that comes *after* all 49 are converted.
+  - **The inline constant was an animated one**, which is why the theme-block
+    grep would have missed it twice over: `Color::rgba(0, 0, 0, (60.0 * vis)
+    as u8)`, the scrim behind the pane faded in with the slide. It now derives
+    from `p.scrim()` and scales the *role's* alpha by `vis`, so the fade
+    survives. Note that the sweep cannot see this one either — it allows black
+    at any alpha, by design, because that is how a scrim and a shadow are
+    spelled — so no defect is offered for it. A module whose only remaining
+    hardcoded colour is black is a module the sweep will call clean.
 
 **Trigger:** this is not blocked on anything. It is sequenced after the shell
 event loop (`TD-C-THE-SHELL-CAN-DRAW-ITSELF-AND-NOBODY-CAN-ASK-IT-TO`) only

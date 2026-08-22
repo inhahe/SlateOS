@@ -405,10 +405,24 @@ pub fn init(hhdm_offset: u64) -> KernelResult<()> {
         transport.reset();
         return Err(KernelError::NotSupported);
     }
-    let controlq = transport.setup_queue(0, hhdm_offset)?;
-    let eventq = transport.setup_queue(1, hhdm_offset)?;
-    let txq = transport.setup_queue(2, hhdm_offset)?;
-    let rxq = transport.setup_queue(3, hhdm_offset)?;
+    let mut controlq = transport.setup_queue(0, hhdm_offset)?;
+    let mut eventq = transport.setup_queue(1, hhdm_offset)?;
+    let mut txq = transport.setup_queue(2, hhdm_offset)?;
+    let mut rxq = transport.setup_queue(3, hhdm_offset)?;
+
+    // This driver completes every request by polling `poll_used` and never
+    // registers an IRQ handler, so tell the device not to raise one.  Left
+    // unset the avail flags are zero, which *requests* interrupts: the device
+    // would then assert its INTx line on completions nothing acknowledges at
+    // the device, leaving a level-triggered line stuck asserted.  All four
+    // queues, including the two the driver does not currently drive — an
+    // idle queue that asks for interrupts is the same problem, and an unset
+    // flag here would be re-armed by a later `reset` besides.  Done before
+    // DRIVER_OK so it holds from the first request the device may process.
+    controlq.set_no_interrupt();
+    eventq.set_no_interrupt();
+    txq.set_no_interrupt();
+    rxq.set_no_interrupt();
 
     // 8. Driver OK — device is live.
     transport.add_status(STATUS_DRIVER_OK);

@@ -1,5 +1,21 @@
 # B → C: `cargo test --workspace` is red on `main` — `apps/editor`'s test module misses one import
 
+**Status:** ✅ **LANDED 2026-08-22 by lane C** in `ef190a866` ("editor: restore
+the trait import its test binary has needed since the frame clock"), which is
+now on `main` and on all three lane branches. The fix is exactly `rustc`'s
+suggestion — `use oswindow::ConnectionTransport as _;` in the
+`against_the_real_compositor` prelude — carrying a comment recording *why* it
+went missing (the frame clock, `design-decisions.md` §521, moved
+`set_wait_timeout` off the socket and onto the transport trait). Verified here
+with `cargo test -p editor --target x86_64-pc-windows-gnu --no-run`: the test
+binary links. Lane B no longer needs `--exclude editor`.
+
+The wider point — that a test binary can be broken for days without any
+single-crate gate noticing — is filed as
+`TD-C-A-TEST-BINARY-CAN-BE-BROKEN-WITHOUT-ANYONE-NOTICING` in
+`known-issues.md`, and lane C's per-task gate is now
+`cargo clippy -p <crate> --all-targets`, which compiles the test profile.
+
 **Filed 2026-08-22 by lane B.** Found running the mandatory pre-merge
 `cargo test --workspace` on `lane-b` after merging `origin/main` at
 `66cdbe163`. The same failure reproduces on `origin/main` and on

@@ -7308,6 +7308,53 @@ impl Compositor {
         Ok(())
     }
 
+    /// Give the display currently known as `from` the identity `to`.
+    ///
+    /// A compositor is built at a size before anything has told it *which*
+    /// screen that size belongs to, so [`DisplayManager::new`] invents the id
+    /// `0` for it. The scanout keys everything on the connector id — that is
+    /// what [`Present::monitors`](present::Present::monitors) reports and what
+    /// `Server::reconcile_monitors` matches the two sets on — so a desktop whose
+    /// first screen is still called `0` has one monitor the reconciliation
+    /// cannot recognise: it sees a connector it does not know (and attaches a
+    /// second display for the *same* physical screen) and a display no connector
+    /// claims (and detaches it). Both, once a second, for ever.
+    ///
+    /// So this exists to be called exactly once, at startup, by whoever knows
+    /// what the first screen is actually plugged into. It is not a general
+    /// renumbering facility: a display's id is the key windows are resolved
+    /// against, and changing it under a running desktop is a different and much
+    /// larger operation.
+    ///
+    /// # Errors
+    ///
+    /// [`CompositorError::DisplayError`] if no display is called `from`, or if
+    /// one is already called `to` — two displays sharing an id would make
+    /// [`DisplayManager::remove_display`] and every reconciliation ambiguous,
+    /// silently, in a way that shows up as the wrong monitor going dark.
+    pub fn rename_display(&mut self, from: u32, to: u32) -> CompositorResult<()> {
+        if from == to {
+            return Ok(());
+        }
+        if self.display_manager.displays.iter().any(|d| d.id == to) {
+            return Err(CompositorError::DisplayError(format!(
+                "cannot rename display {from} to {to}: a display already has that id"
+            )));
+        }
+        let Some(display) = self
+            .display_manager
+            .displays
+            .iter_mut()
+            .find(|d| d.id == from)
+        else {
+            return Err(CompositorError::DisplayError(format!(
+                "cannot rename display {from}: no display has that id"
+            )));
+        };
+        display.id = to;
+        Ok(())
+    }
+
     /// Take a monitor off the desktop, shrink the scanout surface to what is
     /// left, and re-place everything the departed screen was holding.
     ///
@@ -15719,6 +15766,62 @@ mod tests {
             comp.display_manager.displays().len(),
             2,
             "a failed detach took a monitor with it"
+        );
+    }
+
+    // ---- the first screen has to be told what it is plugged into ----
+
+    #[test]
+    fn the_first_screen_can_be_told_which_connector_it_is() {
+        // `DisplayManager::new` invents the id 0 for the screen the compositor
+        // is built at, because nothing has told it what that screen is yet. On
+        // a real card the key is the connector id, and the hotplug
+        // reconciliation matches the two sets on it -- so a desktop whose first
+        // screen is still called 0 has one connector the card reports that the
+        // compositor does not recognise (and attaches a duplicate display for)
+        // and one display no connector claims (and detaches). Both, once a
+        // second, for ever.
+        let mut comp = Compositor::new(800, 600, 2_000_000).expect("compositor");
+        comp.rename_display(0, 31).expect("rename");
+        assert_eq!(comp.display_manager.displays()[0].id, 31);
+        assert!(
+            comp.display_manager.displays()[0].primary,
+            "renaming the screen demoted it"
+        );
+        assert_eq!(
+            comp.display_manager.remove_display(31).map(|d| d.id),
+            Some(31),
+            "and it answers to the new name"
+        );
+    }
+
+    #[test]
+    fn a_screen_cannot_be_renamed_onto_a_name_another_screen_has() {
+        // Two displays sharing an id is not a cosmetic problem: `display_for`,
+        // `remove_display` and every reconciliation resolve by id and would
+        // silently pick whichever came first, so the wrong monitor goes dark.
+        let (mut comp, _, _) = two_monitors(0);
+        assert!(
+            comp.rename_display(0, 1).is_err(),
+            "two displays were given the same id"
+        );
+        let ids: Vec<u32> = comp
+            .display_manager
+            .displays()
+            .iter()
+            .map(|d| d.id)
+            .collect();
+        assert_eq!(ids, vec![0, 1], "a refused rename changed something anyway");
+    }
+
+    #[test]
+    fn renaming_a_screen_that_is_not_there_is_an_error_and_not_a_panic() {
+        let mut comp = Compositor::new(800, 600, 2_000_000).expect("compositor");
+        assert!(comp.rename_display(99, 31).is_err());
+        assert_eq!(
+            comp.display_manager.displays()[0].id,
+            0,
+            "a failed rename renamed something else"
         );
     }
 

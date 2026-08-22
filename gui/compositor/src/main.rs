@@ -53,7 +53,13 @@ const WINDOWED_SIZE: (u32, u32) = (1280, 800);
 /// The default size when nothing will be looked at.
 const HEADLESS_SIZE: (u32, u32) = (1920, 1080);
 
-/// The refresh rate to composite at.
+/// The refresh rate to composite at when nothing has a real one to report — a
+/// headless server, or a host window whose paint rate is the desktop's business
+/// and not ours.
+///
+/// On a real screen the monitor's own reported rate is used instead: a 144Hz
+/// panel paced at 60 wastes two frames in three, and a 30Hz projector paced at
+/// 60 is asked for frames it cannot show.
 const REFRESH_HZ: u32 = 60;
 
 /// What the command line asked for.
@@ -293,8 +299,8 @@ fn main() {
 /// Separated from `run` because every platform needs it and none of them needs
 /// it *first*: the size is not known until the display is, which on a real
 /// screen means after the card has been opened and its mode read.
-fn make_compositor(width: u32, height: u32) -> Compositor {
-    let mut compositor = match Compositor::new(width, height, REFRESH_HZ) {
+fn make_compositor(width: u32, height: u32, refresh_hz: u32) -> Compositor {
+    let mut compositor = match Compositor::new(width, height, refresh_hz) {
         Ok(c) => c,
         Err(e) => {
             eprintln!("compositor: failed to initialize: {e}");
@@ -308,14 +314,14 @@ fn make_compositor(width: u32, height: u32) -> Compositor {
     // and reload cannot come to disagree about where the settings live or what
     // a missing file means — which on a fresh install is simply the defaults.
     compositor.reload_appearance();
-    eprintln!("compositor: initialized ({width}x{height} @ {REFRESH_HZ}Hz)");
+    eprintln!("compositor: initialized ({width}x{height} @ {refresh_hz}Hz)");
     compositor
 }
 
 /// Serve with no display, at whatever size was asked for.
 fn run_headless(server: &mut Server, options: &Options) -> std::io::Result<()> {
     let (width, height) = options.size.unwrap_or(HEADLESS_SIZE);
-    let mut compositor = make_compositor(width, height);
+    let mut compositor = make_compositor(width, height, REFRESH_HZ);
     server.run(&mut compositor)
 }
 
@@ -350,8 +356,14 @@ fn run(server: &mut Server, options: &Options) -> std::io::Result<()> {
             for head in &heads {
                 eprintln!(
                     "compositor: scanning out on connector {} via CRTC {} \
-                     ({}x{} at +{}+{})",
-                    head.connector_id, head.crtc_id, head.width, head.height, head.x, head.y
+                     ({}x{} at +{}+{}, {}Hz)",
+                    head.connector_id,
+                    head.crtc_id,
+                    head.width,
+                    head.height,
+                    head.x,
+                    head.y,
+                    head.refresh_hz
                 );
             }
             // Built at the *first* monitor and then told about the rest, rather
@@ -360,13 +372,36 @@ fn run(server: &mut Server, options: &Options) -> std::io::Result<()> {
             // rule `DrmScanout::new` used to lay the heads out, so the two
             // arrive at the same arrangement. Building at the bounding box and
             // then attaching would grow it a second time.
-            let (first_w, first_h) = heads
-                .first()
-                .map_or((width, height), |h| (h.width, h.height));
-            let mut compositor = make_compositor(first_w, first_h);
-            for (index, head) in heads.iter().enumerate().skip(1) {
-                let id = u32::try_from(index).unwrap_or(u32::MAX);
-                let display = Display::new(id, head.width, head.height, REFRESH_HZ, 1.0, false);
+            let first = heads.first();
+            let (first_w, first_h) = first.map_or((width, height), |h| (h.width, h.height));
+            let mut compositor =
+                make_compositor(first_w, first_h, first.map_or(REFRESH_HZ, |h| h.refresh_hz));
+            // The compositor invented the id 0 for the screen it was built at,
+            // before anything had told it which screen that was. Every monitor
+            // on the desktop has to be named by its connector, because that is
+            // the key `Server::reconcile_monitors` matches the compositor's
+            // arrangement against the card's head list on -- and a first screen
+            // still called 0 is a connector the reconciliation does not
+            // recognise *and* a display no connector claims, so it would attach
+            // a duplicate and detach the original, once a second, for ever.
+            if let Some(head) = first {
+                if let Err(e) = compositor.rename_display(0, head.connector_id) {
+                    eprintln!(
+                        "compositor: cannot name the first screen after connector {} ({e}); \
+                         monitors plugged in or out will not be noticed",
+                        head.connector_id
+                    );
+                }
+            }
+            for head in heads.iter().skip(1) {
+                let display = Display::new(
+                    head.connector_id,
+                    head.width,
+                    head.height,
+                    head.refresh_hz,
+                    1.0,
+                    false,
+                );
                 if let Err(e) = compositor.attach_display(display) {
                     // A monitor the compositor cannot paint for is worse than
                     // one it does not know about: the scanout would go on
@@ -410,7 +445,7 @@ fn run(server: &mut Server, options: &Options) -> std::io::Result<()> {
         return run_headless(server, options);
     }
     let (width, height) = options.size.unwrap_or(WINDOWED_SIZE);
-    let mut compositor = make_compositor(width, height);
+    let mut compositor = make_compositor(width, height, REFRESH_HZ);
     match compositor::present::host::Window::new("SlateOS", width, height) {
         Ok(mut window) => {
             eprintln!("compositor: showing the desktop in a host window; close it to stop");

@@ -4,6 +4,7 @@
 //! target locations, file inclusion/exclusion rules, retention
 //! policies, and backup history with restore capabilities.
 
+use appearance::Palette;
 use guitk::color::Color;
 use guitk::idseq::IdSeq;
 use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
@@ -12,23 +13,36 @@ use guitk::text;
 use guitk::tzrules::Tz;
 
 // ============================================================================
-// Catppuccin Mocha palette
+// Colour
 // ============================================================================
-
-const BASE: Color = Color::from_hex(0x1E1E2E);
-const CRUST: Color = Color::from_hex(0x11111B);
-const SURFACE0: Color = Color::from_hex(0x313244);
-const SURFACE1: Color = Color::from_hex(0x45475A);
-const SURFACE2: Color = Color::from_hex(0x585B70);
-const TEXT: Color = Color::from_hex(0xCDD6F4);
-const SUBTEXT0: Color = Color::from_hex(0xA6ADC8);
-const SUBTEXT1: Color = Color::from_hex(0xBAC2DE);
-const BLUE: Color = Color::from_hex(0x89B4FA);
-const GREEN: Color = Color::from_hex(0xA6E3A1);
-const RED: Color = Color::from_hex(0xF38BA8);
-const YELLOW: Color = Color::from_hex(0xF9E2AF);
-const LAVENDER: Color = Color::from_hex(0xB4BEFE);
-const OVERLAY0: Color = Color::from_hex(0x6C7086);
+//
+// Every colour below is a role read from the resolved [`Palette`], so the panel
+// follows the user's light/dark mode and accent instead of the fourteen Mocha
+// literals it used to hold.
+//
+// **This panel is mostly controls, so it has nine accent sites, not one.** Every
+// switch, checkbox, radio and primary button here says either "this is on
+// because you turned it on" or "press this and something happens" -- state you
+// chose, and invitation, which is what the accent is for. They are: the tab you
+// are on, "Backup now", the automatic-backup switch, the frequency radio (its
+// ring and its dot), the three retention switches, "+ Add source", each source's
+// checkbox (its box and its tick), "+ Add rule", and each exclusion rule's
+// switch. Each gets its own negative assertion in the tests: over their union,
+// one moving control would hide eight frozen ones.
+//
+// The three buttons take their label from [`Palette::on_accent`] rather than a
+// fixed near-black, because a pale accent wants dark text on it and a deep one
+// wants light.
+//
+// **Nothing that reports stays with them.** [`BackupStatus::color`] is an
+// outcome — Completed, Partial, Failed, Cancelled, In progress — drawn as a dot
+// down a scrollable list, so two outcomes sharing a hue makes a failed backup
+// look like a finished one at a glance. `InProgress => blue` is the trap in it:
+// blue is also the *default* accent, so `p.accent` there would look right on a
+// fresh install and collapse onto Completed the moment someone picks Green. The
+// four overview stats (total, successful, failed, size) are the same argument
+// drawn four abreast, and the remove crosses are destructive rather than
+// inviting.
 
 // ============================================================================
 // Backup types
@@ -331,13 +345,13 @@ impl BackupStatus {
     }
 
     /// Status color.
-    pub fn color(self) -> Color {
+    pub fn color(self, p: &Palette) -> Color {
         match self {
-            Self::Success => GREEN,
-            Self::PartialSuccess => YELLOW,
-            Self::Failed => RED,
-            Self::Cancelled => OVERLAY0,
-            Self::InProgress => BLUE,
+            Self::Success => p.green,
+            Self::PartialSuccess => p.yellow,
+            Self::Failed => p.red,
+            Self::Cancelled => p.overlay0,
+            Self::InProgress => p.blue,
         }
     }
 }
@@ -675,7 +689,15 @@ impl BackupSettingsUI {
     /// `tz` is the zone the History tab dates its runs in — see
     /// [`BackupHistoryEntry::date_display`] for why it is asked for here
     /// rather than assumed.
-    pub fn render(&self, x: f32, y: f32, width: f32, height: f32, tz: &Tz) -> Vec<RenderCommand> {
+    pub fn render(
+        &self,
+        p: &Palette,
+        x: f32,
+        y: f32,
+        width: f32,
+        height: f32,
+        tz: &Tz,
+    ) -> Vec<RenderCommand> {
         let mut cmds = Vec::new();
 
         // Panel background
@@ -684,7 +706,7 @@ impl BackupSettingsUI {
             y,
             width,
             height,
-            color: BASE,
+            color: p.base,
             corner_radii: CornerRadii::all(8.0),
         });
 
@@ -694,7 +716,7 @@ impl BackupSettingsUI {
             y: y + 20.0,
             text: "Backup & Restore".to_string(),
             font_size: 22.0,
-            color: TEXT,
+            color: p.text,
             font_weight: FontWeightHint::Bold,
             max_width: None,
             overflow: TextOverflow::Clip,
@@ -714,7 +736,7 @@ impl BackupSettingsUI {
                     y: tab_y,
                     width: tw,
                     height: 32.0,
-                    color: SURFACE0,
+                    color: p.surface0,
                     corner_radii: CornerRadii::all(6.0),
                 });
             }
@@ -724,7 +746,7 @@ impl BackupSettingsUI {
                 y: tab_y + 8.0,
                 text: label.to_string(),
                 font_size: 13.0,
-                color: if is_active { BLUE } else { SUBTEXT0 },
+                color: if is_active { p.accent } else { p.subtext0 },
                 font_weight: if is_active {
                     FontWeightHint::Bold
                 } else {
@@ -745,7 +767,7 @@ impl BackupSettingsUI {
             y: content_y,
             width: width - 16.0,
             height: content_h,
-            color: CRUST,
+            color: p.crust,
             corner_radii: CornerRadii::all(6.0),
         });
 
@@ -754,32 +776,39 @@ impl BackupSettingsUI {
         let cw = width - 48.0;
 
         match self.active_tab {
-            BackupSettingsTab::Overview => self.render_overview(&mut cmds, cx, cy, cw),
-            BackupSettingsTab::Schedule => self.render_schedule(&mut cmds, cx, cy, cw),
-            BackupSettingsTab::Sources => self.render_sources(&mut cmds, cx, cy, cw),
-            BackupSettingsTab::Exclusions => self.render_exclusions(&mut cmds, cx, cy, cw),
-            BackupSettingsTab::History => self.render_history(&mut cmds, cx, cy, cw, tz),
+            BackupSettingsTab::Overview => self.render_overview(p, &mut cmds, cx, cy, cw),
+            BackupSettingsTab::Schedule => self.render_schedule(p, &mut cmds, cx, cy, cw),
+            BackupSettingsTab::Sources => self.render_sources(p, &mut cmds, cx, cy, cw),
+            BackupSettingsTab::Exclusions => self.render_exclusions(p, &mut cmds, cx, cy, cw),
+            BackupSettingsTab::History => self.render_history(p, &mut cmds, cx, cy, cw, tz),
         }
 
         cmds
     }
 
     /// Render overview tab.
-    fn render_overview(&self, cmds: &mut Vec<RenderCommand>, x: f32, y: f32, width: f32) {
+    fn render_overview(
+        &self,
+        p: &Palette,
+        cmds: &mut Vec<RenderCommand>,
+        x: f32,
+        y: f32,
+        width: f32,
+    ) {
         let mut row_y = y;
 
         // Status card
         let status_color = if self.settings.enabled {
-            GREEN
+            p.green
         } else {
-            OVERLAY0
+            p.overlay0
         };
         cmds.push(RenderCommand::FillRect {
             x,
             y: row_y,
             width,
             height: 80.0,
-            color: SURFACE0,
+            color: p.surface0,
             corner_radii: CornerRadii::all(8.0),
         });
 
@@ -802,7 +831,7 @@ impl BackupSettingsUI {
             }
             .to_string(),
             font_size: 18.0,
-            color: TEXT,
+            color: p.text,
             font_weight: FontWeightHint::Bold,
             max_width: None,
             overflow: TextOverflow::Clip,
@@ -813,7 +842,7 @@ impl BackupSettingsUI {
             y: row_y + 44.0,
             text: self.settings.schedule_description(),
             font_size: 12.0,
-            color: SUBTEXT0,
+            color: p.subtext0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(width - 52.0),
             overflow: TextOverflow::Ellipsis,
@@ -825,22 +854,22 @@ impl BackupSettingsUI {
             (
                 "Total backups",
                 format!("{}", self.settings.history.len()),
-                BLUE,
+                p.blue,
             ),
             (
                 "Successful",
                 format!("{}", self.settings.successful_backup_count()),
-                GREEN,
+                p.green,
             ),
             (
                 "Failed",
                 format!("{}", self.settings.failed_backup_count()),
-                RED,
+                p.red,
             ),
             (
                 "Total size",
                 format_bytes(self.settings.total_backup_size),
-                LAVENDER,
+                p.lavender,
             ),
         ];
 
@@ -853,7 +882,7 @@ impl BackupSettingsUI {
                 y: row_y,
                 width: card_w,
                 height: 60.0,
-                color: SURFACE0,
+                color: p.surface0,
                 corner_radii: CornerRadii::all(6.0),
             });
 
@@ -862,7 +891,7 @@ impl BackupSettingsUI {
                 y: row_y + 8.0,
                 text: label.to_string(),
                 font_size: 10.0,
-                color: SUBTEXT0,
+                color: p.subtext0,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
                 overflow: TextOverflow::Clip,
@@ -919,7 +948,7 @@ impl BackupSettingsUI {
             y: row_y,
             text: "Configuration".to_string(),
             font_size: 14.0,
-            color: SUBTEXT1,
+            color: p.subtext1,
             font_weight: FontWeightHint::Bold,
             max_width: None,
             overflow: TextOverflow::Clip,
@@ -932,7 +961,7 @@ impl BackupSettingsUI {
                 y: row_y,
                 text: format!("{label}:"),
                 font_size: 12.0,
-                color: OVERLAY0,
+                color: p.overlay0,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
                 overflow: TextOverflow::Clip,
@@ -943,7 +972,7 @@ impl BackupSettingsUI {
                 y: row_y,
                 text: value.clone(),
                 font_size: 12.0,
-                color: TEXT,
+                color: p.text,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(width - 140.0),
                 overflow: TextOverflow::Ellipsis,
@@ -959,7 +988,7 @@ impl BackupSettingsUI {
             y: row_y,
             width: 120.0,
             height: 36.0,
-            color: BLUE,
+            color: p.accent,
             corner_radii: CornerRadii::all(6.0),
         });
         cmds.push(RenderCommand::Text {
@@ -967,7 +996,7 @@ impl BackupSettingsUI {
             y: row_y + 10.0,
             text: "Backup now".to_string(),
             font_size: 13.0,
-            color: CRUST,
+            color: p.on_accent(),
             font_weight: FontWeightHint::Bold,
             max_width: None,
             overflow: TextOverflow::Clip,
@@ -975,7 +1004,14 @@ impl BackupSettingsUI {
     }
 
     /// Render schedule tab.
-    fn render_schedule(&self, cmds: &mut Vec<RenderCommand>, x: f32, y: f32, width: f32) {
+    fn render_schedule(
+        &self,
+        p: &Palette,
+        cmds: &mut Vec<RenderCommand>,
+        x: f32,
+        y: f32,
+        width: f32,
+    ) {
         let mut row_y = y;
 
         // Enable toggle
@@ -984,7 +1020,7 @@ impl BackupSettingsUI {
             y: row_y,
             width,
             height: 36.0,
-            color: SURFACE0,
+            color: p.surface0,
             corner_radii: CornerRadii::all(4.0),
         });
 
@@ -993,16 +1029,16 @@ impl BackupSettingsUI {
             y: row_y + 10.0,
             text: "Enable automatic backups".to_string(),
             font_size: 14.0,
-            color: TEXT,
+            color: p.text,
             font_weight: FontWeightHint::Bold,
             max_width: None,
             overflow: TextOverflow::Clip,
         });
 
         let toggle_bg = if self.settings.enabled {
-            BLUE
+            p.accent
         } else {
-            SURFACE2
+            p.surface2
         };
         cmds.push(RenderCommand::FillRect {
             x: x + width - 56.0,
@@ -1020,7 +1056,7 @@ impl BackupSettingsUI {
             y: row_y,
             text: "Frequency".to_string(),
             font_size: 13.0,
-            color: SUBTEXT1,
+            color: p.subtext1,
             font_weight: FontWeightHint::Bold,
             max_width: None,
             overflow: TextOverflow::Clip,
@@ -1043,7 +1079,7 @@ impl BackupSettingsUI {
                 y: row_y,
                 width,
                 height: 32.0,
-                color: if is_active { SURFACE1 } else { SURFACE0 },
+                color: if is_active { p.surface1 } else { p.surface0 },
                 corner_radii: CornerRadii::all(4.0),
             });
 
@@ -1053,7 +1089,7 @@ impl BackupSettingsUI {
                 y: row_y + 8.0,
                 width: 16.0,
                 height: 16.0,
-                color: if is_active { BLUE } else { SURFACE2 },
+                color: if is_active { p.accent } else { p.surface2 },
                 corner_radii: CornerRadii::all(8.0),
                 line_width: 2.0,
             });
@@ -1064,7 +1100,7 @@ impl BackupSettingsUI {
                     y: row_y + 12.0,
                     width: 8.0,
                     height: 8.0,
-                    color: BLUE,
+                    color: p.accent,
                     corner_radii: CornerRadii::all(4.0),
                 });
             }
@@ -1074,7 +1110,7 @@ impl BackupSettingsUI {
                 y: row_y + 8.0,
                 text: freq.label().to_string(),
                 font_size: 13.0,
-                color: if is_active { TEXT } else { SUBTEXT0 },
+                color: if is_active { p.text } else { p.subtext0 },
                 font_weight: if is_active {
                     FontWeightHint::Bold
                 } else {
@@ -1094,7 +1130,7 @@ impl BackupSettingsUI {
             y: row_y,
             text: "Backup type".to_string(),
             font_size: 13.0,
-            color: SUBTEXT1,
+            color: p.subtext1,
             font_weight: FontWeightHint::Bold,
             max_width: None,
             overflow: TextOverflow::Clip,
@@ -1116,7 +1152,7 @@ impl BackupSettingsUI {
                 y: row_y,
                 width,
                 height: 44.0,
-                color: if is_active { SURFACE1 } else { SURFACE0 },
+                color: if is_active { p.surface1 } else { p.surface0 },
                 corner_radii: CornerRadii::all(4.0),
             });
 
@@ -1125,7 +1161,7 @@ impl BackupSettingsUI {
                 y: row_y + 6.0,
                 text: bt.label().to_string(),
                 font_size: 13.0,
-                color: if is_active { TEXT } else { SUBTEXT0 },
+                color: if is_active { p.text } else { p.subtext0 },
                 font_weight: if is_active {
                     FontWeightHint::Bold
                 } else {
@@ -1140,7 +1176,7 @@ impl BackupSettingsUI {
                 y: row_y + 24.0,
                 text: bt.description().to_string(),
                 font_size: 10.0,
-                color: OVERLAY0,
+                color: p.overlay0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(width - 32.0),
                 overflow: TextOverflow::Ellipsis,
@@ -1164,7 +1200,7 @@ impl BackupSettingsUI {
             y: row_y,
             text: "Options".to_string(),
             font_size: 13.0,
-            color: SUBTEXT1,
+            color: p.subtext1,
             font_weight: FontWeightHint::Bold,
             max_width: None,
             overflow: TextOverflow::Clip,
@@ -1177,7 +1213,7 @@ impl BackupSettingsUI {
                 y: row_y,
                 width,
                 height: 32.0,
-                color: SURFACE0,
+                color: p.surface0,
                 corner_radii: CornerRadii::all(4.0),
             });
 
@@ -1186,13 +1222,13 @@ impl BackupSettingsUI {
                 y: row_y + 8.0,
                 text: label.to_string(),
                 font_size: 12.0,
-                color: TEXT,
+                color: p.text,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
                 overflow: TextOverflow::Clip,
             });
 
-            let toggle_color = if *enabled { BLUE } else { SURFACE2 };
+            let toggle_color = if *enabled { p.accent } else { p.surface2 };
             cmds.push(RenderCommand::FillRect {
                 x: x + width - 56.0,
                 y: row_y + 6.0,
@@ -1207,7 +1243,14 @@ impl BackupSettingsUI {
     }
 
     /// Render sources tab.
-    fn render_sources(&self, cmds: &mut Vec<RenderCommand>, x: f32, y: f32, width: f32) {
+    fn render_sources(
+        &self,
+        p: &Palette,
+        cmds: &mut Vec<RenderCommand>,
+        x: f32,
+        y: f32,
+        width: f32,
+    ) {
         let mut row_y = y;
 
         cmds.push(RenderCommand::Text {
@@ -1219,7 +1262,7 @@ impl BackupSettingsUI {
                 self.settings.sources.len()
             ),
             font_size: 14.0,
-            color: TEXT,
+            color: p.text,
             font_weight: FontWeightHint::Bold,
             max_width: None,
             overflow: TextOverflow::Clip,
@@ -1231,7 +1274,7 @@ impl BackupSettingsUI {
             y: row_y - 4.0,
             width: 100.0,
             height: 24.0,
-            color: BLUE,
+            color: p.accent,
             corner_radii: CornerRadii::all(4.0),
         });
         cmds.push(RenderCommand::Text {
@@ -1239,7 +1282,7 @@ impl BackupSettingsUI {
             y: row_y,
             text: "+ Add source".to_string(),
             font_size: 11.0,
-            color: CRUST,
+            color: p.on_accent(),
             font_weight: FontWeightHint::Bold,
             max_width: None,
             overflow: TextOverflow::Clip,
@@ -1252,7 +1295,7 @@ impl BackupSettingsUI {
             y: row_y,
             width,
             height: 48.0,
-            color: SURFACE0,
+            color: p.surface0,
             corner_radii: CornerRadii::all(6.0),
         });
 
@@ -1261,7 +1304,7 @@ impl BackupSettingsUI {
             y: row_y + 6.0,
             text: format!("Target: {}", self.settings.target.kind_label()),
             font_size: 12.0,
-            color: SUBTEXT1,
+            color: p.subtext1,
             font_weight: FontWeightHint::Bold,
             max_width: None,
             overflow: TextOverflow::Clip,
@@ -1272,7 +1315,7 @@ impl BackupSettingsUI {
             y: row_y + 26.0,
             text: self.settings.target.display_path(),
             font_size: 12.0,
-            color: BLUE,
+            color: p.blue,
             font_weight: FontWeightHint::Regular,
             max_width: Some(width - 32.0),
             overflow: TextOverflow::Ellipsis,
@@ -1282,9 +1325,9 @@ impl BackupSettingsUI {
         // Source list
         for source in &self.settings.sources {
             let bg = if source.enabled {
-                SURFACE0
+                p.surface0
             } else {
-                Color::rgba(49, 50, 68, 128)
+                Color::rgba(p.surface0.r, p.surface0.g, p.surface0.b, 128)
             };
 
             cmds.push(RenderCommand::FillRect {
@@ -1302,7 +1345,7 @@ impl BackupSettingsUI {
                 y: row_y + 12.0,
                 width: 16.0,
                 height: 16.0,
-                color: if source.enabled { BLUE } else { SURFACE2 },
+                color: if source.enabled { p.accent } else { p.surface2 },
                 corner_radii: CornerRadii::all(3.0),
                 line_width: 2.0,
             });
@@ -1313,7 +1356,7 @@ impl BackupSettingsUI {
                     y: row_y + 12.0,
                     text: "\u{2713}".to_string(),
                     font_size: 12.0,
-                    color: BLUE,
+                    color: p.accent,
                     font_weight: FontWeightHint::Bold,
                     max_width: None,
                     overflow: TextOverflow::Clip,
@@ -1325,7 +1368,7 @@ impl BackupSettingsUI {
                 y: row_y + 12.0,
                 text: source.path.clone(),
                 font_size: 13.0,
-                color: if source.enabled { TEXT } else { OVERLAY0 },
+                color: if source.enabled { p.text } else { p.overlay0 },
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(width - 120.0),
                 overflow: TextOverflow::Ellipsis,
@@ -1337,7 +1380,7 @@ impl BackupSettingsUI {
                     y: row_y + 14.0,
                     text: "Recursive".to_string(),
                     font_size: 10.0,
-                    color: OVERLAY0,
+                    color: p.overlay0,
                     font_weight: FontWeightHint::Regular,
                     max_width: None,
                     overflow: TextOverflow::Clip,
@@ -1350,7 +1393,7 @@ impl BackupSettingsUI {
                 y: row_y + 12.0,
                 text: "\u{2715}".to_string(),
                 font_size: 12.0,
-                color: RED,
+                color: p.red,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
                 overflow: TextOverflow::Clip,
@@ -1361,7 +1404,14 @@ impl BackupSettingsUI {
     }
 
     /// Render exclusions tab.
-    fn render_exclusions(&self, cmds: &mut Vec<RenderCommand>, x: f32, y: f32, width: f32) {
+    fn render_exclusions(
+        &self,
+        p: &Palette,
+        cmds: &mut Vec<RenderCommand>,
+        x: f32,
+        y: f32,
+        width: f32,
+    ) {
         let mut row_y = y;
 
         cmds.push(RenderCommand::Text {
@@ -1372,7 +1422,7 @@ impl BackupSettingsUI {
                 self.settings.active_exclude_count()
             ),
             font_size: 14.0,
-            color: TEXT,
+            color: p.text,
             font_weight: FontWeightHint::Bold,
             max_width: None,
             overflow: TextOverflow::Clip,
@@ -1383,7 +1433,7 @@ impl BackupSettingsUI {
             y: row_y - 4.0,
             width: 80.0,
             height: 24.0,
-            color: BLUE,
+            color: p.accent,
             corner_radii: CornerRadii::all(4.0),
         });
         cmds.push(RenderCommand::Text {
@@ -1391,7 +1441,7 @@ impl BackupSettingsUI {
             y: row_y,
             text: "+ Add rule".to_string(),
             font_size: 11.0,
-            color: CRUST,
+            color: p.on_accent(),
             font_weight: FontWeightHint::Bold,
             max_width: None,
             overflow: TextOverflow::Clip,
@@ -1400,9 +1450,9 @@ impl BackupSettingsUI {
 
         for rule in &self.settings.exclude_rules {
             let bg = if rule.enabled {
-                SURFACE0
+                p.surface0
             } else {
-                Color::rgba(49, 50, 68, 128)
+                Color::rgba(p.surface0.r, p.surface0.g, p.surface0.b, 128)
             };
 
             cmds.push(RenderCommand::FillRect {
@@ -1415,7 +1465,7 @@ impl BackupSettingsUI {
             });
 
             // Toggle
-            let toggle_bg = if rule.enabled { BLUE } else { SURFACE2 };
+            let toggle_bg = if rule.enabled { p.accent } else { p.surface2 };
             cmds.push(RenderCommand::FillRect {
                 x: x + 12.0,
                 y: row_y + 12.0,
@@ -1431,7 +1481,7 @@ impl BackupSettingsUI {
                 y: row_y + 8.0,
                 width: text::padded_width(&rule.pattern, 8.0, 11.0, FontWeightHint::Bold),
                 height: 20.0,
-                color: SURFACE1,
+                color: p.surface1,
                 corner_radii: CornerRadii::all(3.0),
             });
             cmds.push(RenderCommand::Text {
@@ -1439,7 +1489,7 @@ impl BackupSettingsUI {
                 y: row_y + 10.0,
                 text: rule.pattern.clone(),
                 font_size: 11.0,
-                color: LAVENDER,
+                color: p.lavender,
                 font_weight: FontWeightHint::Bold,
                 max_width: None,
                 overflow: TextOverflow::Clip,
@@ -1451,7 +1501,7 @@ impl BackupSettingsUI {
                 y: row_y + 28.0,
                 text: rule.description.clone(),
                 font_size: 10.0,
-                color: SUBTEXT0,
+                color: p.subtext0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(width - 100.0),
                 overflow: TextOverflow::Ellipsis,
@@ -1463,7 +1513,7 @@ impl BackupSettingsUI {
                 y: row_y + 14.0,
                 text: "\u{2715}".to_string(),
                 font_size: 12.0,
-                color: RED,
+                color: p.red,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
                 overflow: TextOverflow::Clip,
@@ -1474,7 +1524,15 @@ impl BackupSettingsUI {
     }
 
     /// Render history tab.
-    fn render_history(&self, cmds: &mut Vec<RenderCommand>, x: f32, y: f32, width: f32, tz: &Tz) {
+    fn render_history(
+        &self,
+        p: &Palette,
+        cmds: &mut Vec<RenderCommand>,
+        x: f32,
+        y: f32,
+        width: f32,
+        tz: &Tz,
+    ) {
         let mut row_y = y;
 
         cmds.push(RenderCommand::Text {
@@ -1482,7 +1540,7 @@ impl BackupSettingsUI {
             y: row_y,
             text: format!("Backup history ({} entries)", self.settings.history.len()),
             font_size: 14.0,
-            color: TEXT,
+            color: p.text,
             font_weight: FontWeightHint::Bold,
             max_width: None,
             overflow: TextOverflow::Clip,
@@ -1496,7 +1554,7 @@ impl BackupSettingsUI {
                 text: "No backups yet. Click \"Backup now\" to create your first backup."
                     .to_string(),
                 font_size: 13.0,
-                color: OVERLAY0,
+                color: p.overlay0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(width - 32.0),
                 overflow: TextOverflow::Ellipsis,
@@ -1508,7 +1566,7 @@ impl BackupSettingsUI {
                     y: row_y,
                     width,
                     height: 56.0,
-                    color: SURFACE0,
+                    color: p.surface0,
                     corner_radii: CornerRadii::all(4.0),
                 });
 
@@ -1518,7 +1576,7 @@ impl BackupSettingsUI {
                     y: row_y + 8.0,
                     width: 8.0,
                     height: 8.0,
-                    color: entry.status.color(),
+                    color: entry.status.color(p),
                     corner_radii: CornerRadii::all(4.0),
                 });
 
@@ -1527,7 +1585,7 @@ impl BackupSettingsUI {
                     y: row_y + 4.0,
                     text: format!("{} — {}", entry.backup_type.label(), entry.status.label()),
                     font_size: 13.0,
-                    color: TEXT,
+                    color: p.text,
                     font_weight: FontWeightHint::Bold,
                     max_width: None,
                     overflow: TextOverflow::Clip,
@@ -1544,7 +1602,7 @@ impl BackupSettingsUI {
                         entry.duration_display()
                     ),
                     font_size: 11.0,
-                    color: SUBTEXT0,
+                    color: p.subtext0,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(width - 40.0),
                     overflow: TextOverflow::Ellipsis,
@@ -1556,7 +1614,7 @@ impl BackupSettingsUI {
                         y: row_y + 38.0,
                         text: err.clone(),
                         font_size: 10.0,
-                        color: RED,
+                        color: p.red,
                         font_weight: FontWeightHint::Regular,
                         max_width: Some(width - 40.0),
                         overflow: TextOverflow::Ellipsis,
@@ -1597,6 +1655,14 @@ mod tests {
     #![allow(clippy::float_cmp)]
 
     use super::*;
+    use crate::draw_check::assert_nothing_is_drawn_and_never_seen;
+    use crate::palette_check::assert_drawn_from;
+
+    /// The palette the older tests were written against: dark mode, stock
+    /// accent, which is what the deleted constants spelled out by hand.
+    fn test_palette() -> Palette {
+        Palette::for_mode(false)
+    }
 
     #[test]
     fn test_backup_type_labels() {
@@ -1650,9 +1716,10 @@ mod tests {
     #[test]
     fn test_backup_status_colors() {
         // Just verify they don't panic
-        let _c1 = BackupStatus::Success.color();
-        let _c2 = BackupStatus::Failed.color();
-        let _c3 = BackupStatus::InProgress.color();
+        let p = test_palette();
+        let _c1 = BackupStatus::Success.color(&p);
+        let _c2 = BackupStatus::Failed.color(&p);
+        let _c3 = BackupStatus::InProgress.color(&p);
     }
 
     #[test]
@@ -1946,7 +2013,7 @@ mod tests {
     #[test]
     fn test_ui_render_produces_commands() {
         let ui = BackupSettingsUI::new();
-        let cmds = ui.render(0.0, 0.0, 600.0, 800.0, &Tz::utc());
+        let cmds = ui.render(&test_palette(), 0.0, 0.0, 600.0, 800.0, &Tz::utc());
         assert!(!cmds.is_empty());
     }
 
@@ -1966,5 +2033,558 @@ mod tests {
     fn test_day_of_week_labels() {
         assert_eq!(DayOfWeek::Monday.short_label(), "Mon");
         assert_eq!(DayOfWeek::Sunday.short_label(), "Sun");
+    }
+
+    // ---- Colour ----
+
+    /// A panel wound up so that every colour-bearing branch actually draws.
+    ///
+    /// Both halves of every switch and checkbox are on screen at once — two
+    /// sources with one of them off, two rules with one of them off, and the
+    /// five retention options split — because a control is coloured by a
+    /// boolean, and a fixture that only ever renders the `true` arm proves
+    /// nothing about the `false` one. Every backup outcome appears in the
+    /// history, including the one that carries an error line.
+    fn wound(tab: BackupSettingsTab, enabled: bool, freq: BackupFrequency) -> BackupSettingsUI {
+        let mut ui = BackupSettingsUI::new();
+        ui.settings.enabled = enabled;
+        ui.settings.frequency = freq;
+        ui.settings.sources.clear();
+        ui.settings.add_source("/home/u/documents");
+        ui.settings.add_source("/home/u/pictures");
+        ui.settings.sources[1].enabled = false;
+        ui.settings.sources[1].include_subdirs = false;
+        ui.settings.exclude_rules.clear();
+        ui.settings.add_exclude_rule("*.tmp", "Temporary files");
+        ui.settings
+            .add_exclude_rule("node_modules", "Dependency trees");
+        ui.settings.exclude_rules[1].enabled = false;
+        ui.settings.compression_enabled = true;
+        ui.settings.encryption_enabled = false;
+        ui.settings.verify_after_backup = true;
+        ui.settings.skip_if_on_battery = false;
+        ui.settings.skip_if_metered = true;
+        ui.settings.history.clear();
+        for (i, status) in [
+            BackupStatus::Success,
+            BackupStatus::PartialSuccess,
+            BackupStatus::Failed,
+            BackupStatus::Cancelled,
+            BackupStatus::InProgress,
+        ]
+        .iter()
+        .enumerate()
+        {
+            ui.settings.record_backup(BackupHistoryEntry {
+                id: 0,
+                timestamp: 1_700_000_000 + i as u64 * 3600,
+                backup_type: BackupType::Full,
+                status: *status,
+                files_count: 1234,
+                total_bytes: 5_000_000,
+                duration_secs: 90,
+                // Only the failed run draws the error line.
+                error_message: if *status == BackupStatus::Failed {
+                    Some("target unreachable".to_string())
+                } else {
+                    None
+                },
+                target_path: "/mnt/backup".to_string(),
+            });
+        }
+        ui.active_tab = tab;
+        ui
+    }
+
+    /// Every state the panel can be in, so no branch escapes the sweep below.
+    fn every_state() -> Vec<(BackupSettingsUI, String)> {
+        let mut out = Vec::new();
+        for tab in BackupSettingsTab::all() {
+            for enabled in [false, true] {
+                for freq in [
+                    BackupFrequency::Manual,
+                    BackupFrequency::Hourly,
+                    BackupFrequency::Daily,
+                    BackupFrequency::Weekly,
+                    BackupFrequency::Monthly,
+                ] {
+                    out.push((
+                        wound(*tab, enabled, freq),
+                        format!("backup panel (tab={tab:?}, enabled={enabled}, freq={freq:?})"),
+                    ));
+                }
+            }
+        }
+        // The empty history draws a caption no populated one ever does.
+        let mut bare = BackupSettingsUI::new();
+        bare.active_tab = BackupSettingsTab::History;
+        bare.settings.history.clear();
+        out.push((bare, "backup panel (History, no backups yet)".to_string()));
+        out
+    }
+
+    fn render(ui: &BackupSettingsUI, p: &Palette) -> Vec<RenderCommand> {
+        ui.render(p, 0.0, 0.0, 700.0, 800.0, &Tz::utc())
+    }
+
+    /// The membership sweep: nothing the panel draws is outside its palette.
+    ///
+    /// Every constant this module used to hold was a Catppuccin *Mocha* value,
+    /// so the light render is where a survivor gives itself away — Latte does
+    /// not contain it, and the failure names the colour back.
+    #[test]
+    fn every_colour_the_panel_draws_comes_from_its_palette() {
+        for light in [false, true] {
+            let p = Palette::for_mode(light);
+            for (ui, what) in every_state() {
+                assert_drawn_from(&p, &render(&ui, &p), &[], &format!("{what}, light={light}"));
+            }
+        }
+    }
+
+    /// Nothing is painted and then erased before anyone could see it.
+    #[test]
+    fn the_panel_draws_nothing_that_is_immediately_erased() {
+        for light in [false, true] {
+            let p = Palette::for_mode(light);
+            for (ui, what) in every_state() {
+                assert_nothing_is_drawn_and_never_seen(
+                    &render(&ui, &p),
+                    &format!("{what}, light={light}"),
+                );
+            }
+        }
+    }
+
+    // -- Extractors, one per class of control the accent is supposed to reach --
+
+    /// The tab strip's labels, in the order they are drawn.
+    fn tab_labels(cmds: &[RenderCommand]) -> Vec<Color> {
+        cmds.iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text {
+                    y: 64.0,
+                    font_size: 13.0,
+                    color,
+                    ..
+                } => Some(*color),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The fill of the button labelled `label`, and that label's own colour.
+    ///
+    /// A button here is a `FillRect` immediately followed by its `Text`, so the
+    /// pairing is "the last fill before this word".
+    fn button(cmds: &[RenderCommand], label: &str) -> (Color, Color) {
+        let mut fill = None;
+        for c in cmds {
+            match c {
+                RenderCommand::FillRect { color, .. } => fill = Some(*color),
+                RenderCommand::Text { text, color, .. } if text == label => {
+                    return (fill.expect("a button's fill precedes its label"), *color);
+                }
+                _ => {}
+            }
+        }
+        panic!("no button labelled {label:?} was drawn");
+    }
+
+    /// Every switch: a fully-rounded pill wider than it is tall.
+    fn switch_fills(cmds: &[RenderCommand]) -> Vec<Color> {
+        cmds.iter()
+            .filter_map(|c| match c {
+                RenderCommand::FillRect {
+                    width,
+                    height,
+                    color,
+                    corner_radii,
+                    ..
+                } if *width > *height && corner_radii.top_left * 2.0 == *height => Some(*color),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Every radio ring and checkbox outline.
+    fn outlines(cmds: &[RenderCommand]) -> Vec<Color> {
+        cmds.iter()
+            .filter_map(|c| match c {
+                RenderCommand::StrokeRect { color, .. } => Some(*color),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The chosen radio's dot — the 8x8 fill at x 16, *not* every 8x8 fill.
+    ///
+    /// The history tab's status badge is also 8x8, so a size-only pattern
+    /// claims both. That is not a theoretical worry: it silently pulled the
+    /// status badges out of [`colors_apart_from_the_controls`] below, which
+    /// left the frozen-union check blind to a run's outcome following the
+    /// accent. The x offset separates them (the dot lands at 40 and the
+    /// badge at 32, both tabs being inset by the same cx = x + 24).
+    fn radio_dots(cmds: &[RenderCommand]) -> Vec<Color> {
+        cmds.iter()
+            .filter_map(|c| match c {
+                RenderCommand::FillRect {
+                    x: 40.0,
+                    width: 8.0,
+                    height: 8.0,
+                    color,
+                    ..
+                } => Some(*color),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Every ticked checkbox's tick.
+    fn ticks(cmds: &[RenderCommand]) -> Vec<Color> {
+        cmds.iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, color, .. } if text == "\u{2713}" => Some(*color),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Every colour the panel draws that no control above claimed.
+    ///
+    /// The radio dot is excluded *by position as well as size*. Dropping every
+    /// 8x8 fill would also drop the history tab's status badges, and those
+    /// belong in this vector: they are a category, and this check exists to
+    /// prove a category does not follow the accent.
+    fn colors_apart_from_the_controls(cmds: &[RenderCommand]) -> Vec<Color> {
+        cmds.iter()
+            .filter(|c| {
+                !matches!(
+                    c,
+                    RenderCommand::Text {
+                        y: 64.0,
+                        font_size: 13.0,
+                        ..
+                    } | RenderCommand::StrokeRect { .. }
+                        | RenderCommand::FillRect {
+                            x: 40.0,
+                            width: 8.0,
+                            height: 8.0,
+                            ..
+                        }
+                ) && !matches!(c, RenderCommand::Text { text, .. } if text == "\u{2713}")
+                    && !matches!(
+                        c,
+                        RenderCommand::FillRect { width, height, corner_radii, .. }
+                            if *width > *height && corner_radii.top_left * 2.0 == *height
+                    )
+                    // The three primary buttons and their labels.
+                    && !matches!(
+                        c,
+                        RenderCommand::FillRect { width: 120.0, height: 36.0, .. }
+                            | RenderCommand::FillRect { width: 100.0, height: 24.0, .. }
+                            | RenderCommand::FillRect { width: 80.0, height: 24.0, .. }
+                    )
+                    && !matches!(
+                        c,
+                        RenderCommand::Text { text, .. }
+                            if text == "Backup now" || text == "+ Add source" || text == "+ Add rule"
+                    )
+            })
+            .filter_map(|c| match c {
+                RenderCommand::FillRect { color, .. }
+                | RenderCommand::StrokeRect { color, .. }
+                | RenderCommand::Text { color, .. } => Some(*color),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Every control that offers something follows the accent — each proved
+    /// separately.
+    ///
+    /// Nine sites means nine `assert_ne!`s. Over their union one moving control
+    /// would hide eight frozen ones, which is the failure FFF/NNN/WWW/EEEE
+    /// established and this module has the most room for.
+    ///
+    /// The frozen half stays a single equality over everything else: an
+    /// `assert_eq!` fails if *any* member moves, so it loses nothing and covers
+    /// sites nobody thought to name.
+    ///
+    /// The three button *labels* are deliberately not among the nine, and an
+    /// `assert_ne!` on them would be a bug in the test rather than a check:
+    /// a label is `p.on_accent()`, which is `readable_on(accent)`, and every
+    /// accent on offer is pale enough that all fourteen resolve to the same
+    /// near-black. Correct code therefore draws the same label under any two
+    /// accents. What actually distinguishes `p.on_accent()` from a frozen
+    /// `p.crust` is the *mode*, so the labels are proved by
+    /// [`each_buttons_label_is_legible_on_it`] instead, which asserts equality
+    /// with `readable_on` across both modes.
+    #[test]
+    fn every_control_that_offers_something_follows_the_accent() {
+        let mut a = Palette::for_mode(false);
+        a.accent = appearance::MAUVE;
+        let mut b = Palette::for_mode(false);
+        b.accent = appearance::TEAL;
+
+        // Walk every tab as the active one: the tab label's colour is chosen by
+        // a boolean, so a fixture pinned to one tab leaves four unproven.
+        for tab in BackupSettingsTab::all() {
+            let ui = wound(*tab, true, BackupFrequency::Daily);
+            let x = render(&ui, &a);
+            let y = render(&ui, &b);
+
+            assert_eq!(tab_labels(&x).len(), 5, "five tabs are labelled");
+            assert_ne!(
+                tab_labels(&x),
+                tab_labels(&y),
+                "the {tab:?} tab's label did not move with the accent"
+            );
+
+            match tab {
+                BackupSettingsTab::Overview => {
+                    let (fa, _) = button(&x, "Backup now");
+                    let (fb, _) = button(&y, "Backup now");
+                    assert_ne!(
+                        (fa.r, fa.g, fa.b),
+                        (fb.r, fb.g, fb.b),
+                        "\"Backup now\" did not move with the accent"
+                    );
+                }
+                BackupSettingsTab::Schedule => {
+                    // Six pills are drawn here, but they are only *two* places
+                    // in the source: the automatic-backup master switch, and
+                    // the five retention switches in their loop. They are the
+                    // same 40x20 shape at the same x, so nothing about a pill
+                    // says which site emitted it — the master is simply the
+                    // first, its row being the top of the tab. Splitting them
+                    // is the point: one `assert_ne!` over all six would still
+                    // pass with the retention loop frozen, because the master
+                    // alone moving makes the vectors differ.
+                    assert_eq!(
+                        switch_fills(&x).len(),
+                        6,
+                        "one master + five retention switches"
+                    );
+                    assert_ne!(
+                        switch_fills(&x).first(),
+                        switch_fills(&y).first(),
+                        "the automatic-backup switch did not move with the accent"
+                    );
+                    assert_ne!(
+                        switch_fills(&x).get(1..),
+                        switch_fills(&y).get(1..),
+                        "no retention switch moved with the accent"
+                    );
+                    assert_eq!(outlines(&x).len(), 5, "five frequency radios are drawn");
+                    assert_ne!(
+                        outlines(&x),
+                        outlines(&y),
+                        "the frequency radio's ring did not move with the accent"
+                    );
+                    assert_eq!(radio_dots(&x).len(), 1, "one radio is chosen");
+                    assert_ne!(
+                        radio_dots(&x),
+                        radio_dots(&y),
+                        "the chosen frequency's dot did not move with the accent"
+                    );
+                }
+                BackupSettingsTab::Sources => {
+                    let (fa, _) = button(&x, "+ Add source");
+                    let (fb, _) = button(&y, "+ Add source");
+                    assert_ne!(
+                        (fa.r, fa.g, fa.b),
+                        (fb.r, fb.g, fb.b),
+                        "\"+ Add source\" did not move with the accent"
+                    );
+                    assert_eq!(outlines(&x).len(), 2, "one checkbox per source");
+                    assert_ne!(
+                        outlines(&x),
+                        outlines(&y),
+                        "a source's checkbox did not move with the accent"
+                    );
+                    assert_eq!(ticks(&x).len(), 1, "one source is ticked");
+                    assert_ne!(
+                        ticks(&x),
+                        ticks(&y),
+                        "the ticked source's tick did not move with the accent"
+                    );
+                }
+                BackupSettingsTab::Exclusions => {
+                    let (fa, _) = button(&x, "+ Add rule");
+                    let (fb, _) = button(&y, "+ Add rule");
+                    assert_ne!(
+                        (fa.r, fa.g, fa.b),
+                        (fb.r, fb.g, fb.b),
+                        "\"+ Add rule\" did not move with the accent"
+                    );
+                    assert_eq!(switch_fills(&x).len(), 2, "one switch per rule");
+                    assert_ne!(
+                        switch_fills(&x),
+                        switch_fills(&y),
+                        "an exclusion rule's switch did not move with the accent"
+                    );
+                }
+                BackupSettingsTab::History => {}
+            }
+
+            assert_eq!(
+                colors_apart_from_the_controls(&x),
+                colors_apart_from_the_controls(&y),
+                "something that is not a control moved with the accent \
+                 (tab={tab:?}) — the outcome dots are a category, the four \
+                 overview stats are a category, and the remove crosses are \
+                 destructive rather than inviting"
+            );
+        }
+    }
+
+    /// The panel's own two surfaces are the palette's, in both modes.
+    ///
+    /// This is the one thing the membership sweep structurally cannot check.
+    /// `assert_drawn_from` allows `0x11111B` and `0xEFF1F5` at any alpha,
+    /// because those are the two answers [`appearance::readable_on`] can give
+    /// and a legitimately-converted foreground will be one of them. But
+    /// `0x11111B` is *also* Mocha's `crust` — so putting the literal back where
+    /// `p.crust` belongs produces a render the sweep is obliged to accept. The
+    /// same goes for `base`, one step lighter.
+    ///
+    /// Membership is the wrong question for these two. They are not "some
+    /// palette colour", they are one specific role each, so the test names the
+    /// role and asserts equality — which also fails in *dark* mode if the role
+    /// is wrong, where a membership check could only ever fail in light.
+    #[test]
+    fn the_panels_own_surfaces_come_from_the_palette() {
+        for light in [false, true] {
+            let p = Palette::for_mode(light);
+            let cmds = render(
+                &wound(BackupSettingsTab::Overview, true, BackupFrequency::Daily),
+                &p,
+            );
+
+            let backdrop = cmds.iter().find_map(|c| match c {
+                RenderCommand::FillRect {
+                    x: 0.0,
+                    y: 0.0,
+                    width: 700.0,
+                    height: 800.0,
+                    color,
+                    ..
+                } => Some(*color),
+                _ => None,
+            });
+            assert_eq!(
+                backdrop,
+                Some(p.base),
+                "the panel's backdrop is not p.base (light={light})"
+            );
+
+            // The well the tab content sits in: the full-width inset at x 8.
+            let well = cmds.iter().find_map(|c| match c {
+                RenderCommand::FillRect {
+                    x: 8.0,
+                    width: 684.0,
+                    color,
+                    ..
+                } => Some(*color),
+                _ => None,
+            });
+            assert_eq!(
+                well,
+                Some(p.crust),
+                "the content well is not p.crust (light={light})"
+            );
+        }
+    }
+
+    /// Each primary button's label is picked for its own fill, not fixed.
+    ///
+    /// The accent test above cannot reach this. Every accent on offer is pale,
+    /// so [`appearance::readable_on`] answers the same near-black for all of
+    /// them and an `assert_ne!` between two accents would fail on correct code.
+    /// What separates `p.on_accent()` from a hard-coded `p.crust` is the
+    /// *mode*: Latte's `crust` is near-white, which on a pale accent is
+    /// illegible.
+    #[test]
+    fn each_buttons_label_is_legible_on_it() {
+        for light in [false, true] {
+            for accent in [
+                appearance::BLUE,
+                appearance::GREEN,
+                appearance::RED,
+                appearance::YELLOW,
+                appearance::MAUVE,
+            ] {
+                let mut p = Palette::for_mode(light);
+                p.accent = accent;
+                for (tab, label) in [
+                    (BackupSettingsTab::Overview, "Backup now"),
+                    (BackupSettingsTab::Sources, "+ Add source"),
+                    (BackupSettingsTab::Exclusions, "+ Add rule"),
+                ] {
+                    let ui = wound(tab, true, BackupFrequency::Daily);
+                    let (fill, text) = button(&render(&ui, &p), label);
+                    assert_eq!(
+                        (fill.r, fill.g, fill.b),
+                        (accent.r, accent.g, accent.b),
+                        "{label:?} is not filled with the accent (light={light})"
+                    );
+                    let want = appearance::readable_on(accent);
+                    assert_eq!(
+                        (text.r, text.g, text.b),
+                        (want.r, want.g, want.b),
+                        "{label:?}'s label is not chosen for its own fill \
+                         (light={light}); a fixed colour is legible on one \
+                         mode's accents and not the other's"
+                    );
+                }
+            }
+        }
+    }
+
+    /// The five backup outcomes stay tellable apart, under every accent and in
+    /// both modes.
+    ///
+    /// They are drawn as dots down one scrollable list, so two outcomes sharing
+    /// a colour do not merely confuse a learnt code — they make a failed backup
+    /// look like a finished one in the same glance. Three of the five are hues
+    /// that are also selectable accents, which is why the accent has to be
+    /// varied and not merely defaulted.
+    #[test]
+    fn the_backup_outcomes_stay_distinct_under_every_accent() {
+        for light in [false, true] {
+            for accent in [
+                appearance::BLUE,
+                appearance::GREEN,
+                appearance::RED,
+                appearance::YELLOW,
+                appearance::MAUVE,
+            ] {
+                let mut p = Palette::for_mode(light);
+                p.accent = accent;
+
+                let mut seen: Vec<(BackupStatus, Color)> = Vec::new();
+                for status in [
+                    BackupStatus::Success,
+                    BackupStatus::PartialSuccess,
+                    BackupStatus::Failed,
+                    BackupStatus::Cancelled,
+                    BackupStatus::InProgress,
+                ] {
+                    let c = status.color(&p);
+                    if let Some((other, _)) = seen
+                        .iter()
+                        .find(|(_, o)| o.r == c.r && o.g == c.g && o.b == c.b)
+                    {
+                        panic!(
+                            "a {status:?} backup is marked exactly like a {other:?} \
+                             one (light={light}, accent={accent:?}), so a failure \
+                             reads as a success in the same list"
+                        );
+                    }
+                    seen.push((status, c));
+                }
+            }
+        }
     }
 }

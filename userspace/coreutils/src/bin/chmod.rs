@@ -1,8 +1,17 @@
 //! chmod — change file mode bits.
 //!
-//! Usage: chmod [-R] MODE FILE...
+//! Usage: chmod [-R|--recursive] [--] MODE FILE...
 //!   MODE is an octal number (e.g. 755) or symbolic (e.g. u+x,g-w).
-//!   -R  operate recursively on directories.
+//!   -R, --recursive  operate recursively on directories.
+//!   --               end of options; everything after is MODE then FILEs.
+//!
+//! Note the asymmetry between `-R` and `-r`: **`-R` is the recursion flag and
+//! `-r` is a mode**, the `-` operator applied to the read bit, exactly like the
+//! `-w` in `chmod -w file`. POSIX specifies the mode operand may begin with a
+//! `-`, which is why `parse_args` cannot simply treat every leading dash as an
+//! option. Getting this wrong is not a cosmetic incompatibility: `chmod -r f`
+//! is the ordinary way to make a file unreadable, and reading its `-r` as
+//! "recurse" leaves the file readable while reporting a usage error.
 //!
 //! Built only on unix-family targets (our x86_64-slateos presents as
 //! linux-musl, so `cfg(unix)` matches).  On non-unix hosts (e.g.
@@ -41,19 +50,62 @@ struct ChmodArgs {
     paths: Vec<String>,
 }
 
-/// Parse chmod's argv.  The first non-flag positional argument is the
-/// mode string; the rest are file paths.  Returns an error if there are
-/// fewer than two positionals (i.e. nothing to chmod).
+/// Characters that may follow a leading `-` in a *mode operand* rather than an
+/// option: the three operators, the permission letters, the `ugoa` who-letters,
+/// the `st` special bits, and the `,` that separates clauses. Deliberately does
+/// not contain `R`, which is the recursion flag — that one letter is the whole
+/// difference between `chmod -R` and `chmod -r`.
+const MODE_OPERAND_CHARS: &str = "rwxXstugoa,+-=";
+
+/// Whether `arg` is a mode written with a leading `-`, e.g. `-r`, `-w`, `-rw`.
+///
+/// POSIX allows the mode operand to start with `-`, so a leading dash cannot be
+/// taken as proof of an option. This is the test that separates the two.
+fn is_mode_operand(arg: &str) -> bool {
+    match arg.strip_prefix('-') {
+        Some(rest) => !rest.is_empty() && rest.chars().all(|c| MODE_OPERAND_CHARS.contains(c)),
+        None => false,
+    }
+}
+
+/// Parse chmod's argv.  The first positional argument is the mode string; the
+/// rest are file paths.  Returns an error if there are fewer than two
+/// positionals (i.e. nothing to chmod), or if an argument is an option we do
+/// not recognise.
+///
+/// An unknown leading-dash argument is rejected rather than silently taken as a
+/// path, because the alternative is a `chmod -v 644 f` that reports
+/// `invalid operator in mode: -v` — an error about the wrong thing, pointing
+/// the reader at their mode instead of at the flag we do not implement.
 fn parse_args(args: &[String]) -> Result<ChmodArgs, String> {
     let mut out = ChmodArgs::default();
     let mut positional: Vec<&str> = Vec::new();
+    let mut end_of_options = false;
 
     for arg in args {
-        if arg == "-R" || arg == "-r" {
-            out.recursive = true;
-        } else {
+        if end_of_options {
             positional.push(arg);
+            continue;
         }
+        // `--` exists so a file genuinely named `-r` can be addressed.
+        if arg == "--" {
+            end_of_options = true;
+            continue;
+        }
+        if arg == "-R" || arg == "--recursive" {
+            out.recursive = true;
+            continue;
+        }
+        // A bare `-` is not an option; let it fall through and fail as a mode,
+        // which is what it is being used as.
+        if arg.starts_with('-') && arg != "-" && !is_mode_operand(arg) {
+            return Err(if arg.starts_with("--") {
+                format!("unrecognized option '{arg}'")
+            } else {
+                format!("invalid option -- '{}'", arg.trim_start_matches('-'))
+            });
+        }
+        positional.push(arg);
     }
 
     if positional.len() < 2 {
@@ -171,7 +223,7 @@ fn main() {
         Ok(p) => p,
         Err(e) => {
             eprintln!("chmod: {e}");
-            eprintln!("Usage: chmod [-R] MODE FILE...");
+            eprintln!("Usage: chmod [-R|--recursive] [--] MODE FILE...");
             process::exit(1);
         }
     };
@@ -261,10 +313,71 @@ mod tests {
         assert_eq!(a.paths, vec!["dir"]);
     }
 
+    // `-r` is a MODE, not a flag. This previously asserted the opposite, which
+    // is how the bug survived: fixing the parser turned an existing test red,
+    // which reads like a regression rather than the fix it is.
     #[test]
-    fn parse_recursive_lowercase_r_accepted() {
-        let a = parse_args(&s(&["-r", "644", "f"])).unwrap();
+    fn parse_lowercase_r_is_a_mode_not_recursion() {
+        let a = parse_args(&s(&["-r", "f"])).unwrap();
+        assert!(!a.recursive);
+        assert_eq!(a.mode, "-r");
+        assert_eq!(a.paths, vec!["f"]);
+    }
+
+    #[test]
+    fn parse_lowercase_r_alone_is_missing_operand() {
+        let err = parse_args(&s(&["-r"])).unwrap_err();
+        assert!(err.contains("missing operand"));
+    }
+
+    // The symmetry that was broken: `-w` always worked because it fell through
+    // to the mode parser; `-r` did not, only because it was special-cased.
+    #[test]
+    fn parse_dash_w_and_dash_r_behave_alike() {
+        for spec in ["-r", "-w", "-x", "-rw", "-rwx"] {
+            let a = parse_args(&s(&[spec, "f"])).unwrap();
+            assert!(!a.recursive, "{spec} must not imply recursion");
+            assert_eq!(a.mode, spec);
+        }
+    }
+
+    #[test]
+    fn parse_long_recursive() {
+        let a = parse_args(&s(&["--recursive", "755", "dir"])).unwrap();
         assert!(a.recursive);
+        assert_eq!(a.mode, "755");
+        assert_eq!(a.paths, vec!["dir"]);
+    }
+
+    #[test]
+    fn parse_double_dash_ends_options() {
+        // Without `--` there is no way to name a file `-R`.
+        let a = parse_args(&s(&["--", "644", "-R"])).unwrap();
+        assert!(!a.recursive);
+        assert_eq!(a.mode, "644");
+        assert_eq!(a.paths, vec!["-R"]);
+    }
+
+    #[test]
+    fn parse_unknown_short_option_rejected() {
+        let err = parse_args(&s(&["-v", "644", "f"])).unwrap_err();
+        assert!(err.contains("invalid option"), "got: {err}");
+    }
+
+    #[test]
+    fn parse_unknown_long_option_rejected() {
+        let err = parse_args(&s(&["--verbose", "644", "f"])).unwrap_err();
+        assert!(err.contains("unrecognized option"), "got: {err}");
+    }
+
+    #[test]
+    fn mode_operand_classification() {
+        for yes in ["-r", "-w", "-x", "-rwx", "-u+x", "-a=r", "-rw,-x"] {
+            assert!(is_mode_operand(yes), "{yes} should be a mode operand");
+        }
+        for no in ["-R", "-v", "--recursive", "644", "u+x", "-", ""] {
+            assert!(!is_mode_operand(no), "{no} should not be a mode operand");
+        }
     }
 
     #[test]

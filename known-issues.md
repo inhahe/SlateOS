@@ -50335,7 +50335,7 @@ commands that carry the colour in question, and assert the two renders agree.
 Candidates: anything drawn on the wallpaper, on a video surface, on a
 thumbnail, or on any other content the palette does not own.
 
-**Part 2 progress. 16 of 49 modules converted.**
+**Part 2 progress. 17 of 49 modules converted.**
 
 - [x] `security_dialog.rs` — 29 constants, done 2026-08-22. The method above
   survived contact: the sweep lives in `gui/desktop/src/palette_check.rs` as
@@ -51024,6 +51024,80 @@ thumbnail, or on any other content the palette does not own.
     would make the desktop inconsistent with itself. Tracked separately as
     `TD-C-SWITCH-KNOBS-ARE-LOW-CONTRAST-ON-THE-ON-PILL`, to be done as one
     sweep once the threading lands.
+- [x] `startup_settings.rs` — 13 constants, done 2026-08-22. Harness defects
+  LLLLLLL–OOOOOOOO (thirty).
+  - **A hardcoded hex has no role until someone assigns one.** The per-entry
+    enable switch and the three boot-tab toggles were a hardcoded `GREEN`,
+    which made this the only settings panel in the shell whose switches did
+    not follow the accent. Mapping them to `p.green` would have been *just as
+    much of a choice* as mapping them to `p.accent`; there is no "leave it
+    alone" option, because the literal names a colour and not a role. This is
+    the general rule for the remaining 32 modules: a conversion that meets a
+    literal must decide what the literal *meant*, and "keep the same pixels"
+    is one answer among several rather than the neutral one. They became
+    `p.accent`, which is what the other sixteen converted modules already say,
+    and which within this module also demotes a real collision: the apps list
+    draws the enable switch and the impact badge on the same row and the impact
+    scale's lowest rung is green, so a green switch sat beside a green "None"
+    badge on every stock install. Following the accent moves that from
+    "always" to "only for a user who picks Green".
+  - **Five variants over four colours, on purpose.** `StartupImpact::color`
+    paints `None` and `Low` the same green: the badge is a three-band traffic
+    light (fine / slow / bad, plus grey for a reading that does not exist yet)
+    laid over a finer-grained label. Distinctness is therefore a claim about
+    the **bands, not the variants** — walking the five pairwise would fail on
+    correct code. There is a separate test
+    (`the_impact_light_has_fewer_bands_than_the_impact_label`) whose only job
+    is to stop a future reader "fixing" the shared arm, and defect KKKKKKKK
+    splits it to prove that test is load-bearing.
+  - **A scale hidden inside a render call cannot be tested.** The last-boot
+    reading's green/yellow/red ladder was three arms of an `if` buried in a
+    `RenderCommand::Text`, unreachable from a test without rendering the whole
+    tab and hunting for a formatted string. It is now `boot_time_color(ms, p)`
+    with a boundary test at 9 999 / 10 000 / 29 999 / 30 000. **Extracting a
+    measurement scale to a named function is part of the conversion, not a
+    detour**: the conversion's whole claim is that these colours are roles
+    chosen by a rule, and a rule nobody can call is a rule nobody can check.
+  - **The impact badge's label was genuinely wrong, not merely fragile.** It
+    was a hardcoded near-black on the badge's own fill. On the four coloured
+    arms that is the usual coincidence — Mocha's green/yellow/red are pale, so
+    dark text reads — but `NotMeasured` fills the badge with `overlay0`, a mid
+    grey, where near-black is poor contrast in dark mode and no better in
+    light. And `NotMeasured` is not an exotic state: `StartupEntry::new` starts
+    every entry there, so it is what a freshly-added app shows. Now
+    `readable_on(impact_color)`. Fourth module with the `p.crust`-on-a-
+    categorical-fill shape, and the first where the coincidence had already
+    failed rather than merely being unmaintained.
+  - **Three accent *sites*, five accent *controls*.** The boot tab's three
+    switches are three rendered pills but one call site (`render_toggle_row`),
+    so they are one `assert_ne!` with a length check beside it; the tab pill
+    and the per-entry switch are the other two. The per-site rule is about
+    **source sites**, not rendered instances — a loop cannot disagree with
+    itself, so splitting it would prove nothing that the count does not.
+  - **The extractor collision was in the label text, not the geometry.** For
+    the first time in four modules the `FillRect` dimensions were all distinct
+    (grepped: one `height: 32.0`, one `36.0` wide, one `40.0` wide, and the two
+    `74.0`-wide badges separated by height). The trap was elsewhere: the
+    module's *title* is the string `"Startup Apps"` and so is one of its *tab
+    labels*, so the `button(cmds, label)` helper the last three modules used —
+    "the last fill before this text" — would have returned the backdrop and the
+    title, silently. The tab strip is keyed on geometry instead (`y: 72.0`
+    pills, `y: 80.0` labels). **Generalisation: an extractor keyed on a string
+    is exactly as much of a guess as one keyed on geometry, and needs the same
+    grep-and-count before it is trusted.**
+  - **The frozen union deliberately *keeps* the `on_accent()` tab label**,
+    unlike `network_settings`, which excluded it. Both accents the test uses
+    are pale, so `readable_on` answers the same near-black for both and a
+    correct label is frozen between them — which means a label wrongly painted
+    with the accent itself is caught there as well as by the legibility test
+    (defect DDDDDDDD proves both). The cost is a dependency on the two accents
+    sharing a lightness band, which is written down at the exclusion list.
+  - The high-impact banner is the same "alpha wash whose RGB is a role"
+    (`Color::rgba(RED.r, RED.g, RED.b, 40)`) as `backup_settings` and
+    `network_settings`, with its own test for the same reason: the membership
+    sweep compares RGB and ignores alpha by design.
+  - **Deliberate non-change:** the switch knobs stay `p.text`, per
+    `TD-C-SWITCH-KNOBS-ARE-LOW-CONTRAST-ON-THE-ON-PILL`.
 
 **Trigger:** this is not blocked on anything. It is sequenced after the shell
 event loop (`TD-C-THE-SHELL-CAN-DRAW-ITSELF-AND-NOBODY-CAN-ASK-IT-TO`) only

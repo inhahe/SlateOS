@@ -65,6 +65,7 @@ CLIP = "gui/desktop/src/clipboard_viewer.rs"
 NOTIF_SET = "gui/desktop/src/notification_settings.rs"
 BACKUP = "gui/desktop/src/backup_settings.rs"
 NET_SET = "gui/desktop/src/network_settings.rs"
+STARTUP = "gui/desktop/src/startup_settings.rs"
 
 # (name, file, [(old, new), ...], [packages], [tests expected to fail])
 DEFECTS = [
@@ -1865,6 +1866,273 @@ DEFECTS = [
           "                    Color::rgba(p.surface0.r, p.surface0.g, p.surface0.b, 255)")],
         ["desktop"],
         ["a_disabled_rule_is_the_enabled_row_made_translucent"],
+    ),
+
+    # ---- startup_settings.rs (module 17) -----------------------------------
+    (
+        "LLLLLLL: the startup panel's backdrop keeps Mocha's base",
+        STARTUP,
+        [("            width,\n            height,\n            color: p.base,",
+          "            width,\n            height,\n            color: Color::from_hex(0x1E1E2E),")],
+        ["desktop"],
+        ["every_colour_the_panel_draws_comes_from_its_palette",
+         "the_panels_own_surfaces_come_from_the_palette"],
+    ),
+    (
+        "MMMMMMM: the filter field keeps Mocha's surface0",
+        STARTUP,
+        [("            height: 30.0,\n            color: p.surface0,",
+          "            height: 30.0,\n            color: Color::from_hex(0x313244),")],
+        ["desktop"],
+        ["every_colour_the_panel_draws_comes_from_its_palette",
+         "the_panels_own_surfaces_come_from_the_palette"],
+    ),
+    (
+        "NNNNNNN: a selected entry's row keeps Mocha's surface1",
+        STARTUP,
+        [("                color: if is_selected { p.surface1 } else { p.surface0 },",
+          "                color: if is_selected { Color::from_hex(0x45475A) } else { p.surface0 },")],
+        ["desktop"],
+        ["every_colour_the_panel_draws_comes_from_its_palette",
+         "the_panels_own_surfaces_come_from_the_palette"],
+    ),
+    (
+        "OOOOOOO: the last-boot-time card keeps Mocha's surface0",
+        STARTUP,
+        [("                height: 48.0,\n                color: p.surface0,",
+          "                height: 48.0,\n                color: Color::from_hex(0x313244),")],
+        ["desktop"],
+        ["every_colour_the_panel_draws_comes_from_its_palette",
+         "the_panels_own_surfaces_come_from_the_palette"],
+    ),
+    (
+        "PPPPPPP: the sort indicator keeps Mocha's overlay0",
+        STARTUP,
+        [("            font_size: 11.0,\n            color: p.overlay0,",
+          "            font_size: 11.0,\n            color: Color::from_hex(0x6C7086),")],
+        ["desktop"],
+        ["every_colour_the_panel_draws_comes_from_its_palette"],
+    ),
+    (
+        "QQQQQQQ: the empty-list caption keeps Mocha's overlay0",
+        STARTUP,
+        [('                text: "No startup apps".into(),\n'
+          "                font_size: 13.0,\n                color: p.overlay0,",
+          '                text: "No startup apps".into(),\n'
+          "                font_size: 13.0,\n                color: Color::from_hex(0x6C7086),")],
+        ["desktop"],
+        ["every_colour_the_panel_draws_comes_from_its_palette"],
+    ),
+    (
+        "RRRRRRR: the filter field's placeholder keeps Mocha's overlay0",
+        STARTUP,
+        [("            color: if self.filter.is_empty() {\n                p.overlay0",
+          "            color: if self.filter.is_empty() {\n"
+          "                Color::from_hex(0x6C7086)")],
+        ["desktop"],
+        ["every_colour_the_panel_draws_comes_from_its_palette"],
+    ),
+    (
+        "SSSSSSS: a disabled entry's name keeps Mocha's overlay0",
+        STARTUP,
+        [("                color: if entry.enabled { p.text } else { p.overlay0 },",
+          "                color: if entry.enabled { p.text } else { Color::from_hex(0x6C7086) },")],
+        ["desktop"],
+        ["every_colour_the_panel_draws_comes_from_its_palette"],
+    ),
+    (
+        "TTTTTTT: a delayed entry's delay line keeps Mocha's overlay0",
+        STARTUP,
+        [("                    font_size: 10.0,\n                    color: p.overlay0,",
+          "                    font_size: 10.0,\n"
+          "                    color: Color::from_hex(0x6C7086),")],
+        ["desktop"],
+        ["every_colour_the_panel_draws_comes_from_its_palette"],
+    ),
+    (
+        "UUUUUUU: the enable switch's off arm keeps Mocha's surface2",
+        STARTUP,
+        [("            let toggle_color = if entry.enabled { p.accent } else { p.surface2 };",
+          "            let toggle_color = if entry.enabled { p.accent } else { Color::from_hex(0x585B70) };")],
+        ["desktop"],
+        ["every_colour_the_panel_draws_comes_from_its_palette"],
+    ),
+    (
+        "VVVVVVV: the switch knob keeps Mocha's text",
+        STARTUP,
+        [("                color: p.text,\n                corner_radii: CornerRadii::all(8.0),",
+          "                color: Color::from_hex(0xCDD6F4),\n"
+          "                corner_radii: CornerRadii::all(8.0),")],
+        ["desktop"],
+        ["every_colour_the_panel_draws_comes_from_its_palette"],
+    ),
+    (
+        "WWWWWWW: the boot tab's heading keeps Mocha's lavender",
+        STARTUP,
+        [('            text: "Boot Performance".into(),\n'
+          "            font_size: 15.0,\n            color: p.lavender,",
+          '            text: "Boot Performance".into(),\n'
+          "            font_size: 15.0,\n            color: Color::from_hex(0xB4BEFE),")],
+        ["desktop"],
+        ["every_colour_the_panel_draws_comes_from_its_palette"],
+    ),
+    (
+        "XXXXXXX: an entry's publisher line keeps Mocha's subtext0",
+        STARTUP,
+        [('                text: format!("{} - {}", entry.publisher, entry.startup_type.label()),\n'
+          "                font_size: 11.0,\n                color: p.subtext0,",
+          '                text: format!("{} - {}", entry.publisher, entry.startup_type.label()),\n'
+          "                font_size: 11.0,\n                color: Color::from_hex(0xA6ADC8),")],
+        ["desktop"],
+        ["every_colour_the_panel_draws_comes_from_its_palette"],
+    ),
+    (
+        "YYYYYYY: the high-impact banner's wash keeps Mocha's red, "
+        "destructured by hand so only the light render can see it",
+        STARTUP,
+        [("                color: Color::rgba(p.red.r, p.red.g, p.red.b, 40),",
+          "                color: Color::rgba(243, 139, 168, 40),")],
+        ["desktop"],
+        ["every_colour_the_panel_draws_comes_from_its_palette",
+         "the_high_impact_warning_is_the_red_it_warns_about"],
+    ),
+    (
+        "ZZZZZZZ: the active tab's pill is a fixed blue, not the accent",
+        STARTUP,
+        [("                color: if active { p.accent } else { p.surface0 },",
+          "                color: if active { p.blue } else { p.surface0 },")],
+        ["desktop"],
+        ["every_control_that_offers_something_follows_the_accent"],
+    ),
+    (
+        "AAAAAAAA: an entry's enable switch is a fixed blue, not the accent",
+        STARTUP,
+        [("            let toggle_color = if entry.enabled { p.accent } else { p.surface2 };",
+          "            let toggle_color = if entry.enabled { p.blue } else { p.surface2 };")],
+        ["desktop"],
+        ["every_control_that_offers_something_follows_the_accent"],
+    ),
+    (
+        "BBBBBBBB: the boot tab's switches are a fixed blue, not the accent",
+        STARTUP,
+        [("            color: if enabled { p.accent } else { p.surface2 },",
+          "            color: if enabled { p.blue } else { p.surface2 },")],
+        ["desktop"],
+        ["every_control_that_offers_something_follows_the_accent"],
+    ),
+    (
+        "CCCCCCCC: the active tab's label is a fixed near-black, legible on a "
+        "pale accent and not on a dark one",
+        STARTUP,
+        [("                color: if active { p.on_accent() } else { p.subtext0 },",
+          "                color: if active { p.crust } else { p.subtext0 },")],
+        ["desktop"],
+        ["each_label_is_legible_on_the_fill_beneath_it"],
+    ),
+    (
+        "DDDDDDDD: the active tab's label is the accent itself, i.e. invisible "
+        "on its own pill",
+        STARTUP,
+        [("                color: if active { p.on_accent() } else { p.subtext0 },",
+          "                color: if active { p.accent } else { p.subtext0 },")],
+        ["desktop"],
+        ["each_label_is_legible_on_the_fill_beneath_it",
+         "every_control_that_offers_something_follows_the_accent"],
+    ),
+    (
+        "EEEEEEEE: the impact badge's label is a fixed near-black again — the "
+        "state the module shipped in, illegible on the grey NotMeasured fill",
+        STARTUP,
+        [("                color: readable_on(impact_color),",
+          "                color: p.crust,")],
+        ["desktop"],
+        ["each_label_is_legible_on_the_fill_beneath_it"],
+    ),
+    (
+        "FFFFFFFF: the failure badge's label is a fixed near-black",
+        STARTUP,
+        [("                    color: readable_on(p.red),",
+          "                    color: p.crust,")],
+        ["desktop"],
+        ["each_label_is_legible_on_the_fill_beneath_it"],
+    ),
+    (
+        "GGGGGGGG: a negligible impact is painted in the accent, so a fact "
+        "about the machine follows a choice about the desktop",
+        STARTUP,
+        [("            Self::None | Self::Low => p.green,",
+          "            Self::None | Self::Low => p.accent,")],
+        ["desktop"],
+        ["no_category_follows_the_accent",
+         "every_control_that_offers_something_follows_the_accent"],
+    ),
+    (
+        "HHHHHHHH: an unmeasured impact is painted in the accent",
+        STARTUP,
+        [("            Self::NotMeasured => p.overlay0,",
+          "            Self::NotMeasured => p.accent,")],
+        ["desktop"],
+        ["no_category_follows_the_accent",
+         "every_control_that_offers_something_follows_the_accent"],
+    ),
+    (
+        "IIIIIIII: medium impact collapses onto the green band, so a slow app "
+        "reads as a harmless one",
+        STARTUP,
+        [("            Self::Medium => p.yellow,",
+          "            Self::Medium => p.green,")],
+        ["desktop"],
+        ["every_category_stays_distinct_under_every_accent"],
+    ),
+    (
+        "JJJJJJJJ: an unmeasured impact collapses onto high impact",
+        STARTUP,
+        [("            Self::NotMeasured => p.overlay0,",
+          "            Self::NotMeasured => p.red,")],
+        ["desktop"],
+        ["every_category_stays_distinct_under_every_accent"],
+    ),
+    (
+        "KKKKKKKK: None and Low are split into two bands, which is the "
+        "'fix' the doc comment exists to forestall",
+        STARTUP,
+        [("            Self::None | Self::Low => p.green,",
+          "            Self::None => p.green,\n            Self::Low => p.teal,")],
+        ["desktop"],
+        ["the_impact_light_has_fewer_bands_than_the_impact_label"],
+    ),
+    (
+        "LLLLLLLL: the boot-time ladder's first band moves from ten seconds "
+        "to one",
+        STARTUP,
+        [("    if ms < 10_000 {\n        p.green", "    if ms < 1_000 {\n        p.green")],
+        ["desktop"],
+        ["the_boot_time_bands_are_where_they_say_they_are"],
+    ),
+    (
+        "MMMMMMMM: a bad boot reading is painted in the accent, so a forty-"
+        "second boot is green on a green desktop",
+        STARTUP,
+        [("    } else {\n        p.red\n    }\n}", "    } else {\n        p.accent\n    }\n}")],
+        ["desktop"],
+        ["no_category_follows_the_accent",
+         "every_control_that_offers_something_follows_the_accent"],
+    ),
+    (
+        "NNNNNNNN: a slow boot collapses onto a fast one",
+        STARTUP,
+        [("    } else if ms < 30_000 {\n        p.yellow",
+          "    } else if ms < 30_000 {\n        p.green")],
+        ["desktop"],
+        ["every_category_stays_distinct_under_every_accent"],
+    ),
+    (
+        "OOOOOOOO: the entry list stops advancing, so every row is painted "
+        "over by the next one",
+        STARTUP,
+        [("            cy += 62.0;", "            cy += 0.0;")],
+        ["desktop"],
+        ["the_panel_draws_nothing_that_is_immediately_erased"],
     ),
 ]
 

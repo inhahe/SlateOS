@@ -50319,7 +50319,7 @@ Do **not** do part 2 without part 1 — threading a struct whose light variant
 does not exist yet just relocates the hardcoding into the struct's
 constructor.
 
-**Part 2 progress. 1 of 49 modules converted.**
+**Part 2 progress. 2 of 49 modules converted.**
 
 - [x] `security_dialog.rs` — 29 constants, done 2026-08-22. The method above
   survived contact: the sweep lives in `gui/desktop/src/palette_check.rs` as
@@ -50342,6 +50342,28 @@ constructor.
     `readable_on(color)` and `p.on_accent()`. These are exactly the sites the
     sweep is blind to (see the `readable_on` wrinkle above), so they were
     decided by reading rather than by test — the standing cost of that hole.
+- [x] `run_dialog.rs` — 16 constants, done 2026-08-22. Harness defects Y/Z/AA.
+  - **The blue constants are the judgement, and there were four of them.**
+    `INPUT_BORDER_FOCUS`, the input's selection fill, the selected suggestion's
+    label and `BUTTON_PRIMARY` were all `0x89B4FA`. All four mean "this is
+    where you are, this is what will happen if you press Enter", which is the
+    accent's job, so all four became `p.accent` — and `BUTTON_PRIMARY_TEXT`
+    (Mocha `base`, drawn on that blue) became `p.on_accent()`, because a pale
+    Latte accent needs dark text and a deep Mocha one needs light. The error
+    message stayed `p.red`: it is categorical, and on a Red desktop an error
+    that matched the OK button would be unreadable as an error.
+  - **The `readable_on` hole bit here for the first time.** `INPUT_BG` was
+    `0x11111B` — Mocha `crust`, which is also what `readable_on` answers for a
+    light fill, so the sweep must allow it and cannot tell a converted site
+    from an unconverted one. It became `p.crust` by reading the code. Expect
+    this in every module with a recessed well or a dark inset; those sites are
+    reviewed, not tested, and that is worth knowing before trusting a green
+    sweep as complete coverage.
+  - The autocomplete dropdown's selected row stayed `p.surface0` rather than
+    becoming `p.highlight_fill()`. `highlight_fill` is the right *role* for a
+    hovered item, but swapping it in changes what the dialog looks like, and
+    this task is a conversion — a redesign hidden inside a 549-substitution
+    edit is a redesign nobody reviewed.
 
 **Trigger:** this is not blocked on anything. It is sequenced after the shell
 event loop (`TD-C-THE-SHELL-CAN-DRAW-ITSELF-AND-NOBODY-CAN-ASK-IT-TO`) only

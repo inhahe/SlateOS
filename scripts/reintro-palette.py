@@ -50,6 +50,7 @@ TARGET = "x86_64-pc-windows-gnu"
 APP = "gui/appearance/src/lib.rs"
 DESK = "gui/desktop/src/lib.rs"
 SEC = "gui/desktop/src/security_dialog.rs"
+RUN = "gui/desktop/src/run_dialog.rs"
 
 # (name, file, [(old, new), ...], [packages], [tests expected to fail])
 DEFECTS = [
@@ -279,6 +280,47 @@ DEFECTS = [
         ["desktop"],
         ["every_colour_the_dialog_draws_comes_from_its_palette"],
     ),
+    # `run_dialog.rs`, 16 constants. Same three depths, plus the one thing this
+    # module has that `security_dialog` did not: a label drawn *on* the accent.
+    #
+    # Not a defect, and it is important that it is not: this module's INPUT_BG
+    # was Mocha `crust` = 0x11111B, and that is also what `readable_on` answers
+    # for a light fill, so the sweep must allow it and therefore cannot see a
+    # leftover one. It became `p.crust` by reading the code, not by testing it.
+    # That is the documented hole (see the harness docstring for the rule, and
+    # known-issues.md for the reasoning); a defect asserting it goes uncaught
+    # would only encode the hole as if it were a result.
+    (
+        "Y: the run box's focus border is left as this module's own Mocha blue",
+        RUN,
+        [("            color: p.accent,\n"
+          "            line_width: 1.0,\n"
+          "            corner_radii: CornerRadii::all(4.0),",
+          "            color: guitk::color::Color::from_hex(0x89B4FA),\n"
+          "            line_width: 1.0,\n"
+          "            corner_radii: CornerRadii::all(4.0),")],
+        ["desktop"],
+        ["every_colour_the_dialog_draws_comes_from_its_palette"],
+    ),
+    (
+        # Only drawn when the query matched something.
+        "Z: the autocomplete dropdown keeps its own Mocha mantle",
+        RUN,
+        [("                color: p.mantle,", "                color: guitk::color::Color::from_hex(0x181825),")],
+        ["desktop"],
+        ["every_colour_the_dialog_draws_comes_from_its_palette"],
+    ),
+    (
+        # The OK button's label. Mocha `base` on a blue fill was fine while
+        # every desktop was Mocha; on Latte the accent is pale and the label
+        # has to go dark by computation, not by constant.
+        "AA: the OK button's label is left as this module's own Mocha base",
+        RUN,
+        [("        let fg = if primary { p.on_accent() } else { p.text };",
+          "        let fg = if primary { guitk::color::Color::from_hex(0x1E1E2E) } else { p.text };")],
+        ["desktop"],
+        ["every_colour_the_dialog_draws_comes_from_its_palette"],
+    ),
 ]
 
 
@@ -320,7 +362,9 @@ def main():
     verdicts = []
     try:
         for name, path, edits, pkgs, expect in DEFECTS:
-            if only and name[0] not in only:
+            # Split on the colon rather than taking `name[0]`: the labels ran
+            # past Z, so `"AA"[0]` would select defect A as well.
+            if only and name.split(":", 1)[0] not in only:
                 continue
             text = snap[path].decode("utf-8")
             ok = True

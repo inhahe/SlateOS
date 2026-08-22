@@ -505,6 +505,57 @@ fn get_size(meta: &Metadata) -> u64 {
 // Strip path components
 // ============================================================================
 
+/// Reduce an archive member name to a path that cannot escape the destination
+/// directory, or refuse it.
+///
+/// **The member names in a tar file are chosen by whoever made it.** Extraction
+/// here used to do `base_dir.join(&entry.path)` with the name exactly as
+/// stored, so an archive containing `../../etc/passwd` wrote there, and one
+/// containing `/etc/shadow` wrote there too — `Path::join` with an absolute
+/// right-hand side *discards* the base, so `-C` was no protection at all. That
+/// is the "tar slip" vulnerability class. See `known-issues.md` →
+/// `B-tar-EXTRACTS-OUTSIDE-THE-DESTINATION-DIRECTORY`, and keep this function
+/// with whichever of the two `tar` implementations survives **B-Q7** — it is a
+/// security boundary, not a convenience like `--strip-components`.
+///
+/// The two escapes are handled differently on purpose:
+///
+/// * **A leading `/` is stripped**, as GNU does ("Removing leading `/' from
+///   member names"). Archives of system trees are routinely absolute and are
+///   safe to unpack somewhere else, so refusing them would break a common case
+///   for no gain.
+/// * **A `..` component is refused** and the member skipped. It cannot be
+///   stripped safely: `a/../b` equals `b` only if `a` is a real directory
+///   rather than a symlink, and the archive is exactly the thing we will not
+///   trust about that.
+///
+/// `.` components and doubled slashes are dropped. The `..` test also splits on
+/// `\`, which is not a separator in this OS but is on the hosts these tests run
+/// on; names are rebuilt with `/` alone so a filename legitimately containing a
+/// backslash survives.
+///
+/// This runs *after* `--strip-components`, so a stripped name is re-checked
+/// rather than trusted — stripping can expose a `..` that was not leading.
+fn sanitize_member_name(raw: &str) -> Result<String, String> {
+    let mut parts: Vec<&str> = Vec::new();
+    for component in raw.split('/') {
+        if component.is_empty() || component == "." {
+            continue;
+        }
+        if component == ".." || component.split('\\').any(|p| p == "..") {
+            return Err(format!(
+                "refusing to extract '{}': member name escapes the destination directory",
+                raw
+            ));
+        }
+        parts.push(component);
+    }
+    if parts.is_empty() {
+        return Err(format!("refusing to extract '{}': empty member name", raw));
+    }
+    Ok(parts.join("/"))
+}
+
 /// Remove the first `n` path components from a path string.
 /// Returns `None` if stripping removes all components.
 fn strip_components(path: &str, n: usize) -> Option<String> {
@@ -1011,6 +1062,8 @@ fn extract_archive(opts: &Options) -> Result<(), String> {
     let mut errors: Vec<String> = Vec::new();
     let mut consecutive_zero_blocks = 0u32;
     let mut block = [0u8; BLOCK_SIZE];
+    // GNU says this once per archive, not once per member.
+    let mut warned_absolute = false;
 
     loop {
         if let Err(e) = read_exact(&mut reader, &mut block) {
@@ -1055,11 +1108,32 @@ fn extract_archive(opts: &Options) -> Result<(), String> {
             entry.path.clone()
         };
 
-        // Apply --exclude.
+        // Apply --exclude. Matched against the name as the archive gives it,
+        // before sanitizing, so a pattern the user wrote still means what they
+        // meant when the member is absolute.
         if is_excluded(&output_path_str, &opts.excludes) {
             skip_data(&mut reader, entry.size)?;
             continue;
         }
+
+        // Nothing below may use the archive's own name as a path. This is the
+        // only thing standing between a downloaded archive and an arbitrary
+        // file write; it runs last, after stripping and excluding, so neither
+        // of those can hand it a name it has not checked.
+        if output_path_str.starts_with('/') && !warned_absolute {
+            eprintln!("tar: Removing leading '/' from member names");
+            warned_absolute = true;
+        }
+        let output_path_str = match sanitize_member_name(&output_path_str) {
+            Ok(p) => p,
+            Err(msg) => {
+                let msg = format!("tar: {}", msg);
+                eprintln!("{}", msg);
+                errors.push(msg);
+                skip_data(&mut reader, entry.size)?;
+                continue;
+            }
+        };
 
         let dest = base_dir.join(&output_path_str);
 
@@ -1672,5 +1746,68 @@ mod tests {
     fn test_parse_header_bad_magic() {
         let block = [0xFFu8; BLOCK_SIZE];
         assert!(parse_header(&block).is_err());
+    }
+
+    // ---------------- sanitize_member_name ----------------
+    //
+    // Every rejected case here was an arbitrary file write before this
+    // function existed. known-issues.md ->
+    // B-tar-EXTRACTS-OUTSIDE-THE-DESTINATION-DIRECTORY.
+
+    #[test]
+    fn test_sanitize_plain_name_unchanged() {
+        assert_eq!(sanitize_member_name("a/b/c.txt").unwrap(), "a/b/c.txt");
+    }
+
+    #[test]
+    fn test_sanitize_strips_leading_slash() {
+        // Without this, `base_dir.join(name)` returns `name` and `-C` is void.
+        assert_eq!(sanitize_member_name("/etc/passwd").unwrap(), "etc/passwd");
+        assert_eq!(sanitize_member_name("///etc/passwd").unwrap(), "etc/passwd");
+    }
+
+    #[test]
+    fn test_sanitize_drops_dot_components() {
+        assert_eq!(sanitize_member_name("./a//b/./c").unwrap(), "a/b/c");
+    }
+
+    #[test]
+    fn test_sanitize_refuses_dotdot() {
+        assert!(sanitize_member_name("../../etc/passwd").is_err());
+        assert!(sanitize_member_name("a/../b").is_err());
+        assert!(sanitize_member_name("/../../root/.ssh/authorized_keys").is_err());
+    }
+
+    #[test]
+    fn test_sanitize_refuses_backslash_traversal() {
+        assert!(sanitize_member_name("..\\..\\x").is_err());
+        assert!(sanitize_member_name("a/..\\b").is_err());
+    }
+
+    #[test]
+    fn test_sanitize_keeps_backslash_inside_a_name() {
+        assert_eq!(sanitize_member_name("a/b\\c").unwrap(), "a/b\\c");
+    }
+
+    #[test]
+    fn test_sanitize_refuses_empty_result() {
+        assert!(sanitize_member_name("").is_err());
+        assert!(sanitize_member_name("/").is_err());
+        assert!(sanitize_member_name("./.").is_err());
+    }
+
+    #[test]
+    fn test_sanitize_allows_leading_dots_in_a_name() {
+        assert_eq!(sanitize_member_name(".bashrc").unwrap(), ".bashrc");
+        assert_eq!(sanitize_member_name("a/..foo").unwrap(), "a/..foo");
+    }
+
+    #[test]
+    fn test_sanitize_runs_after_stripping() {
+        // `--strip-components=1` on `x/../../etc/passwd` yields
+        // `../../etc/passwd`, which is why the check must come last.
+        let stripped = strip_components("x/../../etc/passwd", 1).unwrap();
+        assert_eq!(stripped, "../../etc/passwd");
+        assert!(sanitize_member_name(&stripped).is_err());
     }
 }

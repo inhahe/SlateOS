@@ -1485,20 +1485,20 @@ impl Vfs {
     /// The caller must ensure no file handles are open on this
     /// filesystem.  Currently we don't track per-mount handle counts,
     /// so this is the caller's responsibility.
-    pub fn unmount(mount_path: impl AsRef<Path>) -> KernelResult<()> {
-        let mount_path = mount_path.as_ref();
-        let mut vfs = VFS.lock();
-
+    /// Index of the mount at `mount_path`, if it may be unmounted right now.
+    ///
+    /// `NotFound` if nothing is mounted there, `DeviceBusy` if unmounting it
+    /// would orphan a sub-mount.
+    ///
+    /// Factored out because [`Self::unmount`] must run this check *twice*: once
+    /// to find the filesystem to sync, and again after it has dropped and
+    /// retaken the VFS lock, by which point a sub-mount may have appeared.
+    fn unmount_index(vfs: &VfsInner, mount_path: &Path) -> KernelResult<usize> {
         let idx = vfs
             .mounts
             .iter()
             .position(|mp| mp.path.as_path() == mount_path)
             .ok_or(KernelError::NotFound)?;
-
-        // Refuse to unmount root.
-        if mount_path == Path::new("/") {
-            return Err(KernelError::PermissionDenied);
-        }
 
         // Check for sub-mounts that would be orphaned.  `path_strictly_under`
         // matches on component boundaries, so unmounting `/mnt` is not blocked
@@ -1514,9 +1514,40 @@ impl Vfs {
             );
             return Err(KernelError::DeviceBusy);
         }
+        Ok(idx)
+    }
 
-        // Sync before removing.
-        if let Err(e) = vfs.mounts[idx].fs.lock().sync() {
+    pub fn unmount(mount_path: impl AsRef<Path>) -> KernelResult<()> {
+        let mount_path = mount_path.as_ref();
+
+        // Refuse to unmount root.  Checked before the table lookup so the answer
+        // does not depend on whether `/` happens to be present.
+        if mount_path == Path::new("/") {
+            return Err(KernelError::PermissionDenied);
+        }
+
+        // Phase 1: find the mount, take a *handle* to its filesystem, and drop
+        // the VFS lock before touching that filesystem.
+        //
+        // A per-mount lock must never be taken while the global VFS lock is
+        // held.  `MountPoint::fs` documents the rule (design-decisions §43): the
+        // VFS lock is released as soon as the mount-table lookup is done,
+        // precisely so a stacked filesystem — the overlay — can re-enter the VFS
+        // to read its lower layer while holding its own per-mount lock.  This
+        // function used to sync with both held, which is that order inverted;
+        // lockdep reported the resulting `VFS -> per-mount` edge on every boot
+        // (see known-issues TD-A-LOCKDEP-VIOLATION-REPORT-NAMES-NO-ADDRESS).
+        // Cloning the `Arc` is the whole fix: it keeps the filesystem alive
+        // across the unlocked window without keeping the mount table locked.
+        let (fs, fs_id) = {
+            let vfs = VFS.lock();
+            let idx = Self::unmount_index(&vfs, mount_path)?;
+            let mp = vfs.mounts.get(idx).ok_or(KernelError::NotFound)?;
+            (Arc::clone(&mp.fs), mp.fs_id)
+        };
+
+        // Sync with no VFS lock held.
+        if let Err(e) = fs.lock().sync() {
             crate::serial_println!(
                 "[vfs] WARNING: sync failed during unmount of '{}': {:?}",
                 mount_path.display(),
@@ -1525,13 +1556,36 @@ impl Vfs {
             // Continue with unmount anyway — data loss is better than a
             // permanently stuck mount.
         }
+        // `fs_type` borrows from the guard, so copy it out while unlocked
+        // rather than reaching for it again under the VFS lock below.
+        let fs_type = String::from(fs.lock().fs_type());
 
-        let removed = vfs.mounts.remove(idx);
-        crate::serial_println!(
-            "[vfs] Unmounted {} from '{}'",
-            removed.fs.lock().fs_type(),
-            mount_path.display()
-        );
+        // Phase 2: re-acquire and re-check.  Nothing learned in phase 1 may be
+        // reused, because the table can have changed while we were unlocked:
+        // the index can have shifted, a sub-mount can have appeared, and this
+        // mount can have been replaced by a *different* filesystem at the same
+        // path.  `fs_id` is monotonic and never reused (see `NEXT_FS_ID`), which
+        // is what makes that last case detectable instead of a silent unmount of
+        // someone else's filesystem.
+        let mut vfs = VFS.lock();
+        let idx = match Self::unmount_index(&vfs, mount_path) {
+            Ok(i) => i,
+            // Someone else unmounted it while we were syncing.  The caller's
+            // postcondition — this path is not mounted — holds, and whoever won
+            // the race ran the dcache and advisory-lock cleanup below, so this
+            // is a success rather than a lost race.
+            Err(KernelError::NotFound) => return Ok(()),
+            // A sub-mount appeared in the window: genuinely busy, report it.
+            Err(e) => return Err(e),
+        };
+        if vfs.mounts.get(idx).map(|mp| mp.fs_id) != Some(fs_id) {
+            // Unmounted, and something else was mounted at the same path. Ours
+            // is already gone; removing the newcomer would be the bug.
+            return Ok(());
+        }
+
+        vfs.mounts.remove(idx);
+        crate::serial_println!("[vfs] Unmounted {} from '{}'", fs_type, mount_path.display());
 
         // Unmount changes affect path resolution — invalidate entire dcache.
         drop(vfs);
@@ -2803,25 +2857,35 @@ impl Vfs {
     ///
     /// Returns a list of `(mount_path, fs_type)` pairs.
     pub fn mounts() -> Vec<(PathBuf, String)> {
-        let vfs = VFS.lock();
-        vfs.mounts
-            .iter()
-            .map(|mp| (mp.path.clone(), String::from(mp.fs.lock().fs_type())))
+        // Snapshot handles under the VFS lock, then read `fs_type` with it
+        // dropped — see `unmount` and design-decisions §43 for why a per-mount
+        // lock is never taken while the global VFS lock is held.
+        let snapshot: Vec<(PathBuf, MountedFs)> = {
+            let vfs = VFS.lock();
+            vfs.mounts
+                .iter()
+                .map(|mp| (mp.path.clone(), Arc::clone(&mp.fs)))
+                .collect()
+        };
+        snapshot
+            .into_iter()
+            .map(|(path, fs)| (path, String::from(fs.lock().fs_type())))
             .collect()
     }
 
     /// List all mount points with full information (path, fs type, options).
     pub fn mounts_full() -> Vec<(PathBuf, String, MountOptions)> {
-        let vfs = VFS.lock();
-        vfs.mounts
-            .iter()
-            .map(|mp| {
-                (
-                    mp.path.clone(),
-                    String::from(mp.fs.lock().fs_type()),
-                    mp.options,
-                )
-            })
+        // Same two-phase shape as `mounts`, for the same lock-order reason.
+        let snapshot: Vec<(PathBuf, MountedFs, MountOptions)> = {
+            let vfs = VFS.lock();
+            vfs.mounts
+                .iter()
+                .map(|mp| (mp.path.clone(), Arc::clone(&mp.fs), mp.options))
+                .collect()
+        };
+        snapshot
+            .into_iter()
+            .map(|(path, fs, options)| (path, String::from(fs.lock().fs_type()), options))
             .collect()
     }
 
@@ -3400,16 +3464,27 @@ impl Vfs {
     /// device — fstrim needs the free-space metadata of a live mount, so an
     /// unmounted device cannot be trimmed this way.
     pub fn trim_device(device: &str) -> KernelResult<u64> {
-        // Clone the matching per-mount handle under a brief global lock, then
-        // trim it lock-free.  `device_name` does not re-enter the VFS, so the
-        // brief per-fs lock taken during the scan is safe.
-        let found = {
+        // Snapshot the handles under a brief global lock, then scan and trim
+        // with it dropped.
+        //
+        // The scan used to run `mp.fs.lock().device_name()` inside the VFS lock,
+        // excused as safe because `device_name` cannot re-enter the VFS.  That
+        // reasoning does not hold: a lock *order* is a global property, so what
+        // matters is not what this callee does but that taking a per-mount lock
+        // under the VFS lock inverts the order design-decisions §43 relies on.
+        // Another CPU holding a per-mount lock and waiting on `VFS` — exactly
+        // what the overlay does when it re-enters to reach its lower layer —
+        // deadlocks against it regardless of how trivial `device_name` is.
+        let candidates: Vec<(MountedFs, bool)> = {
             let vfs = VFS.lock();
             vfs.mounts
                 .iter()
-                .find(|mp| mp.fs.lock().device_name() == Some(device))
                 .map(|mp| (Arc::clone(&mp.fs), mp.options.read_only))
+                .collect()
         };
+        let found = candidates
+            .into_iter()
+            .find(|(fs, _)| fs.lock().device_name() == Some(device));
         match found {
             Some((fs, read_only)) => {
                 if read_only {

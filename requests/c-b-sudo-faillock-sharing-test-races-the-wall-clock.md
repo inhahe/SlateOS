@@ -92,3 +92,37 @@ test rather than about the library:
 the failure is unrelated to my change (`gui/desktop` palette threading) and
 everything in `gui/**` passed — but it will fail your workspace gate and mine
 at random, so it is worth a deterministic clock.
+
+---
+
+## Update, 2026-08-22 (lane C): it is worse than filed — it fails **alone**, ~1 in 3
+
+The claim above that it "passes 5/5 when run alone" no longer holds, and that
+matters for how you read the diagnosis rather than whether you act on it.
+
+It failed the workspace gate again from lane C. Re-run in isolation
+immediately afterwards, three times back to back:
+
+```
+cargo test -p sudo --bin sudo --target x86_64-pc-windows-gnu \
+    sudo_honours_a_delay_earned_at_another_prompt
+test result: ok.     1 passed; 0 failed   (0.10s)
+test result: FAILED. 0 passed; 1 failed   (0.09s)
+test result: ok.     1 passed; 0 failed   (0.10s)
+```
+
+**No load, ~0.1s per run, and still one failure in three.** That is exactly
+what the wall-clock analysis above predicts and is in fact the stronger form of
+it: the surviving window is "whatever is left of the current second", so a
+~0.1s test that starts uniformly at random within a second fails whenever it
+starts in the last ~0.1s — about 10% — and rather more than that once the two
+constructor calls and `auth_fixture()` are counted. Load was never the cause;
+it only raised the odds. The original 5/5 was luck.
+
+So: the fix is unchanged (pin the clock with the already-public
+`Authenticator::with_clock`), but the priority is higher than "flaky under a
+loaded gate". At this rate it will fail roughly one workspace gate in three for
+**every** lane, and a gate that is red a third of the time for a reason nobody
+owns is a gate people stop reading.
+
+Still not fixed here — `userspace/**` is yours.

@@ -5555,6 +5555,100 @@ pub fn self_test() -> KernelResult<()> {
         serial_println!("[vfs]     globstar (**) test PASSED");
     }
 
+    // --- Plain rename: POSIX replace semantics ---
+    //
+    // Regression test.  memfs used to reject *any* existing destination with
+    // `AlreadyExists`, i.e. it baked `RENAME_NOREPLACE` into the plain
+    // operation, which made `Vfs::atomic_write` (tested below) unable to
+    // replace an existing file on `/tmp` — the whole point of a safe write.
+    // ext4 and FAT always implemented replacement; memfs was the outlier.
+    if has_tmp {
+        serial_println!("[vfs]   --- rename (replace semantics) ---");
+
+        let src = "/tmp/_vfs_rn_src";
+        let dst = "/tmp/_vfs_rn_dst";
+        // Best-effort pre-clean: absence is the normal case, so an error here
+        // means "nothing to remove" and is not a failure.
+        let _ = Vfs::remove(src);
+        let _ = Vfs::remove(dst);
+
+        // (1) rename over an EXISTING file replaces it.
+        Vfs::write_file(src, b"new")?;
+        Vfs::write_file(dst, b"old")?;
+        Vfs::rename(src, dst)?;
+        if Vfs::read_file(dst)?.as_slice() != b"new" {
+            serial_println!("[vfs]     FAIL: rename did not replace existing destination");
+            let _ = Vfs::remove(src);
+            let _ = Vfs::remove(dst);
+            return Err(KernelError::InternalError);
+        }
+        if Vfs::stat(src).is_ok() {
+            serial_println!("[vfs]     FAIL: rename left the source behind");
+            let _ = Vfs::remove(src);
+            let _ = Vfs::remove(dst);
+            return Err(KernelError::InternalError);
+        }
+        serial_println!("[vfs]     rename replaces existing destination OK");
+
+        // (2) rename onto ITSELF is a no-op success — it must not delete the
+        //     file, which is what a naive "detach then re-insert" does.
+        Vfs::rename(dst, dst)?;
+        if Vfs::read_file(dst)?.as_slice() != b"new" {
+            serial_println!("[vfs]     FAIL: self-rename destroyed the file");
+            let _ = Vfs::remove(dst);
+            return Err(KernelError::InternalError);
+        }
+        serial_println!("[vfs]     rename onto itself is a no-op OK");
+
+        // (3) A DIRECTORY destination is refused (matching ext4 and FAT).
+        let dstdir = "/tmp/_vfs_rn_dir";
+        let _ = Vfs::remove(dstdir);
+        Vfs::mkdir(dstdir)?;
+        match Vfs::rename(dst, dstdir) {
+            Err(KernelError::IsADirectory) => {}
+            other => {
+                serial_println!(
+                    "[vfs]     FAIL: rename onto a directory -> {:?} (expected IsADirectory)",
+                    other
+                );
+                let _ = Vfs::remove(dst);
+                let _ = Vfs::remove(dstdir);
+                return Err(KernelError::InternalError);
+            }
+        }
+        serial_println!("[vfs]     rename onto a directory refused OK");
+
+        // (4) Moving a directory INTO ITS OWN SUBTREE must fail without
+        //     destroying it.  The old code detached the source first, then
+        //     walked to a destination parent that had just gone with it, and
+        //     dropped the entire subtree on the floor.
+        let inner = "/tmp/_vfs_rn_dir/inner";
+        Vfs::mkdir(inner)?;
+        match Vfs::rename(dstdir, "/tmp/_vfs_rn_dir/inner/moved") {
+            Err(KernelError::InvalidArgument) => {}
+            other => {
+                serial_println!(
+                    "[vfs]     FAIL: rename dir into own subtree -> {:?} (expected InvalidArgument)",
+                    other
+                );
+                let _ = Vfs::remove(dst);
+                let _ = Vfs::remove_recursive(dstdir);
+                return Err(KernelError::InternalError);
+            }
+        }
+        if Vfs::stat(inner).is_err() {
+            serial_println!("[vfs]     FAIL: rejected subtree move destroyed the subtree");
+            let _ = Vfs::remove(dst);
+            let _ = Vfs::remove_recursive(dstdir);
+            return Err(KernelError::InternalError);
+        }
+        serial_println!("[vfs]     rename dir into own subtree refused OK");
+
+        let _ = Vfs::remove(dst);
+        let _ = Vfs::remove_recursive(dstdir);
+        serial_println!("[vfs]     rename replace-semantics test PASSED");
+    }
+
     // --- Atomic write test ---
     if has_tmp {
         serial_println!("[vfs]   --- atomic write ---");

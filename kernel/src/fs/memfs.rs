@@ -868,12 +868,45 @@ impl FileSystem for MemFs {
         let resolved_from_parent = self.resolve_path_str(&from_parent_path, true)?;
         let resolved_to_parent = self.resolve_path_str(&to_parent_path, true)?;
 
-        // Check that destination doesn't already exist (before removing source).
+        // POSIX rename semantics.  All three checks below run *before* the
+        // source is detached, so a rejected rename leaves the tree untouched.
+        //
+        // 1. Renaming an entry onto itself is a no-op success, not an error —
+        //    and above all not a removal.
+        if resolved_from_parent == resolved_to_parent && from_name == to_name {
+            return Ok(());
+        }
+
+        // 2. Moving a directory into its own subtree (`/a` -> `/a/b/c`) is
+        //    `InvalidArgument` (POSIX EINVAL).  This used to detach the source
+        //    first and only then walk to the destination parent — which had
+        //    just gone with it — so the walk failed with `NotFound` and the
+        //    entire moved subtree was dropped on the floor.
+        let from_full = resolved_from_parent.join(from_name.as_path());
+        if resolved_to_parent.starts_with(&from_full) {
+            return Err(KernelError::InvalidArgument);
+        }
+
+        // 3. An existing destination is *replaced*, unless it is a directory
+        //    (`IsADirectory`, matching both ext4 and FAT).
+        //
+        //    This used to refuse any existing destination with `AlreadyExists`,
+        //    which is `RENAME_NOREPLACE` behaviour baked into the plain
+        //    operation.  The VFS implements that flag itself — `rename_inner`
+        //    stats the destination under the same per-mount lock it then
+        //    renames under (see `Vfs::rename_noreplace`) — so a filesystem that
+        //    hardcodes it leaves callers no way to get the replacing form at
+        //    all.  `Vfs::atomic_write` is exactly such a caller: its last step
+        //    renames a temp file over the target, so the standard safe-write
+        //    pattern could never replace an existing file on memfs, which is
+        //    what `/tmp` always is.
         {
             let to_parent = self.walk(&resolved_to_parent)?;
             let to_children = to_parent.children().ok_or(KernelError::NotADirectory)?;
-            if to_children.contains_key(to_name.as_path()) {
-                return Err(KernelError::AlreadyExists);
+            if let Some(existing) = to_children.get(to_name.as_path()) {
+                if existing.entry_type() == EntryType::Directory {
+                    return Err(KernelError::IsADirectory);
+                }
             }
         }
 
@@ -888,7 +921,8 @@ impl FileSystem for MemFs {
                 .ok_or(KernelError::NotFound)?
         };
 
-        // Insert at destination.
+        // Insert at destination.  `insert` returns any node that was already
+        // there and drops it — that drop is the replacement in case 3 above.
         let to_parent = self.walk_mut(&resolved_to_parent)?;
         let children = to_parent.children_mut().ok_or(KernelError::NotADirectory)?;
         children.insert(to_name, removed_node);

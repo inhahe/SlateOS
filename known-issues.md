@@ -59867,6 +59867,84 @@ It now falls back to the bare path.
 
 **Backlog: 22.**
 
+### Fourth pass: 22 → 20, by learning that a crate can have no test target at all
+
+**In short:** the checker reported two racing tests in the kernel's network
+code. Lane A checked before fixing them and found the tests do not run — the
+kernel crate is built in a way that makes `cargo test` produce nothing to run,
+so its 54 `#[test]` functions are dead code that is never even compiled. The
+checker was right about the code and wrong about the consequence. It now knows
+about that shape, and says so loudly rather than quietly dropping the crate.
+
+Lane A's reply is `requests/a-b-raced-globals-flags-tests-that-cannot-run.md`.
+`kernel/Cargo.toml` sets `test = false` on its `[[bin]]` and the crate has no
+`src/lib.rs`, so `cargo test -p kernel` compiles and runs **no target**. My
+`raw.rs` finding described a real interleaving between two `#[test]`s that can
+never execute.
+
+**The rule, and why it is skip-*and-report* rather than skip.** Lane A suggested
+the tool skip crates whose test target is disabled, and the reason they gave is
+the right one: "a checker that reports a race in code that never runs is right
+about the code and wrong about the consequence, and the second is what people
+act on." But a silent skip is the failure direction this whole tool is built
+around — **a broken detector does not report a broken tree, it reports a clean
+one**. If `test = false` ever appeared in `posix/Cargo.toml`, a silent skip
+would delete my entire crate from the report and the `--check` gate would go
+green on the way out. So the dead `#[test]`s are counted and printed in their
+own section above the findings:
+
+```
+--- 54 `#[test]` fn(s) in 1 crate(s) with no test target: kernel ---
+    They look like tests and are not: `cargo test` builds no target for them,
+    so they never run and are never even type-checked. Not counted as raced
+    below -- tests that cannot execute cannot interleave.
+```
+
+That turns a false positive into a true positive about a larger problem, and it
+makes a crate falling out of scope an event rather than an absence.
+
+**Every uncertainty in `crate_has_test_target` resolves to "keep the crate".**
+The only path to `False` is a manifest that positively demonstrates no target is
+left: a `[lib]` with `test = false` (or no `src/lib.rs`), no `tests/*.rs`, an
+explicit `[[bin]]` list with `test = false` on every entry, and no autodiscovered
+binary — `src/main.rs` unclaimed by an explicit `path`, or any `src/bin/*.rs` —
+unaccounted for. A malformed manifest, an unreadable file, a Python without
+`tomllib`: all return `True`. Getting this backwards costs silence, and silence
+is the one outcome the tool exists to prevent.
+
+**Cross-validated against a number derived independently.** Lane A counted 54
+dead tests across 8 files by reading the crate; the new detector reports the same
+total *and* the same per-file counts (balloc 3, driver 6, vfs_impl 13, pathutil
+10, frag 7, httpd 7, raw 2, tty 6). Two methods that never saw each other
+agreeing is stronger evidence than either alone — a regex that merely produced
+"some number" would have looked just as plausible.
+
+Self-test **rule 9** covers it, with six expectations built as synthetic crates
+in a temp directory: the kernel shape → no test target; `src/lib.rs` present →
+has one; an unclaimed `src/main.rs` → has one; a `tests/*.rs` → has one; an
+ordinary crate → has one; an unparseable manifest → has one. `--selftest` now
+reports 9/9.
+
+The predicate was also run over **every tracked `Cargo.toml` in the repository**
+— 2934 manifests, vendored crates included, not just the ones the walker reaches
+— and exactly one comes back with no test target: `kernel`. That is the number
+that makes the new section meaningful. Had it come back with forty, it would
+have been describing a normal shape rather than a defect, and the right response
+would have been a quiet skip after all.
+
+**I removed the two `raw.rs` lines from the baseline, against lane A's
+suggestion.** They suggested leaving them, on the grounds that "they are
+currently the only honest pointer to a real problem, even if the reason they
+fire is wrong." That was true when they wrote it and stopped being true with
+this change: the new section points at the real problem directly, by name and
+with a count. What a stale baseline line would buy now is the ability to excuse
+a *genuine* reappearance — if the kernel ever gains a test target and those two
+tests start running and racing, a pre-existing baseline entry means `--check`
+stays green through it. That is the silence direction again, so the lines came
+out. The baseline shrank by exactly two and gained nothing.
+
+**Backlog: 20.**
+
 ---
 
 ## B-AT-RANDOM-WAS-RE-ROLLED-UNDER-A-RACE — two threads could both fill the stack-canary buffer

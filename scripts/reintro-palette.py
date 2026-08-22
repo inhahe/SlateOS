@@ -56,6 +56,7 @@ NOTIF = "gui/desktop/src/notif_pane.rs"
 DEV = "gui/desktop/src/device_settings.rs"
 RULES = "gui/desktop/src/window_rules.rs"
 ACCT = "gui/desktop/src/user_accounts.rs"
+BT = "gui/desktop/src/bluetooth.rs"
 
 # (name, file, [(old, new), ...], [packages], [tests expected to fail])
 DEFECTS = [
@@ -617,6 +618,61 @@ DEFECTS = [
           "                color: if is_active { p.blue } else { p.subtext0 },")],
         ["desktop"],
         ["a_users_identity_colours_do_not_follow_the_accent"],
+    ),
+    # --- bluetooth.rs (module 8) -------------------------------------------
+    (
+        "AAA: the bluetooth panel's background goes back to Mocha base",
+        BT,
+        [("            color: p.base,", "            color: Color::from_hex(0x1E1E2E),")],
+        ["desktop"],
+        ["every_colour_the_panel_draws_comes_from_its_palette"],
+    ),
+    (
+        "BBB: the \"n more\" line goes back to Mocha overlay0",
+        BT,
+        [("                font_size: 10.0,\n                color: p.overlay0,",
+          "                font_size: 10.0,\n                color: Color::from_hex(0x6C7086),")],
+        ["desktop"],
+        ["every_colour_the_panel_draws_comes_from_its_palette"],
+    ),
+    (
+        "CCC: the device icon circle goes back to Mocha lavender",
+        BT,
+        [("            color: p.lavender,", "            color: Color::from_hex(0xB4BEFE),")],
+        ["desktop"],
+        ["every_colour_the_panel_draws_comes_from_its_palette"],
+    ),
+    (
+        "DDD: a healthy battery goes back to Mocha green",
+        BT,
+        [("                p.green\n            } else if bat > 20 {",
+          "                Color::from_hex(0xA6E3A1)\n            } else if bat > 20 {")],
+        ["desktop"],
+        ["every_colour_the_panel_draws_comes_from_its_palette"],
+    ),
+    (
+        "EEE: a connected device's status is made to follow the accent",
+        BT,
+        [("            Self::Connected => p.green,", "            Self::Connected => p.accent,")],
+        ["desktop"],
+        ["a_devices_status_colours_do_not_follow_the_accent"],
+    ),
+    (
+        "FFF: the filled signal bars stop following the accent",
+        BT,
+        [("            let color = if i < bars { p.accent } else { p.surface1 };",
+          "            let color = if i < bars { p.blue } else { p.surface1 };")],
+        ["desktop"],
+        ["a_devices_status_colours_do_not_follow_the_accent"],
+    ),
+    (
+        "GGG: the idle scan button is made to follow the accent",
+        BT,
+        [("        let disc_color = if mgr.adapter.discovering {\n            p.peach\n        } else {\n            p.blue\n        };",
+          "        let disc_color = if mgr.adapter.discovering {\n            p.peach\n        } else {\n            p.accent\n        };")],
+        ["desktop"],
+        ["the_scan_button_says_something_different_while_it_is_scanning",
+         "a_devices_status_colours_do_not_follow_the_accent"],
     ),
 ]
 

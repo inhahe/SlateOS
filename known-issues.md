@@ -50335,7 +50335,7 @@ commands that carry the colour in question, and assert the two renders agree.
 Candidates: anything drawn on the wallpaper, on a video surface, on a
 thumbnail, or on any other content the palette does not own.
 
-**Part 2 progress. 7 of 49 modules converted.**
+**Part 2 progress. 8 of 49 modules converted.**
 
 - [x] `security_dialog.rs` — 29 constants, done 2026-08-22. The method above
   survived contact: the sweep lives in `gui/desktop/src/palette_check.rs` as
@@ -50554,6 +50554,58 @@ thumbnail, or on any other content the palette does not own.
   - Two `MOCHA_MANTLE` sites became `readable_on(...)` — the initials on the
     avatar circle and the label on the account-type pill. Both sit *on* a
     coloured fill whose hue is chosen by data, so neither is a palette role.
+- [x] `bluetooth.rs` — 13 constants, done 2026-08-22. Harness defects
+  AAA/BBB/CCC/DDD/EEE/FFF/GGG.
+  - **The distinctness argument from `user_accounts.rs` generalises, and here
+    it is the *whole* reason a site refuses the accent.** The scan button has
+    two states — blue "Scan for devices", peach "Scanning..." — and peach is
+    one of the fourteen accents a user can pick. An accent-following idle state
+    would therefore render *identically* to the scanning state on a peach
+    desktop, deleting the only signal that a scan is running. That is not a
+    taste judgement about what the accent means; it is a collision, and it is
+    checkable: `the_scan_button_says_something_different_while_it_is_scanning`
+    renders under blue, peach and mauve accents in both modes and asserts the
+    two states differ. Defect GGG is exactly the substitution and is caught by
+    it. **Generalisation worth carrying to the remaining 41 modules: whenever a
+    two-state or n-state control would become "accent vs. fixed hue H", check
+    whether H is one of the fourteen accents; if it is, the accent is wrong
+    there regardless of how much the site otherwise reads like an accent site.**
+  - The two genuine accent sites are the power switch and the filled part of
+    each signal meter — "the interactive thing" and "how much of it there is",
+    which is `notif_pane.rs`'s stated doctrine. Both of their off/empty halves
+    are `p.surface1`, a neutral no accent resolves to, so neither can collide
+    the way the scan button would have.
+  - The blue-state trap for the fourth time: `ConnectionState::Paired` and
+    `PairedNotConnected` are blue, and their siblings (Connected green,
+    Connecting yellow, Disconnected `overlay0`) settle it as categorical.
+    Defect EEE moves `Connected` onto the accent and is caught only by
+    `a_devices_status_colours_do_not_follow_the_accent`; defect FFF freezes the
+    filled signal bars on blue and is caught only by that test's `assert_ne!`
+    half — the third independent confirmation of the TT lesson.
+  - **Defect FFF caught a hole in the negative half itself, and this refines
+    the TT rule rather than repeating it. `assert_ne!` on a *combined* vector of
+    accent sites is too weak: it proves only that *at least one* site moved, so
+    a still-moving site masks a frozen one.** The first draft here collected the
+    power switch and the signal bars into one `accent_site_colors` vector; FFF
+    froze the bars while the switch kept following the accent, and the harness
+    reported `*** NO TEST FAILED ***`. The fix is one `assert_ne!` per site, and
+    the rule for the remaining 41 modules is: **a module with n accent sites
+    needs n negative assertions, not one over their union.** This is exactly the
+    failure the reintroduction discipline exists to find — the test was written,
+    reviewed, green, and measuring less than it claimed; nothing but a
+    deliberately reintroduced bug would have said so.
+  - **The matrix had to cover a branch that returns early.** An unpowered
+    adapter draws four commands and `return`s, so every device colour in the
+    module is unreachable in that half of the state space; the sweep therefore
+    runs powered × discovering × `show_nearby` × four scroll offsets × three
+    panel heights, with one device per connection state, batteries straddling
+    both ladder thresholds, and signal strengths walking 0–4 bars. The "n more"
+    line (defect BBB) is only drawn by the short panels, and the empty signal
+    bar only by the weak-signal devices; a fixture with one healthy device
+    would have missed both.
+  - One `MOCHA_BASE` became `readable_on(p.lavender)` — the device-type glyph
+    on the lavender icon circle. Same shape as `user_accounts.rs`'s two: text
+    on a coloured fill, not a role.
 
 **Trigger:** this is not blocked on anything. It is sequenced after the shell
 event loop (`TD-C-THE-SHELL-CAN-DRAW-ITSELF-AND-NOBODY-CAN-ASK-IT-TO`) only
@@ -59584,7 +59636,7 @@ would have been too. `scripts/raced-globals.py` closes that: it flags a
 Three things make it a check that survives contact rather than one that gets
 deleted:
 
-- **It is a ratchet.** `scripts/raced-globals-baseline.txt` records the 48
+- **It is a ratchet.** `scripts/raced-globals-baseline.txt` records the 40
   pre-existing instances, and `--check` fails only on a global that is *not* in
   it, so the backlog can be worked down without the gate being red on the day it
   lands. The file only ever shrinks. A false positive belongs in the script's
@@ -59600,6 +59652,273 @@ deleted:
   no word resembling "lock". Following the same call graph used for
   reachability is what stops the tool flagging the code that already did it
   right — the failure mode that gets a linter switched off.
+- **`#[cfg]` is evaluated, not ignored.** A global the host build never compiles
+  cannot be raced by a host test. This was not a theoretical concern: the first
+  entry examined from the backlog, `unistd.rs`'s `NO_NEW_PRIVS`, is a
+  `thread_local!` on host and a `static AtomicBool` *only* under
+  `#[cfg(target_os = "none")]` — it is already the fix this tool exists to ask
+  for, and 20 host tests were being credited with racing the bare-metal half
+  they cannot link against. Eight of the original 48 were this, so the tool now
+  parses the predicate under "`target_os = "none"` is false, `test` is true,
+  everything else unknown-and-assumed-true". It has to genuinely parse: the tree
+  writes `#[cfg(any(target_os = "none", test))]` twenty times, and *that* item
+  is compiled on host via the `test` arm, so a rule that merely grepped for the
+  string would have excused all twenty. Unknown predicates resolving to "true"
+  is the safe direction — the tool can fail toward noise, never toward silence.
+
+That left 41, of which one more was a genuine false positive with a reason worth
+recording rather than baselining: `perthread.rs`'s `HOST_FALLBACK` is reached
+only from `current()`'s `try_with(…).unwrap_or(&raw mut HOST_FALLBACK)` arm,
+which is taken only once a thread's TLS has *already been destroyed*. A `#[test]`
+body always runs with live TLS. It is in `IGNORE` with that sentence attached.
+**Backlog: 40.**
+
+### First burn-down: 40 → 32, and the fix is not always a lock
+
+Eight entries closed in the first pass, by two different fixes — which is the
+point, because picking the wrong one produces a comment that lies.
+
+*Locked* (7): `stdlib.rs`'s `RAND_STATE`, `RAND48_STATE`, `OLD_SEED` and
+`L64A_BUF`, and `syslog.rs`'s ident/options/mask. These are shared **by
+specification** — POSIX mandates one `rand` sequence, one `drand48` sequence,
+one `l64a` return buffer and one syslog configuration per process — so they
+cannot stop being shared, and the fix is a test-only `Mutex` taken as the first
+statement of every touching test. Three separate locks in `stdlib.rs` rather
+than one, because the three pieces of state are unrelated and a single lock
+would serialise 21 tests that mostly do not contend; `OLD_SEED` rides the
+`drand48` lock because `seed48` writes it and `RAND48_STATE` in one call.
+
+*Converted* (1): `unistd.rs`'s `HOSTID`. **I started to write a lock for this
+one and the lock would have been wrong** — worth recording, because the error
+is exactly the defect class this whole entry is about. I had drafted a
+`HOSTNAME_TEST_LOCK`, 26 guards, and a `sethostname` SAFETY comment asserting
+that "two concurrent writers can leave the buffer holding one name and the
+length belonging to another." Then I read `posix/src/perprocess.rs` and found
+the hostname is not a `static` at all: it is `process_global!`, which expands
+to a `thread_local!` on the host. The hostname was already per-thread. The
+claim was false, and it was false in the specific way the self-review rule
+warns about — *a SAFETY comment stating an unchecked fact is worse than none,
+because it tells the next reader the question has been considered.*
+
+The real defect was the opposite of the one I had written up: `HOSTID` was a
+plain `static AtomicI64` while the hostname it is *derived from* was
+per-thread. Two halves of one piece of state with two different sharing rules
+— so a test could set the hostname and read back a hostid derived from another
+thread's. The fix is to make the halves agree: `HOSTID` is now a
+`process_global!` too, which is design-decisions.md §110's established answer
+(§110 deleted a 138-site `CAP_TEST_LOCK` in favour of per-thread state,
+rejecting "keep the lock" because it "leaves a live hazard behind an unwritten
+convention"). Zero test guards, one baseline entry gone.
+
+The discriminator, stated so the next 32 don't need re-deriving: **ask whether
+POSIX requires the state to be shared.** If it does, it cannot stop being
+shared and needs a lock. If it is shared only because someone wrote `static`,
+`process_global!` it and the problem is deleted rather than guarded.
+
+`reset_hostid_for_test()` was kept even though per-thread storage makes it
+unnecessary for isolation, because several tests call `sethostid` twice and
+need to return to the unset sentinel *within* one body. Its doc says so.
+
+**Backlog: 32.** Confirmed green: `cargo test -p posix --lib`, 20515 passed.
+
+### Second pass: 32 → 25, and the detector was reading comments
+
+Four more closed by the discriminator above, and one real bug fell out of it.
+
+*Converted* (2): `unistd.rs`'s `KLOG_READ_CURSOR` and `KLOG_CLEAR_FLOOR` — the
+`klogctl` read cursor and clear floor, whose own doc comments already said
+"per-process". They were plain `static AtomicU64`s, which is right on the
+target and wrong under libtest; `SYSLOG_ACTION_READ` *consumes* from the
+cursor, so a second reader sharing it sees entries the first already took.
+`process_global!`, four one-line wrappers to keep `unsafe` out of the match
+body, no test guards.
+
+*Deleted* (1): `linux_seccomp.rs`'s `DUMMY` was a `static mut u8` existing only
+to be a non-null pointer for an EFAULT check, carrying a "single-threaded test"
+SAFETY note that was untrue. Nothing ever wrote through it, so the `mut` was
+excusing a mutability that was never used: it is now `static DUMMY: u8 = 0`
+with `(&raw const DUMMY).cast_mut()`, and there is nothing left to race.
+
+*Fixed, and it was a real bug* (1): `crt.rs`'s `AT_RANDOM_BYTES` — see
+**B-AT-RANDOM-WAS-RE-ROLLED-UNDER-A-RACE** below.
+
+*Locked* (3 new findings): `pthread.rs`'s four TSD error-path tests bypassed
+the `TSD_TEST_LOCK` their happy-path siblings take. Three of them provably
+return before `tsd_lock()`, but `tsd_key_delete_returns_zero` does not:
+`pthread_key_delete(0)` clears `TSD_DESTRUCTORS[0]` unconditionally, and key 0
+is the *first* key `pthread_key_create` hands out — so unlocked it silently
+wipes the destructor `tsd_create_set_get` had just registered. All four now
+take the lock, because whether the other three touch shared state depends on
+where each function's argument checks sit relative to `tsd_lock()`, which is
+an implementation detail nobody editing those functions would think to
+preserve.
+
+**The detector was matching the global's name inside comments.** This is worth
+recording because it inverted the tool's precision exactly where precision
+matters. `time.rs`'s `settimeofday` contains
+
+```rust
+// as a (deprecated) timezone-only update.  We accept it as a no-op.
+```
+
+which made it a "toucher" of the `timezone` global and dragged **all 31**
+`settimeofday` tests into the report — not one of which reads the zone. Prose
+*about* a global is the single most likely place for its name to appear
+without being an access, so this was not background noise; it was noise
+concentrated on the entries a reader would most want to trust.
+
+`strip_comments_and_strings()` now blanks Rust line comments, nested block
+comments, string/byte/raw-string/char literals — space-for-character, so line
+numbers and block matching still work against the result — and body matching
+runs on that. Sixteen unit cases cover nesting, escapes, `r#"…"#`, the
+lifetime-vs-char-literal ambiguity and an unterminated string.
+
+Effect: `timezone` (31), `stdio.rs:FILE_POOL` (24) and `dirent.rs:GETDENTS_POOL`
+(6) all fall to zero unserialised, and `--all` confirms each is still *seen*
+and classified as fully serialised rather than having vanished from analysis —
+the fix moved the tool toward precision, not toward silence, which is the
+direction that matters for a checker nobody re-derives by hand. It also
+*exposed* the three pthread TSD entries above, which had been hidden behind a
+lock hint that was itself only in a comment.
+
+**Backlog: 25.**
+
+---
+
+### Third pass: 25 → 22, all three by making the detector obey Rust's scope rules
+
+No code changed in this pass. `signal.rs` declares `static RECEIVED`, `static
+GOT` and `static CALLED` *inside* three separate `#[test]` bodies, each so a
+nested `extern "C"` handler can record what it was passed — which is the
+correct shape, not a hazard. The detector reported two tests apiece anyway: its
+toucher regex (`\bhandler\s*\(`, `\bh\s*\(`) matched calls to unrelated
+same-named helpers elsewhere in a 246-test file.
+
+The fix encodes a language guarantee rather than a better heuristic. A `static`
+declared inside a function body is a process-global *value* but a
+function-local *name*: Rust does not put it in scope anywhere else, so no code
+outside that function — including any other test — can name it, whatever it is
+called. `analyse()` now records each global's declaration line, finds the
+innermost enclosing function, and skips the global outright if that function is
+a `#[test]`; otherwise it restricts the candidate touchers to functions nested
+within the owner rather than the whole file. Sharpening the regex would have
+been the wrong fix: it would have narrowed a false-positive class that the
+language forbids entirely.
+
+**I nearly made the hostname mistake a second time here.** The first
+hypothesis was that the signal *disposition table* was racing, which would have
+meant a lock. Reading `signal.rs` first showed it is already `process_global!`
+(line 158) and therefore per-thread on host — so the fix belonged in the tool,
+not the tree. That is now twice in three passes that "read the code before
+writing the fix" turned a plausible source change into a no-op plus a detector
+correction.
+
+**Writing the scope rule exposed two more ways the tool failed toward
+silence,** both fixed in the same pass:
+
+- **The direct-name match ignored scope.** Only the *toucher* search was
+  restricted to the declaring function. A test that merely contained the token
+  — `let S = 3;` — was still counted as reaching a `static S` it cannot name.
+  The two arms now differ deliberately: naming the global directly requires the
+  name to be in scope, whereas *calling* a toucher works from anywhere, so only
+  the first arm is scope-restricted.
+- **Same-named statics collapsed, and ten of eleven declarations vanished.**
+  `globals_` was a dict keyed by name, but a name identifies a global only at
+  file scope. `userspace/oils/src/interp.rs` declares **eleven** separate
+  statics called `COUNTER` and `kernel/src/sched/mod.rs` four called `WARNED`;
+  keyed by name, only the last of each was analysed at all and the rest were
+  never examined. It is now a list keyed by declaration site. The baseline stays
+  keyed by `path:NAME` on purpose — line numbers churn, and a ratchet whose keys
+  move on every edit is a ratchet that goes red for no reason.
+
+  Today this changes no result: all eleven `COUNTER`s are `fetch_add`-only with
+  no resetting write, so the reset rule drops them correctly, and `--check`
+  still reports 22/0. It is a latent-correctness fix, not a new finding — but
+  the failure mode it removes is the one that never announces itself.
+
+**The checker now has a self-test, and the pre-push gate runs it first.**
+`raced-globals.py --selftest` builds synthetic `.rs` files in a temp directory
+and asserts `analyse()`'s classification across eight rules: the base case is
+reported; a lock moves it to the serialised column; a comment does not make a
+function a toucher; a `static` inside a `#[test]` is not reported;
+`#[cfg(target_os = "none")]` is dropped but `#[cfg(any(target_os = "none",
+test))]` is kept; a `fetch_add`-only counter is not reported; a static owned by
+a non-test function is still reached through a call to its owner but not by a
+test that merely reuses the name; and two same-named function-local statics are
+analysed separately. Each rule exists because it had already produced a wrong
+answer against the real tree, and each is a regex an edit can break silently.
+The rule count in the summary line is computed from the registered rules rather
+than a literal, so adding a case cannot leave the total lying.
+
+The rules were verified to be capable of failing, not merely observed to pass.
+Disabling the comment stripper, the fn-local scope rule, the lock hint, the
+direct-match scope restriction and the name-collapse fix in turn each turned
+**exactly** the corresponding rule red and no other — so the rules are
+independent, and none is passing by accident. That mutation check is the point:
+**a broken detector does not report a broken tree, it reports a clean one**, so
+`--check` passing is meaningless unless `--selftest` passed first. The gate
+therefore runs `--selftest` before `--check` and refuses the push with a
+distinct message if the checker fails its own tests.
+
+Also fixed: `_relpath()` raised `ValueError` on any path outside the repo root,
+which meant the self-test could not analyse a temp file at all — the checker's
+own tests were impossible to write against the function they exist to pin down.
+It now falls back to the bare path.
+
+**Backlog: 22.**
+
+---
+
+## B-AT-RANDOM-WAS-RE-ROLLED-UNDER-A-RACE — two threads could both fill the stack-canary buffer
+
+**Status:** fixed 2026-08-22 · `posix/src/crt.rs`
+
+**In short:** every program gets a small random number at startup that the
+compiler uses to detect a stack overrun — if the number changes underneath a
+running function, the program kills itself reporting an attack that never
+happened. Our code that produced that number could be run by two threads at
+once, and each would generate a *different* number and overwrite the other's.
+A program doing nothing wrong could therefore abort at random. It is fixed;
+this entry records what was wrong and why the old comment said it was fine.
+
+`getauxval(AT_RANDOM)` returns a pointer to a 16-byte buffer that glibc and
+musl both use to seed `__stack_chk_guard` — the "stack canary", a value written
+below a function's local variables on entry and checked on exit, on the theory
+that an overrun would have to clobber it. `ensure_at_random_initialized()`
+filled that buffer on first use, gated on an `AtomicBool`, with this comment:
+
+> The buffer is owned by this module and only ever written here. A race in
+> single-process userspace is harmless: both racers fill the same buffer, and
+> the second write simply overwrites the first.
+
+That is wrong twice. It is a data race in the language sense — a 16-byte write
+concurrent with the 16-byte read a third thread is doing through the pointer
+`getauxval` just handed it. And "both racers fill the same buffer" is the
+failure, not the excuse for it: `fill_random` gives each racer *different*
+bytes, so a thread that re-rolls the buffer after another has already cached a
+canary makes that thread's next function epilogue compare a new guard against
+an old one and abort a process that was never smashed.
+
+The fix is a three-state latch (`UNINIT` / `FILLING` / `READY`) instead of a
+bool. `compare_exchange(UNINIT → FILLING)` admits exactly one filler; every
+other caller spins on `Acquire` until `READY` rather than writing, which is
+correct here because the critical section is one `fill_random` call, it runs
+at most once per process, and the futex machinery a blocking wait would need
+is itself a posix facility that may not be initialized this early. The
+`Release` store pairs with those `Acquire` loads so a thread that sees `READY`
+sees all sixteen bytes. On the `abort()` path the latch is deliberately left
+at `FILLING`: `abort()` does not return and takes the process with it, so
+there is no thread left to spin.
+
+`AT_RANDOM_BYTES` is now in the detector's `IGNORE` table rather than the
+baseline, with that reasoning attached — it is reachable from ten tests but
+executes in one, and the entry records a fixed bug rather than an excused one.
+
+**How it was found:** not by a test. The raced-globals detector flagged it, and
+the flag was only readable because the entry had to be *read before it was
+fixed* — the caveat written into this file one pass earlier. A tool that only
+listed line numbers would have produced a lock here, which would have been the
+wrong fix and would have left the target build racing.
 
 It is scoped to `posix/` and `userspace/` for the same reason gate 2 is scoped
 to `userspace/`: a lane A or C push must never pay for, or be blocked by, a lane
@@ -59611,6 +59930,12 @@ counts match the hand analysis exactly (`DL_ERROR` 15, `HTAB` 7, `SAVED` 3,
 which is what demonstrates that both halves work, reachability and guard
 detection. The macro-based globals above remain unaudited, but they are now
 *visible*: they sit in the baseline rather than being invisible until they flake.
+
+One caveat on the backlog's meaning, learned from the `NO_NEW_PRIVS` entry: a
+baselined line says "two or more tests reach this with no lock", **not** "this is
+a bug". Reachability here is a regex over a one-hop call graph, so a global
+touched only on a branch no test takes still counts. Each entry has to be read
+before it is fixed, and some will end in `IGNORE` rather than in a lock.
 
 ### Verification
 

@@ -1806,19 +1806,34 @@ pub extern "C" fn sethostname(name: *const u8, len: usize) -> i32 {
 // gethostid / sethostid — host identifier
 // ---------------------------------------------------------------------------
 
-/// Process-local host identifier.
-///
-/// Initialized to 0 (= "unset" sentinel).  `sethostid()` writes here.
-/// When unset, `gethostid()` derives a value from the current hostname
-/// via FNV-1a so callers get a stable-per-hostname 32-bit identifier
-/// instead of always seeing 0 (which would defeat the function's
-/// purpose of distinguishing hosts).
-///
-/// Real Linux persists the value in `/etc/hostid`; we have no on-disk
-/// store yet so it lives in memory only, lost across reboots.  Once
-/// the OS gains a proper config-files directory, this should migrate
-/// to a file under `/etc/hostid` to match Linux semantics.
-static HOSTID: core::sync::atomic::AtomicI64 = core::sync::atomic::AtomicI64::new(0);
+process_global! {
+    /// Process-local host identifier.
+    ///
+    /// Initialized to 0 (= "unset" sentinel).  `sethostid()` writes here.
+    /// When unset, `gethostid()` derives a value from the current hostname
+    /// via FNV-1a so callers get a stable-per-hostname 32-bit identifier
+    /// instead of always seeing 0 (which would defeat the function's
+    /// purpose of distinguishing hosts).
+    ///
+    /// Real Linux persists the value in `/etc/hostid`; we have no on-disk
+    /// store yet so it lives in memory only, lost across reboots.  Once
+    /// the OS gains a proper config-files directory, this should migrate
+    /// to a file under `/etc/hostid` to match Linux semantics.
+    ///
+    /// This is a `process_global!` rather than a plain `static AtomicI64`
+    /// for the same reason the hostname buffer above is: the hostid is
+    /// *derived from* the hostname when unset, so the two are one unit of
+    /// state and must have the same lifetime and the same sharing rules.
+    /// A `static` here would have been shared across `libtest` threads
+    /// while the hostname it derives from was per-thread — so a test that
+    /// set the hostname and read the hostid back could observe a value
+    /// derived from a *different* thread's hostname, or a `sethostid`
+    /// another test had just performed.  Under `process_global!` both
+    /// halves are one process-wide `static mut` on the target and one
+    /// per-thread cell on the host, which is the arrangement
+    /// design-decisions.md §110 established for exactly this case.
+    fn hostid_ptr() -> i64 = 0;
+}
 
 /// FNV-1a 32-bit hash — used to derive a stable hostid from the hostname
 /// when no explicit hostid was set via `sethostid()`.
@@ -1850,15 +1865,18 @@ fn fnv1a32(bytes: &[u8]) -> u32 {
 /// `tar`'s archive UUID seed).
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn gethostid() -> i64 {
-    use core::sync::atomic::Ordering;
-
-    let stored = HOSTID.load(Ordering::Relaxed);
+    // SAFETY: `hostid_ptr()` returns a pointer to this process's (host
+    // build: this thread's) `i64`, which is live for the whole program and
+    // properly aligned.  The read borrows it only for this expression, so
+    // no other reference to the same storage is alive across it.
+    let stored = unsafe { *hostid_ptr() };
     if stored != 0 {
         return stored;
     }
 
-    // Derive from hostname.  SAFETY: single-address-space, no concurrent
-    // writes during read (matches the gethostname / copy_hostname pattern).
+    // Derive from hostname.
+    // SAFETY: same argument as above for the hostname storage — both halves
+    // come from `process_global!`, so they share one scope and one lifetime.
     let (src_ptr, src_len) = unsafe { (hostname_buf_ptr().cast_const(), *hostname_len_ptr()) };
     let mut tmp = [0u8; HOST_NAME_MAX];
     let n = core::cmp::min(src_len, tmp.len());
@@ -1895,8 +1913,6 @@ pub extern "C" fn gethostid() -> i64 {
 /// Returns 0 on success.  Never fails on this platform.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn sethostid(hostid: i64) -> i32 {
-    use core::sync::atomic::Ordering;
-
     // Truncate to 32 bits and sign-extend back, matching Linux's
     // `sethostid(int)` historical behaviour even though our prototype
     // takes `long`.  Callers that pass a 64-bit value will see the low
@@ -1913,7 +1929,14 @@ pub extern "C" fn sethostid(hostid: i64) -> i32 {
     } else {
         truncated
     };
-    HOSTID.store(to_store, Ordering::Relaxed);
+    // SAFETY: `hostid_ptr()` returns a pointer to this process's (host
+    // build: this thread's) `i64`, live for the whole program and properly
+    // aligned.  The write borrows it only for this statement — note the
+    // `gethostid()` call that can also touch the storage has already
+    // finished and released its borrow by the time `to_store` is bound.
+    unsafe {
+        *hostid_ptr() = to_store;
+    }
     0
 }
 
@@ -3339,8 +3362,8 @@ pub const SYSLOG_LOG_LEVEL_MAX: i32 = 8;
 // values.  We bridge the two with per-process cursors and on-the-fly byte
 // counting:
 //
-//   • READ          → consuming read from `KLOG_READ_CURSOR`, advance it.
-//   • READ_ALL      → non-consuming read from `KLOG_CLEAR_FLOOR`.
+//   • READ          → consuming read from `klog_read_cursor()`, advance it.
+//   • READ_ALL      → non-consuming read from `klog_clear_floor()`.
 //   • READ_CLEAR    → READ_ALL, then advance both cursors past everything.
 //   • CLEAR         → advance both cursors past everything (no data copied).
 //   • SIZE_UNREAD   → bytes available to the next READ (since READ cursor).
@@ -3357,18 +3380,60 @@ pub const SYSLOG_LOG_LEVEL_MAX: i32 = 8;
 // and `journald`'s read paths correctly; CONSOLE_* level control remains
 // unimplemented pending a kernel syscall.
 
-/// Per-process cursor for the consuming `SYSLOG_ACTION_READ`.  Holds the
-/// `after_seq` to pass on the next READ; `u64::MAX` = "from the oldest
-/// available entry" (the kernel's read-from-beginning sentinel).
-static KLOG_READ_CURSOR: core::sync::atomic::AtomicU64 =
-    core::sync::atomic::AtomicU64::new(u64::MAX);
+process_global! {
+    /// Per-process cursor for the consuming `SYSLOG_ACTION_READ`.  Holds the
+    /// `after_seq` to pass on the next READ; `u64::MAX` = "from the oldest
+    /// available entry" (the kernel's read-from-beginning sentinel).
+    fn klog_read_cursor() -> u64 = u64::MAX;
 
-/// Per-process "clear floor": entries with `seq <= floor` are hidden from
-/// READ_ALL / READ_CLEAR / SIZE_BUFFER, emulating a buffer clear without a
-/// kernel clear syscall.  Stored as an `after_seq`; `u64::MAX` = nothing
-/// cleared (show everything from the oldest).
-static KLOG_CLEAR_FLOOR: core::sync::atomic::AtomicU64 =
-    core::sync::atomic::AtomicU64::new(u64::MAX);
+    /// Per-process "clear floor": entries with `seq <= floor` are hidden from
+    /// READ_ALL / READ_CLEAR / SIZE_BUFFER, emulating a buffer clear without a
+    /// kernel clear syscall.  Stored as an `after_seq`; `u64::MAX` = nothing
+    /// cleared (show everything from the oldest).
+    fn klog_clear_floor() -> u64 = u64::MAX;
+}
+
+// Both of the above say "per-process" in their own doc comments, and that is
+// exactly what they must be: READ consumes from a cursor and READ_CLEAR moves
+// a floor, so a second reader that shares them sees entries the first already
+// consumed — or none at all.  They were plain `static AtomicU64`s, which is
+// right on the target (one link = one process) and wrong under `cargo test`,
+// where libtest puts every test's notional "process" on a thread of one real
+// one.  `process_global!` keeps the target build byte-identical and gives the
+// host one cursor pair per test thread; see design-decisions.md §110.
+
+// Four one-line wrappers so the `klogctl` match body stays free of `unsafe`.
+// Each borrows its cell for the duration of one statement and no longer, so
+// no two live references to the same storage ever exist.
+
+/// This process's consuming-`READ` cursor.
+fn klog_read_cursor_get() -> u64 {
+    // SAFETY: sole borrow of this process's (host: this thread's) cursor,
+    // which is live for the whole program and properly aligned.
+    unsafe { *klog_read_cursor() }
+}
+
+/// Advance this process's consuming-`READ` cursor.
+fn klog_read_cursor_set(after_seq: u64) {
+    // SAFETY: as `klog_read_cursor_get`.
+    unsafe {
+        *klog_read_cursor() = after_seq;
+    }
+}
+
+/// This process's clear floor.
+fn klog_clear_floor_get() -> u64 {
+    // SAFETY: as `klog_read_cursor_get`, for the floor cell.
+    unsafe { *klog_clear_floor() }
+}
+
+/// Raise this process's clear floor.
+fn klog_clear_floor_set(after_seq: u64) {
+    // SAFETY: as `klog_read_cursor_get`, for the floor cell.
+    unsafe {
+        *klog_clear_floor() = after_seq;
+    }
+}
 
 /// Issue one `SYS_LOG_READ` batch.  Returns `(entry_count, newest_seq)` as
 /// the kernel reports them (`entry_count` < 0 signals a kernel error).
@@ -3568,7 +3633,6 @@ pub extern "C" fn klogctl(cmd: i32, buf: *mut u8, len: i32) -> i32 {
         return -1;
     }
 
-    use core::sync::atomic::Ordering;
     match cmd {
         // CLOSE / OPEN are no-ops on Linux — report success.
         SYSLOG_ACTION_CLOSE | SYSLOG_ACTION_OPEN => 0,
@@ -3576,10 +3640,10 @@ pub extern "C" fn klogctl(cmd: i32, buf: *mut u8, len: i32) -> i32 {
         // Consuming read: start at the per-process cursor, advance it past
         // whatever we returned so the next READ continues forward.
         SYSLOG_ACTION_READ => {
-            let after = KLOG_READ_CURSOR.load(Ordering::Relaxed);
+            let after = klog_read_cursor_get();
             let (result, count, newest) = klog_read_user(after, buf, len);
             if result >= 0 && count > 0 {
-                KLOG_READ_CURSOR.store(newest, Ordering::Relaxed);
+                klog_read_cursor_set(newest);
             }
             result
         }
@@ -3587,7 +3651,7 @@ pub extern "C" fn klogctl(cmd: i32, buf: *mut u8, len: i32) -> i32 {
         // Non-consuming read of everything still "in the buffer" (i.e. above
         // the clear floor).  Does not move any cursor.
         SYSLOG_ACTION_READ_ALL => {
-            let after = KLOG_CLEAR_FLOOR.load(Ordering::Relaxed);
+            let after = klog_clear_floor_get();
             let (result, _count, _newest) = klog_read_user(after, buf, len);
             result
         }
@@ -3595,28 +3659,28 @@ pub extern "C" fn klogctl(cmd: i32, buf: *mut u8, len: i32) -> i32 {
         // Read everything, then clear: advance both the clear floor and the
         // read cursor past every currently-buffered entry.
         SYSLOG_ACTION_READ_CLEAR => {
-            let after = KLOG_CLEAR_FLOOR.load(Ordering::Relaxed);
+            let after = klog_clear_floor_get();
             let (result, _count, _newest) = klog_read_user(after, buf, len);
             if result >= 0 {
                 let (_total, true_newest) = klog_drain(after);
-                KLOG_CLEAR_FLOOR.store(true_newest, Ordering::Relaxed);
-                KLOG_READ_CURSOR.store(true_newest, Ordering::Relaxed);
+                klog_clear_floor_set(true_newest);
+                klog_read_cursor_set(true_newest);
             }
             result
         }
 
         // Clear: hide every currently-buffered entry from future reads.
         SYSLOG_ACTION_CLEAR => {
-            let after = KLOG_CLEAR_FLOOR.load(Ordering::Relaxed);
+            let after = klog_clear_floor_get();
             let (_total, true_newest) = klog_drain(after);
-            KLOG_CLEAR_FLOOR.store(true_newest, Ordering::Relaxed);
-            KLOG_READ_CURSOR.store(true_newest, Ordering::Relaxed);
+            klog_clear_floor_set(true_newest);
+            klog_read_cursor_set(true_newest);
             0
         }
 
         // Bytes available to the next consuming READ.
         SYSLOG_ACTION_SIZE_UNREAD => {
-            let after = KLOG_READ_CURSOR.load(Ordering::Relaxed);
+            let after = klog_read_cursor_get();
             let (total, _newest) = klog_drain(after);
             i32::try_from(total).unwrap_or(i32::MAX)
         }
@@ -3625,7 +3689,7 @@ pub extern "C" fn klogctl(cmd: i32, buf: *mut u8, len: i32) -> i32 {
         // not expose the ring's fixed capacity, so report live contents —
         // which is what dmesg needs to size its READ_ALL buffer.
         SYSLOG_ACTION_SIZE_BUFFER => {
-            let after = KLOG_CLEAR_FLOOR.load(Ordering::Relaxed);
+            let after = klog_clear_floor_get();
             let (total, _newest) = klog_drain(after);
             i32::try_from(total).unwrap_or(i32::MAX)
         }
@@ -8439,10 +8503,18 @@ mod tests {
     // gethostid / sethostid
     // ------------------------------------------------------------------
 
-    /// Reset HOSTID to the unset sentinel so per-test setup is consistent.
+    /// Reset the hostid to the unset sentinel so per-test setup is consistent.
+    ///
+    /// Since the storage moved to `process_global!` this is no longer needed
+    /// for *isolation* — every test thread starts from the `0` initializer —
+    /// but it is kept because several tests below call `sethostid` twice and
+    /// need to return to the unset state *within* one test body.
     fn reset_hostid_for_test() {
-        use core::sync::atomic::Ordering;
-        HOSTID.store(0, Ordering::Relaxed);
+        // SAFETY: sole borrow of this thread's hostid cell, released at the
+        // end of the statement.
+        unsafe {
+            *hostid_ptr() = 0;
+        }
     }
 
     #[test]

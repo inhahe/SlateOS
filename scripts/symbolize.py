@@ -35,8 +35,12 @@ that matter in practice:
   since the panic invalidates every address.  `--log` prints the ELF's mtime
   next to the log's so a stale pairing is visible rather than silently wrong.
 
-Note `--profile release`: `--bench` runs build release, and a release address
-resolved against the debug ELF gives a confidently wrong symbol.
+Note `--profile`: it defaults to `auto`, which reads whichever kernel ELF was
+built most recently -- `boot-test.sh` builds debug for every run except
+`--bench`, which builds release. Pass `--profile debug|release` to pin it. The
+chosen ELF and its mtime are always reported, because an address resolved
+against the other profile's binary gives `??` at best and a confidently wrong
+symbol at worst.
 """
 
 from __future__ import annotations
@@ -176,6 +180,34 @@ def elf_for(profile: str) -> str:
     return os.path.join(REPO, "target", TRIPLE, profile, "kernel")
 
 
+def pick_profile(profile: str) -> tuple[str, str]:
+    """Resolve `--profile` to a concrete `(profile, elf_path)`.
+
+    `auto` picks whichever of the two kernel ELFs was built most recently,
+    which is the one the log being read almost certainly came from.
+
+    This exists because a fixed default is wrong roughly half the time and
+    fails *silently*.  The default used to be `release`, justified in the help
+    text as "what `boot-test.sh` builds" -- but that stopped being true on
+    2026-08-14, when the script changed to build **debug** for every run except
+    `--bench` (see `boot-test.sh`, "`--bench` DEFAULTS to `--release`; every
+    other run defaults to debug").  From then on the common case -- resolve an
+    address out of an ordinary boot log -- read the stale *release* ELF.  The
+    lucky outcome is `??` for a symbol that plainly exists, which is what
+    happened to the lockdep lock addresses on 2026-08-22; the unlucky one is a
+    confidently wrong symbol, the exact failure the module docstring warns
+    about, caused by the tool's own default.
+    """
+    if profile != "auto":
+        return profile, elf_for(profile)
+    built = [(p, elf_for(p)) for p in ("debug", "release") if os.path.exists(elf_for(p))]
+    if not built:
+        # Neither exists; hand back debug so `Symbols` emits its own build hint.
+        return "debug", elf_for("debug")
+    built.sort(key=lambda pe: os.path.getmtime(pe[1]), reverse=True)
+    return built[0]
+
+
 def mtime(path: str) -> str:
     return time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(os.path.getmtime(path)))
 
@@ -187,11 +219,13 @@ def main() -> int:
     ap.add_argument("addrs", nargs="*", help="addresses to resolve (hex, 0x optional)")
     ap.add_argument(
         "--profile",
-        default="release",
-        choices=("debug", "release"),
-        help="which build the panic came from (default: release -- what "
-        "`boot-test.sh` builds; a release address resolved against the debug "
-        "ELF gives a confidently wrong symbol)",
+        default="auto",
+        choices=("auto", "debug", "release"),
+        help="which build the panic came from (default: auto -- use whichever "
+        "kernel ELF was built most recently, since that is the one the log came "
+        "from; `boot-test.sh` builds debug for every run except --bench). An "
+        "address resolved against the other profile's ELF gives `??`, or worse, "
+        "a confidently wrong symbol -- so the chosen ELF is always reported",
     )
     ap.add_argument("--elf", help="use this binary instead of --profile's")
     ap.add_argument(
@@ -218,16 +252,44 @@ def main() -> int:
     if not args.addrs and not args.log:
         ap.error("give some addresses, or --log to annotate a serial log")
 
-    elf = args.elf or elf_for(args.profile)
+    if args.elf:
+        elf, chosen = args.elf, "--elf"
+    else:
+        chosen, elf = pick_profile(args.profile)
     syms = Symbols(elf)
 
+    # Say which binary answered, on stderr so stdout stays pipeable. Provenance
+    # is not a nicety here: every wrong answer this tool can give comes from
+    # reading the wrong ELF, and staying silent about which one it read is what
+    # makes that failure hard to spot. `--log` prints its own banner (on stdout,
+    # as part of the annotated report), so don't repeat it for a pure log run.
+    if args.addrs:
+        print(
+            f"# elf {elf}  ({mtime(elf)}, {len(syms.rows)} symbols, profile: {chosen})",
+            file=sys.stderr,
+        )
+
+    misses = 0
     for a in args.addrs:
         addr = int(a, 16)
         hit = syms.lookup(addr, args.max_offset)
+        if not hit:
+            misses += 1
         print(f"0x{addr:016x}  {fmt(hit) if hit else '??'}")
+    if misses and not args.elf and args.profile == "auto":
+        other = "release" if chosen == "debug" else "debug"
+        if os.path.exists(elf_for(other)):
+            print(
+                f"# {misses} address(es) resolved to `??`. If they came from a "
+                f"{other} build, retry with --profile {other} -- an address is "
+                f"only meaningful against the ELF that actually booted.",
+                file=sys.stderr,
+            )
 
     if args.log:
-        print(f"# elf {elf}  ({mtime(elf)}, {len(syms.rows)} symbols)")
+        print(
+            f"# elf {elf}  ({mtime(elf)}, {len(syms.rows)} symbols, profile: {chosen})"
+        )
         print(f"# log {args.log}  ({mtime(args.log)})")
         print("# a stale ELF resolves every address to a wrong symbol -- "
               "compare the two times above")

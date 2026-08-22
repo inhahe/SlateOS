@@ -31,7 +31,6 @@ userspace/coreutils/src/bin/find.rs:argv-as-string
 userspace/coreutils/src/bin/free.rs:argv-as-string
 userspace/coreutils/src/bin/grep.rs:argv-as-string
 userspace/coreutils/src/bin/id.rs:argv-as-string
-userspace/coreutils/src/bin/ln.rs:argv-as-string
 userspace/coreutils/src/bin/logger.rs:argv-as-string
 userspace/coreutils/src/bin/ls.rs:argv-as-string
 userspace/coreutils/src/bin/md5sum.rs:argv-as-string

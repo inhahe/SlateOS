@@ -57133,15 +57133,16 @@ nice nohup patch ps readlink realpath renice rm rmdir sed sh sha256sum sleep
 stat strings tar tee time_cmd touch tty which xargs yes
 ```
 
-**Burn-down progress.** Converted so far: `rm`, `mv`, `cp` (all 2026-08-22, see
-the sections at the end of this entry). The live count is whatever `python
-scripts/argv-utf8.py --check` prints; the baseline shrinks by one line per
-conversion and never grows, so this paragraph cannot silently go stale in the
-dangerous direction — if it disagrees with the tool, the tool is right.
+**Burn-down progress.** Converted so far: `rm`, `mv`, `cp`, `ln` (all
+2026-08-22, see the sections at the end of this entry). The live count is
+whatever `python scripts/argv-utf8.py --check` prints; the baseline shrinks by
+one line per conversion and never grows, so this paragraph cannot silently go
+stale in the dangerous direction — if it disagrees with the tool, the tool is
+right.
 
 **Every conversion so far has uncovered unrelated bugs in the `main` it
-replaced** — three in `rm`, four in `mv`, six in `cp`, none of them about UTF-8
-and all of them in code that no test touched. That is the argument for converting these
+replaced** — three in `rm`, four in `mv`, six in `cp`, four in `ln`, none of
+them about UTF-8 and all of them in code that no test touched. That is the argument for converting these
 files properly rather than mechanically swapping `env::args()` for
 `env::args_os()`: the defect is a marker for *untested `main`*, and the panic
 is only the part of that a checker can see.
@@ -57499,6 +57500,77 @@ directory into itself without limit.** Both fill the disk.
 - **No `-p`**, so ownership, timestamps and the setuid/setgid bits are not
   carried over on *files*. Directory modes are (bug 3), because leaving those
   wrong is a confidentiality bug rather than a fidelity one.
+
+### `ln` converted, and the four further defects the rewrite uncovered (2026-08-22)
+
+Gate count 49 → 47 (`cp` took it to 48). 32 tests, up from 10, and — as with
+`mv` and `cp` — the *action* path had none at all before, so all of its coverage
+is new.
+
+**Unlike `rm`, `mv` and `cp`, none of `ln`'s defects produced a silently wrong
+result.** Every one was a refusal of a valid command or a mangled message, not a
+link pointing somewhere the user did not ask for. That is worth recording rather
+than dressing up: it is the first of the four conversions where the argv defect
+was not also a marker for something that loses data, and it is evidence about
+what the remaining 47 are likely to hold — not every one of them is `cp`.
+
+**The four defects**, in the lines the rewrite replaced:
+
+1. **No long option worked at all, including `--help`.** The parser treated any
+   argument beginning with `-` as a bundle of short options and iterated its
+   characters, so `--help` tripped on its own second `-` and answered
+   `unknown option: --` — an option nobody typed, and no hint that `--help`,
+   `--version` and `--symbolic` were simply unreachable. The same line is why
+   `--` was not an end-of-options marker, so a file whose name begins with a
+   dash could not be linked either.
+2. **Filenames went into diagnostics unquoted**, between two literal `'` marks,
+   so a file called `a⏎ln: /etc/shadow: Permission denied` made `ln` appear to
+   print a second line it never wrote. Same fix, same reason, as the tree-wide
+   sweep that put file names through `quote`.
+3. **Three of GNU's four operand forms were refused.** Only
+   `ln TARGET LINK_NAME` worked; `ln TARGET` and `ln TARGET... DIRECTORY` both
+   answered `expected exactly two arguments`. The third form is not exotic —
+   `ln -s ../lib/libfoo.so .` is it — and a user who typed it was told they had
+   made a mistake. Forms 1–3 work now; the fourth (`-t DIRECTORY`) needs `-t`,
+   which is rejected by name.
+4. **A relative symlink target was misjudged on Windows.** The `#[cfg(windows)]`
+   arm has to decide at creation time between a file link and a directory link,
+   and asked `Path::new(target).is_dir()` — resolving `target` against the
+   *current* directory. A symlink's text is resolved against the *link's own*
+   directory, so `ln -s ../thing sub/link` asked the wrong question. Host-only
+   (the shipping target takes the `#[cfg(unix)]` branch), but a bug in code that
+   exists, and the fix was one `join`.
+
+**What `ln` still does not do:**
+
+- **Every option but `-s`/`--symbolic`**, all rejected by name: `-b`, `-d`/`-F`,
+  `-f`, `-i`, `-n`, `-r`, `-t`, `-v`, `-L`, `-P`, `-S`, `-T` and their long
+  spellings. `-n` is the one that would be dangerous ignored: it asks for a
+  `LINK_NAME` that is *itself* a symlink to a directory to be treated as a plain
+  file, so ignoring it puts the new link inside the pointed-at directory instead
+  of replacing the link — a link somewhere the user never named, with no message.
+- **The `-t DIRECTORY` operand form**, which depends on `-t`.
+
+**Two things this conversion did better than the three before it, and which the
+remaining 47 should copy:**
+
+- **The GNU behaviour was measured, not recalled.** Every diagnostic and every
+  operand form above was read off GNU coreutils 9.4 through WSL before being
+  implemented, including the long-option table's *declaration order* — obtained
+  with the instrument documented in `getopt::Program::resolve_long`, namely that
+  an empty prefix matches every option, so `ln --=x` prints the whole table in
+  order. Three ambiguities are pinned by tests against the measured strings:
+  `--s` between `--suffix` and `--symbolic`, `--n` between `--no-dereference`
+  and `--no-target-directory`, `--v` between `--verbose` and `--version`. The
+  first is the one that matters — a table pruned to the single implemented
+  option would turn `ln --s` from an error into a symbolic link.
+- **The target-side check is `cargo +nightly clippy --all-targets`, not
+  `cargo +nightly build`.** `build` does not compile `#[cfg(test)]` code, so the
+  `#[cfg(unix)]` *tests* — which are the regression tests for the whole
+  burn-down, and which never run on this Windows host — were still never
+  type-checked by the step introduced for `mv`. `clippy --all-targets` compiles
+  the test harness for `x86_64-slateos` and so covers them. Use it in place of
+  the plain build from here on.
 
 ---
 

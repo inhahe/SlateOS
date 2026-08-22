@@ -49511,10 +49511,10 @@ Still open, and both now stated in the crate doc: the geometry half of the old
 private window manager (`add_window`, `focus_window`, `minimize_window`,
 `maximize_window`, `restore_window`, `toggle_maximize`, `remove_window`,
 `snap_window`, `snap_window_to_zone`, `take_window_id`) has no caller outside
-the demo and the tests and should go; and `TD-C-VIRTUAL-DESKTOPS-HIDE-NOTHING`
-below, which this work made visible.
+the demo and the tests and should go. `TD-C-VIRTUAL-DESKTOPS-HIDE-NOTHING`
+below was also made visible by this work, and is now resolved.
 
-## TD-C-VIRTUAL-DESKTOPS-HIDE-NOTHING (lane C, 2026-08-21)
+## TD-C-VIRTUAL-DESKTOPS-HIDE-NOTHING (lane C, 2026-08-21) — RESOLVED 2026-08-21 (see the final note)
 
 **What:** switching virtual desktop changes which windows the *taskbar lists*
 and nothing else. On a live session the windows of the desktop you just left
@@ -49553,6 +49553,49 @@ incomplete, not wrong-when-used.
 **If never fixed:** the virtual-desktop shortcuts and the desktop indicator are
 worse than absent — they promise a switch and deliver a taskbar that disagrees
 with the screen.
+
+**RESOLVED 2026-08-21, by option (a) — the compositor learned what a virtual
+desktop is.** Two commits, and the fork above was decided the way the entry
+itself predicted, for the reason it gave: option (b) needed a
+hide-any-window-you-do-not-own verb, and that is the ambient authority the
+whole `ShellControl` design exists to refuse. Full reasoning in
+`design-decisions.md` section 518.
+
+| Stage | Commit | What landed |
+|---|---|---|
+| 1 | `a86ff739` | The compositor holds it. `Window::workspace`, `Compositor::current_workspace`, `switch_workspace`, `set_window_workspace`; one `shows_on_current_workspace` predicate consulted by the full-scene pass, the per-window draw, the damage path, hit testing, focus and activation. `Layer` is the stickiness rule — a window outside `Layer::Normal` is on every desktop, so panels and menus never vanish. |
+| 2 | `ed8d5eea2` | It reaches a screen. `WLST` went to version 2 with a `showing` field in the header and a `workspace` on every window; `RequestBody::SwitchWorkspace` (`0x12`) and `SetWindowWorkspace` (`0x13`) behind `require_shell()`; `Connection`/`EventLoop` accessors that return `Option` so "not told yet" cannot be read as "desktop 0"; and a `DesktopShell` that asks instead of deciding. |
+
+**The shell's three second copies are gone.** `current_desktop` and the
+per-window `desktop` are still fields, but nothing writes them except
+`apply_window_list`, which takes the whole `WindowList` and copies the
+compositor's answers in. `switch_desktop` and `move_window_to_desktop` became
+`&self` and return a `ShellRequest` — a new enum, because a desktop switch
+names no window at all and so could not honestly be carried in
+`ShellControlAction`'s `(window, action)` pair. The cost is one round trip
+before the taskbar relabels; the alternative draws the new desktop's buttons
+over the old desktop's windows for a frame, which is this bug in miniature.
+
+**Two stage-1 tests were passing for the wrong reason, and reintroducing the
+defects is what found them** — not reading.
+`a_window_on_another_virtual_desktop_does_not_occlude_the_one_in_front_of_you`
+survived a deliberately broken occlusion cull because `Buffer::is_opaque()` is
+a question about the pixel *format*, so an `Argb8888` buffer full of opaque
+alpha is not an occluder and the hidden window could never have occluded
+anything either way. Fixing that was still not enough: `focus_window` ends in
+`raise_within_layer`, so moving a window elsewhere hands the keyboard to the
+window below it and *reorders the stack* — the window left showing climbs above
+the one just hidden, and a hidden window at the bottom can neither occlude nor
+overpaint. `stack_with_a_hidden_window_on_top` gives the focus handoff a third
+window to land on, which is the ordinary arrangement rather than a contrivance.
+
+**Still open, and named in section 518 as what this deliberately does not do:**
+no per-desktop wallpaper, no per-desktop window arrangement, no memory of which
+window was focused on a desktop you return to, no drag-a-window-to-a-desktop,
+and the number is not persisted across a compositor restart. All of those want
+a per-desktop record rather than a per-window number. The desktop *count* is
+still fixed at `DesktopShell` construction, which is what blocks the overview
+screen's "add a desktop" — see `TD-C-THE-OVERVIEW-SCREEN-IS-1856-LINES-NOBODY-CALLS`.
 
 ## TD-C-ANY-CLIENT-CAN-READ-EVERY-WINDOW-TITLE
 
@@ -53357,3 +53400,69 @@ are worth less than their names claim even when green.
 full diagnosis. Distinct from the resolved
 `B-FTPD-SSHD-AUTH-TESTS-SHARE-TEMP-FILES-AND-FLAKE` — that was shared temp
 files and lane B's `ScratchDir` fix holds; this is wall-clock timing.
+
+
+---
+
+## TD-C-THE-OVERVIEW-SCREEN-IS-1856-LINES-NOBODY-CALLS (lane C, 2026-08-21)
+
+**In short:** The desktop has a finished Expose / Mission-Control screen —
+thumbnails of every window, one lane per virtual desktop, arrow-key navigation,
+type-to-search, click to switch. It is 1856 lines, it is tested, and *nothing in
+the operating system ever shows it*. There is no key that opens it, no code that
+fills it with real windows, and no code that acts on what the user clicks.
+
+**Where:** `gui/desktop/src/overview.rs`, declared `pub mod overview;` at
+`gui/desktop/src/lib.rs:109`. A search of the whole tree for `OverviewState`,
+`DesktopLane` and `overview::` matches exactly one file — `overview.rs` itself.
+Its only constructors of `DesktopLane` are its own `sample_lanes()` fixture and
+three tests.
+
+**How it looks:** it does not look like anything. That is the defect. A user
+cannot reach it; a developer reading `roadmap.md` would tick the feature off.
+
+**Why it was not noticed sooner:** the module is *good* — 15 public items with
+doc comments, a grid layout, a lane layout, a full render pass and a keyboard
+model, all covered by tests that pass. Every test drives the module directly, so
+"is this wired to anything?" is a question none of them can ask. This is the
+same failure mode as `TD-C-VIRTUAL-DESKTOPS-HIDE-NOTHING` — a self-consistent
+component whose tests prove it correct with respect to inputs no one supplies.
+
+**Two things are missing, and they are not the same size.**
+
+1. *A data source.* `WindowThumbnail` needs `window_id`, `desktop_id`, `title`,
+   geometry, focus and minimized — every one of which is now a field of
+   `guiremote::window_list::WindowInfo`, and `DesktopLane::is_current` is the
+   header's `current_workspace`. Since `ed8d5eea2` a `DesktopShell` holds all of
+   it, so this is a projection function over `apply_window_list`'s input, not
+   new protocol. The one thing genuinely absent is the *thumbnail image*: the
+   module lays out rectangles and draws titles, and never asks the compositor
+   for window contents. Live thumbnails need a compositor verb that does not
+   exist (a scaled read of another client's buffer) and is a capability question
+   of the same shape as `TD-C-ANY-CLIENT-CAN-READ-EVERY-WINDOW-TITLE` — only
+   worse, because a title is text and a thumbnail is the screen.
+2. *An output path.* `OverviewAction` is a fourth spelling of verbs the shell
+   already has: `SwitchToWindow(u64)` is `ShellControlAction::Activate`,
+   `SwitchToDesktop(u32)` is `ShellRequest::SwitchDesktop`, `CloseWindow(u64)`
+   is `ShellControlAction::Close`. Wiring should *delete* those three variants
+   and return `Option<ShellRequest>`, exactly as the zone-snapping work deleted
+   the shell's second copy of the edge rules (see
+   `TD-C-EDGE-DRAG-TILING-HAS-NO-DRAG-TO-FIRE-ON`, resolved). A second spelling
+   is a second thing to drift.
+   `OverviewAction::AddDesktop` has no counterpart and cannot get one today:
+   `DesktopShell::num_desktops` is fixed at construction and is the only bound
+   either side enforces (design-decisions.md §518). Making the desktop count
+   mutable is a real decision, not a wiring detail.
+
+**Proper fix:** (a) a `DesktopShell` → `OverviewState` projection driven by the
+same `WindowList` `apply_window_list` already takes, so the overview cannot
+disagree with the taskbar about which desktop is showing; (b) `OverviewAction`
+collapsed into `Option<ShellRequest>` with the three duplicate variants deleted;
+(c) a hotkey in `handle_hotkey` to open it and `Esc` to close; (d) thumbnails
+left as titled rectangles until the compositor can serve window contents under a
+capability, with the module doc saying so rather than implying pictures.
+
+**If never fixed:** 1856 lines of dead weight that reads as a shipped feature.
+The concrete cost is not the disk space — it is that the next person to want an
+Expose screen finds this one, believes it works, and wires a data source to an
+action enum that has since drifted from the shell's.

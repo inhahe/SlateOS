@@ -2273,13 +2273,15 @@ pub fn insert_caps(
 /// `SYS_PROCESS_SPAWN_EX`.  A child that cannot open a file is not equivalent
 /// to a forked one.
 ///
-/// # What this deliberately does not do
+/// # Narrowing
 ///
-/// It does not let the parent hand over a *subset*.  Narrowing on spawn is a
-/// real want (it is how you drop authority before running untrusted code), but
-/// it needs an ABI field to say which subset, and inventing one is a separate
-/// change across two lanes.  Until then the honest default is "same as fork",
-/// not "nothing" — see design-decisions.md §278 and the `todo.txt` note.
+/// This function is the "everything" policy.  To hand over a *subset* — how you
+/// drop authority before running untrusted code — see
+/// [`inherit_caps_subset`], reachable from userspace via
+/// `SYS_PROCESS_SPAWN_EX2`.  `SYS_PROCESS_SPAWN` and `SYS_PROCESS_SPAWN_EX`
+/// have no field in which to name one, so they keep this policy; that is the
+/// honest default for them ("same as fork", not "nothing") rather than a
+/// preference — see design-decisions.md §278 and §279.
 ///
 /// Returns the number of capabilities copied.  A `parent` that does not exist
 /// (including PID 0, the kernel sentinel, which holds implicit authority and
@@ -2327,6 +2329,110 @@ pub fn inherit_caps_from(parent: ProcessId, child: ProcessId) -> usize {
         }
     }
     copied
+}
+
+/// Give `child` exactly the capabilities `requested` names, and only those the
+/// `parent` actually holds.
+///
+/// The narrowing counterpart to [`inherit_caps_from`].  Each request is a
+/// `(resource_type, resource_id, rights)` triple; the child receives that
+/// triple verbatim if — and only if — the parent holds a valid entry for the
+/// same type and id whose rights are a **superset** of the requested ones.
+///
+/// Narrowing rights is the point: a parent holding `READ | WRITE` on a file can
+/// hand the child `READ`, and the child then cannot write.  Widening is not
+/// possible by construction, which is what makes this delegation rather than a
+/// grant.
+///
+/// # Why an unsatisfiable request fails the spawn
+///
+/// [`inherit_caps_from`] silently drops what it cannot copy, and that is right
+/// for it: it is copying a set nobody enumerated, so "most of it" is a
+/// meaningful outcome.  Here the caller wrote the list.  Dropping an entry it
+/// asked for would start a process that looks correct, runs, and fails at the
+/// first use of the capability that went missing — arbitrarily later, in the
+/// child, as a `PermissionDenied` from something unrelated.  That is precisely
+/// the failure mode `BUG-SPAWNED-CHILDREN-INHERIT-NO-CAPABILITIES` had, where
+/// `make` parsed a makefile and then died inside `ld.so`; it cost two rounds of
+/// diagnosis across two lanes. A spawn that refuses to start is a bug report
+/// with the right stack trace attached.
+///
+/// # Errors
+///
+/// * [`KernelError::PermissionDenied`] — the parent does not hold a requested
+///   capability, or holds it with narrower rights than were asked for. The
+///   request was well-formed; the authority was not there.
+/// * [`KernelError::InvalidArgument`] — the child's table filled up. Distinct
+///   from the above on purpose: nothing about the *request* was refused, so
+///   reporting it as a permission failure would send the caller looking for
+///   authority it already has.
+/// * [`KernelError::NoSuchProcess`] — `parent` or `child` is not in the table.
+///
+/// A `parent` of 0 (the kernel sentinel) holds implicit authority and has no
+/// table to check against, so it can satisfy no request: a non-empty
+/// `requested` from PID 0 is `PermissionDenied`, and an empty one is `Ok(0)`.
+/// In-kernel callers name their capabilities through `SpawnOptions` instead.
+pub fn inherit_caps_subset(
+    parent: ProcessId,
+    child: ProcessId,
+    requested: &[(ResourceType, u64, Rights)],
+) -> KernelResult<usize> {
+    if requested.is_empty() {
+        // An explicit empty subset is the whole point of the feature — "this
+        // child gets nothing" — so it is a success, not a degenerate case.
+        return Ok(0);
+    }
+    if parent == 0 {
+        return Err(KernelError::PermissionDenied);
+    }
+
+    // Snapshot, then re-take the lock to insert, for the reason spelled out in
+    // `inherit_caps_from`: one `get_mut` cannot borrow two entries of one map.
+    // The point-in-time semantics are the same, and here they are *checked*
+    // rather than merely copied — the entitlement is evaluated against the
+    // instant spawn was called, which is the instant the caller reasoned about.
+    let entries = {
+        let table = PROCESS_TABLE.lock();
+        match table.get(&parent) {
+            Some(p) => p.cap_table.valid_entries(),
+            None => return Err(KernelError::NoSuchProcess),
+        }
+    };
+
+    // Check *every* request before granting any. A spawn that fails must not
+    // leave the child holding half the set: the caller's error path destroys
+    // the process, but a future one that retries would otherwise be granting
+    // capabilities twice.
+    for &(resource_type, resource_id, rights) in requested {
+        if rights.is_empty() {
+            // A rights-less capability is not a narrowing, it is a table entry
+            // that grants nothing and passes no gate. Almost certainly a caller
+            // that forgot to fill the field in.
+            return Err(KernelError::InvalidArgument);
+        }
+        let held = entries.iter().any(|e| {
+            e.resource_type == resource_type
+                && e.resource_id == resource_id
+                && e.rights.contains(rights)
+        });
+        if !held {
+            return Err(KernelError::PermissionDenied);
+        }
+    }
+
+    let mut table = PROCESS_TABLE.lock();
+    let Some(proc) = table.get_mut(&child) else {
+        return Err(KernelError::NoSuchProcess);
+    };
+    let mut granted = 0usize;
+    for &(resource_type, resource_id, rights) in requested {
+        // The *requested* rights, not the parent's: handing back the parent's
+        // wider set would silently undo the narrowing the caller asked for,
+        // which is the one thing this function exists to do.
+        proc.cap_table.insert(resource_type, resource_id, rights)?;
+        granted = granted.saturating_add(1);
+    }
+    Ok(granted)
 }
 
 // ---------------------------------------------------------------------------

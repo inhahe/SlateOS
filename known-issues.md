@@ -50335,7 +50335,7 @@ commands that carry the colour in question, and assert the two renders agree.
 Candidates: anything drawn on the wallpaper, on a video surface, on a
 thumbnail, or on any other content the palette does not own.
 
-**Part 2 progress. 5 of 49 modules converted.**
+**Part 2 progress. 8 of 49 modules converted.**
 
 - [x] `security_dialog.rs` — 29 constants, done 2026-08-22. The method above
   survived contact: the sweep lives in `gui/desktop/src/palette_check.rs` as
@@ -50482,6 +50482,130 @@ thumbnail, or on any other content the palette does not own.
   - The content well behind the tabs was `CRUST`, the `readable_on` hole
     again; `p.crust` by reading. Text on the driver badges and on the eject
     button became `readable_on(...)` of what they sit on.
+- [x] `window_rules.rs` — 14 constants, done 2026-08-22. Harness defects
+  OO/PP/QQ/RR/SS/TT.
+  - **A third naming shape: `const MOCHA_BASE`, `MOCHA_SURFACE0`, … at file
+    scope.** After `mod theme { … }` (`notif_pane.rs`) and bare `const NAME`
+    (`device_settings.rs`), the survey now has to expect at least three. The
+    conclusion is the same one the inline literals already forced: the only
+    reliable survey is a whole-file grep for `Color::from_hex`/`Color::rgba`,
+    not a search for a block to empty.
+  - **The row-of-cells shape makes the categorical/accent question decidable
+    rather than a matter of taste.** Each cell of a rule row is coloured by
+    what it means — priority red/yellow/`subtext1`, action-count
+    green/`overlay0`, status green/red, match-expression blue — and they are
+    *siblings in one row*. The blue is the `device_settings.rs` trap again
+    (blue is the default accent, so it reads like an accent site), and the
+    siblings are what settle it: moving one member of a categorical row while
+    the rest stay put is the bug, not the feature. Defect SS reintroduces
+    exactly that and is caught only by the accent test.
+  - **The module's two genuine accent sites are in different views from its
+    green confirm button**, which surfaced a pre-existing inconsistency worth
+    recording rather than fixing: the list view's primary action ("+ Add Rule")
+    was blue and became `p.accent`; the editor's primary action ("Save") is
+    green and stayed `p.green`. Green is the one hue no accent resolves to, so
+    reading Save as an accent site would have changed its colour under the
+    *default* accent — which no faithful conversion does. The two never appear
+    on screen together, which is presumably how the inconsistency survived.
+    Same disposition as `notif_pane.rs`'s blue/green toggles: converted
+    faithfully, noted for the pass that comes after all 49.
+  - **Both "does not follow the accent" tests here carry their negative half,
+    and defect TT is the proof it is needed.** TT freezes the selected
+    match-type chip on blue — nothing moves with the accent any more, so the
+    equality half of the test passes; only the `assert_ne!` on the chip catches
+    it. A "does not follow X" test without a negative half certifies a module
+    that ignores X entirely.
+  - The status badge's wash (`Color::rgba(status_color.r, …, 51)`) needed no
+    `derived` declaration, for the reason recorded under `device_settings.rs`:
+    the sweep compares roles on RGB alone. Defect RR replaces it with Mocha
+    green's channels at the same alpha and the light sweep still names it.
+- [x] `user_accounts.rs` — 14 constants, done 2026-08-22. Harness defects
+  UU/VV/WW/XX/YY/ZZ.
+  - **A fourth shape, and the first that cannot be converted by substitution: a
+    `const [Color; N]` table.** `AVATAR_COLORS` was seven Mocha constants in an
+    array, indexed by a `u8` read straight off disk. A palette resolved at
+    runtime cannot live in a `const`, so the table became
+    `fn avatar_colors(p: &Palette) -> [Color; 7]`. Add tables to the survey
+    checklist: a whole-file grep for `Color::from_hex`/`Color::rgba` finds the
+    *definition* of such a table, but the thing that has to change is every
+    signature that reads it — here three public methods
+    (`AccountType::badge_color`, `Avatar::palette_color`,
+    `Avatar::background_color`) all gained a `&Palette`.
+  - **The avatar table settles the categorical question on a new ground:
+    distinctness.** The seven colours are identity — how you tell accounts
+    apart at a glance — so they are categorical for the same reason a risk
+    level is. But they carry an extra constraint no other categorical row has:
+    they must stay mutually *distinct*, which an accent-following member could
+    not guarantee, since it would collide with whichever of the seven the
+    accent happened to equal. `the_avatar_colours_stay_distinct_in_both_modes`
+    asserts it directly; defect XX proves the sweep sees the seventh slot at
+    all, which it only does because the fixture makes one account per slot.
+  - The blue-state trap for the third time: `AccountType::Standard` is blue,
+    blue is the default accent, and its two siblings (`Administrator` red,
+    `Guest` grey) are what settle it. Defect YY is that substitution and is
+    caught only by `a_users_identity_colours_do_not_follow_the_accent`; defect
+    ZZ freezes the active tab label on blue and is caught only by that test's
+    `assert_ne!` half — the second independent confirmation of the TT lesson.
+  - The "on" toggle stayed `p.green` rather than becoming `p.accent`, same
+    disposition and same reason as `notif_pane.rs` and `window_rules.rs`: the
+    shell disagrees with itself about which an on-switch uses, and a conversion
+    is not the place to settle it. Three modules now carry that note; when the
+    49 are done it is one small pass, not 49 judgement calls.
+  - Two `MOCHA_MANTLE` sites became `readable_on(...)` — the initials on the
+    avatar circle and the label on the account-type pill. Both sit *on* a
+    coloured fill whose hue is chosen by data, so neither is a palette role.
+- [x] `bluetooth.rs` — 13 constants, done 2026-08-22. Harness defects
+  AAA/BBB/CCC/DDD/EEE/FFF/GGG.
+  - **The distinctness argument from `user_accounts.rs` generalises, and here
+    it is the *whole* reason a site refuses the accent.** The scan button has
+    two states — blue "Scan for devices", peach "Scanning..." — and peach is
+    one of the fourteen accents a user can pick. An accent-following idle state
+    would therefore render *identically* to the scanning state on a peach
+    desktop, deleting the only signal that a scan is running. That is not a
+    taste judgement about what the accent means; it is a collision, and it is
+    checkable: `the_scan_button_says_something_different_while_it_is_scanning`
+    renders under blue, peach and mauve accents in both modes and asserts the
+    two states differ. Defect GGG is exactly the substitution and is caught by
+    it. **Generalisation worth carrying to the remaining 41 modules: whenever a
+    two-state or n-state control would become "accent vs. fixed hue H", check
+    whether H is one of the fourteen accents; if it is, the accent is wrong
+    there regardless of how much the site otherwise reads like an accent site.**
+  - The two genuine accent sites are the power switch and the filled part of
+    each signal meter — "the interactive thing" and "how much of it there is",
+    which is `notif_pane.rs`'s stated doctrine. Both of their off/empty halves
+    are `p.surface1`, a neutral no accent resolves to, so neither can collide
+    the way the scan button would have.
+  - The blue-state trap for the fourth time: `ConnectionState::Paired` and
+    `PairedNotConnected` are blue, and their siblings (Connected green,
+    Connecting yellow, Disconnected `overlay0`) settle it as categorical.
+    Defect EEE moves `Connected` onto the accent and is caught only by
+    `a_devices_status_colours_do_not_follow_the_accent`; defect FFF freezes the
+    filled signal bars on blue and is caught only by that test's `assert_ne!`
+    half — the third independent confirmation of the TT lesson.
+  - **Defect FFF caught a hole in the negative half itself, and this refines
+    the TT rule rather than repeating it. `assert_ne!` on a *combined* vector of
+    accent sites is too weak: it proves only that *at least one* site moved, so
+    a still-moving site masks a frozen one.** The first draft here collected the
+    power switch and the signal bars into one `accent_site_colors` vector; FFF
+    froze the bars while the switch kept following the accent, and the harness
+    reported `*** NO TEST FAILED ***`. The fix is one `assert_ne!` per site, and
+    the rule for the remaining 41 modules is: **a module with n accent sites
+    needs n negative assertions, not one over their union.** This is exactly the
+    failure the reintroduction discipline exists to find — the test was written,
+    reviewed, green, and measuring less than it claimed; nothing but a
+    deliberately reintroduced bug would have said so.
+  - **The matrix had to cover a branch that returns early.** An unpowered
+    adapter draws four commands and `return`s, so every device colour in the
+    module is unreachable in that half of the state space; the sweep therefore
+    runs powered × discovering × `show_nearby` × four scroll offsets × three
+    panel heights, with one device per connection state, batteries straddling
+    both ladder thresholds, and signal strengths walking 0–4 bars. The "n more"
+    line (defect BBB) is only drawn by the short panels, and the empty signal
+    bar only by the weak-signal devices; a fixture with one healthy device
+    would have missed both.
+  - One `MOCHA_BASE` became `readable_on(p.lavender)` — the device-type glyph
+    on the lavender icon circle. Same shape as `user_accounts.rs`'s two: text
+    on a coloured fill, not a role.
 
 **Trigger:** this is not blocked on anything. It is sequenced after the shell
 event loop (`TD-C-THE-SHELL-CAN-DRAW-ITSELF-AND-NOBODY-CAN-ASK-IT-TO`) only
@@ -52272,7 +52396,15 @@ queue, the deferred-wake queue (occupied slots, the pending flag, the drop
 count) and the hrtimer lists together, from both the liveness watchdog and the
 idle-fallback wedge dump, so the log tells them apart.
 
-### `BUG-DEFERRED-WAKE-NO-REMOTE-IPI` - open, latency only
+### `BUG-DEFERRED-WAKE-NO-REMOTE-IPI` - fixed
+
+**In short:** when one CPU decides another CPU should run a task, it normally
+taps that CPU on the shoulder so it stops idling and picks the task up right
+away. One of the three code paths that hands out work forgot the tap. Nothing
+was lost - the other CPU noticed on its own a few milliseconds later, on its
+next clock tick - but "a few milliseconds" is an eternity here, and it only
+affected machines with more than one CPU, which the boot test is not. Now all
+three paths tap.
 
 `kernel/src/sched/mod.rs`, `drain_deferred_wakes_locked()`.
 
@@ -52292,6 +52424,44 @@ set and have `schedule_inner` signal them after it drops the guard. Deferred
 rather than done now only because the boot in progress is validating the
 lost-wakeup fix and this would change the same function; it is not blocked on
 anything. Currently invisible because the boot tests run single-CPU.
+
+**Fixed** as described. `drain_deferred_wakes_locked` now returns a `u64`
+bitmask of the CPUs it enqueued onto (`cpu_bit`; a mask is what
+`Task::cpu_affinity` already uses for a set of CPUs, and `MAX_CPUS` is 16), and
+`schedule_inner` fires it through a new `PendingWakeSignals` once the guard is
+released.
+
+Two things about the shape are worth keeping in mind if this code is touched
+again:
+
+1. **The IPI genuinely cannot move inside the drain**, even though the
+   reschedule ISR is a bare EOI and so could not deadlock against `SCHED`.
+   `signal_cpu` ends in `send_fixed_ipi`, which brackets its APIC writes with
+   `wait_icr_idle` spins on the ICR delivery-status bit - device I/O, once per
+   target, with the kernel's hottest lock held. That is the "no locks across
+   I/O" rule, not a deadlock worry.
+
+2. **`PendingWakeSignals` is a `Drop` type rather than a plain `u64` on
+   purpose.** `schedule_inner` releases the guard at six points; a release that
+   forgets to signal costs the target a full tick and leaves no trace in any
+   log. Declaring the accumulator *before* the guard makes reverse-declaration
+   drop order signal every early exit automatically, including exits a later
+   edit adds. Only the two paths that continue into `switch_context` - where
+   the frame's locals are not dropped until the task is resumed, possibly
+   milliseconds later - need the explicit `flush()`, and `flush` clears the
+   mask so the eventual drop is a harmless no-op.
+
+**Test:** `sched::self_test` -> `test_deferred_wake_signal_mask`. The symptom
+is not reachable single-CPU (every target is local, and `signal_cpu` correctly
+sends no IPI to itself), so the test pins the *reporting* instead, which is
+what was actually missing: it parks a real task, defers a wake for it, drains
+with interrupts off (otherwise a timer tick's `process_deferred_wakes` can
+empty the slot first and the test fails for a non-reason), and asserts the
+returned set names exactly the CPU the task was enqueued onto. It also checks
+that a drain which enqueues nothing reports nothing - a spurious bit is a
+wasted IPI on every schedule - and that `add` unions rather than overwrites
+(two drains feed one accumulator per `schedule_inner` call) and that `flush`
+empties, without which the `Drop` backstop would double-signal.
 
 ### BUG-BLOCKED-TASK-RESUMED-IN-PLACE - fixed (the barrier-self-test hang)
 

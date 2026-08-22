@@ -54,6 +54,9 @@ RUN = "gui/desktop/src/run_dialog.rs"
 ICON = "gui/desktop/src/icons.rs"
 NOTIF = "gui/desktop/src/notif_pane.rs"
 DEV = "gui/desktop/src/device_settings.rs"
+RULES = "gui/desktop/src/window_rules.rs"
+ACCT = "gui/desktop/src/user_accounts.rs"
+BT = "gui/desktop/src/bluetooth.rs"
 
 # (name, file, [(old, new), ...], [packages], [tests expected to fail])
 DEFECTS = [
@@ -498,6 +501,178 @@ DEFECTS = [
         [("            Self::Updating => p.blue,", "            Self::Updating => p.accent,")],
         ["desktop"],
         ["a_device_status_does_not_follow_the_accent"],
+    ),
+    (
+        "OO: the rules panel's background goes back to Mocha base",
+        RULES,
+        [("            color: p.base,", "            color: Color::from_hex(0x1E1E2E),")],
+        ["desktop"],
+        ["every_colour_the_panel_draws_comes_from_its_palette"],
+    ),
+    (
+        # Only drawn for a one-shot rule, so this measures the fixture as much
+        # as the sweep: a rule set that never sets `one_shot` would leave the
+        # badge unrendered and the reintroduced constant unseen.
+        "PP: the one-shot badge goes back to Mocha peach",
+        RULES,
+        [("                    color: p.peach,", "                    color: Color::from_hex(0xFAB387),")],
+        ["desktop"],
+        ["every_colour_the_panel_draws_comes_from_its_palette"],
+    ),
+    (
+        # Behind a tab: nothing in the rule-list view draws it.
+        "QQ: the editor's Save button goes back to Mocha green",
+        RULES,
+        [("            color: p.green,", "            color: Color::from_hex(0xA6E3A1),")],
+        ["desktop"],
+        ["every_colour_the_panel_draws_comes_from_its_palette"],
+    ),
+    (
+        # The wash, not a named constant -- Mocha green's channels written out
+        # at the call site at a fifth alpha. The sweep compares roles on RGB
+        # alone, which is exactly what lets it see through the alpha to the
+        # wrong hue underneath.
+        "RR: the ON badge's wash goes back to a hardcoded Mocha green",
+        RULES,
+        [("                color: Color::rgba(status_color.r, status_color.g, status_color.b, 51),",
+          "                color: Color::rgba(166, 227, 161, 51),")],
+        ["desktop"],
+        ["every_colour_the_panel_draws_comes_from_its_palette"],
+    ),
+    (
+        # A wrong *role*, not a leftover constant: `p.accent` is a member of
+        # both palettes, so the membership sweep passes this in light mode
+        # exactly as in dark. Only the categorical test can see it.
+        "SS: the ON status badge is made to follow the accent",
+        RULES,
+        [('                ("ON", p.green)', '                ("ON", p.accent)')],
+        ["desktop"],
+        ["a_rule_rows_colours_do_not_follow_the_accent"],
+    ),
+    (
+        # The other direction, and the reason each "does not follow" test
+        # carries a negative half: a selection frozen on blue still passes the
+        # sweep and still passes the equality assertion, because nothing moved.
+        "TT: the selected match-type chip stops following the accent",
+        RULES,
+        [("                color: if selected { p.accent } else { p.surface0 },",
+          "                color: if selected { p.blue } else { p.surface0 },")],
+        ["desktop"],
+        ["the_editors_save_button_does_not_follow_the_accent"],
+    ),
+    (
+        "UU: the accounts panel's background goes back to Mocha base",
+        ACCT,
+        [("            color: p.base,", "            color: Color::from_hex(0x1E1E2E),")],
+        ["desktop"],
+        ["every_colour_the_panel_draws_comes_from_its_palette"],
+    ),
+    (
+        # Only drawn when a status message is set, so this measures the state
+        # matrix too: a fixture that never sets one would leave it unrendered.
+        "VV: the status message goes back to Mocha yellow",
+        ACCT,
+        [("                color: p.yellow,", "                color: Color::from_hex(0xF9E2AF),")],
+        ["desktop"],
+        ["every_colour_the_panel_draws_comes_from_its_palette"],
+    ),
+    (
+        # Behind a tab *and* behind an empty activity log -- the branch a
+        # populated fixture alone would never reach.
+        "WW: the empty activity-log caption goes back to Mocha overlay0",
+        ACCT,
+        [("                color: p.overlay0,", "                color: Color::from_hex(0x6C7086),")],
+        ["desktop"],
+        ["every_colour_the_panel_draws_comes_from_its_palette"],
+    ),
+    (
+        # The last slot of the avatar table, which only an account whose stored
+        # index reduces to 6 ever draws. It is the fixture's one-account-per-slot
+        # loop that makes this visible at all.
+        "XX: the seventh avatar colour goes back to Mocha lavender",
+        ACCT,
+        [("p.mauve, p.red, p.yellow, p.lavender,",
+          "p.mauve, p.red, p.yellow, Color::from_hex(0xB4BEFE),")],
+        ["desktop"],
+        ["every_colour_the_panel_draws_comes_from_its_palette"],
+    ),
+    (
+        # A wrong *role*: blue is the default accent, so a standard account's
+        # badge reads like an obvious accent site. It is not one -- its two
+        # siblings do not move, and moving one cell of a categorical row is the
+        # bug. Invisible to the membership sweep, which sees a legal role.
+        "YY: the Standard account badge is made to follow the accent",
+        ACCT,
+        [("            Self::Standard => p.blue,", "            Self::Standard => p.accent,")],
+        ["desktop"],
+        ["a_users_identity_colours_do_not_follow_the_accent"],
+    ),
+    (
+        # The other direction, and the whole reason that test carries an
+        # `assert_ne!`: freeze the one thing that should follow the accent and
+        # the equality half still passes, certifying a panel that ignores the
+        # accent entirely.
+        "ZZ: the active tab's label stops following the accent",
+        ACCT,
+        [("                color: if is_active { p.accent } else { p.subtext0 },",
+          "                color: if is_active { p.blue } else { p.subtext0 },")],
+        ["desktop"],
+        ["a_users_identity_colours_do_not_follow_the_accent"],
+    ),
+    # --- bluetooth.rs (module 8) -------------------------------------------
+    (
+        "AAA: the bluetooth panel's background goes back to Mocha base",
+        BT,
+        [("            color: p.base,", "            color: Color::from_hex(0x1E1E2E),")],
+        ["desktop"],
+        ["every_colour_the_panel_draws_comes_from_its_palette"],
+    ),
+    (
+        "BBB: the \"n more\" line goes back to Mocha overlay0",
+        BT,
+        [("                font_size: 10.0,\n                color: p.overlay0,",
+          "                font_size: 10.0,\n                color: Color::from_hex(0x6C7086),")],
+        ["desktop"],
+        ["every_colour_the_panel_draws_comes_from_its_palette"],
+    ),
+    (
+        "CCC: the device icon circle goes back to Mocha lavender",
+        BT,
+        [("            color: p.lavender,", "            color: Color::from_hex(0xB4BEFE),")],
+        ["desktop"],
+        ["every_colour_the_panel_draws_comes_from_its_palette"],
+    ),
+    (
+        "DDD: a healthy battery goes back to Mocha green",
+        BT,
+        [("                p.green\n            } else if bat > 20 {",
+          "                Color::from_hex(0xA6E3A1)\n            } else if bat > 20 {")],
+        ["desktop"],
+        ["every_colour_the_panel_draws_comes_from_its_palette"],
+    ),
+    (
+        "EEE: a connected device's status is made to follow the accent",
+        BT,
+        [("            Self::Connected => p.green,", "            Self::Connected => p.accent,")],
+        ["desktop"],
+        ["a_devices_status_colours_do_not_follow_the_accent"],
+    ),
+    (
+        "FFF: the filled signal bars stop following the accent",
+        BT,
+        [("            let color = if i < bars { p.accent } else { p.surface1 };",
+          "            let color = if i < bars { p.blue } else { p.surface1 };")],
+        ["desktop"],
+        ["a_devices_status_colours_do_not_follow_the_accent"],
+    ),
+    (
+        "GGG: the idle scan button is made to follow the accent",
+        BT,
+        [("        let disc_color = if mgr.adapter.discovering {\n            p.peach\n        } else {\n            p.blue\n        };",
+          "        let disc_color = if mgr.adapter.discovering {\n            p.peach\n        } else {\n            p.accent\n        };")],
+        ["desktop"],
+        ["the_scan_button_says_something_different_while_it_is_scanning",
+         "a_devices_status_colours_do_not_follow_the_accent"],
     ),
 ]
 

@@ -16,6 +16,7 @@
 //! Rules are evaluated in priority order; first match wins (unless
 //! `apply_all` is set, in which case all matching rules are merged).
 
+use appearance::{Palette, readable_on};
 use guitk::color::Color;
 use guitk::idseq::IdSeq;
 use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
@@ -38,23 +39,38 @@ const COL_GUTTER: f32 = 8.0;
 const SUMMARY_INSET: f32 = 86.0;
 
 // ============================================================================
-// Catppuccin Mocha theme constants
+// Colour
 // ============================================================================
-
-const MOCHA_BASE: Color = Color::from_hex(0x1E1E2E);
-const MOCHA_MANTLE: Color = Color::from_hex(0x181825);
-const MOCHA_SURFACE0: Color = Color::from_hex(0x313244);
-const MOCHA_SURFACE1: Color = Color::from_hex(0x45475A);
-const MOCHA_SURFACE2: Color = Color::from_hex(0x585B70);
-const MOCHA_TEXT: Color = Color::from_hex(0xCDD6F4);
-const MOCHA_SUBTEXT0: Color = Color::from_hex(0xA6ADC8);
-const MOCHA_SUBTEXT1: Color = Color::from_hex(0xBAC2DE);
-const MOCHA_BLUE: Color = Color::from_hex(0x89B4FA);
-const MOCHA_GREEN: Color = Color::from_hex(0xA6E3A1);
-const MOCHA_RED: Color = Color::from_hex(0xF38BA8);
-const MOCHA_YELLOW: Color = Color::from_hex(0xF9E2AF);
-const MOCHA_PEACH: Color = Color::from_hex(0xFAB387);
-const MOCHA_OVERLAY0: Color = Color::from_hex(0x6C7086);
+//
+// Fourteen `const MOCHA_*: Color` declarations stood here — a private copy of
+// the Catppuccin Mocha ladder, so this panel could not follow the user's mode
+// or accent no matter what they chose. They are gone; `render` takes the
+// resolved `&Palette` and every colour below is a role on it. See
+// known-issues.md `TD-C-FORTY-NINE-SHELL-MODULES-CARRY-THEIR-OWN-COPY-OF-THE-PALETTE`.
+//
+// Two judgements the substitution had to make, since a role is not implied by
+// a hex value:
+//
+// * **The rule row's cells are categorical, not accent.** Each cell of a rule
+//   row is coloured by what it *means* — priority is red above 50, yellow
+//   above 10, `subtext1` otherwise; the action count is green when there are
+//   any and `overlay0` when there are none; status is green for ON and red
+//   for OFF; the match expression is blue. Those are siblings in one row, and
+//   a user who picks a pink accent is telling the shell what to highlight
+//   with, not asking for pink "OFF" badges. They stay on the named hues. The
+//   blue of the match column is the trap in that set: blue is the *default*
+//   accent, so a blue with categorical siblings reads like an accent site and
+//   is not one.
+// * **The two chrome affordances are accent.** The "+ Add Rule" button is the
+//   list view's primary action and the selected match-type chip is a
+//   selection, so both are `p.accent` with `readable_on` labels. The editor's
+//   Save button stays `p.green` — green is "confirm" against the Cancel
+//   button's `surface2`, and it is the one hue no accent resolves to, so
+//   there is no faithful reading of it as an accent site. That leaves a
+//   primary action that follows the accent in one view and one that does not
+//   in the other; the inconsistency predates the conversion and is recorded
+//   in known-issues.md rather than designed away here, because converting a
+//   module and redesigning it at the same time makes both unreviewable.
 
 // ============================================================================
 // Rule matching criteria
@@ -809,6 +825,7 @@ impl RulesSettingsUI {
     /// Render the rules settings panel.
     pub fn render(
         &self,
+        p: &Palette,
         manager: &WindowRulesManager,
         x: f32,
         y: f32,
@@ -823,7 +840,7 @@ impl RulesSettingsUI {
             y,
             width: w,
             height: h,
-            color: MOCHA_BASE,
+            color: p.base,
             corner_radii: CornerRadii::all(8.0),
         });
 
@@ -833,7 +850,7 @@ impl RulesSettingsUI {
             y,
             width: w,
             height: 40.0,
-            color: MOCHA_MANTLE,
+            color: p.mantle,
             corner_radii: CornerRadii::ZERO,
         });
         cmds.push(RenderCommand::Text {
@@ -841,7 +858,7 @@ impl RulesSettingsUI {
             y: y + 12.0,
             text: "Window Rules".to_string(),
             font_size: 16.0,
-            color: MOCHA_TEXT,
+            color: p.text,
             font_weight: FontWeightHint::Bold,
             max_width: None,
             overflow: TextOverflow::Clip,
@@ -858,7 +875,7 @@ impl RulesSettingsUI {
             y: y + 14.0,
             text: count_text,
             font_size: 12.0,
-            color: MOCHA_SUBTEXT0,
+            color: p.subtext0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
             overflow: TextOverflow::Clip,
@@ -874,7 +891,7 @@ impl RulesSettingsUI {
             y: y + 28.0,
             text: mode_text.to_string(),
             font_size: 10.0,
-            color: MOCHA_OVERLAY0,
+            color: p.overlay0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
             overflow: TextOverflow::Clip,
@@ -882,10 +899,10 @@ impl RulesSettingsUI {
 
         match self.active_tab {
             RulesSettingsTab::RuleList => {
-                self.render_rule_list(&mut cmds, manager, x, y + 44.0, w, h - 44.0);
+                self.render_rule_list(p, &mut cmds, manager, x, y + 44.0, w, h - 44.0);
             }
             RulesSettingsTab::EditRule | RulesSettingsTab::CreateRule => {
-                self.render_rule_editor(&mut cmds, x, y + 44.0, w, h - 44.0);
+                self.render_rule_editor(p, &mut cmds, x, y + 44.0, w, h - 44.0);
             }
         }
 
@@ -894,6 +911,7 @@ impl RulesSettingsUI {
 
     fn render_rule_list(
         &self,
+        p: &Palette,
         cmds: &mut Vec<RenderCommand>,
         manager: &WindowRulesManager,
         x: f32,
@@ -922,7 +940,7 @@ impl RulesSettingsUI {
                 y: y + 4.0,
                 text: label.to_string(),
                 font_size: 11.0,
-                color: MOCHA_SUBTEXT0,
+                color: p.subtext0,
                 font_weight: FontWeightHint::Bold,
                 max_width: None,
                 overflow: TextOverflow::Clip,
@@ -936,7 +954,7 @@ impl RulesSettingsUI {
             y1: y + 22.0,
             x2: x + w - 4.0,
             y2: y + 22.0,
-            color: MOCHA_SURFACE1,
+            color: p.surface1,
             width: 1.0,
         });
 
@@ -962,7 +980,7 @@ impl RulesSettingsUI {
                     y: ry,
                     width: w - 8.0,
                     height: row_h - 4.0,
-                    color: MOCHA_SURFACE0,
+                    color: p.surface0,
                     corner_radii: CornerRadii::all(4.0),
                 });
             }
@@ -971,11 +989,11 @@ impl RulesSettingsUI {
 
             // Priority.
             let priority_color = if rule.priority > 50 {
-                MOCHA_RED
+                p.red
             } else if rule.priority > 10 {
-                MOCHA_YELLOW
+                p.yellow
             } else {
-                MOCHA_SUBTEXT1
+                p.subtext1
             };
             cmds.push(RenderCommand::Text {
                 x: cx,
@@ -1003,11 +1021,7 @@ impl RulesSettingsUI {
                     FontWeightHint::Regular,
                 ),
                 font_size: 12.0,
-                color: if rule.enabled {
-                    MOCHA_TEXT
-                } else {
-                    MOCHA_OVERLAY0
-                },
+                color: if rule.enabled { p.text } else { p.overlay0 },
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
                 overflow: TextOverflow::Clip,
@@ -1026,7 +1040,7 @@ impl RulesSettingsUI {
                     FontWeightHint::Regular,
                 ),
                 font_size: 11.0,
-                color: MOCHA_BLUE,
+                color: p.blue,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
                 overflow: TextOverflow::Clip,
@@ -1040,7 +1054,7 @@ impl RulesSettingsUI {
                 y: ry + 8.0,
                 text: format!("{} act.", ac),
                 font_size: 11.0,
-                color: if ac > 0 { MOCHA_GREEN } else { MOCHA_OVERLAY0 },
+                color: if ac > 0 { p.green } else { p.overlay0 },
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
                 overflow: TextOverflow::Clip,
@@ -1053,7 +1067,7 @@ impl RulesSettingsUI {
                 y: ry + 8.0,
                 text: format!("{}", rule.match_count),
                 font_size: 11.0,
-                color: MOCHA_SUBTEXT0,
+                color: p.subtext0,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
                 overflow: TextOverflow::Clip,
@@ -1062,15 +1076,19 @@ impl RulesSettingsUI {
 
             // Status.
             let (status_text, status_color) = if rule.enabled {
-                ("ON", MOCHA_GREEN)
+                ("ON", p.green)
             } else {
-                ("OFF", MOCHA_RED)
+                ("OFF", p.red)
             };
             cmds.push(RenderCommand::FillRect {
                 x: cx,
                 y: ry + 6.0,
                 width: 32.0,
                 height: 18.0,
+                // The badge is the status hue at a fifth strength. Alpha is
+                // how a role becomes a wash, so this is still the role and
+                // the two-mode sweep still recognises it — it compares RGB
+                // and ignores alpha for exactly this shape.
                 color: Color::rgba(status_color.r, status_color.g, status_color.b, 51),
                 corner_radii: CornerRadii::all(4.0),
             });
@@ -1092,7 +1110,7 @@ impl RulesSettingsUI {
                     y: ry + 8.0,
                     text: "1x".to_string(),
                     font_size: 9.0,
-                    color: MOCHA_PEACH,
+                    color: p.peach,
                     font_weight: FontWeightHint::Bold,
                     max_width: None,
                     overflow: TextOverflow::Clip,
@@ -1115,7 +1133,7 @@ impl RulesSettingsUI {
                         FontWeightHint::Regular,
                     ),
                     font_size: 10.0,
-                    color: MOCHA_OVERLAY0,
+                    color: p.overlay0,
                     font_weight: FontWeightHint::Regular,
                     max_width: None,
                     overflow: TextOverflow::Clip,
@@ -1130,7 +1148,7 @@ impl RulesSettingsUI {
             y: btn_y,
             width: 100.0,
             height: 28.0,
-            color: MOCHA_BLUE,
+            color: p.accent,
             corner_radii: CornerRadii::all(6.0),
         });
         cmds.push(RenderCommand::Text {
@@ -1138,14 +1156,22 @@ impl RulesSettingsUI {
             y: btn_y + 7.0,
             text: "+ Add Rule".to_string(),
             font_size: 12.0,
-            color: MOCHA_BASE,
+            color: readable_on(p.accent),
             font_weight: FontWeightHint::Bold,
             max_width: None,
             overflow: TextOverflow::Clip,
         });
     }
 
-    fn render_rule_editor(&self, cmds: &mut Vec<RenderCommand>, x: f32, y: f32, w: f32, _h: f32) {
+    fn render_rule_editor(
+        &self,
+        p: &Palette,
+        cmds: &mut Vec<RenderCommand>,
+        x: f32,
+        y: f32,
+        w: f32,
+        _h: f32,
+    ) {
         let label_x = x + 16.0;
         let input_x = x + 140.0;
         let input_w = w - 170.0;
@@ -1161,7 +1187,7 @@ impl RulesSettingsUI {
             y: cy,
             text: title.to_string(),
             font_size: 14.0,
-            color: MOCHA_TEXT,
+            color: p.text,
             font_weight: FontWeightHint::Bold,
             max_width: None,
             overflow: TextOverflow::Clip,
@@ -1174,7 +1200,7 @@ impl RulesSettingsUI {
             y: cy + 4.0,
             text: "Name:".to_string(),
             font_size: 12.0,
-            color: MOCHA_SUBTEXT0,
+            color: p.subtext0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
             overflow: TextOverflow::Clip,
@@ -1184,7 +1210,7 @@ impl RulesSettingsUI {
             y: cy,
             width: input_w,
             height: 24.0,
-            color: MOCHA_SURFACE0,
+            color: p.surface0,
             corner_radii: CornerRadii::all(4.0),
         });
         cmds.push(RenderCommand::Text {
@@ -1197,9 +1223,9 @@ impl RulesSettingsUI {
             },
             font_size: 12.0,
             color: if self.editing_name.is_empty() {
-                MOCHA_OVERLAY0
+                p.overlay0
             } else {
-                MOCHA_TEXT
+                p.text
             },
             font_weight: FontWeightHint::Regular,
             max_width: None,
@@ -1220,7 +1246,7 @@ impl RulesSettingsUI {
             y: cy + 4.0,
             text: "Match:".to_string(),
             font_size: 12.0,
-            color: MOCHA_SUBTEXT0,
+            color: p.subtext0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
             overflow: TextOverflow::Clip,
@@ -1233,7 +1259,7 @@ impl RulesSettingsUI {
                 y: cy,
                 width: 105.0,
                 height: 24.0,
-                color: if selected { MOCHA_BLUE } else { MOCHA_SURFACE0 },
+                color: if selected { p.accent } else { p.surface0 },
                 corner_radii: CornerRadii::all(4.0),
             });
             cmds.push(RenderCommand::Text {
@@ -1241,7 +1267,11 @@ impl RulesSettingsUI {
                 y: cy + 6.0,
                 text: label.to_string(),
                 font_size: 10.0,
-                color: if selected { MOCHA_BASE } else { MOCHA_TEXT },
+                color: if selected {
+                    readable_on(p.accent)
+                } else {
+                    p.text
+                },
                 font_weight: if selected {
                     FontWeightHint::Bold
                 } else {
@@ -1260,7 +1290,7 @@ impl RulesSettingsUI {
                 y: cy + 4.0,
                 text: "Value:".to_string(),
                 font_size: 12.0,
-                color: MOCHA_SUBTEXT0,
+                color: p.subtext0,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
                 overflow: TextOverflow::Clip,
@@ -1270,7 +1300,7 @@ impl RulesSettingsUI {
                 y: cy,
                 width: input_w,
                 height: 24.0,
-                color: MOCHA_SURFACE0,
+                color: p.surface0,
                 corner_radii: CornerRadii::all(4.0),
             });
             cmds.push(RenderCommand::Text {
@@ -1283,9 +1313,9 @@ impl RulesSettingsUI {
                 },
                 font_size: 12.0,
                 color: if self.editing_criteria_value.is_empty() {
-                    MOCHA_OVERLAY0
+                    p.overlay0
                 } else {
-                    MOCHA_TEXT
+                    p.text
                 },
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
@@ -1300,7 +1330,7 @@ impl RulesSettingsUI {
             y: cy + 4.0,
             text: "Priority:".to_string(),
             font_size: 12.0,
-            color: MOCHA_SUBTEXT0,
+            color: p.subtext0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
             overflow: TextOverflow::Clip,
@@ -1310,7 +1340,7 @@ impl RulesSettingsUI {
             y: cy,
             width: 80.0,
             height: 24.0,
-            color: MOCHA_SURFACE0,
+            color: p.surface0,
             corner_radii: CornerRadii::all(4.0),
         });
         cmds.push(RenderCommand::Text {
@@ -1318,7 +1348,7 @@ impl RulesSettingsUI {
             y: cy + 5.0,
             text: format!("{}", self.editing_priority),
             font_size: 12.0,
-            color: MOCHA_TEXT,
+            color: p.text,
             font_weight: FontWeightHint::Regular,
             max_width: None,
             overflow: TextOverflow::Clip,
@@ -1331,7 +1361,7 @@ impl RulesSettingsUI {
             y: cy,
             width: 80.0,
             height: 28.0,
-            color: MOCHA_GREEN,
+            color: p.green,
             corner_radii: CornerRadii::all(6.0),
         });
         cmds.push(RenderCommand::Text {
@@ -1339,7 +1369,7 @@ impl RulesSettingsUI {
             y: cy + 7.0,
             text: "Save".to_string(),
             font_size: 12.0,
-            color: MOCHA_BASE,
+            color: readable_on(p.green),
             font_weight: FontWeightHint::Bold,
             max_width: None,
             overflow: TextOverflow::Clip,
@@ -1349,7 +1379,7 @@ impl RulesSettingsUI {
             y: cy,
             width: 80.0,
             height: 28.0,
-            color: MOCHA_SURFACE2,
+            color: p.surface2,
             corner_radii: CornerRadii::all(6.0),
         });
         cmds.push(RenderCommand::Text {
@@ -1357,7 +1387,7 @@ impl RulesSettingsUI {
             y: cy + 7.0,
             text: "Cancel".to_string(),
             font_size: 12.0,
-            color: MOCHA_TEXT,
+            color: p.text,
             font_weight: FontWeightHint::Regular,
             max_width: None,
             overflow: TextOverflow::Clip,
@@ -1450,6 +1480,7 @@ mod tests {
     )]
 
     use super::*;
+    use crate::palette_check;
 
     // --- MatchCriteria tests ---
 
@@ -1910,7 +1941,7 @@ mod tests {
         }
         let ui = RulesSettingsUI::new();
         let mut cmds = Vec::new();
-        ui.render_rule_list(&mut cmds, &mgr, 0.0, 0.0, 900.0, 600.0);
+        ui.render_rule_list(&test_palette(), &mut cmds, &mgr, 0.0, 0.0, 900.0, 600.0);
 
         let mut checked = 0;
         for cmd in &cmds {
@@ -1942,7 +1973,7 @@ mod tests {
         mgr.add_rule(WindowRule::new(1, "short", MatchCriteria::Any));
         let ui = RulesSettingsUI::new();
         let mut cmds = Vec::new();
-        ui.render_rule_list(&mut cmds, &mgr, 0.0, 0.0, 900.0, 600.0);
+        ui.render_rule_list(&test_palette(), &mut cmds, &mgr, 0.0, 0.0, 900.0, 600.0);
         assert!(
             cmds.iter().any(|c| matches!(
                 c,
@@ -1987,7 +2018,7 @@ mod tests {
     fn test_ui_render_no_panic() {
         let mgr = WindowRulesManager::new();
         let ui = RulesSettingsUI::new();
-        let cmds = ui.render(&mgr, 0.0, 0.0, 800.0, 600.0);
+        let cmds = ui.render(&test_palette(), &mgr, 0.0, 0.0, 800.0, 600.0);
         assert!(!cmds.is_empty());
     }
 
@@ -1996,7 +2027,7 @@ mod tests {
         let mgr = WindowRulesManager::new();
         let mut ui = RulesSettingsUI::new();
         ui.active_tab = RulesSettingsTab::EditRule;
-        let cmds = ui.render(&mgr, 0.0, 0.0, 800.0, 600.0);
+        let cmds = ui.render(&test_palette(), &mgr, 0.0, 0.0, 800.0, 600.0);
         assert!(!cmds.is_empty());
     }
 
@@ -2005,7 +2036,7 @@ mod tests {
         let mgr = WindowRulesManager::new();
         let mut ui = RulesSettingsUI::new();
         ui.active_tab = RulesSettingsTab::CreateRule;
-        let cmds = ui.render(&mgr, 0.0, 0.0, 800.0, 600.0);
+        let cmds = ui.render(&test_palette(), &mgr, 0.0, 0.0, 800.0, 600.0);
         assert!(!cmds.is_empty());
     }
 
@@ -2275,7 +2306,7 @@ mod tests {
 
         let mut ui = RulesSettingsUI::new();
         ui.scroll_offset = 50;
-        let cmds = ui.render(&mgr, 0.0, 0.0, 800.0, 600.0);
+        let cmds = ui.render(&test_palette(), &mgr, 0.0, 0.0, 800.0, 600.0);
         assert!(!cmds.is_empty(), "the chrome still draws");
         assert!(
             cmds.iter().any(|c| matches!(
@@ -2292,5 +2323,282 @@ mod tests {
         assert!(WindowRulesManager::parse_rule_line("rule|1|name|0|on").is_some());
         assert!(WindowRulesManager::parse_rule_line("notarule|1|name|0|on").is_none());
         assert!(WindowRulesManager::parse_rule_line("").is_none());
+    }
+
+    // -- colour ------------------------------------------------------------
+
+    /// The palette the tests that predate the conversion render against.
+    ///
+    /// Dark, because those tests were written when this module could only be
+    /// dark and they assert about geometry and text rather than colour. The
+    /// colour tests below build their own palettes.
+    fn test_palette() -> Palette {
+        Palette::for_mode(false)
+    }
+
+    /// A rule set that reaches every branch of the row painter.
+    ///
+    /// The colour of a rule row is a function of the *rule*, not of the UI
+    /// state, so a sweep driven only by `RulesSettingsUI` fields would render
+    /// perhaps half the hues in the module and call the other half converted
+    /// without ever drawing them. These five rules between them take all three
+    /// steps of the priority ladder, both sides of `enabled`, both sides of
+    /// "has any actions", the one-shot badge and a non-empty action summary.
+    fn every_branch_rule_set() -> WindowRulesManager {
+        let mut mgr = WindowRulesManager::new();
+        mgr.rules.clear();
+
+        // Priority above 50: red. Has actions: green. Non-empty summary.
+        let mut hot = WindowRule::new(0, "hot", MatchCriteria::TitleExact("A".to_string()));
+        hot.priority = 99;
+        hot.actions.always_on_top = Some(true);
+        hot.match_count = 7;
+        assert!(mgr.add_rule(hot).is_some());
+
+        // Priority above 10: yellow. One-shot: the peach badge.
+        let mut warm = WindowRule::new(0, "warm", MatchCriteria::TitleContains("b".to_string()));
+        warm.priority = 20;
+        warm.one_shot = true;
+        assert!(mgr.add_rule(warm).is_some());
+
+        // Low priority: subtext1. No actions: overlay0, and no summary line.
+        let mut cool = WindowRule::new(0, "cool", MatchCriteria::ProcessName("c".to_string()));
+        cool.priority = 1;
+        assert!(mgr.add_rule(cool).is_some());
+
+        // Disabled: an overlay0 name and the red OFF badge.
+        let mut off = WindowRule::new(0, "off", MatchCriteria::WindowClass("d".to_string()));
+        off.enabled = false;
+        assert!(mgr.add_rule(off).is_some());
+
+        let mut any = WindowRule::new(0, "any", MatchCriteria::Any);
+        any.actions.opacity = Some(0.5);
+        any.actions.skip_taskbar = Some(true);
+        assert!(mgr.add_rule(any).is_some());
+
+        mgr
+    }
+
+    fn no_rules() -> WindowRulesManager {
+        let mut mgr = WindowRulesManager::new();
+        mgr.rules.clear();
+        mgr
+    }
+
+    fn wound_ui(
+        tab: RulesSettingsTab,
+        criteria_type: usize,
+        filled: bool,
+        selected_rule_idx: usize,
+    ) -> RulesSettingsUI {
+        let mut ui = RulesSettingsUI::new();
+        ui.active_tab = tab;
+        ui.editing_criteria_type = criteria_type;
+        ui.selected_rule_idx = selected_rule_idx;
+        if filled {
+            ui.editing_name = "a rule".to_string();
+            ui.editing_criteria_value = "firefox".to_string();
+            ui.editing_priority = 42;
+        }
+        ui
+    }
+
+    /// Every colour the panel paints is a role on the palette it was handed.
+    ///
+    /// Rendered in both modes; the light render is the one that does the work,
+    /// because the fourteen deleted `MOCHA_*` constants were Catppuccin Mocha
+    /// values and none of them is a member of Latte. A leftover therefore names
+    /// itself in the light pass rather than hiding behind a value that happens
+    /// to be right in dark mode.
+    ///
+    /// `derived` is empty even though the status badge is a wash: the sweep
+    /// compares roles on RGB alone, so `p.green` at alpha 51 is still `p.green`
+    /// and a *Mocha* green at alpha 51 is still not a Latte role. Declaring the
+    /// wash as derived would have blinded the sweep to exactly the literal it
+    /// exists to catch.
+    #[test]
+    fn every_colour_the_panel_draws_comes_from_its_palette() {
+        for light in [false, true] {
+            let p = Palette::for_mode(light);
+            for populated in [true, false] {
+                for mode in [EvalMode::FirstMatch, EvalMode::MergeAll] {
+                    let mut mgr = if populated {
+                        every_branch_rule_set()
+                    } else {
+                        no_rules()
+                    };
+                    mgr.set_eval_mode(mode);
+                    for tab in [
+                        RulesSettingsTab::RuleList,
+                        RulesSettingsTab::EditRule,
+                        RulesSettingsTab::CreateRule,
+                    ] {
+                        // 0..=4 covers every match-type chip as the selected
+                        // one, and 4 ("Any") is also the branch that hides the
+                        // value field entirely.
+                        for criteria_type in 0..=4 {
+                            for filled in [false, true] {
+                                // Index 0 selects a visible row; 3 selects a
+                                // different one, so neither the selected nor
+                                // the unselected background goes undrawn.
+                                for selected in [0_usize, 3] {
+                                    let ui = wound_ui(tab, criteria_type, filled, selected);
+                                    let cmds = ui.render(&p, &mgr, 0.0, 0.0, 900.0, 600.0);
+                                    assert!(!cmds.is_empty(), "the panel always draws its frame");
+                                    palette_check::assert_drawn_from(
+                                        &p,
+                                        &cmds,
+                                        &[],
+                                        "window_rules",
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// A rule row's colours say what the rule *is*, so they do not move when
+    /// the user changes the accent.
+    ///
+    /// The sweep above cannot make this check. A role is a member of *both*
+    /// palettes, so a row converted to `p.accent` instead of `p.green` passes
+    /// the light-mode sweep exactly as it passes the dark one — the sweep
+    /// answers "was this converted at all", never "was it converted to the
+    /// right thing".
+    ///
+    /// The match-expression column is this module's trap: it is blue, and blue
+    /// is the *default* accent, so it reads like an accent site at a glance. It
+    /// is not one — it is a sibling of the priority red, the action-count green
+    /// and the OFF red in the same row, and a user who picks a pink accent is
+    /// saying what to highlight with, not asking for pink "OFF" badges.
+    #[test]
+    fn a_rule_rows_colours_do_not_follow_the_accent() {
+        let mgr = every_branch_rule_set();
+        let ui = wound_ui(RulesSettingsTab::RuleList, 0, true, 0);
+        let render = |accent: Color| {
+            let mut p = Palette::for_mode(false);
+            p.accent = accent;
+            ui.render(&p, &mgr, 0.0, 0.0, 900.0, 600.0)
+        };
+        let blue = render(appearance::BLUE);
+        let mauve = render(appearance::MAUVE);
+
+        // Everything in the list view except the "+ Add Rule" button: the row
+        // cells, the status pills, the headers and the chrome.
+        let rows = |cmds: &[RenderCommand]| -> Vec<Color> {
+            cmds.iter()
+                .filter_map(|c| match c {
+                    RenderCommand::Text { text, color, .. } if text != "+ Add Rule" => Some(*color),
+                    RenderCommand::FillRect {
+                        width: 32.0, color, ..
+                    } => Some(*color),
+                    _ => None,
+                })
+                .collect()
+        };
+        assert!(
+            rows(&blue).len() > 20,
+            "the fixture drew {} row colours, too few to be measuring the rows",
+            rows(&blue).len()
+        );
+        assert_eq!(
+            rows(&blue),
+            rows(&mauve),
+            "a rule row's colours are categorical; none of them may move with \
+             the accent"
+        );
+
+        // The negative half. Without it a module that ignored the accent
+        // everywhere -- the very bug this conversion exists to fix -- would
+        // pass the assertion above while measuring nothing at all.
+        let add_button = |cmds: &[RenderCommand]| -> Vec<Color> {
+            cmds.iter()
+                .filter_map(|c| match c {
+                    RenderCommand::FillRect {
+                        width: 100.0,
+                        height: 28.0,
+                        color,
+                        ..
+                    } => Some(*color),
+                    _ => None,
+                })
+                .collect()
+        };
+        assert_eq!(
+            add_button(&blue).len(),
+            1,
+            "the Add Rule button is drawn once"
+        );
+        assert_ne!(
+            add_button(&blue),
+            add_button(&mauve),
+            "the list view's primary action is an accent site and must follow \
+             the accent"
+        );
+    }
+
+    /// Save is green because green means confirm, not because blue was the
+    /// accent — so it stays green when the accent changes.
+    ///
+    /// Green is the one hue no accent resolves to, which is what makes this a
+    /// decidable question rather than a matter of taste: reading Save as an
+    /// accent site would have changed its colour under the *default* accent,
+    /// and no faithful conversion does that. The chips above it are selections
+    /// and do follow the accent, which is this test's negative half.
+    #[test]
+    fn the_editors_save_button_does_not_follow_the_accent() {
+        let mgr = every_branch_rule_set();
+        let ui = wound_ui(RulesSettingsTab::EditRule, 1, true, 0);
+        let render = |accent: Color| {
+            let mut p = Palette::for_mode(false);
+            p.accent = accent;
+            ui.render(&p, &mgr, 0.0, 0.0, 900.0, 600.0)
+        };
+        let blue = render(appearance::BLUE);
+        let mauve = render(appearance::MAUVE);
+
+        // Save and Cancel: the two 80x28 buttons at the foot of the form.
+        let buttons = |cmds: &[RenderCommand]| -> Vec<Color> {
+            cmds.iter()
+                .filter_map(|c| match c {
+                    RenderCommand::FillRect {
+                        width: 80.0,
+                        height: 28.0,
+                        color,
+                        ..
+                    } => Some(*color),
+                    _ => None,
+                })
+                .collect()
+        };
+        assert_eq!(buttons(&blue).len(), 2, "Save and Cancel both draw");
+        assert_eq!(
+            buttons(&blue),
+            buttons(&mauve),
+            "confirm-green and the neutral Cancel are not accent sites"
+        );
+
+        let chips = |cmds: &[RenderCommand]| -> Vec<Color> {
+            cmds.iter()
+                .filter_map(|c| match c {
+                    RenderCommand::FillRect {
+                        width: 105.0,
+                        color,
+                        ..
+                    } => Some(*color),
+                    _ => None,
+                })
+                .collect()
+        };
+        assert_eq!(chips(&blue).len(), 5, "one chip per match type");
+        assert_ne!(
+            chips(&blue),
+            chips(&mauve),
+            "the selected match-type chip is a selection and must follow the \
+             accent"
+        );
     }
 }

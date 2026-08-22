@@ -54594,8 +54594,19 @@ regression traceable to timer scheduling.
 
 ---
 
-sched: the deferred-wake drain does not IPI a remote target CPU (lane A)
-------------------------------------------------------------------------
+sched: the deferred-wake drain does not IPI a remote target CPU (lane A) — DONE
+-------------------------------------------------------------------------------
+
+DONE 2026-08-22. The drain now returns a `u64` mask of the CPUs it enqueued
+onto and `schedule_inner` signals them through `PendingWakeSignals` once the
+guard is released. Sending under the lock was considered and rejected: the
+reschedule ISR is a bare EOI so it could not deadlock, but `send_fixed_ipi`
+spins on the ICR delivery-status bit, which is I/O inside the scheduler's own
+critical section. `PendingWakeSignals` is a `Drop` type declared before the
+guard so that the six release points in `schedule_inner` — and any a later edit
+adds — signal correctly without code at the exit. Test:
+`sched::self_test` → `test_deferred_wake_signal_mask`. Rationale:
+`design-decisions.md` §280. Original entry below.
 
 `kernel/src/sched/mod.rs`, `drain_deferred_wakes_locked()`.
 
@@ -54705,10 +54716,53 @@ then splice its result in front of `cfg.command`. It is pure and therefore
 testable on the host, which is the shape the rest of that file already has.
 
 --------------------------------------------------------------------------
-[lane A] SpawnExArgs has no capability field, so spawn cannot narrow authority
+[lane A] DONE 2026-08-22 -- SpawnExArgs has no capability field, so spawn
+         cannot narrow authority
 --------------------------------------------------------------------------
 Logged 2026-08-22, alongside the fix for
 BUG-SPAWNED-CHILDREN-INHERIT-NO-CAPABILITIES (design-decisions.md 278).
+
+RESOLVED 2026-08-22 by SYS_PROCESS_SPAWN_EX2 (559).  See design-decisions.md
+279 for the three decisions it needed; the short version, and where it
+departs from the plan sketched below:
+
+  * NOT by adding fields to SpawnExArgs.  That struct carries no length and
+    no version, and the kernel reads size_of::<SpawnExArgs>() bytes from the
+    caller's pointer, so appending to it reads 16 bytes past every existing
+    caller.  The clone3 escape (size in a register, 0 == legacy) does not
+    work here either: posix::syscall1 sets only rax and rdi, so arg1 holds
+    whatever the caller left in rsi.  Hence a new number, 559, with a new
+    struct SpawnEx2Args whose FIRST field is its own struct_size -- so a
+    third number will never be needed.
+
+  * The subset is NOT an intersection.  The plan below said "the child
+    receives the intersection of the named set with what the parent actually
+    holds", which is a silent narrowing.  What shipped refuses instead: a
+    requested capability the parent does not hold, or holds with narrower
+    rights than it asked to delegate, fails the WHOLE spawn with
+    PermissionDenied and leaves no process behind.  (The plan's own last
+    paragraph already argued for this; the word "intersection" contradicted
+    it.)  Rights may be narrowed, never widened.
+
+  * The default is unchanged, as the plan required: cap_mode == 0
+    (SPAWN_CAP_MODE_INHERIT_ALL) means inherit everything, which is what a
+    zero-filled or short struct decodes to, so posix_spawn's fork+exec
+    equivalence survives.
+
+  * The request array is crate::cap::CapEntryInfo -- the same 24-byte struct
+    SYS_CAP_QUERY writes out -- so building a subset is enumerate, filter,
+    pass back, with no transcription step.
+
+  Tests: spawn::self_test's test_spawn_capability_subset (narrowing honoured,
+  unlisted caps absent, unheld and widening requests refused, no PCB leaked
+  on the refusal path, empty subset means empty) and test_ex2_copy_plan (the
+  size gate, swept exhaustively); dispatch::self_test's
+  test_dispatch_spawn_ex2_registered.
+
+  Lane B still needs the userspace half: requests/a-b-spawn-ex2-capability-
+  subset.md asks for the SpawnEx2Args mirror in posix/src/spawn.rs.
+
+The original entry follows, kept for the reasoning.
 
 WHAT IS DEFERRED
   A spawned child now inherits its parent's entire capability table (matching

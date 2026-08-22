@@ -50270,6 +50270,51 @@ anything.
    findings at the top of this entry first — `BASE` and `SHADOW` each mean two
    different things depending on the module, so this is not a blind rename.
 
+**Method for part 2, surveyed 2026-08-22.** Two things make it much smaller
+than the 549 figure suggests:
+
+- **No module's render function has a caller outside its own file.** Checked
+  across `gui/` and `apps/`: nothing references `security_dialog::`,
+  `login_screen::`, `print_manager::` and so on — these are state machines
+  built ahead of the shell binary that will drive them, and their `render()`s
+  are exercised only by their own `#[cfg(test)]` modules. So adding a
+  `p: &Palette` parameter is a *within-file* change, not a signature change
+  that ripples through the crate. Only `lib.rs` mentions `DesktopTheme` or
+  `Palette` at all today.
+- **The colour uses cluster in a handful of functions per module.**
+  `security_dialog.rs` is the worst file at 29 constants, and its 44 `theme::`
+  references sit in five functions — `render`, `render_shield_icon`,
+  `render_detail_row`, `render_button`, `render_checkbox` — plus
+  `RiskLevel::color`, which becomes `color(self, p: &Palette)`.
+
+**The verification, which is the part worth getting right.** Do not eyeball 549
+substitutions. Each converted module gets a sweep that renders its state
+*twice*, once per mode, and asserts that every colour the light render emits is
+drawn from the light palette: the set of `Palette` fields for that mode, their
+alpha variants, black at any alpha (scrims and shadows are an absence of light,
+§525 decision 3), and the two `readable_on` endpoints. A constant left behind is
+by definition a *Mocha* value, so it fails that membership check in light mode
+and names itself. This catches a missed replacement mechanically, which is the
+only way a change this size can be trusted.
+
+One wrinkle to encode rather than rediscover: `readable_on` returns `0x11111B`
+or `0xEFF1F5`, and `0x11111B` *is* Mocha `crust`. It has to be allowed in a
+light render — it is the deliberate dark extreme, not a leftover — which means
+the sweep cannot catch a stray literal `CRUST`. Everything else it catches.
+
+Mapping for the alias names, which recur across modules and are the only part
+that needs judgement rather than substitution:
+
+| Declared as | Becomes | Note |
+|---|---|---|
+| `SHIELD_BG`, `BUTTON_BG`, `DETAILS_BORDER` = `0x45475A`/`0x313244` | `p.surface0` / `p.surface1` | plain role aliases |
+| `BUTTON_HOVER` = `0x585B70` | `p.surface2` | |
+| `DETAILS_BG` = `0x181825` | `p.mantle` | |
+| `RISK_LOW`/`MEDIUM`/`HIGH`/`CRITICAL` | `p.green`/`p.yellow`/`p.peach`/`p.red` | categorical, must **not** follow the accent |
+| `SHADOW` = `rgba(0,0,0,160)` | `p.shadow()` | one value replaces the shell's three (100/120/160) |
+| `DIMMER` = `rgba(0,0,0,120)` | `p.scrim()` | 140; deliberately unified |
+| `ALLOW_TEXT`, `DENY_TEXT` = `0x1E1E2E` | `readable_on(p.green)`, `readable_on(p.red)` | **the one trap** — see item 2 below |
+
 Do **not** do part 2 without part 1 — threading a struct whose light variant
 does not exist yet just relocates the hardcoding into the struct's
 constructor.

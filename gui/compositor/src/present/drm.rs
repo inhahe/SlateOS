@@ -34,6 +34,36 @@
 //! compositor wants, and what [`DrmScanout::size`] reports — needs no `SETCRTC`
 //! at all. See `known-issues.md` → `TD-COMPOSITOR-CANNOT-CHANGE-MODE`.
 //!
+//! ## One frame, several monitors
+//!
+//! The sequence above runs once per *connected* monitor, and each one gets its
+//! own CRTC, its own pair of buffers and its own flip. What they share is the
+//! picture: [`Present::show`] is handed one frame the size of the whole desktop
+//! and each head copies out the rectangle it occupies, at the offset
+//! [`DrmScanout::heads`] reports. A window straddling two monitors is one
+//! rectangle in that one frame, and nothing above this module — not the
+//! compositing pipeline, not the damage tracker, not the window rectangles —
+//! ever learns that a head exists. See `design-decisions.md` §514 for why that
+//! is the arrangement rather than one composited frame per head.
+//!
+//! Two rules make the layout agree with the compositor's without either side
+//! telling the other:
+//!
+//! * **Heads are laid out left to right in enumeration order**, which is
+//!   precisely what `DisplayManager::add_display` does with the displays the
+//!   caller attaches in the order `heads()` returns them.
+//! * **A CRTC drives at most one connector.** It scans out one framebuffer at a
+//!   time, so handing the same one to two monitors would not light the second —
+//!   it would take the first monitor's picture away. A connector we cannot give
+//!   a free CRTC to is declined, leaving one working monitor rather than two
+//!   broken ones.
+//!
+//! A head that fails is dropped rather than fatal: one whose first flip fails
+//! never enters the layout, and one whose flips start failing mid-session stops
+//! being drawn on while the others carry on. Only when no head is left does
+//! [`Present::is_open`] go false and the display server exit. Their buffers stay
+//! owned either way, so `Drop` still gives every id back.
+//!
 //! ## Why this is split in three
 //!
 //! Every bug that will ever be in this module is a *protocol* bug: a field at
@@ -217,7 +247,81 @@ struct Framebuffer {
     map: Box<dyn Mapped>,
 }
 
-/// A display, driven directly.
+/// One monitor being driven: a CRTC, the connector it feeds, its own pair of
+/// buffers, and the rectangle of the composited frame it scans out.
+///
+/// The rectangle is the whole point. The compositor draws **one** frame covering
+/// the whole virtual desktop (`design-decisions.md` §514), and a head is a
+/// viewport onto it — so a window straddling the seam between two monitors is
+/// one rectangle in one buffer, and the only thing that has to know about heads
+/// is this struct and the copy that reads from `(x, y)` instead of from the
+/// origin.
+struct Head {
+    /// The CRTC being driven. No two live heads share one: a CRTC drives a
+    /// single scanout at a time, so handing the same one to two connectors
+    /// would mean the second silently stole the first's picture.
+    crtc_id: u32,
+    /// The connector being driven. Kept for diagnostics and for the reconnect
+    /// logic a later change will want; nothing reads it per frame.
+    connector_id: u32,
+    /// The two buffers, flipped between.
+    buffers: [Framebuffer; 2],
+    /// Index into [`Self::buffers`] of the one currently being scanned out.
+    /// The *other* one is the one [`Present::show`] draws into.
+    front: usize,
+    /// This head's left edge within the composited frame.
+    x: u32,
+    /// This head's top edge within the composited frame. Always 0 today —
+    /// [`DrmScanout::new`] lays heads out in a row, matching
+    /// `DisplayManager::add_display`, which is what makes the two agree about
+    /// where each monitor is without either telling the other.
+    y: u32,
+    /// The mode's width in pixels.
+    width: u32,
+    /// The mode's height in pixels.
+    height: u32,
+    /// Cleared when a flip fails for a reason that is not "try again", which
+    /// is what *this* display going away looks like from here. The other heads
+    /// carry on: one monitor unplugged is not a reason to stop drawing on the
+    /// rest.
+    alive: bool,
+}
+
+impl Head {
+    /// Index of the buffer *not* currently on screen — the one [`Present::show`]
+    /// draws into and the next flip selects.
+    ///
+    /// One definition, because "the back buffer" is worked out in three places
+    /// and two of them being right is not enough.
+    const fn back(&self) -> usize {
+        1usize.saturating_sub(self.front)
+    }
+}
+
+/// One driven monitor, as seen from outside: where it is on the desktop and
+/// what it is plugged into.
+///
+/// Returned by [`DrmScanout::heads`] so the caller can declare the same
+/// arrangement to the compositor's `DisplayManager`. The two compute the layout
+/// by the same rule — left to right, in enumeration order — so they agree by
+/// construction rather than by one being told.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct HeadInfo {
+    /// The connector this monitor is plugged into.
+    pub connector_id: u32,
+    /// The CRTC driving it.
+    pub crtc_id: u32,
+    /// Its left edge within the composited frame.
+    pub x: u32,
+    /// Its top edge within the composited frame.
+    pub y: u32,
+    /// Its width in pixels — the mode it is running.
+    pub width: u32,
+    /// Its height in pixels.
+    pub height: u32,
+}
+
+/// Every display on one card, driven directly.
 ///
 /// The `S` is owned rather than borrowed because the framebuffer ids and GEM
 /// handles this holds are per-file-descriptor kernel state: they die with the
@@ -229,31 +333,29 @@ struct Framebuffer {
 pub struct DrmScanout<S: KmsSys> {
     /// The card.
     sys: S,
-    /// The CRTC being driven.
-    crtc_id: u32,
-    /// The connector being driven. Kept for diagnostics and for the reconnect
-    /// logic a later change will want; nothing reads it per frame.
-    connector_id: u32,
-    /// The two buffers, flipped between.
-    buffers: [Framebuffer; 2],
-    /// Index into [`Self::buffers`] of the one currently being scanned out.
-    /// The *other* one is the one [`Present::show`] draws into.
-    front: usize,
-    /// The mode's width in pixels.
+    /// The monitors, in enumeration order, laid out left to right.
+    heads: Vec<Head>,
+    /// The composited frame's width: the bounding box of every live head.
     width: u32,
-    /// The mode's height in pixels.
+    /// The composited frame's height.
     height: u32,
-    /// Cleared when a flip fails for a reason that is not "try again", which
-    /// is what the display going away looks like from here.
-    alive: bool,
 }
 
 impl<S: KmsSys> DrmScanout<S> {
-    /// Set up scanout on an already-open card.
+    /// Set up scanout on an already-open card, driving **every** monitor
+    /// plugged into it.
     ///
-    /// Picks the first connected connector that has a mode and can be routed
-    /// to a CRTC, prefers that connector's `DRM_MODE_TYPE_PREFERRED` (native)
-    /// mode, allocates two buffers at that size and shows the first.
+    /// Takes each connected connector that has a mode and can be routed to a
+    /// CRTC no earlier connector has already claimed, prefers that connector's
+    /// `DRM_MODE_TYPE_PREFERRED` (native) mode, allocates two buffers per head
+    /// at that head's size and shows the first frame on each.
+    ///
+    /// Heads are laid out **left to right in enumeration order**, which is the
+    /// same rule `DisplayManager::add_display` uses, so the compositor's idea of
+    /// where each monitor is and this module's idea of where each monitor is
+    /// agree without either being told. See `design-decisions.md` §514 for why
+    /// the arrangement is one frame with a viewport per head rather than one
+    /// frame per head.
     ///
     /// # Errors
     ///
@@ -263,80 +365,211 @@ impl<S: KmsSys> DrmScanout<S> {
     /// server for remote clients.
     pub fn new(mut sys: S) -> Result<Self, ScanoutError> {
         let (crtcs, connectors) = resources(&mut sys)?;
-        let chosen = choose_display(&mut sys, &crtcs, &connectors)?;
-        let (width, height) = chosen.mode.size();
-        let first = make_buffer(&mut sys, width, height)?;
-        let second = make_buffer(&mut sys, width, height)?;
+        let chosen = choose_displays(&mut sys, &crtcs, &connectors)?;
+        // A head we cannot build is declined rather than fatal, for the same
+        // reason a head we cannot route is: one monitor whose buffers will not
+        // allocate must not blank the monitor next to it that would have
+        // worked. The first failure is kept so that a card on which *nothing*
+        // works reports why rather than reporting "no display".
+        let mut first_error = None;
+        let mut heads = Vec::with_capacity(chosen.len());
+        for pick in &chosen {
+            match make_head(&mut sys, pick) {
+                Ok(head) => heads.push(head),
+                Err(e) => first_error = first_error.or(Some(e)),
+            }
+        }
+        if heads.is_empty() {
+            return Err(first_error.unwrap_or(ScanoutError::NoConnectedDisplay));
+        }
         let mut out = Self {
             sys,
-            crtc_id: chosen.crtc_id,
-            connector_id: chosen.connector_id,
-            buffers: [first, second],
-            // `show` draws into `1 - front`, so starting at 1 means the first
-            // frame lands in buffer 0 and is flipped to. Starting at 0 would
-            // draw the first frame into the buffer that is *already* on screen.
-            front: 1,
-            width,
-            height,
-            alive: true,
+            heads,
+            width: 0,
+            height: 0,
         };
-        // Put something defined on the screen straight away. Without this the
+        // Put something defined on every screen straight away. Without this a
         // display scans out whatever the boot framebuffer left, until the
         // compositor has a reason to compose a frame — which on an idle
         // desktop can be a while.
-        out.flip()?;
+        for index in 0..out.heads.len() {
+            if let Err(e) = out.flip_head(index) {
+                first_error = first_error.or(Some(e));
+                if let Some(head) = out.heads.get_mut(index) {
+                    head.alive = false;
+                }
+            }
+        }
+        // A head that could not show its first frame is not part of the
+        // desktop: laying it out anyway would reserve a strip of the frame that
+        // nothing scans out and put windows on a monitor that is not there. Its
+        // buffers stay in the vector so `Drop` still gives their ids back.
+        if !out.heads.iter().any(|h| h.alive) {
+            return Err(first_error.unwrap_or(ScanoutError::NoConnectedDisplay));
+        }
+        out.lay_out_heads();
         Ok(out)
     }
 
-    /// The display's size in pixels: the mode that was selected.
+    /// Place the live heads in a row and take the composited frame's size from
+    /// their bounding box.
+    fn lay_out_heads(&mut self) {
+        let mut x = 0u32;
+        for head in &mut self.heads {
+            if !head.alive {
+                continue;
+            }
+            head.x = x;
+            head.y = 0;
+            x = x.saturating_add(head.width);
+        }
+        self.width = x;
+        self.height = self
+            .heads
+            .iter()
+            .filter(|h| h.alive)
+            .map(|h| h.y.saturating_add(h.height))
+            .max()
+            .unwrap_or(0);
+    }
+
+    /// The composited frame's size in pixels: the bounding box of every monitor.
     ///
     /// The compositor is built at this size rather than the other way round —
-    /// there is no `SETCRTC` to make the display match a size we picked, and
-    /// even if there were, the native mode is the one that looks right.
+    /// there is no `SETCRTC` to make a display match a size we picked, and even
+    /// if there were, each monitor's native mode is the one that looks right.
     #[must_use]
     pub const fn size(&self) -> (u32, u32) {
         (self.width, self.height)
     }
 
-    /// The CRTC being driven, for diagnostics.
+    /// Every monitor being driven, in layout order.
+    ///
+    /// The caller declares these to the compositor's `DisplayManager` so that
+    /// window placement, maximise, fullscreen and the snap zones all resolve
+    /// against the right screen.
     #[must_use]
-    pub const fn crtc_id(&self) -> u32 {
-        self.crtc_id
+    pub fn heads(&self) -> Vec<HeadInfo> {
+        self.heads
+            .iter()
+            .filter(|h| h.alive)
+            .map(|h| HeadInfo {
+                connector_id: h.connector_id,
+                crtc_id: h.crtc_id,
+                x: h.x,
+                y: h.y,
+                width: h.width,
+                height: h.height,
+            })
+            .collect()
     }
 
-    /// The connector being driven, for diagnostics.
-    #[must_use]
-    pub const fn connector_id(&self) -> u32 {
-        self.connector_id
+    /// The connector id of the leftmost live monitor, or `None` on a scanout
+    /// whose every head has died.
+    ///
+    /// The per-head accessors below are keyed on the **connector id** rather
+    /// than on a position, because a position means two different things here:
+    /// [`Self::heads`] reports only the live heads, while `self.heads` also
+    /// holds the dead ones so `Drop` can still give their buffers back. A
+    /// caller enumerating `heads()` and passing the loop index back in would
+    /// silently read the wrong monitor the moment one died. A connector id is
+    /// the same in both worlds and is what `HeadInfo` already carries.
+    fn first_live(&self) -> Option<&Head> {
+        self.heads.iter().find(|h| h.alive)
     }
 
-    /// Bytes per row of the scanout buffers.
+    /// Index of the live head plugged into `connector_id`.
+    fn live_head(&self, connector_id: u32) -> Option<usize> {
+        self.heads
+            .iter()
+            .position(|h| h.alive && h.connector_id == connector_id)
+    }
+
+    /// The CRTC driving the leftmost live monitor, for diagnostics.
+    #[must_use]
+    pub fn crtc_id(&self) -> u32 {
+        self.first_live().map_or(0, |h| h.crtc_id)
+    }
+
+    /// The connector the leftmost live monitor is plugged into, for
+    /// diagnostics.
+    #[must_use]
+    pub fn connector_id(&self) -> u32 {
+        self.first_live().map_or(0, |h| h.connector_id)
+    }
+
+    /// Bytes per row of the leftmost live monitor's scanout buffers.
     #[must_use]
     pub fn pitch(&self) -> u32 {
-        self.buffers.first().map_or(0, |b| b.pitch)
+        self.first_live()
+            .and_then(|h| h.buffers.first())
+            .map_or(0, |b| b.pitch)
     }
 
-    /// The bytes currently on screen — the buffer the last successful flip
-    /// selected.
+    /// Bytes per row of the buffer [`Present::show`] is about to write on head
+    /// `index` — its *back* buffer.
+    ///
+    /// Taken from the buffer rather than computed from the head's width because
+    /// the pitch is the driver's answer, not ours: it pads rows to whatever
+    /// alignment the card wants, and two heads of different widths generally
+    /// pad differently.
+    fn back_pitch(&self, index: usize) -> u32 {
+        let Some(head) = self.heads.get(index) else {
+            return 0;
+        };
+        head.buffers.get(head.back()).map_or(0, |b| b.pitch)
+    }
+
+    /// Bytes per row of the scanout buffers of the monitor on `connector_id`.
+    ///
+    /// Zero if no live head is plugged into that connector.
+    #[must_use]
+    pub fn pitch_for(&self, connector_id: u32) -> u32 {
+        self.live_head(connector_id)
+            .and_then(|i| self.heads.get(i))
+            .and_then(|h| h.buffers.first())
+            .map_or(0, |b| b.pitch)
+    }
+
+    /// The bytes currently on the leftmost live monitor — the buffer the last
+    /// successful flip selected.
     ///
     /// Exposed because "what reached the display" is a different claim from
     /// "what the compositor drew", and it is the first one that is worth
     /// asserting about. Returns an empty slice only if the buffer array is
     /// somehow malformed, which it cannot be.
     pub fn scanned_out(&mut self) -> &[u8] {
-        self.buffers
-            .get_mut(self.front)
-            .map_or(&[], |b| b.map.bytes())
+        match self.first_live().map(|h| h.connector_id) {
+            Some(connector_id) => self.scanned_out_for(connector_id),
+            None => &[],
+        }
     }
 
-    /// Show the buffer that is not currently on screen, and make it current.
-    fn flip(&mut self) -> Result<(), ScanoutError> {
-        let back = 1usize.saturating_sub(self.front);
-        let Some(fb_id) = self.buffers.get(back).map(|b| b.fb_id) else {
+    /// The bytes currently on the monitor plugged into `connector_id`, or an
+    /// empty slice if no live head is.
+    pub fn scanned_out_for(&mut self, connector_id: u32) -> &[u8] {
+        let Some(index) = self.live_head(connector_id) else {
+            return &[];
+        };
+        let Some(h) = self.heads.get_mut(index) else {
+            return &[];
+        };
+        let front = h.front;
+        h.buffers.get_mut(front).map_or(&[], |b| b.map.bytes())
+    }
+
+    /// Show the buffer that is not currently on screen for one head, and make
+    /// it current.
+    fn flip_head(&mut self, index: usize) -> Result<(), ScanoutError> {
+        let Some(head) = self.heads.get(index) else {
+            return Ok(());
+        };
+        let back = head.back();
+        let (crtc_id, Some(fb_id)) = (head.crtc_id, head.buffers.get(back).map(|b| b.fb_id)) else {
             return Ok(());
         };
         let flip = ModeCrtcPageFlip {
-            crtc_id: self.crtc_id,
+            crtc_id,
             fb_id,
             // No `DRM_MODE_PAGE_FLIP_EVENT`: the compositor has no event loop
             // reading the card fd, and this kernel's backends retire a flip
@@ -347,46 +580,66 @@ impl<S: KmsSys> DrmScanout<S> {
             user_data: 0,
         };
         call(&mut self.sys, uapi::PAGE_FLIP, flip.to_bytes(), &mut [])?;
-        self.front = back;
+        if let Some(head) = self.heads.get_mut(index) {
+            head.front = back;
+        }
         Ok(())
     }
 }
 
 impl<S: KmsSys> Present for DrmScanout<S> {
     fn show(&mut self, pixels: &[u32], width: u32, height: u32) {
-        if !self.alive {
-            return;
-        }
-        let back = 1usize.saturating_sub(self.front);
-        let (dst_pitch, screen_w, screen_h) = (self.pitch(), self.width, self.height);
-        if let Some(buffer) = self.buffers.get_mut(back) {
-            blit(
-                buffer.map.bytes(),
-                dst_pitch,
-                screen_w,
-                screen_h,
-                pixels,
-                width,
-                height,
-            );
-        }
-        match self.flip() {
-            Ok(()) => {}
-            // A flip that is merely early is not a failure: `EBUSY` means the
-            // previous flip has not retired, `EAGAIN` that the driver is not
-            // ready, `EINTR` that a signal arrived. The frame is dropped and
-            // the next one goes to the same back buffer — which is why the
-            // front index is only advanced on success. Dropping a frame under
-            // load is what every compositor does; tearing down the display
-            // because a monitor was slow is not.
-            Err(ScanoutError::Ioctl { errno, .. })
-                if errno == EBUSY || errno == EAGAIN || errno == EINTR => {}
-            Err(_) => self.alive = false,
+        for index in 0..self.heads.len() {
+            // Read before the mutable borrow below, and per head: a head whose
+            // width pads differently from its neighbour's has a different row
+            // stride, so writing one at another's skews it from its second row.
+            let dst_pitch = self.back_pitch(index);
+            let Some(head) = self.heads.get_mut(index) else {
+                continue;
+            };
+            if !head.alive {
+                continue;
+            }
+            let back = head.back();
+            // Each head copies out *its own* rectangle of the one composited
+            // frame. This is the whole of the multi-head arithmetic: everything
+            // above this line composes a single desktop-sized picture and knows
+            // nothing about monitors.
+            let view = Viewport {
+                pitch: dst_pitch,
+                width: head.width,
+                height: head.height,
+                src_x: head.x,
+                src_y: head.y,
+            };
+            if let Some(buffer) = head.buffers.get_mut(back) {
+                blit(buffer.map.bytes(), &view, pixels, width, height);
+            }
+            match self.flip_head(index) {
+                Ok(()) => {}
+                // A flip that is merely early is not a failure: `EBUSY` means
+                // the previous flip has not retired, `EAGAIN` that the driver
+                // is not ready, `EINTR` that a signal arrived. The frame is
+                // dropped and the next one goes to the same back buffer — which
+                // is why the front index is only advanced on success. Dropping
+                // a frame under load is what every compositor does; tearing
+                // down the display because a monitor was slow is not.
+                Err(ScanoutError::Ioctl { errno, .. })
+                    if errno == EBUSY || errno == EAGAIN || errno == EINTR => {}
+                // Only *this* head. A monitor unplugged mid-session must not
+                // stop the others being drawn on, which is the difference
+                // between one screen going dark and the desktop going dark.
+                Err(_) => {
+                    if let Some(head) = self.heads.get_mut(index) {
+                        head.alive = false;
+                    }
+                }
+            }
         }
     }
 
     fn is_open(&self) -> bool {
-        self.alive
+        self.heads.iter().any(|h| h.alive)
     }
 }
 
@@ -404,21 +657,32 @@ impl<S: KmsSys> Drop for DrmScanout<S> {
         // so `DESTROY_DUMB` on a mapped buffer detaches the handle and frees
         // the memory when the last mapping goes, which is a few instructions
         // from now.
-        for i in 0..self.buffers.len() {
-            let Some(&Framebuffer { fb_id, handle, .. }) = self.buffers.get(i) else {
-                continue;
-            };
-            let rm = fb_id.to_le_bytes();
-            let _ = call(&mut self.sys, uapi::RMFB, rm, &mut []);
-            let destroy = ModeDestroyDumb { handle };
-            let _ = call(
-                &mut self.sys,
-                uapi::DESTROY_DUMB,
-                destroy.to_bytes(),
-                &mut [],
-            );
+        // Every buffer of every head, including heads that died: a head marked
+        // not-alive still holds the ids it was given, and dropping the vector
+        // would only unmap the memory.
+        let ids: Vec<(u32, u32)> = self
+            .heads
+            .iter()
+            .flat_map(|h| h.buffers.iter())
+            .map(|b| (b.fb_id, b.handle))
+            .collect();
+        for (fb_id, handle) in ids {
+            release_buffer(&mut self.sys, fb_id, handle);
         }
     }
+}
+
+/// Give one scanout buffer's framebuffer id and GEM handle back to the card.
+///
+/// The framebuffer goes first: the other order leaves the kernel holding a
+/// framebuffer whose backing object the client asked to free, which is refused
+/// on some drivers and merely confusing on the rest. Both failures are ignored
+/// because there is nothing a caller could do about them — this runs on
+/// teardown paths, including one inside a constructor that is already failing.
+fn release_buffer(sys: &mut dyn KmsSys, fb_id: u32, handle: u32) {
+    let _ = call(sys, uapi::RMFB, fb_id.to_le_bytes(), &mut []);
+    let destroy = ModeDestroyDumb { handle };
+    let _ = call(sys, uapi::DESTROY_DUMB, destroy.to_bytes(), &mut []);
 }
 
 /// Issue one ioctl, mapping its errno onto [`ScanoutError`].
@@ -567,16 +831,32 @@ fn best_mode(modes: &[ModeModeinfo]) -> Option<ModeModeinfo> {
         .copied()
 }
 
-/// Find a CRTC that can drive this connector.
+/// Find a CRTC that can drive this connector and that no earlier head has
+/// already taken.
 ///
 /// Prefers the CRTC the connector is already routed to, which is the one the
 /// firmware lit at boot and therefore the one already scanning out at this
 /// mode. Otherwise walks the connector's encoders and takes the first CRTC any
 /// of them can reach.
-fn resolve_crtc(sys: &mut dyn KmsSys, crtcs: &[u32], conn: &Connector) -> Option<u32> {
+///
+/// `taken` is what makes two monitors possible rather than a way of driving one
+/// monitor twice: a CRTC scans out one framebuffer at a time, so giving the same
+/// one to a second connector does not light a second screen — it replaces the
+/// first screen's picture with the second's. On the fake card's two-CRTC machine
+/// and on most real ones the boot-bound preference alone would hand every
+/// connector the same CRTC, so this exclusion is load-bearing and not defensive.
+fn resolve_crtc(
+    sys: &mut dyn KmsSys,
+    crtcs: &[u32],
+    conn: &Connector,
+    taken: &[u32],
+) -> Option<u32> {
     if conn.info.encoder_id != 0 {
         if let Some(bound) = get_encoder(sys, conn.info.encoder_id) {
-            if bound.crtc_id != 0 && crtcs.contains(&bound.crtc_id) {
+            if bound.crtc_id != 0
+                && crtcs.contains(&bound.crtc_id)
+                && !taken.contains(&bound.crtc_id)
+            {
                 return Some(bound.crtc_id);
             }
         }
@@ -591,6 +871,9 @@ fn resolve_crtc(sys: &mut dyn KmsSys, crtcs: &[u32], conn: &Connector) -> Option
         // single-CRTC machine, where index 0 and the only id both make bit 0
         // look right.
         for (index, &crtc_id) in crtcs.iter().enumerate() {
+            if taken.contains(&crtc_id) {
+                continue;
+            }
             let reachable = u32::try_from(index)
                 .ok()
                 .and_then(|shift| encoder.possible_crtcs.checked_shr(shift))
@@ -617,19 +900,24 @@ fn get_encoder(sys: &mut dyn KmsSys, encoder_id: u32) -> Option<ModeGetEncoder> 
     Some(ModeGetEncoder::from_bytes(&bytes))
 }
 
-/// Pick the display to drive.
+/// Pick every display to drive.
 ///
-/// The first connected connector that has a mode and a route to a CRTC wins.
-/// A machine with two monitors gets one of them driven and the other left
-/// dark; extending this to all of them is `known-issues.md` →
-/// `TD-COMPOSITOR-DRIVES-ONE-HEAD` and needs a compositor that can compose
-/// more than one frame, which is a larger change than this module.
-fn choose_display(
+/// Each connected connector that has a mode and a route to a CRTC no earlier
+/// connector claimed becomes a head, in enumeration order. A machine with two
+/// monitors gets both.
+///
+/// The number of heads is bounded by the number of CRTCs the card has, because
+/// each takes one exclusively — which is a tighter and more meaningful bound
+/// than any constant this module could pick, and it is the hardware's own limit
+/// on how many pictures it can scan out at once.
+fn choose_displays(
     sys: &mut dyn KmsSys,
     crtcs: &[u32],
     connectors: &[u32],
-) -> Result<Chosen, ScanoutError> {
+) -> Result<Vec<Chosen>, ScanoutError> {
     let mut saw_connected = false;
+    let mut taken: Vec<u32> = Vec::new();
+    let mut chosen: Vec<Chosen> = Vec::new();
     for &connector_id in connectors {
         // One bad connector must not hide a good one behind it: a card can
         // report a connector whose probe fails while another head works fine.
@@ -643,19 +931,57 @@ fn choose_display(
         let Some(mode) = best_mode(&conn.modes) else {
             continue;
         };
-        let Some(crtc_id) = resolve_crtc(sys, crtcs, &conn) else {
+        let Some(crtc_id) = resolve_crtc(sys, crtcs, &conn, &taken) else {
             continue;
         };
-        return Ok(Chosen {
+        taken.push(crtc_id);
+        chosen.push(Chosen {
             connector_id,
             mode,
             crtc_id,
         });
     }
-    Err(if saw_connected {
-        ScanoutError::NoUsableMode
-    } else {
-        ScanoutError::NoConnectedDisplay
+    if chosen.is_empty() {
+        return Err(if saw_connected {
+            ScanoutError::NoUsableMode
+        } else {
+            ScanoutError::NoConnectedDisplay
+        });
+    }
+    Ok(chosen)
+}
+
+/// Build one head: two scanout buffers at its mode's size.
+///
+/// The pair is all-or-nothing, because a head with one buffer cannot flip. That
+/// makes the second allocation's failure path load-bearing: nothing owns the
+/// first buffer yet — `Drop` walks `DrmScanout::heads` and this head never
+/// reaches it — so its framebuffer id and GEM handle have to be given back here
+/// or they leak for the life of the process. Which matters precisely because
+/// this type does not own the card.
+fn make_head(sys: &mut dyn KmsSys, pick: &Chosen) -> Result<Head, ScanoutError> {
+    let (width, height) = pick.mode.size();
+    let first = make_buffer(sys, width, height)?;
+    let second = match make_buffer(sys, width, height) {
+        Ok(buffer) => buffer,
+        Err(e) => {
+            release_buffer(sys, first.fb_id, first.handle);
+            return Err(e);
+        }
+    };
+    Ok(Head {
+        crtc_id: pick.crtc_id,
+        connector_id: pick.connector_id,
+        buffers: [first, second],
+        // `show` draws into `1 - front`, so starting at 1 means the first frame
+        // lands in buffer 0 and is flipped to. Starting at 0 would draw the
+        // first frame into the buffer that is *already* on screen.
+        front: 1,
+        x: 0,
+        y: 0,
+        width,
+        height,
+        alive: true,
     })
 }
 
@@ -706,7 +1032,26 @@ fn make_buffer(sys: &mut dyn KmsSys, width: u32, height: u32) -> Result<Framebuf
     })
 }
 
-/// Copy a composited frame into a scanout buffer.
+/// One monitor's window onto the composited frame, and the shape of the buffer
+/// it is copied into.
+///
+/// A struct rather than five more parameters because [`blit`] would otherwise
+/// take nine, and because these five are one idea: *this* rectangle of the
+/// desktop goes into *this* buffer.
+struct Viewport {
+    /// Bytes per row of the destination, as the driver computed it.
+    pitch: u32,
+    /// The destination's width in pixels.
+    width: u32,
+    /// The destination's height in pixels.
+    height: u32,
+    /// The left edge, within the composited frame, of the part to copy.
+    src_x: u32,
+    /// The top edge, within the composited frame, of the part to copy.
+    src_y: u32,
+}
+
+/// Copy one monitor's rectangle of a composited frame into its scanout buffer.
 ///
 /// Free function, and generic over nothing, because this is where the
 /// arithmetic that can be wrong lives and a free function can be tested with
@@ -715,35 +1060,44 @@ fn make_buffer(sys: &mut dyn KmsSys, width: u32, height: u32) -> Result<Framebuf
 /// The source is `0xAARRGGBB` in native `u32`s and the destination is `XR24`,
 /// which on a little-endian machine is the same four bytes in the same order —
 /// the alpha byte lands in `X` and is ignored by the display. So this is a copy
-/// and not a conversion, and the only thing it has to get right is *where* each
-/// row goes: `row * pitch`, never `row * width * 4`.
+/// and not a conversion, and the two things it has to get right are *where each
+/// row goes* — `row * pitch`, never `row * width * 4` — and *where each row
+/// comes from*, which is `(src_y + row) * src_width + src_x` and is the whole of
+/// what makes a second monitor show the right half of the desktop rather than
+/// the left half again.
 ///
-/// A source smaller than the screen is drawn in the top-left and the rest of
-/// the buffer is left alone; a source larger is clipped. Neither is expected —
-/// the compositor is built at [`DrmScanout::size`] — but a mismatched frame
-/// must not be able to write outside the buffer, and "must not" is a stronger
-/// claim when it is arithmetic rather than an assertion.
-fn blit(
-    dst: &mut [u8],
-    dst_pitch: u32,
-    dst_width: u32,
-    dst_height: u32,
-    src: &[u32],
-    src_width: u32,
-    src_height: u32,
-) {
-    let pitch = usize::try_from(dst_pitch).unwrap_or(0);
+/// A source that does not reach the far side of the viewport is drawn in the
+/// top-left of the buffer and the rest is left alone; one that overruns it is
+/// clipped. Neither is expected — the compositor is built at
+/// [`DrmScanout::size`] — but a mismatched frame must not be able to write
+/// outside the buffer, and "must not" is a stronger claim when it is arithmetic
+/// rather than an assertion. A viewport whose origin is past the end of the
+/// frame copies nothing, which is the honest answer for a monitor the composited
+/// desktop does not reach.
+fn blit(dst: &mut [u8], view: &Viewport, src: &[u32], src_width: u32, src_height: u32) {
+    let pitch = usize::try_from(view.pitch).unwrap_or(0);
     let src_w = usize::try_from(src_width).unwrap_or(0);
-    let copy_w = src_w.min(usize::try_from(dst_width).unwrap_or(0));
-    let copy_h = usize::try_from(src_height)
-        .unwrap_or(0)
-        .min(usize::try_from(dst_height).unwrap_or(0));
+    let src_h = usize::try_from(src_height).unwrap_or(0);
+    let off_x = usize::try_from(view.src_x).unwrap_or(usize::MAX);
+    let off_y = usize::try_from(view.src_y).unwrap_or(usize::MAX);
+    // What the frame actually has to the right of and below this head's origin.
+    // Saturating, so an origin past the end of the frame yields zero rather
+    // than an enormous count.
+    let copy_w = src_w
+        .saturating_sub(off_x)
+        .min(usize::try_from(view.width).unwrap_or(0));
+    let copy_h = src_h
+        .saturating_sub(off_y)
+        .min(usize::try_from(view.height).unwrap_or(0));
     if pitch == 0 || copy_w == 0 || src_w == 0 {
         return;
     }
     let copy_bytes = copy_w.saturating_mul(BYTES_PER_PIXEL);
     for row in 0..copy_h {
-        let src_start = row.saturating_mul(src_w);
+        let src_start = off_y
+            .saturating_add(row)
+            .saturating_mul(src_w)
+            .saturating_add(off_x);
         let Some(src_row) = src.get(src_start..src_start.saturating_add(copy_w)) else {
             // The caller gave us fewer pixels than it claimed. Documented as
             // the caller's bug and explicitly not a panic: a short frame must

@@ -38,7 +38,7 @@ use super::uapi::{
     self, ModeCardRes, ModeCreateDumb, ModeCrtcPageFlip, ModeDestroyDumb, ModeFbCmd2,
     ModeGetConnector, ModeGetEncoder, ModeMapDumb, ModeModeinfo,
 };
-use super::{DrmScanout, Present, ScanoutError, blit, open_display};
+use super::{DrmScanout, HeadInfo, Present, ScanoutError, Viewport, blit, open_display};
 
 /// Invalid argument, which is what the kernel says to a malformed request.
 const EINVAL: Errno = 22;
@@ -114,6 +114,15 @@ struct CardState {
     /// Failures to inject, consumed in order: the next call whose request
     /// matches the front entry fails with its errno.
     fail: Vec<(u32, Errno)>,
+    /// Failures to inject at a *counted* occurrence: `(request, nth, errno)`
+    /// fails the `nth` call (zero-based) with that request and leaves every
+    /// other one alone.
+    ///
+    /// [`Self::fail`] cannot express this — its front entry waits for a
+    /// matching call and blocks the ones behind it — and "the *second*
+    /// monitor's buffers will not allocate" needs exactly this: the first
+    /// monitor's three ioctls have to succeed first.
+    fail_nth: Vec<(u32, u32, Errno)>,
     /// If set, every `count_*` the card reports is this instead of the truth —
     /// a driver that lies about how much there is to enumerate.
     lie_counts: Option<u32>,
@@ -241,6 +250,22 @@ impl FakeCard {
         }
     }
 
+    /// A two-monitor machine: both connectors plugged in, each reachable by a
+    /// *different* CRTC, and different sizes so a head that scans out the wrong
+    /// rectangle cannot pass by coincidence.
+    ///
+    /// The widths are chosen so the second head's pitch is padded (1366 * 4 =
+    /// 5464, aligned up to 5504) while the first's is not — a `show` that reuses
+    /// head 0's pitch for head 1 skews the picture from its second row on.
+    fn two_monitors() -> Self {
+        let card = Self::desktop();
+        card.edit(|s| {
+            s.connectors[0].connection = uapi::CONNECTED;
+            s.connectors[0].modes = vec![mode(1024, 768, true)];
+        });
+        card
+    }
+
     /// The same machine with the monitor unplugged: a card that opens fine and
     /// has nothing to show. This is the ordinary state of the *other* card in
     /// a laptop, which is the whole reason the search exists.
@@ -302,6 +327,17 @@ impl KmsSys for FakeCard {
         state.log.push(request);
         if state.fail.first().is_some_and(|&(r, _)| r == request) {
             let (_, errno) = state.fail.remove(0);
+            return Err(errno);
+        }
+        // How many calls with this request have been made before this one. The
+        // log was pushed to above, so this call is itself in the count.
+        let seen = state.log.iter().filter(|&&r| r == request).count() as u32 - 1;
+        if let Some(i) = state
+            .fail_nth
+            .iter()
+            .position(|&(r, n, _)| r == request && n == seen)
+        {
+            let (_, _, errno) = state.fail_nth.remove(i);
             return Err(errno);
         }
         let lie = state.lie_counts;
@@ -992,6 +1028,384 @@ fn a_framebuffer_is_removed_before_its_buffer_is_destroyed() {
     });
 }
 
+// ------------------------------------------------------ more than one head --
+
+#[test]
+fn every_connected_monitor_is_driven_and_not_just_the_first() {
+    // The defect this section exists for: `choose_display` returned one
+    // `Chosen` and stopped, so a machine with two monitors lit one and left the
+    // other dark — while the compositor above happily composited windows onto
+    // it, because `DisplayManager` had been told about both.
+    let card = FakeCard::two_monitors();
+    let scanout = DrmScanout::new(card.clone()).expect("both monitors can be driven");
+
+    assert_eq!(scanout.heads().len(), 2, "one head per connected monitor");
+    card.read(|s| {
+        assert_eq!(s.dumb.len(), 4, "two buffers each");
+        assert_eq!(s.fbs.len(), 4);
+        assert_eq!(s.flips.len(), 2, "and both are showing something already");
+    });
+}
+
+#[test]
+fn the_composited_frame_spans_every_monitor_rather_than_the_first_one() {
+    // `size()` is what the compositor is built at. If it were one monitor's
+    // mode, every window past that monitor's right edge would be composited
+    // outside the frame and thrown away — which is exactly the bug §514 fixed
+    // on the model side, arriving from the other direction.
+    let scanout = DrmScanout::new(FakeCard::two_monitors()).unwrap();
+    assert_eq!(
+        scanout.size(),
+        (1024 + 1366, 768),
+        "the bounding box of both monitors, not either one"
+    );
+}
+
+#[test]
+fn heads_are_reported_left_to_right_so_the_compositor_can_place_them() {
+    // The compositor never learns the layout from us directly: it calls
+    // `attach_display` per head, and `DisplayManager::add_display` places each
+    // new monitor to the right of the ones already there. That is the same rule
+    // `lay_out_heads` uses, so the two agree by construction — but only while
+    // this order and these offsets hold, which is what is pinned here.
+    let scanout = DrmScanout::new(FakeCard::two_monitors()).unwrap();
+    assert_eq!(
+        scanout.heads(),
+        vec![
+            HeadInfo {
+                connector_id: 30,
+                crtc_id: 1,
+                x: 0,
+                y: 0,
+                width: 1024,
+                height: 768,
+            },
+            // Abutting the first, not overlapping it and not on top of it.
+            HeadInfo {
+                connector_id: 31,
+                crtc_id: 2,
+                x: 1024,
+                y: 0,
+                width: 1366,
+                height: 768,
+            },
+        ]
+    );
+}
+
+#[test]
+fn each_head_flips_its_own_crtc_and_its_own_framebuffer() {
+    // Two heads flipping the same CRTC would mean the second monitor's picture
+    // landing on the first, alternating every frame. Two heads flipping the
+    // same *framebuffer* would mean both monitors showing one monitor's half of
+    // the desktop.
+    let card = FakeCard::two_monitors();
+    let _scanout = DrmScanout::new(card.clone()).unwrap();
+    card.read(|s| {
+        assert_eq!(
+            s.flips,
+            vec![(1, 1), (2, 3)],
+            "CRTC 1 got head 0's first buffer and CRTC 2 got head 1's"
+        );
+    });
+}
+
+#[test]
+fn a_second_monitor_scans_out_its_own_part_of_the_frame() {
+    // The whole point of one desktop-sized frame: each head copies out the
+    // rectangle it occupies. A head that blits from the frame's origin shows
+    // the *first* monitor's picture on the second one — a mirror rather than an
+    // extension, and one the compositor has no idea it is producing.
+    let card = FakeCard::two_monitors();
+    let mut scanout = DrmScanout::new(card).unwrap();
+    let (w, h) = scanout.size();
+
+    // Left monitor's columns red, right monitor's blue.
+    let mut frame = vec![0xFFFF_0000_u32; (w * h) as usize];
+    for row in 0..h as usize {
+        for col in 1024..w as usize {
+            frame[row * w as usize + col] = 0xFF00_00FF;
+        }
+    }
+    scanout.show(&frame, w, h);
+
+    let left = u32::from_le_bytes(fixed(&scanout.scanned_out_for(30)[..4]));
+    assert_eq!(
+        left, 0xFFFF_0000,
+        "the first monitor shows the left columns"
+    );
+
+    let right = u32::from_le_bytes(fixed(&scanout.scanned_out_for(31)[..4]));
+    assert_eq!(
+        right, 0xFF00_00FF,
+        "the second monitor shows the columns at its own offset, not the frame's"
+    );
+}
+
+#[test]
+fn a_second_monitors_last_row_is_reached_through_its_own_padded_pitch() {
+    // 1366 * 4 is 5464 and the card pads rows to 5504. A `show` that steps the
+    // destination by the head's *width* instead of its pitch, or by the first
+    // head's pitch, drifts a little further left on every row — the classic
+    // skew, and it only appears on the head whose pitch is padded.
+    let card = FakeCard::two_monitors();
+    let mut scanout = DrmScanout::new(card).unwrap();
+    let (w, h) = scanout.size();
+    let frame = vec![0xFF12_3456_u32; (w * h) as usize];
+    scanout.show(&frame, w, h);
+
+    let pitch = scanout.pitch_for(31) as usize;
+    assert_eq!(pitch, 5504, "the fake pads to 64 bytes, as real drivers do");
+    let bytes = scanout.scanned_out_for(31);
+    let last = (h as usize - 1) * pitch;
+    assert_eq!(
+        u32::from_le_bytes(fixed(&bytes[last..last + 4])),
+        0xFF12_3456,
+        "the bottom-left pixel of the second monitor"
+    );
+}
+
+#[test]
+fn two_connectors_that_can_only_share_one_crtc_yield_one_head() {
+    // A CRTC scans out one framebuffer at a time. Handing the same one to both
+    // connectors would not light the second monitor; it would take the first
+    // monitor's picture away and replace it with the second's. Declining the
+    // head we cannot drive leaves one working monitor instead of two broken
+    // ones.
+    let card = FakeCard::two_monitors();
+    card.edit(|s| s.encoders[1].possible_crtcs = 0b01);
+    let scanout = DrmScanout::new(card.clone()).unwrap();
+
+    assert_eq!(scanout.heads().len(), 1);
+    assert_eq!(scanout.crtc_id(), 1, "claimed by the first connector");
+    assert_eq!(scanout.connector_id(), 30);
+    assert_eq!(
+        scanout.size(),
+        (1024, 768),
+        "and the desktop is that monitor"
+    );
+    card.read(|s| {
+        assert_eq!(
+            s.fbs.len(),
+            2,
+            "no buffers built for a head we cannot drive"
+        );
+    });
+}
+
+#[test]
+fn the_crtc_a_connector_is_already_bound_to_is_still_not_taken_twice() {
+    // The boot-bound preference in `resolve_crtc` returns early, so it is the
+    // path most likely to hand out a CRTC that is already spoken for: the
+    // firmware can leave two connectors routed through one CRTC.
+    let card = FakeCard::two_monitors();
+    card.edit(|s| {
+        s.connectors[0].current_encoder = 50;
+        s.encoders[0].crtc_id = 2;
+        s.connectors[1].current_encoder = 51;
+        s.encoders[1].crtc_id = 2;
+        // …and the second connector can in fact reach either CRTC, so there is
+        // somewhere for it to go once the first has claimed the bound one.
+        s.encoders[1].possible_crtcs = 0b11;
+    });
+    let scanout = DrmScanout::new(card).unwrap();
+    let heads = scanout.heads();
+    assert_eq!(heads.len(), 2, "the second fell back to its bitmask");
+    assert_eq!(heads[0].crtc_id, 2, "the one it was already bound to");
+    assert_eq!(
+        heads[1].crtc_id, 1,
+        "and the second took the other one rather than the same: {heads:?}"
+    );
+}
+
+#[test]
+fn a_monitor_that_dies_mid_session_does_not_take_the_others_with_it() {
+    // An unplugged DisplayPort cable makes one CRTC's flips fail forever. The
+    // single-head code closed the display on the first real error, which as
+    // written would have blanked a working monitor because a different one went
+    // away.
+    let card = FakeCard::two_monitors();
+    let mut scanout = DrmScanout::new(card.clone()).unwrap();
+    let (w, h) = scanout.size();
+    card.edit(|s| s.fail.push((uapi::PAGE_FLIP, ENODEV)));
+    scanout.show(&vec![0xFF00_FF00_u32; (w * h) as usize], w, h);
+
+    assert!(
+        scanout.is_open(),
+        "one monitor going away is not the display server's cue to exit"
+    );
+    assert_eq!(
+        scanout.heads().len(),
+        1,
+        "and the dead one is no longer ours"
+    );
+
+    // The survivor keeps taking frames, and the dead head is not flipped again.
+    let before = card.read(|s| s.flips.len());
+    scanout.show(&vec![0xFF00_00FF_u32; (w * h) as usize], w, h);
+    card.read(|s| {
+        assert_eq!(
+            s.flips.len(),
+            before + 1,
+            "exactly one head flipped: the live one"
+        );
+        assert_eq!(s.flips.last().unwrap().0, 2, "CRTC 2, the survivor");
+    });
+}
+
+#[test]
+fn the_single_head_accessors_name_a_monitor_that_is_still_there() {
+    // `crtc_id`, `connector_id`, `pitch` and `scanned_out` are the "there is
+    // one screen" accessors the diagnostics and the single-head tests use. A
+    // dead head stays in the vector so `Drop` can give its buffers back, so
+    // reading position zero answers with the monitor that just went away —
+    // reporting the pitch of a buffer nothing scans out, and naming a CRTC that
+    // is no longer being flipped.
+    let card = FakeCard::two_monitors();
+    let mut scanout = DrmScanout::new(card.clone()).unwrap();
+    let (w, h) = scanout.size();
+    // Kill head 0 — connector 30 on CRTC 1, the one `first()` would find.
+    card.edit(|s| s.fail.push((uapi::PAGE_FLIP, ENODEV)));
+    scanout.show(&vec![0xFF44_5566_u32; (w * h) as usize], w, h);
+
+    assert_eq!(scanout.connector_id(), 31, "the survivor, not the corpse");
+    assert_eq!(scanout.crtc_id(), 2, "and the CRTC still being flipped");
+    assert_eq!(
+        scanout.pitch(),
+        5504,
+        "the survivor's padded pitch, not the dead head's 4096"
+    );
+    assert_eq!(
+        u32::from_le_bytes(fixed(&scanout.scanned_out()[..4])),
+        0xFF44_5566,
+        "and the bytes read back are the ones a monitor is showing"
+    );
+}
+
+#[test]
+fn a_dead_heads_buffers_are_not_reachable_through_its_connector() {
+    // The other half of the same rule: asking about a monitor that has died
+    // gets nothing rather than its stale last frame. A caller that kept a
+    // `HeadInfo` from before the failure must not be able to read a buffer no
+    // CRTC is scanning out and conclude it is on screen.
+    let card = FakeCard::two_monitors();
+    let mut scanout = DrmScanout::new(card.clone()).unwrap();
+    let (w, h) = scanout.size();
+    card.edit(|s| s.fail.push((uapi::PAGE_FLIP, ENODEV)));
+    scanout.show(&vec![0xFF44_5566_u32; (w * h) as usize], w, h);
+
+    assert_eq!(scanout.pitch_for(30), 0, "connector 30 is gone");
+    assert!(scanout.scanned_out_for(30).is_empty());
+    assert_eq!(scanout.pitch_for(99), 0, "and so is one that never existed");
+    assert!(scanout.scanned_out_for(99).is_empty());
+}
+
+#[test]
+fn a_head_that_never_showed_its_first_frame_still_gives_its_buffers_back() {
+    // A head excluded from the layout is still holding two dumb buffers and two
+    // framebuffer ids. Dropping it from `self.heads` on failure would leak them
+    // for the life of the process, which on a card shared with a second scanout
+    // is a real leak rather than a bookkeeping one.
+    let card = FakeCard::two_monitors();
+    card.edit(|s| s.fail.push((uapi::PAGE_FLIP, ENODEV)));
+    {
+        let scanout = DrmScanout::new(card.clone()).expect("the other monitor still works");
+        assert_eq!(scanout.heads().len(), 1);
+        assert_eq!(
+            scanout.size(),
+            (1366, 768),
+            "the dead head takes no space in the desktop"
+        );
+        assert_eq!(
+            scanout.heads()[0].x,
+            0,
+            "and the survivor moved left to fill the gap"
+        );
+    }
+    card.read(|s| {
+        assert_eq!(
+            s.removed.len(),
+            4,
+            "all four framebuffer ids: {:?}",
+            s.removed
+        );
+        assert_eq!(s.destroyed.len(), 4, "all four GEM handles");
+        assert!(s.fbs.is_empty() && s.dumb.is_empty());
+    });
+}
+
+#[test]
+fn every_head_gives_back_its_framebuffers_when_scanout_is_dropped() {
+    let card = FakeCard::two_monitors();
+    {
+        let _scanout = DrmScanout::new(card.clone()).unwrap();
+        card.read(|s| assert_eq!((s.fbs.len(), s.dumb.len()), (4, 4)));
+    }
+    card.read(|s| {
+        assert_eq!(s.removed, vec![1, 2, 3, 4]);
+        assert_eq!(s.destroyed, vec![1, 2, 3, 4]);
+        assert!(s.fbs.is_empty() && s.dumb.is_empty());
+    });
+}
+
+#[test]
+fn a_monitor_whose_buffers_will_not_allocate_does_not_blank_the_one_next_to_it() {
+    // A card can run out of scanout-capable memory partway through, and the
+    // second monitor is the one that finds out. Failing the whole setup would
+    // mean the *first* monitor — whose buffers allocated fine — shows nothing
+    // either, which is the same wrong answer that sharing a CRTC gives.
+    let card = FakeCard::two_monitors();
+    // The third `CREATE_DUMB` is the second head's first buffer: the first
+    // head's pair has to succeed before this bites, which is the whole point.
+    card.edit(|s| s.fail_nth.push((uapi::CREATE_DUMB, 2, ENODEV)));
+
+    let scanout = DrmScanout::new(card.clone()).expect("the first monitor is still usable");
+    assert_eq!(scanout.heads().len(), 1, "just the one that allocated");
+    assert_eq!(scanout.connector_id(), 30, "the first connector");
+    assert_eq!(
+        scanout.size(),
+        (1024, 768),
+        "and the desktop is sized as if the other were not plugged in"
+    );
+    assert!(scanout.is_open());
+    card.read(|s| assert_eq!((s.fbs.len(), s.dumb.len()), (2, 2)));
+}
+
+#[test]
+fn a_head_that_got_only_one_of_its_two_buffers_gives_that_one_back() {
+    // A head is all-or-nothing: it cannot flip with one buffer. So the second
+    // allocation's failure path has to hand the first buffer back *here* —
+    // nothing owns it yet, since the head never reaches `DrmScanout::heads`,
+    // and this type does not own the card, so a leaked id is a real leak.
+    let card = FakeCard::two_monitors();
+    // The fourth `CREATE_DUMB`: the second head's *second* buffer, after its
+    // first one already succeeded and took fb id 3.
+    card.edit(|s| s.fail_nth.push((uapi::CREATE_DUMB, 3, ENODEV)));
+    {
+        let scanout = DrmScanout::new(card.clone()).expect("the first monitor is still usable");
+        assert_eq!(scanout.heads().len(), 1);
+        card.read(|s| {
+            assert_eq!(
+                s.removed,
+                vec![3],
+                "the orphan was released while the scanout was still alive, \
+                 which is the only moment anything knows about it"
+            );
+            assert_eq!(s.destroyed, vec![3]);
+            assert_eq!(
+                (s.fbs.len(), s.dumb.len()),
+                (2, 2),
+                "leaving exactly the surviving head's pair"
+            );
+        });
+    }
+    card.read(|s| {
+        assert_eq!(s.removed, vec![3, 1, 2], "then the survivor's on drop");
+        assert_eq!(s.destroyed, vec![3, 1, 2]);
+        assert!(s.fbs.is_empty() && s.dumb.is_empty());
+    });
+}
+
 // -------------------------------------------------------- card selection --
 
 /// Permission denied, which is what `/dev/dri/card0` says to a process that is
@@ -1191,10 +1605,21 @@ fn every_index_the_search_covers_has_a_distinct_path() {
 
 // ------------------------------------------------------------------- blit --
 
+/// A viewport onto the top-left of the frame: what every single-head blit is.
+fn view(pitch: u32, width: u32, height: u32) -> Viewport {
+    Viewport {
+        pitch,
+        width,
+        height,
+        src_x: 0,
+        src_y: 0,
+    }
+}
+
 #[test]
 fn blit_writes_nothing_when_the_pitch_is_zero() {
     let mut dst = vec![0xEEu8; 64];
-    blit(&mut dst, 0, 4, 4, &[0xFFFF_FFFF; 16], 4, 4);
+    blit(&mut dst, &view(0, 4, 4), &[0xFFFF_FFFF; 16], 4, 4);
     assert!(dst.iter().all(|&b| b == 0xEE));
 }
 
@@ -1203,7 +1628,7 @@ fn blit_stops_at_the_end_of_the_destination_rather_than_wrapping() {
     // A destination one row shorter than the source claims: the last row must
     // be dropped, not folded back onto the first.
     let mut dst = vec![0u8; 16]; // one row of 4 pixels
-    blit(&mut dst, 16, 4, 2, &[1, 2, 3, 4, 9, 9, 9, 9], 4, 2);
+    blit(&mut dst, &view(16, 4, 2), &[1, 2, 3, 4, 9, 9, 9, 9], 4, 2);
     assert_eq!(u32::from_le_bytes(fixed(&dst[..4])), 1);
     assert_eq!(dst.len(), 16, "and nothing grew");
 }
@@ -1216,9 +1641,81 @@ fn blit_uses_the_source_width_to_step_rows_not_the_copy_width() {
     let mut dst = vec![0u8; 2 * 8];
     // 3-wide source, 2-wide destination.
     let src: Vec<u32> = vec![10, 11, 12, 20, 21, 22];
-    blit(&mut dst, 8, 2, 2, &src, 3, 2);
+    blit(&mut dst, &view(8, 2, 2), &src, 3, 2);
     assert_eq!(u32::from_le_bytes(fixed(&dst[..4])), 10);
     assert_eq!(u32::from_le_bytes(fixed(&dst[4..8])), 11);
     assert_eq!(u32::from_le_bytes(fixed(&dst[8..12])), 20, "not 12");
     assert_eq!(u32::from_le_bytes(fixed(&dst[12..16])), 21);
+}
+
+#[test]
+fn blit_reads_from_the_viewports_origin_and_not_the_frames() {
+    // What makes a head a *viewport*. Ignoring `src_x`/`src_y` copies the
+    // top-left of the desktop to every monitor — the picture is not corrupt,
+    // which is what makes it hard to spot: it is a mirror where an extension
+    // was asked for.
+    let mut dst = vec![0u8; 2 * 8];
+    // A 4x3 frame; the viewport is the 2x2 block at (2, 1).
+    let src: Vec<u32> = vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12];
+    let port = Viewport {
+        pitch: 8,
+        width: 2,
+        height: 2,
+        src_x: 2,
+        src_y: 1,
+    };
+    blit(&mut dst, &port, &src, 4, 3);
+    assert_eq!(u32::from_le_bytes(fixed(&dst[..4])), 7);
+    assert_eq!(u32::from_le_bytes(fixed(&dst[4..8])), 8);
+    assert_eq!(u32::from_le_bytes(fixed(&dst[8..12])), 11);
+    assert_eq!(u32::from_le_bytes(fixed(&dst[12..16])), 12);
+}
+
+#[test]
+fn a_viewport_starting_past_the_end_of_the_frame_copies_nothing() {
+    // The frame the compositor hands us can be smaller than the monitors span —
+    // during a resize, or if `attach_display` failed and the desktop never grew.
+    // Subtracting an offset larger than the width must clamp to zero rather than
+    // wrap into a copy width of four billion.
+    let mut dst = vec![0xEEu8; 32];
+    let port = Viewport {
+        pitch: 8,
+        width: 2,
+        height: 2,
+        src_x: 10,
+        src_y: 0,
+    };
+    blit(&mut dst, &port, &[1, 2, 3, 4, 5, 6, 7, 8], 4, 2);
+    assert!(dst.iter().all(|&b| b == 0xEE), "nothing was written");
+
+    // Same for a viewport below the bottom of the frame.
+    let port = Viewport {
+        pitch: 8,
+        width: 2,
+        height: 2,
+        src_x: 0,
+        src_y: 9,
+    };
+    blit(&mut dst, &port, &[1, 2, 3, 4, 5, 6, 7, 8], 4, 2);
+    assert!(dst.iter().all(|&b| b == 0xEE));
+}
+
+#[test]
+fn a_viewport_wider_than_what_is_left_of_the_frame_copies_what_there_is() {
+    // A monitor hanging off the right edge of a too-small desktop: the part of
+    // it that has pixels gets them, and the rest keeps whatever was there —
+    // rather than the row copy running off the end of the frame.
+    let mut dst = vec![0u8; 2 * 16];
+    let port = Viewport {
+        pitch: 16,
+        width: 4,
+        height: 2,
+        src_x: 2,
+        src_y: 0,
+    };
+    // A 3-wide frame, so only one column lies inside the viewport.
+    blit(&mut dst, &port, &[1, 2, 3, 4, 5, 6], 3, 2);
+    assert_eq!(u32::from_le_bytes(fixed(&dst[..4])), 3);
+    assert_eq!(u32::from_le_bytes(fixed(&dst[4..8])), 0, "and no more");
+    assert_eq!(u32::from_le_bytes(fixed(&dst[16..20])), 6, "the second row");
 }

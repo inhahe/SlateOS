@@ -32366,10 +32366,12 @@ information DRM does not hand over cheaply.
 **Severity.** Low today — QEMU presents one card — and it rises the moment this
 runs on real hardware. Do (1) and (2) together before any bare-metal bring-up.
 
-## TD-COMPOSITOR-DRIVES-ONE-HEAD (lane C, 2026-08-21)
+## TD-COMPOSITOR-DRIVES-ONE-HEAD (lane C, 2026-08-21) — ✅ RESOLVED 2026-08-21
 
 **In short:** with two monitors plugged in, one shows the desktop and the other
 stays dark. Not a bug in what exists — the second screen was never implemented.
+*(Both halves are now done; see the two updates at the end. The original
+diagnosis below turned out to be half wrong, and is kept for that reason.)*
 
 **What.** `choose_display` returns the *first* connected connector that has a
 usable mode and a CRTC that can reach it, and `DrmScanout` owns exactly one
@@ -32417,16 +32419,114 @@ rectangle wider than 2^31 unioned to a bounding box *narrower than either input*
 and intersected with anything to nothing. They now use the already-saturating
 `right()`/`bottom()`.
 
-**Still open — the scanout half.** `DrmScanout` still resolves one CRTC and one
-connector, so the second monitor is now modelled and composited and then not
-scanned out. The remaining work is `struct Head { crtc_id, connector_id, buffers,
-front, x, y, width, height }`, `choose_display` becoming `choose_displays`
-(every connected connector with a usable mode and a *distinct* CRTC), `blit`
-gaining `src_x`/`src_y` so each head copies its own viewport out of the one
-frame, and `main.rs` declaring each head via `attach_display`. The fake card in
-`present/drm/tests.rs` already models a two-CRTC machine with a disconnected head
-and an encoder that can only drive the second CRTC, so this is testable on the
-host today.
+**Update 2026-08-21 (2) — RESOLVED; the scanout half is done too.**
+`DrmScanout` now holds a `Vec<Head>`, one per connected connector that has a
+usable mode and a CRTC no earlier connector claimed, each with its own buffer
+pair and its own page flip. `blit` takes a `Viewport` — pitch, size and the
+head's `(src_x, src_y)` within the composited frame — so each monitor copies out
+its own rectangle of the one desktop-sized picture, and `Present` did not gain a
+method or a parameter. `main.rs` builds the compositor at head 0 and declares
+the rest with `attach_display`, then cross-checks `frame_size()` against
+`screen.size()` and warns if they disagree.
+
+Three things that were latent in the single-head code and became defects the
+moment there were two, all fixed here:
+
+* **CRTC exclusivity.** `resolve_crtc`'s preference for the CRTC a connector was
+  already bound to at boot would hand the same one to two connectors, which does
+  not light the second monitor — it replaces the first monitor's picture with
+  the second's, every frame. `choose_displays` now carries a `taken` list and
+  declines a connector it cannot give a free CRTC to.
+* **A flip failure closed the whole display.** Unplugging one monitor
+  mid-session would have blanked the other and exited the display server. A
+  failing head is now marked dead individually; `is_open()` goes false only when
+  none is left.
+* **The destination row stride.** Writing every head at the first head's pitch
+  skews any monitor whose width pads differently — invisible on one head, and on
+  two whose widths happen to pad alike.
+* **An allocation failure was fatal, and a partial one leaked.** A head whose
+  flip failed was declined, but a head whose *buffers* would not allocate
+  returned `Err` from `new()` and blanked the monitor next to it that had
+  allocated fine. Worse, when the second of a head's two `CREATE_DUMB`s failed,
+  the first buffer was owned by nobody — the head never reaches
+  `DrmScanout::heads`, which is what `Drop` walks — so its framebuffer id and
+  GEM handle leaked for the life of the process. `make_head` now releases the
+  orphan at the point of failure and `new()` declines the head, returning an
+  error only when no head was built at all.
+* **The per-head accessors indexed a different list from the one `heads()`
+  reports.** Dead heads stay in the vector so `Drop` can return their buffers,
+  but `heads()` filters them out, so a caller enumerating `heads()` and passing
+  the loop index back to `pitch_of(i)` read the wrong monitor once one died.
+  They are now keyed on the connector id — `pitch_for` / `scanned_out_for` —
+  and the single-head accessors (`crtc_id`, `connector_id`, `pitch`,
+  `scanned_out`) resolve through one `first_live()` helper instead of reading
+  position zero, which after a failure is the head that just went away.
+
+A head that fails stays in the vector so `Drop` still returns its two dumb
+buffers and two framebuffer ids; dropping it would leak four kernel objects,
+which matters because this type does not own the card. Rationale, and the
+rejected alternatives for each of the three rules: `design-decisions.md` §515.
+18 new tests, 17 proved by defect reintroduction and the eighteenth recorded
+there as additional coverage.
+
+**What remains, and is filed elsewhere.** Per-head scale factor and rotation are
+not possible under the one-surface arrangement (`design-decisions.md` §514) and
+monitors can only be arranged in a row, because the surface's origin is the
+desktop's origin. Each monitor runs at the mode it came up in —
+`TD-COMPOSITOR-CANNOT-CHANGE-MODE`. Hotplug of a monitor *after* startup is not
+handled: heads are enumerated once in `DrmScanout::new`, so plugging a screen in
+does nothing until the display server restarts. That last one is new debt and is
+filed below as `TD-COMPOSITOR-IGNORES-MONITOR-HOTPLUG`.
+
+## TD-COMPOSITOR-IGNORES-MONITOR-HOTPLUG (lane C, 2026-08-21)
+
+**In short:** plugging a second monitor in while the desktop is running does
+nothing — it stays dark until the display server is restarted. Unplugging one
+works, in the sense that the remaining screen keeps going, but the desktop does
+not shrink back and windows stranded on the departed monitor stay stranded.
+
+**What.** `DrmScanout::new` enumerates connectors once and builds the head list
+from that. Nothing re-reads `GETCONNECTOR` afterwards, so a connector that
+becomes `CONNECTED` later is never noticed. On the way out, a head whose flips
+start failing is marked dead (`head.alive = false`) and stops being drawn on,
+which keeps the *other* monitors alive — but the composited frame keeps its
+size, `Compositor` is never told the display went away, and so
+`DisplayManager` still lists it, `work_bounds_for` still resolves to it, and a
+window maximised there is on a screen that no longer exists.
+
+**Where.** `gui/compositor/src/present/drm.rs` — `DrmScanout::new`,
+`lay_out_heads`, and the `Err(_)` arm of `Present::show`.
+
+**What the proper fix looks like.** Two halves, and the second is the load-
+bearing one:
+
+1. *Detect.* DRM signals hotplug with a uevent on a netlink socket, which
+   SlateOS's kernel does not expose. The portable fallback is to re-probe every
+   connector periodically (a `GETCONNECTOR` per connector per second is cheap)
+   and diff against the head list. Polling is the right first implementation
+   here because it needs nothing from lane A.
+2. *Propagate.* A head appearing or disappearing has to reach `Compositor` as
+   an `attach_display` / a new `detach_display`, which must re-run
+   `relayout_for_desktop_change` so the surface is resized, fullscreen windows
+   are re-fitted and stranded windows are rescued — the machinery §512 and §513
+   built, which already does exactly this for a *resize* and has never been
+   asked to do it for a removal. `detach_display` does not exist yet and is the
+   real work: it is `attach_display` in reverse, and it must decide what happens
+   to a window whose only monitor left, which `bring_stranded_windows_back`
+   already answers for the resize case.
+
+Note that `Present` currently has no way to tell its caller anything except
+"still open", so the seam for (2) has to be added: either a method that returns
+the head list and is polled by `Server::run_with`, or the same
+`Present::input`-shaped channel that `TD-COMPOSITOR-HAS-NO-LOCAL-INPUT` needs.
+Doing both through one mechanism is probably right and is a reason to do them
+together.
+
+**Severity.** Low. It costs a restart, on hardware SlateOS does not yet run on
+(QEMU presents one card), and nothing is corrupted — the surviving monitors
+keep a correct picture. It rises to medium alongside any real bare-metal
+bring-up, and it is the obvious next thing after
+`TD-COMPOSITOR-DRIVES-ONE-HEAD`.
 
 ## TD-COMPOSITOR-HAS-NO-LOCAL-INPUT (lane C, 2026-08-21)
 
@@ -53101,3 +53201,38 @@ tested today. On two it is a visible misfeature the first time anyone
 fullscreens anything on the secondary screen. It does not corrupt state — the
 restore rectangle is captured before the move, so leaving fullscreen still
 returns the window to where it was — and it does not get worse with time.
+
+## B-AUTH-DAEMON-RATE-LIMIT-TESTS-RACE-A-ONE-SECOND-WINDOW (lane B, filed by lane C 2026-08-21) — OPEN, filed as a request
+
+**In short:** four userspace daemons test their password rate limiter by making
+four wrong guesses and asserting the fifth is refused. The refusal lasts exactly
+one *real* second, and the four guesses each run a real password hash, so on a
+loaded machine the window is already over by the time the fifth guess happens
+and the test fails. Observed once in a lane-C full-workspace run.
+
+**Where it lives:** `userspace/sshd/src/main.rs` (observed),
+`userspace/ftpd/src/main.rs`, `userspace/doas/src/main.rs`,
+`userspace/logind/src/main.rs` — all four build the authenticator with the real
+clock. `userspace/authlib/src/lib.rs` ~line 520 is the window
+(`now < last_failure_secs + delay_for(failures)`; `delay_for(4) == 1`).
+
+**Reproduce:** `cargo test --workspace --target x86_64-pc-windows-gnu` under
+load. Green in isolation (`sshd` 140/140). Observed:
+`sshd/src/main.rs:4902: expected a rate limit, got Rejected`.
+
+**Proper fix:** pin the clock, as `authlib`'s own copy of the same test already
+does — `Authenticator::with_clock(...)` over an `AtomicU64` the test steps
+deliberately. This also strengthens the assertions: a frozen clock lets them
+check `RateLimited { retry_after_secs: 1 }` at a known instant instead of
+`matches!(.., RateLimited { .. })` at whatever instant the scheduler provided.
+
+**Why it matters more than a flake:** the failing direction is noisy but the
+*passing* direction is quietly weak. A pass proves only "refused within a second
+of the fourth failure", which a mis-computed delay would also satisfy. The tests
+are worth less than their names claim even when green.
+
+**Not lane C's tree.** Filed as
+`requests/c-b-auth-daemon-rate-limit-tests-race-a-one-second-window.md` with the
+full diagnosis. Distinct from the resolved
+`B-FTPD-SSHD-AUTH-TESTS-SHARE-TEMP-FILES-AND-FLAKE` — that was shared temp
+files and lane B's `ScratchDir` fix holds; this is wall-clock timing.

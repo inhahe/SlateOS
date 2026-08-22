@@ -14,9 +14,13 @@
 //!
 //! ## Where the frame goes
 //!
-//! On SlateOS this opens `/dev/dri/card0`, reads the mode the display is
-//! already running, and page-flips composited frames onto it — see
-//! [`compositor::present::drm`]. That is the target. On Windows it opens a host
+//! On SlateOS this opens `/dev/dri/card0`, reads the mode **each** attached
+//! display is already running, and page-flips composited frames onto every one
+//! of them — see [`compositor::present::drm`]. That is the target. The
+//! compositor is built at the first monitor's size and told about the rest with
+//! `attach_display`, which grows the composited frame to the bounding box of the
+//! lot; each monitor then scans out its own rectangle of that one frame. On
+//! Windows it opens a host
 //! window and draws into it instead, so a person can see the desktop the
 //! compositor composites and type at it — see [`compositor::present::host`];
 //! that is a **development harness**. Everywhere else, and under `--headless`,
@@ -323,6 +327,7 @@ fn run_headless(server: &mut Server, options: &Options) -> std::io::Result<()> {
 /// of the screen with a border round it.
 #[cfg(target_os = "linux")]
 fn run(server: &mut Server, options: &Options) -> std::io::Result<()> {
+    use compositor::Display;
     use compositor::present::drm::DrmScanout;
 
     if options.headless {
@@ -341,12 +346,47 @@ fn run(server: &mut Server, options: &Options) -> std::io::Result<()> {
                     );
                 }
             }
-            eprintln!(
-                "compositor: scanning out on connector {} via CRTC {}",
-                screen.connector_id(),
-                screen.crtc_id()
-            );
-            let mut compositor = make_compositor(width, height);
+            let heads = screen.heads();
+            for head in &heads {
+                eprintln!(
+                    "compositor: scanning out on connector {} via CRTC {} \
+                     ({}x{} at +{}+{})",
+                    head.connector_id, head.crtc_id, head.width, head.height, head.x, head.y
+                );
+            }
+            // Built at the *first* monitor and then told about the rest, rather
+            // than built at the bounding box: `attach_display` places each new
+            // monitor to the right of the ones already there, which is the same
+            // rule `DrmScanout::new` used to lay the heads out, so the two
+            // arrive at the same arrangement. Building at the bounding box and
+            // then attaching would grow it a second time.
+            let (first_w, first_h) = heads
+                .first()
+                .map_or((width, height), |h| (h.width, h.height));
+            let mut compositor = make_compositor(first_w, first_h);
+            for (index, head) in heads.iter().enumerate().skip(1) {
+                let id = u32::try_from(index).unwrap_or(u32::MAX);
+                let display = Display::new(id, head.width, head.height, REFRESH_HZ, 1.0, false);
+                if let Err(e) = compositor.attach_display(display) {
+                    // A monitor the compositor cannot paint for is worse than
+                    // one it does not know about: the scanout would go on
+                    // copying a rectangle of the frame that was never composed.
+                    // Say so, and carry on with the screens that did fit.
+                    eprintln!(
+                        "compositor: cannot composite for connector {} ({e}); it \
+                         will show whatever the desktop has at +{}+{}",
+                        head.connector_id, head.x, head.y
+                    );
+                }
+            }
+            let composed = compositor.frame_size();
+            if composed != (width, height) {
+                eprintln!(
+                    "compositor: warning - the desktop is {}x{} but the monitors \
+                     span {width}x{height}; part of a screen will not be painted",
+                    composed.0, composed.1
+                );
+            }
             server.run_with(&mut compositor, &mut screen)
         }
         Err(e) => {

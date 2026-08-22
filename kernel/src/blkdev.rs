@@ -371,6 +371,23 @@ pub fn discard(name: &str, start_lba: u64, count: u64) -> Option<KernelResult<()
     with_device(name, |dev| dev.discard(start_lba, count))
 }
 
+/// Metadata for one registered block device, by name.
+///
+/// Returns the registration-time snapshot, whose `name` the registry stamped
+/// as authoritative.  **Prefer this over `with_device(name, |d| d.info())`**:
+/// that form reaches past the registry to the driver's own `info()`, which
+/// does not know the name it was registered under — [`RamBlockDevice`] returns
+/// an empty one, so a scratch device printed that way shows up as `Device ''`.
+/// Every existing caller of the `with_device` form silently works around this
+/// by hardcoding the device name into its format string.
+pub fn info(name: &str) -> Option<BlockDeviceInfo> {
+    let registry = REGISTRY.lock();
+    registry
+        .iter()
+        .find(|entry| entry.name == name)
+        .map(|entry| entry.info.clone())
+}
+
 /// List all registered block devices.
 ///
 /// Returns the metadata snapshotted at registration time (real capacity,
@@ -440,7 +457,12 @@ impl RamBlockDevice {
 impl BlockDevice for RamBlockDevice {
     fn info(&self) -> BlockDeviceInfo {
         BlockDeviceInfo {
-            name: String::new(), // overridden by the registry on register().
+            // A RAM disk has no name of its own — the registry assigns one at
+            // `register()` time and stamps it into the snapshot it keeps.  That
+            // stamping does NOT reach back here, so this stays empty and a
+            // caller reading the name must go through `blkdev::info(name)`
+            // rather than calling this method directly.
+            name: String::new(),
             sector_count: self.sector_count,
             sector_size: SECTOR_SIZE as u32,
             read_only: self.read_only,

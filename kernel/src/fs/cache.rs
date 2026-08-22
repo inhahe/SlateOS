@@ -1064,21 +1064,22 @@ pub fn self_test() -> KernelResult<()> {
 /// down on the error paths as well as the success one.
 #[allow(clippy::arithmetic_side_effects)]
 fn self_test_on(device: &str) -> KernelResult<()> {
-    let exists = blkdev::with_device(device, |dev| {
-        let info = dev.info();
-        crate::serial_println!(
-            "[bcache]   Device '{}': {} sectors",
-            info.name,
-            info.sector_count,
-        );
-    });
-    if exists.is_none() {
+    // Read the metadata through the registry, not through
+    // `with_device(|d| d.info())`: the latter asks the driver, which does not
+    // know the name it was registered under, so a RAM disk reports itself as
+    // `Device ''`.
+    let Some(info) = blkdev::info(device) else {
         crate::serial_println!(
             "[bcache]   FAIL: scratch device '{}' did not register",
             device
         );
         return Err(KernelError::NoSuchDevice);
-    }
+    };
+    crate::serial_println!(
+        "[bcache]   Device '{}': {} sectors",
+        info.name,
+        info.sector_count,
+    );
 
     // Seed sector 0 with a recognisable pattern, written straight to the device
     // so it is independent of the cache under test.  Without it, "the second

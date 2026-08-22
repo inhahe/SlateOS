@@ -3523,6 +3523,14 @@ pub fn sys_process_spawn_ex2(args: &SyscallArgs) -> SyscallResult {
 
     // Copy in the part we understand, leaving any fields the caller stopped
     // short of at zero.
+    //
+    // This re-reads the first eight bytes, so a peer thread could change
+    // `struct_size` between the two reads.  That is deliberate and harmless:
+    // `copy_len`/`tail_len` are already fixed from the *first* read, and
+    // `ex2.struct_size` is never consulted again.  A racing write can therefore
+    // only alter a field nothing looks at — it cannot make the kernel copy a
+    // different number of bytes than it decided to.  Every field that is read is
+    // read exactly once, out of this kernel-owned copy.
     let head = match crate::mm::user::read_user_vec(args.arg0, copy_len, copy_len) {
         Ok(b) => b,
         Err(e) => return SyscallResult::err(e),
@@ -3581,11 +3589,24 @@ pub fn sys_process_spawn_ex2(args: &SyscallArgs) -> SyscallResult {
     match ex2.cap_mode {
         SPAWN_CAP_MODE_INHERIT_ALL => spawn_ex_common(&spawn_args, CapInherit::All),
         SPAWN_CAP_MODE_SUBSET => {
-            let cap_count = if ex2.cap_ptr == 0 {
-                0
-            } else {
-                ex2.cap_count as usize
-            };
+            // A null pointer with a non-zero count is a caller bug, and is
+            // refused rather than read as "no capabilities".
+            //
+            // `SYS_PROCESS_SPAWN_EX` is lenient about exactly this shape for its
+            // fd map and argv, treating a null pointer as an absent *optional*
+            // array.  Here the array is not optional: the caller has already
+            // said `SPAWN_CAP_MODE_SUBSET`, so it is asking for a specific list.
+            // Quietly substituting the empty list would start a child holding
+            // nothing, which fails later and elsewhere — the precise failure
+            // mode this whole syscall exists to stop.  The safe *direction* is
+            // not an excuse to silently rewrite a request.
+            //
+            // `cap_ptr == 0 && cap_count == 0` stays legal: both spellings say
+            // "no capabilities", and they agree.
+            if ex2.cap_ptr == 0 && ex2.cap_count != 0 {
+                return SyscallResult::err(KernelError::InvalidArgument);
+            }
+            let cap_count = ex2.cap_count as usize;
             let infos = match crate::mm::user::read_user_items::<CapEntryInfo>(
                 ex2.cap_ptr,
                 cap_count,

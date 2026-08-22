@@ -1119,6 +1119,7 @@ mod tests {
     )]
 
     use super::*;
+    use crate::draw_check::assert_nothing_is_drawn_and_never_seen;
     use crate::palette_check::assert_drawn_from;
 
     fn test_palette() -> Palette {
@@ -1430,31 +1431,10 @@ mod tests {
     /// hidden command is invisible in every screenshot too, which is why this
     /// wants a test rather than an eye.
     ///
-    /// The rule is deliberately conservative — it only reports a fill that a
-    /// *later* fill contains outright, while being opaque and no more rounded
-    /// at the corners. Containment plus equal-or-smaller radii is enough to
-    /// make coverage total: where the two outlines touch they are the same
-    /// curve, and everywhere else the earlier rect is in the later one's
-    /// interior. Anything a partial overlap could hide is left alone, because
-    /// partial overlap is how every panel on the desktop draws a border.
+    /// The rule itself — and why it is deliberately narrow — lives in
+    /// [`crate::draw_check`], which this panel's own bug is the reason for.
     #[test]
     fn the_panel_draws_nothing_that_is_immediately_erased() {
-        /// `(x, y, w, h, radii, opaque)` for a fill, or `None` for any other
-        /// command — text and images are never treated as coverers.
-        fn fill(c: &RenderCommand) -> Option<(f32, f32, f32, f32, CornerRadii, bool)> {
-            match c {
-                RenderCommand::FillRect {
-                    x,
-                    y,
-                    width,
-                    height,
-                    color,
-                    corner_radii,
-                } => Some((*x, *y, *width, *height, *corner_radii, color.a == 255)),
-                _ => None,
-            }
-        }
-
         for light in [false, true] {
             let p = Palette::for_mode(light);
             for charge in [0_u32, 5, 15, 35, 80, 100] {
@@ -1465,44 +1445,10 @@ mod tests {
                         ChargeState::Discharging,
                     ));
                     ui.set_active_tab(tab);
-                    let cmds = ui.render(&p, 0.0, 0.0, 500.0);
-
-                    for (i, under) in cmds.iter().enumerate() {
-                        let Some((ux, uy, uw, uh, ur, _)) = fill(under) else {
-                            continue;
-                        };
-                        // The other way to draw nothing: an empty rectangle.
-                        // An empty battery used to push a zero-width charge
-                        // fill, which no later command covers -- the rule below
-                        // would never have found it.
-                        assert!(
-                            uw > 0.0 && uh > 0.0,
-                            "command {i} is a {uw}x{uh} fill at {ux},{uy}, which \
-                             covers no pixels (charge={charge}%, tab={tab}, \
-                             light={light})"
-                        );
-                        for over in cmds.iter().skip(i + 1) {
-                            let Some((ox, oy, ow, oh, or, opaque)) = fill(over) else {
-                                continue;
-                            };
-                            let contains = opaque
-                                && ox <= ux
-                                && oy <= uy
-                                && ox + ow >= ux + uw
-                                && oy + oh >= uy + uh;
-                            let no_rounder = or.top_left <= ur.top_left
-                                && or.top_right <= ur.top_right
-                                && or.bottom_right <= ur.bottom_right
-                                && or.bottom_left <= ur.bottom_left;
-                            assert!(
-                                !(contains && no_rounder),
-                                "command {i} ({uw}x{uh} at {ux},{uy}) is covered \
-                                 outright by a later opaque fill ({ow}x{oh} at \
-                                 {ox},{oy}) — it is drawn and never seen \
-                                 (charge={charge}%, tab={tab}, light={light})"
-                            );
-                        }
-                    }
+                    assert_nothing_is_drawn_and_never_seen(
+                        &ui.render(&p, 0.0, 0.0, 500.0),
+                        &format!("power panel (charge={charge}%, tab={tab}, light={light})"),
+                    );
                 }
             }
         }

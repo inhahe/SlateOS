@@ -5,6 +5,7 @@
 //! VPN profiles, and firewall rules. Communicates with the network
 //! stack via IPC for actual configuration changes.
 
+use appearance::{Palette, readable_on};
 use guitk::color::Color;
 use guitk::idseq::IdSeq;
 use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
@@ -12,23 +13,45 @@ use guitk::style::CornerRadii;
 use guitk::text;
 
 // ============================================================================
-// Catppuccin Mocha palette
+// Colour
 // ============================================================================
-
-const BASE: Color = Color::from_hex(0x1E1E2E);
-const CRUST: Color = Color::from_hex(0x11111B);
-const SURFACE0: Color = Color::from_hex(0x313244);
-const SURFACE1: Color = Color::from_hex(0x45475A);
-const SURFACE2: Color = Color::from_hex(0x585B70);
-const TEXT: Color = Color::from_hex(0xCDD6F4);
-const SUBTEXT0: Color = Color::from_hex(0xA6ADC8);
-const SUBTEXT1: Color = Color::from_hex(0xBAC2DE);
-const BLUE: Color = Color::from_hex(0x89B4FA);
-const GREEN: Color = Color::from_hex(0xA6E3A1);
-const RED: Color = Color::from_hex(0xF38BA8);
-const YELLOW: Color = Color::from_hex(0xF9E2AF);
-const PEACH: Color = Color::from_hex(0xFAB387);
-const OVERLAY0: Color = Color::from_hex(0x6C7086);
+//
+// This panel used to keep fourteen Catppuccin Mocha constants of its own, so
+// it stayed dark whatever the user chose. It now draws from the resolved
+// `Palette` it is handed. Three judgements are worth stating, because none of
+// them is recoverable from the code alone:
+//
+// * **Eight sites take the accent.** The active tab's label; four *loops* of
+//   toggle switch — the status tab's four quick toggles, the three firewall
+//   options, DNS-over-HTTPS, and proxy authentication; the two segmented
+//   pickers (DNS mode and proxy type); and the "+ Add rule" button. Each of
+//   those loops is one site in the source even where it draws several pills
+//   on screen, which is why the tests below assert per *loop* and not per
+//   pill. All eight mark *where you are* or *what pressing this will do*,
+//   which is the accent's job.
+//
+// * **Five scales stay categorical**, and deliberately do not follow the
+//   accent: connection state (connected / connecting / limited / off), Wi-Fi
+//   security strength, signal strength, a firewall rule's allow / block / ask,
+//   and whether the firewall is up at all. Every one of these is read as a
+//   *measurement or a category*, and three are drawn as a column down a list —
+//   a Wi-Fi list where every visible row carries its own signal bars and its
+//   own lock is the strongest case there is for keeping hues distinct, because
+//   the rows are compared against each other in one glance. On a Green desktop
+//   an accented "connected" would be indistinguishable from "allow", and a Red
+//   one would make a strong signal look like a blocked rule.
+//
+// * **Four labels are chosen from the fill they sit on**, not fixed. All four
+//   were `p.crust`, which is right only while the thing underneath is
+//   guaranteed pale. Three of them — the active segment of each picker and
+//   the "+ Add rule" button — sit on the accent, so they take `on_accent()`.
+//   The fourth is a firewall rule's action badge, which sits on a
+//   *categorical* fill, so it takes `readable_on` of that fill directly.
+//   `p.crust` happens to stay legible on all six categorical values today only
+//   because Mocha's green/red/yellow are pale while Latte's are deep, so
+//   crust flips with them; that is a coincidence of two palettes, not a
+//   property anyone maintains, and `readable_on` is the thing that actually
+//   answers the question being asked.
 
 // ============================================================================
 // Connection types and states
@@ -96,12 +119,12 @@ impl ConnectionState {
     }
 
     /// Status color.
-    pub fn color(self) -> Color {
+    pub fn color(self, p: &Palette) -> Color {
         match self {
-            Self::Connected => GREEN,
-            Self::Connecting => YELLOW,
-            Self::Limited | Self::NoInternet => PEACH,
-            Self::Disconnected | Self::Disabled => OVERLAY0,
+            Self::Connected => p.green,
+            Self::Connecting => p.yellow,
+            Self::Limited | Self::NoInternet => p.peach,
+            Self::Disconnected | Self::Disabled => p.overlay0,
         }
     }
 }
@@ -305,12 +328,12 @@ impl WiFiSecurity {
     }
 
     /// Color based on security strength.
-    pub fn color(self) -> Color {
+    pub fn color(self, p: &Palette) -> Color {
         match self.strength() {
-            0 => RED,
-            1 => PEACH,
-            2 => YELLOW,
-            _ => GREEN,
+            0 => p.red,
+            1 => p.peach,
+            2 => p.yellow,
+            _ => p.green,
         }
     }
 }
@@ -363,12 +386,12 @@ impl SignalQuality {
     }
 
     /// Color for signal indicator.
-    pub fn color(self) -> Color {
+    pub fn color(self, p: &Palette) -> Color {
         match self {
-            Self::Weak => RED,
-            Self::Fair => PEACH,
-            Self::Good => YELLOW,
-            Self::Excellent => GREEN,
+            Self::Weak => p.red,
+            Self::Fair => p.peach,
+            Self::Good => p.yellow,
+            Self::Excellent => p.green,
         }
     }
 }
@@ -613,11 +636,11 @@ impl FirewallAction {
     }
 
     /// Color for the action.
-    pub fn color(self) -> Color {
+    pub fn color(self, p: &Palette) -> Color {
         match self {
-            Self::Allow => GREEN,
-            Self::Block => RED,
-            Self::Ask => YELLOW,
+            Self::Allow => p.green,
+            Self::Block => p.red,
+            Self::Ask => p.yellow,
         }
     }
 }
@@ -1029,6 +1052,33 @@ impl NetworkSettingsTab {
     }
 }
 
+/// The gap between two segments of a segmented picker.
+const SEGMENT_GAP: f32 = 4.0;
+
+/// The x and width of segment `i` of `n`, in a picker row `width` wide at `x`.
+///
+/// Both segmented pickers in this panel lay out the same way — equal segments
+/// separated by [`SEGMENT_GAP`], together filling the row exactly — but they
+/// had each drifted from it in a different direction, which is why this is one
+/// function rather than two open-coded expressions:
+///
+/// * The DNS mode picker advanced no x at all. Both of its segments were drawn
+///   at the row's own x, so "Automatic" was painted and then covered outright
+///   by "Manual": the option existed, was never visible, and could not be
+///   picked. `draw_check`'s "drawn and never seen" rule is what surfaced it.
+/// * The proxy type picker sized its segments as `(width - 12) / n` and then
+///   spaced them by `btn_w + 4`, which is only consistent for one particular
+///   `n`; at four segments the row already ran ~4px past its right edge, and
+///   at six it would have run past by ~20.
+///
+/// Taking the gap out of the total *before* dividing is what makes the row fit
+/// for any `n`: `n` segments have `n - 1` gaps between them.
+fn segment_bounds(x: f32, width: f32, i: usize, n: usize) -> (f32, f32) {
+    let n_f = n as f32;
+    let seg_w = (width - SEGMENT_GAP * (n_f - 1.0)) / n_f;
+    (x + i as f32 * (seg_w + SEGMENT_GAP), seg_w)
+}
+
 /// Network settings UI state.
 pub struct NetworkSettingsUI {
     pub settings: NetworkSettings,
@@ -1079,7 +1129,14 @@ impl NetworkSettingsUI {
     }
 
     /// Render the complete settings panel.
-    pub fn render(&self, x: f32, y: f32, width: f32, height: f32) -> Vec<RenderCommand> {
+    pub fn render(
+        &self,
+        p: &Palette,
+        x: f32,
+        y: f32,
+        width: f32,
+        height: f32,
+    ) -> Vec<RenderCommand> {
         let mut cmds = Vec::new();
 
         // Panel background
@@ -1088,7 +1145,7 @@ impl NetworkSettingsUI {
             y,
             width,
             height,
-            color: BASE,
+            color: p.base,
             corner_radii: CornerRadii::all(8.0),
         });
 
@@ -1098,7 +1155,7 @@ impl NetworkSettingsUI {
             y: y + 20.0,
             text: "Network & Internet".to_string(),
             font_size: 22.0,
-            color: TEXT,
+            color: p.text,
             font_weight: FontWeightHint::Bold,
             max_width: None,
             overflow: TextOverflow::Clip,
@@ -1118,7 +1175,7 @@ impl NetworkSettingsUI {
                     y: tab_y,
                     width: tw,
                     height: 32.0,
-                    color: SURFACE0,
+                    color: p.surface0,
                     corner_radii: CornerRadii::all(6.0),
                 });
             }
@@ -1128,7 +1185,7 @@ impl NetworkSettingsUI {
                 y: tab_y + 8.0,
                 text: label.to_string(),
                 font_size: 13.0,
-                color: if is_active { BLUE } else { SUBTEXT0 },
+                color: if is_active { p.accent } else { p.subtext0 },
                 font_weight: if is_active {
                     FontWeightHint::Bold
                 } else {
@@ -1150,7 +1207,7 @@ impl NetworkSettingsUI {
             y: content_y,
             width: width - 16.0,
             height: content_h,
-            color: CRUST,
+            color: p.crust,
             corner_radii: CornerRadii::all(6.0),
         });
 
@@ -1161,22 +1218,22 @@ impl NetworkSettingsUI {
 
         match self.active_tab {
             NetworkSettingsTab::Status => {
-                self.render_status_tab(&mut cmds, cx, cy, cw);
+                self.render_status_tab(p, &mut cmds, cx, cy, cw);
             }
             NetworkSettingsTab::WiFi => {
-                self.render_wifi_tab(&mut cmds, cx, cy, cw);
+                self.render_wifi_tab(p, &mut cmds, cx, cy, cw);
             }
             NetworkSettingsTab::Ethernet => {
-                self.render_ethernet_tab(&mut cmds, cx, cy, cw);
+                self.render_ethernet_tab(p, &mut cmds, cx, cy, cw);
             }
             NetworkSettingsTab::Dns => {
-                self.render_dns_tab(&mut cmds, cx, cy, cw);
+                self.render_dns_tab(p, &mut cmds, cx, cy, cw);
             }
             NetworkSettingsTab::Proxy => {
-                self.render_proxy_tab(&mut cmds, cx, cy, cw);
+                self.render_proxy_tab(p, &mut cmds, cx, cy, cw);
             }
             NetworkSettingsTab::Firewall => {
-                self.render_firewall_tab(&mut cmds, cx, cy, cw);
+                self.render_firewall_tab(p, &mut cmds, cx, cy, cw);
             }
         }
 
@@ -1184,7 +1241,14 @@ impl NetworkSettingsUI {
     }
 
     /// Render the status overview tab.
-    fn render_status_tab(&self, cmds: &mut Vec<RenderCommand>, x: f32, y: f32, width: f32) {
+    fn render_status_tab(
+        &self,
+        p: &Palette,
+        cmds: &mut Vec<RenderCommand>,
+        x: f32,
+        y: f32,
+        width: f32,
+    ) {
         let mut row_y = y;
 
         // Connection status card
@@ -1193,15 +1257,15 @@ impl NetworkSettingsUI {
             y: row_y,
             width,
             height: 80.0,
-            color: SURFACE0,
+            color: p.surface0,
             corner_radii: CornerRadii::all(8.0),
         });
 
         let status = self.settings.connection_status();
         let status_color = if let Some(iface) = self.settings.default_interface() {
-            iface.state.color()
+            iface.state.color(p)
         } else {
-            OVERLAY0
+            p.overlay0
         };
 
         // Status dot
@@ -1219,7 +1283,7 @@ impl NetworkSettingsUI {
             y: row_y + 16.0,
             text: status.to_string(),
             font_size: 18.0,
-            color: TEXT,
+            color: p.text,
             font_weight: FontWeightHint::Bold,
             max_width: None,
             overflow: TextOverflow::Clip,
@@ -1236,7 +1300,7 @@ impl NetworkSettingsUI {
                     iface.speed_display()
                 ),
                 font_size: 12.0,
-                color: SUBTEXT0,
+                color: p.subtext0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(width - 52.0),
                 overflow: TextOverflow::Ellipsis,
@@ -1259,7 +1323,7 @@ impl NetworkSettingsUI {
                 y: row_y,
                 width,
                 height: 36.0,
-                color: SURFACE0,
+                color: p.surface0,
                 corner_radii: CornerRadii::all(4.0),
             });
 
@@ -1268,7 +1332,7 @@ impl NetworkSettingsUI {
                 y: row_y + 10.0,
                 text: label.to_string(),
                 font_size: 13.0,
-                color: TEXT,
+                color: p.text,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
                 overflow: TextOverflow::Clip,
@@ -1276,7 +1340,7 @@ impl NetworkSettingsUI {
 
             // Toggle indicator
             let toggle_x = x + width - 56.0;
-            let toggle_bg = if *enabled { BLUE } else { SURFACE2 };
+            let toggle_bg = if *enabled { p.accent } else { p.surface2 };
             cmds.push(RenderCommand::FillRect {
                 x: toggle_x,
                 y: row_y + 8.0,
@@ -1296,7 +1360,7 @@ impl NetworkSettingsUI {
                 y: row_y + 10.0,
                 width: 16.0,
                 height: 16.0,
-                color: TEXT,
+                color: p.text,
                 corner_radii: CornerRadii::all(8.0),
             });
 
@@ -1310,7 +1374,7 @@ impl NetworkSettingsUI {
             y: row_y,
             text: "Network interfaces".to_string(),
             font_size: 14.0,
-            color: SUBTEXT1,
+            color: p.subtext1,
             font_weight: FontWeightHint::Bold,
             max_width: None,
             overflow: TextOverflow::Clip,
@@ -1323,7 +1387,7 @@ impl NetworkSettingsUI {
                 y: row_y,
                 width,
                 height: 48.0,
-                color: SURFACE0,
+                color: p.surface0,
                 corner_radii: CornerRadii::all(4.0),
             });
 
@@ -1332,7 +1396,7 @@ impl NetworkSettingsUI {
                 y: row_y + 8.0,
                 text: format!("{} ({})", iface.display_name, iface.name),
                 font_size: 13.0,
-                color: TEXT,
+                color: p.text,
                 font_weight: FontWeightHint::Bold,
                 max_width: None,
                 overflow: TextOverflow::Clip,
@@ -1348,7 +1412,7 @@ impl NetworkSettingsUI {
                     NetworkInterface::format_bytes(iface.rx_bytes)
                 ),
                 font_size: 11.0,
-                color: SUBTEXT0,
+                color: p.subtext0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(width - 80.0),
                 overflow: TextOverflow::Ellipsis,
@@ -1360,7 +1424,7 @@ impl NetworkSettingsUI {
                 y: row_y + 18.0,
                 width: 12.0,
                 height: 12.0,
-                color: iface.state.color(),
+                color: iface.state.color(p),
                 corner_radii: CornerRadii::all(6.0),
             });
 
@@ -1374,7 +1438,7 @@ impl NetworkSettingsUI {
             y: row_y,
             text: format!("Hostname: {}", self.settings.hostname),
             font_size: 12.0,
-            color: OVERLAY0,
+            color: p.overlay0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
             overflow: TextOverflow::Clip,
@@ -1382,7 +1446,14 @@ impl NetworkSettingsUI {
     }
 
     /// Render the WiFi tab.
-    fn render_wifi_tab(&self, cmds: &mut Vec<RenderCommand>, x: f32, y: f32, width: f32) {
+    fn render_wifi_tab(
+        &self,
+        p: &Palette,
+        cmds: &mut Vec<RenderCommand>,
+        x: f32,
+        y: f32,
+        width: f32,
+    ) {
         let mut row_y = y;
 
         // WiFi toggle and status
@@ -1403,7 +1474,7 @@ impl NetworkSettingsUI {
             y: row_y,
             text: format!("Wi-Fi: {wifi_status}"),
             font_size: 14.0,
-            color: TEXT,
+            color: p.text,
             font_weight: FontWeightHint::Bold,
             max_width: None,
             overflow: TextOverflow::Clip,
@@ -1416,7 +1487,7 @@ impl NetworkSettingsUI {
             y: row_y,
             width,
             height: 32.0,
-            color: SURFACE0,
+            color: p.surface0,
             corner_radii: CornerRadii::all(6.0),
         });
 
@@ -1432,9 +1503,9 @@ impl NetworkSettingsUI {
             text: search_text,
             font_size: 12.0,
             color: if self.wifi_search.is_empty() {
-                OVERLAY0
+                p.overlay0
             } else {
-                TEXT
+                p.text
             },
             font_weight: FontWeightHint::Regular,
             max_width: Some(width - 24.0),
@@ -1448,7 +1519,7 @@ impl NetworkSettingsUI {
             y: row_y,
             text: "Available networks".to_string(),
             font_size: 13.0,
-            color: SUBTEXT1,
+            color: p.subtext1,
             font_weight: FontWeightHint::Bold,
             max_width: None,
             overflow: TextOverflow::Clip,
@@ -1466,7 +1537,7 @@ impl NetworkSettingsUI {
                     "Wi-Fi is disabled".to_string()
                 },
                 font_size: 12.0,
-                color: OVERLAY0,
+                color: p.overlay0,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
                 overflow: TextOverflow::Clip,
@@ -1475,7 +1546,7 @@ impl NetworkSettingsUI {
             for net in &networks {
                 let is_selected = self.selected_wifi.as_ref() == Some(&net.ssid);
 
-                let bg = if is_selected { SURFACE1 } else { SURFACE0 };
+                let bg = if is_selected { p.surface1 } else { p.surface0 };
                 let row_h = if is_selected { 64.0 } else { 44.0 };
 
                 cmds.push(RenderCommand::FillRect {
@@ -1493,9 +1564,9 @@ impl NetworkSettingsUI {
                 for bar_idx in 0u8..4 {
                     let bar_h = 4.0 + bar_idx as f32 * 3.0;
                     let bar_color = if bar_idx < quality.bars() {
-                        quality.color()
+                        quality.color(p)
                     } else {
-                        SURFACE2
+                        p.surface2
                     };
                     cmds.push(RenderCommand::FillRect {
                         x: bar_x + bar_idx as f32 * 5.0,
@@ -1513,7 +1584,7 @@ impl NetworkSettingsUI {
                     y: row_y + 8.0,
                     text: net.ssid.clone(),
                     font_size: 13.0,
-                    color: if net.is_connected { GREEN } else { TEXT },
+                    color: if net.is_connected { p.green } else { p.text },
                     font_weight: if net.is_connected {
                         FontWeightHint::Bold
                     } else {
@@ -1534,7 +1605,7 @@ impl NetworkSettingsUI {
                         net.channel
                     ),
                     font_size: 10.0,
-                    color: SUBTEXT0,
+                    color: p.subtext0,
                     font_weight: FontWeightHint::Regular,
                     max_width: None,
                     overflow: TextOverflow::Clip,
@@ -1547,7 +1618,7 @@ impl NetworkSettingsUI {
                         y: row_y + 12.0,
                         text: "Connected".to_string(),
                         font_size: 11.0,
-                        color: GREEN,
+                        color: p.green,
                         font_weight: FontWeightHint::Bold,
                         max_width: None,
                         overflow: TextOverflow::Clip,
@@ -1558,7 +1629,7 @@ impl NetworkSettingsUI {
                         y: row_y + 12.0,
                         text: "Saved".to_string(),
                         font_size: 11.0,
-                        color: SUBTEXT0,
+                        color: p.subtext0,
                         font_weight: FontWeightHint::Regular,
                         max_width: None,
                         overflow: TextOverflow::Clip,
@@ -1572,7 +1643,7 @@ impl NetworkSettingsUI {
                         y: row_y + 12.0,
                         text: "\u{1F512}".to_string(),
                         font_size: 12.0,
-                        color: net.security.color(),
+                        color: net.security.color(p),
                         font_weight: FontWeightHint::Regular,
                         max_width: None,
                         overflow: TextOverflow::Clip,
@@ -1590,7 +1661,7 @@ impl NetworkSettingsUI {
             y: row_y,
             text: format!("Saved networks ({})", self.settings.saved_wifi.len()),
             font_size: 13.0,
-            color: SUBTEXT1,
+            color: p.subtext1,
             font_weight: FontWeightHint::Bold,
             max_width: None,
             overflow: TextOverflow::Clip,
@@ -1603,7 +1674,7 @@ impl NetworkSettingsUI {
                 y: row_y,
                 width,
                 height: 36.0,
-                color: SURFACE0,
+                color: p.surface0,
                 corner_radii: CornerRadii::all(4.0),
             });
 
@@ -1617,7 +1688,7 @@ impl NetworkSettingsUI {
                     if profile.auto_connect { " (auto)" } else { "" }
                 ),
                 font_size: 12.0,
-                color: TEXT,
+                color: p.text,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(width - 80.0),
                 overflow: TextOverflow::Ellipsis,
@@ -1629,7 +1700,7 @@ impl NetworkSettingsUI {
                 y: row_y + 10.0,
                 text: "Forget".to_string(),
                 font_size: 11.0,
-                color: RED,
+                color: p.red,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
                 overflow: TextOverflow::Clip,
@@ -1640,7 +1711,14 @@ impl NetworkSettingsUI {
     }
 
     /// Render the Ethernet tab.
-    fn render_ethernet_tab(&self, cmds: &mut Vec<RenderCommand>, x: f32, y: f32, width: f32) {
+    fn render_ethernet_tab(
+        &self,
+        p: &Palette,
+        cmds: &mut Vec<RenderCommand>,
+        x: f32,
+        y: f32,
+        width: f32,
+    ) {
         let mut row_y = y;
 
         let eth_ifaces: Vec<&NetworkInterface> = self
@@ -1656,7 +1734,7 @@ impl NetworkSettingsUI {
                 y: row_y,
                 text: "No Ethernet interfaces detected".to_string(),
                 font_size: 14.0,
-                color: OVERLAY0,
+                color: p.overlay0,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
                 overflow: TextOverflow::Clip,
@@ -1671,7 +1749,7 @@ impl NetworkSettingsUI {
                 y: row_y,
                 width,
                 height: 200.0,
-                color: SURFACE0,
+                color: p.surface0,
                 corner_radii: CornerRadii::all(8.0),
             });
 
@@ -1680,7 +1758,7 @@ impl NetworkSettingsUI {
                 y: row_y + 12.0,
                 text: format!("{} ({})", iface.display_name, iface.name),
                 font_size: 16.0,
-                color: TEXT,
+                color: p.text,
                 font_weight: FontWeightHint::Bold,
                 max_width: None,
                 overflow: TextOverflow::Clip,
@@ -1692,7 +1770,7 @@ impl NetworkSettingsUI {
                 y: row_y + 38.0,
                 width: 8.0,
                 height: 8.0,
-                color: iface.state.color(),
+                color: iface.state.color(p),
                 corner_radii: CornerRadii::all(4.0),
             });
 
@@ -1701,7 +1779,7 @@ impl NetworkSettingsUI {
                 y: row_y + 34.0,
                 text: iface.state.label().to_string(),
                 font_size: 12.0,
-                color: SUBTEXT0,
+                color: p.subtext0,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
                 overflow: TextOverflow::Clip,
@@ -1738,7 +1816,7 @@ impl NetworkSettingsUI {
                     y: prop_y,
                     text: format!("{label}:"),
                     font_size: 11.0,
-                    color: OVERLAY0,
+                    color: p.overlay0,
                     font_weight: FontWeightHint::Regular,
                     max_width: None,
                     overflow: TextOverflow::Clip,
@@ -1749,7 +1827,7 @@ impl NetworkSettingsUI {
                     y: prop_y,
                     text: value.clone(),
                     font_size: 11.0,
-                    color: SUBTEXT1,
+                    color: p.subtext1,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(width - 160.0),
                     overflow: TextOverflow::Ellipsis,
@@ -1765,7 +1843,7 @@ impl NetworkSettingsUI {
                 y: prop_y,
                 text: format!("IP Configuration: {}", iface.ipv4.method.label()),
                 font_size: 12.0,
-                color: TEXT,
+                color: p.text,
                 font_weight: FontWeightHint::Bold,
                 max_width: None,
                 overflow: TextOverflow::Clip,
@@ -1776,7 +1854,14 @@ impl NetworkSettingsUI {
     }
 
     /// Render the DNS tab.
-    fn render_dns_tab(&self, cmds: &mut Vec<RenderCommand>, x: f32, y: f32, width: f32) {
+    fn render_dns_tab(
+        &self,
+        p: &Palette,
+        cmds: &mut Vec<RenderCommand>,
+        x: f32,
+        y: f32,
+        width: f32,
+    ) {
         let mut row_y = y;
 
         cmds.push(RenderCommand::Text {
@@ -1784,7 +1869,7 @@ impl NetworkSettingsUI {
             y: row_y,
             text: "DNS Configuration".to_string(),
             font_size: 16.0,
-            color: TEXT,
+            color: p.text,
             font_weight: FontWeightHint::Bold,
             max_width: None,
             overflow: TextOverflow::Clip,
@@ -1793,20 +1878,21 @@ impl NetworkSettingsUI {
 
         // DNS mode
         let modes = [DnsMode::Automatic, DnsMode::Manual];
-        for mode in &modes {
+        for (i, mode) in modes.iter().enumerate() {
             let is_active = *mode == self.settings.dns.mode;
+            let (bx, bw) = segment_bounds(x, width, i, modes.len());
 
             cmds.push(RenderCommand::FillRect {
-                x,
+                x: bx,
                 y: row_y,
-                width: width / 2.0 - 4.0,
+                width: bw,
                 height: 32.0,
-                color: if is_active { BLUE } else { SURFACE0 },
+                color: if is_active { p.accent } else { p.surface0 },
                 corner_radii: CornerRadii::all(6.0),
             });
 
             cmds.push(RenderCommand::Text {
-                x: x + 12.0,
+                x: bx + 12.0,
                 y: row_y + 8.0,
                 text: match mode {
                     DnsMode::Automatic => "Automatic",
@@ -1814,7 +1900,7 @@ impl NetworkSettingsUI {
                 }
                 .to_string(),
                 font_size: 13.0,
-                color: if is_active { CRUST } else { TEXT },
+                color: if is_active { p.on_accent() } else { p.text },
                 font_weight: if is_active {
                     FontWeightHint::Bold
                 } else {
@@ -1853,7 +1939,7 @@ impl NetworkSettingsUI {
                     y: row_y,
                     text: label.to_string(),
                     font_size: 12.0,
-                    color: SUBTEXT1,
+                    color: p.subtext1,
                     font_weight: FontWeightHint::Regular,
                     max_width: None,
                     overflow: TextOverflow::Clip,
@@ -1865,7 +1951,7 @@ impl NetworkSettingsUI {
                     y: row_y,
                     width,
                     height: 32.0,
-                    color: SURFACE0,
+                    color: p.surface0,
                     corner_radii: CornerRadii::all(4.0),
                 });
 
@@ -1878,7 +1964,7 @@ impl NetworkSettingsUI {
                         value.clone()
                     },
                     font_size: 12.0,
-                    color: if value.is_empty() { OVERLAY0 } else { TEXT },
+                    color: if value.is_empty() { p.overlay0 } else { p.text },
                     font_weight: FontWeightHint::Regular,
                     max_width: None,
                     overflow: TextOverflow::Clip,
@@ -1894,7 +1980,7 @@ impl NetworkSettingsUI {
             y: row_y,
             text: "DNS over HTTPS (DoH)".to_string(),
             font_size: 14.0,
-            color: TEXT,
+            color: p.text,
             font_weight: FontWeightHint::Bold,
             max_width: None,
             overflow: TextOverflow::Clip,
@@ -1902,9 +1988,9 @@ impl NetworkSettingsUI {
         row_y += 24.0;
 
         let doh_toggle_bg = if self.settings.dns.dns_over_https {
-            BLUE
+            p.accent
         } else {
-            SURFACE2
+            p.surface2
         };
         cmds.push(RenderCommand::FillRect {
             x,
@@ -1925,7 +2011,7 @@ impl NetworkSettingsUI {
             }
             .to_string(),
             font_size: 12.0,
-            color: SUBTEXT0,
+            color: p.subtext0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
             overflow: TextOverflow::Clip,
@@ -1941,7 +2027,7 @@ impl NetworkSettingsUI {
                     y: row_y,
                     width,
                     height: 36.0,
-                    color: SURFACE0,
+                    color: p.surface0,
                     corner_radii: CornerRadii::all(4.0),
                 });
 
@@ -1950,7 +2036,7 @@ impl NetworkSettingsUI {
                     y: row_y + 4.0,
                     text: provider.name.clone(),
                     font_size: 13.0,
-                    color: TEXT,
+                    color: p.text,
                     font_weight: FontWeightHint::Bold,
                     max_width: None,
                     overflow: TextOverflow::Clip,
@@ -1961,7 +2047,7 @@ impl NetworkSettingsUI {
                     y: row_y + 20.0,
                     text: provider.description.clone(),
                     font_size: 10.0,
-                    color: SUBTEXT0,
+                    color: p.subtext0,
                     font_weight: FontWeightHint::Regular,
                     max_width: None,
                     overflow: TextOverflow::Clip,
@@ -1978,7 +2064,7 @@ impl NetworkSettingsUI {
             y: row_y,
             text: "Search domains".to_string(),
             font_size: 13.0,
-            color: SUBTEXT1,
+            color: p.subtext1,
             font_weight: FontWeightHint::Bold,
             max_width: None,
             overflow: TextOverflow::Clip,
@@ -1991,7 +2077,7 @@ impl NetworkSettingsUI {
                 y: row_y,
                 text: "None configured".to_string(),
                 font_size: 11.0,
-                color: OVERLAY0,
+                color: p.overlay0,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
                 overflow: TextOverflow::Clip,
@@ -2003,7 +2089,7 @@ impl NetworkSettingsUI {
                     y: row_y,
                     text: domain.clone(),
                     font_size: 11.0,
-                    color: TEXT,
+                    color: p.text,
                     font_weight: FontWeightHint::Regular,
                     max_width: None,
                     overflow: TextOverflow::Clip,
@@ -2027,7 +2113,7 @@ impl NetworkSettingsUI {
                 self.settings.dns.cache_size
             ),
             font_size: 11.0,
-            color: OVERLAY0,
+            color: p.overlay0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
             overflow: TextOverflow::Clip,
@@ -2035,7 +2121,14 @@ impl NetworkSettingsUI {
     }
 
     /// Render the Proxy tab.
-    fn render_proxy_tab(&self, cmds: &mut Vec<RenderCommand>, x: f32, y: f32, width: f32) {
+    fn render_proxy_tab(
+        &self,
+        p: &Palette,
+        cmds: &mut Vec<RenderCommand>,
+        x: f32,
+        y: f32,
+        width: f32,
+    ) {
         let mut row_y = y;
 
         cmds.push(RenderCommand::Text {
@@ -2043,24 +2136,31 @@ impl NetworkSettingsUI {
             y: row_y,
             text: "Proxy Configuration".to_string(),
             font_size: 16.0,
-            color: TEXT,
+            color: p.text,
             font_weight: FontWeightHint::Bold,
             max_width: None,
             overflow: TextOverflow::Clip,
         });
         row_y += 28.0;
 
-        // Proxy type buttons
+        // Proxy type buttons.
+        //
+        // Every variant of `ProxyType`, not a subset. The row used to offer
+        // four of the six, which left a configuration the type system permits
+        // — and `ProxyConfig::validate` accepts — with no segment highlighted
+        // and no way back to it: a user on HTTPS or SOCKS4 saw a picker with
+        // nothing selected, and touching it could only move them off.
         let types = [
             ProxyType::None,
             ProxyType::Http,
+            ProxyType::Https,
+            ProxyType::Socks4,
             ProxyType::Socks5,
             ProxyType::Auto,
         ];
-        let btn_w = (width - 12.0) / types.len() as f32;
 
         for (i, ptype) in types.iter().enumerate() {
-            let bx = x + i as f32 * (btn_w + 4.0);
+            let (bx, btn_w) = segment_bounds(x, width, i, types.len());
             let is_active = *ptype == self.settings.proxy.proxy_type;
 
             cmds.push(RenderCommand::FillRect {
@@ -2068,7 +2168,7 @@ impl NetworkSettingsUI {
                 y: row_y,
                 width: btn_w,
                 height: 32.0,
-                color: if is_active { BLUE } else { SURFACE0 },
+                color: if is_active { p.accent } else { p.surface0 },
                 corner_radii: CornerRadii::all(6.0),
             });
 
@@ -2077,7 +2177,7 @@ impl NetworkSettingsUI {
                 y: row_y + 8.0,
                 text: ptype.label().to_string(),
                 font_size: 12.0,
-                color: if is_active { CRUST } else { TEXT },
+                color: if is_active { p.on_accent() } else { p.text },
                 font_weight: if is_active {
                     FontWeightHint::Bold
                 } else {
@@ -2097,7 +2197,7 @@ impl NetworkSettingsUI {
                     y: row_y,
                     text: "PAC URL".to_string(),
                     font_size: 12.0,
-                    color: SUBTEXT1,
+                    color: p.subtext1,
                     font_weight: FontWeightHint::Regular,
                     max_width: None,
                     overflow: TextOverflow::Clip,
@@ -2109,7 +2209,7 @@ impl NetworkSettingsUI {
                     y: row_y,
                     width,
                     height: 32.0,
-                    color: SURFACE0,
+                    color: p.surface0,
                     corner_radii: CornerRadii::all(4.0),
                 });
 
@@ -2125,9 +2225,9 @@ impl NetworkSettingsUI {
                         .to_string(),
                     font_size: 12.0,
                     color: if self.settings.proxy.pac_url.is_some() {
-                        TEXT
+                        p.text
                     } else {
-                        OVERLAY0
+                        p.overlay0
                     },
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(width - 24.0),
@@ -2146,7 +2246,7 @@ impl NetworkSettingsUI {
                         y: row_y,
                         text: label.to_string(),
                         font_size: 12.0,
-                        color: SUBTEXT1,
+                        color: p.subtext1,
                         font_weight: FontWeightHint::Regular,
                         max_width: None,
                         overflow: TextOverflow::Clip,
@@ -2158,7 +2258,7 @@ impl NetworkSettingsUI {
                         y: row_y,
                         width,
                         height: 32.0,
-                        color: SURFACE0,
+                        color: p.surface0,
                         corner_radii: CornerRadii::all(4.0),
                     });
 
@@ -2167,7 +2267,7 @@ impl NetworkSettingsUI {
                         y: row_y + 8.0,
                         text: value.clone(),
                         font_size: 12.0,
-                        color: TEXT,
+                        color: p.text,
                         font_weight: FontWeightHint::Regular,
                         max_width: None,
                         overflow: TextOverflow::Clip,
@@ -2181,7 +2281,7 @@ impl NetworkSettingsUI {
                     y: row_y,
                     width,
                     height: 36.0,
-                    color: SURFACE0,
+                    color: p.surface0,
                     corner_radii: CornerRadii::all(4.0),
                 });
 
@@ -2190,16 +2290,16 @@ impl NetworkSettingsUI {
                     y: row_y + 10.0,
                     text: "Requires authentication".to_string(),
                     font_size: 13.0,
-                    color: TEXT,
+                    color: p.text,
                     font_weight: FontWeightHint::Regular,
                     max_width: None,
                     overflow: TextOverflow::Clip,
                 });
 
                 let auth_bg = if self.settings.proxy.requires_auth {
-                    BLUE
+                    p.accent
                 } else {
-                    SURFACE2
+                    p.surface2
                 };
                 cmds.push(RenderCommand::FillRect {
                     x: x + width - 56.0,
@@ -2218,7 +2318,7 @@ impl NetworkSettingsUI {
                 y: row_y,
                 text: "Bypass proxy for:".to_string(),
                 font_size: 12.0,
-                color: SUBTEXT1,
+                color: p.subtext1,
                 font_weight: FontWeightHint::Bold,
                 max_width: None,
                 overflow: TextOverflow::Clip,
@@ -2231,7 +2331,7 @@ impl NetworkSettingsUI {
                     y: row_y,
                     text: addr.clone(),
                     font_size: 11.0,
-                    color: TEXT,
+                    color: p.text,
                     font_weight: FontWeightHint::Regular,
                     max_width: None,
                     overflow: TextOverflow::Clip,
@@ -2244,7 +2344,7 @@ impl NetworkSettingsUI {
                 y: row_y + 8.0,
                 text: "No proxy configured. Direct connection to the internet.".to_string(),
                 font_size: 13.0,
-                color: OVERLAY0,
+                color: p.overlay0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(width - 32.0),
                 overflow: TextOverflow::Ellipsis,
@@ -2253,7 +2353,14 @@ impl NetworkSettingsUI {
     }
 
     /// Render the Firewall tab.
-    fn render_firewall_tab(&self, cmds: &mut Vec<RenderCommand>, x: f32, y: f32, width: f32) {
+    fn render_firewall_tab(
+        &self,
+        p: &Palette,
+        cmds: &mut Vec<RenderCommand>,
+        x: f32,
+        y: f32,
+        width: f32,
+    ) {
         let mut row_y = y;
 
         // Firewall status
@@ -2262,14 +2369,14 @@ impl NetworkSettingsUI {
             y: row_y,
             width,
             height: 60.0,
-            color: SURFACE0,
+            color: p.surface0,
             corner_radii: CornerRadii::all(8.0),
         });
 
         let fw_color = if self.settings.firewall.enabled {
-            GREEN
+            p.green
         } else {
-            RED
+            p.red
         };
         cmds.push(RenderCommand::FillRect {
             x: x + 16.0,
@@ -2292,7 +2399,7 @@ impl NetworkSettingsUI {
                 }
             ),
             font_size: 16.0,
-            color: TEXT,
+            color: p.text,
             font_weight: FontWeightHint::Bold,
             max_width: None,
             overflow: TextOverflow::Clip,
@@ -2309,7 +2416,7 @@ impl NetworkSettingsUI {
                 self.settings.firewall.default_outbound.label()
             ),
             font_size: 11.0,
-            color: SUBTEXT0,
+            color: p.subtext0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(width - 52.0),
             overflow: TextOverflow::Ellipsis,
@@ -2332,7 +2439,7 @@ impl NetworkSettingsUI {
                 y: row_y,
                 width,
                 height: 36.0,
-                color: SURFACE0,
+                color: p.surface0,
                 corner_radii: CornerRadii::all(4.0),
             });
 
@@ -2341,13 +2448,13 @@ impl NetworkSettingsUI {
                 y: row_y + 10.0,
                 text: label.to_string(),
                 font_size: 13.0,
-                color: TEXT,
+                color: p.text,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
                 overflow: TextOverflow::Clip,
             });
 
-            let toggle_bg = if *enabled { BLUE } else { SURFACE2 };
+            let toggle_bg = if *enabled { p.accent } else { p.surface2 };
             cmds.push(RenderCommand::FillRect {
                 x: x + width - 56.0,
                 y: row_y + 8.0,
@@ -2367,7 +2474,7 @@ impl NetworkSettingsUI {
             y: row_y,
             text: "Firewall rules".to_string(),
             font_size: 14.0,
-            color: SUBTEXT1,
+            color: p.subtext1,
             font_weight: FontWeightHint::Bold,
             max_width: None,
             overflow: TextOverflow::Clip,
@@ -2379,7 +2486,7 @@ impl NetworkSettingsUI {
             y: row_y - 4.0,
             width: 80.0,
             height: 24.0,
-            color: BLUE,
+            color: p.accent,
             corner_radii: CornerRadii::all(4.0),
         });
         cmds.push(RenderCommand::Text {
@@ -2387,7 +2494,7 @@ impl NetworkSettingsUI {
             y: row_y,
             text: "+ Add rule".to_string(),
             font_size: 11.0,
-            color: CRUST,
+            color: p.on_accent(),
             font_weight: FontWeightHint::Bold,
             max_width: None,
             overflow: TextOverflow::Clip,
@@ -2400,7 +2507,7 @@ impl NetworkSettingsUI {
                 y: row_y,
                 text: "No custom rules. Using default policies.".to_string(),
                 font_size: 12.0,
-                color: OVERLAY0,
+                color: p.overlay0,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
                 overflow: TextOverflow::Clip,
@@ -2408,9 +2515,9 @@ impl NetworkSettingsUI {
         } else {
             for rule in &self.settings.firewall.rules {
                 let rule_color = if rule.enabled {
-                    SURFACE0
+                    p.surface0
                 } else {
-                    Color::rgba(49, 50, 68, 128)
+                    Color::rgba(p.surface0.r, p.surface0.g, p.surface0.b, 128)
                 };
 
                 cmds.push(RenderCommand::FillRect {
@@ -2428,7 +2535,7 @@ impl NetworkSettingsUI {
                     y: row_y + 8.0,
                     width: 50.0,
                     height: 18.0,
-                    color: rule.action.color(),
+                    color: rule.action.color(p),
                     corner_radii: CornerRadii::all(3.0),
                 });
                 cmds.push(RenderCommand::Text {
@@ -2436,7 +2543,7 @@ impl NetworkSettingsUI {
                     y: row_y + 10.0,
                     text: rule.action.label().to_string(),
                     font_size: 10.0,
-                    color: CRUST,
+                    color: readable_on(rule.action.color(p)),
                     font_weight: FontWeightHint::Bold,
                     max_width: None,
                     overflow: TextOverflow::Clip,
@@ -2448,7 +2555,7 @@ impl NetworkSettingsUI {
                     y: row_y + 8.0,
                     text: rule.name.clone(),
                     font_size: 12.0,
-                    color: if rule.enabled { TEXT } else { OVERLAY0 },
+                    color: if rule.enabled { p.text } else { p.overlay0 },
                     font_weight: FontWeightHint::Bold,
                     max_width: Some(width - 140.0),
                     overflow: TextOverflow::Ellipsis,
@@ -2464,7 +2571,7 @@ impl NetworkSettingsUI {
                         rule.port_display()
                     ),
                     font_size: 10.0,
-                    color: SUBTEXT0,
+                    color: p.subtext0,
                     font_weight: FontWeightHint::Regular,
                     max_width: None,
                     overflow: TextOverflow::Clip,
@@ -2477,7 +2584,7 @@ impl NetworkSettingsUI {
                         y: row_y + 16.0,
                         text: "Disabled".to_string(),
                         font_size: 10.0,
-                        color: OVERLAY0,
+                        color: p.overlay0,
                         font_weight: FontWeightHint::Regular,
                         max_width: None,
                         overflow: TextOverflow::Clip,
@@ -2518,6 +2625,8 @@ mod tests {
     #![allow(clippy::float_cmp)]
 
     use super::*;
+    use crate::draw_check::assert_nothing_is_drawn_and_never_seen;
+    use crate::palette_check::assert_drawn_from;
 
     /// An address has exactly four fields. The count and the reads used to be
     /// separate statements; these are the inputs that tell them apart.
@@ -3139,7 +3248,7 @@ mod tests {
     #[test]
     fn test_ui_render_produces_commands() {
         let ui = NetworkSettingsUI::new();
-        let cmds = ui.render(0.0, 0.0, 600.0, 800.0);
+        let cmds = ui.render(&Palette::for_mode(false), 0.0, 0.0, 600.0, 800.0);
         assert!(!cmds.is_empty());
     }
 
@@ -3160,9 +3269,10 @@ mod tests {
     #[test]
     fn test_connection_state_colors() {
         // Just verify colors don't panic
-        let _c1 = ConnectionState::Connected.color();
-        let _c2 = ConnectionState::Disconnected.color();
-        let _c3 = ConnectionState::Limited.color();
+        let p = Palette::for_mode(false);
+        let _c1 = ConnectionState::Connected.color(&p);
+        let _c2 = ConnectionState::Disconnected.color(&p);
+        let _c3 = ConnectionState::Limited.color(&p);
     }
 
     #[test]
@@ -3181,5 +3291,887 @@ mod tests {
         settings.wifi_enabled = false;
         settings.start_wifi_scan();
         assert!(!settings.wifi_scanning);
+    }
+
+    // ========================================================================
+    // The palette
+    // ========================================================================
+
+    /// A panel wound up so that every colour-bearing branch actually draws.
+    ///
+    /// Every control here is coloured by a boolean, so a fixture that only
+    /// renders the `true` arm proves nothing about the `false` one: both
+    /// halves of every switch are on screen at once. The Wi-Fi list carries
+    /// all four signal qualities and a spread of securities including the open
+    /// one that draws no lock; the interface list carries every connection
+    /// state; the firewall carries all three actions and one disabled rule,
+    /// which is the only thing that draws the half-alpha row.
+    /// One interface per connection state, so `ConnectionState::color` is
+    /// exercised across its whole range in a single render.
+    fn every_connection_state() -> Vec<NetworkInterface> {
+        [
+            ConnectionState::Connected,
+            ConnectionState::Connecting,
+            ConnectionState::Limited,
+            ConnectionState::NoInternet,
+            ConnectionState::Disconnected,
+            ConnectionState::Disabled,
+        ]
+        .iter()
+        .enumerate()
+        .map(|(i, state)| {
+            let mut iface = NetworkInterface::default_ethernet();
+            iface.name = format!("eth{i}");
+            iface.display_name = format!("Ethernet {i}");
+            iface.state = *state;
+            iface.is_default = i == 0;
+            iface
+        })
+        .collect()
+    }
+
+    /// One network per signal quality, with securities spread so that the open
+    /// one (which draws no lock at all) and all four strength bands appear.
+    fn every_visible_network() -> Vec<WiFiNetwork> {
+        [
+            ("strong", WiFiSecurity::WPA3Personal, -40, true, true),
+            ("good", WiFiSecurity::WPA2Personal, -60, false, true),
+            ("fair", WiFiSecurity::WEP, -75, false, false),
+            ("weak", WiFiSecurity::Open, -90, false, false),
+        ]
+        .into_iter()
+        .enumerate()
+        .map(|(i, (ssid, security, dbm, connected, saved))| WiFiNetwork {
+            ssid: ssid.to_string(),
+            bssid: format!("00:11:22:33:44:{i:02}"),
+            security,
+            signal_dbm: dbm,
+            channel: 1 + i as u32,
+            frequency_mhz: if i % 2 == 0 { 2412 } else { 5180 },
+            is_hidden: false,
+            is_saved: saved,
+            is_connected: connected,
+        })
+        .collect()
+    }
+
+    /// All three firewall actions, the last rule disabled so that the
+    /// half-alpha row gets drawn at all.
+    fn every_firewall_action() -> Vec<FirewallRule> {
+        [
+            FirewallAction::Allow,
+            FirewallAction::Block,
+            FirewallAction::Ask,
+        ]
+        .iter()
+        .enumerate()
+        .map(|(i, action)| FirewallRule {
+            id: 0,
+            name: format!("rule {i}"),
+            enabled: i < 2,
+            action: *action,
+            direction: FirewallDirection::Inbound,
+            protocol: FirewallProtocol::Tcp,
+            port_range: Some((80, 80)),
+            remote_address: None,
+            application: None,
+            description: format!("rule {i} description"),
+        })
+        .collect()
+    }
+
+    fn wound(tab: NetworkSettingsTab, up: bool) -> NetworkSettingsUI {
+        let mut ui = NetworkSettingsUI::new();
+        ui.active_tab = tab;
+
+        ui.settings.interfaces = every_connection_state();
+        ui.settings.wifi_networks = every_visible_network();
+        // One row selected, because a selected row is a different fill and a
+        // taller box than an unselected one.
+        ui.selected_wifi = Some("good".to_string());
+
+        ui.settings.saved_wifi = vec![SavedWiFiProfile {
+            ssid: "good".to_string(),
+            ..SavedWiFiProfile::default()
+        }];
+
+        ui.settings.wifi_enabled = up;
+        ui.settings.airplane_mode = !up;
+        ui.settings.metered_connection = up;
+        ui.settings.data_usage_tracking = !up;
+
+        ui.settings.dns.mode = if up {
+            DnsMode::Manual
+        } else {
+            DnsMode::Automatic
+        };
+        ui.settings.dns.primary = Some(Ipv4Addr::new(1, 1, 1, 1));
+        ui.settings.dns.secondary = Some(Ipv4Addr::new(9, 9, 9, 9));
+        ui.settings.dns.search_domains = vec!["lan".to_string()];
+        ui.settings.dns.dns_over_https = up;
+        ui.settings.dns.doh_url = Some("https://1.1.1.1/dns-query".to_string());
+
+        ui.settings.proxy.proxy_type = if up { ProxyType::Http } else { ProxyType::None };
+        ui.settings.proxy.host = "proxy.lan".to_string();
+        ui.settings.proxy.requires_auth = up;
+        ui.settings.proxy.username = Some("u".to_string());
+
+        ui.settings.firewall.enabled = up;
+        ui.settings.firewall.log_blocked = up;
+        ui.settings.firewall.block_icmp = !up;
+        ui.settings.firewall.stealth_mode = up;
+        ui.settings.firewall.rules.clear();
+        for rule in every_firewall_action() {
+            ui.settings.firewall.add_rule(rule);
+        }
+        ui
+    }
+
+    /// Every state the panel can be in, so no branch escapes the sweep below.
+    fn every_state() -> Vec<(NetworkSettingsUI, String)> {
+        let mut out = Vec::new();
+        for tab in NetworkSettingsTab::all() {
+            for up in [false, true] {
+                out.push((
+                    wound(*tab, up),
+                    format!("network panel (tab={tab:?}, up={up})"),
+                ));
+            }
+        }
+        // Every empty-list caption: each draws a line no populated panel does.
+        for tab in NetworkSettingsTab::all() {
+            let mut bare = NetworkSettingsUI::new();
+            bare.active_tab = *tab;
+            bare.settings.interfaces.clear();
+            bare.settings.wifi_networks.clear();
+            bare.settings.saved_wifi.clear();
+            bare.settings.firewall.rules.clear();
+            out.push((bare, format!("network panel ({tab:?}, nothing to show)")));
+        }
+        // Wi-Fi off draws a different empty caption from Wi-Fi on and empty.
+        let mut off = NetworkSettingsUI::new();
+        off.active_tab = NetworkSettingsTab::WiFi;
+        off.settings.wifi_enabled = false;
+        off.settings.wifi_networks.clear();
+        out.push((off, "network panel (WiFi, radio off)".to_string()));
+        // A proxy set to Auto draws the PAC row nothing else does.
+        let mut pac = NetworkSettingsUI::new();
+        pac.active_tab = NetworkSettingsTab::Proxy;
+        pac.settings.proxy.proxy_type = ProxyType::Auto;
+        pac.settings.proxy.pac_url = Some("http://wpad/wpad.dat".to_string());
+        out.push((pac, "network panel (Proxy, auto/PAC)".to_string()));
+        out
+    }
+
+    fn render(ui: &NetworkSettingsUI, p: &Palette) -> Vec<RenderCommand> {
+        ui.render(p, 0.0, 0.0, 600.0, 800.0)
+    }
+
+    /// The membership sweep: nothing the panel draws is outside its palette.
+    ///
+    /// Every constant this module used to hold was a Catppuccin *Mocha* value,
+    /// so the light render is where a survivor gives itself away — Latte does
+    /// not contain it, and the failure names the colour back.
+    #[test]
+    fn every_colour_the_panel_draws_comes_from_its_palette() {
+        for light in [false, true] {
+            let p = Palette::for_mode(light);
+            for (ui, what) in every_state() {
+                assert_drawn_from(&p, &render(&ui, &p), &[], &format!("{what}, light={light}"));
+            }
+        }
+    }
+
+    /// Nothing is painted and then erased before anyone could see it.
+    #[test]
+    fn the_panel_draws_nothing_that_is_immediately_erased() {
+        for light in [false, true] {
+            let p = Palette::for_mode(light);
+            for (ui, what) in every_state() {
+                assert_nothing_is_drawn_and_never_seen(
+                    &render(&ui, &p),
+                    &format!("{what}, light={light}"),
+                );
+            }
+        }
+    }
+
+    // -- Extractors, one per class of control the accent is supposed to reach --
+
+    /// The tab strip's labels, in the order they are drawn.
+    ///
+    /// The strip is the only thing drawn at y 64 in a 13pt face; every tab
+    /// body starts at y 116 or below.
+    fn tab_labels(cmds: &[RenderCommand]) -> Vec<Color> {
+        cmds.iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text {
+                    y: 64.0,
+                    font_size: 13.0,
+                    color,
+                    ..
+                } => Some(*color),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Every switch pill: the 40x20 fully-rounded fill each toggle row draws.
+    ///
+    /// Deliberately *not* "any fill wider than it is tall with a full radius" —
+    /// that shape also matches a firewall action badge (50x18) if its radius is
+    /// ever rounded up, and the size is what the four toggle loops actually
+    /// share. The knob is 16x16, so it is excluded by width alone.
+    fn switch_fills(cmds: &[RenderCommand]) -> Vec<Color> {
+        cmds.iter()
+            .filter_map(|c| match c {
+                RenderCommand::FillRect {
+                    width: 40.0,
+                    height: 20.0,
+                    color,
+                    ..
+                } => Some(*color),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The segmented pickers' fills: the 32-tall buttons inside the content.
+    ///
+    /// Seven things in this module are 32 tall, and neither the height nor the
+    /// width alone tells the two pickers from the other five. Four of the five
+    /// — the Wi-Fi search bar and the DNS-server, PAC-URL and proxy-host text
+    /// fields — span the full content width, so the width bound excludes them.
+    /// The fifth is the *active tab's own pill*, which is `tw` wide, a padded
+    /// text width, and therefore passes any width bound a segment passes. Only
+    /// its position separates it: the tab strip is the one thing drawn above
+    /// the content well, which starts at y 100 with the tab bodies at 116.
+    ///
+    /// Getting this wrong would be a false negative, not a false positive:
+    /// the same pattern is subtracted in [`colors_apart_from_the_controls`],
+    /// so a pill wrongly counted as a segment is a colour silently removed
+    /// from the frozen union.
+    fn segment_fills(cmds: &[RenderCommand]) -> Vec<Color> {
+        cmds.iter()
+            .filter_map(|c| match c {
+                RenderCommand::FillRect {
+                    y,
+                    width,
+                    height: 32.0,
+                    color,
+                    ..
+                } if *y > 100.0 && *width < 400.0 => Some(*color),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Whether `text` is a segmented picker's own label.
+    ///
+    /// `IpConfigMethod::Static` is also labelled "Manual", but it is only ever
+    /// drawn interpolated into "IP Configuration: Manual", so exact equality
+    /// does not reach it.
+    fn is_picker_label(text: &str) -> bool {
+        matches!(
+            text,
+            "Automatic"
+                | "Manual"
+                | "No proxy"
+                | "HTTP"
+                | "HTTPS"
+                | "SOCKS4"
+                | "SOCKS5"
+                | "Auto-detect"
+        )
+    }
+
+    /// The fill of the button labelled `label`, and that label's own colour.
+    fn button(cmds: &[RenderCommand], label: &str) -> (Color, Color) {
+        let mut fill = None;
+        for c in cmds {
+            match c {
+                RenderCommand::FillRect { color, .. } => fill = Some(*color),
+                RenderCommand::Text { text, color, .. } if text == label => {
+                    return (fill.expect("a button's fill precedes its label"), *color);
+                }
+                _ => {}
+            }
+        }
+        panic!("no button labelled {label:?} was drawn");
+    }
+
+    /// Every colour the panel draws that no control above claimed.
+    ///
+    /// This is the frozen half: an `assert_eq!` over it fails if *anything*
+    /// that is not one of the named controls moves with the accent, including
+    /// sites nobody thought to name. The exclusions are exactly the extractors
+    /// above and the three `on_accent()` labels, and nothing more.
+    ///
+    /// A firewall rule's action badge label is deliberately *kept*. It is
+    /// `readable_on` of a categorical fill, which does not move with the
+    /// accent, so it belongs here and its presence is real coverage.
+    fn colors_apart_from_the_controls(cmds: &[RenderCommand]) -> Vec<Color> {
+        cmds.iter()
+            .filter(|c| {
+                !matches!(
+                    c,
+                    RenderCommand::Text {
+                        y: 64.0,
+                        font_size: 13.0,
+                        ..
+                    } | RenderCommand::FillRect {
+                        width: 40.0,
+                        height: 20.0,
+                        ..
+                    } | RenderCommand::FillRect {
+                        width: 80.0,
+                        height: 24.0,
+                        ..
+                    }
+                ) && !matches!(
+                    c,
+                    RenderCommand::FillRect { y, width, height: 32.0, .. }
+                        if *y > 100.0 && *width < 400.0
+                ) && !matches!(
+                    c,
+                    RenderCommand::Text { text, .. }
+                        if text == "+ Add rule" || is_picker_label(text)
+                )
+            })
+            .filter_map(|c| match c {
+                RenderCommand::FillRect { color, .. }
+                | RenderCommand::StrokeRect { color, .. }
+                | RenderCommand::Text { color, .. } => Some(*color),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Every control that offers something follows the accent — each proved
+    /// separately.
+    ///
+    /// Eight sites means eight `assert_ne!`s. Over their union one moving
+    /// control would hide seven frozen ones, which is the failure the earlier
+    /// modules in this conversion established.
+    ///
+    /// The three `on_accent()` labels are deliberately *not* among the eight.
+    /// An `assert_ne!` on them would be a bug in the test rather than a check:
+    /// `on_accent()` is `readable_on(accent)`, and every accent on offer is
+    /// pale enough that all fourteen resolve to the same near-black, so
+    /// correct code draws the same label under any two accents. What separates
+    /// `p.on_accent()` from a frozen `p.crust` is the *mode*, which is what
+    /// [`each_label_is_legible_on_the_fill_beneath_it`] asserts instead.
+    #[test]
+    fn every_control_that_offers_something_follows_the_accent() {
+        let mut a = Palette::for_mode(false);
+        a.accent = appearance::MAUVE;
+        let mut b = Palette::for_mode(false);
+        b.accent = appearance::TEAL;
+
+        // Walk every tab as the active one: the tab label's colour is chosen
+        // by a boolean, so a fixture pinned to one tab leaves five unproven.
+        for tab in NetworkSettingsTab::all() {
+            let ui = wound(*tab, true);
+            let x = render(&ui, &a);
+            let y = render(&ui, &b);
+
+            assert_eq!(tab_labels(&x).len(), 6, "six tabs are labelled");
+            assert_ne!(
+                tab_labels(&x),
+                tab_labels(&y),
+                "the {tab:?} tab's label did not move with the accent"
+            );
+
+            match tab {
+                NetworkSettingsTab::Status => {
+                    assert_eq!(switch_fills(&x).len(), 4, "four quick toggles");
+                    assert_ne!(
+                        switch_fills(&x),
+                        switch_fills(&y),
+                        "the status tab's quick toggles did not move with the accent"
+                    );
+                }
+                NetworkSettingsTab::Dns => {
+                    // Two sites here, and they must be split: the picker alone
+                    // moving would make a union of the two differ even with
+                    // the DoH switch frozen.
+                    assert_eq!(segment_fills(&x).len(), 2, "two DNS mode segments");
+                    assert_ne!(
+                        segment_fills(&x),
+                        segment_fills(&y),
+                        "the DNS mode picker did not move with the accent"
+                    );
+                    assert_eq!(switch_fills(&x).len(), 1, "one DoH switch");
+                    assert_ne!(
+                        switch_fills(&x),
+                        switch_fills(&y),
+                        "the DNS-over-HTTPS switch did not move with the accent"
+                    );
+                }
+                NetworkSettingsTab::Proxy => {
+                    assert_eq!(segment_fills(&x).len(), 6, "six proxy type segments");
+                    assert_ne!(
+                        segment_fills(&x),
+                        segment_fills(&y),
+                        "the proxy type picker did not move with the accent"
+                    );
+                    assert_eq!(switch_fills(&x).len(), 1, "one authentication switch");
+                    assert_ne!(
+                        switch_fills(&x),
+                        switch_fills(&y),
+                        "the proxy authentication switch did not move with the accent"
+                    );
+                }
+                NetworkSettingsTab::Firewall => {
+                    assert_eq!(switch_fills(&x).len(), 3, "three firewall options");
+                    assert_ne!(
+                        switch_fills(&x),
+                        switch_fills(&y),
+                        "a firewall option's switch did not move with the accent"
+                    );
+                    let (fa, _) = button(&x, "+ Add rule");
+                    let (fb, _) = button(&y, "+ Add rule");
+                    assert_ne!(
+                        (fa.r, fa.g, fa.b),
+                        (fb.r, fb.g, fb.b),
+                        "\"+ Add rule\" did not move with the accent"
+                    );
+                }
+                NetworkSettingsTab::WiFi | NetworkSettingsTab::Ethernet => {}
+            }
+
+            assert_eq!(
+                colors_apart_from_the_controls(&x),
+                colors_apart_from_the_controls(&y),
+                "something that is not a control moved with the accent \
+                 (tab={tab:?}) — connection state, Wi-Fi security, signal \
+                 strength, a rule's allow/block/ask and whether the firewall \
+                 is up are all categories, and a category read against its \
+                 neighbours in a list must not be the accent"
+            );
+        }
+    }
+
+    /// The panel's own two surfaces are the palette's, in both modes.
+    ///
+    /// This is the one thing the membership sweep structurally cannot check.
+    /// `assert_drawn_from` allows `0x11111B` and `0xEFF1F5` at any alpha,
+    /// because those are the two answers [`appearance::readable_on`] can give
+    /// and a legitimately-converted foreground will be one of them. But
+    /// `0x11111B` is *also* Mocha's `crust` — so putting the literal back where
+    /// `p.crust` belongs produces a render the sweep is obliged to accept.
+    ///
+    /// Membership is the wrong question for these two. They are not "some
+    /// palette colour", they are one specific role each, so the test names the
+    /// role and asserts equality — which also fails in *dark* mode if the role
+    /// is wrong, where a membership check could only ever fail in light.
+    #[test]
+    fn the_panels_own_surfaces_come_from_the_palette() {
+        for light in [false, true] {
+            let p = Palette::for_mode(light);
+            let cmds = render(&wound(NetworkSettingsTab::Status, true), &p);
+
+            let backdrop = cmds.iter().find_map(|c| match c {
+                RenderCommand::FillRect {
+                    x: 0.0,
+                    y: 0.0,
+                    width: 600.0,
+                    height: 800.0,
+                    color,
+                    ..
+                } => Some(*color),
+                _ => None,
+            });
+            assert_eq!(
+                backdrop,
+                Some(p.base),
+                "the panel's backdrop is not p.base (light={light})"
+            );
+
+            // The well the tab content sits in: the full-width inset at x 8.
+            let well = cmds.iter().find_map(|c| match c {
+                RenderCommand::FillRect {
+                    x: 8.0,
+                    width: 584.0,
+                    color,
+                    ..
+                } => Some(*color),
+                _ => None,
+            });
+            assert_eq!(
+                well,
+                Some(p.crust),
+                "the content well is not p.crust (light={light})"
+            );
+        }
+    }
+
+    /// Each label that sits on a coloured fill is picked *for that fill*.
+    ///
+    /// The accent test above cannot reach this. Every accent on offer is pale,
+    /// so [`appearance::readable_on`] answers the same near-black for all of
+    /// them and an `assert_ne!` between two accents would fail on correct
+    /// code. What separates a chosen label from a hard-coded `p.crust` is the
+    /// *mode*: Latte's `crust` is near-white, which on a pale accent is
+    /// illegible.
+    ///
+    /// The firewall action badge is here for a different reason. Its fill is
+    /// *categorical*, not the accent, and `p.crust` stays legible on all six
+    /// of green/red/yellow across both modes purely because Mocha's are pale
+    /// while Latte's are deep — a coincidence of the two palettes that nobody
+    /// maintains. Asserting `readable_on` of the badge's own fill is what
+    /// makes that legibility a property rather than a coincidence.
+    #[test]
+    fn each_label_is_legible_on_the_fill_beneath_it() {
+        for light in [false, true] {
+            for accent in [
+                appearance::BLUE,
+                appearance::GREEN,
+                appearance::RED,
+                appearance::YELLOW,
+                appearance::MAUVE,
+            ] {
+                let mut p = Palette::for_mode(light);
+                p.accent = accent;
+                let want = appearance::readable_on(accent);
+
+                // "+ Add rule": an accent fill and its label.
+                let fw = render(&wound(NetworkSettingsTab::Firewall, true), &p);
+                let (fill, text) = button(&fw, "+ Add rule");
+                assert_eq!(
+                    (fill.r, fill.g, fill.b),
+                    (accent.r, accent.g, accent.b),
+                    "\"+ Add rule\" is not filled with the accent (light={light})"
+                );
+                assert_eq!(
+                    (text.r, text.g, text.b),
+                    (want.r, want.g, want.b),
+                    "\"+ Add rule\"'s label is not chosen for its own fill \
+                     (light={light}); a fixed colour is legible on one mode's \
+                     accents and not the other's"
+                );
+
+                // Each picker's *active* segment label, likewise.
+                for (tab, label) in [
+                    (NetworkSettingsTab::Dns, "Manual"),
+                    (NetworkSettingsTab::Proxy, "HTTP"),
+                ] {
+                    let cmds = render(&wound(tab, true), &p);
+                    let (fill, text) = button(&cmds, label);
+                    assert_eq!(
+                        (fill.r, fill.g, fill.b),
+                        (accent.r, accent.g, accent.b),
+                        "the active {label:?} segment is not filled with the \
+                         accent (light={light})"
+                    );
+                    assert_eq!(
+                        (text.r, text.g, text.b),
+                        (want.r, want.g, want.b),
+                        "the active {label:?} segment's label is not chosen \
+                         for its own fill (light={light})"
+                    );
+                }
+
+                // A firewall rule's action badge: a *categorical* fill, so the
+                // expected label is readable_on of that, not of the accent.
+                for action in [
+                    FirewallAction::Allow,
+                    FirewallAction::Block,
+                    FirewallAction::Ask,
+                ] {
+                    let (fill, text) = button(&fw, action.label());
+                    let badge = action.color(&p);
+                    assert_eq!(
+                        (fill.r, fill.g, fill.b),
+                        (badge.r, badge.g, badge.b),
+                        "the {action:?} badge is not filled with its own \
+                         category's colour (light={light})"
+                    );
+                    let want_badge = appearance::readable_on(badge);
+                    assert_eq!(
+                        (text.r, text.g, text.b),
+                        (want_badge.r, want_badge.g, want_badge.b),
+                        "the {action:?} badge's label is not chosen for its \
+                         own fill (light={light}); p.crust is legible on all \
+                         six of these only by coincidence of the two palettes"
+                    );
+                }
+            }
+        }
+    }
+
+    /// Every categorical scale stays tellable apart, under every accent and in
+    /// both modes.
+    ///
+    /// These are drawn down a list — a Wi-Fi row's signal bars and lock sit
+    /// beside the next row's, and a firewall rule's badge beside the next
+    /// rule's — so two values sharing a colour do not merely confuse a learnt
+    /// code, they make a blocked rule look like an allowed one in the same
+    /// glance. Several of the hues involved are themselves selectable accents,
+    /// which is why the accent has to be varied and not merely defaulted.
+    #[test]
+    fn every_category_stays_distinct_under_every_accent() {
+        for light in [false, true] {
+            for accent in [
+                appearance::BLUE,
+                appearance::GREEN,
+                appearance::RED,
+                appearance::YELLOW,
+                appearance::PEACH,
+                appearance::MAUVE,
+                appearance::TEAL,
+            ] {
+                let mut p = Palette::for_mode(light);
+                p.accent = accent;
+                let what = format!("light={light}, accent={accent:?}");
+
+                // Connection state: connected / connecting / trouble / off are
+                // four answers and must read as four.
+                let states = [
+                    ConnectionState::Connected,
+                    ConnectionState::Connecting,
+                    ConnectionState::Limited,
+                    ConnectionState::Disconnected,
+                ];
+                for (i, s1) in states.iter().enumerate() {
+                    for s2 in states.iter().skip(i + 1) {
+                        assert_ne!(
+                            s1.color(&p),
+                            s2.color(&p),
+                            "{s1:?} and {s2:?} are the same colour ({what})"
+                        );
+                    }
+                }
+
+                // Signal strength is a four-step measurement; two steps that
+                // share a colour turn four bars of information into three.
+                let quals = [
+                    SignalQuality::Weak,
+                    SignalQuality::Fair,
+                    SignalQuality::Good,
+                    SignalQuality::Excellent,
+                ];
+                for (i, q1) in quals.iter().enumerate() {
+                    for q2 in quals.iter().skip(i + 1) {
+                        assert_ne!(
+                            q1.color(&p),
+                            q2.color(&p),
+                            "{q1:?} and {q2:?} signal are the same colour ({what})"
+                        );
+                    }
+                }
+
+                // Security strength, by band rather than by variant: WPA2 and
+                // WPA3 are deliberately the same strength and so deliberately
+                // the same colour, which is why this walks one member of each
+                // of the four bands.
+                let secs = [
+                    WiFiSecurity::Open,
+                    WiFiSecurity::WEP,
+                    WiFiSecurity::WPA2Personal,
+                    WiFiSecurity::WPA3Personal,
+                ];
+                for (i, s1) in secs.iter().enumerate() {
+                    for s2 in secs.iter().skip(i + 1) {
+                        assert_ne!(
+                            s1.color(&p),
+                            s2.color(&p),
+                            "{s1:?} and {s2:?} are the same colour ({what})"
+                        );
+                    }
+                }
+
+                // Allow / block / ask is the one where a collision is a
+                // security misreading rather than a cosmetic one.
+                let acts = [
+                    FirewallAction::Allow,
+                    FirewallAction::Block,
+                    FirewallAction::Ask,
+                ];
+                for (i, a1) in acts.iter().enumerate() {
+                    for a2 in acts.iter().skip(i + 1) {
+                        assert_ne!(
+                            a1.color(&p),
+                            a2.color(&p),
+                            "{a1:?} and {a2:?} are the same colour ({what})"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// A category is not the accent — proved by moving the accent onto it.
+    ///
+    /// The distinctness test above is necessary but not sufficient: a scale
+    /// whose values were all rewritten to `p.accent` would collapse and be
+    /// caught, but a scale where only *one* value became the accent would
+    /// still be pairwise-distinct under most accents. This asserts the
+    /// stronger property directly — every one of these colours is the same
+    /// under two different accents, because none of them is the accent.
+    #[test]
+    fn no_category_follows_the_accent() {
+        let mut a = Palette::for_mode(false);
+        a.accent = appearance::MAUVE;
+        let mut b = Palette::for_mode(false);
+        b.accent = appearance::TEAL;
+
+        for s in [
+            ConnectionState::Connected,
+            ConnectionState::Connecting,
+            ConnectionState::Limited,
+            ConnectionState::NoInternet,
+            ConnectionState::Disconnected,
+            ConnectionState::Disabled,
+        ] {
+            assert_eq!(s.color(&a), s.color(&b), "{s:?} follows the accent");
+        }
+        for q in [
+            SignalQuality::Weak,
+            SignalQuality::Fair,
+            SignalQuality::Good,
+            SignalQuality::Excellent,
+        ] {
+            assert_eq!(q.color(&a), q.color(&b), "{q:?} signal follows the accent");
+        }
+        for s in [
+            WiFiSecurity::Open,
+            WiFiSecurity::WEP,
+            WiFiSecurity::WPA,
+            WiFiSecurity::WPA2Personal,
+            WiFiSecurity::WPA2Enterprise,
+            WiFiSecurity::WPA3Personal,
+            WiFiSecurity::WPA3Enterprise,
+        ] {
+            assert_eq!(s.color(&a), s.color(&b), "{s:?} follows the accent");
+        }
+        for act in [
+            FirewallAction::Allow,
+            FirewallAction::Block,
+            FirewallAction::Ask,
+        ] {
+            assert_eq!(act.color(&a), act.color(&b), "{act:?} follows the accent");
+        }
+    }
+
+    /// A disabled firewall rule's row is its enabled row, made translucent.
+    ///
+    /// The row was `Color::rgba(49, 50, 68, 128)` — Mocha's `surface0` at half
+    /// alpha, written out by hand. The membership sweep cannot see the
+    /// difference, because it compares RGB and ignores alpha by design, so
+    /// this is the test that says the RGB is a *role* and the alpha is not.
+    #[test]
+    fn a_disabled_rule_is_the_enabled_row_made_translucent() {
+        for light in [false, true] {
+            let p = Palette::for_mode(light);
+            let cmds = render(&wound(NetworkSettingsTab::Firewall, true), &p);
+            let rows: Vec<Color> = cmds
+                .iter()
+                .filter_map(|c| match c {
+                    RenderCommand::FillRect {
+                        height: 48.0,
+                        color,
+                        ..
+                    } => Some(*color),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(rows.len(), 3, "three rules are drawn (light={light})");
+            for row in &rows[..2] {
+                assert_eq!(*row, p.surface0, "an enabled rule's row is not p.surface0");
+            }
+            let off = rows[2];
+            assert_eq!(
+                (off.r, off.g, off.b),
+                (p.surface0.r, p.surface0.g, p.surface0.b),
+                "a disabled rule's row is not p.surface0 underneath its alpha \
+                 (light={light}); the membership sweep ignores alpha, so a \
+                 hand-written Mocha rgba survives it"
+            );
+            assert_eq!(off.a, 128, "a disabled rule's row is not half-alpha");
+        }
+    }
+
+    /// Every segment of a picker is somewhere the user can see and reach.
+    ///
+    /// Both bugs this asserts against were live in the panel, and the palette
+    /// conversion is only how they came to light — neither has anything to do
+    /// with colour:
+    ///
+    /// * The DNS mode picker advanced no x, so both segments were drawn at the
+    ///   row's own x and "Automatic" was covered outright by "Manual". It was
+    ///   on screen in the sense that a command existed for it, and invisible
+    ///   and unclickable in every sense that matters.
+    /// * The proxy type picker sized segments as if there were no gaps between
+    ///   them, so the row ran past its own right edge — by ~4px at the four
+    ///   segments it then had, and by ~20 at the six it has now.
+    ///
+    /// `draw_check` catches the first as a special case of "drawn and never
+    /// seen", but only because the overlap happened to be exact; two segments
+    /// half on top of each other would slip past it, since partial overlap is
+    /// deliberately exempt there. So this checks the property directly.
+    #[test]
+    fn no_picker_segment_hides_another_or_leaves_the_row() {
+        let p = Palette::for_mode(false);
+        for (tab, want) in [(NetworkSettingsTab::Dns, 2), (NetworkSettingsTab::Proxy, 6)] {
+            let cmds = render(&wound(tab, true), &p);
+            let segs: Vec<(f32, f32)> = cmds
+                .iter()
+                .filter_map(|c| match c {
+                    RenderCommand::FillRect {
+                        x,
+                        y,
+                        width,
+                        height: 32.0,
+                        ..
+                    } if *y > 100.0 && *width < 400.0 => Some((*x, *width)),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(segs.len(), want, "{tab:?} draws {want} segments");
+
+            // Every variant of the enum is offered, so no reachable setting is
+            // one the picker cannot show as chosen.
+            if tab == NetworkSettingsTab::Proxy {
+                for t in [
+                    ProxyType::None,
+                    ProxyType::Http,
+                    ProxyType::Https,
+                    ProxyType::Socks4,
+                    ProxyType::Socks5,
+                    ProxyType::Auto,
+                ] {
+                    let mut ui = wound(tab, true);
+                    ui.settings.proxy.proxy_type = t;
+                    let c = render(&ui, &p);
+                    let lit = segment_fills(&c)
+                        .into_iter()
+                        .filter(|f| *f == p.accent)
+                        .count();
+                    assert_eq!(lit, 1, "{t:?} lights exactly one segment");
+                }
+            }
+
+            // The content row starts at cx = 24 and is cw = 600 - 48 wide.
+            let (row_x, row_w) = (24.0_f32, 552.0_f32);
+            for (i, (sx, sw)) in segs.iter().enumerate() {
+                assert!(
+                    *sx >= row_x && sx + sw <= row_x + row_w + 0.01,
+                    "{tab:?} segment {i} spans {sx}..{} , outside the row \
+                     {row_x}..{}",
+                    sx + sw,
+                    row_x + row_w
+                );
+                if let Some((px, pw)) = segs.get(i.wrapping_sub(1)).filter(|_| i > 0) {
+                    assert!(
+                        *sx >= px + pw,
+                        "{tab:?} segment {i} starts at {sx}, inside segment \
+                         {} which ends at {}",
+                        i - 1,
+                        px + pw
+                    );
+                }
+            }
+        }
     }
 }

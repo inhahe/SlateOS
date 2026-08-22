@@ -53967,6 +53967,217 @@ in sort order. `split-diff.sh` had no case that reached it yet; it was fixed
 anyway rather than left as a trap.
 
 
+## BUG-SPAWNED-CHILDREN-INHERIT-NO-CAPABILITIES — a ring-3 process cannot spawn a child that can open a file (lane B found; lane A owns the fix)
+
+**In short:** When a program already running on SlateOS starts another program,
+the new program is given *no permission to open any file at all*. It can be
+loaded and it can run, but the very first file it tries to read fails with
+"Permission denied". For a dynamically-linked program that first file is its C
+library, so it dies before reaching `main`. This is why the boot test's `make`
+self-tests have been failing: `make` starts `/bin/sh`, and `/bin/sh` cannot
+load `libc.so.6`.
+
+**Found 2026-08-22** by lane B while diagnosing the boot test on `92501b295`.
+**Not fixed** — the code is `kernel/src/syscall/handlers.rs` and
+`kernel/src/proc/spawn.rs`, which is lane A's tree. Filed as
+`requests/b-a-spawned-children-inherit-no-capabilities.md`.
+
+### The evidence, in the order it was found
+
+Two of the three self-test failures on that boot are this one bug:
+
+```
+34403  /bin/sh: error while loading shared libraries: libc.so.6: cannot open shared object file: Permission denied
+34407  make: /bin/sh: Permission denied
+34408  make: *** [/Makefile:2: all] Error 127
+34424  [spawn]   FAIL: real make — exit code=Some(2), expected 0
+
+36775  /bin/tcc: error while loading shared libraries: libm.so.6: cannot open shared object file: Permission denied
+36778  make: /bin/tcc: Permission denied
+36779  make: *** [/cap.mk:5: /cap-a.o] Error 127
+36796  [spawn]   FAIL: make+tcc — make exit code=Some(2), expected 0
+```
+
+(line numbers in `build/serial-test.txt` from that run).
+
+The failure is *not* "dynamic linking is broken" and *not* "fork/exec is
+broken". Both work fine elsewhere in the same boot:
+
+| Case | How the child was created | Result |
+|---|---|---|
+| 95 programs incl. `/bin/sh`, `/bin/tcc`, `/bin/emit` | kernel self-test calls `spawn_process` directly | ld.so opens `libc.so.6` fine |
+| dash forks and execs `/bin/emit` (itself dynamic) | ring-3 `fork()` + `execve()` | fine |
+| make starts `/bin/sh` | ring-3 `posix_spawn()` → `SYS_PROCESS_SPAWN` | **EACCES on `libc.so.6`** |
+
+So the discriminator is exactly *which* process-creation path was used, and
+the reason is a one-line asymmetry between them:
+
+- **`fork` clones the parent's capability table.** `kernel/src/proc/fork.rs`
+  line 8: "clone of the parent's capability table". The child therefore
+  inherits the parent's `File` capability and can open files.
+- **`SYS_PROCESS_SPAWN` grants the child nothing.**
+  `kernel/src/syscall/handlers.rs` ~line 3427 builds
+
+  ```rust
+  let options = SpawnOptions::new(name)
+      .parent(caller_pid().unwrap_or(0))
+      .fd_map(&fd_pairs)
+      .argv(&argv_slices)
+      .envp(&envp_slices);
+  ```
+
+  with no `.capabilities(…)`, and `spawn_process`'s Step 5
+  (`kernel/src/proc/spawn.rs` ~line 994) grants exactly `options.capabilities`
+  — an empty slice. The child is born with an empty capability table.
+
+- The Linux-ABI `openat` then refuses it:
+  `kernel/src/syscall/linux.rs` ~line 5948,
+  `require_cap_type(ResourceType::File, Rights::READ)` → `PermissionDenied` →
+  `EACCES`. The native-ABI open path gates the same way.
+
+Every kernel-side self-test grants its process a `File` capability explicitly
+(there are ~60 `let caps = [(ResourceType::File, …)]` sites in `spawn.rs`),
+which is precisely why the hole never showed up until a *ring-3* program became
+the one doing the spawning.
+
+### Why it surfaced now, and why it is `make` that found it
+
+`make` is the first program on the image that both (a) runs in ring 3 and
+(b) starts other programs via `posix_spawn` rather than `fork`+`exec`. GNU make
+4.3+ prefers `posix_spawn`, and the `make` we stage is
+`build/spike/make-slateos.elf` — GNU make 4.4.1 linked against our own
+`libc.a`, so it speaks the native syscall ABI and its `posix_spawn` lands on
+`SYS_PROCESS_SPAWN`. Nothing before it exercised that path from userspace.
+
+Note that this is the *second* capability-shaped failure in the same self-test.
+The first (stat of `/Makefile` returning `EACCES` because the test granted
+`READ|WRITE` but the native `stat` needs `METADATA`) is written up on
+`self_test_linux_real_glibc_make` in `spawn.rs` and in
+`requests/b-a-path-z-real-make-fails-because-stat-of-Makefile-returns-eacces.md`.
+That one was a too-narrow grant *to the parent*; this one is no grant at all
+*to the child*. They are separate bugs with the same symptom shape, which is
+worth remembering the next time a Path-Z test reports something implausible
+like "file does not exist".
+
+### What the fix has to decide (this is why it is a request, not a patch)
+
+The naive fix — clone the parent's capability table into the child, exactly as
+`fork` does — is almost certainly right, because `posix_spawn` is specified to
+be equivalent to `fork`+`exec`, and any difference between them is a POSIX
+conformance bug on its face. But it is a *security* change, so it belongs to
+whoever owns the capability model:
+
+1. **Clone the parent's table** (matches `fork`; smallest surprise).
+2. **Let the caller pass an explicit capability list, intersected with what it
+   already holds.** More in the spirit of "no ambient authority" — a spawner
+   could hand a child strictly less than itself — but it needs an ABI change to
+   `SYS_PROCESS_SPAWN` and would break every existing caller until they are
+   updated.
+3. **Both**: clone by default, allow an explicit narrower set.
+
+Option 1 is what lane B recommends as the immediate fix, with option 3 as the
+eventual shape. Whichever is chosen, the regression test is the one that found
+it: `self_test_linux_real_glibc_make` must go green, and a smaller in-kernel
+test should assert directly that a child of `SYS_PROCESS_SPAWN` holds a `File`
+capability.
+
+### Until it is fixed
+
+Two boot self-tests are red on every branch (`real make`, `make-drives-tcc`),
+so the whole boot test scores `SELFTEST_FAIL` and cannot be used as a
+pass/fail gate — you have to read the failure list and compare it against the
+known three. That is the actual cost: a red suite that everyone learns to
+ignore. It does not block lane B's userland work, and it is not a regression
+from any recent lane-B change (see the timeline note below).
+
+
+## BUG-FASTPY-MINISHELL-EXITS-0-WITHOUT-FORKING (lane B)
+
+**In short:** `minishell` is a tiny shell written in Python and compiled to a
+native SlateOS binary; the boot test hands it the command line
+`cat /tmp/minishell-in.txt > /tmp/minishell-out.txt` and expects it to run
+`cat`. Instead it exits immediately, reporting success, having started nothing.
+The boot log proves it never even forked.
+
+**Found 2026-08-22** by lane B on `92501b295`. **Not fixed yet.** This one *is*
+lane B's own — `services/fastpy-minishell/`.
+
+**The symptom.**
+
+```
+[spawn]   FAIL: fastpy-minishell (test 1, `cat > out`) — shell exit Some(0),
+          expected 32 (cat's byte count, propagated as $?)
+```
+
+**Why the exit code 0 is the interesting part.** `services/fastpy-minishell/build.py`
+gives every failure path its own distinctive exit code — 90 (empty command),
+100 (argv[0] resolved to nothing), 101 (execv returned), 110 (fork failed),
+111/112 (waitpid), 120/122 (redirect open failed), 130 (pipe failed). `0` is
+none of them. The only way out of the program with status 0 is to fall off the
+end with an empty `pids` list, i.e. **the `'|'` branch of the main loop never
+ran even once** — and it is written to always run at least once, because the
+program appends a sentinel `'|'` to the token list precisely so the final stage
+is flushed by the same code path as an internal pipe boundary.
+
+An empty `pids` therefore means `toks2` was empty, which means `toks` was
+empty, which means `sys.argv[1].split()` produced nothing.
+
+**The boot log corroborates it independently:** a successful `os.fork()` prints
+`[cow] Cloned address space: parent=… -> child=…`. That line appears for the
+`redirect`, `inredirect`, `forkexec`, `capture` and `pipeline` fixtures, which
+all pass in the same boot and all do the same fork→dup2→execv dance. It does
+**not** appear anywhere between `[spawn] Created process 190
+("fastpy-minishell")` and `[sched] Task 157 exiting`. The shell really did run
+to completion without forking.
+
+**So the suspect is argv delivery or `str.split()` in the compiled program**,
+not the shell logic and not the kernel's fork/exec/redirect plumbing — all of
+which are proven green by the five sibling fixtures in the same run. The kernel
+passes `argv = ["fastpy-minishell", "<the command line>"]` and the log confirms
+`[spawn] Stored 2 argv, 0 envp entries for process 190`, so the argv reaches the
+kernel side intact; the loss is on the fastpy/`crt` side or in `split()`.
+
+**Next step:** rebuild `services/fastpy-minishell/fastpy-minishell.elf` from
+`build.py` against the current fastpy and re-run. The `.elf` and `prog.o` in the
+tree are dated 2026-08-21 16:05 while `build.py` is dated 2026-08-16, so the
+binary is *newer* than its recipe — it was rebuilt against some fastpy revision,
+and a fastpy regression in argv handling or `str.split()` would produce exactly
+this. Bisect by compiling a two-line probe (`print(len(sys.argv))`,
+`print(len(sys.argv[1]))`) through the same toolchain before touching the shell
+source.
+
+**Cost while unfixed:** one red boot self-test. The primitives it composes are
+each covered by a passing fixture, so nothing is *untested* — only the
+composition is.
+
+
+## Timeline note — the three boot self-test failures are older than any lane-B coreutils change
+
+Recorded 2026-08-22 because the question "did my merge break the boot test?"
+comes up every time, and answering it took long enough to be worth writing down.
+
+`bench/boot-history.jsonl` shows `SELFTEST_FAIL` on **every** full-length boot
+back through 2026-08-21 14:35 (`2b8b1a536`), across both lane A and lane B,
+dirty and clean trees alike. The two `PASS` rows in that stretch are not
+counter-examples:
+
+| Row | Serial lines | Wall | What it actually is |
+|---|---|---|---|
+| `0e4e927de` 17:17 PASS | 7,041 | 88 s | a short run that never reached the Path-Z tests |
+| `558d5fc1e` 19:12 PASS | 31,286 | — | the *same* serial log as the `SELFTEST_FAIL` row 33 s earlier, re-scored |
+
+A full-length boot is ~31k–42k serial lines and 380–850 s. Anything much
+shorter did not get far enough to fail these tests, so it must not be read as
+evidence that they once passed.
+
+Second, independent check that lane B's coreutils work is not implicated: the
+three failing tests are `fastpy-minishell` (a fastpy fixture ELF), `real make`
+and `make-drives-tcc` (staged `/bin/make`, `/bin/sh`, `/bin/tcc` from the Debian
+rootfs plus `build/spike/make-slateos.elf`). None of them loads anything built
+from `userspace/coreutils/`, which is not staged on `rootfs.ext4` at all yet.
+The artifact sets are disjoint.
+
+
 ## BUG-TR-CURLED-TWO-QUOTES-GNU-LEAVES-STRAIGHT — §351 applied one level too broadly (lane B)
 
 **Found 2026-08-21** by `scripts/tr-diff.sh`, the only red harness in a

@@ -50335,7 +50335,7 @@ commands that carry the colour in question, and assert the two renders agree.
 Candidates: anything drawn on the wallpaper, on a video surface, on a
 thumbnail, or on any other content the palette does not own.
 
-**Part 2 progress. 9 of 49 modules converted.**
+**Part 2 progress. 10 of 49 modules converted.**
 
 - [x] `security_dialog.rs` — 29 constants, done 2026-08-22. The method above
   survived contact: the sweep lives in `gui/desktop/src/palette_check.rs` as
@@ -50638,6 +50638,51 @@ thumbnail, or on any other content the palette does not own.
     distinction to carry forward — *which of these am I on* is the accent's,
     *which kind of thing is this* is not, and both can be a blue `if active`
     one-liner in the source.
+- [x] `storage_settings.rs` — 13 constants, done 2026-08-22. Harness defects
+  PPP/QQQ/RRR/SSS/TTT/UUU/VVV/WWW/XXX, all nine caught by exactly the tests
+  named.
+  - **A ten-member categorical row, and the first one where the distinctness
+    argument is not an analogy but the feature itself.** `StorageCategory::color`
+    paints a *stacked bar* and the legend beneath it: System blue, Apps
+    lavender, Documents green, Media peach, Downloads yellow, recycle bin red,
+    then four greys. Two members sharing a colour do not merely look similar —
+    their slices abut in the bar and **merge into one slice**, so the chart
+    silently reports a lie. Six of the ten are among the fourteen selectable
+    accents, so a member that followed the accent would collide for at least six
+    of the fourteen. `the_ten_storage_categories_stay_distinct_in_both_modes`
+    walks four accents × both modes; defect XXX (Downloads given Media's peach)
+    is caught by it and by nothing else, because peach is a perfectly good
+    palette role and the membership sweep cannot see it.
+  - **Defect WWW is the FFF/NNN shape a third time, and it is now a pattern
+    rather than a coincidence.** The two accent sites here are the active tab's
+    label and the six `Change` buttons; WWW freezes only the buttons, and the
+    tab label goes on moving. Every module converted so far that has had more
+    than one accent site has had a defect that only a per-site assertion can
+    see. Treat **n accent sites ⇒ n negative assertions** as mandatory, not as
+    a refinement.
+  - **A button label is the third thing the accent owns.** The rule so far was
+    *which of these am I on* → accent, *which kind of thing is this* →
+    categorical. `Change` is neither: it is a press-me affordance, with no
+    sibling to be distinguished from and no fact to report. It takes the accent,
+    for the same reason a link does — the accent is where the eye is told to go.
+    So the rule generalises to: **the accent marks position and invitation; it
+    never marks category or measurement.**
+  - **`is_low_space` is a measurement and stays red.** The warning banner and
+    the over-90% figure are the first *threshold* colour in this conversion, as
+    opposed to an enum arm. It is not a selection and not an invitation, so it
+    is not the accent's — a nearly-full disk is red the way a stop sign is red,
+    under every accent a user can pick. Held by the positive half of
+    `the_storage_panels_own_colours_do_not_follow_the_accent`.
+  - **Two *absences* needed their own fixture shapes.** The sweep runs three
+    fixtures, not one: no drives at all (the overview loop runs zero times and
+    the breakdown bails on `drives().get(selected) == None`), one drive carrying
+    all ten categories with each slice big enough to clear the `seg_w > 0.5`
+    guard, and one drive holding only System and Apps so nothing is reclaimable
+    and the green estimate line is skipped. The second and third are mutually
+    exclusive — a fixture with a recycle bin in it can never reach the
+    zero-reclaimable branch — which is worth knowing in advance: *when a branch
+    is an absence, adding data to the fixture cannot reach it, only a second
+    fixture can.*
 
 **Trigger:** this is not blocked on anything. It is sequenced after the shell
 event loop (`TD-C-THE-SHELL-CAN-DRAW-ITSELF-AND-NOBODY-CAN-ASK-IT-TO`) only

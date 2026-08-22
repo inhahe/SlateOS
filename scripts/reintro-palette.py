@@ -58,6 +58,7 @@ RULES = "gui/desktop/src/window_rules.rs"
 ACCT = "gui/desktop/src/user_accounts.rs"
 BT = "gui/desktop/src/bluetooth.rs"
 UPD = "gui/desktop/src/update_settings.rs"
+STOR = "gui/desktop/src/storage_settings.rs"
 
 # (name, file, [(old, new), ...], [packages], [tests expected to fail])
 DEFECTS = [
@@ -738,6 +739,75 @@ DEFECTS = [
         [("            Self::Available => p.yellow,", "            Self::Available => p.green,")],
         ["desktop"],
         ["the_update_statuses_stay_distinct_in_both_modes"],
+    ),
+    # --- storage_settings.rs (module 10) -------------------------------------
+    (
+        "PPP: the panel background goes back to Mocha base",
+        STOR,
+        [("            color: p.base,", "            color: Color::from_hex(0x1E1E2E),")],
+        ["desktop"],
+        ["every_colour_the_panel_draws_comes_from_its_palette"],
+    ),
+    (
+        "QQQ: the breakdown heading goes back to Mocha lavender",
+        STOR,
+        [("                color: p.lavender,", "                color: Color::from_hex(0xB4BEFE),")],
+        ["desktop"],
+        ["every_colour_the_panel_draws_comes_from_its_palette"],
+    ),
+    (
+        "RRR: the low-space warning caption goes back to Mocha red",
+        STOR,
+        [("                color: p.red,", "                color: Color::from_hex(0xF38BA8),")],
+        ["desktop"],
+        ["every_colour_the_panel_draws_comes_from_its_palette"],
+    ),
+    (
+        "SSS: the reclaimable estimate goes back to Mocha green",
+        STOR,
+        [("                    color: p.green,", "                    color: Color::from_hex(0xA6E3A1),")],
+        ["desktop"],
+        ["every_colour_the_panel_draws_comes_from_its_palette"],
+    ),
+    (
+        "TTT: the filesystem caption goes back to Mocha overlay0",
+        STOR,
+        [("                color: p.overlay0,", "                color: Color::from_hex(0x6C7086),")],
+        ["desktop"],
+        ["every_colour_the_panel_draws_comes_from_its_palette"],
+    ),
+    (
+        "UUU: the recycle bin's slice is made to follow the accent",
+        STOR,
+        [("            Self::Trash => p.red,", "            Self::Trash => p.accent,")],
+        ["desktop"],
+        ["the_storage_panels_own_colours_do_not_follow_the_accent",
+         "the_ten_storage_categories_stay_distinct_in_both_modes"],
+    ),
+    (
+        "VVV: the active tab's label stops following the accent",
+        STOR,
+        [("                color: if active { p.accent } else { p.subtext0 },",
+          "                color: if active { p.blue } else { p.subtext0 },")],
+        ["desktop"],
+        ["the_storage_panels_own_colours_do_not_follow_the_accent"],
+    ),
+    # The FFF/NNN shape a third time. The tab label keeps moving with the
+    # accent here, so an assert_ne! over the union of the two accent sites
+    # would still pass and this would ship unnoticed.
+    (
+        "WWW: the Change buttons stop following the accent",
+        STOR,
+        [("                color: p.accent,", "                color: p.blue,")],
+        ["desktop"],
+        ["the_storage_panels_own_colours_do_not_follow_the_accent"],
+    ),
+    (
+        "XXX: Downloads is given the same slice colour as Media",
+        STOR,
+        [("            Self::Downloads => p.yellow,", "            Self::Downloads => p.peach,")],
+        ["desktop"],
+        ["the_ten_storage_categories_stay_distinct_in_both_modes"],
     ),
 ]
 

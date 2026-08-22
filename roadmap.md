@@ -625,11 +625,25 @@ Known-issues (open, kernel-owned):
   can no longer let the child run the glibc clone entry with an unseeded `%fs`.
   Corroborated by a 20/20 clean soak. (defect 2 fixed 2026-08-13 `315a7e0ca`.)
 - `B-PTHREAD-TEARDOWN-PF` — kernel `#PF` @ 0x97 during clone-thread teardown.
-  **Blocked on a repro**: 20 boots produced zero occurrences (vs. the stale
+  ~~**Blocked on a repro**~~: 20 boots produced zero occurrences (vs. the stale
   1-in-5 historical rate), and the recorded mechanism does not fit the capture
   (assumed a write, but error=0x0 is a read — RIP was likely mis-attributed to
   the nearest preceding symbol). A bytes-at-RIP dump is now emitted on kernel
   `#PF` (`5431facbd`) so the next occurrence settles it.
+  **Update 2026-08-21 — it recurred, in ring 3, and none of that fired.** The
+  capture was `RIP == CR2 == 0x6000066370`, `CS=0x23` — a control-flow hijack
+  into an address holding no code, i.e. the same *shape* as the historical
+  ring-0 capture but on the other side of the privilege boundary, where all the
+  instrumentation added above was absent. It produced three lines. RSP was
+  intact, which is what makes a single wild write into the task's **kernel**
+  stack the unifying hypothesis for both manifestations: hit the saved kernel
+  return address and you get the ring-0 jump into `.data`; hit the saved user
+  RIP in the same stack's interrupt frame and you get this one. The ring-3
+  diagnostics entry in §2.x closes that asymmetry, so the next occurrence is a
+  two-way decision rather than another round of inference — a user-stack scan
+  showing plausible frames means the corruption is in the kernel interrupt
+  frame (hunt the writer), garbage or the hijack value on the stack means
+  glibc/TLS teardown (hunt the freed object). Full writeup in `known-issues.md`.
 - `B-FORKEXEC-BOOT-HANG` — intermittent hang at the glibc fork+exec self-test
 - ~~`B-KASAN-INSTRUMENTED-BOOT-WEDGES-MID-PRINT-ON-A-PAGE-FAULT`~~ — **NOT A
   KERNEL BUG, closed 2026-08-19.** The "wedge" was never real: the instrumented
@@ -1543,6 +1557,7 @@ _Define scheduler trait interface first, implement one scheduler behind it._
     inherited; vfork aliases fork).
 - [x] exec equivalent
 - [x] Hardware exception → language-level exception (SEH-style, not Unix signals)
+  - [x] `[A]` Ring-3 fatal-fault diagnostics (2026-08-21) — a fatal *user* fault now reports as much as a fatal *kernel* one. Until this, `kill_userspace_task_with_info` printed only the vector, the faulting address and the segment registers, while the ring-0 path had a bytes-at-RIP dump, a stack scan and symbolisation; the 2026-08-21 recurrence of `B-PTHREAD-TEARDOWN-PF` landed in ring 3, so five weeks of waiting for a repro bought three lines that could not answer "what is mapped at the address we jumped to?". Added: `describe_user_addr` (PTE flags via `translate_flags` + the owning VMA, or — for a hole — both bracketing VMAs and the gap sizes) applied to RIP, RSP and the faulting address; a 16-byte bytes-at-RIP dump; and `dump_user_stack`, the ring-3 counterpart of `backtrace::dump_stack_scan`, which flags slots pointing into mapped executable user pages as return-address candidates. Backed by a new `pcb::classify_user_addr` that is deliberately `try_lock`-based and allocation-free — `list_vmas` is unusable on this path twice over, since it takes the process-table lock unconditionally (a fault raised while that lock is held would deadlock instead of printing) and clones a `Vec` (a heap allocation on the very path that reports heap corruption). Every read is preceded by a page-table check on that exact address, so the diagnostic cannot itself fault. **Mistake worth keeping:** the first version killed the boot it was added on with `error = 0x1` (present, read, kernel) — SMAP means a ring-0 read of a user page needs STAC/CLAC, so both read sites now go through `smep_smap::with_user_access`, with a `// SAFETY:` comment saying why it is required rather than defensive. Exercised on every boot by the deliberate exception self-tests, so it cannot rot unnoticed the way the ring-0 dump did.
 - [x] Structured shutdown via IPC message, not Unix signals
 - [x] Process credential / capability management
 - [x] File descriptor inheritance across spawn (SYS_PROCESS_SPAWN_EX / SYS_PROCESS_GET_INITIAL_FDS)
@@ -1640,7 +1655,9 @@ _Depends on: Phase 1 complete. Goal: boot to a shell prompt._
 - [x] Timer (HPET, APIC timer)
   - [x] Local APIC timer (calibrated via PIT, 100 Hz periodic, preemptive scheduling)
   - [x] HPET (High Precision Event Timer): ACPI table discovery, MMIO mapping, 100 MHz monotonic counter, ticks_to_ns conversion, self-test
-  - [x] High-resolution timers (hrtimer): per-CPU sorted timer lists, nanosecond scheduling via HPET, repeating timers, cancel API, process_expired() from APIC ISR
+  - [x] High-resolution timers (hrtimer): per-CPU ~~sorted timer lists~~ **binary min-heaps over a slot slab (2026-08-21, lane A)**, nanosecond scheduling via HPET, repeating timers, cancel API, process_expired() from APIC ISR
+  - [x] `[A]` hrtimer O(log n) queue — replaced the per-CPU sorted `Vec` with a binary min-heap over a slot slab, because CLAUDE.md forbids linear scans in event dispatch outright and every operation on the old queue ran linear *under the queue lock with interrupts disabled* (a ~160 KiB memmove at the hard ceiling). `schedule` and `process_expired` are now O(log n); `cancel` is an O(1) slot lookup plus an O(log n) sift, since each slot records its own heap position rather than being searched for. Three details are load-bearing and are not the textbook heap: the ordering key is `(expiry_ns, id)` and not `expiry_ns` alone (a binary heap is **not** stable, so a bare-deadline key lets a timer be passed over indefinitely by arrivals sharing its deadline — monotonic ids restore FIFO); `heap_remove_at` sifts **both** ways (moving the tail into the hole usually needs sift-down, but on a different branch it can need sift-up, and doing only the sift-down leaves a plausible-looking heap that pops *a* minimum, just not the right one); and handles carry `(slot, generation)` so a stale handle cannot evict whichever timer inherited its recycled slot — the exact shape of `BUG-HRTIMER-EVICTS-AN-ARMED-TIMER`. Repeating timers re-arm **in place**, keeping slot and id, so a periodic handle stays cancellable across firings. Four new self-tests, because Tests 1–5 all passed against the `Vec` and *cannot* observe a mis-ordering (the only multi-timer case sums its arguments, and a sum is order-independent). **Incidental find, fixed in the same pass:** the `scheduled - fired - cancelled - pending` tripwire added by the eviction-bug fix could never have fired — `TOTAL_FIRED` counted every firing of a repeating timer while `TOTAL_SCHEDULED` counted only its first arming, so `fired` permanently outran `scheduled` (boots read `scheduled=388, fired=75833`) and the `saturating_sub` chain floored the result at 0 on a healthy boot *and* on a broken one. Re-arms are now counted as armings, and Test 10 pins that invariant so the guard cannot be silently disabled again. See `known-issues.md`.
+  - [x] `[A]` ktimer accounting conservation (2026-08-21) — the same counter asymmetry hrtimer had: a periodic timer's re-arm bumped `TIMERS_FIRED` but not `TIMERS_SCHEDULED`, so the self-test printed `scheduled=5, fired=8`. Nothing was false yet (ktimer had no tripwire over those counters), but adding one later would have inherited a guard that could never fire. Re-arms are now counted, and the self-test asserts `scheduled >= fired + cancelled` — a check the pre-fix numbers **would have failed**, which is the only evidence worth having that a guard is live. Phrased as a comparison rather than a `saturating_sub` (that is precisely how hrtimer's guard died), and it samples `fired`/`cancelled` before `scheduled` so a concurrent expiry on another CPU biases the check safe.
   - [x] hrtimer IRQ safety: all CPU_TIMERS lock acquisitions wrapped in without_interrupts() to prevent ISR deadlock
   - [x] Scheduler integration: sleep_ns() for nanosecond-precision task sleep (hrtimer-backed, tick-based fallback for >100ms)
   - [x] Deferred wake queue: 32-slot lock-free retry mechanism for ISR-context try_wake failures, drained by schedule_inner + softirq + idle loop

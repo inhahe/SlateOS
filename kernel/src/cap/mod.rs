@@ -369,8 +369,10 @@ impl ResourceType {
     ///    `1..=LAST`, so omitting it turns a green boot red — which is the
     ///    intended outcome, not an inconvenience: it forces the "should admin
     ///    have this?" question to be answered rather than defaulted.
-    /// 3. `test_cap_entry_info_abi`'s discriminant pin, if the new variant is
-    ///    now the last one.
+    /// 3. `test_cap_entry_info_abi`'s `ResourceType::LAST` pin. Doing step 1
+    ///    turns the boot red until you do this one — deliberately, because
+    ///    step 4 is the one with no compiler behind it at all and this is the
+    ///    last place that can make you stop and read it.
     /// 4. Lane B's mirrored copy in `posix/src/sys_capability.rs`, which no
     ///    compiler here can see. File a request; do not assume they will
     ///    notice.
@@ -562,18 +564,59 @@ fn test_cap_entry_info_abi() -> KernelResult<()> {
         return Err(KernelError::InternalError);
     }
 
-    // The discriminant is the wire value; a renumbering of ResourceType would
-    // silently repoint every caller's decode table, so pin both ends of the
-    // range actually used plus one interior anchor.  The *last* variant is
-    // pinned deliberately: a new type appended without updating this line is
-    // exactly the change that would go unnoticed, and lane B mirrors these
-    // numbers by hand in `posix/src/sys_capability.rs`.
+    // The discriminant is the wire value, and lane B mirrors these numbers by
+    // hand in `posix/src/sys_capability.rs`, where no compiler here can see
+    // them.  Two *different* mistakes have to be caught, and it is worth being
+    // precise about which pin catches which — an earlier version of this
+    // comment claimed the `ResourceLimit` pin caught an append, which it does
+    // not: appending a variant leaves `ResourceLimit` at 29 and this check
+    // passes unchanged.
+    //
+    // 1. **Renumbering or insertion** — someone slots a variant into the middle
+    //    of the enum, shifting every later discriminant and silently repointing
+    //    lane B's decode table by one.  Caught by the four value pins below:
+    //    the first variant, two interior anchors, and the last.
     if ResourceType::Channel as u16 != 1
         || ResourceType::NetSocket as u16 != 25
         || ResourceType::SystemClock as u16 != 27
         || ResourceType::ResourceLimit as u16 != 29
     {
-        serial_println!("[cap]   FAIL: ResourceType discriminants moved");
+        serial_println!(
+            "[cap]   FAIL: ResourceType discriminants moved — a variant was inserted \
+             rather than appended, so every later wire value shifted. Lane B's \
+             hand-mirrored table in posix/src/sys_capability.rs is now off by one \
+             and must be corrected; file a request."
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    // 2. **Appending** — a genuinely new type at the end.  None of the pins
+    //    above move, so they cannot see it.  `LAST` can: `ResourceType::
+    //    discriminant()`'s exhaustive match is a compile error on append, and
+    //    it directs whoever hit it to bump `LAST` first (see its doc comment,
+    //    step 1).  Pinning `LAST` here catches the case where they satisfied
+    //    that compile error by adding the variant to the or-pattern and stopped
+    //    — which compiles clean, and leaves `LAST` naming the second-to-last
+    //    type.
+    //
+    //    It is runtime rather than a `const` assert to match the four checks
+    //    around it, all of which are equally const-foldable and all of which
+    //    are runtime on purpose: this function's output line is the boot log's
+    //    *evidence* that the wire ABI was verified on this build, and an
+    //    assertion that fires at compile time leaves no such record.
+    //
+    //    It restates a constant, which is normally the wrong shape for a test.
+    //    It earns the exception because the value is not ours — it is the
+    //    wire's, and the other copy of it lives in a tree this build cannot
+    //    compile, so there is nothing to derive it from.
+    if ResourceType::LAST != 29 {
+        serial_println!(
+            "[cap]   FAIL: ResourceType::LAST is {}, pinned at 29 — a new resource type \
+             was appended. That is fine, but the wire ABI just grew: bump the pin here, \
+             and file a request so lane B adds it to posix/src/sys_capability.rs. Until \
+             they do, userspace decodes the new type as unknown.",
+            ResourceType::LAST
+        );
         return Err(KernelError::InternalError);
     }
 

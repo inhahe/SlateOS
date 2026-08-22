@@ -1175,6 +1175,224 @@ fn kill_userspace_task(exception_name: &str, frame: &InterruptStackFrame) -> ! {
     kill_userspace_task_with_info(exception_name, frame, None);
 }
 
+/// Print a one-line classification of a user virtual address: the mapping it
+/// falls in (or the hole it falls between), plus the leaf PTE flags if the page
+/// is present.
+///
+/// Used by [`kill_userspace_task_with_info`].  See the rationale there for why
+/// the ring-3 path needs this at all.
+fn describe_user_addr(label: &str, pid: Option<crate::proc::pcb::ProcessId>, addr: u64) {
+    use crate::proc::pcb::UserAddrClass;
+
+    // PTE first: it is cheap, takes no lock, and answers "was this page ever
+    // populated?" independently of whether the VMA bookkeeping agrees.
+    let pte = match page_table::translate_flags(page_table::active_pml4_phys(), VirtAddr::new(addr))
+    {
+        Some(f) => {
+            let x = if f.contains(PageFlags::NO_EXECUTE) {
+                "nx"
+            } else {
+                "X"
+            };
+            let w = if f.contains(PageFlags::WRITABLE) {
+                "w"
+            } else {
+                "r"
+            };
+            let u = if f.contains(PageFlags::USER_ACCESSIBLE) {
+                "u"
+            } else {
+                "k"
+            };
+            (true, x, w, u)
+        }
+        None => (false, "-", "-", "-"),
+    };
+
+    // A ring-3 task can legitimately have no owning process (the self-test
+    // harness spawns bare ring-3 tasks).  The VMA list is then unavailable, but
+    // the PTE verdict is not — and "present/absent + rwx" is most of what the
+    // classification was for, so report it rather than dropping it on the floor.
+    let Some(pid) = pid else {
+        serial_println!(
+            "  {label} {addr:#018x}: <no owning process — no VMA list>, pte={}{}{}{}",
+            if pte.0 { "present " } else { "absent " },
+            pte.1,
+            pte.2,
+            pte.3
+        );
+        return;
+    };
+
+    match crate::proc::pcb::classify_user_addr(pid, addr) {
+        UserAddrClass::InVma(v) => {
+            serial_println!(
+                "  {label} {:#018x}: in {:?} VMA [{:#x}..{:#x}) (+{:#x}), pte={}{}{}{}",
+                addr,
+                v.kind,
+                v.start,
+                v.end,
+                addr.saturating_sub(v.start),
+                if pte.0 { "present " } else { "absent " },
+                pte.1,
+                pte.2,
+                pte.3
+            );
+        }
+        UserAddrClass::Hole { below, above } => {
+            // The gap is the interesting part: a wild jump that lands between
+            // two thread stacks is a very different story from one that lands
+            // in address space that was never mapped.
+            serial_println!(
+                "  {label} {:#018x}: NOT MAPPED (hole), pte={}{}{}{}",
+                addr,
+                if pte.0 { "present " } else { "absent " },
+                pte.1,
+                pte.2,
+                pte.3
+            );
+            match below {
+                Some(v) => serial_println!(
+                    "        below: {:?} [{:#x}..{:#x}), gap {:#x} bytes",
+                    v.kind,
+                    v.start,
+                    v.end,
+                    addr.saturating_sub(v.end)
+                ),
+                None => serial_println!("        below: <nothing mapped lower>"),
+            }
+            match above {
+                Some(v) => serial_println!(
+                    "        above: {:?} [{:#x}..{:#x}), gap {:#x} bytes",
+                    v.kind,
+                    v.start,
+                    v.end,
+                    v.start.saturating_sub(addr)
+                ),
+                None => serial_println!("        above: <nothing mapped higher>"),
+            }
+        }
+        UserAddrClass::NoProcess => {
+            serial_println!("  {label} {addr:#018x}: <pid {pid} has no live record>");
+        }
+        UserAddrClass::TableBusy => {
+            serial_println!("  {label} {addr:#018x}: <process table busy — not waited on>");
+        }
+    }
+}
+
+/// Dump the top `slots` quadwords of the faulting thread's **user** stack,
+/// flagging any value that points into a mapped, executable user page.
+///
+/// Those flagged values are the return-address candidates: on a control-flow
+/// hijack the RBP chain is broken by definition, so a raw scan is the only
+/// thing that recovers where the thread came from.  This is the ring-3
+/// counterpart of `backtrace::dump_stack_scan`, which only knows about kernel
+/// stacks and kernel `.text`.
+///
+/// Every read is preceded by a page-table check on that exact address, so this
+/// cannot itself fault — which matters because it runs on the path that is
+/// already reporting one fault, and a nested fault here would bury the
+/// evidence.
+fn dump_user_stack(rsp: u64, slots: usize) {
+    if rsp == 0 || rsp >= page_table::USER_SPACE_END {
+        serial_println!("  user stack: <RSP {rsp:#018x} is not a user address>");
+        return;
+    }
+    serial_println!("  user stack @{rsp:#018x} ({slots} qwords, X = mapped executable):");
+    let pml4 = page_table::active_pml4_phys();
+    // Consecutive unreadable slots are collapsed into a single line.  A thread
+    // that faults immediately on entry has an RSP at the (exclusive) top of a
+    // fresh stack, so *every* slot scanned is unmapped — sixteen identical
+    // `<unmapped>` lines that push the informative part of the report off a
+    // scrollback and make the interesting case (a *few* holes between real
+    // values) harder to spot.  `run` is (reason, first index, count).
+    let mut run: Option<(&'static str, usize, usize)> = None;
+    for i in 0..slots {
+        // `slots` is a small constant at every call site, so the multiply
+        // cannot overflow; `saturating_*` keeps clippy's arithmetic lint happy
+        // without an `allow` that would have to be re-justified on every edit.
+        let addr = rsp.saturating_add((i as u64).saturating_mul(8));
+        if addr >= page_table::USER_SPACE_END {
+            break;
+        }
+        // Check the exact slot's page every time rather than caching: 8-byte
+        // steps cross a page boundary every 2048 slots, but a *guard* page can
+        // appear anywhere, and the cost of being wrong is a nested fault.
+        let skip = match page_table::translate_flags(pml4, VirtAddr::new(addr)) {
+            None => Some("<unmapped>"),
+            Some(f) if !f.contains(PageFlags::USER_ACCESSIBLE) => Some("<not user-accessible>"),
+            Some(_) => None,
+        };
+        if let Some(reason) = skip {
+            match &mut run {
+                // Same reason as the slot before it: extend rather than print.
+                Some((r, _, n)) if *r == reason => *n = n.saturating_add(1),
+                // A different reason ends the previous run and starts a new one.
+                slot => {
+                    flush_skip_run(slot.take(), rsp);
+                    *slot = Some((reason, i, 1));
+                }
+            }
+            continue;
+        }
+        flush_skip_run(run.take(), rsp);
+        // SAFETY: the page containing `addr` was just confirmed present and
+        // user-accessible in the *active* address space (we are still on the
+        // faulting thread's CR3), and `addr` is 8-byte-stepped from a user RSP,
+        // so the read is in-bounds of a mapped page.  `with_user_access`
+        // (STAC/CLAC) is **required**, not belt-and-braces: SMAP is enabled on
+        // this kernel, so a bare ring-0 read of a user page faults with
+        // `error = 0x1` (present, read, kernel) — which is exactly how the
+        // first version of this diagnostic killed the boot it was added on.
+        let val = unsafe {
+            crate::smep_smap::with_user_access(|| core::ptr::read_volatile(addr as *const u64))
+        };
+        // Mark values that could be a code pointer: mapped, user, executable.
+        let mark = match page_table::translate_flags(pml4, VirtAddr::new(val)) {
+            Some(f)
+                if f.contains(PageFlags::USER_ACCESSIBLE) && !f.contains(PageFlags::NO_EXECUTE) =>
+            {
+                " X"
+            }
+            _ => "",
+        };
+        serial_println!(
+            "    +{:#05x} {:#018x}  {:#018x}{}",
+            i.saturating_mul(8),
+            addr,
+            val,
+            mark
+        );
+    }
+    flush_skip_run(run.take(), rsp);
+}
+
+/// Print one line for a run of consecutive unreadable stack slots recorded by
+/// [`dump_user_stack`], if there is one.
+///
+/// A single-slot run prints in exactly the same shape as a readable slot, so
+/// the common "one hole in the middle of real values" case stays column-aligned
+/// with its neighbours; only runs of two or more collapse to a range.
+fn flush_skip_run(run: Option<(&'static str, usize, usize)>, rsp: u64) {
+    let Some((reason, start, count)) = run else {
+        return;
+    };
+    let off = start.saturating_mul(8);
+    let addr = rsp.saturating_add(off as u64);
+    if count <= 1 {
+        serial_println!("    +{off:#05x} {addr:#018x}  {reason}");
+        return;
+    }
+    // Inclusive end: the offset of the *last* slot in the run, so the printed
+    // range is the set of slots actually skipped and not one past it.
+    let last_off = start
+        .saturating_add(count)
+        .saturating_sub(1)
+        .saturating_mul(8);
+    serial_println!("    +{off:#05x}..+{last_off:#05x} {addr:#018x}  {reason} (x{count})");
+}
+
 /// Terminate the faulting **process** because one of its threads took an
 /// unrecoverable ring-3 exception that nothing handled.
 ///
@@ -1224,6 +1442,72 @@ fn kill_userspace_task_with_info(
     );
 
     let owner = crate::proc::thread::owner_process(task_id);
+
+    // ------------------------------------------------------------------
+    // Extended ring-3 fault report.
+    //
+    // Until 2026-08-21 this path printed exactly the two lines above, while
+    // the *kernel* fatal-fault path printed a stack scan, the raw bytes at
+    // RIP, the task context and a backtrace.  That asymmetry is not
+    // defensible: the two report the same class of defect — a control-flow
+    // hijack, where RIP == the fault address and the RBP chain is broken —
+    // and it cost a whole capture of `B-PTHREAD-TEARDOWN-PF`.  On 2026-08-21
+    // the glibc-pthread self-test faulted in ring 3 with
+    // `rip = cr2 = 0x6000066370`, and the log could not answer the first
+    // question anyone would ask: *what is at that address?*  A freed thread
+    // stack, the heap, or nothing at all are three different bugs, and the
+    // two-line report distinguished none of them.
+    //
+    // So: classify RIP, the fault address and RSP against the process's VMA
+    // list, dump the bytes at RIP, and raw-scan the user stack.  Ordering
+    // mirrors the kernel path's reasoning — the cheapest, least
+    // fault-prone probes first, and the stack scan (the thing that names the
+    // hijacked caller) before anything that walks a possibly-corrupt chain.
+    describe_user_addr("RIP ", owner, frame.rip);
+    if let Some(info) = crash.as_ref()
+        && info.aux != frame.rip
+    {
+        describe_user_addr("addr", owner, info.aux);
+    }
+    describe_user_addr("RSP ", owner, frame.rsp);
+
+    // Bytes at RIP: decisive when RIP has landed outside any executable
+    // mapping, because it says whether the jump target held *anything* or is
+    // simply a hole.  Guarded by a page-table check so it cannot fault; capped
+    // at the page boundary so it never touches the following page.
+    {
+        let mapped =
+            page_table::translate(page_table::active_pml4_phys(), VirtAddr::new(frame.rip))
+                .is_some();
+        if mapped {
+            let avail = (0x1000 - (frame.rip & 0xFFF)).min(16) as usize;
+            let mut buf = [0u8; 16];
+            // SAFETY: the page containing `frame.rip` is present in the active
+            // (faulting process's) address space, and `avail` stops at the page
+            // boundary, so this read is entirely within one mapped page.  The
+            // STAC/CLAC window is mandatory: RIP is a *user* address and SMAP is
+            // on, so reading it from ring 0 without clearing enforcement faults
+            // — the mistake this dump's first version shipped with.
+            unsafe {
+                crate::smep_smap::with_user_access(|| {
+                    core::ptr::copy_nonoverlapping(
+                        frame.rip as *const u8,
+                        buf.as_mut_ptr(),
+                        avail,
+                    );
+                });
+            }
+            serial_println!(
+                "  bytes @RIP ({avail}): {:02x?}",
+                buf.get(..avail).unwrap_or(&[])
+            );
+        } else {
+            serial_println!("  bytes @RIP: <{:#018x} not mapped>", frame.rip);
+        }
+    }
+
+    dump_user_stack(frame.rsp, 16);
+    // ------------------------------------------------------------------
 
     // Record crash info in the PCB before killing anything.  This both gives
     // the parent (service manager) the diagnostic details via

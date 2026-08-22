@@ -10267,6 +10267,104 @@ boots cannot separate "cured" from "rarer", and silently closing it would throw
 away the instrumentation's value. Keep at WATCH; if a repro appears, the new
 bytes-at-RIP dump plus the existing stack scan should close it in one capture.
 
+**Update 2026-08-21 — IT RECURRED, and in a form nobody had allowed for: the
+hijack was in *ring 3*, so none of the instrumentation fired.** The
+`spawn-test-glibc-pthread` process (pid 310; main thread task 277, workers
+278–281) faulted during exactly the documented window — siblings 279, 280 and
+281 had just printed `[sched] Task N exiting` — with:
+
+```
+[exception] User page fault (task 278) at 0x6000066370, addr=0x6000066370 (not-present, read) — trying SEH
+[exception] Killing task 278 — Page Fault (#PF) at 0x6000066370 (ring 3)
+  CS=0x23 RFLAGS=0x10246 RSP=0x6000a15e68 SS=0x1b
+[spawn]   FAIL: real glibc pthread — exit code=Some(-8), expected 13
+```
+
+`RIP == CR2` again, so it is the same *shape* — a control-flow hijack, execution
+sent to an address that holds no code — but `CS=0x23` means it happened at
+**CPL 3**, not in the kernel. Every previous capture was ring 0. The whole
+2026-08-14a bytes-at-RIP dump and the `dump_stack_scan` call it was added
+alongside live on the *kernel* fatal path (`idt.rs`, after the
+`error & 4 == 0` branch); a ring-3 fault never reaches them. So the capture
+this entry had been waiting five weeks for arrived and produced three lines.
+
+**Not caused by the change it surfaced under.** It appeared on the boot
+validating the hrtimer min-heap rewrite (`520634ccc`), and the immediately
+following boot on the same source was clean — the usual pattern for this
+defect, and consistent with the historical ~1/5 rate. A heap-vs-sorted-list
+change in the timer queue also has no mechanism to corrupt a user code pointer:
+its failure modes are a lost or mis-ordered wakeup, which hang, not jump.
+
+**What the capture does and does not say.** `0x6000066370` is *below* every
+mapping the log records for pid 310 — the first `mmap` was `0x6000212000`, and
+the four 8 MiB thread stacks run upward from `0x6000216000`. Thread 278's own
+stack was `0x6000216000..0x6000a1a000` and `RSP = 0x6000a15e68` sits ~16.8 KiB
+below its top, i.e. **the stack pointer was perfectly sane while RIP was
+garbage.** That is the one genuinely new fact, and it is worth more than it
+looks:
+
+- If the *user* stack is intact and only RIP is wrong, the corrupted value was
+  most likely not read from the user stack at all — which points away from
+  "glibc scribbled on its own frame" and toward **the saved user RIP in the
+  kernel's interrupt frame**, restored by `IRETQ` on the way back to ring 3.
+- And that unifies the two manifestations. A single wild write into a task's
+  **kernel stack** explains both: land on the saved *kernel* return address and
+  you get the 2026-07-15 ring-0 jump into `.data`; land on the saved *user* RIP
+  in the same stack's interrupt frame and you get this ring-3 jump into a hole.
+  The historical hijack value was `&CURRENT_TASK_IDS[0]`, a kernel data address
+  — a plausible spill, and a value that could only have got onto a stack by
+  being written there. Two different victims, one class of writer.
+
+This is a hypothesis, not a conclusion: the capture cannot yet distinguish it
+from a user-side corruption that happened to leave the stack pointer valid.
+
+**Action taken 2026-08-21: the ring-3 fatal path now reports as much as the
+ring-0 one** (`idt.rs`, `kill_userspace_task_with_info`). It classifies RIP, the
+fault address and RSP against the process's VMA list via a new allocation-free
+`pcb::classify_user_addr` (`try_lock`, copies out at most three `Vma`s, and
+reports "table busy" rather than waiting — a diagnostic must never be the thing
+that deadlocks the machine), naming the *hole* an address falls into and the
+mappings bracketing it; dumps the bytes at RIP; and raw-scans 16 quadwords of
+the user stack, flagging every value that points into a mapped executable user
+page. Each read is preceded by a page-table check on that exact address so the
+report cannot itself fault.
+
+**That turns the next repro into a decision rather than another inference
+round**, because the two hypotheses above predict opposite outputs:
+
+| | user stack scan shows | verdict |
+|---|---|---|
+| kernel-stack wild write | plausible frames, executable-looking return candidates | the corruption is in the *kernel* interrupt frame; hunt the writer |
+| user-side corruption | garbage, or the hijack value visible on the stack | glibc/TLS teardown; hunt the freed object |
+
+The classification of `0x6000066370` also settles, in one line, whether that
+address is a freed thread stack, the `brk` heap, or address space that was never
+mapped — three different bugs that the old two-line report could not tell apart.
+The instrumentation is exercised on every boot, because the exception self-tests
+deliberately kill ring-3 tasks (`0x4000000000`-family faults), so it cannot rot
+unnoticed the way the ring-0 dump did.
+
+**A mistake made adding it, recorded because the next person will make it too:
+the first version killed the boot it was added on.** Reading user memory from
+ring 0 is not merely a pointer dereference on this kernel — SMAP is enabled, so
+a bare kernel read of a user page faults, and the boot died with
+
+```
+EXCEPTION: Page Fault (#PF) at 0xffffffff821936b8, address=0x4000000002, error=0x1
+Cause: present, read, kernel
+FATAL: Unrecoverable kernel page fault. Halting.
+```
+
+Note the shape of that: **`present`** — the page *was* mapped and the read
+faulted anyway, which is exactly what makes SMAP easy to misdiagnose as a bad
+address. Both read sites now go through `crate::smep_smap::with_user_access`
+(STAC/CLAC), each with a `// SAFETY:` comment saying the wrapper is **required**
+rather than defensive, so that nobody later "simplifies" it away. The general
+point is the one the diagnostic's own design already concedes: a fault handler
+is the worst possible place to discover that your code can fault, and only a
+boot test finds it — this would have shipped clean under a "it compiles and
+clippy is quiet" standard.
+
 ### B-FORKEXEC-BOOT-HANG. Intermittent silent boot hang at the glibc `fork()`+`execl()`+`waitpid()` self-test — WATCH (rare, non-fatal to a re-run) 2026-07-15
 
 **Symptom (1 occurrence, 2026-07-15):** During
@@ -50944,6 +51042,46 @@ and `TOTAL_REFUSED` is now reported by the self-test alongside a
 `scheduled - fired - cancelled - pending` tripwire that would have made the
 original bug visible on the first boot that hit it.
 
+**Correction, 2026-08-21 (lane A): that last claim was false — the tripwire
+could never have fired.** `TOTAL_FIRED` counted every firing of a repeating
+timer, but `TOTAL_SCHEDULED` counted only its *first* arming, so within a
+second or two of boot `fired` permanently exceeded `scheduled` and the
+`saturating_sub` chain floored the difference at 0 no matter how many wakeups
+were being destroyed. The boot logs said so plainly and nobody read them:
+`scheduled=388, fired=75833` — a 195x gap that is arithmetically impossible if
+the two counters measure the same events. A guard that reports 0 on a healthy
+boot and 0 on a broken one is not a guard; it is a green light wired to nothing,
+and it sat in the tree as the designated detector for the very bug it was
+written to catch. Fixed by counting each re-arm in `process_expired` into
+`TOTAL_SCHEDULED`, which makes the two counters commensurable: every firing of
+a repeating timer is now preceded by exactly one arming. The self-test carries
+a comment forbidding the "simplification" that would undo it.
+
+**The general lesson, which is not about timers.** A derived quantity that is
+clamped at one end (`saturating_sub`, `max(0, …)`, an unsigned subtraction) can
+be *structurally* incapable of reporting a fault, and it will look completely
+healthy while being so. When adding a tripwire, check that its two inputs count
+the same events — and prefer to prove it by making the tripwire fire once on
+purpose rather than by reading the code.
+
+**The same asymmetry was latent in `ktimer`, and was fixed in the same pass
+(2026-08-21, lane A).** `ktimer::process_expirations` re-armed a periodic timer
+without touching `TIMERS_SCHEDULED` while `TIMERS_FIRED` counted every firing,
+so its self-test printed `scheduled=5, fired=8` — three wakeups apparently
+conjured from nowhere. Nothing was *false* there yet, because ktimer had no
+tripwire over those counters; the danger was that adding one later would have
+inherited a guard that could never fire, exactly as hrtimer's did. Re-arms are
+now counted, and the self-test carries the conservation check
+`scheduled >= fired + cancelled`, which the pre-fix numbers **would have
+failed** — that failure is the only evidence worth having that the guard can
+fire at all. Two details of that check are deliberate and are commented at the
+site: it is phrased as a **comparison, not a clamped subtraction** (a
+`saturating_sub` would have reproduced hrtimer's failure mode verbatim), and it
+samples `fired`/`cancelled` *before* `scheduled` — a firing increments
+`scheduled` (the re-arm) before `fired` (the workqueue submit), so reading the
+consequence first and the cause last makes a concurrent expiry on another CPU
+bias the check safe rather than manufacture a spurious failure.
+
 ### Not fixed, and deliberately so
 
 - **`IRQ 10` storming at ~500 kHz.** IRQ 10 is a shared level-triggered PCI
@@ -50957,9 +51095,20 @@ original bug visible on the first boot that hit it.
   passenger here, not the driver. Needs its own investigation: identify which
   of the five unhandled devices asserts, and either give it a stub handler that
   acks or mask it at the PCI command register.
-- **`hrtimer`'s sorted `Vec`.** O(n) insert under a lock with interrupts
+- ~~**`hrtimer`'s sorted `Vec`.** O(n) insert under a lock with interrupts
   disabled. At the new ceiling that is a 160 KiB memmove worst case. Logged in
-  `todo.txt`; wants a real min-heap with lazy cancel-by-id, or a timer wheel.
+  `todo.txt`; wants a real min-heap with lazy cancel-by-id, or a timer wheel.~~
+  **FIXED 2026-08-21 (lane A, commit `520634ccc`).** Replaced by a binary
+  min-heap over a slot slab: `schedule` and `process_expired` are O(log n),
+  `cancel` is an O(1) slot lookup plus an O(log n) sift (handles carry
+  `(slot, generation)`, so a stale handle cannot evict the timer that inherited
+  a recycled slot). The heap key is `(expiry_ns, id)` rather than `expiry_ns`
+  alone, because a binary heap is not stable and a bare-deadline key lets a
+  timer be passed over indefinitely by arrivals sharing its deadline. Four new
+  self-tests (heap order under a shuffled permutation, equal-deadline FIFO,
+  interior cancel, stale-handle rejection) — the five pre-existing ones all
+  passed against the `Vec` and *cannot* observe a mis-ordering, since the only
+  multi-timer case sums its arguments and a sum is order-independent.
 
 ---
 

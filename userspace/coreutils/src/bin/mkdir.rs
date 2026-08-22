@@ -58,33 +58,40 @@
 //!
 //! # Options this implementation does not have
 //!
-//! Everything except `-p`/`--parents`. They are recognised and rejected with a
-//! message saying they are not implemented, rather than ignored, and they are
-//! listed in [`LONG_OPTIONS`] anyway because the table is what decides whether
-//! an abbreviation is ambiguous — `--v` must stay ambiguous between `--verbose`
-//! and `--version`, which is measured GNU behaviour and is exactly what a table
-//! pruned to the one implemented option would get wrong: `mkdir --v` would print
-//! a version instead of refusing.
+//! Everything except `-p`/`--parents` and `-m`/`--mode`. They are recognised and
+//! rejected with a message saying they are not implemented, rather than ignored,
+//! and they are listed in [`LONG_OPTIONS`] anyway because the table is what
+//! decides whether an abbreviation is ambiguous — `--v` must stay ambiguous
+//! between `--verbose` and `--version`, which is measured GNU behaviour and is
+//! exactly what a table pruned to the implemented options would get wrong:
+//! `mkdir --v` would print a version instead of refusing.
 //!
-//! `-m`/`--mode` is the one where ignoring would actually be harmful, and it is
-//! the reason none of them are ignored. It asks for the new directory to be
-//! created with a specific permission mode, and the usual reason to ask is that
-//! the default is too permissive — `mkdir -m 700 ~/.ssh`. Ignored, the directory
-//! is created 0755 and the user is told nothing, so a directory they asked to be
-//! private is world-readable. That is the same class of defect as `cp`'s
-//! attribute handling, recorded in this crate's `known-issues.md`. Implementing
-//! it properly needs a symbolic-mode parser (`u=rwx,go=`); the only one in the
-//! tree is private to `chmod.rs`, so `-m` waits for that to be lifted into a
-//! shared module rather than getting a second, subtly different copy here.
+//! `-m`/`--mode` used to be in that list, and was the reason none of them are
+//! ignored: it asks for the new directory to be created with a specific
+//! permission mode, and the usual reason to ask is that the default is *too
+//! permissive* — `mkdir -m 700 ~/.ssh`. Ignored, the directory would be created
+//! 0755 and the user told nothing, so a directory they asked to be private would
+//! be world-readable. Implementing it needs a symbolic-mode parser (`u=rwx,go=`),
+//! which now exists as [`modechange`] rather than being private to `chmod.rs`;
+//! see the [mode section](#mode) below for the four behaviours that had to be
+//! measured to use it correctly here.
 
 use coreutils::errmsg::strerror;
-use coreutils::getopt::{self, Program, Takes};
+use coreutils::getopt::{self, Opt, Program, Takes};
 use coreutils::quote::quote_os;
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::io::{self, Write};
 use std::path::Path;
 use std::process::ExitCode;
+
+/// The file-mode creation mask. There is no read-only spelling of it in POSIX —
+/// reading it means setting it — and `std` exposes no wrapper, so this is the
+/// libc call itself.
+#[cfg(unix)]
+unsafe extern "C" {
+    fn umask(mask: u32) -> u32;
+}
 
 /// `mkdir`'s usage status is 1 — measured: `mkdir -q z; echo $?` prints 1. See
 /// [`coreutils::getopt::Error`] for the handful of utilities that differ.
@@ -109,10 +116,20 @@ const LONG_OPTIONS: &[(&str, Takes)] = &[
     ("version", Takes::Nothing),
 ];
 
+/// GNU `mkdir`'s `getopt_long` short-option string, verbatim. `m` is the only
+/// one that takes a value.
+const SHORT_OPTIONS: &str = "pm:vZ";
+
 #[derive(Default)]
 #[cfg_attr(test, derive(Debug, PartialEq, Eq))]
 struct MkdirFlags {
     parents: bool,
+    /// `-m`'s argument **uncompiled**, because the order in which `mkdir`
+    /// reports two different mistakes is observable and is the opposite of
+    /// `chmod`'s. Measured: `mkdir -m zzz` with no operands answers `missing
+    /// operand`, not `invalid mode` — so the mode cannot be compiled while the
+    /// command line is still being read.
+    mode: Option<OsString>,
 }
 
 /// What the command line asked for.
@@ -155,6 +172,7 @@ fn help_text() -> String {
 Usage: mkdir [OPTION]... DIRECTORY...
 Create the DIRECTORY(ies), if they do not already exist.
 
+  -m, --mode=MODE set file mode (as in chmod), not a=rwx - umask
   -p, --parents   no error if existing, make parent directories as needed
       --help      display this help and exit
       --version   output version information and exit
@@ -182,101 +200,34 @@ use one of these commands:
 fn parse_args(args: &[OsString]) -> Result<Request, getopt::Error> {
     let mut flags = MkdirFlags::default();
     let mut dirs: Vec<OsString> = Vec::new();
-    let mut only_operands = false;
 
-    for arg in args {
-        if only_operands {
-            dirs.push(arg.clone());
-            continue;
-        }
-        let bytes = arg_bytes(arg);
-
-        if bytes == b"--" {
-            only_operands = true;
-        } else if bytes == b"-" || bytes.first() != Some(&b'-') {
-            // A lone `-` is a directory called `-`. `mkdir` has no
-            // standard-input operand for it to mean anything else.
-            dirs.push(arg.clone());
-        } else if let Some(body) = bytes.strip_prefix(b"--") {
-            match parse_long(body, &bytes, &mut flags)? {
-                Some(request) => return Ok(request),
-                None => continue,
+    // The shared driver, rather than the byte loop this file used to carry.
+    // That loop was correct as far as it went, but it had no way to express an
+    // option that takes a *value*, which is exactly what `-m` is: `-m 700`,
+    // `-m700`, `--mode=700` and `--mode 700` are four spellings of one thing
+    // and the driver already knows all four.
+    for item in MKDIR.parse(args, SHORT_OPTIONS, LONG_OPTIONS) {
+        match item? {
+            Opt::Long("help", _) => return Ok(Request::Help),
+            Opt::Long("version", _) => return Ok(Request::Version),
+            Opt::Short(b'p', _) | Opt::Long("parents", _) => flags.parents = true,
+            Opt::Short(b'm', value) | Opt::Long("mode", value) => flags.mode = value,
+            // GNU `mkdir`'s remaining options. Rejected rather than ignored:
+            // see the module docs.
+            Opt::Short(flag @ (b'v' | b'Z'), _) => return Err(unimplemented_short(flag)),
+            Opt::Long(name @ ("verbose" | "context"), _) => {
+                return Err(unimplemented_long(name));
             }
-        } else {
-            // Bytes, not `char`s. `-é` is two bytes in UTF-8, and iterating
-            // `char`s would answer `invalid option -- 'é'` — an option nobody
-            // typed, and one that cannot be typed, since options are single
-            // bytes. It also would not survive an argument that is not UTF-8 at
-            // all, which is the whole point of this rewrite.
-            for &b in bytes.get(1..).unwrap_or_default() {
-                apply_short(b, &mut flags)?;
-            }
+            Opt::Short(other, _) => return Err(MKDIR.invalid_option(other)),
+            Opt::Long(other, _) => return Err(unimplemented_long(other)),
+            // A lone `-` arrives here, not as an option: `mkdir` has no
+            // standard-input operand for it to mean anything else, so it is a
+            // directory called `-`.
+            Opt::Operand(dir) => dirs.push(dir.clone()),
         }
     }
 
     Ok(Request::Run(flags, dirs))
-}
-
-/// Handle one `--name[=value]` argument.
-///
-/// Returns `Some(request)` for the two options that end parsing immediately, and
-/// `None` for one that only sets a flag.
-///
-/// # Errors
-///
-/// The name resolving to nothing or to more than one option, a value given to an
-/// option that takes none, or an option this implementation lacks.
-fn parse_long(
-    body: &[u8],
-    whole: &[u8],
-    flags: &mut MkdirFlags,
-) -> Result<Option<Request>, getopt::Error> {
-    // Split before resolving: the name is what gets matched, and the argument
-    // *as typed* — `=VALUE` included — is what gets echoed back if it resolves
-    // to nothing.
-    let (typed, inline) = match body.iter().position(|&c| c == b'=') {
-        Some(at) => (
-            body.get(..at).unwrap_or_default(),
-            Some(body.get(at.saturating_add(1)..).unwrap_or_default()),
-        ),
-        None => (body, None),
-    };
-    // Every option name is ASCII, so a name that is not UTF-8 can match none of
-    // them. It takes the unrecognised path — reported as the bytes typed —
-    // rather than failing in some third way.
-    let typed = std::str::from_utf8(typed).map_err(|_| MKDIR.unrecognized_option(whole))?;
-    let (name, takes) = MKDIR.resolve_long(typed, whole, LONG_OPTIONS)?;
-
-    if inline.is_some() && takes == Takes::Nothing {
-        return Err(MKDIR.long_unwanted_argument(name));
-    }
-
-    match name {
-        "help" => Ok(Some(Request::Help)),
-        "version" => Ok(Some(Request::Version)),
-        "parents" => {
-            flags.parents = true;
-            Ok(None)
-        }
-        other => Err(unimplemented_long(other)),
-    }
-}
-
-/// Handle one short option byte.
-///
-/// # Errors
-///
-/// A byte that is no option of `mkdir`'s, or one this implementation lacks.
-fn apply_short(flag: u8, flags: &mut MkdirFlags) -> Result<(), getopt::Error> {
-    match flag {
-        b'p' => flags.parents = true,
-        // GNU `mkdir`'s remaining short options, from its `getopt_long` string.
-        // Rejected rather than ignored: see the module docs — `-m` ignored
-        // publishes a directory the user asked to be private.
-        b'm' | b'v' | b'Z' => return Err(unimplemented_short(flag)),
-        other => return Err(MKDIR.invalid_option(other)),
-    }
-    Ok(())
 }
 
 /// The diagnostic for an option that GNU `mkdir` has and this one does not.
@@ -297,15 +248,155 @@ fn unimplemented_long(name: &str) -> getopt::Error {
     ))
 }
 
+// -------------------------------------------------------------------- mode --
+
+/// What `-m` resolved to: the mode for the directory the user named, and the
+/// mode for any parent `-p` has to invent along the way.
+#[derive(Clone, Copy)]
+#[cfg_attr(test, derive(Debug, PartialEq, Eq))]
+struct Modes {
+    /// The requested mode, already through the umask, for the last component.
+    named: u32,
+    /// `(0777 & ~umask) | 0300` for every component `-p` creates on the way.
+    ///
+    /// Measured across six umasks, and the `| 0300` is not decoration: under
+    /// `umask 300` — which strips the owner's write and search bits — GNU still
+    /// creates the parents `0777` rather than `0477`, because a parent it
+    /// cannot write to or descend into is a parent it cannot put the next
+    /// component inside.
+    parent: u32,
+}
+
+/// Read the file-mode creation mask **and zero it**, once per process.
+///
+/// Zeroing is GNU's: having applied the mask itself, in [`resolve_mode`], it
+/// must stop the kernel applying it a second time to the same mode. Doing it
+/// exactly once is this implementation's, and it is not a micro-optimisation —
+/// the second call would read the zero the first one wrote and compute a parent
+/// mode of `0777` for a user whose umask is `077`. The real binary calls
+/// [`make_all`] once, so only the tests can make that happen; a cached value
+/// makes it impossible either way.
 #[cfg(unix)]
-fn arg_bytes(a: &OsString) -> Vec<u8> {
-    use std::os::unix::ffi::OsStrExt;
-    a.as_os_str().as_bytes().to_vec()
+fn take_umask() -> u32 {
+    use std::sync::OnceLock;
+    static UMASK: OnceLock<u32> = OnceLock::new();
+    // SAFETY: `umask` is a POSIX call that cannot fail and touches only this
+    // process's file-mode creation mask. Reading it requires setting it, which
+    // is why there is no read-only spelling; we want it zeroed anyway.
+    *UMASK.get_or_init(|| unsafe { umask(0) })
+}
+
+/// [`take_umask`] on the target; `0` on a host that has no such thing.
+///
+/// A Windows host still compiles and runs everything else in this file, which
+/// is the point: an invalid `-m` must be refused there with the right sentence,
+/// and the arithmetic below is pure and so can be tested there against every
+/// umask by calling [`modes_for`] directly.
+#[cfg(unix)]
+fn current_umask() -> u32 {
+    take_umask()
 }
 
 #[cfg(not(unix))]
-fn arg_bytes(a: &OsString) -> Vec<u8> {
-    a.to_string_lossy().into_owned().into_bytes()
+fn current_umask() -> u32 {
+    0
+}
+
+/// Resolve `-m`'s argument against the umask in force.
+fn resolve_mode(spec: &OsStr) -> Option<Modes> {
+    modes_for(spec, current_umask())
+}
+
+/// The mode arithmetic, with the umask passed in rather than read.
+///
+/// The mode is compiled against a starting mode of `0777` — not `0755`, and not
+/// the umask'd default. Measured: `mkdir -m 700 d` is `0700` under every umask,
+/// and `mkdir -m 'a=,+w' d` is `0222`, `0200`, `0200` and `0220` under umasks
+/// 000, 022, 077 and 002, so the umask still reaches a clause that names no
+/// `who` — which is why it is handed to [`modechange::adjust`] rather than
+/// merely being cleared. `dir` is `true`, so `+X` sees a directory: `mkdir -m
+/// 'a=,+X' d` is `0111` where `mkfifo -m 'a=,+X' p` is `0000`.
+fn modes_for(spec: &OsStr, umask_value: u32) -> Option<Modes> {
+    let changes = modechange::compile(&coreutils::quote::os_bytes(spec))?;
+    Some(Modes {
+        named: modechange::adjust(0o777, true, umask_value, &changes).mode,
+        parent: (0o777 & !umask_value) | 0o300,
+    })
+}
+
+/// Create one directory, with an exact mode when `-m` asked for one.
+///
+/// The special bits need the second step. `mkdir(2)`'s mode argument is
+/// advisory for `S_ISUID`/`S_ISGID`/`S_ISVTX` — the kernel may decline to store
+/// them, and on a setgid parent it may add one nobody asked for — so a mode
+/// carrying any of them is set again explicitly afterwards. Measured: `mkdir -m
+/// 2755 d` is `2755`, and `mkdir -p -m 2755 a/b` leaves `a` at `755` and `a/b`
+/// at `2755`.
+#[cfg(unix)]
+fn create_dir_with_mode(path: &Path, mode: Option<u32>) -> io::Result<()> {
+    use std::os::unix::fs::DirBuilderExt;
+
+    let Some(mode) = mode else {
+        return fs::create_dir(path);
+    };
+    fs::DirBuilder::new().mode(mode & 0o777).create(path)?;
+    if mode & !0o777 != 0 {
+        fs::set_permissions(path, std::os::unix::fs::PermissionsExt::from_mode(mode))?;
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn create_dir_with_mode(path: &Path, _mode: Option<u32>) -> io::Result<()> {
+    fs::create_dir(path)
+}
+
+/// A failure, paired with **the component that failed** rather than the operand
+/// the user typed.
+///
+/// The distinction is measured, and `-p` is the only place it can be seen:
+/// `mkdir -p f/g/h` where `f` is a file answers ``cannot create directory ‘f’:
+/// Not a directory``, naming `f`. Returning a bare [`io::Error`] would leave the
+/// caller with nothing to name but `f/g/h`, which is a path that was never
+/// attempted and which sends the reader to look at the wrong component.
+type WalkError = (std::path::PathBuf, io::Error);
+
+/// `-p`'s walk, done by hand because each component needs a different mode.
+///
+/// [`fs::create_dir_all`] cannot express that, and with the umask zeroed it
+/// would create every parent `0777`. Measured: `umask 022; mkdir -p -m 700
+/// a/b/c` leaves `a` and `a/b` at `755` and only `a/b/c` at `700`.
+///
+/// A component that already exists is not an error and its mode is not touched
+/// — measured: `mkdir -p x; chmod 755 x; mkdir -p -m 700 x` exits 0 and leaves
+/// `x` at `0755`. So an existing directory is skipped rather than attempted:
+/// that is also what keeps the walk off `/` and off a Windows drive root, which
+/// [`Path::ancestors`] yields and which no `create_dir` should ever be handed.
+fn create_dir_all_with_modes(path: &Path, modes: Option<Modes>) -> Result<(), WalkError> {
+    let mut ancestors: Vec<&Path> = path.ancestors().collect();
+    ancestors.reverse();
+    let Some((named, parents)) = ancestors.split_last() else {
+        return Ok(());
+    };
+    for parent in parents {
+        // `ancestors` also yields `""` for a relative path, which is the current
+        // directory said in the least useful way.
+        if parent.as_os_str().is_empty() || parent.is_dir() {
+            continue;
+        }
+        create_one(parent, modes.map(|m| m.parent))?;
+    }
+    match create_one(named, modes.map(|m| m.named)) {
+        // The one case `-p` exists to swallow, and only for a *directory*: GNU
+        // still reports `File exists` for `mkdir -p f` where `f` is a file.
+        Err((_, e)) if e.kind() == io::ErrorKind::AlreadyExists && named.is_dir() => Ok(()),
+        other => other,
+    }
+}
+
+/// [`create_dir_with_mode`], with the path attached to any error.
+fn create_one(path: &Path, mode: Option<u32>) -> Result<(), WalkError> {
+    create_dir_with_mode(path, mode).map_err(|e| (path.to_path_buf(), e))
 }
 
 // ---------------------------------------------------------------- creating --
@@ -332,18 +423,39 @@ fn make_all<W: Write>(flags: &MkdirFlags, dirs: &[OsString], err: &mut W) -> boo
         return false;
     }
 
+    // *After* the operand check, and that order is measured, not incidental:
+    // `mkdir -m zzz` with no operands answers `missing operand`, where `chmod
+    // xyz` — which has the mode as an operand rather than an option — answers
+    // `invalid mode`. Compiling the mode during parsing would reverse this one.
+    let modes = match &flags.mode {
+        None => None,
+        Some(spec) => match resolve_mode(spec) {
+            Some(m) => Some(m),
+            None => {
+                // Four utilities in this tree print four different sentences for
+                // this, all measured against GNU 9.4: `chmod: invalid mode:
+                // ‘zzz’` (with a colon), `install: invalid mode ‘zzz’`,
+                // `mkfifo: invalid mode` (operand dropped entirely) and this
+                // one. There is also no referral — `chmod`'s has none either.
+                let _ = writeln!(err, "mkdir: invalid mode {}", quote_os(spec));
+                return false;
+            }
+        },
+    };
+
     let mut ok = true;
     for dir in dirs {
         let result = if flags.parents {
-            // `create_dir_all` is silent when the path is already a directory,
-            // which is `-p`'s whole point, and still fails when it is an
-            // existing *file* — matching GNU, which reports `File exists` for
-            // `mkdir -p f`.
-            fs::create_dir_all(Path::new(dir))
+            // Silent when the path is already a directory, which is `-p`'s whole
+            // point, and still failing when it is an existing *file* — matching
+            // GNU, which reports `File exists` for `mkdir -p f`.
+            create_dir_all_with_modes(Path::new(dir), modes)
         } else {
-            fs::create_dir(Path::new(dir))
+            create_one(Path::new(dir), modes.map(|m| m.named))
         };
-        if let Err(e) = result {
+        // `failed` is the component that failed, which under `-p` need not be
+        // the operand: see [`WalkError`].
+        if let Err((failed, e)) = result {
             // `quote_os`, not `quoteaf_os`: curly marks. Module docs, defect 2 —
             // this one message is the exception among its neighbours, and the
             // table there is the evidence.
@@ -357,7 +469,7 @@ fn make_all<W: Write>(flags: &MkdirFlags, dirs: &[OsString], err: &mut W) -> boo
             let _ = writeln!(
                 err,
                 "mkdir: cannot create directory {}: {why}",
-                quote_os(dir)
+                quote_os(failed.as_os_str())
             );
             ok = false;
         }
@@ -491,7 +603,24 @@ mod tests {
         // `--c` prefixes only `--context`, so it resolves — and is then refused
         // as unimplemented rather than as unrecognised.
         assert!(fail(&["--c"]).sentence.contains("not implemented"));
-        assert!(fail(&["--m"]).sentence.contains("not implemented"));
+        // `--m` prefixes only `--mode`, which is implemented. Measured: `mkdir
+        // --m 700 z` creates `z` at 0700.
+        assert_eq!(
+            run_parse(&["--m", "700", "z"]).0.mode,
+            Some(OsString::from("700"))
+        );
+    }
+
+    /// The two sentences glibc uses for a missing value, which are different
+    /// from each other and are the library's rather than this file's. Measured:
+    /// `mkdir --mode` and `mkdir -m` say these, each with the referral.
+    #[test]
+    fn the_mode_option_needs_a_value() {
+        assert_eq!(
+            fail(&["--mode"]).sentence,
+            "option '--mode' requires an argument"
+        );
+        assert_eq!(fail(&["-m"]).sentence, "option requires an argument -- 'm'");
     }
 
     #[test]
@@ -508,11 +637,13 @@ mod tests {
         assert_eq!(e.status, 1);
     }
 
-    /// `-m` ignored would create a world-readable directory the user asked to
-    /// be private; `-Z` ignored would drop a security context.
+    /// `-Z` ignored would silently drop a security context. `-m` used to be on
+    /// this list for the same reason — ignored, it would create world-readable
+    /// the directory a user asked to be private — and is now implemented; see
+    /// [`the_four_spellings_of_the_mode_option`].
     #[test]
     fn unimplemented_short_options_are_rejected_by_name() {
-        for flag in ["-m", "-v", "-Z"] {
+        for flag in ["-v", "-Z"] {
             let e = fail(&[flag, "a"]);
             assert!(
                 e.sentence.contains("not implemented"),
@@ -524,7 +655,7 @@ mod tests {
 
     #[test]
     fn unimplemented_long_options_are_rejected_by_name() {
-        for name in ["--context", "--mode", "--verbose"] {
+        for name in ["--context", "--verbose"] {
             let e = fail(&[name, "a"]);
             assert!(
                 e.sentence.contains("not implemented"),
@@ -532,14 +663,37 @@ mod tests {
                 e.sentence
             );
         }
-        // With a value attached, too: `--mode` takes one, so the value is
-        // accepted by the parser and the refusal still has to come from the
-        // name.
-        assert!(
-            fail(&["--mode=700", "a"])
-                .sentence
-                .contains("not implemented")
-        );
+    }
+
+    /// `-m 700`, `-m700`, `--mode=700` and `--mode 700` are one option, and the
+    /// driver is what knows all four — which is the whole reason this file gave
+    /// up its hand-written byte loop, since that loop had no way to express an
+    /// option with a *value* at all.
+    #[test]
+    fn the_four_spellings_of_the_mode_option() {
+        for spelling in [
+            &["-m", "700", "a"][..],
+            &["-m700", "a"][..],
+            &["--mode=700", "a"][..],
+            &["--mode", "700", "a"][..],
+        ] {
+            let (f, d) = run_parse(spelling);
+            assert_eq!(f.mode, Some(OsString::from("700")), "{spelling:?}");
+            assert_eq!(d, vec!["a"], "{spelling:?}");
+        }
+    }
+
+    /// The mode is carried **uncompiled** out of the parser, because the order
+    /// in which two mistakes are reported is observable. Measured: `mkdir -m
+    /// zzz` with no operands answers `missing operand`, not `invalid mode` —
+    /// the opposite of `chmod xyz`, which answers `missing operand after ‘xyz’`
+    /// and so must have compiled nothing either. A parser that validated `-m`
+    /// as it read it could not produce GNU's ordering here.
+    #[test]
+    fn an_invalid_mode_is_not_diagnosed_during_parsing() {
+        let (f, d) = run_parse(&["-m", "zzz"]);
+        assert_eq!(f.mode, Some(OsString::from("zzz")));
+        assert!(d.is_empty());
     }
 
     #[test]
@@ -638,9 +792,17 @@ mod tests {
 
     /// Run `make_all`, returning `(ok, diagnostics)`.
     fn run(parents: bool, dirs: &[&Path]) -> (bool, String) {
+        run_with_mode(parents, None, dirs)
+    }
+
+    fn run_with_mode(parents: bool, mode: Option<&str>, dirs: &[&Path]) -> (bool, String) {
         let owned: Vec<OsString> = dirs.iter().map(|p| p.as_os_str().to_owned()).collect();
         let mut err: Vec<u8> = Vec::new();
-        let ok = make_all(&MkdirFlags { parents }, &owned, &mut err);
+        let flags = MkdirFlags {
+            parents,
+            mode: mode.map(OsString::from),
+        };
+        let ok = make_all(&flags, &owned, &mut err);
         (ok, String::from_utf8_lossy(&err).into_owned())
     }
 
@@ -758,6 +920,199 @@ mod tests {
         assert!(!ok, "the existing one must count against the status");
         assert!(g.is_dir(), "{msg}");
         assert_eq!(msg.lines().count(), 1, "{msg:?}");
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    /// Under `-p`, GNU names **the component that failed**, not the operand.
+    /// Measured: `touch f; mkdir -p f/g/h` answers ``cannot create directory
+    /// ‘f’: Not a directory`` — and says nothing about `f/g/h`, which was never
+    /// attempted. This is the assertion that fails if the walk ever goes back to
+    /// returning a bare `io::Error`.
+    #[test]
+    fn dash_p_names_the_component_that_failed() {
+        let d = scratch("component");
+        let f = d.join("f");
+        fs::write(&f, b"x").unwrap();
+        let deep = f.join("g").join("h");
+        let (ok, msg) = run(true, &[&deep]);
+        assert!(!ok, "{msg}");
+        // Compared through `quote_os`, the same rendering the message itself
+        // uses: on the Windows host a path's backslashes come back escaped, so
+        // the raw `Display` form is not a substring of the diagnostic.
+        assert!(
+            msg.contains(&coreutils::quote::quote_os(&f)),
+            "must name f: {msg:?}"
+        );
+        assert!(
+            !msg.contains(&coreutils::quote::quote_os(&deep)),
+            "must not name the operand: {msg:?}"
+        );
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    // --------------------------------------------------------------- mode --
+
+    /// Four utilities, four sentences. This one has **no colon** after `mode`
+    /// and **no referral** — measured, `mkdir -m zzz q` prints exactly
+    /// ``mkdir: invalid mode ‘zzz’`` and nothing else. `chmod`'s has the colon,
+    /// `mkfifo`'s drops the operand entirely.
+    #[test]
+    fn an_invalid_mode_is_refused() {
+        let d = scratch("badmode");
+        let a = d.join("a");
+        let (ok, msg) = run_with_mode(false, Some("zzz"), &[&a]);
+        assert!(!ok);
+        assert_eq!(msg, "mkdir: invalid mode \u{2018}zzz\u{2019}\n");
+        assert!(!a.exists(), "nothing may be created after a bad mode");
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    /// The measured ordering, and the reason [`MkdirFlags::mode`] holds an
+    /// uncompiled `OsString`: with no operands the missing operand is the
+    /// complaint, even though the mode is also wrong.
+    #[test]
+    fn missing_operand_is_reported_before_an_invalid_mode() {
+        let (ok, msg) = run_with_mode(false, Some("zzz"), &[]);
+        assert!(!ok);
+        assert!(msg.contains("missing operand"), "{msg}");
+        assert!(!msg.contains("invalid mode"), "{msg}");
+    }
+
+    #[test]
+    fn a_valid_mode_creates_the_directory() {
+        let d = scratch("goodmode");
+        let a = d.join("a");
+        let (ok, msg) = run_with_mode(false, Some("u=rwx,go="), &[&a]);
+        assert!(ok, "{msg}");
+        assert!(a.is_dir());
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    /// Measured: `mkdir -p x; chmod 755 x; mkdir -p -m 700 x` exits 0 and leaves
+    /// `x` at `0755`. `-m` applies to what is created, not to what is found.
+    #[test]
+    fn an_existing_directory_keeps_its_mode() {
+        let d = scratch("keepmode");
+        let a = d.join("a");
+        fs::create_dir(&a).unwrap();
+        let (ok, msg) = run_with_mode(true, Some("700"), &[&a]);
+        assert!(ok, "{msg}");
+        assert!(msg.is_empty(), "{msg}");
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    /// Applying the mode is the *system's* job; what this file has to get right
+    /// is the arithmetic, and that is pure, so it is checked here against every
+    /// umask rather than only on a unix host. Every row was measured against
+    /// GNU coreutils 9.4.
+    #[test]
+    fn the_measured_mode_arithmetic() {
+        let named = |spec: &str, umask_value: u32| {
+            modes_for(OsStr::new(spec), umask_value)
+                .expect("valid spec")
+                .named
+        };
+
+        // An octal mode is the mode, whatever the umask. This is the one people
+        // assume, and it is only true because the base is 0777 and `=` is
+        // implied — a base of 0755 would answer 0755 for `mkdir -m 777 d`.
+        for umask_value in [0o000, 0o022, 0o077, 0o002] {
+            assert_eq!(named("700", umask_value), 0o700);
+            assert_eq!(named("777", umask_value), 0o777);
+        }
+
+        // …but a *symbolic* clause that names no `who` is masked, which is what
+        // proves the umask is passed through rather than merely zeroed. The four
+        // answers are all different, so a stubbed umask cannot pass this.
+        assert_eq!(named("a=,+w", 0o000), 0o222);
+        assert_eq!(named("a=,+w", 0o022), 0o200);
+        assert_eq!(named("a=,+w", 0o077), 0o200);
+        assert_eq!(named("a=,+w", 0o002), 0o220);
+
+        // A `who` of its own is *not* masked: `u+w` is the owner's write bit
+        // even under a umask that would have taken it.
+        assert_eq!(named("a=,u+w", 0o077), 0o200);
+        assert_eq!(named("a=,o+w", 0o002), 0o002);
+
+        // `X` consults the mode as accumulated so far *and* the fact that this
+        // is a directory. After `a=` no execute bit survives, so on a file `+X`
+        // would be nothing — but a directory always takes it. Measured: `mkdir
+        // -m 'a=,+X' d` is 0111 where `mkfifo -m 'a=,+X' p` is 0000.
+        assert_eq!(named("a=,+X", 0o000), 0o111);
+
+        // The special bits survive compilation; `create_dir_with_mode` is what
+        // then has to set them twice, because `mkdir(2)` may drop them.
+        assert_eq!(named("2755", 0o022), 0o2755);
+        assert_eq!(named("u=rwx,go=", 0o000), 0o700);
+
+        // The parent mode: `(0777 & ~umask) | 0300`, pinned across six umasks.
+        // The `| 0300` is the interesting half — under `umask 300` GNU still
+        // makes the parents 0777, because a parent it can neither write to nor
+        // descend into cannot hold the next component.
+        let parent = |umask_value: u32| {
+            modes_for(OsStr::new("700"), umask_value)
+                .expect("valid spec")
+                .parent
+        };
+        assert_eq!(parent(0o000), 0o777);
+        assert_eq!(parent(0o022), 0o755);
+        assert_eq!(parent(0o077), 0o700);
+        assert_eq!(parent(0o002), 0o775);
+        assert_eq!(parent(0o300), 0o777);
+        assert_eq!(parent(0o777), 0o300);
+    }
+
+    /// Measured one by one against GNU 9.4, because the boundary is not where
+    /// it looks. `8` is refused for being an octal mode with a non-octal digit;
+    /// `a` is refused for being a `who` with no operator; `,` and `+r,` are
+    /// refused for the empty clause; but `+` and `=` are **accepted**, and are
+    /// the rows worth having, because a parser written from intuition refuses
+    /// them.
+    #[test]
+    fn the_boundary_between_a_valid_and_an_invalid_mode() {
+        for spec in ["zzz", "8", "u=q", "z+r", ",", "a", "+r,"] {
+            assert!(
+                modes_for(OsStr::new(spec), 0o022).is_none(),
+                "{spec} must not compile"
+            );
+        }
+        // `+` adds nothing, and — this is the part the umask makes visible — it
+        // names no bits either, so the umask has nothing to take away from it.
+        // Measured under `umask 022`: `mkdir -m + t` leaves `t` at 0777, not
+        // 0755, which is the only place in this file where a mode comes out
+        // *more* permissive than the default.
+        assert_eq!(
+            modes_for(OsStr::new("+"), 0o022).expect("+ is valid").named,
+            0o777
+        );
+        // `=` with no `who` clears everything. Measured: `mkdir -m = t` is 0.
+        assert_eq!(
+            modes_for(OsStr::new("="), 0o022).expect("= is valid").named,
+            0
+        );
+    }
+
+    /// `-p` gives the parents a different mode from the leaf, which is the
+    /// reason the walk is hand-written rather than [`fs::create_dir_all`].
+    /// Measured: `umask 022; mkdir -p -m 700 a/b/c` leaves `a` and `a/b` at
+    /// `755` and only `a/b/c` at `700`.
+    #[test]
+    #[cfg(unix)]
+    fn dash_p_gives_the_parents_the_parent_mode() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let d = scratch("parentmode");
+        let deep = d.join("a").join("b").join("c");
+        let (ok, msg) = run_with_mode(true, Some("700"), &[&deep]);
+        assert!(ok, "{msg}");
+
+        let expected_parent = modes_for(OsStr::new("700"), current_umask())
+            .unwrap()
+            .parent;
+        let mode_of = |p: &Path| fs::metadata(p).unwrap().permissions().mode() & 0o7777;
+        assert_eq!(mode_of(&d.join("a")), expected_parent);
+        assert_eq!(mode_of(&d.join("a").join("b")), expected_parent);
+        assert_eq!(mode_of(&deep), 0o700);
         let _ = fs::remove_dir_all(&d);
     }
 }

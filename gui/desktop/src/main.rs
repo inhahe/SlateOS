@@ -20,7 +20,7 @@
 //! manager whose edits the next list from the compositor threw away; the demo
 //! showed a snapped window at a rectangle no user would ever have seen.
 
-use desktop::{DesktopShell, ShellAction, WindowInfo, calendar, click};
+use desktop::{DesktopShell, ShellAction, WindowInfo, WindowList, calendar, click};
 use guitk::event::{Key, KeyEvent, Modifiers};
 
 /// A window as the compositor would describe it. Nothing here has geometry:
@@ -53,11 +53,14 @@ fn main() {
     // the editor is the topmost window, and it is the one holding focus.
     let mut editor = window(3, 1003, "Text Editor");
     editor.focused = true;
-    desktop.apply_window_list(&[
-        window(1, 1001, "Terminal"),
-        window(2, 1002, "File Explorer"),
-        editor,
-    ]);
+    desktop.apply_window_list(&WindowList::new(
+        0,
+        vec![
+            window(1, 1001, "Terminal"),
+            window(2, 1002, "File Explorer"),
+            editor,
+        ],
+    ));
     println!(
         "Compositor says {} windows, focused {:?}",
         desktop.visible_windows().len(),
@@ -167,10 +170,7 @@ fn main() {
     let button = desktop.taskbar_button_rect(2);
     match desktop.handle_mouse(&click(button.x + button.w / 2.0, button.y + button.h / 2.0)) {
         ShellAction::Control(request) => {
-            println!(
-                "Taskbar asked the compositor for {:?} on {:?}",
-                request.action, request.window
-            );
+            println!("Taskbar asked the compositor for {request:?}");
         }
         other => println!("Taskbar returned {other:?}"),
     }
@@ -183,24 +183,44 @@ fn main() {
     // it can.
     let mut away = window(3, 1003, "Text Editor");
     away.minimized = true;
-    desktop.apply_window_list(&[
-        window(1, 1001, "Terminal"),
-        window(2, 1002, "File Explorer"),
-        away,
-    ]);
+    desktop.apply_window_list(&WindowList::new(
+        0,
+        vec![
+            window(1, 1001, "Terminal"),
+            window(2, 1002, "File Explorer"),
+            away,
+        ],
+    ));
     println!(
         "After the next list: {} windows, focused {:?}",
         desktop.visible_windows().len(),
         desktop.focused_window
     );
 
-    // Test virtual desktop switching. Which desktop is showing is the shell's
-    // own — the compositor has no notion of desktops — but which window then has
-    // the keyboard is not, so the switch hands back a request the same way a
-    // click does.
-    let raise = desktop.switch_desktop(1);
+    // Virtual desktop switching, which is a request like everything else: the
+    // compositor holds each window's desktop number and hides the ones filed
+    // elsewhere, so the shell asks and then waits for the list that says it
+    // happened. Nothing below has changed yet, and that is the point.
+    let switch = desktop.switch_desktop(1);
+    println!("Asked the compositor for {switch:?}");
     println!(
-        "Switched to desktop {}: {} visible windows, raise {raise:?}",
+        "...still showing desktop {} with {} windows, because no list has come back",
+        desktop.current_desktop_number(),
+        desktop.visible_windows().len()
+    );
+
+    // The compositor did it. Every window is still open, every one is now filed
+    // on desktop 0, and the list says desktop 1 is what the screen shows — so
+    // the taskbar has nothing to draw.
+    desktop.apply_window_list(&WindowList::new(
+        1,
+        vec![
+            window(1, 1001, "Terminal"),
+            window(2, 1002, "File Explorer"),
+        ],
+    ));
+    println!(
+        "After the next list: desktop {} with {} windows",
         desktop.current_desktop_number(),
         desktop.visible_windows().len()
     );

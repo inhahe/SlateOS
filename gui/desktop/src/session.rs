@@ -66,7 +66,7 @@ use guitk::render::RenderTree;
 use oswindow::{ConnectionError, ConnectionTransport as Transport, Error, EventLoop, Layer, Spec};
 
 use crate::wallpaper::WallpaperManager;
-use crate::{DesktopShell, ShellAction, WindowRequest};
+use crate::{DesktopShell, ShellAction, ShellRequest, WindowRequest};
 
 /// One window the shell draws on, and where it sits on screen.
 ///
@@ -404,7 +404,12 @@ impl<T: Transport> ShellSession<T> {
         let latest = self.events.desktop_revision();
         if latest != self.revision {
             self.revision = latest;
-            self.shell.apply_window_list(self.events.desktop_windows());
+            // Whole, not just the windows: which desktop is showing arrives
+            // in the same frame, and a shell that read the two separately
+            // could read them from different frames.
+            if let Some(list) = self.events.desktop() {
+                self.shell.apply_window_list(list);
+            }
             self.dirty = true;
             worked = true;
         }
@@ -518,9 +523,18 @@ impl<T: Transport> ShellSession<T> {
     /// repaint is unconditional because the shell has drawn something that
     /// depends on the answer — a pressed button, a closed switcher — even when
     /// the answer turns out to be no.
-    fn request(&mut self, request: WindowRequest) -> Result<(), Error<T>> {
+    fn request(&mut self, request: ShellRequest) -> Result<(), Error<T>> {
         self.dirty = true;
-        match self.events.control_window(request.window.0, request.action) {
+        let sent = match request {
+            ShellRequest::Window(WindowRequest { window, action }) => {
+                self.events.control_window(window.0, action)
+            }
+            ShellRequest::SwitchDesktop { desktop } => self.events.switch_desktop(desktop),
+            ShellRequest::MoveWindowToDesktop { window, desktop } => {
+                self.events.move_window_to_desktop(window.0, desktop)
+            }
+        };
+        match sent {
             Ok(()) => {}
             // A refusal means the window went away between the list the
             // button was drawn from and the click. That is an ordinary

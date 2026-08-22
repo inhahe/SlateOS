@@ -114,8 +114,8 @@ pub use submit::{
 
 pub mod window_list;
 pub use window_list::{
-    MAX_WINDOWS_PER_LIST, WINDOW_LIST_MAGIC, WINDOW_LIST_VERSION, WindowInfo, decode_window_list,
-    encode_window_list, encode_window_list_into, try_decode_window_list,
+    MAX_WINDOWS_PER_LIST, WINDOW_LIST_MAGIC, WINDOW_LIST_VERSION, WindowInfo, WindowList,
+    decode_window_list, encode_window_list, encode_window_list_into, try_decode_window_list,
 };
 
 pub mod zones;

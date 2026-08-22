@@ -81,7 +81,7 @@ pub use guiremote::control::{
 };
 /// What a shell learns about the windows it does not own. See
 /// [`EventLoop::watch_desktop`].
-pub use guiremote::window_list::WindowInfo;
+pub use guiremote::window_list::{WindowInfo, WindowList};
 // An addressed event, as it travels. Applications never build one — they
 // receive `(window, Event)` pairs from the loop — but anything driving an
 // application synthetically does, which is what [`testing`] is for.
@@ -732,6 +732,37 @@ impl<T: Transport> EventLoop<T> {
         self.conn.shell_control(window, action)
     }
 
+    /// Show a different virtual desktop.
+    ///
+    /// The other half of [`watch_desktop`](Self::watch_desktop) again, and for
+    /// shells only: this hides and shows windows belonging to every client on
+    /// the display. The compositor decides which window gets the keyboard
+    /// afterwards, and the answer arrives in the next window list — read
+    /// [`current_desktop`](Self::current_desktop) rather than assuming this
+    /// succeeded.
+    ///
+    /// The compositor enforces no upper bound. *How many* desktops exist is a
+    /// user preference, and belongs to the shell that holds the preference.
+    ///
+    /// # Errors
+    ///
+    /// As [`Connection::confirm`].
+    pub fn switch_desktop(&mut self, desktop: u32) -> Result<(), Error<T>> {
+        self.conn.switch_workspace(desktop)
+    }
+
+    /// File a window on a different virtual desktop.
+    ///
+    /// `window` is an id from [`desktop_windows`](Self::desktop_windows). If
+    /// `desktop` is the one showing the window appears; if not, it vanishes.
+    ///
+    /// # Errors
+    ///
+    /// As [`Connection::confirm`].
+    pub fn move_window_to_desktop(&mut self, window: u64, desktop: u32) -> Result<(), Error<T>> {
+        self.conn.set_window_workspace(window, desktop)
+    }
+
     /// Tell the compositor the user's appearance settings have changed on disk.
     ///
     /// For the one application that edits them — Settings — to call *after* it
@@ -769,6 +800,35 @@ impl<T: Transport> EventLoop<T> {
     #[must_use]
     pub fn desktop_windows(&self) -> &[WindowInfo] {
         self.conn.window_list().unwrap_or(&[])
+    }
+
+    /// The last desktop window list whole — the windows *and* the desktop
+    /// showing — or `None` before one has arrived.
+    ///
+    /// For a shell that needs both, which is any shell drawing a taskbar:
+    /// taking them from two calls invites taking them from two different frames.
+    #[must_use]
+    pub const fn desktop(&self) -> Option<&WindowList> {
+        self.conn.desktop()
+    }
+
+    /// Which virtual desktop the screen is showing, as of the last list.
+    ///
+    /// `None` before the first list arrives. Compare it against
+    /// [`WindowInfo::workspace`] to tell which of
+    /// [`desktop_windows`](Self::desktop_windows) the user can actually see —
+    /// but only for windows in [`Layer::Normal`], because a window outside that
+    /// band (a taskbar, a menu, a lock screen) is on every desktop and its
+    /// stored number means nothing.
+    ///
+    /// **Read this every time; do not remember it.** The compositor changes
+    /// desktops on its own account — activating a window that is filed
+    /// elsewhere is a switch — so a shell that kept its own copy would sooner
+    /// or later list one desktop's windows while the screen showed another's,
+    /// which is the bug this field exists to end.
+    #[must_use]
+    pub fn current_desktop(&self) -> Option<u32> {
+        self.conn.current_workspace()
     }
 
     /// How many desktop window lists have arrived.
@@ -1141,8 +1201,24 @@ pub mod testing {
         ///
         /// As [`Self::send_input`].
         pub fn send_window_list(&mut self, windows: &[WindowInfo]) {
+            self.send_window_list_showing(0, windows);
+        }
+
+        /// As [`Self::send_window_list`], naming the desktop the screen is
+        /// showing.
+        ///
+        /// A separate entry point rather than a parameter on the first because
+        /// almost every test in this file cares about the windows and not the
+        /// desktop, and a `0` threaded through all of them would say the
+        /// desktop number mattered there when it does not.
+        ///
+        /// # Panics
+        ///
+        /// As [`Self::send_input`].
+        pub fn send_window_list_showing(&mut self, showing: u32, windows: &[WindowInfo]) {
+            let list = guiremote::window_list::WindowList::new(showing, windows.to_vec());
             self.pipe
-                .write(&guiremote::encode_window_list(windows))
+                .write(&guiremote::encode_window_list(&list))
                 .unwrap();
         }
 
@@ -1702,6 +1778,10 @@ mod tests {
                 minimized: false,
                 maximized: false,
                 focused: false,
+                // Stored and meaningless: a `Background` window is on every
+                // desktop, so nothing should ever compare this against the one
+                // showing. It is here to be carried, not obeyed.
+                workspace: 0,
             },
             WindowInfo {
                 id: 9,
@@ -1712,6 +1792,7 @@ mod tests {
                 minimized: true,
                 maximized: true,
                 focused: true,
+                workspace: 3,
             },
         ]
     }
@@ -1790,6 +1871,39 @@ mod tests {
         assert!(events.poll().unwrap().is_none());
         assert_eq!(events.desktop_windows(), sent.as_slice());
         assert_eq!(events.desktop_revision(), 1);
+    }
+
+    #[test]
+    fn the_desktop_being_shown_comes_from_the_compositor_and_not_from_memory() {
+        // A shell must not keep its own idea of which desktop is up. The
+        // compositor switches on its own account -- activating a window filed
+        // elsewhere is a switch -- so the number arrives with every list, and
+        // a later list saying something different is the truth.
+        let (mut events, server) = wired();
+        events.watch_desktop(true).unwrap();
+        assert_eq!(
+            events.current_desktop(),
+            None,
+            "a client that has been told nothing should not claim to be on desktop 0"
+        );
+
+        server
+            .borrow_mut()
+            .send_window_list_showing(3, &two_desktop_windows());
+        assert!(events.poll().unwrap().is_none());
+        assert_eq!(events.current_desktop(), Some(3));
+        assert_eq!(
+            events.desktop_windows()[1].workspace,
+            3,
+            "the window's own desktop travels with it, not just the one showing"
+        );
+
+        // The switch the shell did not ask for.
+        server
+            .borrow_mut()
+            .send_window_list_showing(0, &two_desktop_windows());
+        assert!(events.poll().unwrap().is_none());
+        assert_eq!(events.current_desktop(), Some(0));
     }
 
     #[test]

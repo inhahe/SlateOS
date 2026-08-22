@@ -24,8 +24,8 @@ use crate::launcher::{self, Category};
 use crate::snap;
 use crate::{
     DesktopShell, Hit, Key, KeyEvent, Layer, ManagedWindow, Modifiers, MouseButton, MouseEvent,
-    MouseEventKind, Rect, START_MENU_ROW_HEIGHT, ShellAction, ShellControlAction, TextRole,
-    WindowId, WindowInfo, WindowRequest, WindowState, click, scroll, scroll_rows,
+    MouseEventKind, Rect, START_MENU_ROW_HEIGHT, ShellAction, ShellControlAction, ShellRequest,
+    TextRole, WindowId, WindowInfo, WindowList, WindowState, click, scroll, scroll_rows,
 };
 use appearance::{AppearanceSettings, WindowCorners};
 use guitk::render::{RenderCommand, RenderTree};
@@ -34,6 +34,16 @@ use guitk::wheel;
 
 fn shell() -> DesktopShell {
     DesktopShell::new(1000, 800)
+}
+
+/// A window list on the desktop the user is looking at.
+///
+/// Almost every test in this file is about a click landing somewhere, and none
+/// is about virtual desktops — so they all say desktop 0 and mean "the one
+/// showing". The tests that *are* about desktops build the list themselves,
+/// with numbers that differ, which is the only way the difference can matter.
+fn here(windows: &[WindowInfo]) -> WindowList {
+    WindowList::new(0, windows.to_vec())
 }
 
 /// The centre of a rectangle — where a user aiming at a control clicks.
@@ -91,7 +101,7 @@ fn open(shell: &mut DesktopShell, title: &str) -> WindowId {
     let mut fresh = app(id, title);
     fresh.focused = true;
     list.push(fresh);
-    shell.apply_window_list(&list);
+    shell.apply_window_list(&here(&list));
     WindowId(id)
 }
 
@@ -105,7 +115,7 @@ fn minimize(shell: &mut DesktopShell, id: WindowId) {
             info.focused = false;
         }
     }
-    shell.apply_window_list(&list);
+    shell.apply_window_list(&here(&list));
 }
 
 // ---- the start menu -------------------------------------------------------
@@ -617,7 +627,7 @@ fn a_taskbar_button_asks_to_activate_an_unfocused_window_and_to_minimize_a_focus
     let first = shell.taskbar_button_rect(0);
     assert_eq!(
         click_at(&mut shell, first),
-        ShellAction::Control(WindowRequest::new(a, ShellControlAction::Activate)),
+        ShellAction::Control(ShellRequest::window(a, ShellControlAction::Activate)),
         "the button of an unfocused window must summon it"
     );
 
@@ -638,7 +648,7 @@ fn a_taskbar_button_asks_to_activate_an_unfocused_window_and_to_minimize_a_focus
     let button = shell.taskbar_button_rect(index);
     assert_eq!(
         click_at(&mut shell, button),
-        ShellAction::Control(WindowRequest::new(b, ShellControlAction::Minimize)),
+        ShellAction::Control(ShellRequest::window(b, ShellControlAction::Minimize)),
         "the button of the focused window must put it away"
     );
     assert_eq!(
@@ -656,7 +666,7 @@ fn a_taskbar_button_whose_window_has_gone_swallows_the_click() {
     let mut shell = shell();
     open(&mut shell, "A");
     let button = shell.taskbar_button_rect(0);
-    shell.apply_window_list(&[]);
+    shell.apply_window_list(&here(&[]));
 
     assert_eq!(click_at(&mut shell, button), ShellAction::Consumed);
 }
@@ -673,12 +683,12 @@ fn the_window_list_replaces_what_the_shell_believed_rather_than_adding_to_it() {
     // appears in no later list — the point being missed otherwise. Seeding with
     // `add_window` gives the stale window id 1, which the next list happens to
     // reuse and therefore overwrites, so a shell that merged would pass anyway.
-    shell.apply_window_list(&[app(9, "closed since")]);
+    shell.apply_window_list(&here(&[app(9, "closed since")]));
     assert!(shell.windows.contains_key(&WindowId(9)));
 
     let mut second = app(2, "Editor");
     second.focused = true;
-    shell.apply_window_list(&[app(1, "Terminal"), second]);
+    shell.apply_window_list(&here(&[app(1, "Terminal"), second]));
 
     assert!(
         !shell.windows.contains_key(&WindowId(9)),
@@ -713,7 +723,7 @@ fn the_taskbar_leaves_out_every_surface_that_is_not_an_application_window() {
     let mut bar = app(2, "Taskbar");
     bar.layer = Layer::Overlay;
 
-    shell.apply_window_list(&[wallpaper, app(3, "Editor"), bar]);
+    shell.apply_window_list(&here(&[wallpaper, app(3, "Editor"), bar]));
 
     let ids: Vec<WindowId> = shell.visible_windows().iter().map(|w| w.id).collect();
     assert_eq!(ids, [WindowId(3)], "the shell listed its own surfaces");
@@ -730,7 +740,7 @@ fn a_minimized_window_keeps_its_button_and_an_unmapped_one_does_not() {
     let mut hidden = app(2, "Unmapped");
     hidden.visible = false;
 
-    shell.apply_window_list(&[away, hidden, app(3, "Ordinary")]);
+    shell.apply_window_list(&here(&[away, hidden, app(3, "Ordinary")]));
 
     assert_eq!(shell.windows[&WindowId(1)].state, WindowState::Minimized);
     assert!(
@@ -751,19 +761,24 @@ fn a_retitle_reaches_the_button_without_disturbing_shell_local_state() {
     // a window that is already known must be updated in place, not rebuilt,
     // because the shell holds per-window state the compositor knows nothing
     // about and cannot send back.
+    //
+    // The virtual desktop used to be on that list and is not any more: it is
+    // the compositor's field now, arrives with every window, and a shell that
+    // preserved its own copy across an update would be preserving a stale one.
     let mut shell = shell();
-    shell.apply_window_list(&[app(1, "untitled")]);
+    shell.apply_window_list(&here(&[app(1, "untitled")]));
     shell.windows.get_mut(&WindowId(1)).unwrap().icon_id = 42;
-    shell.windows.get_mut(&WindowId(1)).unwrap().desktop = 3;
 
-    shell.apply_window_list(&[app(1, "notes.txt — saved")]);
+    let mut retitled = app(1, "notes.txt — saved");
+    retitled.workspace = 3;
+    shell.apply_window_list(&here(&[retitled]));
 
     let win = &shell.windows[&WindowId(1)];
     assert_eq!(win.title, "notes.txt — saved");
     assert_eq!(win.icon_id, 42, "the icon was rebuilt from nothing");
     assert_eq!(
         win.desktop, 3,
-        "a retitle moved the window to another virtual desktop"
+        "the desktop the compositor named was ignored in favour of a local copy"
     );
 }
 
@@ -776,10 +791,10 @@ fn an_empty_desktop_leaves_nothing_focused() {
     let mut shell = shell();
     let mut only = app(1, "Editor");
     only.focused = true;
-    shell.apply_window_list(&[only]);
+    shell.apply_window_list(&here(&[only]));
     assert_eq!(shell.focused_window, Some(WindowId(1)));
 
-    shell.apply_window_list(&[]);
+    shell.apply_window_list(&here(&[]));
     assert_eq!(shell.focused_window, None);
     assert!(shell.windows.is_empty());
 }
@@ -793,13 +808,13 @@ fn the_window_list_is_the_only_thing_that_grows_the_shells_idea_of_the_desktop()
     let mut shell = shell();
     let mut focused = app(1, "Editor");
     focused.focused = true;
-    shell.apply_window_list(&[focused]);
+    shell.apply_window_list(&here(&[focused]));
 
     let button = shell.taskbar_button_rect(0);
     let action = click_at(&mut shell, button);
     assert_eq!(
         action,
-        ShellAction::Control(WindowRequest::new(
+        ShellAction::Control(ShellRequest::window(
             WindowId(1),
             ShellControlAction::Minimize
         ))
@@ -812,7 +827,7 @@ fn the_window_list_is_the_only_thing_that_grows_the_shells_idea_of_the_desktop()
     // The compositor did as it was asked and said so.
     let mut away = app(1, "Editor");
     away.minimized = true;
-    shell.apply_window_list(&[away]);
+    shell.apply_window_list(&here(&[away]));
     assert!(shell.visible_windows().is_empty());
     assert_eq!(shell.focused_window, None);
 }
@@ -1262,7 +1277,7 @@ fn a_double_click_is_the_same_event_to_this_shell_as_a_single_one() {
     let (x, y) = centre(shell.taskbar_button_rect(0));
     assert_eq!(
         shell.handle_mouse(&doubled(x, y)),
-        ShellAction::Control(WindowRequest::new(a, ShellControlAction::Activate)),
+        ShellAction::Control(ShellRequest::window(a, ShellControlAction::Activate)),
         "double-click on a taskbar button asked for nothing"
     );
 
@@ -1708,7 +1723,10 @@ fn clicking_a_zone_asks_for_the_focused_window_to_be_tiled_into_it() {
                 .expect("every drawn zone must name a slot");
             assert_eq!(
                 shell.handle_mouse(&click(cx, cy)),
-                ShellAction::Control(WindowRequest::new(id, ShellControlAction::SnapToZone(slot))),
+                ShellAction::Control(ShellRequest::window(
+                    id,
+                    ShellControlAction::SnapToZone(slot)
+                )),
                 "clicking zone {zone_id} of {preset:?} at ({cx}, {cy})"
             );
             assert!(
@@ -1730,7 +1748,9 @@ fn the_tiled_window_is_whichever_one_is_focused_now() {
 
     let (_, cx, cy) = drawn_zones(&shell)[0];
     match shell.handle_mouse(&click(cx, cy)) {
-        ShellAction::Control(request) => assert_eq!(request.window, second),
+        ShellAction::Control(ShellRequest::Window(request)) => {
+            assert_eq!(request.window, second);
+        }
         other => panic!("expected a request for the focused window, got {other:?}"),
     }
 }
@@ -1827,7 +1847,10 @@ fn the_lit_zone_is_the_one_a_press_would_place_into() {
         let slot = snap::SnapSlot::new(PRESET, u8::try_from(zone_id).unwrap()).unwrap();
         assert_eq!(
             shell.handle_mouse(&click(cx, cy)),
-            ShellAction::Control(WindowRequest::new(id, ShellControlAction::SnapToZone(slot))),
+            ShellAction::Control(ShellRequest::window(
+                id,
+                ShellControlAction::SnapToZone(slot)
+            )),
             "the zone that was lit is not the zone the press placed into"
         );
     }

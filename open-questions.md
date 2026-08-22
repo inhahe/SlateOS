@@ -881,6 +881,23 @@ Each of those declares exactly one executable and switches on its invocation
 name — precisely the BusyBox shape. So §8's own security rationale, applied to
 the real code, argues for the bundle and against the separate projects.
 
+**And it is not four crates — it is at least nineteen, and it has already cost
+us working commands.** Surveyed 2026-08-22: **50–70 command names** are
+implemented as extra personalities of some other separate project, and **no
+build produces an executable for any of them**, because creating the links that
+would select the personality is a step nobody ever wrote. `e2fsck`, `mke2fs`,
+`tune2fs`, `resize2fs`, `strip`, `ranlib`, `xxd`, `killall`, `shred`, `visudo`,
+`lpr`, `mpstat`, `finger` and dozens more exist as finished code that cannot be
+run. `e2fsck` and `mke2fs` are the check and create tools for **ext4, our only
+filesystem**. Filed as `known-issues.md` →
+`B-DOZENS-OF-COMMANDS-EXIST-IN-SOURCE-AND-CAN-NEVER-BE-RUN`.
+
+This bears on the choice directly. §8's rule is *"one tool = one crate = one
+binary = one identity"*, and the side §8 declared canonical is where that rule
+is broken — not occasionally, but as the house style, in at least 19 crates.
+`coreutils`, the side §8 retires, is the only part of the tree where the rule
+actually holds today.
+
 **Nothing was built on §8.** Ten weeks on, not one part of it was carried out:
 no `coreutils-common`, no retirement, no build repointing. Both sets are still
 compiled, and both still write executables to the same filenames — whichever

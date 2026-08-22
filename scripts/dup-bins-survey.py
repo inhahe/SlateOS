@@ -58,7 +58,12 @@ USERSPACE = ROOT / "userspace"
 _SHORT = re.compile(r'"(-[A-Za-z])"')
 _LONG = re.compile(r'"(--[A-Za-z][-A-Za-z0-9]+)"')
 # Byte-literal match arms: `b'c' =>` or `b'c' |`, how several of these parsers
-# spell a short option once they are iterating a cluster like `-abc`.
+# spell a short option once they are iterating a cluster like `-abc`. The `b`
+# prefix is optional because the two sides disagree about it -- `coreutils`
+# iterates `arg.as_bytes()` and matches `b'd'`, while several standalone crates
+# iterate `arg.chars()` and match `'d'`. Reading only the byte form credited
+# `coreutils` with `-c -d -s -C` as options `tr` alone had, when the standalone
+# `tr` accepts all four; it just spells them `'d' => delete = true`.
 #
 # The trailing `=>`/`|` is required, and it is not decoration. A bare `b'X'`
 # scan credited `tr` with `-A -F -X -Z` that it does not accept: the literals
@@ -66,7 +71,13 @@ _LONG = re.compile(r'"(--[A-Za-z][-A-Za-z0-9]+)"')
 # decoding hex. Character-oriented utilities -- `tr`, `expand`, `fold`, `od` --
 # are full of byte literals that are data, not flags, and they are exactly the
 # ones this survey is used on.
+#
+# Dropping the `b` widens the same hazard, so the char form is subject to the
+# locality rule below (only inside a function that mentions `--`) while the byte
+# form is not. A range arm (`'a'..='z' =>`) is excluded by the negative
+# lookahead: it is a classifier, never an option.
 _BYTE = re.compile(r"b'([A-Za-z])'\s*(?:=>|\|)")
+_CHAR = re.compile(r"(?<![A-Za-z0-9_])(?<!\.\.=)'([A-Za-z])'\s*(?:=>|\|)(?!=)")
 # Unit tests are cut before scanning, for the same reason: an assertion like
 # `assert_eq!(set2, vec![b'A', b'x'])` is not an option table. Cutting from the
 # first `#[cfg(test)]` to end-of-file works because that is where every one of
@@ -89,7 +100,7 @@ _TESTS = re.compile(r"^#\[cfg\(test\)\]", re.MULTILINE)
 # and is the side under a differential harness. Believing that would have
 # deleted the tested implementation. It is the same mistake, in miniature, that
 # the whole duplication caused with `bc`.
-_TABLE = re.compile(r'\(\s*"([a-z][-a-z0-9]+)"\s*,\s*[A-Z][A-Za-z0-9]*(?:::|\s*\))')
+_TABLE = re.compile(r'\(\s*(?<!b)"([a-z][-a-z0-9]+)"\s*,\s*[A-Z][A-Za-z0-9]*(?:::|\s*\))')
 # A third shape, in the bins that dispatch on the stripped name directly rather
 # than through a table: `match typed { "regexp-extended" => out.ere = true, …`.
 # `sed` is the one that made this necessary -- it was reported as missing
@@ -105,21 +116,44 @@ _TABLE = re.compile(r'\(\s*"([a-z][-a-z0-9]+)"\s*,\s*[A-Z][A-Za-z0-9]*(?:::|\s*\
 # lives. That is a locality argument rather than a syntactic one, so it still
 # lets some noise through; `--verbose` prints the names precisely so that a
 # reader can see an implausible one for what it is.
-_ARM = re.compile(r'"([a-z][-a-z0-9]{2,})"\s*=>')
+#
+# The `(?<!b)` is the fourth bias this script has had, and the most instructive.
+# `tr` matches POSIX character classes as *byte strings* -- `b"alpha" => …`,
+# `b"digit"`, `b"xdigit"` -- because it is comparing against bytes taken from
+# `[:alpha:]` inside a SET operand. Without the guard this read all twelve class
+# names as long options and reported `tr` as "standalone ahead" by 12 to 6, on
+# a pair where `coreutils` is the side under a differential harness. A `b`
+# prefix is the difference between a string the program *prints or matches
+# against user text* and one it compares against its own argv, and only the
+# latter can be an option.
+_ARM = re.compile(r'(?<!b)"([a-z][-a-z0-9]{2,})"\s*=>')
 # Function starts, at any indentation, including `pub fn` and `async fn`. Used
 # only to chop the file into regions for the rule above.
 _FN = re.compile(r"^[ \t]*(?:pub(?:\([^)]*\))?\s+)?(?:async\s+)?fn\s", re.MULTILINE)
 
 
-def _match_arm_options(text: str) -> set[str]:
+def _local_options(text: str) -> tuple[set[str], set[str]]:
+    """Long and short options from `match` arms, scanned per function.
+
+    Returns `(long, short)`. Both patterns are too loose to run over a whole
+    file -- any `match` on a lowercase string has the long shape, and any
+    `match` on a character has the short one -- so both are confined to
+    functions that mention `--` somewhere, which is where long-option dispatch
+    lives and is not where a `match` on a format specifier or a character class
+    lives. That is a locality argument rather than a syntactic one, so it still
+    lets some noise through; `--verbose` prints the names precisely so a reader
+    can see an implausible one for what it is.
+    """
     starts = [m.start() for m in _FN.finditer(text)]
     bounds = list(zip([0] + starts, starts + [len(text)]))
-    found: set[str] = set()
+    long_: set[str] = set()
+    short: set[str] = set()
     for lo, hi in bounds:
         chunk = text[lo:hi]
         if "--" in chunk:
-            found |= set(_ARM.findall(chunk))
-    return found
+            long_ |= set(_ARM.findall(chunk))
+            short |= set(_CHAR.findall(chunk))
+    return long_, short
 
 
 def options(text: str) -> set[str]:
@@ -128,7 +162,9 @@ def options(text: str) -> set[str]:
     opts = set(_SHORT.findall(text)) | set(_LONG.findall(text))
     opts |= {"-" + c for c in _BYTE.findall(text)}
     opts |= {"--" + n for n in _TABLE.findall(text)}
-    opts |= {"--" + n for n in _match_arm_options(text)}
+    long_, short = _local_options(text)
+    opts |= {"--" + n for n in long_}
+    opts |= {"-" + c for c in short}
     return opts
 
 

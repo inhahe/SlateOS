@@ -7570,6 +7570,15 @@ Remaining net improvements (diminishing returns):
        case.  Same root cause and proper fix as the utimensat
        AT_SYMLINK_NOFOLLOW limitation below (needs a no-follow kernel ABI).
        Deferred: low value.
+       (NO LONGER TRUE, 2026-08-22 — lane B.  The no-follow kernel ABI was
+       built: SYS_FS_SET_OWNER arg4 bit 0 = NO_FOLLOW, handled by
+       kernel/src/syscall/handlers.rs sys_fs_set_owner -> set_owner_no_follow,
+       and posix/src/file.rs lchown passes it via set_owner_path_ex.  Anything
+       still saying "there is no lchown yet" is stale; userspace/chown was
+       relying on exactly that claim and was chowning symlink TARGETS during
+       -R, which is a traversal escape.  See known-issues.md ->
+       B-chown-FOLLOWS-SYMLINKS-WHILE-RECURSING.  "Deferred: low value" was
+       wrong twice over: it was neither low value nor, by then, undone.)
     2. chmod ignores file-type bits and forwards only mode & 0o7777; the
        kernel additionally masks to 0o7777.  setuid/setgid/sticky bits ARE
        forwarded (they live in 0o7000).

@@ -13,6 +13,26 @@
 //! is the ordinary way to make a file unreadable, and reading its `-r` as
 //! "recurse" leaves the file readable while reporting a usage error.
 //!
+//! # Symbolic links, and why `-R` never touches one
+//!
+//! Under `-R`, every path after the operand was chosen by whoever wrote the
+//! files, not by the caller — which under `/tmp`, a download directory, or a
+//! user's home is not the same person. A symbolic link met during the walk is
+//! therefore an instruction from a stranger, and this program obeys none of
+//! them (`known-issues.md` → `B-chmod-FOLLOWS-SYMLINKS-WHILE-RECURSING`):
+//!
+//! 1. **It is not descended into.** The recursion used to test `path.is_dir()`,
+//!    which follows links, so `srv/x -> /etc` turned `chmod -R 777 srv/` into
+//!    `chmod -R 777 /etc`. It now tests the link's own type.
+//! 2. **It is skipped entirely**, as GNU chmod skips it. A symlink's own mode
+//!    bits are never consulted by anything, so the only effect a `chmod` on one
+//!    can have is on its target — and `srv/x -> /etc/shadow` would otherwise
+//!    make `/etc/shadow` world-writable.
+//!
+//! A link named directly on the command line *is* followed, also matching GNU
+//! (`fts` with `FTS_COMFOLLOW`): the caller typed that name and can see what it
+//! is.
+//!
 //! Built only on unix-family targets (our x86_64-slateos presents as
 //! linux-musl, so `cfg(unix)` matches).  On non-unix hosts (e.g.
 //! Windows when running `cargo test --workspace`), a stub `main` keeps
@@ -56,6 +76,35 @@ struct ChmodArgs {
 /// not contain `R`, which is the recursion flag — that one letter is the whole
 /// difference between `chmod -R` and `chmod -r`.
 const MODE_OPERAND_CHARS: &str = "rwxXstugoa,+-=";
+
+/// What a recursive walk does with one entry it found.
+#[cfg_attr(test, derive(Debug, PartialEq, Eq))]
+enum WalkAction {
+    /// A symbolic link: leave it, and everything it points at, alone.
+    Skip,
+    /// A real directory: walk into it.
+    Descend,
+    /// Anything else: chmod it.
+    Apply,
+}
+
+/// Decide what to do with a walk entry from its `lstat` file type.
+///
+/// Extracted as a pure function purely so it can be tested: the walk itself is
+/// `cfg(unix)`, so on the build host — where `cargo test --workspace` runs —
+/// not one line of it is compiled, and a rule nobody can test is a rule that
+/// quietly stops holding. `is_symlink` is checked first and wins outright,
+/// which is the entire fix: `is_dir` alone had already followed the link by the
+/// time it answered.
+fn walk_action(is_symlink: bool, is_dir: bool) -> WalkAction {
+    if is_symlink {
+        WalkAction::Skip
+    } else if is_dir {
+        WalkAction::Descend
+    } else {
+        WalkAction::Apply
+    }
+}
 
 /// Whether `arg` is a mode written with a leading `-`, e.g. `-r`, `-w`, `-rw`.
 ///
@@ -231,11 +280,11 @@ fn main() {
     let mut exit_code = 0;
     for path_str in &parsed.paths {
         let path = Path::new(path_str);
+        // `is_dir()` follows, which is correct *here*: a command-line symlink
+        // is dereferenced, as it is by GNU chmod. Inside `chmod_recursive` the
+        // opposite rule applies — see the module doc.
         if parsed.recursive && path.is_dir() {
-            if let Err(e) = chmod_recursive(path, &parsed.mode) {
-                eprintln!("chmod: {}: {e}", quotef_os(path_str));
-                exit_code = 1;
-            }
+            chmod_recursive(path, &parsed.mode, &mut exit_code);
         } else if let Err(e) = apply_chmod(path, &parsed.mode) {
             eprintln!("chmod: {}: {e}", quotef_os(path_str));
             exit_code = 1;
@@ -245,30 +294,75 @@ fn main() {
     process::exit(exit_code);
 }
 
+/// Apply `mode_str` to `dir` and everything beneath it.
+///
+/// Errors are reported and recorded in `exit_code` rather than returned,
+/// because a walk that stops at the first failure leaves the caller with a tree
+/// in an unknown state: `chmod -R 700 ~` hitting one unreadable subdirectory
+/// used to abandon every sibling after it, silently leaving them world-
+/// readable. GNU chmod reports and keeps going, and so does this.
 #[cfg(unix)]
-fn chmod_recursive(dir: &Path, mode_str: &str) -> Result<(), String> {
-    apply_chmod(dir, mode_str)?;
+fn chmod_recursive(dir: &Path, mode_str: &str, exit_code: &mut i32) {
+    if let Err(e) = apply_chmod(dir, mode_str) {
+        eprintln!("chmod: {}: {e}", quotef_os(dir));
+        *exit_code = 1;
+    }
 
-    let entries = fs::read_dir(dir).map_err(|e| format!("{e}"))?;
+    let entries = match fs::read_dir(dir) {
+        Ok(e) => e,
+        Err(e) => {
+            eprintln!("chmod: {}: {e}", quotef_os(dir));
+            *exit_code = 1;
+            return;
+        }
+    };
     for entry_result in entries {
-        let entry = entry_result.map_err(|e| format!("{e}"))?;
+        let entry = match entry_result {
+            Ok(e) => e,
+            Err(e) => {
+                eprintln!("chmod: {}: {e}", quotef_os(dir));
+                *exit_code = 1;
+                continue;
+            }
+        };
         let path = entry.path();
-        if path.is_dir() {
-            chmod_recursive(&path, mode_str)?;
-        } else {
-            apply_chmod(&path, mode_str)?;
+        // `file_type()` is lstat-based: a symlink to a directory reports
+        // `is_symlink()`, not `is_dir()`, so neither branch below can leave the
+        // tree. An entry whose type cannot be read is treated as a link — the
+        // conservative guess, costing at worst one file left unchanged.
+        let Ok(ft) = entry.file_type() else {
+            eprintln!(
+                "chmod: {}: cannot determine file type; skipping",
+                quotef_os(&path)
+            );
+            *exit_code = 1;
+            continue;
+        };
+        match walk_action(ft.is_symlink(), ft.is_dir()) {
+            // Deliberately silent: GNU chmod skips links without comment, and
+            // a tree full of them would otherwise bury the real diagnostics.
+            WalkAction::Skip => {}
+            WalkAction::Descend => chmod_recursive(&path, mode_str, exit_code),
+            WalkAction::Apply => {
+                if let Err(e) = apply_chmod(&path, mode_str) {
+                    eprintln!("chmod: {}: {e}", quotef_os(&path));
+                    *exit_code = 1;
+                }
+            }
         }
     }
-    Ok(())
 }
 
 #[cfg(unix)]
 fn apply_chmod(path: &Path, mode_str: &str) -> Result<(), String> {
-    // Look up the current mode lazily — only needed for symbolic specs,
-    // but the helper always accepts it.
+    // The current mode is the base a symbolic spec modifies, so a failure to
+    // read it is fatal to the operation rather than something to paper over.
+    // This used to be `.unwrap_or(0)`, which turned an unreadable mode into
+    // "no bits set" and made `chmod u+x f` *clear every other permission on
+    // the file* instead of failing.
     let current = fs::metadata(path)
         .map(|m| m.permissions().mode())
-        .unwrap_or(0);
+        .map_err(|e| format!("{e}"))?;
     let new_mode = apply_mode_string(mode_str, current)?;
     let perms = fs::Permissions::from_mode(new_mode);
     fs::set_permissions(path, perms).map_err(|e| format!("{e}"))
@@ -281,6 +375,36 @@ mod tests {
 
     fn s(items: &[&str]) -> Vec<String> {
         items.iter().map(|x| (*x).to_string()).collect()
+    }
+
+    // ---------------- walk_action (symlink policy) ----------------
+    //
+    // These guard a security boundary, so they are written as the rule rather
+    // than as the code: a red one here is a question about the rule, not an
+    // assertion to update. See known-issues.md →
+    // `B-chmod-FOLLOWS-SYMLINKS-WHILE-RECURSING`.
+
+    #[test]
+    fn walk_skips_a_symlink() {
+        assert_eq!(walk_action(true, false), WalkAction::Skip);
+    }
+
+    #[test]
+    fn walk_skips_a_symlink_to_a_directory_rather_than_descending() {
+        // The whole bug in one assertion. `is_dir()` on a link to a directory
+        // answers true, and answering "descend" to that is how `chmod -R`
+        // walked out of the tree it was given.
+        assert_eq!(walk_action(true, true), WalkAction::Skip);
+    }
+
+    #[test]
+    fn walk_descends_into_a_real_directory() {
+        assert_eq!(walk_action(false, true), WalkAction::Descend);
+    }
+
+    #[test]
+    fn walk_applies_to_a_regular_file() {
+        assert_eq!(walk_action(false, false), WalkAction::Apply);
     }
 
     // ---------------- parse_args ----------------

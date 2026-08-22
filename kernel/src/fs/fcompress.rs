@@ -299,6 +299,20 @@ pub fn reset_stats() {
 // Core compression / decompression
 // ---------------------------------------------------------------------------
 
+/// Count one file that was considered for compression and left alone.
+///
+/// A function rather than an inline statement because the inline version was
+/// written twice as `STATE.lock().stats.files_skipped =
+/// STATE.lock().stats.files_skipped.saturating_add(1)`, which deadlocks: Rust
+/// evaluates the right-hand side first, but its lock guard is a temporary that
+/// lives to the end of the statement, so the left-hand side waits on a
+/// non-reentrant lock the same thread already holds. Every caller now shares
+/// this one correct acquisition.
+fn note_skipped() {
+    let mut state = STATE.lock();
+    state.stats.files_skipped = state.stats.files_skipped.saturating_add(1);
+}
+
 /// Check if data should be compressed for a given path, and if so,
 /// return the compressed data with header.
 ///
@@ -311,7 +325,7 @@ pub fn compress_for_write(path: &str, data: &[u8]) -> Option<Vec<u8>> {
 
     let min = MIN_SIZE.load(Ordering::Relaxed);
     if (data.len() as u64) < min {
-        STATE.lock().stats.files_skipped = STATE.lock().stats.files_skipped.saturating_add(1);
+        note_skipped();
         return None;
     }
 
@@ -327,7 +341,7 @@ pub fn compress_for_write(path: &str, data: &[u8]) -> Option<Vec<u8>> {
 
     // Skip if compressed size >= original (incompressible data).
     if compressed.len() >= data.len() {
-        STATE.lock().stats.files_skipped = STATE.lock().stats.files_skipped.saturating_add(1);
+        note_skipped();
         return None;
     }
 

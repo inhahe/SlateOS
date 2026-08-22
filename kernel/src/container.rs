@@ -2685,6 +2685,13 @@ pub fn tar_tree<B: AsRef<Path> + ?Sized>(base: &B) -> KernelResult<Vec<u8>> {
                 EntryType::VolumeLabel => {
                     // FAT volume labels have no portable tar representation.
                 }
+                EntryType::CharDevice => {
+                    // A device node has no contents to archive, and our
+                    // ustar writer has no device entry kind. Archiving one
+                    // as an empty regular file would be worse than skipping
+                    // it: extracting the archive would replace a device with
+                    // a plain file of the same name.
+                }
             }
         }
     }

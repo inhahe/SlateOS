@@ -201,6 +201,22 @@ pub enum HandleKind {
     /// on the last fd, tears the daemon connection down).  Only created when
     /// the `net.userspace` boot switch is set.
     Socket,
+    /// Input event device — Linux `/dev/input/event0` (keyboard) or
+    /// `/dev/input/event1` (mouse).  Opened by anything that needs raw input:
+    /// a Wayland compositor, an X server, SDL, `libinput`.  Driven by plain
+    /// `read(2)`, which yields whole 24-byte `struct input_event` records and
+    /// never a partial one; `write` returns `EINVAL` (Linux allows writes to
+    /// drive LEDs and force feedback, neither of which exists here, and
+    /// accepting a write that does nothing would be worse than refusing it).
+    ///
+    /// `raw_handle` holds the `evdev_fd::EvdevHandle` raw u64 — the per-open
+    /// *client* object holding this file description's cursor into the
+    /// device's shared event ring.  Two separate opens get two cursors and
+    /// each therefore sees every event, which is why the cursor lives here
+    /// and not in the device.  Shared across `dup`/`fork` via the refcounted
+    /// instance model, exactly like `DrmCard`, so `needs_kernel_close()`
+    /// returns `true`.
+    Evdev,
 }
 
 impl HandleKind {
@@ -220,6 +236,7 @@ impl HandleKind {
             | Self::Inotify
             | Self::AlsaPcm
             | Self::DrmCard
+            | Self::Evdev
             | Self::Socket => true,
         }
     }
@@ -469,6 +486,23 @@ impl FdEntry {
     pub const fn drm_card(handle: u64, fd_flags: u32, status_flags: u32) -> Self {
         Self {
             kind: HandleKind::DrmCard,
+            raw_handle: handle,
+            fd_flags,
+            status_flags,
+            f_owner: 0,
+            f_owner_sig: 0,
+        }
+    }
+
+    /// Construct an entry for an evdev input node (`/dev/input/eventN`).
+    /// `handle` is the `evdev_fd::EvdevHandle` raw u64.  `fd_flags` carries
+    /// `FD_CLOEXEC` when opened with `O_CLOEXEC`; `status_flags` carries
+    /// `O_NONBLOCK`, which is what decides whether a read with no pending
+    /// event returns `EAGAIN` or blocks until one arrives.
+    #[must_use]
+    pub const fn evdev(handle: u64, fd_flags: u32, status_flags: u32) -> Self {
+        Self {
+            kind: HandleKind::Evdev,
             raw_handle: handle,
             fd_flags,
             status_flags,

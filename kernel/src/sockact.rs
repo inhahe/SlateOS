@@ -217,18 +217,31 @@ pub fn register(service_id: u32, spec: SocketSpec) -> KernelResult<u32> {
     let id = state.next_id;
     state.next_id = state.next_id.saturating_add(1);
 
+    // Seed the entry from the service's *actual* state rather than assuming it
+    // is down.  A socket registered for an already-running service and left
+    // `Listening` is a trap: the first connection to arrive would call
+    // `start_service` on a running service, which is rejected, and the entry
+    // would land in `Failed` — see the matching guard in [`trigger`].
+    let (initial_state, initial_activity_ns) = match info.state {
+        crate::fs::servicemgr::ServiceState::Running
+        | crate::fs::servicemgr::ServiceState::Starting => {
+            (ActivationState::Active, crate::hpet::elapsed_ns())
+        }
+        _ => (ActivationState::Listening, 0),
+    };
+
     state.entries.push(SocketEntry {
         id,
         service_id,
         service_name: info.name.clone(),
         spec,
-        state: ActivationState::Listening,
+        state: initial_state,
         activation_count: 0,
         pending_connections: 0,
         last_activation_ns: 0,
         idle_stop: false,
         idle_timeout_ns: DEFAULT_IDLE_TIMEOUT_NS,
-        last_activity_ns: 0,
+        last_activity_ns: initial_activity_ns,
     });
 
     crate::syslog!(
@@ -305,6 +318,9 @@ pub fn trigger(entry_id: u32) -> KernelResult<bool> {
     let now = crate::hpet::elapsed_ns();
     let svc_id = entry.service_id;
     let svc_name = entry.service_name.clone();
+    // Kept so the optimistic bookkeeping below can be undone exactly if the
+    // service turns out to have been up already (no activation happened).
+    let prev_activation_ns = entry.last_activation_ns;
     entry.state = ActivationState::Activating;
     entry.pending_connections = entry.pending_connections.saturating_add(1);
     entry.last_activation_ns = now;
@@ -333,6 +349,42 @@ pub fn trigger(entry_id: u32) -> KernelResult<bool> {
     match crate::fs::servicemgr::start_service(svc_id) {
         Ok(()) => Ok(true),
         Err(e) => {
+            // "Already running" is not an activation failure.  A service can be
+            // brought up by any other route — an operator `services start`, a
+            // dependency pulling it in, another entry's activation — between
+            // this entry being registered and the first connection arriving,
+            // and `start_service` rejects starting a service that is already
+            // up.  Booking that as a failure marks the entry `Failed`, and a
+            // `Failed` entry only recovers through an explicit
+            // `set_enabled(id, true)`: the connection that just arrived would
+            // be the last one this socket ever activates on.
+            //
+            // Re-query the service rather than sniffing the error code, so a
+            // service that came up *during* our call is handled identically.
+            let already_up = matches!(
+                crate::fs::servicemgr::get_service(svc_id),
+                Ok(info)
+                    if matches!(
+                        info.state,
+                        crate::fs::servicemgr::ServiceState::Running
+                            | crate::fs::servicemgr::ServiceState::Starting
+                    )
+            );
+
+            if already_up {
+                let mut state = STATE.lock();
+                if let Some(entry) = state.entries.iter_mut().find(|e| e.id == entry_id) {
+                    // The connection stays queued — `claim` will hand it over —
+                    // but the activation counters mean "starts this entry
+                    // caused", and no start happened, so undo the bump above.
+                    entry.state = ActivationState::Active;
+                    entry.activation_count = entry.activation_count.saturating_sub(1);
+                    entry.last_activation_ns = prev_activation_ns;
+                }
+                state.total_activations = state.total_activations.saturating_sub(1);
+                return Ok(false);
+            }
+
             // Mark the entry as failed.
             let mut state = STATE.lock();
             if let Some(entry) = state.entries.iter_mut().find(|e| e.id == entry_id) {
@@ -614,6 +666,48 @@ pub fn procfs_content() -> String {
 // Self-tests
 // ---------------------------------------------------------------------------
 
+/// The activation state of one entry, or `NotFound` if it has gone.
+///
+/// Self-test only.  Written to fail loudly on a missing entry: the obvious
+/// `if let Some(e) = …` shape passes *vacuously* when the entry has vanished,
+/// which is the one case a state assertion most needs to catch.
+fn test_entry_state(entry_id: u32) -> KernelResult<ActivationState> {
+    let state = STATE.lock();
+    state
+        .entries
+        .iter()
+        .find(|e| e.id == entry_id)
+        .map(|e| e.state)
+        .ok_or(KernelError::NotFound)
+}
+
+/// Queued-connection count and activation count of one entry. Self-test only.
+fn test_entry_counts(entry_id: u32) -> KernelResult<(u32, u64)> {
+    let state = STATE.lock();
+    state
+        .entries
+        .iter()
+        .find(|e| e.id == entry_id)
+        .map(|e| (e.pending_connections, e.activation_count))
+        .ok_or(KernelError::NotFound)
+}
+
+/// Assert an entry is in `want`, printing both states on mismatch.
+fn test_expect_state(entry_id: u32, want: ActivationState, what: &str) -> KernelResult<()> {
+    let got = test_entry_state(entry_id)?;
+    if got != want {
+        crate::serial_println!(
+            "[sockact]   FAIL: {}: entry {} is {}, expected {}",
+            what,
+            entry_id,
+            got.label(),
+            want.label()
+        );
+        return Err(KernelError::InternalError);
+    }
+    Ok(())
+}
+
 /// Run socket activation self-tests.
 pub fn self_test() -> KernelResult<()> {
     crate::serial_println!("[sockact] Running socket activation self-tests...");
@@ -679,122 +773,194 @@ pub fn self_test() -> KernelResult<()> {
     }
     crate::serial_println!("[sockact]   3. Duplicate rejection: OK");
 
-    // Test 4: Trigger activation (service already running → returns false).
-    let triggered = trigger(entry_id)?;
-    if triggered {
-        crate::serial_println!("[sockact]   FAIL: expected false for already-running service");
-        return Err(KernelError::InternalError);
-    }
-    crate::serial_println!("[sockact]   4. Trigger (already running): OK");
-
-    // Test 5: Stop service, then trigger (should start it).
-    crate::fs::servicemgr::stop_service(net.id)?;
-    // Reset entry state to Listening since we manually stopped the service.
-    release(net.id);
-
+    // Test 4: A connection to a stopped service starts it.
+    //
+    // `servicemgr::init_defaults` seeds every service `Stopped` (it stopped
+    // fabricating running daemons in 4adf6110e), so this is the state the
+    // entry was registered in and the ordinary activation path.
     let triggered = trigger(entry_id)?;
     if !triggered {
-        crate::serial_println!("[sockact]   FAIL: expected true for stopped service activation");
+        crate::serial_println!("[sockact]   FAIL: expected true for stopped-service activation");
         return Err(KernelError::InternalError);
     }
-    crate::serial_println!("[sockact]   5. Trigger (start service): OK");
-
-    // Test 6: Claim pending connections.
-    let pending = claim(net.id);
-    if pending != 1 {
-        crate::serial_println!("[sockact]   FAIL: expected 1 pending, got {}", pending);
-        return Err(KernelError::InternalError);
-    }
+    if crate::fs::servicemgr::get_service(net.id)?.state
+        != crate::fs::servicemgr::ServiceState::Running
     {
-        let state = STATE.lock();
-        let entry = state.entries.iter().find(|e| e.id == entry_id);
-        if let Some(e) = entry {
-            if e.state != ActivationState::Active {
-                crate::serial_println!("[sockact]   FAIL: expected Active state after claim");
-                return Err(KernelError::InternalError);
-            }
-        }
+        crate::serial_println!("[sockact]   FAIL: service not running after activation");
+        return Err(KernelError::InternalError);
     }
+    test_expect_state(
+        entry_id,
+        ActivationState::Activating,
+        "after first connection",
+    )?;
+    crate::serial_println!("[sockact]   4. Trigger starts a stopped service: OK");
+
+    // Test 5: A second connection arriving while the service is still coming up
+    // is queued behind the first, not counted as another activation.
+    let triggered = trigger(entry_id)?;
+    if !triggered {
+        crate::serial_println!("[sockact]   FAIL: expected true while service is activating");
+        return Err(KernelError::InternalError);
+    }
+    let (pending, activations) = test_entry_counts(entry_id)?;
+    if (pending, activations) != (2, 1) {
+        crate::serial_println!(
+            "[sockact]   FAIL: expected 2 queued connections from 1 activation, got {} from {}",
+            pending,
+            activations
+        );
+        return Err(KernelError::InternalError);
+    }
+    crate::serial_println!("[sockact]   5. Second connection queues, does not re-activate: OK");
+
+    // Test 6: Claim hands both queued connections to the started service.
+    let pending = claim(net.id);
+    if pending != 2 {
+        crate::serial_println!("[sockact]   FAIL: expected 2 pending, got {}", pending);
+        return Err(KernelError::InternalError);
+    }
+    test_expect_state(entry_id, ActivationState::Active, "after claim")?;
     crate::serial_println!("[sockact]   6. Claim connections: OK");
 
-    // Test 7: Release (service stopped, back to Listening).
-    release(net.id);
-    {
-        let state = STATE.lock();
-        let entry = state.entries.iter().find(|e| e.id == entry_id);
-        if let Some(e) = entry {
-            if e.state != ActivationState::Listening {
-                crate::serial_println!("[sockact]   FAIL: expected Listening after release");
-                return Err(KernelError::InternalError);
-            }
-        }
+    // Test 7: A connection to a socket whose service is already active queues
+    // for the running service and reports "no start was needed".
+    let triggered = trigger(entry_id)?;
+    if triggered {
+        crate::serial_println!("[sockact]   FAIL: expected false for an active socket");
+        return Err(KernelError::InternalError);
     }
-    crate::serial_println!("[sockact]   7. Release → Listening: OK");
+    let (pending, activations) = test_entry_counts(entry_id)?;
+    if (pending, activations) != (1, 1) {
+        crate::serial_println!(
+            "[sockact]   FAIL: expected 1 queued connection and 1 activation, got {} and {}",
+            pending,
+            activations
+        );
+        return Err(KernelError::InternalError);
+    }
+    crate::serial_println!("[sockact]   7. Trigger on an active socket does not restart: OK");
 
-    // Test 8: Disable/enable.
-    set_enabled(entry_id, false)?;
-    {
-        let state = STATE.lock();
-        let entry = state.entries.iter().find(|e| e.id == entry_id);
-        if let Some(e) = entry {
-            if e.state != ActivationState::Disabled {
-                crate::serial_println!("[sockact]   FAIL: expected Disabled");
-                return Err(KernelError::InternalError);
-            }
-        }
+    // Test 8: Release returns the socket to Listening when the service stops.
+    crate::fs::servicemgr::stop_service(net.id)?;
+    release(net.id);
+    test_expect_state(entry_id, ActivationState::Listening, "after release")?;
+    crate::serial_println!("[sockact]   8. Release → Listening: OK");
+
+    // Test 9: A service started behind sockact's back is not an activation
+    // *failure*.  The entry is Listening (its service was down when it was
+    // registered) but the service is up, so `start_service` refuses — and a
+    // `Failed` entry only recovers via an explicit `set_enabled`, i.e. this
+    // socket would never activate again for the rest of the boot.
+    // Regression test for that bug; see the `already_up` branch of `trigger`.
+    crate::fs::servicemgr::start_service(net.id)?;
+    let triggered = trigger(entry_id)?;
+    if triggered {
+        crate::serial_println!(
+            "[sockact]   FAIL: expected false when the service was already started elsewhere"
+        );
+        return Err(KernelError::InternalError);
     }
-    // Trigger on disabled should fail.
-    let result = trigger(entry_id);
-    if result.is_ok() {
+    test_expect_state(
+        entry_id,
+        ActivationState::Active,
+        "service started behind sockact's back",
+    )?;
+    let (_, activations) = test_entry_counts(entry_id)?;
+    if activations != 1 {
+        crate::serial_println!(
+            "[sockact]   FAIL: a start we did not perform was counted as an activation ({})",
+            activations
+        );
+        return Err(KernelError::InternalError);
+    }
+    crate::serial_println!("[sockact]   9. Already-running service is not a failure: OK");
+
+    // Test 10: Registering a socket for an already-running service seeds the
+    // entry Active, not Listening — a Listening entry would take the Test 9
+    // path on its very first connection.
+    let audio = crate::fs::servicemgr::find_by_name("audio")?;
+    crate::fs::servicemgr::start_service(audio.id)?;
+    let audio_entry = register(
+        audio.id,
+        SocketSpec {
+            socket_type: SocketType::Tcp,
+            port: 4713,
+            path: String::new(),
+            bind_addr: String::new(),
+            backlog: 16,
+        },
+    )?;
+    test_expect_state(
+        audio_entry,
+        ActivationState::Active,
+        "registered against a running service",
+    )?;
+    unregister(audio_entry)?;
+    crate::fs::servicemgr::stop_service(audio.id)?;
+    crate::serial_println!("[sockact]   10. Register against a running service: OK");
+
+    // Test 11: Disable/enable.
+    // `set_enabled(false)` overrides whatever state the entry is in; Test 9
+    // left it Active.
+    set_enabled(entry_id, false)?;
+    test_expect_state(entry_id, ActivationState::Disabled, "after disable")?;
+    // Trigger on disabled must fail rather than starting the service.
+    if trigger(entry_id).is_ok() {
         crate::serial_println!("[sockact]   FAIL: trigger should fail on disabled socket");
         return Err(KernelError::InternalError);
     }
     set_enabled(entry_id, true)?;
-    crate::serial_println!("[sockact]   8. Disable/enable: OK");
+    test_expect_state(entry_id, ActivationState::Listening, "after re-enable")?;
+    crate::serial_println!("[sockact]   11. Disable/enable: OK");
 
-    // Test 9: Idle stop configuration.
+    // Test 12: Idle stop configuration.
     set_idle_stop(entry_id, true, 60_000_000_000)?; // 60 seconds
     {
         let state = STATE.lock();
-        let entry = state.entries.iter().find(|e| e.id == entry_id);
-        if let Some(e) = entry {
-            if !e.idle_stop || e.idle_timeout_ns != 60_000_000_000 {
-                crate::serial_println!("[sockact]   FAIL: idle stop not configured");
-                return Err(KernelError::InternalError);
-            }
+        let Some(e) = state.entries.iter().find(|e| e.id == entry_id) else {
+            crate::serial_println!("[sockact]   FAIL: entry vanished before idle-stop check");
+            return Err(KernelError::InternalError);
+        };
+        if !e.idle_stop || e.idle_timeout_ns != 60_000_000_000 {
+            crate::serial_println!("[sockact]   FAIL: idle stop not configured");
+            return Err(KernelError::InternalError);
         }
     }
-    crate::serial_println!("[sockact]   9. Idle stop config: OK");
+    crate::serial_println!("[sockact]   12. Idle stop config: OK");
 
-    // Test 10: Unregister.
+    // Test 13: Unregister.
     unregister(log_entry)?;
     {
         let state = STATE.lock();
         if state.entries.len() != 1 {
-            crate::serial_println!("[sockact]   FAIL: expected 1 entry after unregister");
+            crate::serial_println!(
+                "[sockact]   FAIL: expected 1 entry after unregister, got {}",
+                state.entries.len()
+            );
             return Err(KernelError::InternalError);
         }
     }
-    crate::serial_println!("[sockact]   10. Unregister: OK");
+    crate::serial_println!("[sockact]   13. Unregister: OK");
 
-    // Test 11: Stats.
+    // Test 14: Stats.
     let st = stats();
     if st.total_activations == 0 {
         crate::serial_println!("[sockact]   FAIL: expected > 0 activations");
         return Err(KernelError::InternalError);
     }
     crate::serial_println!(
-        "[sockact]   11. Stats: OK (activations={})",
+        "[sockact]   14. Stats: OK (activations={})",
         st.total_activations
     );
 
-    // Test 12: Procfs content.
+    // Test 15: Procfs content.
     let content = procfs_content();
     if !content.contains("Socket Activation") {
         crate::serial_println!("[sockact]   FAIL: procfs content missing header");
         return Err(KernelError::InternalError);
     }
-    crate::serial_println!("[sockact]   12. Procfs content: OK");
+    crate::serial_println!("[sockact]   15. Procfs content: OK");
 
     // Clean up.
     crate::fs::servicemgr::clear_all();
@@ -803,6 +969,6 @@ pub fn self_test() -> KernelResult<()> {
         *state = State::new();
     }
 
-    crate::serial_println!("[sockact] All 12 self-tests passed.");
+    crate::serial_println!("[sockact] All 15 self-tests passed.");
     Ok(())
 }

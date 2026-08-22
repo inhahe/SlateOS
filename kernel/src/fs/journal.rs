@@ -184,6 +184,43 @@ const FLUSH_THRESHOLD: usize = 64;
 /// Path of the on-disk journal file.
 const JOURNAL_FILE: &str = "/_JOURNAL";
 
+/// Private bookkeeping files that the journal must never report as changes.
+///
+/// The journal exists to answer "what changed in the filesystem?" for backup
+/// agents, indexers and sync daemons. These three files are not filesystem
+/// changes; they are the answering machinery's own notes, and reporting them
+/// is not merely noise — for two of them it is a feedback loop that makes the
+/// subsystem structurally unable to reach a steady state:
+///
+/// - `/_CHANGE_CURSORS` is persisted by `changetrack::changes()` *after* it
+///   advances the caller's cursor, so that write lands at a sequence number
+///   past the one just handed out. The next `changes()` call therefore returns
+///   the previous call's bookkeeping, persists again, and arms the call after
+///   it. `changes()` could never return empty, and an agent polling until
+///   quiescent would poll forever, doing real disk writes each round.
+/// - `/_JOURNAL` is written by this module's own auto-flush, which re-enters
+///   `record` and immediately dirties the journal it just cleaned. It does not
+///   recurse (`unflushed` is zeroed before the write), but it guarantees the
+///   journal is never actually flushed-clean.
+/// - `/_TRASH/_INDEX` does not self-feed — it is written only when a user
+///   trashes something, and *that* deletion is separately and correctly
+///   recorded — but the index update is still internal state, and a consumer
+///   that saw it would be told the same event twice in two vocabularies.
+///
+/// Matched exactly rather than by an `_` prefix: a prefix rule would silently
+/// swallow a real user file named `/_notes.txt`, and losing a genuine change
+/// is the more expensive direction of error.
+const INTERNAL_METADATA: [&str; 3] = [JOURNAL_FILE, "/_CHANGE_CURSORS", "/_TRASH/_INDEX"];
+
+/// True when `path` is one of the kernel's own bookkeeping files.
+///
+/// Compared as bytes, because a path need not be UTF-8.
+fn is_internal_metadata(path: &Path) -> bool {
+    INTERNAL_METADATA
+        .iter()
+        .any(|p| path.as_bytes() == p.as_bytes())
+}
+
 struct JournalInner {
     /// Ring buffer of journal entries (oldest at head, newest at tail).
     /// Uses VecDeque so eviction of the oldest entry is O(1) instead
@@ -282,6 +319,13 @@ pub fn record_rename(old_path: impl AsRef<Path>, new_path: impl AsRef<Path>) {
 
 /// Internal: record an event with an optional old path.
 fn record_with_old_path(event_type: JournalEventType, path: &Path, old_path: Option<&Path>) {
+    // Drop the journal's own bookkeeping before taking the lock. See
+    // `INTERNAL_METADATA`: recording these turns the change-tracking
+    // subsystem into a generator of the changes it reports.
+    if is_internal_metadata(path) || old_path.is_some_and(is_internal_metadata) {
+        return;
+    }
+
     let mut journal = JOURNAL.lock();
     if !journal.initialized {
         return; // Not yet initialized — drop silently.
@@ -665,6 +709,47 @@ pub fn self_test() -> KernelResult<()> {
     if last_four[0].old_path.is_some() {
         crate::serial_println!("[journal]   FAILED: non-rename carries an old_path");
         return Err(KernelError::IoError);
+    }
+
+    // The journal must not report its own bookkeeping.  Recording these once
+    // made `changetrack::changes()` structurally unable to return empty: it
+    // persists `/_CHANGE_CURSORS` *after* advancing the caller's cursor, so
+    // the write landed past the sequence just handed out and became the next
+    // call's "change", which persisted again, forever.  See INTERNAL_METADATA.
+    {
+        let before = cursor();
+        for path in INTERNAL_METADATA {
+            record(JournalEventType::Modified, path);
+            record(JournalEventType::Created, path);
+        }
+        // A rename *away from* an internal file is equally invisible: it is
+        // how the flush path would spell a replace-by-rename.
+        record_rename(JOURNAL_FILE, JOURNAL_FILE);
+        let (entries, _) = read_since(before);
+        if !entries.is_empty() {
+            crate::serial_println!(
+                "[journal]   FAILED: {} internal-metadata event(s) reported, first {:?}",
+                entries.len(),
+                entries.first().map(|e| e.path.clone())
+            );
+            return Err(KernelError::IoError);
+        }
+        if cursor() != before {
+            crate::serial_println!("[journal]   FAILED: internal metadata consumed a seq");
+            return Err(KernelError::IoError);
+        }
+        // A path that merely *starts* like one is a real user file and must
+        // still be reported -- the exclusion is exact, not a prefix rule.
+        record(JournalEventType::Created, "/_JOURNAL.bak");
+        let (entries, _) = read_since(before);
+        if entries.len() != 1 {
+            crate::serial_println!(
+                "[journal]   FAILED: /_JOURNAL.bak is a user file, got {} entries",
+                entries.len()
+            );
+            return Err(KernelError::IoError);
+        }
+        crate::serial_println!("[journal]   internal metadata not reported: OK");
     }
 
     // Test serialization round-trip.

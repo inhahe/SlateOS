@@ -97,6 +97,8 @@ mod drm;
 mod drvmon;
 mod e1000;
 mod error;
+mod evdev;
+mod evdev_fd;
 mod eventlog;
 mod fb;
 mod font;
@@ -2984,6 +2986,16 @@ extern "C" fn kernel_main() -> ! {
         );
     }
 
+    // Ring-3 regression test for /dev/input/event0: the EVIOC* interrogation
+    // sequence a real input client issues, plus the capability gate that keeps
+    // every keystroke from being readable by anything that can name the path.
+    if let Err(e) = proc::spawn::self_test_linux_evdev() {
+        serial_println!(
+            "WARNING: evdev input device (ring 3) self-test failed: {:?}",
+            e
+        );
+    }
+
     // Ring-3 regression test for the virtio-gpu GETPARAM render ioctl on
     // /dev/dri/renderD128 (honest no-3D reporting; Q18/§59). Skips cleanly when
     // no DRM device is bound.
@@ -5140,6 +5152,132 @@ extern "C" fn kernel_main() -> ! {
     }
 
     {
+        // Self-tests that existed in the tree without a single caller.
+        //
+        // Every one of these was written, compiled, and cited as coverage, and
+        // none of them had ever executed. `scripts/check-self-tests-wired.py`
+        // found them by asking which `self_test` symbols are reachable from
+        // this file, and now fails the boot test's prerequisite gate if a new
+        // one appears. The lesson that produced the check: `evdev::self_test`
+        // sat uncalled for one commit, and the very first boot that ran it
+        // failed on a real ordering bug
+        // (`B-A-EVDEV-SYN-DROPPED-ARRIVES-ONE-RECORD-LATE`). Each entry below
+        // was the same unscratched lottery ticket.
+        //
+        // Kept as its own `case()` rather than merged into the block above so
+        // that the reason they are here survives in the code, and so a failure
+        // bisects to one obvious place.
+        #[inline(never)]
+        fn case() {
+            if let Err(e) = fs::archive::self_test() {
+                serial_println!("WARNING: archive self-test failed: {:?}", e);
+            }
+            if let Err(e) = fs::backup::self_test() {
+                serial_println!("WARNING: backup self-test failed: {:?}", e);
+            }
+            if let Err(e) = fs::batch::self_test() {
+                serial_println!("WARNING: batch-rename self-test failed: {:?}", e);
+            }
+            if let Err(e) = fs::changetrack::self_test() {
+                serial_println!("WARNING: change-tracking self-test failed: {:?}", e);
+            }
+            if let Err(e) = fs::contextmenu::self_test() {
+                serial_println!("WARNING: context-menu self-test failed: {:?}", e);
+            }
+            fs::cpufreq::self_test();
+            fs::cputopo::self_test();
+            if let Err(e) = fs::dedup::self_test() {
+                serial_println!("WARNING: dedup self-test failed: {:?}", e);
+            }
+            if let Err(e) = fs::deskicons::self_test() {
+                serial_println!("WARNING: desktop-icons self-test failed: {:?}", e);
+            }
+            if let Err(e) = fs::dirsync::self_test() {
+                serial_println!("WARNING: dirsync self-test failed: {:?}", e);
+            }
+            fs::diskio::self_test();
+            if let Err(e) = fs::encrypt::self_test() {
+                serial_println!("WARNING: file-encryption self-test failed: {:?}", e);
+            }
+            if let Err(e) = fs::fcompress::self_test() {
+                serial_println!("WARNING: file-compression self-test failed: {:?}", e);
+            }
+            if let Err(e) = fs::fileselect::self_test() {
+                serial_println!("WARNING: file-select self-test failed: {:?}", e);
+            }
+            if let Err(e) = fs::filetype::self_test() {
+                serial_println!("WARNING: filetype self-test failed: {:?}", e);
+            }
+            if let Err(e) = fs::fswalk::self_test() {
+                serial_println!("WARNING: fswalk self-test failed: {:?}", e);
+            }
+            if let Err(e) = fs::health::self_test() {
+                serial_println!("WARNING: fs health self-test failed: {:?}", e);
+            }
+            if let Err(e) = fs::ioprio::self_test() {
+                serial_println!("WARNING: I/O priority self-test failed: {:?}", e);
+            }
+            if let Err(e) = fs::iso9660::self_test() {
+                serial_println!("WARNING: iso9660 self-test failed: {:?}", e);
+            }
+            if let Err(e) = fs::linkcheck::self_test() {
+                serial_println!("WARNING: linkcheck self-test failed: {:?}", e);
+            }
+            if let Err(e) = fs::openwith::self_test() {
+                serial_println!("WARNING: open-with self-test failed: {:?}", e);
+            }
+            if let Err(e) = fs::policy::self_test() {
+                serial_println!("WARNING: fs policy self-test failed: {:?}", e);
+            }
+            fs::powerwake::self_test();
+            if let Err(e) = fs::properties::self_test() {
+                serial_println!("WARNING: file-properties self-test failed: {:?}", e);
+            }
+            if let Err(e) = fs::readdir_plus::self_test() {
+                serial_println!("WARNING: readdir-plus self-test failed: {:?}", e);
+            }
+            if let Err(e) = fs::reclaim::self_test() {
+                serial_println!("WARNING: reclaim self-test failed: {:?}", e);
+            }
+            if let Err(e) = fs::search::self_test() {
+                serial_println!("WARNING: fs search self-test failed: {:?}", e);
+            }
+            if let Err(e) = fs::sidebar::self_test() {
+                serial_println!("WARNING: sidebar self-test failed: {:?}", e);
+            }
+            if let Err(e) = fs::snapshot::self_test() {
+                serial_println!("WARNING: snapshot self-test failed: {:?}", e);
+            }
+            if let Err(e) = fs::splice::self_test() {
+                serial_println!("WARNING: splice self-test failed: {:?}", e);
+            }
+            if let Err(e) = fs::statusbar::self_test() {
+                serial_println!("WARNING: statusbar self-test failed: {:?}", e);
+            }
+            fs::sysctlfs::self_test();
+            fs::sysuptime::self_test();
+            if let Err(e) = fs::tags::self_test() {
+                serial_println!("WARNING: file-tags self-test failed: {:?}", e);
+            }
+            fs::thermal::self_test();
+            if let Err(e) = fs::transaction::self_test() {
+                serial_println!("WARNING: fs transaction self-test failed: {:?}", e);
+            }
+            if let Err(e) = fs::undelete::self_test() {
+                serial_println!("WARNING: undelete self-test failed: {:?}", e);
+            }
+            if let Err(e) = fs::usage::self_test() {
+                serial_println!("WARNING: disk-usage self-test failed: {:?}", e);
+            }
+            if let Err(e) = crate::sockact::self_test() {
+                serial_println!("WARNING: socket-activation self-test failed: {:?}", e);
+            }
+            crate::sync::self_test();
+        }
+        case();
+    }
+
+    {
         #[inline(never)]
         fn case() {
             // Run cryptographic self-tests.
@@ -5757,6 +5895,21 @@ extern "C" fn kernel_main() -> ! {
     // DRM card client-instance lifecycle self-test (the /dev/dri fd family).
     if let Err(e) = drm::card_fd::self_test() {
         serial_println!("FATAL: DRM card client self-test failed: {:?}", e);
+        cpu::halt_loop();
+    }
+
+    // evdev input-device self-test (the /dev/input/event* fd family).
+    //
+    // Fatal, like the DRM ABI tests and for the same reason: this is a wire
+    // format a userspace client parses by memcpy, so a record that is the
+    // wrong size or the wrong shape is not a degraded input device — it is a
+    // client reading garbage and acting on it.
+    if let Err(e) = evdev::self_test() {
+        serial_println!("FATAL: evdev self-test failed: {:?}", e);
+        cpu::halt_loop();
+    }
+    if let Err(e) = evdev_fd::self_test() {
+        serial_println!("FATAL: evdev fd self-test failed: {:?}", e);
         cpu::halt_loop();
     }
 

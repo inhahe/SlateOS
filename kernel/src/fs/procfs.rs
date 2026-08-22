@@ -3305,6 +3305,16 @@ fn fd_link_target(entry: &crate::proc::linux_fd::FdEntry) -> PathBuf {
                 PathBuf::from("/dev/dri/card0")
             }
         }
+        // An evdev fd is a real device node under /dev/input; which one is
+        // recorded on the instance object.  A stale handle falls back to
+        // event0 rather than an anon_inode label, since the fd was certainly
+        // opened on *some* input node.
+        HandleKind::Evdev => {
+            let minor =
+                crate::evdev_fd::device(crate::evdev_fd::EvdevHandle::from_raw(entry.raw_handle))
+                    .map_or(0, crate::evdev::InputDevice::minor);
+            PathBuf::from(format!("/dev/input/event{minor}"))
+        }
         // A daemon-backed AF_INET stream socket resolves to Linux's
         // `socket:[inode]` label; we use the raw handle as the inode.
         HandleKind::Socket => PathBuf::from(format!("socket:[{}]", entry.raw_handle)),

@@ -640,7 +640,7 @@ pub fn init() {
 pub fn init_multi(hhdm_offset: u64) {
     let devices = crate::virtio::blk::probe_all(hhdm_offset);
 
-    for (i, device) in devices.into_iter().enumerate() {
+    for (i, mut device) in devices.into_iter().enumerate() {
         // Generate name: vda, vdb, vdc, ...
         let suffix = b'a'.checked_add(i as u8).unwrap_or(b'z');
         let name = alloc::format!("vd{}", suffix as char);
@@ -652,6 +652,24 @@ pub fn init_multi(hhdm_offset: u64) {
             cap,
             cap.saturating_mul(SECTOR_SIZE as u64) / 1024
         );
+        // Smoke-test the virtqueue here, which is the only point on the live
+        // boot path where a *concrete* `VirtioBlkDevice` is owned — one line
+        // further down it is boxed as `dyn BlockDevice` and the driver-specific
+        // test can no longer be reached. That is why the test had never run:
+        // it was written against `virtio::blk::with_device`, part of the
+        // single-device `virtio::blk::init()` path that `probe_all` superseded
+        // and that nothing has called since.
+        //
+        // Non-fatal on purpose: the device still registers, and the boot test
+        // fails the run on the "self-test failed" warning, so a dead virtqueue
+        // is reported without turning one bad disk into an unbootable kernel.
+        if let Err(e) = crate::virtio::blk::self_test(&mut device) {
+            crate::serial_println!(
+                "WARNING: virtio-blk '{}' self-test failed: {:?}",
+                name,
+                e
+            );
+        }
         register(&name, Box::new(device));
     }
 

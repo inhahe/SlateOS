@@ -389,31 +389,68 @@ fn type_sort_key(et: EntryType) -> u8 {
 pub fn self_test() -> KernelResult<()> {
     serial_println!("[readdir_plus] Running self-test...");
 
-    test_basic_listing();
-    test_sort_orders();
-    test_type_filter();
-    test_glob_filter();
-    test_pagination();
+    test_basic_listing()?;
+    test_sort_orders()?;
+    test_type_filter()?;
+    test_glob_filter()?;
+    test_pagination()?;
     test_glob_match();
 
     serial_println!("[readdir_plus] Self-test passed (6 tests).");
     Ok(())
 }
 
-fn test_basic_listing() {
+/// Create a directory for a test to populate, tolerating a leftover one.
+///
+/// Every test below used to write straight into a path like
+/// `/tmp/_rdplus_test/alpha.txt` on the assumption that `Vfs::write_file`
+/// creates missing parents. It does not — it returns `NotFound` — so the very
+/// first line of the very first test failed the first time these tests were
+/// ever executed. One of them even said so out loud ("Create a subdir by
+/// writing a file inside it"), which is how a wrong assumption survives when
+/// nothing runs the code.
+///
+/// `mkdir_all` is already idempotent — it `stat`s each component and only
+/// creates the missing ones — which matters because these tests remove their
+/// *files* on the way out but not their directories, so the second run in a
+/// boot always finds the directory there. The `AlreadyExists` arm is belt and
+/// braces against that guarantee changing underneath us; it is not currently
+/// reachable.
+fn ensure_test_dir(path: &str) -> KernelResult<()> {
+    match Vfs::mkdir_all(path) {
+        Ok(()) | Err(KernelError::AlreadyExists) => Ok(()),
+        Err(e) => Err(e),
+    }
+}
+
+fn test_basic_listing() -> KernelResult<()> {
     // Create test directory with files.
     let dir = "/tmp/_rdplus_test";
-    Vfs::write_file(alloc::format!("{}/alpha.txt", dir), b"aaa").unwrap();
-    Vfs::write_file(alloc::format!("{}/beta.dat", dir), b"bbbbb").unwrap();
-    Vfs::write_file(alloc::format!("{}/gamma.log", dir), b"g").unwrap();
+    ensure_test_dir(dir)?;
+    Vfs::write_file(alloc::format!("{}/alpha.txt", dir), b"aaa")?;
+    Vfs::write_file(alloc::format!("{}/beta.dat", dir), b"bbbbb")?;
+    Vfs::write_file(alloc::format!("{}/gamma.log", dir), b"g")?;
 
-    let result = readdir_plus_simple(dir).unwrap();
-    assert!(result.entries.len() >= 3);
-    assert!(result.total_count >= 3);
+    let result = readdir_plus_simple(dir)?;
+    assert!(
+        result.entries.len() >= 3,
+        "wrote 3 files, listing returned {}",
+        result.entries.len()
+    );
+    assert!(
+        result.total_count >= 3,
+        "wrote 3 files, total_count is {}",
+        result.total_count
+    );
 
-    // Entries should have metadata.
+    // Entries should have metadata: prefetching it is the entire point of
+    // readdir_plus over readdir, so a `None` here means the module did nothing.
     for entry in &result.entries {
-        assert!(entry.meta.is_some());
+        assert!(
+            entry.meta.is_some(),
+            "entry {:?} came back without prefetched metadata",
+            entry.name
+        );
     }
 
     // Clean up.
@@ -421,58 +458,84 @@ fn test_basic_listing() {
     let _ = Vfs::remove(alloc::format!("{}/beta.dat", dir));
     let _ = Vfs::remove(alloc::format!("{}/gamma.log", dir));
     serial_println!("[readdir_plus]   basic_listing: ok");
+    Ok(())
 }
 
-fn test_sort_orders() {
+fn test_sort_orders() -> KernelResult<()> {
     let dir = "/tmp/_rdplus_sort";
-    Vfs::write_file(alloc::format!("{}/c.txt", dir), b"ccc").unwrap();
-    Vfs::write_file(alloc::format!("{}/a.txt", dir), b"a").unwrap();
-    Vfs::write_file(alloc::format!("{}/b.txt", dir), b"bb").unwrap();
+    ensure_test_dir(dir)?;
+    Vfs::write_file(alloc::format!("{}/c.txt", dir), b"ccc")?;
+    Vfs::write_file(alloc::format!("{}/a.txt", dir), b"a")?;
+    Vfs::write_file(alloc::format!("{}/b.txt", dir), b"bb")?;
 
     // Sort by name.
     let opts = ListOptions {
         sort: SortOrder::Name,
         ..Default::default()
     };
-    let result = readdir_plus(dir, &opts).unwrap();
+    let result = readdir_plus(dir, &opts)?;
     let names: Vec<&Path> = result.entries.iter().map(|e| e.name.as_path()).collect();
-    // First should be 'a.txt' (alphabetically first among our test files).
-    assert!(names.windows(2).all(|w| w[0] <= w[1]));
+    assert!(
+        names.windows(2).all(|w| w[0] <= w[1]),
+        "SortOrder::Name did not produce a non-decreasing name sequence: {:?}",
+        names
+    );
 
     // Sort by size (largest first).
     let opts2 = ListOptions {
         sort: SortOrder::SizeLargest,
         ..Default::default()
     };
-    let result2 = readdir_plus(dir, &opts2).unwrap();
+    let result2 = readdir_plus(dir, &opts2)?;
     let sizes: Vec<u64> = result2
         .entries
         .iter()
         .filter_map(|e| e.meta.as_ref())
         .map(|m| m.size)
         .collect();
-    assert!(sizes.windows(2).all(|w| w[0] >= w[1]));
+    assert!(
+        sizes.windows(2).all(|w| w[0] >= w[1]),
+        "SortOrder::SizeLargest did not produce a non-increasing size sequence: {:?}",
+        sizes
+    );
 
     let _ = Vfs::remove(alloc::format!("{}/a.txt", dir));
     let _ = Vfs::remove(alloc::format!("{}/b.txt", dir));
     let _ = Vfs::remove(alloc::format!("{}/c.txt", dir));
     serial_println!("[readdir_plus]   sort_orders: ok");
+    Ok(())
 }
 
-fn test_type_filter() {
+fn test_type_filter() -> KernelResult<()> {
     let dir = "/tmp/_rdplus_type";
-    Vfs::write_file(alloc::format!("{}/file.txt", dir), b"x").unwrap();
-    // Create a subdir by writing a file inside it.
-    Vfs::write_file(alloc::format!("{}/subdir/inner.txt", dir), b"y").unwrap();
+    ensure_test_dir(dir)?;
+    Vfs::write_file(alloc::format!("{}/file.txt", dir), b"x")?;
+    // A subdirectory, so the directory-only filter has something to find.
+    // This used to be one `write_file` into `subdir/inner.txt` with the comment
+    // "Create a subdir by writing a file inside it" — `write_file` does not
+    // create parents, so both filters were being asked about a directory that
+    // was never created.
+    ensure_test_dir(&alloc::format!("{}/subdir", dir))?;
+    Vfs::write_file(alloc::format!("{}/subdir/inner.txt", dir), b"y")?;
 
     // Files only.
     let opts = ListOptions {
         type_filter: TypeFilter::FilesOnly,
         ..Default::default()
     };
-    let result = readdir_plus(dir, &opts).unwrap();
+    let result = readdir_plus(dir, &opts)?;
+    assert!(
+        result.entries.iter().any(|e| e.name.as_bytes() == b"file.txt"),
+        "FilesOnly dropped the one regular file in the directory"
+    );
     for entry in &result.entries {
-        assert_eq!(entry.entry_type, EntryType::File);
+        assert_eq!(
+            entry.entry_type,
+            EntryType::File,
+            "FilesOnly returned {:?}, which is a {:?}",
+            entry.name,
+            entry.entry_type
+        );
     }
 
     // Dirs only.
@@ -480,53 +543,86 @@ fn test_type_filter() {
         type_filter: TypeFilter::DirsOnly,
         ..Default::default()
     };
-    let result2 = readdir_plus(dir, &opts2).unwrap();
+    let result2 = readdir_plus(dir, &opts2)?;
+    assert!(
+        result2.entries.iter().any(|e| e.name.as_bytes() == b"subdir"),
+        "DirsOnly dropped the one subdirectory in the directory"
+    );
     for entry in &result2.entries {
-        assert_eq!(entry.entry_type, EntryType::Directory);
+        assert_eq!(
+            entry.entry_type,
+            EntryType::Directory,
+            "DirsOnly returned {:?}, which is a {:?}",
+            entry.name,
+            entry.entry_type
+        );
     }
 
     let _ = Vfs::remove(alloc::format!("{}/file.txt", dir));
     let _ = Vfs::remove(alloc::format!("{}/subdir/inner.txt", dir));
     serial_println!("[readdir_plus]   type_filter: ok");
+    Ok(())
 }
 
-fn test_glob_filter() {
+fn test_glob_filter() -> KernelResult<()> {
     let dir = "/tmp/_rdplus_glob";
-    Vfs::write_file(alloc::format!("{}/test.txt", dir), b"t").unwrap();
-    Vfs::write_file(alloc::format!("{}/test.dat", dir), b"d").unwrap();
-    Vfs::write_file(alloc::format!("{}/other.txt", dir), b"o").unwrap();
+    ensure_test_dir(dir)?;
+    Vfs::write_file(alloc::format!("{}/test.txt", dir), b"t")?;
+    Vfs::write_file(alloc::format!("{}/test.dat", dir), b"d")?;
+    Vfs::write_file(alloc::format!("{}/other.txt", dir), b"o")?;
 
     // Filter: *.txt
     let opts = ListOptions {
         pattern: b"*.txt".to_vec(),
         ..Default::default()
     };
-    let result = readdir_plus(dir, &opts).unwrap();
+    let result = readdir_plus(dir, &opts)?;
     for entry in &result.entries {
-        assert!(entry.name.as_bytes().ends_with(b".txt"));
+        assert!(
+            entry.name.as_bytes().ends_with(b".txt"),
+            "pattern *.txt matched {:?}",
+            entry.name
+        );
     }
-    assert!(result.total_count >= 2); // test.txt + other.txt
+    // Exactly the two `.txt` files, and not the `.dat` one: a filter that
+    // returned everything would satisfy the loop above but not this.
+    assert_eq!(
+        result.total_count, 2,
+        "pattern *.txt should match exactly test.txt and other.txt, got {}",
+        result.total_count
+    );
 
     // Filter: test.*
     let opts2 = ListOptions {
         pattern: b"test.*".to_vec(),
         ..Default::default()
     };
-    let result2 = readdir_plus(dir, &opts2).unwrap();
+    let result2 = readdir_plus(dir, &opts2)?;
     for entry in &result2.entries {
-        assert!(entry.name.as_bytes().starts_with(b"test."));
+        assert!(
+            entry.name.as_bytes().starts_with(b"test."),
+            "pattern test.* matched {:?}",
+            entry.name
+        );
     }
+    assert_eq!(
+        result2.total_count, 2,
+        "pattern test.* should match exactly test.txt and test.dat, got {}",
+        result2.total_count
+    );
 
     let _ = Vfs::remove(alloc::format!("{}/test.txt", dir));
     let _ = Vfs::remove(alloc::format!("{}/test.dat", dir));
     let _ = Vfs::remove(alloc::format!("{}/other.txt", dir));
     serial_println!("[readdir_plus]   glob_filter: ok");
+    Ok(())
 }
 
-fn test_pagination() {
+fn test_pagination() -> KernelResult<()> {
     let dir = "/tmp/_rdplus_page";
+    ensure_test_dir(dir)?;
     for i in 0..10 {
-        Vfs::write_file(alloc::format!("{}/file{:02}.txt", dir, i), b"x").unwrap();
+        Vfs::write_file(alloc::format!("{}/file{:02}.txt", dir, i), b"x")?;
     }
 
     // Page 1: first 3 entries.
@@ -535,10 +631,16 @@ fn test_pagination() {
         offset: 0,
         ..Default::default()
     };
-    let result = readdir_plus(dir, &opts).unwrap();
-    assert_eq!(result.entries.len(), 3);
-    assert!(result.has_more);
-    assert!(result.total_count >= 10);
+    let result = readdir_plus(dir, &opts)?;
+    assert_eq!(result.entries.len(), 3, "limit=3 returned a different count");
+    assert!(
+        result.has_more,
+        "10 entries with limit=3 must report more remaining"
+    );
+    assert_eq!(
+        result.total_count, 10,
+        "total_count must count the whole directory, not the page"
+    );
 
     // Page 2: next 3.
     let opts2 = ListOptions {
@@ -546,19 +648,38 @@ fn test_pagination() {
         offset: 3,
         ..Default::default()
     };
-    let result2 = readdir_plus(dir, &opts2).unwrap();
-    assert_eq!(result2.entries.len(), 3);
+    let result2 = readdir_plus(dir, &opts2)?;
+    assert_eq!(result2.entries.len(), 3, "offset=3 limit=3 returned a different count");
 
     // Verify no overlap between pages.
     let page1_names: Vec<&Path> = result.entries.iter().map(|e| e.name.as_path()).collect();
     for entry in &result2.entries {
-        assert!(!page1_names.contains(&entry.name.as_path()));
+        assert!(
+            !page1_names.contains(&entry.name.as_path()),
+            "{:?} appeared on both page 1 and page 2",
+            entry.name
+        );
     }
+
+    // The last page must say so, or a caller paging until `has_more` is false
+    // never terminates.
+    let opts3 = ListOptions {
+        limit: 3,
+        offset: 9,
+        ..Default::default()
+    };
+    let result3 = readdir_plus(dir, &opts3)?;
+    assert_eq!(result3.entries.len(), 1, "offset=9 of 10 entries should yield 1");
+    assert!(
+        !result3.has_more,
+        "the final page must not claim more entries remain"
+    );
 
     for i in 0..10 {
         let _ = Vfs::remove(alloc::format!("{}/file{:02}.txt", dir, i));
     }
     serial_println!("[readdir_plus]   pagination: ok");
+    Ok(())
 }
 
 fn test_glob_match() {

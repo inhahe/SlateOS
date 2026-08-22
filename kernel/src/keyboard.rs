@@ -179,6 +179,14 @@ static EXTENDED: AtomicBool = AtomicBool::new(false);
 pub unsafe fn init() {
     crate::serial_println!("[keyboard] Initializing PS/2 keyboard...");
 
+    // Forget which keys we believed were held.  The controller reset below
+    // discards any release byte that was in flight, so a key held across it
+    // would stay marked down forever and its *next* press would be filtered
+    // as a hardware auto-repeat and never reach an evdev client.  Clearing
+    // here trades a possible missing release (which a client resolves on its
+    // next SYN) for a permanently dead key, which it cannot.
+    clear_key_state();
+
     // Disable both PS/2 ports during setup.
     // SAFETY: Standard i8042 commands, always safe during init.
     unsafe {
@@ -277,10 +285,89 @@ pub unsafe fn init() {
 // ISR entry point — called from handle_device_irq when IRQ == 1
 // ---------------------------------------------------------------------------
 
+/// Which keycodes are currently held down, one bit per Linux keycode.
+///
+/// The PS/2 controller's own typematic repeat re-sends the make code of a held
+/// key several times a second. Those must not reach `/dev/input/event0` as
+/// fresh presses: Linux suppresses hardware repeat and synthesises its own,
+/// because the repeat delay and rate are a user preference and a client that
+/// receives the hardware's cannot retime or disable it. This bitmap is what
+/// lets the ISR tell "pressed again" from "still pressed".
+///
+/// 256 bits covers every keycode either translation table can produce (the
+/// highest is `KEY_SEARCH`, 217).
+static KEY_DOWN_BITS: [core::sync::atomic::AtomicU64; 4] =
+    [const { core::sync::atomic::AtomicU64::new(0) }; 4];
+
+/// Record a key transition and report whether it changed anything.
+///
+/// Returns `false` for a make code of an already-held key (hardware repeat) so
+/// the caller can drop it, and `false` for a break code of a key that was not
+/// held — which happens routinely after a focus change or an `0xE0` prefix
+/// that was consumed by a reset, and which would otherwise deliver a release
+/// with no matching press.
+fn note_key_transition(keycode: u16, pressed: bool) -> bool {
+    let idx = (keycode >> 6) as usize;
+    let bit = 1_u64 << (keycode & 63);
+    let Some(word) = KEY_DOWN_BITS.get(idx) else {
+        // keycode >= 256; neither table produces one, so this is unreachable.
+        // Reporting "changed" would be the riskier direction: it would let an
+        // untracked key emit unbounded repeats.
+        return false;
+    };
+    if pressed {
+        let prev = word.fetch_or(bit, Ordering::AcqRel);
+        prev & bit == 0
+    } else {
+        let prev = word.fetch_and(!bit, Ordering::AcqRel);
+        prev & bit != 0
+    }
+}
+
+/// Snapshot of which keycodes are currently held, one bit per Linux keycode
+/// (word `i` bit `b` is keycode `i * 64 + b`).
+///
+/// Backs `EVIOCGKEY` on `/dev/input/event0`. A client needs this because the
+/// event stream carries only *transitions*: a key already held when the client
+/// opened the device has no press event for it to have seen, so without an
+/// explicit query the client believes that key is up until it is released.
+///
+/// The four words are loaded independently, so a key that changes state during
+/// the snapshot may be reported either way. That is inherent — Linux has the
+/// same race — and harmless, because any transition missed here is immediately
+/// followed by an `EV_KEY` record on the stream that corrects it.
+#[must_use]
+pub fn key_down_bits() -> [u64; 4] {
+    let mut out = [0_u64; 4];
+    for (dst, src) in out.iter_mut().zip(KEY_DOWN_BITS.iter()) {
+        *dst = src.load(Ordering::Acquire);
+    }
+    out
+}
+
+/// Forget all held keys.
+///
+/// Used when the keyboard is reinitialised: any key held across the reset has
+/// a make code the driver never saw and a break code it will, so without this
+/// the bitmap would suppress that key's next genuine press.
+pub fn clear_key_state() {
+    for word in &KEY_DOWN_BITS {
+        word.store(0, Ordering::Release);
+    }
+}
+
 /// Process a keyboard scan code from the ISR.
 ///
-/// Reads the scan code byte from port 0x60, updates modifier state,
-/// and pushes any resulting ASCII character into the ring buffer.
+/// Reads the scan code byte from port 0x60, updates modifier state, pushes any
+/// resulting ASCII character into the console ring buffer, and publishes the
+/// raw transition to `/dev/input/event0`.
+///
+/// The two consumers are deliberately independent. The console ring carries
+/// decoded characters and only for keys that have one, which is what the shell
+/// and the TTY layer want; the evdev ring carries every press *and release* as
+/// a keycode, which is what a display server needs and what the ASCII path
+/// structurally cannot express. Neither is derived from the other, so a change
+/// to the keymap cannot silently alter what a compositor sees.
 ///
 /// # Safety note
 ///
@@ -311,11 +398,46 @@ pub fn handle_scancode() {
     let pressed = scancode & 0x80 == 0;
     let code = scancode & 0x7F;
 
+    publish_evdev(code, extended, pressed);
+
     if extended {
         handle_extended(code, pressed);
     } else {
         handle_normal(code, pressed);
     }
+}
+
+/// Translate one scan code to a Linux keycode and publish it to
+/// `/dev/input/event0`, unless it is hardware repeat.
+///
+/// A code with no keycode in either table is dropped entirely rather than
+/// reported as `MSC_SCAN` alone. A bare `MSC_SCAN` with no `EV_KEY` is legal
+/// evdev, but it is indistinguishable from a key the kernel *does* know and
+/// merely failed to map, and a client that acts on it would be acting on a
+/// scancode it has no way to interpret. Silence is the honest answer; the
+/// scancode is still recoverable from the `MSC_SCAN` of any key that *is*
+/// mapped, so no diagnostic ability is lost.
+fn publish_evdev(code: u8, extended: bool, pressed: bool) {
+    let keycode = if extended {
+        crate::evdev::set1_extended_to_keycode(code)
+    } else {
+        crate::evdev::set1_to_keycode(code)
+    };
+    let Some(keycode) = keycode else {
+        return;
+    };
+    if !note_key_transition(keycode, pressed) {
+        return;
+    }
+    // The scancode reported is the one that arrived, extended prefix folded
+    // into the high byte the way `MSC_SCAN` conventionally carries it, so a
+    // client doing its own keymapping can tell E0-48 from 48.
+    let raw = if extended {
+        0xE000_u16 | u16::from(code)
+    } else {
+        u16::from(code)
+    };
+    crate::evdev::push_key(crate::evdev::InputDevice::Keyboard, keycode, raw, pressed);
 }
 
 // ---------------------------------------------------------------------------

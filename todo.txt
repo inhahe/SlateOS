@@ -54671,3 +54671,42 @@ The fix, when taken: give `LineBuf` a column counter advanced by the same
 `\n`/`\r`, and have the `VERASE`/`VKILL` arms compute the rub-out width as the
 column delta rather than as a per-byte sum. Note this also fixes `VKILL`'s
 `ECHOKE` width, which sums the same per-byte widths and is wrong in the same way.
+
+--------------------------------------------------------------------------
+[lane A] SpawnExArgs has no capability field, so spawn cannot narrow authority
+--------------------------------------------------------------------------
+Logged 2026-08-22, alongside the fix for
+BUG-SPAWNED-CHILDREN-INHERIT-NO-CAPABILITIES (design-decisions.md 278).
+
+WHAT IS DEFERRED
+  A spawned child now inherits its parent's entire capability table (matching
+  fork, which has always done this).  There is no way for the parent to hand
+  over a *subset*.  Dropping authority before running untrusted code is a real
+  want and is currently impossible via spawn.
+
+WHY IT IS DEFERRED, NOT DONE
+  It needs an ABI field.  `SpawnExArgs` (kernel/src/proc/spawn.rs) has twelve
+  fields -- ELF ptr/len, name, fd map, argv, envp -- and not one is a
+  capability array.  That absence is the root reason userspace could not
+  express any capability at all, which is what the fix worked around.  Adding
+  the field is a cross-lane ABI change: lane B's libc calls
+  SYS_PROCESS_SPAWN_EX for posix_spawn, so the struct layout is shared.
+
+WHAT THE CORRECT FIX LOOKS LIKE
+  Add `cap_ptr` / `cap_count` to SpawnExArgs, pointing at an array of
+  (resource_type, resource_id, rights).  Semantics: when cap_count is 0,
+  inherit the full table (today's behaviour, and what POSIX requires --
+  posix_spawn is specified as fork+exec-equivalent, so the default must not
+  change).  When non-zero, the child receives the *intersection* of the named
+  set with what the parent actually holds, so the field can only narrow and
+  never widen.  Reject with InvalidArgument rather than silently dropping an
+  entry the parent does not hold -- a caller that asked for authority it lacks
+  has a bug, and silently starting a weaker child hides it.
+
+TRIGGER
+  The first caller that genuinely needs to run something less privileged than
+  itself -- a shell running an untrusted script, the package manager running a
+  build recipe, or a sandbox launcher.  Until one exists there is no way to
+  validate the semantics against a real requirement, and the inherit-everything
+  default is no weaker than fork.
+

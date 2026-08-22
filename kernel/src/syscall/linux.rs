@@ -3809,6 +3809,20 @@ pub fn close_handle(entry: FdEntry) -> SyscallResult {
             crate::drm::card_fd::close(h);
             SyscallResult::ok(0)
         }
+        HandleKind::Evdev => {
+            // Same shape as the DrmCard arm: deregister from the per-process
+            // ipc_handles list, then drop one refcount on the per-open cursor.
+            if let Some(pid) = caller_pid() {
+                pcb::deregister_ipc_handle(
+                    pid,
+                    crate::cap::ResourceType::InputDevice,
+                    entry.raw_handle,
+                );
+            }
+            let h = crate::evdev_fd::EvdevHandle::from_raw(entry.raw_handle);
+            crate::evdev_fd::close(h);
+            SyscallResult::ok(0)
+        }
         HandleKind::Socket => {
             // Deregister from the per-process ipc_handles list — same
             // rationale as the EventFd/.../DrmCard arms above — then drop one
@@ -3898,13 +3912,17 @@ fn dispatch_write(entry: FdEntry, buf: u64, len: u64) -> SyscallResult {
         HandleKind::EventFd => dispatch_eventfd_write(entry, buf, len),
         // signalfd, timerfd and inotify are read-only: write(2) → EINVAL.
         // The ALSA control device and DRM card are ioctl-only, so
-        // write(2) → EINVAL too.
+        // write(2) → EINVAL too.  An evdev node is read-only here for a
+        // narrower reason: Linux's `evdev_write` exists solely to upload
+        // force-feedback effects, and a device with no FF capability — which
+        // is every input device we expose — returns EINVAL from it.
         HandleKind::PidFd
         | HandleKind::Epoll
         | HandleKind::SignalFd
         | HandleKind::Timerfd
         | HandleKind::Inotify
         | HandleKind::AlsaControl
+        | HandleKind::Evdev
         | HandleKind::DrmCard => linux_err(errno::EINVAL),
         // ALSA PCM playback substream — `write(2)` pushes interleaved frames
         // to the mixer (the byte-stream equivalent of `WRITEI_FRAMES`).
@@ -4283,6 +4301,7 @@ fn dispatch_read(entry: FdEntry, buf: u64, cap: u64) -> SyscallResult {
         HandleKind::PidFd | HandleKind::Epoll | HandleKind::AlsaControl => linux_err(errno::EINVAL),
         // A DRM card fd delivers queued KMS events (flip-complete) via read(2).
         HandleKind::DrmCard => dispatch_drm_card_read(&entry, buf, cap),
+        HandleKind::Evdev => dispatch_evdev_read(&entry, buf, cap),
         HandleKind::MemFd => dispatch_memfd_read(entry, buf, cap),
         HandleKind::SignalFd => dispatch_signalfd_read(entry, buf, cap),
         HandleKind::Timerfd => dispatch_timerfd_read(entry, buf, cap),
@@ -5275,6 +5294,7 @@ fn fcntl_flock_apply(
         | HandleKind::AlsaPcm
         | HandleKind::AlsaControl
         | HandleKind::DrmCard
+        | HandleKind::Evdev
         | HandleKind::Socket => {
             return linux_err(errno::EBADF);
         }
@@ -5423,6 +5443,7 @@ fn sys_lseek(args: &SyscallArgs) -> SyscallResult {
         | HandleKind::AlsaPcm
         | HandleKind::AlsaControl
         | HandleKind::DrmCard
+        | HandleKind::Evdev
         | HandleKind::Socket => linux_err(errno::ESPIPE),
     }
 }
@@ -5633,6 +5654,65 @@ fn try_open_drm(path: &[u8], flags: u32) -> Option<SyscallResult> {
     }
 }
 
+/// Intercept `open("/dev/input/eventN", …)` and mint an
+/// [`crate::proc::linux_fd::HandleKind::Evdev`] fd instead of routing through
+/// the VFS.
+///
+/// Returns `None` for any other path, so the caller falls through to the
+/// normal open.  Interception rather than a devfs node is not a shortcut: a
+/// devfs read is `read_at(path, offset, len)` with no flags argument, so it
+/// can express neither `O_NONBLOCK` nor a blocking wait, and an input device
+/// that can do neither forces every client to busy-poll the keyboard.  The
+/// same reasoning already put `/dev/dri/card0` here.
+fn try_open_evdev(path: &[u8], flags: u32) -> Option<SyscallResult> {
+    let device = match path {
+        b"/dev/input/event0" => crate::evdev::InputDevice::Keyboard,
+        b"/dev/input/event1" => crate::evdev::InputDevice::Mouse,
+        _ => return None,
+    };
+
+    // A real caller is required — kernel context has no fd table to install
+    // into.  EBADF, the same way the VFS path reports it for kernel context.
+    let pid = match caller_pid() {
+        Some(p) => p,
+        None => return Some(linux_err(errno::EBADF)),
+    };
+
+    // Reading the keyboard is the authority to observe every keystroke typed
+    // into every application, so it is gated on holding an InputDevice
+    // capability rather than on being able to name the path.  The class grant
+    // (`resource_id == 0`) is what a compositor is given; nothing else has it.
+    if let Err(e) = handlers::require_cap_type(
+        crate::cap::ResourceType::InputDevice,
+        crate::cap::Rights::READ,
+    ) {
+        return Some(linux_err(linux_errno_for(e)));
+    }
+
+    // Create the per-open cursor and register it as a per-process IPC resource
+    // so exit-cleanup and fork-sharing see it.
+    let handle = crate::evdev_fd::create(device);
+    pcb::register_ipc_handle(pid, crate::cap::ResourceType::InputDevice, handle.raw());
+
+    let status_flags = flags & oflags::O_NONBLOCK;
+    let fd_flags = if flags & oflags::O_CLOEXEC != 0 {
+        crate::proc::linux_fd::FD_CLOEXEC
+    } else {
+        0
+    };
+    let entry = FdEntry::evdev(handle.raw(), fd_flags, status_flags);
+
+    match pcb::linux_fd_install(pid, entry, 0) {
+        Ok(fd) => Some(SyscallResult::ok(i64::from(fd))),
+        Err(e) => {
+            // Roll back the registration + instance on table failure.
+            pcb::deregister_ipc_handle(pid, crate::cap::ResourceType::InputDevice, handle.raw());
+            crate::evdev_fd::close(handle);
+            Some(linux_err(linux_errno_for(e)))
+        }
+    }
+}
+
 /// Shared backend for `open` / `openat`.
 fn open_common(path_ptr: u64, path_len_hint: u64, flags: u32, no_symlinks: bool) -> SyscallResult {
     if path_ptr == 0 {
@@ -5683,6 +5763,9 @@ fn open_common(path_ptr: u64, path_len_hint: u64, flags: u32, no_symlinks: bool)
             return r;
         }
         if let Some(r) = try_open_drm(path_slice, flags) {
+            return r;
+        }
+        if let Some(r) = try_open_evdev(path_slice, flags) {
             return r;
         }
     }
@@ -5943,6 +6026,9 @@ fn open_kernel_path_install(path: &str, flags: u32, no_symlinks: bool) -> Syscal
         return r;
     }
     if let Some(r) = try_open_drm(path.as_bytes(), flags) {
+        return r;
+    }
+    if let Some(r) = try_open_evdev(path.as_bytes(), flags) {
         return r;
     }
     if let Err(e) =
@@ -9051,7 +9137,8 @@ fn sys_ioctl(args: &SyscallArgs) -> SyscallResult {
             // substream answers the `SNDRV_PCM_IOCTL_*` family ('A' magic);
             // an ALSA control device answers the `SNDRV_CTL_IOCTL_*` family
             // ('U' magic); a DRM card answers the `DRM_IOCTL_*` family
-            // ('d' magic); everything else is an unsupported request on this
+            // ('d' magic); an input device answers the `EVIOC*` family
+            // ('E' magic); everything else is an unsupported request on this
             // fd → ENOTTY.
             if let Some(entry) = pcb::linux_fd_lookup(pid, fd) {
                 match entry.kind {
@@ -9063,6 +9150,9 @@ fn sys_ioctl(args: &SyscallArgs) -> SyscallResult {
                     }
                     crate::proc::linux_fd::HandleKind::DrmCard => {
                         return drm_card_ioctl(&entry, request, args.arg2);
+                    }
+                    crate::proc::linux_fd::HandleKind::Evdev => {
+                        return evdev_ioctl(&entry, request, args.arg2);
                     }
                     _ => {}
                 }
@@ -9743,6 +9833,226 @@ fn alsa_control_ioctl_elem_write(argp: u64) -> SyscallResult {
     SyscallResult::ok(0)
 }
 
+/// `ioctl(EVIOC*)` dispatch for a `/dev/input/eventN` fd.
+///
+/// A Linux input client does not just read from an input device — it
+/// *interrogates* it first, and refuses to use one it cannot classify.
+/// libinput will not touch a node whose `EVIOCGBIT` reports nothing; `evtest`
+/// prints the identity before showing a single event; SDL picks its device
+/// class from the same bits.  So a readable node with no ioctls is a node no
+/// real client will open, which is why these are here rather than left to the
+/// one compositor we happen to have written ourselves.
+///
+/// Implemented: `EVIOCGVERSION`, `EVIOCGID`, `EVIOCGNAME`, `EVIOCGPHYS`,
+/// `EVIOCGPROP`, `EVIOCGBIT(*)`, `EVIOCGKEY`, `EVIOCGLED`/`GSND`/`GSW`,
+/// `EVIOCGRAB`, `EVIOCREVOKE` and `EVIOCSCLOCKID`.
+///
+/// Deliberately *not* implemented, each with the error Linux itself gives for
+/// a device that lacks the feature — because a client tests for the feature by
+/// making the call, and a success it cannot act on is worse than a refusal:
+///
+/// | Request | Result | Why |
+/// |---|---|---|
+/// | `EVIOCGUNIQ` | `ENOENT` | a PS/2 device has no serial number to report |
+/// | `EVIOCGREP`/`SREP` | `ENOSYS` | we do not advertise `EV_REP`; hardware typematic is filtered out and software repeat belongs to the client |
+/// | `EVIOCGABS` | `EINVAL` | no absolute axes exist on either device |
+/// | `EVIOCGKEYCODE`/`SKEYCODE` | `ENOTTY` | the scancode→keycode tables are fixed |
+///
+/// Note the argument convention is not uniform, and matching Linux exactly
+/// matters: `EVIOCGRAB` and `EVIOCREVOKE` take the argument **by value**
+/// despite being encoded `_IOW(…, int)`, while `EVIOCSCLOCKID` really is a
+/// pointer to an `int`.
+fn evdev_ioctl(entry: &FdEntry, request: u32, argp: u64) -> SyscallResult {
+    use crate::evdev;
+    use crate::evdev_fd::{self, EvdevHandle};
+
+    let handle = EvdevHandle::from_raw(entry.raw_handle);
+    let Some(device) = evdev_fd::device(handle) else {
+        return linux_err(errno::EBADF);
+    };
+    // A revoked fd answers nothing: that is the entire point of revoking it.
+    if evdev_fd::is_revoked(handle) {
+        return linux_err(errno::ENODEV);
+    }
+    // Anything that is not an 'E'-magic request cannot be meant for this fd.
+    if evdev::ioc_type(request) != evdev::EVDEV_IOC_MAGIC {
+        return linux_err(errno::ENOTTY);
+    }
+
+    let nr = evdev::ioc_nr(request);
+    let dir = evdev::ioc_dir(request);
+    let size = usize::try_from(evdev::ioc_size(request)).unwrap_or(0);
+
+    // --- fixed-shape requests ----------------------------------------------
+    match (dir, nr) {
+        (evdev::IOC_READ, evdev::EVIOC_NR_GVERSION) => {
+            return match write_user_struct(argp, &evdev::EV_VERSION) {
+                Ok(()) => SyscallResult::ok(0),
+                Err(e) => linux_err(e),
+            };
+        }
+        (evdev::IOC_READ, evdev::EVIOC_NR_GID) => {
+            return match write_user_struct(argp, &device.input_id()) {
+                Ok(()) => SyscallResult::ok(0),
+                Err(e) => linux_err(e),
+            };
+        }
+        // Neither device advertises EV_REP, and Linux's own answer for that is
+        // ENOSYS rather than a zeroed pair — which is what lets a client tell
+        // "no repeat" from "repeat, disabled".
+        (_, evdev::EVIOC_NR_REP) => return linux_err(errno::ENOSYS),
+        (evdev::IOC_WRITE, evdev::EVIOC_NR_GRAB) => {
+            // The argument is used *by value*, not dereferenced, even though
+            // the request is encoded `_IOW('E', 0x90, int)`. That is not a
+            // Linux quirk we are copying for its own sake: every real client
+            // passes a literal — libinput issues `ioctl(fd, EVIOCGRAB,
+            // (void *)1)` — so reading an `int` through it would fault on
+            // address 1 and make every grab fail with EFAULT.
+            let res = if argp == 0 {
+                evdev_fd::ungrab(handle)
+            } else {
+                evdev_fd::grab(handle)
+            };
+            return match res {
+                Ok(()) => SyscallResult::ok(0),
+                Err(e) => linux_err(linux_errno_for(e)),
+            };
+        }
+        (evdev::IOC_WRITE, evdev::EVIOC_NR_REVOKE) => {
+            // Also by value, and Linux additionally *requires* the value to be
+            // zero: `EVIOCREVOKE` has no parameter, and a non-zero argument
+            // means the caller thinks it is passing one, so it is likelier a
+            // mistake than an intent to irreversibly revoke.
+            if argp != 0 {
+                return linux_err(errno::EINVAL);
+            }
+            return match evdev_fd::revoke(handle) {
+                Ok(()) => SyscallResult::ok(0),
+                Err(e) => linux_err(linux_errno_for(e)),
+            };
+        }
+        (evdev::IOC_WRITE, evdev::EVIOC_NR_SCLOCKID) => {
+            let clockid = match read_user_struct::<i32>(argp) {
+                Ok(v) => v,
+                Err(e) => return linux_err(e),
+            };
+            let Ok(clockid) = u32::try_from(clockid) else {
+                return linux_err(errno::EINVAL);
+            };
+            return match evdev_fd::set_clockid(handle, clockid) {
+                Ok(()) => SyscallResult::ok(0),
+                Err(e) => linux_err(linux_errno_for(e)),
+            };
+        }
+        _ => {}
+    }
+
+    // --- variable-length reads ----------------------------------------------
+    // Everything below encodes the client's buffer length in the request's
+    // size field and returns the number of bytes actually written.
+    if dir != evdev::IOC_READ {
+        return linux_err(errno::ENOTTY);
+    }
+    if size == 0 {
+        // A zero-length buffer transfers nothing; saying so beats an error,
+        // since a client that probes with zero is asking for the length and
+        // gets it from the return value.
+        return SyscallResult::ok(0);
+    }
+
+    match nr {
+        evdev::EVIOC_NR_GNAME => evdev_ioctl_copy_str(argp, size, device.name().as_bytes()),
+        evdev::EVIOC_NR_GPHYS => evdev_ioctl_copy_str(argp, size, device.phys().as_bytes()),
+        // No unique identifier exists for a PS/2 device. ENOENT is what Linux
+        // returns for the same case, and is how a client knows to fall back to
+        // EVIOCGPHYS for a stable name.
+        evdev::EVIOC_NR_GUNIQ => linux_err(errno::ENOENT),
+        // No INPUT_PROP_* applies: neither device is a pointing stick, a
+        // buttonpad, or anything else the property bits describe.
+        evdev::EVIOC_NR_GPROP => {
+            evdev_ioctl_copy_bitmap(argp, size.min(evdev::INPUT_PROP_BYTES), &[0u8; 0])
+        }
+        evdev::EVIOC_NR_GKEY => {
+            let bits = device.key_state_bits();
+            evdev_ioctl_copy_bitmap(argp, size.min(evdev::KEY_BYTES), &bits)
+        }
+        // No LEDs (the keyboard's are not driven yet), no sound generator, no
+        // switches. All three answer "none" rather than erroring, because a
+        // client asks unconditionally and treats an error as a broken device.
+        evdev::EVIOC_NR_GLED | evdev::EVIOC_NR_GSND | evdev::EVIOC_NR_GSW => {
+            evdev_ioctl_copy_bitmap(argp, size.min(evdev::KEY_BYTES), &[0u8; 0])
+        }
+        // EVIOCGABS(axis): no absolute axes, so no absinfo to report. Linux
+        // returns EINVAL when `dev->absinfo` is NULL, which is our case.
+        n if (evdev::EVIOC_NR_GABS_BASE..=evdev::EVIOC_NR_GABS_TOP).contains(&n) => {
+            linux_err(errno::EINVAL)
+        }
+        // EVIOCGBIT(type, len): the codes this device can emit for `type`.
+        n if (evdev::EVIOC_NR_GBIT_BASE..evdev::EVIOC_NR_GABS_BASE).contains(&n) => {
+            let etype = u16::try_from(n.saturating_sub(evdev::EVIOC_NR_GBIT_BASE)).unwrap_or(0);
+            let mut bits = [0u8; evdev::KEY_BYTES];
+            let want = size.min(evdev::KEY_BYTES);
+            let Some(dst) = bits.get_mut(..want) else {
+                return linux_err(errno::EINVAL);
+            };
+            let n_bytes = device.bits_for(etype, dst);
+            evdev_ioctl_copy_bitmap(argp, n_bytes, &bits)
+        }
+        _ => linux_err(errno::ENOTTY),
+    }
+}
+
+/// Copy a device string out for `EVIOCGNAME` / `EVIOCGPHYS`.
+///
+/// Copies `min(size, len+1)` bytes including the NUL terminator and returns
+/// that count, exactly as Linux's `str_to_user` does — a client sizes its
+/// buffer from the return value and expects the string to be terminated, so
+/// dropping the NUL on a tight buffer would hand it an unterminated string.
+fn evdev_ioctl_copy_str(argp: u64, size: usize, src: &[u8]) -> SyscallResult {
+    let mut out = [0u8; 128];
+    let want = src.len().saturating_add(1).min(size).min(out.len());
+    let Some(dst) = out.get_mut(..want) else {
+        return linux_err(errno::EINVAL);
+    };
+    // Leave the final byte as the NUL already in `out` when the string is
+    // truncated, so what userspace receives is always terminated.
+    let body = want.saturating_sub(1);
+    match (dst.get_mut(..body), src.get(..body)) {
+        (Some(d), Some(s)) => d.copy_from_slice(s),
+        _ => return linux_err(errno::EINVAL),
+    }
+    // SAFETY: `out` is a live 128-byte kernel buffer and `want <= out.len()`;
+    // `copy_to_user` validates the user destination range and handles SMAP.
+    if unsafe { crate::mm::user::copy_to_user(out.as_ptr(), argp, want) }.is_err() {
+        return linux_err(errno::EFAULT);
+    }
+    SyscallResult::ok(i64::try_from(want).unwrap_or(i64::MAX))
+}
+
+/// Copy `n` bytes of a capability/state bitmap out, zero-filling past the end
+/// of `src`, and return `n`.
+///
+/// The zero fill is what makes "this device has no LEDs" expressible: the
+/// client asked for a bitmap of a given length and must receive that length of
+/// cleared bits, not a short read it would misparse as a truncated map.
+fn evdev_ioctl_copy_bitmap(argp: u64, n: usize, src: &[u8]) -> SyscallResult {
+    let mut out = [0u8; crate::evdev::KEY_BYTES];
+    let n = n.min(out.len());
+    let copy = n.min(src.len());
+    match (out.get_mut(..copy), src.get(..copy)) {
+        (Some(d), Some(s)) => d.copy_from_slice(s),
+        _ => return linux_err(errno::EINVAL),
+    }
+    if n > 0 {
+        // SAFETY: `out` is a live `KEY_BYTES` kernel buffer and `n <=
+        // out.len()`; `copy_to_user` validates the user range and handles SMAP.
+        if unsafe { crate::mm::user::copy_to_user(out.as_ptr(), argp, n) }.is_err() {
+            return linux_err(errno::EFAULT);
+        }
+    }
+    SyscallResult::ok(i64::try_from(n).unwrap_or(i64::MAX))
+}
+
 /// `ioctl(DRM_IOCTL_*)` dispatch for a `/dev/dri/*` fd.
 ///
 /// This commit wires the **core (non-KMS) ioctls** every libdrm client issues
@@ -9843,6 +10153,14 @@ fn drm_card_ioctl(entry: &FdEntry, request: u32, argp: u64) -> SyscallResult {
                 return linux_err(errno::EACCES);
             }
             drm_card_ioctl_mode_getcrtc(handle, argp)
+        }
+        // SETCRTC programs a display timing and binds a framebuffer, which is
+        // the definition of modeset authority — a render node gets EACCES.
+        uapi::DRM_IOCTL_MODE_SETCRTC => {
+            if render_node {
+                return linux_err(errno::EACCES);
+            }
+            drm_card_ioctl_mode_setcrtc(handle, argp)
         }
         uapi::DRM_IOCTL_MODE_GETPLANERESOURCES => {
             if render_node {
@@ -10790,6 +11108,116 @@ fn drm_card_ioctl_mode_getcrtc(
     }
 }
 
+/// The largest `count_connectors` a `SETCRTC` may name.
+///
+/// There is no hardware here with anything like this many outputs — every
+/// backend enumerates exactly one connector — so this is not a capability
+/// limit but a bound on what a hostile or confused caller can make the kernel
+/// allocate. `count_connectors` is a `u32` read straight from userspace, and
+/// without a cap `0xFFFF_FFFF` asks for a 16 GiB copy before any of it can be
+/// rejected.
+const DRM_SETCRTC_MAX_CONNECTORS: u32 = 32;
+
+/// Copy a `u32` array in from userspace for a KMS setter.
+///
+/// The counterpart to [`drm_copy_array`]. Returns an empty vector for a zero
+/// count, and `EINVAL` rather than `EFAULT` for a non-zero count with a null
+/// pointer — the request is malformed, not merely unreadable.
+fn drm_read_u32_array(user_ptr: u64, count: u32, max: u32) -> Result<alloc::vec::Vec<u32>, i32> {
+    if count == 0 {
+        return Ok(alloc::vec::Vec::new());
+    }
+    if count > max {
+        return Err(errno::EINVAL);
+    }
+    if user_ptr == 0 {
+        return Err(errno::EINVAL);
+    }
+    let n = usize::try_from(count).map_err(|_| errno::EINVAL)?;
+    let bytes = n.checked_mul(core::mem::size_of::<u32>()).ok_or(errno::EINVAL)?;
+    let mut out = alloc::vec![0u32; n];
+    // SAFETY: `out` is `n` contiguous `u32` = `bytes` bytes of valid, writable
+    // kernel memory; `copy_from_user` validates the user source range and
+    // handles SMAP. A byte copy imposes no alignment requirement on the user
+    // pointer.
+    if unsafe { crate::mm::user::copy_from_user(user_ptr, out.as_mut_ptr().cast::<u8>(), bytes) }
+        .is_err()
+    {
+        return Err(errno::EFAULT);
+    }
+    Ok(out)
+}
+
+/// `DRM_IOCTL_MODE_SETCRTC` — program a CRTC's mode, connectors and scanout
+/// framebuffer, or turn it off.
+///
+/// `mode_valid == 0` means "disable this CRTC", and per the Linux ABI must
+/// come with `fb_id == 0` and `count_connectors == 0`; a compositor shutting
+/// down cleanly is the normal user of that form, so it is a success path and
+/// not an error one.
+///
+/// Only `hdisplay`, `vdisplay` and `vrefresh` are taken from the caller's
+/// `drm_mode_modeinfo`; the rest is looked up from the connector's own mode
+/// list by [`crate::drm::DrmDevice::set_crtc`]. That is deliberate and is not
+/// a shortcut: [`drm_mode_to_uapi`] emits zeros for `hsync_*`, `vsync_*`,
+/// `hskew`, `vscan` and `flags`, so a client that reads a mode out of
+/// `GETCONNECTOR` and passes it straight back is *not* returning the timing it
+/// was given, and honouring the struct as written would blank the display.
+///
+/// Nothing is written back — `SETCRTC` is a pure input ioctl in Linux too, and
+/// a client that wants to know what took effect asks `GETCRTC`, which now
+/// reports the mode actually programmed rather than the boot one.
+fn drm_card_ioctl_mode_setcrtc(
+    handle: crate::drm::card_fd::DrmCardHandle,
+    argp: u64,
+) -> SyscallResult {
+    use crate::drm::uapi;
+    let req = match read_user_struct::<uapi::DrmModeCrtc>(argp) {
+        Ok(v) => v,
+        Err(e) => return linux_err(e),
+    };
+    let device = match drm_card_device(handle) {
+        Ok(d) => d,
+        Err(e) => return linux_err(e),
+    };
+    let conn_ids = match drm_read_u32_array(
+        req.set_connectors_ptr,
+        req.count_connectors,
+        DRM_SETCRTC_MAX_CONNECTORS,
+    ) {
+        Ok(v) => v,
+        Err(e) => return linux_err(e),
+    };
+
+    let crtc_id = crate::drm::DrmObjectId::new(req.crtc_id);
+    let fb_id = if req.fb_id == 0 {
+        None
+    } else {
+        Some(crate::drm::DrmObjectId::new(req.fb_id))
+    };
+    let connectors: alloc::vec::Vec<crate::drm::DrmObjectId> = conn_ids
+        .iter()
+        .map(|&id| crate::drm::DrmObjectId::new(id))
+        .collect();
+    let mode = if req.mode_valid == 0 {
+        None
+    } else {
+        Some(crate::drm::mode::DrmMode::from_resolution(
+            u32::from(req.mode.hdisplay),
+            u32::from(req.mode.vdisplay),
+            req.mode.vrefresh,
+        ))
+    };
+
+    let res = crate::drm::with_device_mut(device, |dev| {
+        dev.set_crtc(crtc_id, fb_id, req.x, req.y, &connectors, mode.as_ref())
+    });
+    match res {
+        Ok(()) => SyscallResult::ok(0),
+        Err(e) => linux_err(drm_kernel_err(e)),
+    }
+}
+
 /// `DRM_IOCTL_MODE_GETPLANERESOURCES` — enumerate the device's plane ids.
 fn drm_card_ioctl_mode_getplaneresources(
     handle: crate::drm::card_fd::DrmCardHandle,
@@ -11161,6 +11589,99 @@ fn drm_card_ioctl_mode_page_flip(
         crate::drm::card_fd::queue_event(handle, &ev.to_bytes());
     }
     SyscallResult::ok(0)
+}
+
+/// Maximum `input_event` records one `read(2)` on an evdev fd delivers.
+///
+/// The batch is copied through a kernel stack buffer, so it is a real stack
+/// cost: 32 records is 768 bytes, which is comfortable in a syscall frame and
+/// is more than a client ever has pending in practice — a single keystroke is
+/// 3 records and a mouse packet at most 7.  A caller with a larger buffer gets
+/// a short read and calls again, which `read(2)` permits and every evdev
+/// client already handles (Linux likewise stops at whatever its per-client
+/// buffer holds).
+const EVDEV_READ_BATCH: usize = 32;
+
+/// `read(2)` on a `/dev/input/eventN` fd — deliver whole `input_event` records.
+///
+/// Blocks until at least one whole record is available unless the fd carries
+/// `O_NONBLOCK`, in which case an empty stream is `EAGAIN`.  This is the
+/// difference that made an open-interception fd necessary rather than a devfs
+/// node: `DevFs::read_at` takes no flags, so it could neither honour
+/// `O_NONBLOCK` nor block interruptibly, and an input device that cannot block
+/// forces every client into a busy-poll.
+///
+/// The blocking wait is the same HLT-poll the console read path uses
+/// ([`crate::keyboard::read_char_interruptible`]) and for the same reason: the
+/// producer is an ISR, which cannot take a wait-queue lock, so the sleeper
+/// wakes on the device IRQ (or the timer tick, which bounds how long a pending
+/// signal goes unnoticed) and re-checks.  A deliverable signal aborts the wait
+/// with `ERESTARTSYS`, so an interrupted blocking read restarts transparently
+/// under `SA_RESTART` exactly as it does on a pipe.
+///
+/// A buffer too small for one whole 24-byte record is `EINVAL`, never a short
+/// or partial read — matching Linux's `evdev_read`, and for the same reason: a
+/// client that passes 16 bytes has misunderstood the protocol, and a partial
+/// record would let it keep misunderstanding it while silently corrupting its
+/// own event stream.
+fn dispatch_evdev_read(entry: &FdEntry, buf: u64, cap: u64) -> SyscallResult {
+    use crate::evdev::INPUT_EVENT_SIZE;
+    use crate::evdev_fd::{self, EvdevHandle};
+
+    let handle = EvdevHandle::from_raw(entry.raw_handle);
+    // Existence check (None ⇒ stale instance).
+    if evdev_fd::device(handle).is_none() {
+        return linux_err(errno::EBADF);
+    }
+
+    let cap_usize = usize::try_from(cap).unwrap_or(usize::MAX);
+    if cap_usize < INPUT_EVENT_SIZE {
+        return linux_err(errno::EINVAL);
+    }
+    // Only ever deliver whole records, and never more than one batch.
+    let want = cap_usize.min(EVDEV_READ_BATCH.saturating_mul(INPUT_EVENT_SIZE));
+    let want = want.saturating_sub(want % INPUT_EVENT_SIZE);
+
+    // Validate the destination before draining anything: a bad pointer must
+    // not consume events the client will then never see.
+    if let Err(e) = crate::mm::user::validate_user_write(buf, want) {
+        return linux_err(linux_errno_for(e));
+    }
+
+    let nonblock = entry.status_flags & oflags::O_NONBLOCK != 0;
+    let pid = crate::ipc::waiters::current_user_pid();
+    let mut kbuf = [0u8; EVDEV_READ_BATCH * INPUT_EVENT_SIZE];
+    let Some(dst) = kbuf.get_mut(..want) else {
+        // Unreachable: `want <= EVDEV_READ_BATCH * INPUT_EVENT_SIZE` by the
+        // `min` above.  Report EINVAL rather than index and panic.
+        return linux_err(errno::EINVAL);
+    };
+
+    let n = loop {
+        match evdev_fd::read(handle, dst) {
+            Ok(0) => {}
+            Ok(n) => break n,
+            Err(e) => return linux_err(linux_errno_for(e)),
+        }
+        if nonblock {
+            return linux_err(errno::EAGAIN);
+        }
+        // A signal aborts the wait; the read has consumed nothing, so a
+        // transparent restart re-enters here and loses no event.
+        if crate::ipc::waiters::deliverable_signal_pending(pid) {
+            return restart::restart_result(restart::ERESTARTSYS);
+        }
+        // Wake on the keyboard/mouse IRQ or the timer tick.
+        crate::cpu::hlt();
+    };
+
+    // SAFETY: `want` bytes at `buf` were validated writable above and
+    // `n <= want`; `copy_to_user` re-validates the range and performs the SMAP
+    // dance.  `kbuf` holds `n` live kernel bytes written by `evdev_fd::read`.
+    if unsafe { crate::mm::user::copy_to_user(kbuf.as_ptr(), buf, n) }.is_err() {
+        return linux_err(errno::EFAULT);
+    }
+    SyscallResult::ok(i64::try_from(n).unwrap_or(i64::MAX))
 }
 
 /// `read(2)` on a `/dev/dri/cardN` fd — drain queued KMS events.
@@ -16587,6 +17108,7 @@ fn sys_fsync(args: &SyscallArgs) -> SyscallResult {
         | HandleKind::AlsaPcm
         | HandleKind::AlsaControl
         | HandleKind::DrmCard
+        | HandleKind::Evdev
         | HandleKind::Socket => linux_err(errno::EINVAL),
     }
 }
@@ -17476,6 +17998,7 @@ fn sys_readahead(args: &SyscallArgs) -> SyscallResult {
         | HandleKind::AlsaPcm
         | HandleKind::AlsaControl
         | HandleKind::DrmCard
+        | HandleKind::Evdev
         | HandleKind::Socket => return linux_err(errno::EINVAL),
     }
     SyscallResult::ok(0)
@@ -19323,6 +19846,9 @@ fn meta_mode_bits(meta: &crate::fs::FileMeta) -> u32 {
         // VolumeLabel is a FAT artefact with no Unix analogue; treat as a
         // regular file so stat() at least returns a coherent shape.
         crate::fs::EntryType::File | crate::fs::EntryType::VolumeLabel => (S_IFREG, 0o644),
+        // The point of the variant: libinput refuses a node that is not
+        // S_ISCHR, and libdrm and ALSA make the same check.
+        crate::fs::EntryType::CharDevice => (S_IFCHR, 0o660),
     };
     let perm = if meta.permissions == 0 {
         default_perm
@@ -19521,6 +20047,8 @@ fn fill_stat_for_fd(buf: &mut [u8; STAT_SIZE], entry: &crate::proc::linux_fd::Fd
         // DRM card / render node is a character device node under /dev/dri
         // (crw-rw---- root:video on Linux), like the ALSA nodes.
         HandleKind::DrmCard => (S_IFCHR | 0o660, 4096),
+        // evdev input node under /dev/input (crw-rw---- root:input on Linux).
+        HandleKind::Evdev => (S_IFCHR | 0o660, 4096),
         // A daemon-backed AF_INET stream socket: Linux stat reports
         // S_IFSOCK with 0777 perms (srwxrwxrwx on the anon socket inode).
         HandleKind::Socket => (S_IFSOCK | 0o777, 4096),
@@ -19881,6 +20409,8 @@ fn fill_statx_for_fd(buf: &mut [u8; STATX_SIZE], entry: &crate::proc::linux_fd::
         HandleKind::AlsaControl => ((S_IFCHR | 0o660) as u16, 4096),
         // DRM card / render node character device node under /dev/dri.
         HandleKind::DrmCard => ((S_IFCHR | 0o660) as u16, 4096),
+        // evdev input character device node under /dev/input.
+        HandleKind::Evdev => ((S_IFCHR | 0o660) as u16, 4096),
         // Daemon-backed AF_INET stream socket — S_IFSOCK | 0777, like Linux.
         HandleKind::Socket => ((S_IFSOCK | 0o777) as u16, 4096),
     };
@@ -21569,6 +22099,7 @@ fn sys_ftruncate(args: &SyscallArgs) -> SyscallResult {
         | HandleKind::AlsaPcm
         | HandleKind::AlsaControl
         | HandleKind::DrmCard
+        | HandleKind::Evdev
         | HandleKind::Socket => linux_err(errno::EINVAL),
     }
 }
@@ -26824,6 +27355,12 @@ fn sys_pidfd_getfd(args: &SyscallArgs) -> SyscallResult {
                 return linux_err(errno::EBADF);
             }
         }
+        HandleKind::Evdev => {
+            let h = crate::evdev_fd::EvdevHandle::from_raw(entry.raw_handle);
+            if crate::evdev_fd::dup(h).is_err() {
+                return linux_err(errno::EBADF);
+            }
+        }
         HandleKind::Socket => {
             let h = crate::net::socket::SocketHandle::from_raw(entry.raw_handle);
             if crate::net::socket::dup(h).is_err() {
@@ -26868,6 +27405,7 @@ fn sys_pidfd_getfd(args: &SyscallArgs) -> SyscallResult {
         HandleKind::Inotify => Some(crate::cap::ResourceType::Inotify),
         HandleKind::AlsaPcm => Some(crate::cap::ResourceType::AlsaPcm),
         HandleKind::DrmCard => Some(crate::cap::ResourceType::Drm),
+        HandleKind::Evdev => Some(crate::cap::ResourceType::InputDevice),
         HandleKind::Socket => Some(crate::cap::ResourceType::NetSocket),
         HandleKind::Console | HandleKind::PidFd | HandleKind::AlsaControl => None,
     };
@@ -26951,6 +27489,10 @@ fn release_handle_ref(kind: HandleKind, raw_handle: u64) {
         HandleKind::DrmCard => {
             let h = crate::drm::card_fd::DrmCardHandle::from_raw(raw_handle);
             crate::drm::card_fd::close(h);
+        }
+        HandleKind::Evdev => {
+            let h = crate::evdev_fd::EvdevHandle::from_raw(raw_handle);
+            crate::evdev_fd::close(h);
         }
         HandleKind::Socket => {
             let h = crate::net::socket::SocketHandle::from_raw(raw_handle);
@@ -29861,6 +30403,25 @@ fn poll_revents_from_entry(
                 0
             }
         }
+        HandleKind::Evdev => {
+            // Readable whenever at least one whole input_event is pending, or
+            // a SYN_DROPPED is owed after the reader was lapped.  Never
+            // POLLOUT: write(2) is EINVAL (no force-feedback), so a client
+            // that polled for writability would spin on a readiness it can
+            // never use.
+            let h = crate::evdev_fd::EvdevHandle::from_raw(entry.raw_handle);
+            if crate::evdev_fd::is_revoked(h) {
+                // A revoked fd will never produce another event.  Reporting it
+                // as merely not-ready would hang the client's event loop
+                // forever; POLLERR|POLLHUP is what tells it to close the fd,
+                // and is what Linux's `evdev_poll` returns for the same state.
+                poll_bits::POLLERR | poll_bits::POLLHUP
+            } else if crate::evdev_fd::readable(h) {
+                poll_bits::POLLIN | poll_bits::POLLRDNORM
+            } else {
+                0
+            }
+        }
         HandleKind::Socket => {
             // Honest readiness for the daemon-backed stream socket: a single
             // non-destructive `OP_POLL` round-trip asks the daemon whether the
@@ -30798,6 +31359,7 @@ fn sys_epoll_ctl(args: &SyscallArgs) -> SyscallResult {
         | HandleKind::AlsaPcm
         | HandleKind::AlsaControl
         | HandleKind::DrmCard
+        | HandleKind::Evdev
         | HandleKind::Socket => {}
     }
 
@@ -34093,6 +34655,7 @@ fn handle_kind_ord(k: crate::proc::linux_fd::HandleKind) -> u64 {
         HandleKind::AlsaControl => 11,
         HandleKind::DrmCard => 12,
         HandleKind::Socket => 13,
+        HandleKind::Evdev => 14,
     }
 }
 
@@ -35227,6 +35790,7 @@ fn sys_cachestat(args: &SyscallArgs) -> SyscallResult {
                 | HandleKind::AlsaPcm
                 | HandleKind::AlsaControl
                 | HandleKind::DrmCard
+                | HandleKind::Evdev
                 | HandleKind::Socket => {
                     return linux_err(errno::EOPNOTSUPP);
                 }
@@ -41712,6 +42276,7 @@ fn sys_pread64(args: &SyscallArgs) -> SyscallResult {
         | HandleKind::AlsaPcm
         | HandleKind::AlsaControl
         | HandleKind::DrmCard
+        | HandleKind::Evdev
         | HandleKind::Socket => linux_err(errno::ESPIPE),
     }
 }
@@ -41780,6 +42345,7 @@ fn sys_pwrite64(args: &SyscallArgs) -> SyscallResult {
         | HandleKind::AlsaPcm
         | HandleKind::AlsaControl
         | HandleKind::DrmCard
+        | HandleKind::Evdev
         | HandleKind::Socket => linux_err(errno::ESPIPE),
     }
 }
@@ -42471,6 +43037,7 @@ fn sys_getdents64(args: &SyscallArgs) -> SyscallResult {
             crate::fs::EntryType::Directory => 4,   // DT_DIR
             crate::fs::EntryType::Symlink => 10,    // DT_LNK
             crate::fs::EntryType::VolumeLabel => 0, // DT_UNKNOWN
+            crate::fs::EntryType::CharDevice => 2,  // DT_CHR
         };
 
         out.extend_from_slice(&d_ino.to_le_bytes());
@@ -43601,6 +44168,7 @@ fn sys_preadv(args: &SyscallArgs) -> SyscallResult {
         | HandleKind::AlsaPcm
         | HandleKind::AlsaControl
         | HandleKind::DrmCard
+        | HandleKind::Evdev
         | HandleKind::Socket => linux_err(errno::ESPIPE),
     }
 }
@@ -43643,6 +44211,7 @@ fn sys_pwritev(args: &SyscallArgs) -> SyscallResult {
         | HandleKind::AlsaPcm
         | HandleKind::AlsaControl
         | HandleKind::DrmCard
+        | HandleKind::Evdev
         | HandleKind::Socket => linux_err(errno::ESPIPE),
     }
 }
@@ -43716,6 +44285,7 @@ fn sys_preadv2(args: &SyscallArgs) -> SyscallResult {
         | HandleKind::AlsaPcm
         | HandleKind::AlsaControl
         | HandleKind::DrmCard
+        | HandleKind::Evdev
         | HandleKind::Socket => linux_err(errno::ESPIPE),
     }
 }
@@ -43771,6 +44341,7 @@ fn sys_pwritev2(args: &SyscallArgs) -> SyscallResult {
         | HandleKind::AlsaPcm
         | HandleKind::AlsaControl
         | HandleKind::DrmCard
+        | HandleKind::Evdev
         | HandleKind::Socket => linux_err(errno::ESPIPE),
     }
 }
@@ -63292,6 +63863,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                     HandleKind::Inotify => Some(crate::cap::ResourceType::Inotify),
                     HandleKind::AlsaPcm => Some(crate::cap::ResourceType::AlsaPcm),
                     HandleKind::DrmCard => Some(crate::cap::ResourceType::Drm),
+                    HandleKind::Evdev => Some(crate::cap::ResourceType::InputDevice),
                     HandleKind::Socket => Some(crate::cap::ResourceType::NetSocket),
                     HandleKind::Console | HandleKind::PidFd | HandleKind::AlsaControl => None,
                 }

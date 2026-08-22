@@ -200,6 +200,20 @@ global_asm!(
     // task_finished to mark the task as dead and yield.
     ".global task_entry_trampoline",
     "task_entry_trampoline:",
+    // Release the task this CPU switched away from to get here — the analogue
+    // of Linux's `schedule_tail`.  A *resumed* task does this on the line
+    // after its own `switch_context` call returns, but a task running for the
+    // FIRST time never returns from `switch_context` at all: it arrives here
+    // instead.  Without this call its predecessor would stay pinned in
+    // `PREV_TASK_IDS` until the next context switch on this CPU, which on an
+    // otherwise-idle CPU is never.
+    //
+    // Safe to call before `entry`: it clobbers only caller-saved registers,
+    // and the two values this trampoline carries — `rbx` (entry) and `r12`
+    // (arg) — are callee-saved under the System V ABI.  Stack alignment is
+    // whatever `call rbx` below already requires, and is unchanged by an
+    // extra call made at the same RSP.
+    "call sched_finish_task_switch",
     "mov rdi, r12",       // arg → first parameter
     "call rbx",           // call entry(arg)
     "call task_finished", // entry returned — clean up
@@ -251,6 +265,20 @@ unsafe extern "C" {
 ///
 /// This is `#[unsafe(no_mangle)]` so the assembly trampoline can call
 /// it by name.
+/// Called by `task_entry_trampoline` as the very first instruction a brand-new
+/// task executes, to release the task this CPU switched away from.
+///
+/// This is the first-run counterpart of the `finish_task_switch()` call that
+/// follows `switch_context` in `schedule_inner`: a task running for the first
+/// time never returns from `switch_context`, so it would otherwise never run
+/// that line.  See `sched::PREV_TASK_IDS` for what is being released and why.
+///
+/// `#[unsafe(no_mangle)]` so the assembly trampoline can call it by name.
+#[unsafe(no_mangle)]
+extern "C" fn sched_finish_task_switch() {
+    super::finish_task_switch();
+}
+
 #[unsafe(no_mangle)]
 extern "C" fn task_finished() -> ! {
     super::task_exit();

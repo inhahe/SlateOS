@@ -51,9 +51,17 @@ Three properties that are the whole point
    declares `validated_by`: the occurrences it is known to match. One with an
    empty list prints a warning in place of its streak, because "we have not
    seen this in 90 boots" and "we could not have seen this in 90 boots" are
-   indistinguishable from the number alone. This is the same rule
-   `stamp-ancestry.py` follows when a declared source path does not exist:
-   *could not verify* must never render as *fine*.
+   indistinguishable from the number alone: *could not verify* must never
+   render as *fine*.
+
+   The converse failure is worth naming next to it, because the tree has now
+   hit both. `scripts/stamp-ancestry.py` followed exactly this rule and was
+   retired anyway (design-decisions.md §277): once the artifacts it watched
+   stopped being tracked, "could not verify" became its *only* answer, and a
+   warning that fires on every run is read as noise rather than as doubt. So
+   the rule holds, with a rider — a check whose could-not-verify branch has
+   become unconditional is no longer expressing doubt about the run, it is
+   expressing a fact about itself, and belongs in a fixture, not in a banner.
 
 Usage
 -----

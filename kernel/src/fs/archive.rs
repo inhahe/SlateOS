@@ -751,12 +751,13 @@ pub fn self_test() -> KernelResult<()> {
     test_detect_ar();
     test_detect_extension();
     test_zip_roundtrip();
+    test_zip_byte_name_roundtrip();
     test_tar_roundtrip();
     test_tar_byte_name_roundtrip();
     test_extract_rejects_traversal();
     test_stats();
 
-    serial_println!("[archive] Self-test passed (10 tests).");
+    serial_println!("[archive] Self-test passed (11 tests).");
     Ok(())
 }
 
@@ -839,19 +840,44 @@ fn test_zip_roundtrip() {
     let content = extract_one(&archive, "hello.txt").expect("extract");
     assert_eq!(&content, b"Hello from archive!");
 
-    // The zip writer still models names as `String`, so a non-UTF-8 name must
-    // be refused outright rather than silently mangled.
-    let odd = alloc::vec![CreateEntry {
-        name: PathBuf::from(b"re\xffport.txt".as_slice()),
-        data: Vec::new(),
+    serial_println!("[archive]   zip roundtrip: ok");
+}
+
+/// A zip member whose name is not valid UTF-8 must survive create → list →
+/// extract byte-for-byte, exactly as the tar one does.
+///
+/// This assertion used to read the other way round — "zip must reject a name it
+/// cannot represent, not corrupt it" — because the zip writer once modelled
+/// names as `String`, and refusal was the only non-corrupting answer available.
+/// The writer was later converted to carry bytes end to end (`zip::create`
+/// writes `entry.name.as_bytes()` verbatim), which turned refusal from the safe
+/// option into a wrong one: there is now nothing it cannot represent.
+///
+/// The stale assertion survived that change because nothing ever ran it. Worth
+/// keeping in mind about the other forty tests wired up alongside this one: an
+/// uncalled test does not merely fail to catch bugs, it also rots silently
+/// against the code it names, so its first run can fail for the *opposite*
+/// reason to the one it was written for. Check which side is stale before
+/// concluding the code is wrong.
+fn test_zip_byte_name_roundtrip() {
+    let odd = PathBuf::from(b"re\xffport.txt".as_slice());
+    let entries = alloc::vec![CreateEntry {
+        name: odd.clone(),
+        data: b"raw bytes".to_vec(),
         kind: EntryKind::File,
     }];
+
+    let archive = create(ArchiveFormat::Zip, &entries).expect("create zip");
+    let listed = list(&archive).expect("list zip");
     assert!(
-        create(ArchiveFormat::Zip, &odd).is_err(),
-        "zip must reject a name it cannot represent, not corrupt it",
+        listed.iter().any(|e| e.name == odd),
+        "non-UTF-8 member name must round-trip intact",
     );
 
-    serial_println!("[archive]   zip roundtrip: ok");
+    let content = extract_one(&archive, &odd).expect("extract by byte name");
+    assert_eq!(&content, b"raw bytes");
+
+    serial_println!("[archive]   zip byte name roundtrip: ok");
 }
 
 fn test_tar_roundtrip() {

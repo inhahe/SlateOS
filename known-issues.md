@@ -53759,6 +53759,53 @@ fires whenever a full-surface virtio-gpu flip happens — which is exactly the
 compositor's steady state. Anyone re-opening B-KNULLJUMP should first check
 whether it still reproduces on a tree containing this fix.
 
+### Direct confirmation (2026-08-22): caught in the act, one frame past the end
+
+A KASAN-instrumented boot of the **pre-fix** kernel was left running as
+independent evidence. It did not need to produce a KASAN report — it produced
+something better, a hardware page fault at the exact instruction, with
+arithmetic that admits only one explanation:
+
+```
+[drm]   Cursor operations: OK
+EXCEPTION: Page Fault (#PF) at 0xffffffff824b96a3, address=0xffff80007feb0000, error=0x2
+  Cause: not-present, write, kernel
+  bytes @RIP (16): [f3, 48, a5, 83, e2, 07, 48, 89, d1, f3, a4, c3, ...]
+```
+
+Four facts, each independently checkable from the log:
+
+1. **The faulting instruction is `memcpy`.** `f3 48 a5` is `rep movsq`, and the
+   bytes that follow (`and edx,7` / `mov rcx,rdx` / `rep movsb` / `ret`) are the
+   tail of a bulk copy. Nothing else in the kernel has that byte sequence.
+2. **The destination was a single 16 KiB frame, and the fault is exactly one
+   frame past its base.** `0xffff80007feac000` appears four times in the stack
+   scan; the fault address is `0xffff80007feb0000`. The difference is `0x4000`
+   — `FRAME_SIZE`, to the byte. The copy walked to the end of one frame and
+   took one step more.
+3. **That step left mapped RAM.** The boot memory map in the same log reads
+   `[0x007fe46000 - 0x007feb0000] usable` — the usable region ends at
+   `0x7feb0000`, the faulting physical address, with a reserved hole before the
+   next region at `0x7feb6000`. The frame at `0x7feac000` is the *last* frame
+   of its region, so the flat arithmetic's first step past it had nowhere to
+   land.
+4. **It happened in the DRM path.** The line immediately before is
+   `[drm]   Cursor operations: OK`.
+
+This is the same bug as the `BTreeMap` panic that started the hunt, seen under
+a different heap layout. KASAN's shadow shifts every allocation, so on this
+boot the frame that `framebuffer_addr()` returned happened to be the last one
+in its region and the overrun hit an unmapped hole immediately; on the
+uninstrumented boot it landed in live page-cache structures and corrupted them
+silently, surfacing thousands of lines later inside `BTreeMap`. Same wild
+write, two symptoms — which is exactly why it was intermittent.
+
+Worth keeping as a diagnostic lesson: **a page fault whose address is a round
+multiple of `FRAME_SIZE` above a value on the stack is an overrun of a single
+frame, and the memory map says whether that frame was the last one in its
+region.** That triangulation took minutes; the symptom-chasing before it took
+days.
+
 ## TD-A-SYMBOLIZE-PY-RESOLVES-CODE-ADDRESSES-TO-DATA-SYMBOLS (lane A, 2026-08-21) — OPEN
 
 **In short:** `scripts/symbolize.py` is the tool for turning the hex addresses

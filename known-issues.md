@@ -50335,7 +50335,7 @@ commands that carry the colour in question, and assert the two renders agree.
 Candidates: anything drawn on the wallpaper, on a video surface, on a
 thumbnail, or on any other content the palette does not own.
 
-**Part 2 progress. 4 of 49 modules converted.**
+**Part 2 progress. 5 of 49 modules converted.**
 
 - [x] `security_dialog.rs` — 29 constants, done 2026-08-22. The method above
   survived contact: the sweep lives in `gui/desktop/src/palette_check.rs` as
@@ -50452,6 +50452,36 @@ thumbnail, or on any other content the palette does not own.
     at any alpha, by design, because that is how a scrim and a shadow are
     spelled — so no defect is offered for it. A module whose only remaining
     hardcoded colour is black is a module the sweep will call clean.
+- [x] `device_settings.rs` — 15 constants plus 1 written inline, done
+  2026-08-22. Harness defects LL/MM/NN.
+  - **First module where the constants were not in a `mod theme`** but bare
+    `const`s at file scope. Nothing about the method changes, but the survey
+    step does: grep for `Color::from_hex`/`Color::rgba` across the *whole*
+    file rather than looking for a block to empty. This module's sixteenth
+    colour — `Color::rgba(243, 139, 168, 30)`, the wash behind the
+    driver-problem banner — is exactly what a block-shaped survey misses, and
+    defect LL is it.
+  - **The sweep needed no `derived` declaration for that wash**, which is
+    worth knowing before reaching for one. `palette_check` compares roles on
+    **RGB only** — alpha is how a role becomes a panel, a wash or a hover — so
+    a translucent `p.red` is still `p.red`, and a translucent *Mocha* red in a
+    Latte render is still not a Latte role. `derived` is for colours whose
+    *hue* is computed (a `lerp`, an `emphasized`), not for alpha.
+  - **`DriverStatus::Updating` is the sharpest instance yet of the
+    categorical/accent question**, because it is *blue* — the default accent —
+    and so reads as an obvious `p.accent`. It is not: it is one of five fixed
+    badge states, and following the accent would move it while `Loaded`,
+    `NotFound`, `Error` and `Disabled` stayed put. Defect NN reintroduces
+    exactly that mistake and is caught only by the accent test, never by the
+    sweep. Expect this trap in every module with a blue *state*: check whether
+    the colour has siblings before assuming a blue is the accent.
+  - Two things here genuinely are the accent: the active tab's label, and a
+    settings toggle in its enabled position. The four overview figures
+    (Connected / Total / Problems / Removable) are not — they are one row of
+    categorical hues written as a table.
+  - The content well behind the tabs was `CRUST`, the `readable_on` hole
+    again; `p.crust` by reading. Text on the driver badges and on the eject
+    button became `readable_on(...)` of what they sit on.
 
 **Trigger:** this is not blocked on anything. It is sequenced after the shell
 event loop (`TD-C-THE-SHELL-CAN-DRAW-ITSELF-AND-NOBODY-CAN-ASK-IT-TO`) only

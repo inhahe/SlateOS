@@ -4,30 +4,45 @@
 //! display, input) with driver status, safely-remove functionality,
 //! auto-mount preferences, and power management per device.
 
+use appearance::{Palette, readable_on};
 use guitk::color::Color;
 use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::style::CornerRadii;
 use guitk::text;
 
 // ============================================================================
-// Catppuccin Mocha palette
+// Colour
 // ============================================================================
-
-const BASE: Color = Color::from_hex(0x1E1E2E);
-const CRUST: Color = Color::from_hex(0x11111B);
-const SURFACE0: Color = Color::from_hex(0x313244);
-const SURFACE1: Color = Color::from_hex(0x45475A);
-const SURFACE2: Color = Color::from_hex(0x585B70);
-const TEXT: Color = Color::from_hex(0xCDD6F4);
-const SUBTEXT0: Color = Color::from_hex(0xA6ADC8);
-const SUBTEXT1: Color = Color::from_hex(0xBAC2DE);
-const BLUE: Color = Color::from_hex(0x89B4FA);
-const GREEN: Color = Color::from_hex(0xA6E3A1);
-const RED: Color = Color::from_hex(0xF38BA8);
-const YELLOW: Color = Color::from_hex(0xF9E2AF);
-const PEACH: Color = Color::from_hex(0xFAB387);
-const LAVENDER: Color = Color::from_hex(0xB4BEFE);
-const OVERLAY0: Color = Color::from_hex(0x6C7086);
+//
+// The fifteen Catppuccin Mocha constants that used to be spelled out here are
+// gone; the caller passes a resolved `Palette` and every colour below is a role
+// on it. See known-issues.md
+// TD-C-FORTY-NINE-SHELL-MODULES-CARRY-THEIR-OWN-COPY-OF-THE-PALETTE.
+//
+// **A device's status and its driver's status are categorical.** Connected,
+// pairing, error, sleeping, disabled — and loaded, missing, updating — are
+// *kinds*, and they are drawn as a row of dots and badges that are only legible
+// because they differ from each other. So `DeviceStatus::color` and
+// `DriverStatus::color` read the named hues (`p.green`, `p.yellow`, `p.red`,
+// `p.lavender`, `p.blue`), which follow the mode but never the accent. The same
+// goes for the four summary figures on the overview tab, which are one such row
+// by another name: a Red desktop that painted "Connected", "Total", "Problems"
+// and "Removable" all the same colour would have lost the only thing that
+// distinguishes them.
+//
+// `DriverStatus::Updating` is worth naming explicitly: it is blue, and blue is
+// also the default accent, so it looks like a candidate for `p.accent`. It is
+// not. It is one of five fixed states in a badge, and following the accent
+// would put it in the user's colour while its four siblings stayed put.
+//
+// **Two things do follow the accent**, because both mean "this is the one you
+// are on / the one that is on": the active tab's label, and a settings toggle
+// in its enabled position.
+//
+// Text drawn *on* a status badge is `readable_on(...)` of the badge rather than
+// the fixed near-black it was, because the badge's colour is now a palette role
+// and in Latte those hues are light enough that dark text is the legible
+// choice.
 
 // ============================================================================
 // Device types and status
@@ -123,14 +138,14 @@ impl DeviceStatus {
     }
 
     /// Status color.
-    pub fn color(self) -> Color {
+    pub fn color(self, p: &Palette) -> Color {
         match self {
-            Self::Connected => GREEN,
-            Self::Disconnected => OVERLAY0,
-            Self::Pairing => YELLOW,
-            Self::Error => RED,
-            Self::Sleeping => LAVENDER,
-            Self::Disabled => SURFACE2,
+            Self::Connected => p.green,
+            Self::Disconnected => p.overlay0,
+            Self::Pairing => p.yellow,
+            Self::Error => p.red,
+            Self::Sleeping => p.lavender,
+            Self::Disabled => p.surface2,
         }
     }
 }
@@ -158,13 +173,13 @@ impl DriverStatus {
     }
 
     /// Status color.
-    pub fn color(self) -> Color {
+    pub fn color(self, p: &Palette) -> Color {
         match self {
-            Self::Loaded => GREEN,
-            Self::NotFound => YELLOW,
-            Self::Error => RED,
-            Self::Updating => BLUE,
-            Self::Disabled => OVERLAY0,
+            Self::Loaded => p.green,
+            Self::NotFound => p.yellow,
+            Self::Error => p.red,
+            Self::Updating => p.blue,
+            Self::Disabled => p.overlay0,
         }
     }
 }
@@ -559,7 +574,14 @@ impl DeviceSettingsUI {
     }
 
     /// Render the panel.
-    pub fn render(&self, x: f32, y: f32, width: f32, height: f32) -> Vec<RenderCommand> {
+    pub fn render(
+        &self,
+        p: &Palette,
+        x: f32,
+        y: f32,
+        width: f32,
+        height: f32,
+    ) -> Vec<RenderCommand> {
         let mut cmds = Vec::new();
 
         // Background
@@ -568,7 +590,7 @@ impl DeviceSettingsUI {
             y,
             width,
             height,
-            color: BASE,
+            color: p.base,
             corner_radii: CornerRadii::all(8.0),
         });
 
@@ -578,7 +600,7 @@ impl DeviceSettingsUI {
             y: y + 20.0,
             text: "Devices".to_string(),
             font_size: 22.0,
-            color: TEXT,
+            color: p.text,
             font_weight: FontWeightHint::Bold,
             max_width: None,
             overflow: TextOverflow::Clip,
@@ -598,7 +620,7 @@ impl DeviceSettingsUI {
                     y: tab_y,
                     width: tw,
                     height: 32.0,
-                    color: SURFACE0,
+                    color: p.surface0,
                     corner_radii: CornerRadii::all(6.0),
                 });
             }
@@ -608,7 +630,7 @@ impl DeviceSettingsUI {
                 y: tab_y + 8.0,
                 text: label.to_string(),
                 font_size: 13.0,
-                color: if is_active { BLUE } else { SUBTEXT0 },
+                color: if is_active { p.accent } else { p.subtext0 },
                 font_weight: if is_active {
                     FontWeightHint::Bold
                 } else {
@@ -630,7 +652,7 @@ impl DeviceSettingsUI {
             y: content_y,
             width: width - 16.0,
             height: content_h,
-            color: CRUST,
+            color: p.crust,
             corner_radii: CornerRadii::all(6.0),
         });
 
@@ -639,17 +661,24 @@ impl DeviceSettingsUI {
         let cw = width - 48.0;
 
         match self.active_tab {
-            DeviceSettingsTab::Overview => self.render_overview(&mut cmds, cx, cy, cw),
-            DeviceSettingsTab::ByCategory => self.render_by_category(&mut cmds, cx, cy, cw),
-            DeviceSettingsTab::Drivers => self.render_drivers(&mut cmds, cx, cy, cw),
-            DeviceSettingsTab::SafeRemove => self.render_safe_remove(&mut cmds, cx, cy, cw),
+            DeviceSettingsTab::Overview => self.render_overview(p, &mut cmds, cx, cy, cw),
+            DeviceSettingsTab::ByCategory => self.render_by_category(p, &mut cmds, cx, cy, cw),
+            DeviceSettingsTab::Drivers => self.render_drivers(p, &mut cmds, cx, cy, cw),
+            DeviceSettingsTab::SafeRemove => self.render_safe_remove(p, &mut cmds, cx, cy, cw),
         }
 
         cmds
     }
 
     /// Render overview tab.
-    fn render_overview(&self, cmds: &mut Vec<RenderCommand>, x: f32, y: f32, width: f32) {
+    fn render_overview(
+        &self,
+        p: &Palette,
+        cmds: &mut Vec<RenderCommand>,
+        x: f32,
+        y: f32,
+        width: f32,
+    ) {
         let mut row_y = y;
 
         // Summary cards
@@ -657,22 +686,22 @@ impl DeviceSettingsUI {
             (
                 "Connected",
                 format!("{}", self.manager.connected_count()),
-                GREEN,
+                p.green,
             ),
-            ("Total", format!("{}", self.manager.devices.len()), BLUE),
+            ("Total", format!("{}", self.manager.devices.len()), p.blue),
             (
                 "Problems",
                 format!("{}", self.manager.problem_count()),
                 if self.manager.problem_count() > 0 {
-                    RED
+                    p.red
                 } else {
-                    OVERLAY0
+                    p.overlay0
                 },
             ),
             (
                 "Removable",
                 format!("{}", self.manager.safely_removable().len()),
-                LAVENDER,
+                p.lavender,
             ),
         ];
 
@@ -685,7 +714,7 @@ impl DeviceSettingsUI {
                 y: row_y,
                 width: card_w,
                 height: 56.0,
-                color: SURFACE0,
+                color: p.surface0,
                 corner_radii: CornerRadii::all(6.0),
             });
 
@@ -694,7 +723,7 @@ impl DeviceSettingsUI {
                 y: row_y + 8.0,
                 text: label.to_string(),
                 font_size: 10.0,
-                color: SUBTEXT0,
+                color: p.subtext0,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
                 overflow: TextOverflow::Clip,
@@ -719,7 +748,7 @@ impl DeviceSettingsUI {
             y: row_y,
             text: "Device categories".to_string(),
             font_size: 14.0,
-            color: SUBTEXT1,
+            color: p.subtext1,
             font_weight: FontWeightHint::Bold,
             max_width: None,
             overflow: TextOverflow::Clip,
@@ -732,7 +761,7 @@ impl DeviceSettingsUI {
                 y: row_y,
                 width,
                 height: 36.0,
-                color: SURFACE0,
+                color: p.surface0,
                 corner_radii: CornerRadii::all(4.0),
             });
 
@@ -741,7 +770,7 @@ impl DeviceSettingsUI {
                 y: row_y + 8.0,
                 text: category.icon().to_string(),
                 font_size: 14.0,
-                color: TEXT,
+                color: p.text,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
                 overflow: TextOverflow::Clip,
@@ -752,7 +781,7 @@ impl DeviceSettingsUI {
                 y: row_y + 10.0,
                 text: category.label().to_string(),
                 font_size: 13.0,
-                color: TEXT,
+                color: p.text,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
                 overflow: TextOverflow::Clip,
@@ -763,7 +792,7 @@ impl DeviceSettingsUI {
                 y: row_y + 10.0,
                 text: format!("{count}"),
                 font_size: 13.0,
-                color: SUBTEXT0,
+                color: p.subtext0,
                 font_weight: FontWeightHint::Bold,
                 max_width: None,
                 overflow: TextOverflow::Clip,
@@ -779,7 +808,7 @@ impl DeviceSettingsUI {
             y: row_y,
             text: "Settings".to_string(),
             font_size: 14.0,
-            color: SUBTEXT1,
+            color: p.subtext1,
             font_weight: FontWeightHint::Bold,
             max_width: None,
             overflow: TextOverflow::Clip,
@@ -802,7 +831,7 @@ impl DeviceSettingsUI {
                 y: row_y,
                 width,
                 height: 32.0,
-                color: SURFACE0,
+                color: p.surface0,
                 corner_radii: CornerRadii::all(4.0),
             });
 
@@ -811,13 +840,13 @@ impl DeviceSettingsUI {
                 y: row_y + 8.0,
                 text: label.to_string(),
                 font_size: 12.0,
-                color: TEXT,
+                color: p.text,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
                 overflow: TextOverflow::Clip,
             });
 
-            let toggle_bg = if *enabled { BLUE } else { SURFACE2 };
+            let toggle_bg = if *enabled { p.accent } else { p.surface2 };
             cmds.push(RenderCommand::FillRect {
                 x: x + width - 56.0,
                 y: row_y + 6.0,
@@ -832,7 +861,14 @@ impl DeviceSettingsUI {
     }
 
     /// Render devices by category tab.
-    fn render_by_category(&self, cmds: &mut Vec<RenderCommand>, x: f32, y: f32, width: f32) {
+    fn render_by_category(
+        &self,
+        p: &Palette,
+        cmds: &mut Vec<RenderCommand>,
+        x: f32,
+        y: f32,
+        width: f32,
+    ) {
         let mut row_y = y;
 
         // Search bar
@@ -841,7 +877,7 @@ impl DeviceSettingsUI {
             y: row_y,
             width,
             height: 32.0,
-            color: SURFACE0,
+            color: p.surface0,
             corner_radii: CornerRadii::all(6.0),
         });
 
@@ -857,9 +893,9 @@ impl DeviceSettingsUI {
             text: search_text,
             font_size: 12.0,
             color: if self.search_query.is_empty() {
-                OVERLAY0
+                p.overlay0
             } else {
-                TEXT
+                p.text
             },
             font_weight: FontWeightHint::Regular,
             max_width: Some(width - 24.0),
@@ -897,7 +933,7 @@ impl DeviceSettingsUI {
                 y: row_y,
                 width,
                 height: 28.0,
-                color: SURFACE0,
+                color: p.surface0,
                 corner_radii: CornerRadii::all(4.0),
             });
 
@@ -911,7 +947,7 @@ impl DeviceSettingsUI {
                     cat_devices.len()
                 ),
                 font_size: 12.0,
-                color: SUBTEXT1,
+                color: p.subtext1,
                 font_weight: FontWeightHint::Bold,
                 max_width: None,
                 overflow: TextOverflow::Clip,
@@ -927,7 +963,7 @@ impl DeviceSettingsUI {
                         y: row_y,
                         width: width - 16.0,
                         height: 48.0,
-                        color: if is_selected { SURFACE1 } else { SURFACE0 },
+                        color: if is_selected { p.surface1 } else { p.surface0 },
                         corner_radii: CornerRadii::all(4.0),
                     });
 
@@ -937,7 +973,7 @@ impl DeviceSettingsUI {
                         y: row_y + 14.0,
                         width: 8.0,
                         height: 8.0,
-                        color: device.status.color(),
+                        color: device.status.color(p),
                         corner_radii: CornerRadii::all(4.0),
                     });
 
@@ -947,7 +983,7 @@ impl DeviceSettingsUI {
                         y: row_y + 6.0,
                         text: device.name.clone(),
                         font_size: 13.0,
-                        color: TEXT,
+                        color: p.text,
                         font_weight: FontWeightHint::Bold,
                         max_width: Some(width - 140.0),
                         overflow: TextOverflow::Ellipsis,
@@ -964,7 +1000,7 @@ impl DeviceSettingsUI {
                             device.id_string()
                         ),
                         font_size: 10.0,
-                        color: SUBTEXT0,
+                        color: p.subtext0,
                         font_weight: FontWeightHint::Regular,
                         max_width: Some(width - 80.0),
                         overflow: TextOverflow::Ellipsis,
@@ -976,7 +1012,7 @@ impl DeviceSettingsUI {
                         y: row_y + 8.0,
                         width: 60.0,
                         height: 16.0,
-                        color: device.driver.color(),
+                        color: device.driver.color(p),
                         corner_radii: CornerRadii::all(3.0),
                     });
                     cmds.push(RenderCommand::Text {
@@ -984,7 +1020,7 @@ impl DeviceSettingsUI {
                         y: row_y + 10.0,
                         text: if device.has_driver() { "OK" } else { "No drv" }.to_string(),
                         font_size: 9.0,
-                        color: CRUST,
+                        color: readable_on(device.driver.color(p)),
                         font_weight: FontWeightHint::Bold,
                         max_width: None,
                         overflow: TextOverflow::Clip,
@@ -997,7 +1033,14 @@ impl DeviceSettingsUI {
     }
 
     /// Render drivers tab.
-    fn render_drivers(&self, cmds: &mut Vec<RenderCommand>, x: f32, y: f32, width: f32) {
+    fn render_drivers(
+        &self,
+        p: &Palette,
+        cmds: &mut Vec<RenderCommand>,
+        x: f32,
+        y: f32,
+        width: f32,
+    ) {
         let mut row_y = y;
 
         cmds.push(RenderCommand::Text {
@@ -1005,7 +1048,7 @@ impl DeviceSettingsUI {
             y: row_y,
             text: "Device drivers".to_string(),
             font_size: 16.0,
-            color: TEXT,
+            color: p.text,
             font_weight: FontWeightHint::Bold,
             max_width: None,
             overflow: TextOverflow::Clip,
@@ -1026,7 +1069,15 @@ impl DeviceSettingsUI {
                 y: row_y,
                 width,
                 height: 32.0,
-                color: Color::rgba(243, 139, 168, 30),
+                color: {
+                    // A wash of the same red the banner's text is in. Written
+                    // as `Color::rgba(243, 139, 168, 30)` at this call site
+                    // before the conversion -- a hardcoded palette value that
+                    // was never in the block of constants, and so would have
+                    // survived a survey that only emptied that block.
+                    let c = p.red;
+                    Color::rgba(c.r, c.g, c.b, 30)
+                },
                 corner_radii: CornerRadii::all(4.0),
             });
             cmds.push(RenderCommand::Text {
@@ -1034,7 +1085,7 @@ impl DeviceSettingsUI {
                 y: row_y + 8.0,
                 text: format!("{} device(s) with driver issues", problems.len()),
                 font_size: 13.0,
-                color: RED,
+                color: p.red,
                 font_weight: FontWeightHint::Bold,
                 max_width: None,
                 overflow: TextOverflow::Clip,
@@ -1049,7 +1100,7 @@ impl DeviceSettingsUI {
                 y: row_y,
                 width,
                 height: 52.0,
-                color: SURFACE0,
+                color: p.surface0,
                 corner_radii: CornerRadii::all(4.0),
             });
 
@@ -1058,7 +1109,7 @@ impl DeviceSettingsUI {
                 y: row_y + 6.0,
                 text: device.name.clone(),
                 font_size: 13.0,
-                color: TEXT,
+                color: p.text,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(width - 100.0),
                 overflow: TextOverflow::Ellipsis,
@@ -1075,7 +1126,7 @@ impl DeviceSettingsUI {
                 y: row_y + 24.0,
                 text: driver_info,
                 font_size: 11.0,
-                color: SUBTEXT0,
+                color: p.subtext0,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
                 overflow: TextOverflow::Clip,
@@ -1087,7 +1138,7 @@ impl DeviceSettingsUI {
                 y: row_y + 10.0,
                 width: 64.0,
                 height: 18.0,
-                color: device.driver.color(),
+                color: device.driver.color(p),
                 corner_radii: CornerRadii::all(3.0),
             });
             cmds.push(RenderCommand::Text {
@@ -1095,7 +1146,7 @@ impl DeviceSettingsUI {
                 y: row_y + 12.0,
                 text: device.driver.label().to_string(),
                 font_size: 9.0,
-                color: CRUST,
+                color: readable_on(device.driver.color(p)),
                 font_weight: FontWeightHint::Bold,
                 max_width: None,
                 overflow: TextOverflow::Clip,
@@ -1106,7 +1157,14 @@ impl DeviceSettingsUI {
     }
 
     /// Render safe remove tab.
-    fn render_safe_remove(&self, cmds: &mut Vec<RenderCommand>, x: f32, y: f32, width: f32) {
+    fn render_safe_remove(
+        &self,
+        p: &Palette,
+        cmds: &mut Vec<RenderCommand>,
+        x: f32,
+        y: f32,
+        width: f32,
+    ) {
         let mut row_y = y;
 
         cmds.push(RenderCommand::Text {
@@ -1114,7 +1172,7 @@ impl DeviceSettingsUI {
             y: row_y,
             text: "Safely remove devices".to_string(),
             font_size: 16.0,
-            color: TEXT,
+            color: p.text,
             font_weight: FontWeightHint::Bold,
             max_width: None,
             overflow: TextOverflow::Clip,
@@ -1129,7 +1187,7 @@ impl DeviceSettingsUI {
                 y: row_y + 8.0,
                 text: "No removable devices connected.".to_string(),
                 font_size: 13.0,
-                color: OVERLAY0,
+                color: p.overlay0,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
                 overflow: TextOverflow::Clip,
@@ -1141,7 +1199,7 @@ impl DeviceSettingsUI {
                     y: row_y,
                     width,
                     height: 56.0,
-                    color: SURFACE0,
+                    color: p.surface0,
                     corner_radii: CornerRadii::all(6.0),
                 });
 
@@ -1150,7 +1208,7 @@ impl DeviceSettingsUI {
                     y: row_y + 8.0,
                     text: device.name.clone(),
                     font_size: 14.0,
-                    color: TEXT,
+                    color: p.text,
                     font_weight: FontWeightHint::Bold,
                     max_width: None,
                     overflow: TextOverflow::Clip,
@@ -1161,7 +1219,7 @@ impl DeviceSettingsUI {
                     y: row_y + 28.0,
                     text: format!("{} — {}", device.manufacturer, device.bus_path),
                     font_size: 11.0,
-                    color: SUBTEXT0,
+                    color: p.subtext0,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(width - 120.0),
                     overflow: TextOverflow::Ellipsis,
@@ -1173,7 +1231,7 @@ impl DeviceSettingsUI {
                     y: row_y + 14.0,
                     width: 56.0,
                     height: 28.0,
-                    color: PEACH,
+                    color: p.peach,
                     corner_radii: CornerRadii::all(6.0),
                 });
                 cmds.push(RenderCommand::Text {
@@ -1181,7 +1239,7 @@ impl DeviceSettingsUI {
                     y: row_y + 20.0,
                     text: "Eject".to_string(),
                     font_size: 12.0,
-                    color: CRUST,
+                    color: readable_on(p.peach),
                     font_weight: FontWeightHint::Bold,
                     max_width: None,
                     overflow: TextOverflow::Clip,
@@ -1221,6 +1279,7 @@ mod tests {
     #![allow(clippy::float_cmp)]
 
     use super::*;
+    use crate::palette_check;
 
     fn sample_device(id: &str, category: DeviceCategory) -> DeviceInfo {
         DeviceInfo {
@@ -1455,8 +1514,9 @@ mod tests {
 
     #[test]
     fn test_device_status_colors() {
-        let _c1 = DeviceStatus::Connected.color();
-        let _c2 = DeviceStatus::Error.color();
+        let p = Palette::for_mode(false);
+        let _c1 = DeviceStatus::Connected.color(&p);
+        let _c2 = DeviceStatus::Error.color(&p);
     }
 
     #[test]
@@ -1491,7 +1551,7 @@ mod tests {
     #[test]
     fn test_ui_render() {
         let ui = DeviceSettingsUI::new();
-        let cmds = ui.render(0.0, 0.0, 600.0, 800.0);
+        let cmds = ui.render(&Palette::for_mode(false), 0.0, 0.0, 600.0, 800.0);
         assert!(!cmds.is_empty());
     }
 
@@ -1512,5 +1572,222 @@ mod tests {
         assert_eq!(mgr.devices_by_category(DeviceCategory::Usb).len(), 1);
         mgr.show_disconnected = true;
         assert_eq!(mgr.devices_by_category(DeviceCategory::Usb).len(), 2);
+    }
+    // ========================================================================
+    // Colour
+    // ========================================================================
+
+    /// Every device status and every driver status, one device each, so a
+    /// render reaches all eleven hues rather than the three a default panel
+    /// happens to show.
+    fn every_state_device_set() -> Vec<DeviceInfo> {
+        let statuses = [
+            DeviceStatus::Connected,
+            DeviceStatus::Disconnected,
+            DeviceStatus::Pairing,
+            DeviceStatus::Error,
+            DeviceStatus::Sleeping,
+            DeviceStatus::Disabled,
+        ];
+        let drivers = [
+            DriverStatus::Loaded,
+            DriverStatus::NotFound,
+            DriverStatus::Error,
+            DriverStatus::Updating,
+            DriverStatus::Disabled,
+        ];
+        let mut out = Vec::new();
+        for (i, status) in statuses.iter().enumerate() {
+            out.push(DeviceInfo {
+                status: *status,
+                driver: drivers[i % drivers.len()],
+                removable: i % 2 == 0,
+                ..sample_device(&format!("s{i}"), DeviceCategory::all()[i])
+            });
+        }
+        for (i, driver) in drivers.iter().enumerate() {
+            out.push(DeviceInfo {
+                driver: *driver,
+                ..sample_device(&format!("d{i}"), DeviceCategory::Usb)
+            });
+        }
+        out
+    }
+
+    /// A panel wound into one state. Every axis here changes *which* colours get
+    /// drawn: the driver-problem banner only exists when a driver is broken, the
+    /// eject button only on the safe-remove tab with something to eject, the
+    /// selected-row fill only with a selection, the placeholder grey only with
+    /// an empty search box.
+    fn wound_panel(
+        devices: Vec<DeviceInfo>,
+        tab: DeviceSettingsTab,
+        selected: bool,
+        expanded: bool,
+        search: &str,
+        toggles_on: bool,
+    ) -> DeviceSettingsUI {
+        let mut ui = DeviceSettingsUI {
+            manager: DeviceManager::default(),
+            active_tab: tab,
+            search_query: search.to_string(),
+            selected_device: None,
+            expanded_category: expanded.then_some(DeviceCategory::Usb),
+            scroll_offset: 0.0,
+        };
+        for d in devices {
+            ui.manager.register_device(d);
+        }
+        if selected {
+            ui.selected_device = ui.manager.devices.first().map(|d| d.id.clone());
+        }
+        ui.manager.show_disconnected = toggles_on;
+        ui.manager.auto_install_drivers = toggles_on;
+        ui.manager.safely_remove_notifications = toggles_on;
+        ui.manager.usb_power_saving = toggles_on;
+        ui
+    }
+
+    /// Every colour the panel paints is a role on the palette it was handed.
+    ///
+    /// Rendered in both modes; the light render is the one that does the work,
+    /// because the fifteen deleted constants were Catppuccin Mocha values and
+    /// none of them is a member of Latte. That includes the sixteenth, which was
+    /// never a constant at all — the driver-problem banner's wash was
+    /// `Color::rgba(243, 139, 168, 30)`, Mocha red's channels written out at the
+    /// call site. The sweep compares roles on RGB alone, precisely so that a
+    /// wash of a role still counts as that role, so no `derived` declaration is
+    /// needed and the literal is still caught.
+    #[test]
+    fn every_colour_the_panel_draws_comes_from_its_palette() {
+        let sets: [Vec<DeviceInfo>; 3] = [
+            every_state_device_set(),
+            vec![sample_device("quiet", DeviceCategory::Audio)],
+            Vec::new(),
+        ];
+        for light in [false, true] {
+            let p = Palette::for_mode(light);
+            for set in &sets {
+                for tab in DeviceSettingsTab::all() {
+                    for selected in [false, true] {
+                        for expanded in [false, true] {
+                            for search in ["", "Device"] {
+                                for toggles_on in [false, true] {
+                                    let ui = wound_panel(
+                                        set.clone(),
+                                        *tab,
+                                        selected,
+                                        expanded,
+                                        search,
+                                        toggles_on,
+                                    );
+                                    let cmds = ui.render(&p, 0.0, 0.0, 600.0, 800.0);
+                                    assert!(!cmds.is_empty(), "the panel always draws its frame");
+                                    palette_check::assert_drawn_from(
+                                        &p,
+                                        &cmds,
+                                        &[],
+                                        "device_settings",
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// A device's status, its driver's status and the four overview figures are
+    /// *kinds*, and must not move when the user changes their accent.
+    ///
+    /// The assertion the membership sweep structurally cannot make: `p.accent`
+    /// and `p.green` are both members of the palette, so a status dot wrongly
+    /// painted in the accent passes the sweep in either mode. Only rendering the
+    /// same state twice under two different accents can tell them apart.
+    ///
+    /// `DriverStatus::Updating` is the reason this test is here rather than
+    /// merely nice to have: it is blue, blue is the default accent, and a
+    /// converter reaching for the obvious role would have made it follow the
+    /// user's colour while its four sibling states stayed put.
+    #[test]
+    fn a_device_status_does_not_follow_the_accent() {
+        // The status dot is 8x8; the two driver badges are 60 and 64 wide; the
+        // four overview figures are the only 18pt text the panel draws.
+        let categorical = |accent: Color| -> Vec<Color> {
+            let mut p = Palette::for_mode(false);
+            p.accent = accent;
+            let mut out = Vec::new();
+            for tab in DeviceSettingsTab::all() {
+                let ui = wound_panel(every_state_device_set(), *tab, false, true, "", true);
+                for cmd in ui.render(&p, 0.0, 0.0, 600.0, 800.0) {
+                    match cmd {
+                        RenderCommand::FillRect { width, color, .. }
+                            if width == 8.0 || width == 60.0 || width == 64.0 =>
+                        {
+                            out.push(color);
+                        }
+                        RenderCommand::Text {
+                            font_size: 18.0,
+                            color,
+                            ..
+                        } => out.push(color),
+                        _ => {}
+                    }
+                }
+            }
+            out
+        };
+
+        // The settings toggle in its enabled position is the control that *does*
+        // follow the accent, and is checked so this test cannot pass by the two
+        // renders being identical everywhere.
+        let accented = |accent: Color| -> Vec<Color> {
+            let mut p = Palette::for_mode(false);
+            p.accent = accent;
+            let ui = wound_panel(
+                every_state_device_set(),
+                DeviceSettingsTab::Overview,
+                false,
+                true,
+                "",
+                true,
+            );
+            ui.render(&p, 0.0, 0.0, 600.0, 800.0)
+                .into_iter()
+                .filter_map(|c| match c {
+                    RenderCommand::FillRect {
+                        width,
+                        height,
+                        color,
+                        ..
+                    } if width == 40.0 && height == 20.0 => Some(color),
+                    _ => None,
+                })
+                .collect()
+        };
+
+        let blue = Palette::for_mode(false).blue;
+        let mauve = Palette::for_mode(false).mauve;
+        assert_ne!(blue, mauve, "the two accents must differ");
+
+        let with_blue = categorical(blue);
+        assert!(
+            !with_blue.is_empty(),
+            "nothing categorical was found to check"
+        );
+        assert_eq!(
+            with_blue,
+            categorical(mauve),
+            "a status colour moved when the accent did"
+        );
+
+        let toggles = accented(blue);
+        assert!(!toggles.is_empty(), "no settings toggle was found");
+        assert_ne!(
+            toggles,
+            accented(mauve),
+            "nothing followed the accent, so this test measures nothing"
+        );
     }
 }

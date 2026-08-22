@@ -53,6 +53,7 @@ SEC = "gui/desktop/src/security_dialog.rs"
 RUN = "gui/desktop/src/run_dialog.rs"
 ICON = "gui/desktop/src/icons.rs"
 NOTIF = "gui/desktop/src/notif_pane.rs"
+DEV = "gui/desktop/src/device_settings.rs"
 
 # (name, file, [(old, new), ...], [packages], [tests expected to fail])
 DEFECTS = [
@@ -454,6 +455,49 @@ DEFECTS = [
         [("            Self::Urgent => p.red,", "            Self::Urgent => p.accent,")],
         ["desktop"],
         ["a_notification_priority_does_not_follow_the_accent"],
+    ),
+    (
+        # The colour that was never a constant. `Color::rgba(243, 139, 168, 30)`
+        # is Mocha red's channels written out at the call site, so emptying the
+        # block of `const`s at the top of the file would have left it behind.
+        # The sweep still names it, because it compares roles on RGB alone and
+        # Mocha red is not a member of Latte at any alpha.
+        "LL: the driver-problem banner keeps its inline wash of Mocha red",
+        DEV,
+        [("                color: {\n"
+          "                    // A wash of the same red the banner's text is in. Written\n"
+          "                    // as `Color::rgba(243, 139, 168, 30)` at this call site\n"
+          "                    // before the conversion -- a hardcoded palette value that\n"
+          "                    // was never in the block of constants, and so would have\n"
+          "                    // survived a survey that only emptied that block.\n"
+          "                    let c = p.red;\n"
+          "                    Color::rgba(c.r, c.g, c.b, 30)\n"
+          "                },",
+          "                color: Color::rgba(243, 139, 168, 30),")],
+        ["desktop"],
+        ["every_colour_the_panel_draws_comes_from_its_palette"],
+    ),
+    (
+        # Only drawn on the safe-remove tab, and only when something is
+        # removable. Two axes of the state matrix have to line up for the sweep
+        # to reach this line at all.
+        "MM: the eject button, on one tab and only when there is something to eject",
+        DEV,
+        [("                    color: p.peach,", "                    color: Color::from_hex(0xFAB387),")],
+        ["desktop"],
+        ["every_colour_the_panel_draws_comes_from_its_palette"],
+    ),
+    (
+        # The trap this module's second test exists for. `DriverStatus::Updating`
+        # is blue, and blue is the default accent, so `p.accent` looks like the
+        # obvious role -- but it is one of five fixed badge states, and following
+        # the accent would move it while its four siblings stayed put. A role is
+        # a member of both palettes, so the membership sweep cannot see this.
+        "NN: the `Updating` driver badge is made to follow the accent",
+        DEV,
+        [("            Self::Updating => p.blue,", "            Self::Updating => p.accent,")],
+        ["desktop"],
+        ["a_device_status_does_not_follow_the_accent"],
     ),
 ]
 

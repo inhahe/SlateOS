@@ -60156,16 +60156,16 @@ nothing ran.
 
 ### Where they are
 
-| File | dead `#[test]`s | has a `self_test()`? |
-|---|---|---|
-| `kernel/src/fs/ext4/vfs_impl.rs` | 13 | yes |
-| `kernel/src/fs/pathutil.rs` | 10 | **no** |
-| `kernel/src/net/frag.rs` | 7 | yes |
-| `kernel/src/net/httpd.rs` | 7 | yes |
-| `kernel/src/fs/ext4/driver.rs` | 6 | yes |
-| `kernel/src/tty/mod.rs` | 6 | yes |
-| `kernel/src/fs/ext4/balloc.rs` | 3 | yes |
-| `kernel/src/net/raw.rs` | 2 | **no** |
+| File | dead `#[test]`s | has a `self_test()`? | converted |
+|---|---|---|---|
+| `kernel/src/fs/ext4/vfs_impl.rs` | 13 | yes | |
+| `kernel/src/fs/pathutil.rs` | 10 | **no** | **yes** — 2026-08-22 |
+| `kernel/src/net/frag.rs` | 7 | yes | **yes** — 2026-08-22 |
+| `kernel/src/net/httpd.rs` | 7 | yes | |
+| `kernel/src/fs/ext4/driver.rs` | 6 | yes | |
+| `kernel/src/tty/mod.rs` | 6 | yes | |
+| `kernel/src/fs/ext4/balloc.rs` | 3 | yes | |
+| `kernel/src/net/raw.rs` | 2 | **no** | **yes** — 2026-08-22 |
 
 Six of the eight have a boot self-test, so the module is not wholly unchecked —
 but the self-test and the dead unit tests cover different things, and the dead
@@ -60192,6 +60192,33 @@ also fixes lane B's `raw.rs` report for free: boot self-tests run sequentially o
 one CPU, so the `CLAIMED`/`OWNER` interleaving they traced is impossible by
 construction rather than by a mutex.
 
+The conversion is not mechanical, and three constraints keep recurring:
+
+- **A boot self-test cannot `assert!`.** A failed assertion is a panic and a
+  panic during boot is a dead machine, not a failed test. Every check has to log
+  its specific failure and return `Err`.
+- **The kernel state is real.** Unit tests could assume an empty process table
+  or an idle global; a boot self-test cannot. `raw.rs`'s two hardcoded PID 4242
+  and relied on it being absent — now searched for and skipped if unavailable.
+  Anything writing a live global has to restore it on every exit path.
+- **Re-read each test against the current API.** They have never been
+  type-checked, so treat compilation as an open question per file.
+
+### Progress (19 of 54)
+
+| Date | Files | Result |
+|---|---|---|
+| 2026-08-22 | `pathutil.rs` (10), `raw.rs` (2) | boot PASS 1674s; both print `Self-test PASSED` |
+| 2026-08-22 | `frag.rs` (7) | found `A-FRAG-REJECTED-FRAGMENTS-STILL-CLAIM-A-REASSEMBLY-SLOT` |
+
+The `frag.rs` conversion is the argument for doing the rest. Its seven dead
+tests all drove the module-level `add_fragment`, i.e. the global reassembly
+table — a layer the module's existing `self_test()` deliberately avoids in order
+to stay hermetic. Porting them therefore meant reading a code path nothing
+covered, and a remotely-triggerable table-exhaustion DoS was sitting in it. The
+value here is not only "the tests run now"; it is that porting a test forces
+someone to read the path it covers.
+
 Two things to get right while converting:
 
 - **A boot self-test cannot `assert!`.** A failed assertion in the kernel is a
@@ -60214,7 +60241,7 @@ suggested mutex is what turned up the larger problem. Reply in
 `requests/a-b-raced-globals-flags-tests-that-cannot-run.md`, which also suggests
 the checker skip crates whose test target is disabled.
 
-## `A-FRAG-REJECTED-FRAGMENTS-STILL-CLAIM-A-REASSEMBLY-SLOT` — open, found 2026-08-22 (lane A)
+## `A-FRAG-REJECTED-FRAGMENTS-STILL-CLAIM-A-REASSEMBLY-SLOT` — found 2026-08-22 (lane A) — FIXED 2026-08-22
 
 **In short:** When a machine receives a large network message split into pieces
 ("fragments"), the kernel holds the pieces in a small table until the last one
@@ -60322,3 +60349,32 @@ hole as well as the vehicle for a regression test on this bug.
 Found while converting this module's dead `#[test]`s to boot self-tests under
 `A-KERNEL-UNIT-TESTS-NEVER-RUN`. Reading the two rejection tests closely enough
 to port them is what exposed the slot leak they were sitting next to.
+
+### Fixed 2026-08-22
+
+Both `add_fragment` and `add_fragment_v6` now release a slot whose entry
+contributed nothing:
+
+```rust
+if entry.buffer.is_empty() {
+    entry.clear();
+}
+```
+
+on the `else` (not-complete) arm. `buffer.is_empty()` is an exact test for
+"contributed nothing" — an accepted fragment has non-empty `data`, so `end >= 1`
+and the buffer is grown to at least one byte — which makes it a no-op for an
+entry legitimately still waiting for more fragments.
+
+The regression test drives the actual attack rather than asserting on internals:
+`test_table_rejected_fragments_free_their_slot` pushes `MAX_REASSEMBLY_ENTRIES`
+empty fragments with distinct ids, then the same number of oversized ones,
+checking the table is empty after each sweep, and finally sends a real datagram
+and requires it to reassemble. Before the fix that last step could only succeed
+by evicting something.
+
+Boot test: PASS, 1656 s, 11th consecutive clean boot, 6 WARNING / 3 FAIL
+baseline unchanged. The serial log shows `[frag] table: rejected fragments free
+their slot (8 empty + 8 oversized): OK` and **zero** occurrences of `[frag]
+Evicting reassembly entry`, which is the observable the fix is about — the
+sixteen junk fragments forced no eviction at all.

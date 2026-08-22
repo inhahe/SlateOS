@@ -740,6 +740,36 @@ pub fn emit_closed(path: impl AsRef<Path>, was_writable: bool, is_dir: bool) {
 // Self-test
 // ---------------------------------------------------------------------------
 
+/// Every synthetic path [`self_test`] emits lives under this prefix, and every
+/// count-asserting read filters to it.
+///
+/// The checks below share one watch on `/` with `ALL_CHANGES`, so *anything*
+/// that touches the root lands in the same queue — another task writing a file,
+/// or an earlier section of this very suite whose events were never drained.
+/// Asserting absolute counts over that queue was only ever safe because the
+/// `fat_ok` gate kept the suite off the live root: the first boot that ran it
+/// on a real memfs root failed immediately, because the mask-filtering section
+/// emits a `MetadataChanged` to prove a `CREATE`-only watch ignores it, and
+/// that event *also* matches the shared watch, which nothing then drained — so
+/// the coalescing section three lines later read 2 events where it wanted 1.
+///
+/// Filtering every read to a private namespace fixes both halves at once: each
+/// section becomes independent of the others' leftovers and of the rest of the
+/// kernel.  This mirrors what [`interest_gate_self_test`] already does with its
+/// captured baselines, for the same reason.
+const PROBE_PREFIX: &[u8] = b"/NOTIFY_ST_";
+
+/// Drain `watch` and keep only the events this suite itself emitted.
+///
+/// `max` is deliberately generous where callers pass it: an unrelated event
+/// occupying a slot must not push one of ours past the cap and turn a
+/// contamination into a missing-event failure.
+fn read_probe_events(watch_id: u64, max: usize) -> KernelResult<Vec<FsEvent>> {
+    let mut events = read_events(watch_id, max)?;
+    events.retain(|e| e.path.as_path().as_bytes().starts_with(PROBE_PREFIX));
+    Ok(events)
+}
+
 /// Self-test for the filesystem change notification system.
 ///
 /// Creates a watch, emits events, reads them back, and verifies
@@ -787,7 +817,7 @@ pub fn self_test() -> KernelResult<()> {
     let watch_id = create_watch("/", FsEventMask::ALL_CHANGES, false)?;
 
     // No events yet.
-    let events = read_events(watch_id, 10)?;
+    let events = read_probe_events(watch_id, 64)?;
     if !events.is_empty() {
         crate::serial_println!("[notify]   FAIL: expected 0 events, got {}", events.len());
         close_watch(watch_id)?;
@@ -796,12 +826,12 @@ pub fn self_test() -> KernelResult<()> {
     crate::serial_println!("[notify]   Empty queue verified ✓");
 
     // Emit some events.
-    emit_created("/TEST.TXT");
-    emit_modified("/TEST.TXT");
-    emit_deleted("/TEST.TXT");
+    emit_created("/NOTIFY_ST_TEST.TXT");
+    emit_modified("/NOTIFY_ST_TEST.TXT");
+    emit_deleted("/NOTIFY_ST_TEST.TXT");
 
     // Read them back.
-    let events = read_events(watch_id, 10)?;
+    let events = read_probe_events(watch_id, 64)?;
     if events.len() != 3 {
         crate::serial_println!("[notify]   FAIL: expected 3 events, got {}", events.len());
         close_watch(watch_id)?;
@@ -820,7 +850,7 @@ pub fn self_test() -> KernelResult<()> {
     crate::serial_println!("[notify]   3 events received in correct order ✓");
 
     // Verify paths.
-    if events[0].path.as_path() != Path::new("/TEST.TXT") {
+    if events[0].path.as_path() != Path::new("/NOTIFY_ST_TEST.TXT") {
         crate::serial_println!(
             "[notify]   FAIL: event path is '{}'",
             events[0].path.display()
@@ -831,8 +861,8 @@ pub fn self_test() -> KernelResult<()> {
     crate::serial_println!("[notify]   Event paths correct ✓");
 
     // Test non-recursive: events in subdirectories should NOT match.
-    emit_created("/SUB/DEEP.TXT");
-    let events = read_events(watch_id, 10)?;
+    emit_created("/NOTIFY_ST_SUB/DEEP.TXT");
+    let events = read_probe_events(watch_id, 64)?;
     if !events.is_empty() {
         crate::serial_println!(
             "[notify]   FAIL: non-recursive watch got subdirectory event ({} events)",
@@ -845,8 +875,8 @@ pub fn self_test() -> KernelResult<()> {
 
     // Test recursive watch.
     let rec_id = create_watch("/", FsEventMask::ALL_CHANGES, true)?;
-    emit_created("/SUB/DEEP.TXT");
-    let events = read_events(rec_id, 10)?;
+    emit_created("/NOTIFY_ST_SUB/DEEP.TXT");
+    let events = read_probe_events(rec_id, 64)?;
     if events.len() != 1 {
         crate::serial_println!(
             "[notify]   FAIL: recursive watch expected 1 event, got {}",
@@ -859,15 +889,15 @@ pub fn self_test() -> KernelResult<()> {
     crate::serial_println!("[notify]   Recursive watch verified ✓");
 
     // Test rename event.
-    emit_renamed("/OLD.TXT", "/NEW.TXT");
-    let events = read_events(watch_id, 10)?;
+    emit_renamed("/NOTIFY_ST_OLD.TXT", "/NOTIFY_ST_NEW.TXT");
+    let events = read_probe_events(watch_id, 64)?;
     if events.len() != 1 || events[0].event_type != FsEventType::Renamed {
         crate::serial_println!("[notify]   FAIL: rename event not received");
         close_watch(watch_id)?;
         close_watch(rec_id)?;
         return Err(KernelError::InternalError);
     }
-    if events[0].new_path.as_deref() != Some(Path::new("/NEW.TXT")) {
+    if events[0].new_path.as_deref() != Some(Path::new("/NOTIFY_ST_NEW.TXT")) {
         crate::serial_println!(
             "[notify]   FAIL: rename new_path is {:?}",
             events[0].new_path
@@ -879,8 +909,8 @@ pub fn self_test() -> KernelResult<()> {
     crate::serial_println!("[notify]   Rename event with new_path verified ✓");
 
     // Test metadata changed event.
-    emit_metadata("/TEST.TXT");
-    let events = read_events(watch_id, 10)?;
+    emit_metadata("/NOTIFY_ST_TEST.TXT");
+    let events = read_probe_events(watch_id, 64)?;
     if events.len() != 1 || events[0].event_type != FsEventType::MetadataChanged {
         crate::serial_println!(
             "[notify]   FAIL: metadata event not received (got {} events)",
@@ -895,8 +925,8 @@ pub fn self_test() -> KernelResult<()> {
     // Test event mask filtering: watch with only CREATE mask should
     // ignore METADATA events.
     let create_only_id = create_watch("/", FsEventMask::CREATE, false)?;
-    emit_metadata("/TEST.TXT");
-    let events = read_events(create_only_id, 10)?;
+    emit_metadata("/NOTIFY_ST_TEST.TXT");
+    let events = read_probe_events(create_only_id, 64)?;
     if !events.is_empty() {
         crate::serial_println!(
             "[notify]   FAIL: CREATE-only watch got metadata event ({} events)",
@@ -908,13 +938,21 @@ pub fn self_test() -> KernelResult<()> {
         return Err(KernelError::InternalError);
     }
     close_watch(create_only_id)?;
+    // The emit above proved a point about `create_only_id`, but it matched the
+    // shared `watch_id` too — an `ALL_CHANGES` watch on "/" catches everything
+    // this suite emits, whether or not the emitting section cares about it.
+    // Drop that leftover here, at the section that created it, rather than
+    // leaving it to be miscounted by whichever section next asserts a total.
+    // (This is the bug the `fat_ok` gate hid: the coalescing check below read
+    // this stray `MetadataChanged` alongside its own event and saw 2, not 1.)
+    let _ = read_events(watch_id, 64)?;
     crate::serial_println!("[notify]   Event mask filtering verified ✓");
 
     // Test event coalescing: duplicate events should be suppressed.
-    emit_modified("/COALESCE.TXT");
-    emit_modified("/COALESCE.TXT");
-    emit_modified("/COALESCE.TXT");
-    let events = read_events(watch_id, 10)?;
+    emit_modified("/NOTIFY_ST_COALESCE.TXT");
+    emit_modified("/NOTIFY_ST_COALESCE.TXT");
+    emit_modified("/NOTIFY_ST_COALESCE.TXT");
+    let events = read_probe_events(watch_id, 64)?;
     if events.len() != 1 {
         crate::serial_println!(
             "[notify]   FAIL: coalescing expected 1 event, got {}",
@@ -927,10 +965,10 @@ pub fn self_test() -> KernelResult<()> {
     crate::serial_println!("[notify]   Event coalescing verified ✓");
 
     // Different event types on the same path should NOT coalesce.
-    emit_created("/MULTI.TXT");
-    emit_modified("/MULTI.TXT");
-    emit_deleted("/MULTI.TXT");
-    let events = read_events(watch_id, 10)?;
+    emit_created("/NOTIFY_ST_MULTI.TXT");
+    emit_modified("/NOTIFY_ST_MULTI.TXT");
+    emit_deleted("/NOTIFY_ST_MULTI.TXT");
+    let events = read_probe_events(watch_id, 64)?;
     if events.len() != 3 {
         crate::serial_println!(
             "[notify]   FAIL: different types expected 3, got {}",
@@ -949,9 +987,13 @@ pub fn self_test() -> KernelResult<()> {
     let overflow_id = create_watch("/", FsEventMask::ALL_CHANGES, false)?;
     // Push DEFAULT_MAX_EVENTS + extra unique events to trigger overflow.
     for i in 0..DEFAULT_MAX_EVENTS + 10 {
-        let p = alloc::format!("/OVF_{}", i);
+        let p = alloc::format!("/NOTIFY_ST_OVF_{}", i);
         emit_created(&p);
     }
+    // Deliberately *not* `read_probe_events`: the overflow marker carries an
+    // empty path, so the namespace filter would drop the very event under test.
+    // Safe unfiltered because this asserts only that the marker comes first,
+    // and `read_events` always prepends it — no absolute count is taken.
     let events = read_events(overflow_id, DEFAULT_MAX_EVENTS + 20)?;
     // First event should be Overflow indicator.
     if events.is_empty() || events[0].event_type != FsEventType::Overflow {
@@ -979,14 +1021,37 @@ pub fn self_test() -> KernelResult<()> {
     }
     crate::serial_println!("[notify]   Watch cleanup verified ✓");
 
-    // --- End-to-end VFS/handle hooks (TD17) --------------------------------
-    //
-    // The FS-independent interest-gate / synthetic-emit / mask-filtering checks
-    // for the opt-in events live in `interest_gate_self_test()` (run
-    // unconditionally at boot via `ipc::inotify::self_test`). Here we verify the
-    // actual VFS and file-handle wiring emits those events, which needs a
-    // mounted filesystem.
+    // The end-to-end hooks below need a *writable* root; everything above this
+    // point is synthetic and runs on any root.  A probe write rather than a
+    // mount-flag check because that is the real precondition: it accounts for a
+    // read-only mount, a quota, a file tag and anything else that could stand
+    // between here and a successful write.
+    let probe = "/_notify_writable_probe";
+    if super::vfs::Vfs::write_file(probe, b"").is_ok() {
+        // Absence is the expected end state, so a failure here is nothing to
+        // report.
+        let _ = super::vfs::Vfs::remove(probe);
+        end_to_end_vfs_hooks_self_test()?;
+    } else {
+        crate::serial_println!(
+            "[notify]   Root is not writable — skipping end-to-end VFS/handle hooks."
+        );
+    }
 
+    waiter_registry_self_test()?;
+
+    crate::serial_println!("[notify] Self-test passed.");
+    Ok(())
+}
+
+/// End-to-end coverage for the VFS and file-handle notification hooks (TD17).
+///
+/// The FS-independent interest-gate / synthetic-emit / mask-filtering checks for
+/// the opt-in events live in [`interest_gate_self_test`] (run unconditionally at
+/// boot via [`crate::ipc::inotify::self_test`]).  Here we verify that the actual
+/// VFS and file-handle wiring *emits* those events, which needs a writable
+/// filesystem mounted at `/` — hence the caller's probe-write gate.
+fn end_to_end_vfs_hooks_self_test() -> KernelResult<()> {
     // ACCESS: a real `Vfs::read_file` must surface an Accessed event when an
     // ACCESS watch is live. Write a probe, read it, assert the event surfaces.
     let access_id = create_watch("/", FsEventMask::ACCESS, false)?;
@@ -1080,9 +1145,6 @@ pub fn self_test() -> KernelResult<()> {
     close_watch(oc_id)?;
     let _ = super::vfs::Vfs::remove(oc_probe);
 
-    waiter_registry_self_test()?;
-
-    crate::serial_println!("[notify] Self-test passed.");
     Ok(())
 }
 
@@ -1092,8 +1154,9 @@ pub fn self_test() -> KernelResult<()> {
 /// and mask filtering for the four high-frequency opt-in events (`ACCESS`,
 /// `OPEN`, `CLOSE_WRITE`, `CLOSE_NOWRITE`) without touching a real filesystem,
 /// so it runs **unconditionally** at boot (driven from
-/// [`crate::ipc::inotify::self_test`]) — unlike the FAT-gated [`self_test`],
-/// whose end-to-end hooks need a mounted filesystem. All assertions are
+/// [`crate::ipc::inotify::self_test`]) — unlike
+/// [`end_to_end_vfs_hooks_self_test`], which needs a writable root and is
+/// skipped when it does not have one. All assertions are
 /// delta-correct against a captured baseline, so a concurrent unrelated watch
 /// of the same bit cannot make them flake.
 pub fn interest_gate_self_test() -> KernelResult<()> {

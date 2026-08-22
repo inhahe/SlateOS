@@ -628,6 +628,26 @@ fn format_u32(mut n: u32) -> String {
 pub fn self_test() -> KernelResult<()> {
     crate::serial_println!("[trash] Running self-test...");
 
+    // Self-skip on a read-only root.
+    //
+    // Everything below writes to "/": the test file, the `_TRASH` directory and
+    // its index.  That precondition used to be enforced from the outside by
+    // `if fat_ok` in main.rs, which was never the right question — it asks
+    // whether the *FAT* root mounted, not whether the root is writable — and
+    // which kept this suite out of CI entirely, where the root is a perfectly
+    // writable memfs.  Probing directly is both narrower and actually correct.
+    //
+    // A probe write rather than a mount-flag check because that is the real
+    // precondition: it accounts for a read-only mount, a quota, a file tag and
+    // anything else that could stand between here and a successful write.
+    let probe = "/_trash_writable_probe";
+    if Vfs::write_file(probe, b"").is_err() {
+        crate::serial_println!("[trash]   Root is not writable — skipping self-test.");
+        return Ok(());
+    }
+    // Absence is the expected end state, so a failure here is nothing to report.
+    let _ = Vfs::remove(probe);
+
     // Clean up any leftover from previous runs.
     let _ = Vfs::remove("/_TRASH/_INDEX");
     let _ = Vfs::remove("/_TRASH/TRTEST.TXT");
@@ -735,12 +755,14 @@ pub fn self_test() -> KernelResult<()> {
     // unrelated entry's original path and so made a file restorable to an
     // attacker-chosen location.
     //
-    // This exercises the index directly rather than by trashing a real file:
-    // this self-test only runs on the FAT root, and FAT physically cannot
-    // store such a name (its long names are UCS-2), so the filesystem would
-    // reject it long before the index saw it.  The index must nevertheless be
-    // correct, because the trash also serves the in-memory and ext4 mounts,
-    // which can store these names.
+    // This exercises the index directly rather than by trashing a real file,
+    // which keeps the case reachable on every root.  On a FAT root the
+    // filesystem physically cannot store such a name (its long names are
+    // UCS-2), so it would reject it long before the index saw it; on a memfs or
+    // ext4 root — which is what CI actually boots — the name stores fine and a
+    // round-trip through a real file would work, but it would then be testing
+    // the filesystem as much as the index.  Going straight at the index tests
+    // the thing that was broken, on any root.
     {
         ensure_trash_dir()?;
         let hostile_name = Path::new(b"tr\xffk=y\nname.txt".as_slice());

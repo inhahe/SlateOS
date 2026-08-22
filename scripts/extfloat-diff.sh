@@ -60,16 +60,11 @@ while [ $# -gt 0 ]; do
 done
 
 TARGET=x86_64-pc-windows-gnu
-OURS=${OURS:-target/$TARGET/debug/examples/extfloat-probe.exe}
-
-if [ ! -x "$OURS" ]; then
-  echo "building the probe..."
-  cargo build -p coreutils --example extfloat-probe --target "$TARGET" || exit 1
-fi
-if [ ! -x "$OURS" ]; then
-  echo "no probe at $OURS" >&2
-  exit 1
-fi
+# Built every run, not only when it is missing: an existing probe compiled from
+# an older `extfloat.rs` answers confidently and wrongly, which is worse than
+# not answering. See `scripts/diff-subject.sh`.
+. "$(dirname "$0")/diff-subject.sh"
+OURS=$(DIFF_TARGET=$TARGET subject_example coreutils extfloat-probe "${OURS:-}") || exit 1
 
 WORK=$(mktemp -d)
 cleanup() { [ "$KEEP" = 1 ] || rm -rf "$WORK"; }

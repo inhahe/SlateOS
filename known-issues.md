@@ -54362,15 +54362,53 @@ with the reason written above them.
 unit test.
 
 
-## BUG-BC-PRINTS-A-BANNER-A-LEADING-ZERO-AND-NEVER-WRAPS (lane B)
+## BUG-BC-PRINTS-A-BANNER-A-LEADING-ZERO-AND-NEVER-WRAPS (lane B) — WITHDRAWN 2026-08-22, THE BUGS WERE NEVER THERE
 
-**Found 2026-08-21** by `scripts/calc-diff.sh`, which reports 95 passed and
-105 differed. All 105 are one or more of the three defects below, none of them
-related to the quoting migration that turned them up — the harness has been red
-at roughly this number since it was written, and nobody had read the rows.
+**In short:** This entry reported three bugs in `bc` that `bc` does not have.
+The harness that found them was running a *different program of the same name*:
+two packages in this workspace both build a file called `bc.exe` into the same
+place, and the one the harness happened to pick up was an older, abandoned
+implementation. The `bc` we ship agrees with GNU on all 200 cases, and did on
+the day this was filed. Nothing below needs fixing; the real defect is
+`B-FORTY-TWO-BINARY-NAMES-ARE-BUILT-BY-TWO-PACKAGES`, filed the same day.
 
-Reproduce: `bash scripts/calc-diff.sh`. Every case is `printf '<expr>\n' | bc`
-against GNU bc 1.07 in WSL.
+**What actually happened.** `scripts/calc-diff.sh` named its subject as the
+*path* `target/x86_64-pc-windows-gnu/debug/bc.exe` and ran it without building
+it. Two packages write that path — `userspace/bc` (the bignum rewrite, which
+this harness was written to certify) and `coreutils/src/bin/bc.rs` (a separate
+June implementation nobody has touched since) — so which program the harness
+measured was decided by whichever had been built last, at some unrelated earlier
+moment. It was `coreutils`'s. Rebuilding `userspace/bc` and re-running the
+identical harness, unchanged, gives **200 passed, 0 differed**.
+
+So all three sections below are accurate descriptions of
+`coreutils/src/bin/bc.rs`, and none of them describes `userspace/bc`:
+
+| # | Claimed of `bc` | True of `coreutils`'s bc | True of `userspace/bc` |
+|---|---|---|---|
+| 1 | banner on a pipe | yes | no — gated on `stdin.is_terminal()`, and `-q` accepted (`main.rs:2139`) |
+| 2 | `0.333…` not `.333…` | yes | no — fixed in `a1625db82` |
+| 3 | never wraps | yes | no — `BC_LINE_LENGTH` honoured, `wrap_chunk` (`main.rs:1121`) |
+
+**What this cost, and the lesson.** A day of a red harness that everyone
+believed, an `all-diff.sh` invocation documented as needing `calc` skipped, and
+three fixes queued against code that already had them. The reading that should
+have raised the alarm was in the entry itself: it said the harness "has been red
+at roughly this number since it was written", which is not how a harness written
+*to certify a rewrite* behaves — it is how one behaves when it is pointed at
+something other than the rewrite. The measurement was doubted only after the
+banner text in the failure rows (`bc 1.0 (slateos coreutils)`) turned out not to
+occur anywhere in `userspace/bc/src/main.rs`, which says the source of the
+program under test in one grep. **When a differential harness disagrees with a
+unit test, check that they are testing the same binary before believing either.**
+
+The three sections are kept below as the record of what was claimed, and because
+they remain a correct bug report against `coreutils/src/bin/bc.rs` — which is
+one of the 42 duplicates that has to be resolved one way or the other.
+
+Reproduce (as originally written): `bash scripts/calc-diff.sh`. Every case is
+`printf '<expr>\n' | bc` against GNU bc 1.07 in WSL. The harness now builds
+`-p bc --bin bc` itself, so it can no longer be reproduced.
 
 ### 1. The welcome banner is printed even when stdin is not a terminal
 
@@ -54418,6 +54456,83 @@ diagnostics, which GNU does not wrap.
 **The proper fix is all three, measured against the harness** — `calc-diff.sh`
 already covers them, so the work is done when it reports 0 differed rather than
 when the three changes are written.
+
+*(2026-08-22: the paragraph above is what made this entry survive a day. It is
+right that the harness is the measure, and the harness did report 0 differed —
+the moment it was pointed at the right binary. "Measured against the harness" is
+only worth anything if the harness builds what it measures, which is what
+`scripts/diff-subject.sh` now guarantees for all twenty-seven of them.)*
+
+---
+
+
+## B-FORTY-TWO-BINARY-NAMES-ARE-BUILT-BY-TWO-PACKAGES (lane B, 2026-08-22) — harnesses fixed, the duplication itself is open
+
+**In short:** Forty-two of our command-line utilities exist *twice* in this
+tree, as two separate programs with the same name — one inside the big
+`userspace/coreutils` package, one as its own little `userspace/<name>` crate.
+Both get compiled to the same file on disk, so the one you actually run is
+whichever was compiled most recently. That is how a test harness spent a day
+reporting three bugs in `bc` that the shipped `bc` does not have. Nothing we
+*install* is affected yet, because the disk image does not stage these binaries;
+what is affected is every measurement taken by running one of them.
+
+**How to see it:**
+
+```
+$ cargo build -p tr -p coreutils --bin tr --target x86_64-pc-windows-gnu
+warning: output filename collision at …\target\x86_64-pc-windows-gnu\debug\tr.exe
+  = note: the bin target `tr` in package `tr` has the same output filename as
+          the bin target `tr` in package `coreutils`
+  = note: this may become a hard error in the future; see rust-lang/cargo#6313
+```
+
+Cargo warns and then picks one. The warning is emitted only when both are asked
+for in a single invocation, so `cargo build -p coreutils` alone is silent — and
+then a later `cargo build --workspace` quietly replaces the file.
+
+**The full list** (42 names; every one is `coreutils` vs a standalone
+`userspace/<name>`):
+
+```
+awk bc cal chown cmp comm cut date dd df diff du env expand fold free head
+hostname join kill logger nl paste patch ps sed seq sha256sum sort split stat
+strings tar tee tr tsort uname uniq uptime wc who xargs
+```
+
+**It is not simply "the standalone ones are dead."** The fork went both ways:
+
+| | live copy | the other one |
+|---|---|---|
+| `tr`, `wc`, `uniq`, `nl`, `cut`, `head`, `join`, `sed`, `seq`, `split`, `tsort`, `expand`, `fold`, `comm`, `paste`, `awk`, `sort` | **`coreutils`** — rewritten Aug 2026 for GNU parity, each certified by its own `*-diff.sh` | standalone, frozen 2026-06-13, roughly half the size |
+| `bc` | **`userspace/bc`** — Aug 2026 rewrite on `bignum::Decimal`, 200/200 against GNU | `coreutils/src/bin/bc.rs`, June, the one that fails 105 cases |
+| `cal`, `date`, `dd`, `df`, `diff`, `du`, `env`, `free`, `hostname`, `kill`, `logger`, `patch`, `ps`, `stat`, `strings`, `tar`, `tee`, `uname`, `uptime`, `who`, `xargs`, `chown`, `cmp`, `sha256sum` | **standalone** — 1000–2800 lines each | `coreutils/src/bin/<n>.rs`, a 125–450 line stub |
+
+So resolving it means a per-utility decision, and in the third row it means
+moving the real implementation *into* `coreutils` (or deciding `coreutils` is
+not the home). It is not a delete-41-directories change.
+
+**Fixed so far (2026-08-22).** The differential harnesses no longer depend on
+which copy won: `scripts/diff-subject.sh` builds the subject from a named
+package immediately before the comparison, and all 27 `*-diff.sh` harnesses use
+it. That removes the way this defect was actually hurting us.
+
+**Still open — the proper fix.** One name, one program. For each of the 42:
+pick the implementation that is under test and maintained, make sure nothing in
+the other is worth keeping (the standalone ones are older but not uniformly
+worse — `stat` is 2845 lines against a 343-line stub), fold in anything that
+is, and delete the loser so the name has exactly one producer. Verify with a
+build that asks for everything at once and emits no `output filename collision`
+warning:
+
+```
+cargo build --workspace --target x86_64-pc-windows-gnu 2>&1 | grep -c collision   # must be 0
+```
+
+**Why it has not shipped a wrong binary yet.** `scripts/create-ext4-rootfs.sh`
+stages the fastpy-compiled ELFs, not these; nothing in the image build reads
+`target/<triple>/debug/<name>.exe`. That is luck, not design — the moment
+anything does, it inherits the coin flip.
 ---
 
 ## TD-C-COMPOSITOR-TILES-UNDER-THE-TASKBAR (lane C, 2026-08-21) — MOSTLY RESOLVED 2026-08-21, step 4 blocked

@@ -47,7 +47,12 @@ set -u
 # that looks like a path.
 export MSYS2_ARG_CONV_EXCL='*'
 
-OURS=${OURS:-"target/x86_64-pc-windows-gnu/debug/unexpand.exe"}
+# Built here, from the package named, rather than picked up out of `target/`.
+# A harness that only *runs* that path measures whatever was written there
+# last, which need not be current and need not even be this crate — see
+# `scripts/diff-subject.sh`.
+. "$(dirname "$0")/diff-subject.sh"
+OURS=$(subject_binary coreutils unexpand "${OURS:-}") || exit 1
 export LC_ALL=${LC_ALL:-C.UTF-8}
 
 pass=0; fail=0; xfail=0; xpass=0

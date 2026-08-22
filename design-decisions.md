@@ -35387,3 +35387,122 @@ taken before patching**, written back unconditionally — which cannot fail on
 non-uniqueness because it does not search for anything. The general lesson: an
 undo that has to *find* what it is undoing is a guess; an undo that restores
 what it saved is not.
+
+## §359 — One binary name, one producer: the duplicated utilities consolidate into `coreutils`, but the surviving *code* is chosen per utility
+
+**Date:** 2026-08-22
+**Decided by:** Claude (autonomous)
+
+**In short:** Forty-two of our command names — `wc`, `sed`, `stat`, `bc`, `tar`
+and so on — are currently built by *two* different crates, each producing a file
+with the same name in the same output directory. Cargo does not stop this; it
+prints a warning (only when both are built in one command) and then lets
+whichever finished last overwrite the other. So which `wc` you actually ran was
+decided by build order, and could change between two runs that did not touch
+`wc` at all. This decides that each name gets exactly one producer, that the
+producer is the `coreutils` crate, and that when the two versions differ the
+better one is moved into `coreutils` before the other is deleted — the crate
+that survives is not automatically the code that survives.
+
+### What went wrong, concretely
+
+`scripts/calc-diff.sh` reported "95 passed, 105 differed" against GNU `bc` and
+three bugs were written up in `known-issues.md` from that report. None of them
+existed. The harness had been running `userspace/coreutils`'s `bc`, an older and
+genuinely broken implementation, while the `bc` that is shipped and unit-tested
+is `userspace/bc`, which passes all 200 cases. Both write
+`target/x86_64-pc-windows-gnu/debug/bc.exe`. The report was withdrawn
+(`known-issues.md` → `BUG-BC-PRINTS-A-BANNER…— WITHDRAWN`), the harnesses were
+taught to build their own subject from a *named package*
+(`scripts/diff-subject.sh`), and `calc-diff.sh` immediately went to 200/0 with
+no change to any utility. The duplication itself is what this entry is about;
+it is tracked as `known-issues.md` →
+`B-FORTY-TWO-BINARY-NAMES-ARE-BUILT-BY-TWO-PACKAGES`.
+
+The forty-two names:
+
+```
+awk bc cal chown cmp comm cut date dd df diff du env expand fold free head
+hostname join kill logger nl paste patch ps sed seq sha256sum sort split stat
+strings tar tee tr tsort uname uniq uptime wc who xargs
+```
+
+Four of the standalone crates are additionally multi-call, so they contend for
+more names than their own: `stat` also produces `touch`/`ln`/`readlink`/
+`realpath`/`mkfifo`, `sha256sum` also `md5sum`/`sha1sum`/`sha512sum`, `chown`
+also `chmod`, `who` also `w`.
+
+### The decision
+
+1. **`coreutils` is the one home.** Every one of the 27 differential harnesses
+   names `coreutils`; every August-2026 GNU-parity rewrite (`printf`'s `\uXXXX`,
+   §351's quote marks, §356, §357, `seq`'s 80-bit float) landed there; and the
+   shared infrastructure those rewrites depend on — `quote`, `ere`, `bignum`,
+   `charwidth`, `extfloat` — is `coreutils`'s. Splitting a utility away from
+   that infrastructure is how the second copy drifted in the first place.
+2. **Merit decides the code, not the crate.** For roughly half of the forty-two
+   the standalone crate is the substantially larger and more complete
+   implementation, and `coreutils`'s namesake is a stub:
+
+   | | `coreutils` | standalone |
+   |---|---|---|
+   | `stat` | 343 | **2845** |
+   | `chown` (+`chmod`) | 326 | **1770** |
+   | `who` (+`w`) | 347 | **1689** |
+   | `date` | 245 | **1621** |
+   | `sha256sum` (+3) | 187 | **1529** |
+   | `du` | 352 | **1341** |
+   | `hostname` | 125 | **1225** |
+   | `df` | 339 | **1181** |
+   | `dd` | 365 | **1166** |
+   | `xargs` | 274 | **1096** |
+   | `ps` | 393 | **1082** |
+   | `patch` | 886 | **2183** |
+   | `tar` | 752 | **1676** |
+   | `bc` | 2677 | **2731** |
+
+   and for the harnessed ones it runs the other way (`head` 1205 vs 1123,
+   `expand` 853 vs 589, `seq` 1453 vs 1276), because those are the ones the
+   harnesses have been grinding against GNU. So each name is resolved
+   individually: the better implementation is *moved into*
+   `coreutils/src/bin/<name>.rs`, and only then is the standalone crate deleted.
+   `coreutils` has no bin at all for `sha1sum`, `sha512sum` or `w`, so those
+   three are gained, not merely relocated.
+3. **Nothing is deleted before it is measured.** A utility only loses its second
+   copy once the survivor is under a differential harness or a unit-test suite
+   that covers what the loser could do. Deleting first and discovering the gap
+   later is exactly the failure this entry exists to end.
+
+### Alternatives considered
+
+*Consolidate the other way — keep the standalone crates, delete `coreutils`'s
+bins.* Attractive on raw line counts, and it would preserve the richer half
+untouched. Rejected because it inverts the dependency: the standalone crates do
+not use `quote`/`ere`/`bignum`/`charwidth`, so every GNU-parity fix of the last
+month would have to be re-applied, and the harnesses — the only thing that has
+ever caught a real difference here — would all have to be repointed. It trades a
+one-off port for a permanent divergence from the tested code.
+
+*Keep both, rename one set's output.* One line of `Cargo.toml` per crate and the
+collision is gone. Rejected because the collision is a symptom: the real defect
+is two implementations of `stat` that will keep drifting apart, only now with
+nothing forcing anyone to notice. A build that no longer warns is worse than one
+that does, if the duplication survives it.
+
+*Keep both, drop the duplicates from the workspace `members`.* Same objection,
+plus the unbuilt half rots silently and stops compiling.
+
+### What this costs if it is not finished
+
+The harness fix already removes the *measurement* hazard — every harness now
+builds the package it names, so a red harness is a real difference again. What
+remains is the shipping hazard: `scripts/create-ext4-rootfs.sh` currently stages
+fastpy-compiled ELFs rather than these Rust binaries, so no image has yet been
+built from a coin flip. That is luck, not design, and it stops being true the
+day a rootfs recipe reaches into `target/…/debug/`.
+
+Verification that the work is complete:
+
+```sh
+cargo build --workspace --target x86_64-pc-windows-gnu 2>&1 | grep -c collision   # must be 0
+```

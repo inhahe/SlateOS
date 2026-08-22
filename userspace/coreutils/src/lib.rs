@@ -7,7 +7,7 @@
 //! to read and no faster to build. This library is for the exceptions: the
 //! things where two utilities disagreeing would itself be the bug.
 //!
-//! There are eight so far. Three are about the interface these programs share
+//! There are eleven so far. Three are about the interface these programs share
 //! whether or not anyone designed it that way: a script that reads `grep`'s
 //! diagnostic and a script that reads `cp`'s are the same script, and a person
 //! who learned to type `ls --col` expects `cat --squeeze` to work too.
@@ -120,11 +120,42 @@
 //!   from GNU itself; see `design-decisions.md` §338 for why that fixture is
 //!   committed rather than diffed live.
 //!
+//! The eleventh is the one where "two hand-written copies would disagree" is
+//! not a prediction but a description of the code that was already here:
+//!
+//! - [`canon`] — turning a name into *the* name of the file it denotes:
+//!   following every symlink, resolving every `..` physically, and deciding
+//!   what to do when something along the way does not exist. `readlink -f`,
+//!   `readlink -e`, `readlink -m` and all three of `realpath`'s corresponding
+//!   modes are, upstream, a single gnulib function
+//!   (`canonicalize_filename_mode`) with a three-valued parameter — and the
+//!   three values differ in exactly one `if`. Our two utilities had instead
+//!   each called `std::fs::canonicalize`, which is only the *first* of the
+//!   three modes: it requires the whole path to exist, so `-f` and `-m` were
+//!   both silently answering `-e`'s question.
+//!
+//!   The parts that make it worth a module rather than a function are the two
+//!   rules nobody would guess and neither copy had. A name ending in `/`, in
+//!   `/.`, or containing `/..` obliges the component before it to be a
+//!   *directory* — and the check is not free, because the main walk never
+//!   looks at those suffixes: a trailing slash yields a zero-length component,
+//!   `.` is skipped, and `..` is arithmetic on the accumulated path rather
+//!   than a lookup. That single rule is why GNU's `readlink -f d/sub/real/`
+//!   fails with `Not a directory` while `readlink -f d/sub/missing/` succeeds.
+//!   The second is that there is no depth limit at all, only cycle detection:
+//!   a 300-link chain resolves here even though `cat` on the same name reports
+//!   `Too many levels of symbolic links`, because a canonicaliser never hands
+//!   the kernel a name with more than one link left in it. Where the loop is
+//!   declared is *observable* — gnulib expands the first 20 links with no
+//!   bookkeeping before it starts recording, and that constant decides which
+//!   of a three-link cycle's members `-m` prints.
+//!
 //! The regex engine, which is the other thing they must not disagree about,
 //! lives in `userspace/ere` rather than here — the shell needs it too, and it
 //! cannot depend on the coreutils. See `design-decisions.md` §322.
 
 mod bignat;
+pub mod canon;
 pub mod cfmt;
 pub mod errmsg;
 pub mod extfloat;

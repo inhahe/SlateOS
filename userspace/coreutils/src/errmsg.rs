@@ -80,11 +80,63 @@ pub fn strerror(e: &Error) -> String {
         // read that needed more bytes got none. GNU words this as a truncation
         // rather than as a system error.
         ErrorKind::UnexpectedEof => "Unexpected end of file",
-        // Not a kind std names. The host's text is the only description of the
-        // failure that exists, and printing it beats printing "error".
-        _ => return e.to_string(),
+        // Not a kind std names *on stable*. One errno in that group has a
+        // caller here and so is recovered from the raw code; see `errno_text`.
+        // Otherwise the host's text is the only description of the failure that
+        // exists, and printing it beats printing "error".
+        _ => return errno_text(e).map_or_else(|| e.to_string(), ToString::to_string),
     };
     s.to_string()
+}
+
+/// The POSIX text for `ELOOP`.
+///
+/// A named constant rather than a literal because two things must produce
+/// exactly this string and they reach it by different routes: [`strerror`],
+/// when the kernel raises `ELOOP`, and [`filesystem_loop`], when this crate's
+/// own canonicaliser decides a symlink chain does not terminate.
+pub const FILESYSTEM_LOOP: &str = "Too many levels of symbolic links";
+
+/// `ELOOP` as an [`Error`], for a caller that detects the loop itself.
+///
+/// `ErrorKind::FilesystemLoop` would be the obvious way to say this, and it is
+/// still unstable (`io_error_more`, rust-lang/rust#86442) — every *other* kind
+/// this module words was stabilised in 1.83 and this one was left behind. So a
+/// loop that *we* detect, rather than the kernel, cannot be carried as a kind.
+///
+/// It is carried as its own message instead: `Error::other`'s `Display` is
+/// verbatim the string handed to it, and [`strerror`]'s fallback for a kind it
+/// cannot name is `to_string()`. The two therefore already agree, and no arm in
+/// the match above is needed — which is the point of doing it this way rather
+/// than inventing a private error type that every caller would have to know
+/// about. Swap in `ErrorKind::FilesystemLoop` when it stabilises; nothing
+/// outside this function has to change.
+#[must_use]
+pub fn filesystem_loop() -> Error {
+    Error::other(FILESYSTEM_LOOP)
+}
+
+/// POSIX text for an errno that stable `ErrorKind` cannot name.
+///
+/// Compiled only where `raw_os_error` genuinely *is* an errno. That is the
+/// whole reason the module header rejects errno mapping in general: the same
+/// integer is a Win32 code on the development host. Under `cfg(unix)` — which
+/// is SlateOS, per `toolchain/x86_64-slateos.json`'s `target-family` — the
+/// ambiguity is gone, and the numbers are Linux's, per `posix::errno`.
+#[cfg(unix)]
+fn errno_text(e: &Error) -> Option<&'static str> {
+    match e.raw_os_error()? {
+        // ELOOP. Distinct from `TooManyLinks` (EMLINK), which is about how many
+        // *hard* links one file may have; this is a symlink chain that does not
+        // terminate.
+        40 => Some(FILESYSTEM_LOOP),
+        _ => None,
+    }
+}
+
+#[cfg(not(unix))]
+fn errno_text(_e: &Error) -> Option<&'static str> {
+    None
 }
 
 #[cfg(test)]
@@ -113,9 +165,32 @@ mod tests {
             (ErrorKind::NotADirectory, "Not a directory"),
             (ErrorKind::BrokenPipe, "Broken pipe"),
             (ErrorKind::StorageFull, "No space left on device"),
+            (ErrorKind::TooManyLinks, "Too many links"),
         ] {
             assert_eq!(strerror(&Error::from(kind)), text, "{kind:?}");
         }
+    }
+
+    #[test]
+    fn a_loop_is_worded_the_same_whoever_detected_it() {
+        // The two routes to ELOOP have to arrive at one sentence, or a script
+        // matching on it works against `cat` and not against `readlink`.
+        assert_eq!(
+            strerror(&filesystem_loop()),
+            "Too many levels of symbolic links"
+        );
+        assert!(
+            !strerror(&filesystem_loop()).contains("os error"),
+            "the constructed form must not pick up a numeric suffix"
+        );
+
+        // The kernel's route. Only checkable where `raw_os_error` is an errno,
+        // which is the target rather than the development host.
+        #[cfg(unix)]
+        assert_eq!(
+            strerror(&Error::from_raw_os_error(40)),
+            "Too many levels of symbolic links"
+        );
     }
 
     #[test]

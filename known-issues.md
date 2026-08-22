@@ -57133,6 +57133,12 @@ nice nohup patch ps readlink realpath renice rm rmdir sed sh sha256sum sleep
 stat strings tar tee time_cmd touch tty which xargs yes
 ```
 
+**Burn-down progress.** Converted so far: `rm` (2026-08-22, see the section at
+the end of this entry). The live count is whatever `python
+scripts/argv-utf8.py --check` prints; the baseline shrinks by one line per
+conversion and never grows, so this paragraph cannot silently go stale in the
+dangerous direction — if it disagrees with the tool, the tool is right.
+
 `env`, `kill`, `hostname` and `uname` were on this list and were fixed the same
 day, which is why they are absent above. `stat`, `chmod`, `chown` and `tar`
 were rewritten this week for other reasons and use `os_bytes` internally but
@@ -57248,9 +57254,74 @@ report plus a baseline that could never match. The names are now hyphenated and
 a module-level `assert` forbids a colon in a rule name, so the mistake cannot
 recur.
 
-**The backlog stands at 51 findings across 50 files** — this adds no fix, only
-the guarantee that the number cannot grow. The burn-down still starts with the
-file-touching bins listed above.
+**The backlog stood at 51 findings across 50 files when the gate landed** —
+that commit added no fix, only the guarantee that the number cannot grow. The
+burn-down starts with the file-touching bins listed above.
+
+### `rm` converted, and the three further bugs the rewrite uncovered (2026-08-22)
+
+`rm` is the first of the 49 and sets the pattern for the rest: `env::args_os()`
+into a `Vec<OsString>`, a hand-written byte-wise option loop over
+`coreutils::getopt` (which supplies the diagnostics and the long-name
+abbreviation resolution, not the iteration), and `OsString` operands carried
+untouched all the way to `fs::remove_file`. Gate count 51 → 50; the baseline
+was shrunk in the same commit so the file cannot regress.
+
+**Converting it also turned up three real bugs in the lines being replaced.**
+None of them are about UTF-8; all three were invisible because the old file's
+tests covered `parse_args` only and there were *zero* tests of the removal
+path. This is the second time in this audit that rewriting a `main` for the
+argv defect has surfaced unrelated defects underneath it, which is an argument
+for doing the conversions properly rather than mechanically swapping the one
+function call.
+
+1. **`--` was not an end-of-options marker.** `rm -- -foo` answered `unknown
+   option: --` instead of deleting the file named `-foo`. `--` is the only way
+   to name a file whose name begins with `-`, so the utility had no way at all
+   to delete one.
+2. **`-f` suppressed *every* error, not just absence.** POSIX says `-f`
+   ignores a *nonexistent* operand; ours ignored a permission denial, a
+   non-empty directory, a read-only filesystem — anything. `rm -f important`
+   on an undeletable file printed nothing and exited 0, i.e. reported success
+   for work it had not done. That is the worst shape a bug can have in a
+   delete utility: silence that reads as completion.
+3. **Symlinks were followed.** The old code used `Path::exists` and
+   `Path::is_dir`, which both *resolve* the link. So `rm dangling-link` said
+   "No such file or directory" about a link that was plainly there and could
+   have been unlinked, and `rm -r link-to-dir` chose its recursive branch by
+   looking at the *target's* type. Now `fs::symlink_metadata`, which stats the
+   link itself.
+
+**What `rm` still does not do**, deliberately kept out of the conversion
+commit so that one commit is one logical change:
+
+- **No root failsafe.** GNU `rm` refuses `rm -rf /` unless
+  `--no-preserve-root` is given. Ours has nothing: `--preserve-root` and
+  `--no-preserve-root` are accepted by the option parser (so that abbreviation
+  resolution stays correct) and then rejected as `not implemented`. Until this
+  lands, the single most destructive typo in Unix has no guard on this OS.
+  Fixing it needs a canonicalised-path comparison against `/`, which needs
+  `realpath` semantics that are themselves on the burn-down list — so it is
+  sequenced after them rather than forgotten.
+- **Seven GNU options unimplemented:** `-d`, `-i`, `-I`, `-v`,
+  `--interactive[=WHEN]`, `--one-file-system`, `--preserve-root[=all]`. They
+  are *rejected by name* rather than ignored. That choice matters for `-i`
+  specifically: silently ignoring a request to be asked before each deletion
+  would convert it into deleting without asking, which is the one direction a
+  user of this utility cannot afford to be surprised in. An error costs a
+  retype; a wrong default costs the files.
+
+**On testing the fix from Windows.** The obvious regression test — an operand
+containing byte `0x80` — is `#[cfg(unix)]` and therefore does not run on the
+development host, which is precisely the blind spot that let the bug live. So
+`rm` also carries `#[cfg(windows)]` twins keyed on an **unpaired surrogate**
+(a UTF-16 code unit in `0xD800..=0xDFFF` with no partner, which Windows will
+hand you in `argv` and which no `String` can represent). `OsString` stores it
+as WTF-8, `to_str()` returns `None`, and `env::args()` panics on it — the same
+`unwrap`, in the same std function, reached by a different route. Both twins
+pass here, so the fix is genuinely covered on the machine the work is done on.
+**Every remaining conversion should carry the same pair**; a `#[cfg(unix)]`-only
+regression test for this defect is a test that never runs.
 
 ---
 

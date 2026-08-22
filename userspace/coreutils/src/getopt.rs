@@ -608,6 +608,7 @@ impl Program {
             shorts,
             longs,
             aliases,
+            word: 0,
             cluster: Vec::new(),
             only_operands: false,
             stop_at_operand,
@@ -646,6 +647,10 @@ pub struct Parser<'a> {
     shorts: &'a str,
     longs: &'a [(&'a str, Takes)],
     aliases: &'a [(&'a str, &'a str)],
+    /// Where in `argv` the word being read now begins. See
+    /// [`Parser::current_word`]; it is not derivable from `at`, which a bundle
+    /// leaves pointing past the word it is still yielding from.
+    word: usize,
     /// What is left of a bundle like `-am`: one argv word yields several items,
     /// so the remainder outlives the `next` call that started it.
     cluster: Vec<u8>,
@@ -655,6 +660,24 @@ pub struct Parser<'a> {
 }
 
 impl<'a> Parser<'a> {
+    /// The whole argv word the item just yielded came out of.
+    ///
+    /// Only one caller needs this, and it needs it for a rule that cannot be
+    /// stated any other way. GNU `chmod` builds its mode string out of
+    /// `argv[optind - 1]` — the *entire word* that contained a mode letter, not
+    /// the letter and its value — so `chmod -Rw d` produces the mode `-Rw` and
+    /// is rejected, where reconstructing `-` + `w` from the parsed option would
+    /// produce `-w` and silently recurse. Measured: GNU answers
+    /// `chmod: invalid mode: ‘-Rw’`.
+    ///
+    /// Using it requires binding the [`Parser`] rather than consuming it in a
+    /// `for` loop, since the answer is only meaningful between one `next` and
+    /// the next.
+    #[must_use]
+    pub fn current_word(&self) -> Option<&'a OsString> {
+        self.argv.get(self.word)
+    }
+
     /// The next word of argv, consumed as some option's value.
     fn next_word(&mut self) -> Option<OsString> {
         let word = self.argv.get(self.at)?.clone();
@@ -763,6 +786,7 @@ impl<'a> Parser<'a> {
         // rather than `self` — an operand is handed back unchanged.
         let argv: &'a [OsString] = self.argv;
         let arg = argv.get(self.at)?;
+        self.word = self.at;
         self.at = self.at.saturating_add(1);
 
         if self.only_operands {

@@ -32380,14 +32380,53 @@ connectors, allocate a buffer pair per head, flip each. The hard half is
 upstream — `Compositor` composes *one* frame at *one* size, and a second monitor
 is not a second copy of that frame but a second viewport onto one desktop with
 its own resolution, its own position in a virtual screen, and windows that can
-straddle the boundary. `gui/compositor/src/display.rs` already models multiple
-displays, modes and refresh rates faithfully; it is the compositing pipeline
-that assumes one.
+straddle the boundary. `DisplayManager` (in `gui/compositor/src/lib.rs`, not a
+`display.rs` — an earlier revision of this entry named a file that does not
+exist) already models multiple displays, modes and refresh rates faithfully; it
+is the compositing pipeline that assumes one.
 
 **Severity.** Low as a defect, medium as a missing feature. Multi-monitor is
 table stakes for a desktop OS, but a one-headed desktop is fully usable and
 nothing about the current design has to be unwound to add the second — the
 per-head state is already a struct.
+
+**Update 2026-08-21 — the compositor half is done, and it was not a missing
+feature but a live bug.** The claim above that the model "already models
+multiple displays faithfully" was wrong. `DisplayManager::add_display` extended
+the virtual desktop and *nothing extended the surface being composited into*, so
+a window placed on the second monitor was drawn past the end of the framebuffer
+and clipped away entirely — while the model went on reporting it as visible on
+screen 2. Two more followed from the same crack: `set_fullscreen` sized from
+`backend.size()` rather than from the window's own monitor (so fullscreening on
+the second screen jumped the window to the first and spanned both, disagreeing
+with `maximize_window` one line away), and `refit_fullscreen_windows` applied the
+resized framebuffer's dimensions to *every* fullscreen window (so a mode change
+on one monitor dragged the games on all the others onto it).
+
+Fixed by making the scanout surface exactly the virtual desktop's bounding box,
+as an invariant of the only two functions that can change either
+(`resize_display` and a new `attach_display`, both of which allocate before they
+adopt, so a surface that cannot be allocated leaves the arrangement alone), and
+by resolving fullscreen against `work_bounds_for` like maximise does. Rationale
+and the rejected per-head-frame alternative: `design-decisions.md` §514. 10 new
+tests, each proved by defect reintroduction.
+
+A latent `Rect` defect fell out of that work and is fixed in the same change:
+`union` and `intersect` computed far edges with `self.width as i32`, so a
+rectangle wider than 2^31 unioned to a bounding box *narrower than either input*
+and intersected with anything to nothing. They now use the already-saturating
+`right()`/`bottom()`.
+
+**Still open — the scanout half.** `DrmScanout` still resolves one CRTC and one
+connector, so the second monitor is now modelled and composited and then not
+scanned out. The remaining work is `struct Head { crtc_id, connector_id, buffers,
+front, x, y, width, height }`, `choose_display` becoming `choose_displays`
+(every connected connector with a usable mode and a *distinct* CRTC), `blit`
+gaining `src_x`/`src_y` so each head copies its own viewport out of the one
+frame, and `main.rs` declaring each head via `attach_display`. The fake card in
+`present/drm/tests.rs` already models a two-CRTC machine with a disconnected head
+and an encoder that can only drive the second CRTC, so this is testable on the
+host today.
 
 ## TD-COMPOSITOR-HAS-NO-LOCAL-INPUT (lane C, 2026-08-21)
 

@@ -409,17 +409,17 @@ impl Rect {
     }
 
     /// Compute the intersection of two rectangles. Returns None if they don't overlap.
+    ///
+    /// The far edges come from [`right`](Self::right) and
+    /// [`bottom`](Self::bottom) rather than being recomputed here, because those
+    /// two saturate a width above `i32::MAX` instead of casting it — and `as
+    /// i32` on such a width yields a *negative* number, so the far edge lands
+    /// left of the near one and a gigantic rectangle intersects to nothing.
     pub fn intersect(&self, other: &Rect) -> Option<Rect> {
         let x1 = self.x.max(other.x);
         let y1 = self.y.max(other.y);
-        let x2 = self
-            .x
-            .saturating_add(self.width as i32)
-            .min(other.x.saturating_add(other.width as i32));
-        let y2 = self
-            .y
-            .saturating_add(self.height as i32)
-            .min(other.y.saturating_add(other.height as i32));
+        let x2 = self.right().min(other.right());
+        let y2 = self.bottom().min(other.bottom());
 
         if x2 > x1 && y2 > y1 {
             Some(Rect::new(x1, y1, span(x1, x2), span(y1, y2)))
@@ -429,17 +429,16 @@ impl Rect {
     }
 
     /// Compute the bounding box that contains both rectangles.
+    ///
+    /// Same reasoning as [`intersect`](Self::intersect), and it bites harder
+    /// here: with `as i32`, unioning an over-wide rectangle produced a bounding
+    /// box *smaller* than either input, so a caller sizing a buffer from the
+    /// union would have believed an impossible desktop fitted.
     pub fn union(&self, other: &Rect) -> Rect {
         let x1 = self.x.min(other.x);
         let y1 = self.y.min(other.y);
-        let x2 = self
-            .x
-            .saturating_add(self.width as i32)
-            .max(other.x.saturating_add(other.width as i32));
-        let y2 = self
-            .y
-            .saturating_add(self.height as i32)
-            .max(other.y.saturating_add(other.height as i32));
+        let x2 = self.right().max(other.right());
+        let y2 = self.bottom().max(other.bottom());
 
         Rect::new(x1, y1, span(x1, x2), span(y1, y2))
     }
@@ -2484,6 +2483,32 @@ impl DisplayManager {
 
     /// Get the total virtual desktop bounds (union of all displays).
     pub fn virtual_bounds(&self) -> Rect {
+        self.bounds_folded(|d| d.bounds())
+    }
+
+    /// The virtual desktop bounds that *would* result from the display at
+    /// `index` being `width` by `height`.
+    ///
+    /// Asked before the change is made rather than after, because the scanout
+    /// surface has to be reallocated to match and that allocation can fail. A
+    /// compositor that had already adopted the new arrangement when it found
+    /// out would be describing a desktop it cannot paint; asking first means a
+    /// failed mode change leaves everything exactly as it was.
+    ///
+    /// An `index` that names no display answers the current bounds, which is
+    /// the truthful answer to "what would change?" — nothing.
+    pub fn virtual_bounds_if_resized(&self, index: usize, width: u32, height: u32) -> Rect {
+        self.bounds_folded(|d| {
+            if self.displays.get(index).is_some_and(|t| t.id == d.id) {
+                Rect::new(d.offset_x, d.offset_y, width, height)
+            } else {
+                d.bounds()
+            }
+        })
+    }
+
+    /// The union of every display's rectangle, each mapped through `f` first.
+    fn bounds_folded(&self, f: impl Fn(&Display) -> Rect) -> Rect {
         // Taken from the iterator rather than by `[0]` after an `is_empty()`
         // guard: the guard and the index are two statements that have to agree
         // about the same fact, and only one of them is checked by the compiler.
@@ -2491,9 +2516,7 @@ impl DisplayManager {
         let Some(first) = rest.next() else {
             return Rect::new(0, 0, 0, 0);
         };
-        rest.fold(first.bounds(), |bounds, display| {
-            bounds.union(&display.bounds())
-        })
+        rest.fold(f(first), |bounds, display| bounds.union(&f(display)))
     }
 
     /// Get all displays.
@@ -5158,14 +5181,24 @@ impl Compositor {
     /// Enter or leave true fullscreen for a window.
     ///
     /// Entering saves the window's geometry, removes decorations, and resizes
-    /// the client area to cover the entire display. Leaving restores the saved
-    /// geometry — subject to it still being somewhere the user can reach, for
-    /// the reason given on [`restore_window`](Self::restore_window): a game left
-    /// fullscreen across a resolution change would otherwise be put back at a
-    /// rectangle on a screen that no longer exists, and the saved rectangle is
-    /// consumed on the way out, so nothing afterwards could recover it. A
-    /// fullscreen window with an opaque, display-sized shared buffer is eligible
-    /// for direct-scanout bypass (see [`compose_frame`]).
+    /// the client area to cover **the monitor the window is on** — not the
+    /// framebuffer, which on a multi-head desktop is the union of every monitor
+    /// and belongs to no one screen. This is the same question
+    /// [`maximize_window`](Self::maximize_window) asks, answered by the same
+    /// [`work_bounds_for`](Self::work_bounds_for), and the two differ only in
+    /// that maximising yields the panels their reserved strips and fullscreen
+    /// covers them.
+    ///
+    /// Leaving restores the saved geometry — subject to it still being
+    /// somewhere the user can reach, for the reason given on
+    /// [`restore_window`](Self::restore_window): a game left fullscreen across a
+    /// resolution change would otherwise be put back at a rectangle on a screen
+    /// that no longer exists, and the saved rectangle is consumed on the way
+    /// out, so nothing afterwards could recover it. A fullscreen window with an
+    /// opaque, display-sized shared buffer is eligible for direct-scanout
+    /// bypass (see [`compose_frame`]) — which, correctly, means only a window
+    /// fullscreen on a *single-head* desktop, since covering one monitor of
+    /// several does not cover the scanout surface.
     ///
     /// [`compose_frame`]: Compositor::compose_frame
     ///
@@ -5175,10 +5208,12 @@ impl Compositor {
     pub fn set_fullscreen(&mut self, window_id: WindowId, enable: bool) -> CompositorResult<()> {
         self.damage_window(window_id);
 
-        let (fb_w, fb_h) = self.backend.size();
-        // As in `restore_window`: read before the mutable borrow, and the
-        // fallback screen is the one the window covers right now.
-        let home = self
+        // The monitor the window is on, read before the mutable borrow. It
+        // answers both of this function's questions: which screen a window
+        // going fullscreen should cover, and — as in `restore_window` — which
+        // screen one coming back out falls back to if its saved rectangle is
+        // no longer anywhere reachable.
+        let screen = self
             .window_ref(window_id)
             .map(|w| self.work_bounds_for(w.frame_rect()));
         let desktop = self.display_manager.virtual_bounds();
@@ -5193,13 +5228,22 @@ impl Compositor {
                     window.fs_restore_rect =
                         Some(Rect::new(window.x, window.y, window.width, window.height));
                 }
+                // The monitor, not the framebuffer. With one screen at the
+                // origin those are the same rectangle, which is why this went
+                // unnoticed; with two, sizing from the framebuffer made a
+                // window fullscreened on the second monitor jump to the first
+                // and span both, while `maximize_window` — one screen's work
+                // area, via the same `work_bounds_for` — stayed put. Two
+                // commands a user thinks of as the same gesture disagreeing
+                // about which monitor they act on is not a defensible split.
+                let bounds = screen.unwrap_or(desktop);
                 window.fullscreen = true;
-                window.x = 0;
-                window.y = 0;
-                window.width = fb_w;
-                window.height = fb_h;
+                window.x = bounds.x;
+                window.y = bounds.y;
+                window.width = bounds.width;
+                window.height = bounds.height;
                 window.dirty = true;
-                Some((fb_w, fb_h))
+                Some((bounds.width, bounds.height))
             } else if window.fullscreen {
                 window.fullscreen = false;
                 let restored = window.fs_restore_rect.take();
@@ -5211,7 +5255,7 @@ impl Compositor {
                     let placed = kept_reachable(
                         window.frame_rect_for_client(r),
                         desktop,
-                        home.unwrap_or(desktop),
+                        screen.unwrap_or(desktop),
                     );
                     let (x, y, _, _) = window.client_geometry_for_frame(placed);
                     window.x = x;
@@ -5257,6 +5301,16 @@ impl Compositor {
     /// client's buffer pixels directly — no per-frame blit, no occluded windows
     /// drawn. A buffer smaller/larger than the display is rejected (a partial
     /// buffer would leave the rest of the screen stale), preserving correctness.
+    ///
+    /// **The framebuffer, deliberately, and not the window's own monitor.** On a
+    /// multi-head desktop the scanout surface is the union of every screen, so a
+    /// window fullscreen on one of them does not cover it and is declined here —
+    /// which is the right answer, because the bypass hands the client's buffer
+    /// to *every* head, and the second monitor would show the game's pixels
+    /// instead of the desktop. The bypass is therefore a single-head
+    /// optimisation, and the test that makes it one is this one rather than an
+    /// explicit head count: with one screen at the origin the two rectangles are
+    /// equal and nothing changes.
     fn direct_scanout_window(&self) -> Option<WindowId> {
         // Topmost visible window in z-order (z_stack top == last).
         let &top = self.z_stack.iter().rev().find(|&&id| {
@@ -7153,9 +7207,11 @@ impl Compositor {
     /// the desktop, so only windows that would otherwise be unrecoverable are
     /// moved, and only by the smallest amount that recovers them.
     ///
-    /// Single-head, like the rest of the mode-setting path: it resizes the
-    /// primary display and the one framebuffer behind it. See
-    /// `known-issues.md` → `TD-COMPOSITOR-DRIVES-ONE-HEAD`.
+    /// It is the **primary** display that is resized, and the scanout surface
+    /// then follows the whole virtual desktop rather than that one screen —
+    /// see [`resize_scanout_surface`](Self::resize_scanout_surface). On a
+    /// one-monitor desktop those are the same rectangle, which is why this
+    /// took a bare width and height for as long as there was only ever one.
     ///
     /// # Errors
     ///
@@ -7164,74 +7220,162 @@ impl Compositor {
     /// compositor carries on drawing the size it already had rather than
     /// half-adopting one it cannot paint.
     pub fn resize_display(&mut self, width: u32, height: u32) -> CompositorResult<()> {
-        self.backend.resize(width, height)?;
+        // Asked before anything is mutated, so that a surface which cannot be
+        // allocated leaves the display arrangement alone. `displays[0]` is the
+        // primary by construction: `DisplayManager::new` creates it, and
+        // `add_display` only ever appends beside it.
+        let desktop = self
+            .display_manager
+            .virtual_bounds_if_resized(0, width, height);
+        self.resize_scanout_surface(desktop)?;
 
-        // `displays[0]` is the primary by construction: `DisplayManager::new`
-        // creates it, and `add_display` only ever appends beside it.
         let Some(display) = self.display_manager.displays.first_mut() else {
-            self.full_recomposite = true;
-            self.damage.mark_full(width, height);
             return Ok(());
         };
         display.width = width;
         display.height = height;
         let bounds = display.bounds();
 
-        // The first two cannot fight over a window that is both maximised and
-        // fullscreen — the re-tile excludes fullscreen outright — so their
-        // order is free. The rescue must follow both, because a window placed
-        // by either rule is by definition not stranded and asking before they
-        // have run would move one that was about to be re-placed anyway.
-        self.retile_for_work_area_change(bounds);
-        self.refit_fullscreen_windows(width, height);
-        self.bring_stranded_windows_back(bounds);
-        self.pull_pointer_onto_the_desktop();
+        self.relayout_for_desktop_change(bounds);
+        Ok(())
+    }
 
+    /// Add a monitor to the desktop, placed to the right of the ones already
+    /// there, and grow the scanout surface to cover it.
+    ///
+    /// The counterpart of [`resize_display`](Self::resize_display) for the
+    /// other way a desktop changes shape, and the reason
+    /// [`DisplayManager::add_display`] is not simply exposed: adding a display
+    /// enlarges the virtual desktop, and a virtual desktop larger than the
+    /// surface it is composited into is one whose second monitor has no pixels
+    /// behind it. Every window placed there would be drawn into a framebuffer
+    /// that ends before it starts and clipped away entirely — the model would
+    /// say the window was on the second screen and nothing would ever appear.
+    ///
+    /// # Errors
+    ///
+    /// As [`resize_display`](Self::resize_display): an allocation failure for
+    /// the enlarged surface, with the display *not* added, so that the
+    /// arrangement and the surface cannot come apart.
+    pub fn attach_display(&mut self, display: Display) -> CompositorResult<()> {
+        let mut manager = DisplayManager {
+            displays: self.display_manager.displays.clone(),
+        };
+        manager.add_display(display);
+        let desktop = manager.virtual_bounds();
+        self.resize_scanout_surface(desktop)?;
+
+        // Only now, when the surface it needs is known to exist.
+        let bounds = manager
+            .displays
+            .last()
+            .map_or_else(|| Rect::new(0, 0, 0, 0), Display::bounds);
+        self.display_manager = manager;
+        self.relayout_for_desktop_change(bounds);
+        Ok(())
+    }
+
+    /// Grow or shrink the composited surface to hold `desktop`.
+    ///
+    /// **The surface is the virtual desktop, not one monitor.** A second
+    /// monitor is a second *viewport* onto one composed frame rather than a
+    /// second frame: windows straddling the seam are one rectangle in one
+    /// buffer and each head copies out its own part, so nothing in the
+    /// compositing pipeline has to learn what a head is. What does learn it is
+    /// the scanout, which owns a buffer pair per head and blits each head's
+    /// rectangle out of this frame.
+    ///
+    /// The cost, stated plainly: a monitor arrangement whose bounding box is
+    /// larger than the monitors themselves — an L-shape, or two screens offset
+    /// vertically — composites the gap and scans it out nowhere. That is
+    /// bounded by the arrangement the user chose and is paid in a clear, not in
+    /// per-window work.
+    ///
+    /// The surface's pixel (0, 0) is the virtual desktop's (0, 0), so a display
+    /// at a negative offset would be unaddressable. Nothing produces one:
+    /// [`DisplayManager::add_display`] only ever places to the right of what is
+    /// already there. `right()`/`bottom()` rather than `width`/`height` for the
+    /// same reason — they are the extent that has to exist, and they agree with
+    /// the size only while the origin is where it is documented to be.
+    fn resize_scanout_surface(&mut self, desktop: Rect) -> CompositorResult<()> {
+        let width = u32::try_from(desktop.right().max(0)).unwrap_or(u32::MAX);
+        let height = u32::try_from(desktop.bottom().max(0)).unwrap_or(u32::MAX);
+        self.backend.resize(width, height)?;
         self.full_recomposite = true;
         self.damage.mark_full(width, height);
         Ok(())
     }
 
-    /// Re-fit every fullscreen window to a framebuffer that just changed size.
+    /// Put the desktop back in order after one monitor changed shape or arrived.
     ///
-    /// Fullscreen is defined against the *scanout surface* rather than against a
-    /// work area — that is what makes such a window eligible for the
-    /// direct-scanout bypass in [`compose_frame`](Self::compose_frame) — so it
-    /// is re-derived from the new framebuffer size here rather than by the
-    /// re-tile, which divides up work areas and would hand it back the taskbar's
-    /// leftovers.
+    /// `changed` is that monitor's new bounds — the one whose tiled windows must
+    /// be re-derived, and the screen a window that ends up nowhere is put on.
+    ///
+    /// The first two passes cannot fight over a window that is both maximised
+    /// and fullscreen — the re-tile excludes fullscreen outright — so their
+    /// order is free. The rescue must follow both, because a window placed by
+    /// either rule is by definition not stranded and asking before they have run
+    /// would move one that was about to be re-placed anyway.
+    fn relayout_for_desktop_change(&mut self, changed: Rect) {
+        self.retile_for_work_area_change(changed);
+        self.refit_fullscreen_windows();
+        self.bring_stranded_windows_back(changed);
+        self.pull_pointer_onto_the_desktop();
+    }
+
+    /// Re-fit every fullscreen window to the monitor it is on, after one of them
+    /// changed size.
+    ///
+    /// Fullscreen is defined against a whole *monitor* rather than against a
+    /// work area — covering the panels is the point, and it is what makes such
+    /// a window eligible for the direct-scanout bypass in
+    /// [`compose_frame`](Self::compose_frame) on a single-head desktop — so it
+    /// is re-derived here rather than by the re-tile, which divides up work
+    /// areas and would hand it back the taskbar's leftovers.
+    ///
+    /// Each window is re-fitted to *its own* screen, resolved the same way
+    /// [`set_fullscreen`] resolves it, rather than all of them to the one that
+    /// changed. Handing the second monitor's dimensions to a game fullscreen on
+    /// the first is the same class of error as sizing it from the framebuffer,
+    /// and every fullscreen window whose screen did not move falls out as a
+    /// no-op rather than needing to be excluded.
     ///
     /// The client is told, for the same reason [`set_fullscreen`] tells it: its
     /// surface is now a different size, and it is the only party that can
     /// redraw at it.
     ///
     /// [`set_fullscreen`]: Self::set_fullscreen
-    fn refit_fullscreen_windows(&mut self, width: u32, height: u32) {
-        let affected: Vec<WindowId> = self
+    fn refit_fullscreen_windows(&mut self) {
+        let affected: Vec<(WindowId, Rect)> = self
             .windows
             .iter()
             .filter(|w| w.fullscreen)
+            .map(|w| (w.id, self.work_bounds_for(w.frame_rect())))
             // Nothing to say to a client whose surface did not move or change
             // size — a spurious `WindowResized` is a repaint it did not need.
-            .filter(|w| w.x != 0 || w.y != 0 || w.width != width || w.height != height)
-            .map(|w| w.id)
+            // This is also what keeps a mode change on one monitor silent for
+            // the fullscreen windows on all the others.
+            .filter(|&(id, screen)| {
+                self.window_ref(id)
+                    .is_some_and(|w| w.client_rect() != screen)
+            })
             .collect();
 
-        for window_id in affected {
+        for (window_id, screen) in affected {
             self.damage_window(window_id);
             if let Some(window) = self.window_mut(window_id) {
-                window.x = 0;
-                window.y = 0;
-                window.width = width;
-                window.height = height;
+                window.x = screen.x;
+                window.y = screen.y;
+                window.width = screen.width;
+                window.height = screen.height;
                 window.dirty = true;
             }
             self.damage_window(window_id);
             self.pending_notifications
                 .push_back(EventNotification::WindowResized {
                     window_id,
-                    width,
-                    height,
+                    width: screen.width,
+                    height: screen.height,
                 });
         }
     }
@@ -11640,8 +11784,8 @@ mod tests {
         if let Some(d) = comp.display_manager.displays.first_mut() {
             d.scale_factor = left_scale;
         }
-        comp.display_manager
-            .add_display(Display::new(1, 800, 600, 60, right_scale, false));
+        comp.attach_display(Display::new(1, 800, 600, 60, right_scale, false))
+            .expect("attach");
         comp
     }
 
@@ -13976,8 +14120,8 @@ mod tests {
     /// form "this landed on that monitor and not on the union of both".
     fn two_monitors(window_on: usize) -> (Compositor, WindowId, [Rect; 2]) {
         let mut comp = Compositor::new(800, 600, 2_000_000).expect("compositor");
-        comp.display_manager
-            .add_display(Display::new(1, 1024, 768, 60, 1.0, false));
+        comp.attach_display(Display::new(1, 1024, 768, 60, 1.0, false))
+            .expect("attach");
         let screens = [
             comp.display_manager.displays()[0].bounds(),
             comp.display_manager.displays()[1].bounds(),
@@ -14093,8 +14237,8 @@ mod tests {
         // re-derived the work area from the window tiles a different screen
         // from the one whose outline the user was watching.
         let mut comp = Compositor::new(800, 600, 2_000_000).expect("compositor");
-        comp.display_manager
-            .add_display(Display::new(1, 1024, 768, 60, 1.0, false));
+        comp.attach_display(Display::new(1, 1024, 768, 60, 1.0, false))
+            .expect("attach");
         let screens = [
             comp.display_manager.displays()[0].bounds(),
             comp.display_manager.displays()[1].bounds(),
@@ -14999,6 +15143,250 @@ mod tests {
             frame.intersect(&screens[1]).is_some(),
             "a window maximised on the second monitor was rescued onto the \
              first: {frame:?}"
+        );
+    }
+
+    // ---- the composited surface is the virtual desktop ----
+
+    #[test]
+    fn attaching_a_monitor_grows_the_surface_to_cover_it() {
+        // `DisplayManager::add_display` enlarges the virtual desktop, and for
+        // as long as that was reachable on its own it enlarged it past the
+        // framebuffer everything is composited into. A window on the second
+        // monitor was then drawn into pixels beyond the end of the surface and
+        // clipped away in full: the model said the window was on the second
+        // screen and nothing would ever appear there.
+        let mut comp = Compositor::new(800, 600, 60).expect("compositor");
+        assert_eq!(comp.frame_size(), (800, 600));
+        comp.attach_display(Display::new(1, 1024, 768, 60, 1.0, false))
+            .expect("attach");
+        let desktop = comp.display_manager.virtual_bounds();
+        assert_eq!(
+            comp.frame_size(),
+            (1824, 768),
+            "the surface does not cover the {desktop:?} it is supposed to hold"
+        );
+    }
+
+    #[test]
+    fn resizing_one_monitor_does_not_shrink_the_surface_off_the_other() {
+        // The surface follows the *desktop*, and the desktop is the union.
+        // Sizing it from the display that changed instead cuts the second
+        // monitor's pixels off at the first monitor's new width -- which on a
+        // shrink is most of them.
+        let (mut comp, _, _) = two_monitors(1);
+        comp.resize_display(400, 300).expect("resize");
+        assert_eq!(
+            comp.frame_size(),
+            (1824, 768),
+            "shrinking the first monitor took the second monitor's pixels with it"
+        );
+    }
+
+    #[test]
+    fn a_surface_that_cannot_be_allocated_leaves_the_arrangement_alone() {
+        // The surface and the display arrangement have to agree, so the
+        // allocation is attempted *first*: a compositor that had already
+        // adopted a desktop it turned out it could not paint would describe a
+        // monitor whose pixels do not exist, which is the very failure the
+        // surface-follows-the-desktop rule exists to prevent.
+        let mut comp = Compositor::new(800, 600, 60).expect("compositor");
+        let before = comp.display_manager.displays().len();
+        // Beyond `MAX_DIMENSION`, so the backend refuses it.
+        let refused = comp.attach_display(Display::new(1, u32::MAX, 768, 60, 1.0, false));
+        assert!(
+            refused.is_err(),
+            "the backend accepted an impossible surface"
+        );
+        assert_eq!(
+            comp.display_manager.displays().len(),
+            before,
+            "the display was added even though its pixels could not be"
+        );
+        assert_eq!(comp.frame_size(), (800, 600), "the surface changed anyway");
+    }
+
+    // ---- fullscreen covers one monitor, not the whole scanout surface ----
+
+    #[test]
+    fn fullscreen_fills_the_windows_own_monitor_and_not_every_monitor() {
+        // The exact bug `maximizing_fills_the_windows_own_monitor_and_not_every_monitor`
+        // pins, in the one command that still had it: `set_fullscreen` sized
+        // the window from `backend.size()` -- the whole scanout surface -- and
+        // put it at (0, 0). So fullscreening a video on the second monitor
+        // moved it to the first and stretched it across both, while
+        // *maximising* the same window stayed put. The two are the same gesture
+        // to a user.
+        let (mut comp, id, screens) = two_monitors(1);
+        comp.set_fullscreen(id, true).expect("fullscreen");
+        assert_eq!(
+            comp.window_ref(id).expect("window").client_rect(),
+            screens[1],
+            "fullscreen did not fill the window's own monitor"
+        );
+    }
+
+    #[test]
+    fn a_fullscreen_window_is_told_its_own_monitors_size() {
+        // The client is the only party that can redraw at the new size, and it
+        // is told by `WindowResized`. Reporting the framebuffer's dimensions
+        // would have a game on the 1024x768 second monitor allocate a
+        // 1824x768 surface -- the failure mode is a correctly-placed window
+        // full of a wrongly-scaled picture, which is harder to attribute than
+        // a window in the wrong place.
+        let (mut comp, id, screens) = two_monitors(1);
+        comp.pending_notifications.clear();
+        comp.set_fullscreen(id, true).expect("fullscreen");
+        assert!(
+            comp.pending_notifications.iter().any(|n| matches!(
+                n,
+                EventNotification::WindowResized { window_id, width, height }
+                    if *window_id == id
+                        && *width == screens[1].width
+                        && *height == screens[1].height
+            )),
+            "the client was told a size that is not its monitor's: {:?}",
+            comp.pending_notifications
+        );
+    }
+
+    #[test]
+    fn leaving_fullscreen_on_the_second_monitor_stays_on_it() {
+        // The way in was wrong, so the way out could not be checked before
+        // this: the window was never on the second monitor to come back to it.
+        let (mut comp, id, screens) = two_monitors(1);
+        let before = comp.window_ref(id).expect("window").frame_rect();
+        comp.set_fullscreen(id, true).expect("fullscreen");
+        comp.set_fullscreen(id, false).expect("leave");
+        assert_eq!(
+            comp.window_ref(id).expect("window").frame_rect(),
+            before,
+            "a window fullscreened and un-fullscreened on the second monitor \
+             did not come back to where it was"
+        );
+        assert!(
+            before.intersect(&screens[1]).is_some(),
+            "the fixture put the window somewhere other than the second \
+             monitor, so this proves nothing"
+        );
+    }
+
+    #[test]
+    fn resizing_one_monitor_leaves_a_fullscreen_window_on_the_other_alone() {
+        // `refit_fullscreen_windows` used to take the resized framebuffer's
+        // width and height and apply them to *every* fullscreen window. With
+        // one screen that is right by construction; with two it moved a game
+        // fullscreen on the second monitor onto the first and sent its client
+        // a `WindowResized` for a size it does not have.
+        let (mut comp, id, screens) = two_monitors(1);
+        comp.set_fullscreen(id, true).expect("fullscreen");
+        comp.pending_notifications.clear();
+
+        comp.resize_display(400, 300).expect("resize");
+
+        assert_eq!(
+            comp.window_ref(id).expect("window").client_rect(),
+            screens[1],
+            "a mode change on the first monitor moved a window fullscreen on \
+             the second"
+        );
+        assert!(
+            !comp.pending_notifications.iter().any(
+                |n| matches!(n, EventNotification::WindowResized { window_id, .. }
+                    if *window_id == id)
+            ),
+            "the client was told its surface had changed size when it had not"
+        );
+    }
+
+    #[test]
+    fn a_fullscreen_window_on_the_resized_monitor_still_follows_it() {
+        // The other half of the pair above: making the re-fit per-monitor must
+        // not stop it re-fitting the windows that genuinely are on the monitor
+        // that changed.
+        let (mut comp, id, _) = two_monitors(0);
+        comp.set_fullscreen(id, true).expect("fullscreen");
+        comp.pending_notifications.clear();
+
+        comp.resize_display(400, 300).expect("resize");
+
+        assert_eq!(
+            comp.window_ref(id).expect("window").client_rect(),
+            Rect::new(0, 0, 400, 300),
+            "a fullscreen window kept its old monitor's size across a mode change"
+        );
+        assert!(
+            comp.pending_notifications.iter().any(|n| matches!(
+                n,
+                EventNotification::WindowResized {
+                    window_id,
+                    width: 400,
+                    height: 300,
+                } if *window_id == id
+            )),
+            "the client was never told its fullscreen surface had changed size"
+        );
+    }
+
+    #[test]
+    fn the_direct_scanout_bypass_declines_a_second_monitor() {
+        // The bypass hands one client's buffer to the scanout surface entire.
+        // On a two-headed desktop that surface spans both monitors, so taking
+        // it for a window that covers only one would put the game's pixels on
+        // the other screen in place of the desktop. The guard is that the
+        // window must cover the whole framebuffer, which a one-monitor
+        // fullscreen window no longer does -- this pins that the guard is
+        // actually load-bearing rather than incidentally true.
+        let (mut comp, id, screens) = two_monitors(0);
+        comp.set_fullscreen(id, true).expect("fullscreen");
+        let (w, h) = (screens[0].width, screens[0].height);
+        let bytes = solid_buffer_bytes(w, h, 0xFF00_FF00);
+        comp.attach_buffer(id, 1, w, h, w * 4, BufferFormat::Argb8888, &bytes)
+            .expect("attach");
+        assert_eq!(
+            comp.direct_scanout_window(),
+            None,
+            "the bypass took a window that covers one monitor of two"
+        );
+    }
+
+    // ---- a rectangle wider than i32 is wide, not negative ----
+
+    #[test]
+    fn unioning_an_over_wide_rect_does_not_shrink_the_bounding_box() {
+        // `union` used to compute its far edge as `x + width as i32`. A width
+        // above `i32::MAX` casts to a negative number, so the bounding box came
+        // out *smaller* than the rectangle it was supposed to contain -- and
+        // the caller that noticed was `attach_display`, which sized the scanout
+        // surface from the union and so accepted a desktop no framebuffer could
+        // hold. `right()` already saturated correctly; `union` now uses it.
+        let sane = Rect::new(0, 0, 800, 600);
+        let huge = Rect::new(0, 0, u32::MAX, 600);
+        let bounds = sane.union(&huge);
+        assert!(
+            bounds.width >= sane.width,
+            "the union of a rectangle with a wider one came out narrower than \
+             the first: {bounds:?}"
+        );
+        assert_eq!(
+            bounds.width, 2_147_483_647,
+            "an over-wide rectangle should pin the bounding box at the widest \
+             representable one, not wrap"
+        );
+    }
+
+    #[test]
+    fn intersecting_an_over_wide_rect_does_not_come_back_empty() {
+        // The same cast in `intersect` put the far edge left of the near one,
+        // so a rectangle that contains everything intersected to nothing --
+        // which would silently clip away every window on such a display.
+        let huge = Rect::new(0, 0, u32::MAX, u32::MAX);
+        let window = Rect::new(100, 100, 200, 150);
+        assert_eq!(
+            huge.intersect(&window),
+            Some(window),
+            "a rectangle inside an over-wide one was reported as not \
+             overlapping it"
         );
     }
 }

@@ -60,6 +60,7 @@ BT = "gui/desktop/src/bluetooth.rs"
 UPD = "gui/desktop/src/update_settings.rs"
 STOR = "gui/desktop/src/storage_settings.rs"
 POW = "gui/desktop/src/power_settings.rs"
+NET = "gui/desktop/src/network_indicator.rs"
 
 # (name, file, [(old, new), ...], [packages], [tests expected to fail])
 DEFECTS = [
@@ -948,6 +949,110 @@ DEFECTS = [
         [("        if bar_w > 0.0 {", "        if bar_w >= 0.0 {")],
         ["desktop"],
         ["the_panel_draws_nothing_that_is_immediately_erased"],
+    ),
+    # --- network_indicator.rs (module 12) ------------------------------------
+    (
+        "JJJJ: the flyout keeps its own background",
+        NET,
+        [(
+            "            width,\n            height,\n            color: p.base,",
+            "            width,\n            height,\n            color: Color::from_hex(0x1E1E2E),",
+        )],
+        ["desktop"],
+        ["every_colour_either_render_draws_comes_from_its_palette"],
+    ),
+    (
+        "KKKK: an unremarkable network's row keeps its own background",
+        NET,
+        [("                    p.mantle", "                    Color::from_hex(0x181825)")],
+        ["desktop"],
+        ["every_colour_either_render_draws_comes_from_its_palette"],
+    ),
+    (
+        "LLLL: the transfer-rate caption keeps its own grey",
+        NET,
+        [(
+            "            font_size: 11.0,\n            color: p.subtext0,",
+            "            font_size: 11.0,\n            color: Color::from_hex(0xA6ADC8),",
+        )],
+        ["desktop"],
+        ["every_colour_either_render_draws_comes_from_its_palette"],
+    ),
+    (
+        "MMMM: the tray icon's disc keeps its own grey",
+        NET,
+        [(
+            "            height: 24.0,\n            color: p.surface0,",
+            "            height: 24.0,\n            color: Color::from_hex(0x313244),",
+        )],
+        ["desktop"],
+        ["every_colour_either_render_draws_comes_from_its_palette"],
+    ),
+    # The blue-state trap, made concrete. `Excellent => p.accent` is exactly
+    # what a careless conversion writes, because the rung *is* blue and blue is
+    # the default accent -- so it looks right until the user picks Green, at
+    # which point a full-strength signal and a merely-good one become the same
+    # swatch, side by side in the same list.
+    (
+        "NNNN: the strongest signal is repainted the user's accent",
+        NET,
+        [("            Self::Excellent => p.blue,", "            Self::Excellent => p.accent,")],
+        ["desktop"],
+        [
+            "only_the_network_you_are_on_follows_the_accent",
+            "signal_strength_stays_a_ladder_under_every_accent",
+        ],
+    ),
+    # The one accent site frozen. Nothing else on this panel follows the accent,
+    # so without the negative half of the test every other assertion in it would
+    # still pass -- vacuously, on an indicator that ignored the accent entirely.
+    (
+        "OOOO: the network you are on stops following the accent",
+        NET,
+        [(
+            "color: if net.connected { p.accent } else { p.text },",
+            "color: if net.connected { p.blue } else { p.text },",
+        )],
+        ["desktop"],
+        ["only_the_network_you_are_on_follows_the_accent"],
+    ),
+    (
+        "PPPP: airplane mode is repainted the user's accent",
+        NET,
+        [("            p.peach\n        } else {", "            p.accent\n        } else {")],
+        ["desktop"],
+        ["only_the_network_you_are_on_follows_the_accent"],
+    ),
+    # The other half of the same shape, and the reason the loop walks two
+    # booleans rather than one: the radio-on green is only on screen when the
+    # radio is on, exactly as the airplane peach is only on screen in airplane
+    # mode. Each needs its own state or it is compared with its own opposite.
+    (
+        "SSSS: an enabled radio is repainted the user's accent",
+        NET,
+        [(
+            "let wifi_color = if self.wifi_enabled {\n            p.green",
+            "let wifi_color = if self.wifi_enabled {\n            p.accent",
+        )],
+        ["desktop"],
+        ["only_the_network_you_are_on_follows_the_accent"],
+    ),
+    (
+        "QQQQ: a cellular link is drawn exactly like an ethernet one",
+        NET,
+        [(
+            "                ConnectionType::Cellular => p.peach,",
+            "                ConnectionType::Cellular => p.green,",
+        )],
+        ["desktop"],
+        ["the_five_kinds_of_link_stay_distinct_in_both_modes"],
+    ),
+    (
+        "RRRR: two rungs of the signal ladder collapse onto one colour",
+        NET,
+        [("            Self::Good => p.green,", "            Self::Good => p.yellow,")],
+        ["desktop"],
+        ["signal_strength_stays_a_ladder_under_every_accent"],
     ),
 ]
 

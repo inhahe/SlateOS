@@ -50335,7 +50335,7 @@ commands that carry the colour in question, and assert the two renders agree.
 Candidates: anything drawn on the wallpaper, on a video surface, on a
 thumbnail, or on any other content the palette does not own.
 
-**Part 2 progress. 11 of 49 modules converted.**
+**Part 2 progress. 12 of 49 modules converted.**
 
 - [x] `security_dialog.rs` — 29 constants, done 2026-08-22. The method above
   survived contact: the sweep lives in `gui/desktop/src/palette_check.rs` as
@@ -50748,6 +50748,39 @@ thumbnail, or on any other content the palette does not own.
       renders to a `Vec<RenderCommand>` the rule can be run over. Left local
       for now: one instance is not yet a shared helper, and the rule's
       conservatism may need adjusting against a panel that layers differently.
+- [x] `network_indicator.rs` — 13 constants, done 2026-08-22. Harness defects
+  JJJJ/KKKK/LLLL/MMMM/NNNN/OOOO/PPPP/QQQQ/RRRR/SSSS.
+  - **The harness earned its keep here: defect PPPP caught nothing on the
+    first run, and the test was wrong, not the defect.** PPPP repaints the
+    *airplane-mode-on* peach with the accent. The accent test's fixture came
+    from `NetworkState::wifi(…)`, which leaves airplane mode off — so the
+    render never emitted the peach at all, and the assertion compared the
+    off-state grey with itself and passed. Vacuously green, exactly the failure
+    mode this whole harness exists to detect. **Generalised rule: when a colour
+    is chosen by a boolean, the test needs the boolean, not just the render.**
+    The fix walks airplane × radio (four fixtures) rather than one, and defect
+    SSSS was added afterwards to prove the *radio-on* green the same way — each
+    on-colour needs its own state or it is silently compared with its own
+    opposite.
+  - **The blue-state trap, in its purest form yet.** `SignalStrength::color`
+    runs red → yellow → green → **blue**, and that blue rung reads exactly like
+    an obvious `p.accent`: it is blue, and blue is the default accent, so the
+    mistake looks correct on a fresh install. It is not the accent — it is the
+    top rung of a ladder, and on a Green desktop `Excellent => p.accent` would
+    collapse onto the `Good` green. Defect NNNN.
+  - **The strongest side-by-side distinctness case so far.** Unlike the battery
+    ladder (one reading on screen) or the storage bar (one chart), the flyout
+    lists *every* visible network with its own swatch, so two colliding rungs
+    put two differently-strong networks on screen looking identical, in one
+    glance, with nothing else to disambiguate them.
+  - **Only one site follows the accent** — the SSID of the network you are on,
+    which is the same "which of these am I on" role the selected power plan
+    takes. The five connection-type hues stay categorical; the note in
+    `the_five_kinds_of_link_stay_distinct_in_both_modes` records that this is a
+    *weaker* argument than the ladder's, since only one tray icon is on screen
+    at a time — it rests on a code the user has learnt rather than on a
+    comparison. `Wifi` is excluded from that row because it has no colour of
+    its own, delegating to the signal ladder.
 
 **Trigger:** this is not blocked on anything. It is sequenced after the shell
 event loop (`TD-C-THE-SHELL-CAN-DRAW-ITSELF-AND-NOBODY-CAN-ASK-IT-TO`) only

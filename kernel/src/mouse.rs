@@ -151,6 +151,16 @@ static ACCUM_Y: AtomicI16 = AtomicI16::new(0);
 /// Total event count (for diagnostics).
 static EVENT_COUNT: AtomicU32 = AtomicU32::new(0);
 
+/// Button mask from the previous packet.
+///
+/// evdev reports button *transitions*, not levels — a client learns
+/// `BTN_LEFT` went down, not that it is down — so producing them needs the
+/// previous mask. It is kept here rather than read back from the event ring
+/// because that ring is consume-once: by the time the next packet arrives the
+/// previous event may already have been taken by a kernel consumer, and a
+/// button edge that depended on it would be lost or invented.
+static PREV_BUTTONS: AtomicU8 = AtomicU8::new(0);
+
 // ---------------------------------------------------------------------------
 // Initialization
 // ---------------------------------------------------------------------------
@@ -392,6 +402,18 @@ fn assemble_event(packet_size: u8) {
 
     // Push event into ring buffer.
     push_event(buttons, dx, dy, dz);
+
+    // Publish the same packet to `/dev/input/event1`.
+    //
+    // A second, independent consumer rather than a re-derivation of the first:
+    // the kernel ring above is consume-once (a reader that takes an event
+    // takes it from everyone), which is right for a single in-kernel cursor
+    // and wrong for userspace, where every open must see every event. The two
+    // rings also differ in what they carry — evdev needs the button *edges*,
+    // which is why the previous mask is tracked here rather than recomputed
+    // from a ring that may already have been drained.
+    let prev = PREV_BUTTONS.swap(buttons, Ordering::AcqRel);
+    crate::evdev::push_mouse_packet(buttons, prev, dx, dy, dz);
 }
 
 /// Push a mouse event into the ring buffer (ISR context).

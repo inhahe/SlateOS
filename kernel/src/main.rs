@@ -97,6 +97,8 @@ mod drm;
 mod drvmon;
 mod e1000;
 mod error;
+mod evdev;
+mod evdev_fd;
 mod eventlog;
 mod fb;
 mod font;
@@ -5757,6 +5759,21 @@ extern "C" fn kernel_main() -> ! {
     // DRM card client-instance lifecycle self-test (the /dev/dri fd family).
     if let Err(e) = drm::card_fd::self_test() {
         serial_println!("FATAL: DRM card client self-test failed: {:?}", e);
+        cpu::halt_loop();
+    }
+
+    // evdev input-device self-test (the /dev/input/event* fd family).
+    //
+    // Fatal, like the DRM ABI tests and for the same reason: this is a wire
+    // format a userspace client parses by memcpy, so a record that is the
+    // wrong size or the wrong shape is not a degraded input device — it is a
+    // client reading garbage and acting on it.
+    if let Err(e) = evdev::self_test() {
+        serial_println!("FATAL: evdev self-test failed: {:?}", e);
+        cpu::halt_loop();
+    }
+    if let Err(e) = evdev_fd::self_test() {
+        serial_println!("FATAL: evdev fd self-test failed: {:?}", e);
         cpu::halt_loop();
     }
 

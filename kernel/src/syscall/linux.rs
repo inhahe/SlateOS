@@ -3809,6 +3809,20 @@ pub fn close_handle(entry: FdEntry) -> SyscallResult {
             crate::drm::card_fd::close(h);
             SyscallResult::ok(0)
         }
+        HandleKind::Evdev => {
+            // Same shape as the DrmCard arm: deregister from the per-process
+            // ipc_handles list, then drop one refcount on the per-open cursor.
+            if let Some(pid) = caller_pid() {
+                pcb::deregister_ipc_handle(
+                    pid,
+                    crate::cap::ResourceType::InputDevice,
+                    entry.raw_handle,
+                );
+            }
+            let h = crate::evdev_fd::EvdevHandle::from_raw(entry.raw_handle);
+            crate::evdev_fd::close(h);
+            SyscallResult::ok(0)
+        }
         HandleKind::Socket => {
             // Deregister from the per-process ipc_handles list — same
             // rationale as the EventFd/.../DrmCard arms above — then drop one
@@ -3898,13 +3912,17 @@ fn dispatch_write(entry: FdEntry, buf: u64, len: u64) -> SyscallResult {
         HandleKind::EventFd => dispatch_eventfd_write(entry, buf, len),
         // signalfd, timerfd and inotify are read-only: write(2) → EINVAL.
         // The ALSA control device and DRM card are ioctl-only, so
-        // write(2) → EINVAL too.
+        // write(2) → EINVAL too.  An evdev node is read-only here for a
+        // narrower reason: Linux's `evdev_write` exists solely to upload
+        // force-feedback effects, and a device with no FF capability — which
+        // is every input device we expose — returns EINVAL from it.
         HandleKind::PidFd
         | HandleKind::Epoll
         | HandleKind::SignalFd
         | HandleKind::Timerfd
         | HandleKind::Inotify
         | HandleKind::AlsaControl
+        | HandleKind::Evdev
         | HandleKind::DrmCard => linux_err(errno::EINVAL),
         // ALSA PCM playback substream — `write(2)` pushes interleaved frames
         // to the mixer (the byte-stream equivalent of `WRITEI_FRAMES`).
@@ -4283,6 +4301,7 @@ fn dispatch_read(entry: FdEntry, buf: u64, cap: u64) -> SyscallResult {
         HandleKind::PidFd | HandleKind::Epoll | HandleKind::AlsaControl => linux_err(errno::EINVAL),
         // A DRM card fd delivers queued KMS events (flip-complete) via read(2).
         HandleKind::DrmCard => dispatch_drm_card_read(&entry, buf, cap),
+        HandleKind::Evdev => dispatch_evdev_read(&entry, buf, cap),
         HandleKind::MemFd => dispatch_memfd_read(entry, buf, cap),
         HandleKind::SignalFd => dispatch_signalfd_read(entry, buf, cap),
         HandleKind::Timerfd => dispatch_timerfd_read(entry, buf, cap),
@@ -5275,6 +5294,7 @@ fn fcntl_flock_apply(
         | HandleKind::AlsaPcm
         | HandleKind::AlsaControl
         | HandleKind::DrmCard
+        | HandleKind::Evdev
         | HandleKind::Socket => {
             return linux_err(errno::EBADF);
         }
@@ -5423,6 +5443,7 @@ fn sys_lseek(args: &SyscallArgs) -> SyscallResult {
         | HandleKind::AlsaPcm
         | HandleKind::AlsaControl
         | HandleKind::DrmCard
+        | HandleKind::Evdev
         | HandleKind::Socket => linux_err(errno::ESPIPE),
     }
 }
@@ -5633,6 +5654,65 @@ fn try_open_drm(path: &[u8], flags: u32) -> Option<SyscallResult> {
     }
 }
 
+/// Intercept `open("/dev/input/eventN", …)` and mint an
+/// [`crate::proc::linux_fd::HandleKind::Evdev`] fd instead of routing through
+/// the VFS.
+///
+/// Returns `None` for any other path, so the caller falls through to the
+/// normal open.  Interception rather than a devfs node is not a shortcut: a
+/// devfs read is `read_at(path, offset, len)` with no flags argument, so it
+/// can express neither `O_NONBLOCK` nor a blocking wait, and an input device
+/// that can do neither forces every client to busy-poll the keyboard.  The
+/// same reasoning already put `/dev/dri/card0` here.
+fn try_open_evdev(path: &[u8], flags: u32) -> Option<SyscallResult> {
+    let device = match path {
+        b"/dev/input/event0" => crate::evdev::InputDevice::Keyboard,
+        b"/dev/input/event1" => crate::evdev::InputDevice::Mouse,
+        _ => return None,
+    };
+
+    // A real caller is required — kernel context has no fd table to install
+    // into.  EBADF, the same way the VFS path reports it for kernel context.
+    let pid = match caller_pid() {
+        Some(p) => p,
+        None => return Some(linux_err(errno::EBADF)),
+    };
+
+    // Reading the keyboard is the authority to observe every keystroke typed
+    // into every application, so it is gated on holding an InputDevice
+    // capability rather than on being able to name the path.  The class grant
+    // (`resource_id == 0`) is what a compositor is given; nothing else has it.
+    if let Err(e) = handlers::require_cap_type(
+        crate::cap::ResourceType::InputDevice,
+        crate::cap::Rights::READ,
+    ) {
+        return Some(linux_err(linux_errno_for(e)));
+    }
+
+    // Create the per-open cursor and register it as a per-process IPC resource
+    // so exit-cleanup and fork-sharing see it.
+    let handle = crate::evdev_fd::create(device);
+    pcb::register_ipc_handle(pid, crate::cap::ResourceType::InputDevice, handle.raw());
+
+    let status_flags = flags & oflags::O_NONBLOCK;
+    let fd_flags = if flags & oflags::O_CLOEXEC != 0 {
+        crate::proc::linux_fd::FD_CLOEXEC
+    } else {
+        0
+    };
+    let entry = FdEntry::evdev(handle.raw(), fd_flags, status_flags);
+
+    match pcb::linux_fd_install(pid, entry, 0) {
+        Ok(fd) => Some(SyscallResult::ok(i64::from(fd))),
+        Err(e) => {
+            // Roll back the registration + instance on table failure.
+            pcb::deregister_ipc_handle(pid, crate::cap::ResourceType::InputDevice, handle.raw());
+            crate::evdev_fd::close(handle);
+            Some(linux_err(linux_errno_for(e)))
+        }
+    }
+}
+
 /// Shared backend for `open` / `openat`.
 fn open_common(path_ptr: u64, path_len_hint: u64, flags: u32, no_symlinks: bool) -> SyscallResult {
     if path_ptr == 0 {
@@ -5683,6 +5763,9 @@ fn open_common(path_ptr: u64, path_len_hint: u64, flags: u32, no_symlinks: bool)
             return r;
         }
         if let Some(r) = try_open_drm(path_slice, flags) {
+            return r;
+        }
+        if let Some(r) = try_open_evdev(path_slice, flags) {
             return r;
         }
     }
@@ -5943,6 +6026,9 @@ fn open_kernel_path_install(path: &str, flags: u32, no_symlinks: bool) -> Syscal
         return r;
     }
     if let Some(r) = try_open_drm(path.as_bytes(), flags) {
+        return r;
+    }
+    if let Some(r) = try_open_evdev(path.as_bytes(), flags) {
         return r;
     }
     if let Err(e) =
@@ -11279,6 +11365,99 @@ fn drm_card_ioctl_mode_page_flip(
         crate::drm::card_fd::queue_event(handle, &ev.to_bytes());
     }
     SyscallResult::ok(0)
+}
+
+/// Maximum `input_event` records one `read(2)` on an evdev fd delivers.
+///
+/// The batch is copied through a kernel stack buffer, so it is a real stack
+/// cost: 32 records is 768 bytes, which is comfortable in a syscall frame and
+/// is more than a client ever has pending in practice — a single keystroke is
+/// 3 records and a mouse packet at most 7.  A caller with a larger buffer gets
+/// a short read and calls again, which `read(2)` permits and every evdev
+/// client already handles (Linux likewise stops at whatever its per-client
+/// buffer holds).
+const EVDEV_READ_BATCH: usize = 32;
+
+/// `read(2)` on a `/dev/input/eventN` fd — deliver whole `input_event` records.
+///
+/// Blocks until at least one whole record is available unless the fd carries
+/// `O_NONBLOCK`, in which case an empty stream is `EAGAIN`.  This is the
+/// difference that made an open-interception fd necessary rather than a devfs
+/// node: `DevFs::read_at` takes no flags, so it could neither honour
+/// `O_NONBLOCK` nor block interruptibly, and an input device that cannot block
+/// forces every client into a busy-poll.
+///
+/// The blocking wait is the same HLT-poll the console read path uses
+/// ([`crate::keyboard::read_char_interruptible`]) and for the same reason: the
+/// producer is an ISR, which cannot take a wait-queue lock, so the sleeper
+/// wakes on the device IRQ (or the timer tick, which bounds how long a pending
+/// signal goes unnoticed) and re-checks.  A deliverable signal aborts the wait
+/// with `ERESTARTSYS`, so an interrupted blocking read restarts transparently
+/// under `SA_RESTART` exactly as it does on a pipe.
+///
+/// A buffer too small for one whole 24-byte record is `EINVAL`, never a short
+/// or partial read — matching Linux's `evdev_read`, and for the same reason: a
+/// client that passes 16 bytes has misunderstood the protocol, and a partial
+/// record would let it keep misunderstanding it while silently corrupting its
+/// own event stream.
+fn dispatch_evdev_read(entry: &FdEntry, buf: u64, cap: u64) -> SyscallResult {
+    use crate::evdev::INPUT_EVENT_SIZE;
+    use crate::evdev_fd::{self, EvdevHandle};
+
+    let handle = EvdevHandle::from_raw(entry.raw_handle);
+    // Existence check (None ⇒ stale instance).
+    if evdev_fd::device(handle).is_none() {
+        return linux_err(errno::EBADF);
+    }
+
+    let cap_usize = usize::try_from(cap).unwrap_or(usize::MAX);
+    if cap_usize < INPUT_EVENT_SIZE {
+        return linux_err(errno::EINVAL);
+    }
+    // Only ever deliver whole records, and never more than one batch.
+    let want = cap_usize.min(EVDEV_READ_BATCH.saturating_mul(INPUT_EVENT_SIZE));
+    let want = want.saturating_sub(want % INPUT_EVENT_SIZE);
+
+    // Validate the destination before draining anything: a bad pointer must
+    // not consume events the client will then never see.
+    if let Err(e) = crate::mm::user::validate_user_write(buf, want) {
+        return linux_err(linux_errno_for(e));
+    }
+
+    let nonblock = entry.status_flags & oflags::O_NONBLOCK != 0;
+    let pid = crate::ipc::waiters::current_user_pid();
+    let mut kbuf = [0u8; EVDEV_READ_BATCH * INPUT_EVENT_SIZE];
+    let Some(dst) = kbuf.get_mut(..want) else {
+        // Unreachable: `want <= EVDEV_READ_BATCH * INPUT_EVENT_SIZE` by the
+        // `min` above.  Report EINVAL rather than index and panic.
+        return linux_err(errno::EINVAL);
+    };
+
+    let n = loop {
+        match evdev_fd::read(handle, dst) {
+            Ok(0) => {}
+            Ok(n) => break n,
+            Err(e) => return linux_err(linux_errno_for(e)),
+        }
+        if nonblock {
+            return linux_err(errno::EAGAIN);
+        }
+        // A signal aborts the wait; the read has consumed nothing, so a
+        // transparent restart re-enters here and loses no event.
+        if crate::ipc::waiters::deliverable_signal_pending(pid) {
+            return restart::restart_result(restart::ERESTARTSYS);
+        }
+        // Wake on the keyboard/mouse IRQ or the timer tick.
+        crate::cpu::hlt();
+    };
+
+    // SAFETY: `want` bytes at `buf` were validated writable above and
+    // `n <= want`; `copy_to_user` re-validates the range and performs the SMAP
+    // dance.  `kbuf` holds `n` live kernel bytes written by `evdev_fd::read`.
+    if unsafe { crate::mm::user::copy_to_user(kbuf.as_ptr(), buf, n) }.is_err() {
+        return linux_err(errno::EFAULT);
+    }
+    SyscallResult::ok(i64::try_from(n).unwrap_or(i64::MAX))
 }
 
 /// `read(2)` on a `/dev/dri/cardN` fd — drain queued KMS events.
@@ -16705,6 +16884,7 @@ fn sys_fsync(args: &SyscallArgs) -> SyscallResult {
         | HandleKind::AlsaPcm
         | HandleKind::AlsaControl
         | HandleKind::DrmCard
+        | HandleKind::Evdev
         | HandleKind::Socket => linux_err(errno::EINVAL),
     }
 }
@@ -17594,6 +17774,7 @@ fn sys_readahead(args: &SyscallArgs) -> SyscallResult {
         | HandleKind::AlsaPcm
         | HandleKind::AlsaControl
         | HandleKind::DrmCard
+        | HandleKind::Evdev
         | HandleKind::Socket => return linux_err(errno::EINVAL),
     }
     SyscallResult::ok(0)
@@ -19639,6 +19820,8 @@ fn fill_stat_for_fd(buf: &mut [u8; STAT_SIZE], entry: &crate::proc::linux_fd::Fd
         // DRM card / render node is a character device node under /dev/dri
         // (crw-rw---- root:video on Linux), like the ALSA nodes.
         HandleKind::DrmCard => (S_IFCHR | 0o660, 4096),
+        // evdev input node under /dev/input (crw-rw---- root:input on Linux).
+        HandleKind::Evdev => (S_IFCHR | 0o660, 4096),
         // A daemon-backed AF_INET stream socket: Linux stat reports
         // S_IFSOCK with 0777 perms (srwxrwxrwx on the anon socket inode).
         HandleKind::Socket => (S_IFSOCK | 0o777, 4096),
@@ -19999,6 +20182,8 @@ fn fill_statx_for_fd(buf: &mut [u8; STATX_SIZE], entry: &crate::proc::linux_fd::
         HandleKind::AlsaControl => ((S_IFCHR | 0o660) as u16, 4096),
         // DRM card / render node character device node under /dev/dri.
         HandleKind::DrmCard => ((S_IFCHR | 0o660) as u16, 4096),
+        // evdev input character device node under /dev/input.
+        HandleKind::Evdev => ((S_IFCHR | 0o660) as u16, 4096),
         // Daemon-backed AF_INET stream socket — S_IFSOCK | 0777, like Linux.
         HandleKind::Socket => ((S_IFSOCK | 0o777) as u16, 4096),
     };
@@ -21687,6 +21872,7 @@ fn sys_ftruncate(args: &SyscallArgs) -> SyscallResult {
         | HandleKind::AlsaPcm
         | HandleKind::AlsaControl
         | HandleKind::DrmCard
+        | HandleKind::Evdev
         | HandleKind::Socket => linux_err(errno::EINVAL),
     }
 }
@@ -26942,6 +27128,12 @@ fn sys_pidfd_getfd(args: &SyscallArgs) -> SyscallResult {
                 return linux_err(errno::EBADF);
             }
         }
+        HandleKind::Evdev => {
+            let h = crate::evdev_fd::EvdevHandle::from_raw(entry.raw_handle);
+            if crate::evdev_fd::dup(h).is_err() {
+                return linux_err(errno::EBADF);
+            }
+        }
         HandleKind::Socket => {
             let h = crate::net::socket::SocketHandle::from_raw(entry.raw_handle);
             if crate::net::socket::dup(h).is_err() {
@@ -26986,6 +27178,7 @@ fn sys_pidfd_getfd(args: &SyscallArgs) -> SyscallResult {
         HandleKind::Inotify => Some(crate::cap::ResourceType::Inotify),
         HandleKind::AlsaPcm => Some(crate::cap::ResourceType::AlsaPcm),
         HandleKind::DrmCard => Some(crate::cap::ResourceType::Drm),
+        HandleKind::Evdev => Some(crate::cap::ResourceType::InputDevice),
         HandleKind::Socket => Some(crate::cap::ResourceType::NetSocket),
         HandleKind::Console | HandleKind::PidFd | HandleKind::AlsaControl => None,
     };
@@ -27069,6 +27262,10 @@ fn release_handle_ref(kind: HandleKind, raw_handle: u64) {
         HandleKind::DrmCard => {
             let h = crate::drm::card_fd::DrmCardHandle::from_raw(raw_handle);
             crate::drm::card_fd::close(h);
+        }
+        HandleKind::Evdev => {
+            let h = crate::evdev_fd::EvdevHandle::from_raw(raw_handle);
+            crate::evdev_fd::close(h);
         }
         HandleKind::Socket => {
             let h = crate::net::socket::SocketHandle::from_raw(raw_handle);
@@ -29979,6 +30176,18 @@ fn poll_revents_from_entry(
                 0
             }
         }
+        HandleKind::Evdev => {
+            // Readable whenever at least one whole input_event is pending, or
+            // a SYN_DROPPED is owed after the reader was lapped.  Never
+            // POLLOUT: write(2) is EINVAL (no force-feedback), so a client
+            // that polled for writability would spin on a readiness it can
+            // never use.
+            if crate::evdev_fd::readable(crate::evdev_fd::EvdevHandle::from_raw(entry.raw_handle)) {
+                poll_bits::POLLIN | poll_bits::POLLRDNORM
+            } else {
+                0
+            }
+        }
         HandleKind::Socket => {
             // Honest readiness for the daemon-backed stream socket: a single
             // non-destructive `OP_POLL` round-trip asks the daemon whether the
@@ -30916,6 +31125,7 @@ fn sys_epoll_ctl(args: &SyscallArgs) -> SyscallResult {
         | HandleKind::AlsaPcm
         | HandleKind::AlsaControl
         | HandleKind::DrmCard
+        | HandleKind::Evdev
         | HandleKind::Socket => {}
     }
 
@@ -34211,6 +34421,7 @@ fn handle_kind_ord(k: crate::proc::linux_fd::HandleKind) -> u64 {
         HandleKind::AlsaControl => 11,
         HandleKind::DrmCard => 12,
         HandleKind::Socket => 13,
+        HandleKind::Evdev => 14,
     }
 }
 
@@ -35345,6 +35556,7 @@ fn sys_cachestat(args: &SyscallArgs) -> SyscallResult {
                 | HandleKind::AlsaPcm
                 | HandleKind::AlsaControl
                 | HandleKind::DrmCard
+                | HandleKind::Evdev
                 | HandleKind::Socket => {
                     return linux_err(errno::EOPNOTSUPP);
                 }
@@ -41830,6 +42042,7 @@ fn sys_pread64(args: &SyscallArgs) -> SyscallResult {
         | HandleKind::AlsaPcm
         | HandleKind::AlsaControl
         | HandleKind::DrmCard
+        | HandleKind::Evdev
         | HandleKind::Socket => linux_err(errno::ESPIPE),
     }
 }
@@ -41898,6 +42111,7 @@ fn sys_pwrite64(args: &SyscallArgs) -> SyscallResult {
         | HandleKind::AlsaPcm
         | HandleKind::AlsaControl
         | HandleKind::DrmCard
+        | HandleKind::Evdev
         | HandleKind::Socket => linux_err(errno::ESPIPE),
     }
 }
@@ -43719,6 +43933,7 @@ fn sys_preadv(args: &SyscallArgs) -> SyscallResult {
         | HandleKind::AlsaPcm
         | HandleKind::AlsaControl
         | HandleKind::DrmCard
+        | HandleKind::Evdev
         | HandleKind::Socket => linux_err(errno::ESPIPE),
     }
 }
@@ -43761,6 +43976,7 @@ fn sys_pwritev(args: &SyscallArgs) -> SyscallResult {
         | HandleKind::AlsaPcm
         | HandleKind::AlsaControl
         | HandleKind::DrmCard
+        | HandleKind::Evdev
         | HandleKind::Socket => linux_err(errno::ESPIPE),
     }
 }
@@ -43834,6 +44050,7 @@ fn sys_preadv2(args: &SyscallArgs) -> SyscallResult {
         | HandleKind::AlsaPcm
         | HandleKind::AlsaControl
         | HandleKind::DrmCard
+        | HandleKind::Evdev
         | HandleKind::Socket => linux_err(errno::ESPIPE),
     }
 }
@@ -43889,6 +44106,7 @@ fn sys_pwritev2(args: &SyscallArgs) -> SyscallResult {
         | HandleKind::AlsaPcm
         | HandleKind::AlsaControl
         | HandleKind::DrmCard
+        | HandleKind::Evdev
         | HandleKind::Socket => linux_err(errno::ESPIPE),
     }
 }
@@ -63410,6 +63628,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                     HandleKind::Inotify => Some(crate::cap::ResourceType::Inotify),
                     HandleKind::AlsaPcm => Some(crate::cap::ResourceType::AlsaPcm),
                     HandleKind::DrmCard => Some(crate::cap::ResourceType::Drm),
+                    HandleKind::Evdev => Some(crate::cap::ResourceType::InputDevice),
                     HandleKind::Socket => Some(crate::cap::ResourceType::NetSocket),
                     HandleKind::Console | HandleKind::PidFd | HandleKind::AlsaControl => None,
                 }

@@ -107,6 +107,9 @@ pub fn cleanup_handles(handles: &[(ResourceType, u64)]) {
                     handle_raw,
                 ));
             }
+            ResourceType::InputDevice => {
+                crate::evdev_fd::close(crate::evdev_fd::EvdevHandle::from_raw(handle_raw));
+            }
             ResourceType::NetSocket => {
                 // Drop this process's reference to the AF_INET socket's daemon
                 // connection.  The final owner's close runs `NetstackConn`

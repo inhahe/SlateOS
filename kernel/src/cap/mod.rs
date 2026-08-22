@@ -339,6 +339,24 @@ pub enum ResourceType {
     /// which is not a write to anything and so does not fit `WRITE`.  §312
     /// projects `CAP_SYS_RESOURCE` and `CAP_IPC_LOCK` from it.
     ResourceLimit = 29,
+
+    /// An open input device (`/dev/input/eventN`) — keyboard or pointer.
+    ///
+    /// `resource_id` is the `evdev_fd::EvdevHandle` raw value of one open, so
+    /// this is an *instance* type like [`Drm`](ResourceType::Drm): it exists so
+    /// process-exit cleanup and `fork` sharing can find the per-open cursor
+    /// object, and so that "may read the keyboard" is derived from a held
+    /// object rather than from being able to name a path.
+    ///
+    /// Deliberately **not** folded into [`Drm`](ResourceType::Drm).  An fd on
+    /// the GPU and an fd on the keyboard are different authorities: the first
+    /// can scan out pixels, the second is a keylogger — it sees every
+    /// keystroke typed into every application, including passwords, regardless
+    /// of which window has focus.  X11 handing exactly this to every client is
+    /// the canonical example of the mistake, and withholding it was the change
+    /// Wayland was built around.  A compositor legitimately needs both, but
+    /// nothing should acquire the second by holding the first.
+    InputDevice = 30,
 }
 
 impl ResourceType {
@@ -348,7 +366,7 @@ impl ResourceType {
     /// variant count. Consumers that need "every type" iterate `1..=LAST`
     /// rather than keeping their own list — see
     /// [`groups::test_admin_grants_every_resource_type`](crate::cap::groups).
-    pub const LAST: u16 = Self::ResourceLimit as u16;
+    pub const LAST: u16 = Self::InputDevice as u16;
 
     /// This type's wire discriminant, as sent to userspace.
     ///
@@ -410,7 +428,8 @@ impl ResourceType {
             | Self::Pty
             | Self::SystemClock
             | Self::PrivilegedPort
-            | Self::ResourceLimit => self as u16,
+            | Self::ResourceLimit
+            | Self::InputDevice => self as u16,
         }
     }
 }
@@ -609,9 +628,9 @@ fn test_cap_entry_info_abi() -> KernelResult<()> {
     //    It earns the exception because the value is not ours — it is the
     //    wire's, and the other copy of it lives in a tree this build cannot
     //    compile, so there is nothing to derive it from.
-    if ResourceType::LAST != 29 {
+    if ResourceType::LAST != 30 {
         serial_println!(
-            "[cap]   FAIL: ResourceType::LAST is {}, pinned at 29 — a new resource type \
+            "[cap]   FAIL: ResourceType::LAST is {}, pinned at 30 — a new resource type \
              was appended. That is fine, but the wire ABI just grew: bump the pin here, \
              and file a request so lane B adds it to posix/src/sys_capability.rs. Until \
              they do, userspace decodes the new type as unknown.",

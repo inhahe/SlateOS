@@ -224,6 +224,7 @@ pub fn init() {
         ResourceType::SystemClock,
         ResourceType::PrivilegedPort,
         ResourceType::ResourceLimit,
+        ResourceType::InputDevice,
     ]
     .map(|resource_type| CapGrant {
         resource_type,

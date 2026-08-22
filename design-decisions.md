@@ -33252,6 +33252,22 @@ deterministic failure that names it back: `fullscreenisframebuffer`,
 `resizenopointer`) were repaired against the refactor, since a marker that no
 longer applies is a proof that has quietly stopped being run.
 
+**Addendum, 2026-08-21 — the eleventh test.** Closing
+`TD-C-FULLSCREEN-IGNORES-WHICH-MONITOR-AND-WHAT-IS-RESERVED` (which this entry
+had in fact already fixed) turned up one property from its own checklist with no
+test behind it: that fullscreen resolves the monitor's **bounds** where maximize
+resolves its **work area**. Every fullscreen test here ran on a screen with
+nothing reserved, and on such a screen `work_bounds_for` and `work_area_for`
+return the same rectangle — so routing `set_fullscreen` through `work_area_for`,
+which is the tidy-up an unwary reader would make since every *other* tiling path
+does exactly that, passed all 427 of them while leaving a band of taskbar across
+the bottom of every full-screen video. `fullscreen_covers_the_taskbar_that_maximize_stops_at`
+asserts both halves in one test — maximize stops at `screen.bottom() - 40`, then
+the same window fullscreened covers the whole 800x600 — so the contrast cannot
+decay into a tautology if the fixture ever loses its reservation. Proved by the
+marker `fullscreenspareasthetaskbar`, and it failed **alone**, which is the
+evidence that the gap was real rather than incidentally covered elsewhere.
+
 One new test — `leaving_fullscreen_on_the_second_monitor_stays_on_it` — is
 **additional coverage rather than the sole guard on a new invariant**: the
 fullscreen round trip is lossless whether fullscreen sizes from the monitor or

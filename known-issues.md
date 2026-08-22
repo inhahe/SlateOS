@@ -53138,7 +53138,36 @@ That is the whole difference between this entry and the bug it replaces.
 contradiction and asked which of the two numbers should move.
 ---
 
-## TD-C-FULLSCREEN-IGNORES-WHICH-MONITOR-AND-WHAT-IS-RESERVED (lane C, 2026-08-21) — OPEN
+## TD-C-FULLSCREEN-IGNORES-WHICH-MONITOR-AND-WHAT-IS-RESERVED (lane C, 2026-08-21) — RESOLVED 2026-08-21
+
+**Resolution.** Already fixed by `c85729f62` (design-decisions.md §514), which
+landed between this entry being written and being picked up — the entry below
+describes code that no longer exists. `set_fullscreen` reads
+`self.work_bounds_for(w.frame_rect())` and sizes from *that* (lib.rs ~5216), and
+`work_bounds_for` returns `Display::bounds` — the monitor, not its work area —
+which is exactly what step 1 asks for. Step 2's blocker was resolved in the same
+commit and recorded in §514: the direct-scanout bypass is deliberately a
+single-head optimisation, and the guard that makes it so is the pre-existing
+"the window must cover the whole framebuffer" test, which a one-monitor
+fullscreen window no longer satisfies. `the_direct_scanout_bypass_declines_a_second_monitor`
+(lib.rs ~15366) pins that the guard is load-bearing rather than incidentally
+true.
+
+Step 3's checklist had two of its three tests —
+`fullscreen_fills_the_windows_own_monitor_and_not_every_monitor` and
+`leaving_fullscreen_on_the_second_monitor_stays_on_it`. The third, the contrast
+against a reservation, was genuinely missing and is now
+`fullscreen_covers_the_taskbar_that_maximize_stops_at`: it maximizes a window
+over a 40-row bottom reservation and asserts it stops at `screen.bottom() - 40`,
+then fullscreens the *same* window and asserts it covers the whole 800x600. The
+gap mattered — with nothing reserved the two helpers return the same rectangle,
+so swapping `work_bounds_for` for `work_area_for` in `set_fullscreen` passed all
+427 other tests while leaving a strip of taskbar across every full-screen video.
+Proved by the reintro marker `fullscreenspareasthetaskbar`, which fails that one
+test and no other. Compositor 428 + 18 green.
+
+<details><summary>Original entry (describes pre-<code>c85729f62</code> code)</summary>
+
 
 **In short:** Putting a window fullscreen always makes it fill the *first*
 monitor, starting at the top-left corner of the whole desktop — no matter which
@@ -53201,6 +53230,8 @@ tested today. On two it is a visible misfeature the first time anyone
 fullscreens anything on the secondary screen. It does not corrupt state — the
 restore rectangle is captured before the move, so leaving fullscreen still
 returns the window to where it was — and it does not get worse with time.
+
+</details>
 
 ## B-AUTH-DAEMON-RATE-LIMIT-TESTS-RACE-A-ONE-SECOND-WINDOW (lane B, filed by lane C 2026-08-21) — OPEN, filed as a request
 

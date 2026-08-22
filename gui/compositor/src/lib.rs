@@ -15272,6 +15272,41 @@ mod tests {
     }
 
     #[test]
+    fn fullscreen_covers_the_taskbar_that_maximize_stops_at() {
+        // Fullscreen and maximize resolve the *same* monitor and must then ask
+        // it two different questions. `maximize_window` wants the work area, so
+        // it stops above a reserved strip; `set_fullscreen` wants the bounds, so
+        // it covers it. Routing fullscreen through `work_area_for` -- the
+        // obvious tidy-up, since every other tiling path uses it, and the two
+        // helpers differ by one word at the call site -- would leave a 40-pixel
+        // band of taskbar across the bottom of every full-screen video, which is
+        // the one thing fullscreen exists to prevent. On a screen with nothing
+        // reserved the two helpers agree, so only a reservation can tell them
+        // apart, and every other fullscreen test here has an empty work area.
+        let mut comp = Compositor::new(800, 600, 2_000_000).expect("compositor");
+        let screen = comp.display_manager.displays()[0].bounds();
+        let panel = add_panel(&mut comp, screen, 40);
+        comp.reserve_edge(panel, PanelEdge::Bottom, 40)
+            .expect("reserve");
+        let app = app_at(&mut comp, 50, 50, 200, 150);
+
+        comp.maximize_window(app).expect("maximize");
+        assert_eq!(
+            comp.window_ref(app).expect("window").frame_rect().bottom(),
+            screen.bottom() - 40,
+            "maximize walked under the taskbar, so the contrast below proves \
+             nothing about fullscreen"
+        );
+
+        comp.set_fullscreen(app, true).expect("fullscreen");
+        assert_eq!(
+            comp.window_ref(app).expect("window").client_rect(),
+            screen,
+            "fullscreen left the reserved strip uncovered"
+        );
+    }
+
+    #[test]
     fn resizing_one_monitor_leaves_a_fullscreen_window_on_the_other_alone() {
         // `refit_fullscreen_windows` used to take the resized framebuffer's
         // width and height and apply them to *every* fullscreen window. With

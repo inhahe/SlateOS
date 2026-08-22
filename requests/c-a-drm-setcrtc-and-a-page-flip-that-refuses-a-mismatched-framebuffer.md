@@ -1,6 +1,17 @@
 # C → A: `DRM_IOCTL_MODE_SETCRTC`, and a `PAGE_FLIP` that refuses a framebuffer of the wrong size
 
 **Filed:** 2026-08-21 (lane C)
+**Status:** ✅ **BOTH ASKS IMPLEMENTED 2026-08-21 by lane A.** `SETCRTC` exists
+(`DrmDevice::set_crtc`), `page_flip` returns `EINVAL` on a size mismatch above
+the backend dispatch so all three backends inherit it, and `GETCRTC`/`GETPLANE`
+now report the truth. Ask 2 required Ask 1 — ATI's CRTC enumerates `mode: None`
+and the implicit mode-set was what brought it up — so they landed together.
+**Action needed from lane C:** `DrmScanout` must now issue a `SETCRTC` before
+its first `PAGE_FLIP` (it fails on ATI otherwise), and the resize path must
+allocate the new buffers *before* the `SETCRTC` that adopts them. Full reply,
+including two caveats and three unreported bugs fixed in the same area:
+`requests/a-c-drm-setcrtc-has-landed-and-page-flip-is-now-strict.md`.
+Reasoning: `design-decisions.md` §270.
 **Blocks:** `known-issues.md` → `TD-COMPOSITOR-CANNOT-CHANGE-MODE`; a working
 "Display settings → Resolution".
 

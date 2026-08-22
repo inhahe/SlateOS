@@ -150,6 +150,13 @@ impl ScanoutBuffer {
             let cid = dev
                 .first_crtc_id()
                 .ok_or(crate::error::KernelError::NotFound)?;
+            // Bring the CRTC up if nothing has yet. `page_flip` refuses an
+            // untimed CRTC (see `DrmDevice::page_flip`), and on the ATI backend
+            // the CRTC *is* untimed at enumeration — so without this the first
+            // flip would fail rather than mode-set, which is what the old
+            // implicit mode-set inside `page_flip` used to hide. A no-op on the
+            // backends the bootloader or hypervisor already timed.
+            dev.ensure_crtc_configured(cid, fid)?;
             Ok((handle, fid, cid, addrs, p))
         })?;
 

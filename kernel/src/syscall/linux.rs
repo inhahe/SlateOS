@@ -9844,6 +9844,14 @@ fn drm_card_ioctl(entry: &FdEntry, request: u32, argp: u64) -> SyscallResult {
             }
             drm_card_ioctl_mode_getcrtc(handle, argp)
         }
+        // SETCRTC programs a display timing and binds a framebuffer, which is
+        // the definition of modeset authority — a render node gets EACCES.
+        uapi::DRM_IOCTL_MODE_SETCRTC => {
+            if render_node {
+                return linux_err(errno::EACCES);
+            }
+            drm_card_ioctl_mode_setcrtc(handle, argp)
+        }
         uapi::DRM_IOCTL_MODE_GETPLANERESOURCES => {
             if render_node {
                 return linux_err(errno::EACCES);
@@ -10787,6 +10795,116 @@ fn drm_card_ioctl_mode_getcrtc(
     match write_user_struct(argp, &crtc) {
         Ok(()) => SyscallResult::ok(0),
         Err(e) => linux_err(e),
+    }
+}
+
+/// The largest `count_connectors` a `SETCRTC` may name.
+///
+/// There is no hardware here with anything like this many outputs — every
+/// backend enumerates exactly one connector — so this is not a capability
+/// limit but a bound on what a hostile or confused caller can make the kernel
+/// allocate. `count_connectors` is a `u32` read straight from userspace, and
+/// without a cap `0xFFFF_FFFF` asks for a 16 GiB copy before any of it can be
+/// rejected.
+const DRM_SETCRTC_MAX_CONNECTORS: u32 = 32;
+
+/// Copy a `u32` array in from userspace for a KMS setter.
+///
+/// The counterpart to [`drm_copy_array`]. Returns an empty vector for a zero
+/// count, and `EINVAL` rather than `EFAULT` for a non-zero count with a null
+/// pointer — the request is malformed, not merely unreadable.
+fn drm_read_u32_array(user_ptr: u64, count: u32, max: u32) -> Result<alloc::vec::Vec<u32>, i32> {
+    if count == 0 {
+        return Ok(alloc::vec::Vec::new());
+    }
+    if count > max {
+        return Err(errno::EINVAL);
+    }
+    if user_ptr == 0 {
+        return Err(errno::EINVAL);
+    }
+    let n = usize::try_from(count).map_err(|_| errno::EINVAL)?;
+    let bytes = n.checked_mul(core::mem::size_of::<u32>()).ok_or(errno::EINVAL)?;
+    let mut out = alloc::vec![0u32; n];
+    // SAFETY: `out` is `n` contiguous `u32` = `bytes` bytes of valid, writable
+    // kernel memory; `copy_from_user` validates the user source range and
+    // handles SMAP. A byte copy imposes no alignment requirement on the user
+    // pointer.
+    if unsafe { crate::mm::user::copy_from_user(user_ptr, out.as_mut_ptr().cast::<u8>(), bytes) }
+        .is_err()
+    {
+        return Err(errno::EFAULT);
+    }
+    Ok(out)
+}
+
+/// `DRM_IOCTL_MODE_SETCRTC` — program a CRTC's mode, connectors and scanout
+/// framebuffer, or turn it off.
+///
+/// `mode_valid == 0` means "disable this CRTC", and per the Linux ABI must
+/// come with `fb_id == 0` and `count_connectors == 0`; a compositor shutting
+/// down cleanly is the normal user of that form, so it is a success path and
+/// not an error one.
+///
+/// Only `hdisplay`, `vdisplay` and `vrefresh` are taken from the caller's
+/// `drm_mode_modeinfo`; the rest is looked up from the connector's own mode
+/// list by [`crate::drm::DrmDevice::set_crtc`]. That is deliberate and is not
+/// a shortcut: [`drm_mode_to_uapi`] emits zeros for `hsync_*`, `vsync_*`,
+/// `hskew`, `vscan` and `flags`, so a client that reads a mode out of
+/// `GETCONNECTOR` and passes it straight back is *not* returning the timing it
+/// was given, and honouring the struct as written would blank the display.
+///
+/// Nothing is written back — `SETCRTC` is a pure input ioctl in Linux too, and
+/// a client that wants to know what took effect asks `GETCRTC`, which now
+/// reports the mode actually programmed rather than the boot one.
+fn drm_card_ioctl_mode_setcrtc(
+    handle: crate::drm::card_fd::DrmCardHandle,
+    argp: u64,
+) -> SyscallResult {
+    use crate::drm::uapi;
+    let req = match read_user_struct::<uapi::DrmModeCrtc>(argp) {
+        Ok(v) => v,
+        Err(e) => return linux_err(e),
+    };
+    let device = match drm_card_device(handle) {
+        Ok(d) => d,
+        Err(e) => return linux_err(e),
+    };
+    let conn_ids = match drm_read_u32_array(
+        req.set_connectors_ptr,
+        req.count_connectors,
+        DRM_SETCRTC_MAX_CONNECTORS,
+    ) {
+        Ok(v) => v,
+        Err(e) => return linux_err(e),
+    };
+
+    let crtc_id = crate::drm::DrmObjectId::new(req.crtc_id);
+    let fb_id = if req.fb_id == 0 {
+        None
+    } else {
+        Some(crate::drm::DrmObjectId::new(req.fb_id))
+    };
+    let connectors: alloc::vec::Vec<crate::drm::DrmObjectId> = conn_ids
+        .iter()
+        .map(|&id| crate::drm::DrmObjectId::new(id))
+        .collect();
+    let mode = if req.mode_valid == 0 {
+        None
+    } else {
+        Some(crate::drm::mode::DrmMode::from_resolution(
+            u32::from(req.mode.hdisplay),
+            u32::from(req.mode.vdisplay),
+            req.mode.vrefresh,
+        ))
+    };
+
+    let res = crate::drm::with_device_mut(device, |dev| {
+        dev.set_crtc(crtc_id, fb_id, req.x, req.y, &connectors, mode.as_ref())
+    });
+    match res {
+        Ok(()) => SyscallResult::ok(0),
+        Err(e) => linux_err(drm_kernel_err(e)),
     }
 }
 

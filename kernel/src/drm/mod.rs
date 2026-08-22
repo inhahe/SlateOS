@@ -99,7 +99,7 @@ use self::crtc::DrmCrtc;
 use self::encoder::DrmEncoder;
 use self::framebuffer::DrmFramebuffer;
 use self::gem::GemObject;
-use self::mode::PixelFormat;
+use self::mode::{DrmMode, PixelFormat};
 use self::plane::DrmPlane;
 
 // ---------------------------------------------------------------------------
@@ -363,6 +363,19 @@ impl DrmDevice {
     }
 
     /// Destroy a framebuffer object.
+    ///
+    /// Any plane still naming it is unbound. Linux's `drm_framebuffer_remove`
+    /// goes further and disables the CRTC as well; this does not, because the
+    /// display engine has *not* stopped reading that memory and saying it has
+    /// would be the same class of lie this call is here to avoid. Unbinding the
+    /// plane is the part that is true: the framebuffer object is gone, so a
+    /// `GETPLANE` reporting its id would be reporting an id that resolves to
+    /// nothing — and worse, one a later `fb_create` can reuse, at which point
+    /// the plane would appear bound to an unrelated buffer.
+    ///
+    /// # Errors
+    ///
+    /// `NotFound` if no framebuffer has this id.
     pub fn fb_destroy(&mut self, fb_id: DrmObjectId) -> KernelResult<()> {
         let idx = self
             .framebuffers
@@ -370,6 +383,11 @@ impl DrmDevice {
             .position(|f| f.id == fb_id)
             .ok_or(KernelError::NotFound)?;
         self.framebuffers.remove(idx);
+        for p in &mut self.planes {
+            if p.fb == Some(fb_id) {
+                p.fb = None;
+            }
+        }
         Ok(())
     }
 
@@ -381,17 +399,183 @@ impl DrmDevice {
 
     // --- Display operations ---
 
-    /// Page flip: swap the framebuffer on a CRTC's primary plane.
-    pub fn page_flip(&mut self, crtc_id: DrmObjectId, fb_id: DrmObjectId) -> KernelResult<()> {
-        // Validate both IDs exist.
-        if !self.crtcs.iter().any(|c| c.id == crtc_id) {
-            return Err(KernelError::NotFound);
+    /// Configure a CRTC: program `mode`, drive it out of `connectors`, and
+    /// scan `fb_id` out of its primary plane — or, with `mode: None`, turn it
+    /// off.
+    ///
+    /// This is the kernel side of `DRM_IOCTL_MODE_SETCRTC`, and it is the only
+    /// path that changes a display timing. Until 2026-08-21 there was none, and
+    /// [`Self::page_flip`] carried an implicit mode-set on one of the three
+    /// backends; see `design-decisions.md` §270 for why that was removed rather
+    /// than generalised.
+    ///
+    /// ## What is validated, and why each check is here rather than in a driver
+    ///
+    /// * **The mode must be one the connector advertises.** Not "close to" one:
+    ///   a CRTC programmed with a timing that merely resembles what the monitor
+    ///   expects produces no picture, and the symptom is indistinguishable from
+    ///   a hang. Checking here means a backend cannot be reached with a mode its
+    ///   own enumeration never offered.
+    /// * **The stored mode is the kernel's copy, never the caller's.**
+    ///   `DrmModeCrtc` round-trips through userspace, and
+    ///   `drm_mode_to_uapi` writes zeros for `hsync_*`, `vsync_*`, `hskew`,
+    ///   `vscan` and `flags` — so a client that reads a mode out of `GETCONNECTOR`
+    ///   and hands it straight back is *not* returning what it was given. Storing
+    ///   the caller's struct would silently zero the blanking intervals of every
+    ///   mode ever set.
+    /// * **The connector must actually be able to drive this CRTC**, through one
+    ///   of its encoders' `possible_crtcs` masks. Otherwise a client can wire a
+    ///   panel to a CRTC that is not routed to it and get a black screen with a
+    ///   successful return code.
+    /// * **The framebuffer must cover the mode at the requested origin.** Linux
+    ///   makes exactly this check (`Invalid fb size`), and it is what stops the
+    ///   display engine reading past the end of the buffer.
+    ///
+    /// ## Errors
+    ///
+    /// * `NotFound` — no such CRTC, framebuffer, GEM object or connector.
+    /// * `InvalidArgument` — a disable that also names a framebuffer or
+    ///   connectors; an enable that names neither; a mode no listed connector
+    ///   advertises; a connector that cannot reach this CRTC; a framebuffer too
+    ///   small for the mode.
+    /// * Whatever the backend's `set_mode`/`disable_crtc` returns —
+    ///   `NotSupported` from a backend that cannot retime at all, `NotFound`
+    ///   from one that has no timing for the requested size.
+    ///
+    /// The object model is updated **only after** the backend reports success,
+    /// so a failed mode-set leaves `GETCRTC` reporting what is genuinely still
+    /// being scanned out rather than what was asked for.
+    pub fn set_crtc(
+        &mut self,
+        crtc_id: DrmObjectId,
+        fb_id: Option<DrmObjectId>,
+        x: u32,
+        y: u32,
+        connectors: &[DrmObjectId],
+        mode: Option<&DrmMode>,
+    ) -> KernelResult<()> {
+        let crtc_idx = self
+            .crtcs
+            .iter()
+            .position(|c| c.id == crtc_id)
+            .ok_or(KernelError::NotFound)?;
+        let crtc_index_bit = self
+            .crtcs
+            .get(crtc_idx)
+            .map_or(0u32, |c| 1u32.checked_shl(c.index).unwrap_or(0));
+        let primary_plane = self
+            .crtcs
+            .get(crtc_idx)
+            .ok_or(KernelError::NotFound)?
+            .primary_plane;
+
+        let Some(want) = mode else {
+            // Disable. Linux requires `fb_id == 0` and `count_connectors == 0`
+            // to accompany `mode_valid == 0`; a request that turns the CRTC off
+            // *and* names a framebuffer is self-contradictory, and guessing
+            // which half was meant is how a compositor shutting down ends up
+            // with a CRTC still scanning a buffer it has just freed.
+            if fb_id.is_some() || !connectors.is_empty() {
+                return Err(KernelError::InvalidArgument);
+            }
+            match &mut self.backend {
+                DrmBackend::Limine(b) => b.disable_crtc(crtc_id),
+                DrmBackend::VirtioGpu(b) => b.disable_crtc(crtc_id),
+                DrmBackend::Ati(b) => b.disable_crtc(crtc_id),
+            }?;
+            if let Some(c) = self.crtcs.get_mut(crtc_idx) {
+                c.active = false;
+                c.mode = None;
+            }
+            if let Some(p) = self.planes.iter_mut().find(|p| p.id == primary_plane) {
+                p.fb = None;
+            }
+            self.unbind_crtc_routing(crtc_id);
+            return Ok(());
+        };
+
+        // Enable. A mode with no framebuffer would leave the CRTC timed and
+        // fetching from wherever it last pointed, and a mode with no connector
+        // drives nothing — both are `EINVAL` in Linux and both are refused here.
+        let fb_id = fb_id.ok_or(KernelError::InvalidArgument)?;
+        if connectors.is_empty() {
+            return Err(KernelError::InvalidArgument);
         }
+
+        // Resolve every connector before anything is programmed, and take the
+        // kernel's own copy of the matched mode from the first of them.
+        //
+        // The encoder each connector will be routed through is chosen here too,
+        // but not *recorded* until the backend has succeeded — the routing is
+        // part of what `GETCONNECTOR` and `GETENCODER` report, and a failed
+        // mode-set must not leave them describing a path no signal takes.
+        let mut kernel_mode: Option<DrmMode> = None;
+        let mut routing: Vec<(DrmObjectId, DrmObjectId)> = Vec::new();
+        for &conn_id in connectors {
+            let conn = self
+                .connectors
+                .iter()
+                .find(|c| c.id == conn_id)
+                .ok_or(KernelError::NotFound)?;
+            // Routable to this CRTC through at least one of its encoders? Take
+            // the first that is: the connectors here each have one hardware
+            // path to a given CRTC, so "first" and "only" coincide, and if that
+            // ever stops being true the choice becomes a real one rather than a
+            // tie-break — at which point it belongs to the caller, via the
+            // atomic path's explicit connector→encoder binding.
+            let enc_id = conn
+                .possible_encoders
+                .iter()
+                .copied()
+                .find(|eid| {
+                    self.encoders
+                        .iter()
+                        .any(|e| e.id == *eid && (e.possible_crtcs & crtc_index_bit) != 0)
+                })
+                .ok_or(KernelError::InvalidArgument)?;
+            routing.push((conn_id, enc_id));
+            // Matched on size, and on refresh only when the caller stated one.
+            // Linux's own `drm_mode_equal` ignores `vrefresh` entirely — it is
+            // a derived convenience field, not part of the timing — and a
+            // client that built its request from scratch rather than from
+            // `GETCONNECTOR` will legitimately leave it 0. Treating 0 as "any"
+            // accepts that client; treating a *stated* refresh as binding stops
+            // a request for 60 Hz being silently served at 75.
+            let matched = conn
+                .modes
+                .iter()
+                .find(|m| {
+                    m.hdisplay == want.hdisplay
+                        && m.vdisplay == want.vdisplay
+                        && (want.vrefresh == 0 || m.vrefresh == want.vrefresh)
+                })
+                .ok_or(KernelError::InvalidArgument)?;
+            if kernel_mode.is_none() {
+                kernel_mode = Some(*matched);
+            }
+        }
+        let kernel_mode = kernel_mode.ok_or(KernelError::InvalidArgument)?;
+
         let fb = self
             .framebuffers
             .iter()
             .find(|f| f.id == fb_id)
             .ok_or(KernelError::NotFound)?;
+        // `x`/`y` are the origin *within* the framebuffer that lands at the top
+        // left of the display, so the buffer must extend a full mode past them.
+        // Checked arithmetic: a caller-supplied origin near `u32::MAX` would
+        // otherwise wrap and turn an absurd request into a passing one.
+        let need_w = kernel_mode
+            .hdisplay
+            .checked_add(x)
+            .ok_or(KernelError::InvalidArgument)?;
+        let need_h = kernel_mode
+            .vdisplay
+            .checked_add(y)
+            .ok_or(KernelError::InvalidArgument)?;
+        if fb.width < need_w || fb.height < need_h {
+            return Err(KernelError::InvalidArgument);
+        }
         let gem = self
             .gem_objects
             .iter()
@@ -399,10 +583,130 @@ impl DrmDevice {
             .ok_or(KernelError::NotFound)?;
 
         match &mut self.backend {
+            DrmBackend::Limine(b) => b.set_mode(crtc_id, &kernel_mode, fb, gem),
+            DrmBackend::VirtioGpu(b) => b.set_mode(crtc_id, &kernel_mode, fb, gem),
+            DrmBackend::Ati(b) => b.set_mode(crtc_id, &kernel_mode, fb, gem),
+        }?;
+
+        if let Some(c) = self.crtcs.get_mut(crtc_idx) {
+            c.active = true;
+            c.mode = Some(kernel_mode);
+        }
+        // Drop whatever used to be routed here before recording the new set, so
+        // a `SETCRTC` that re-points a CRTC at a different connector does not
+        // leave the old one still claiming to drive it.
+        self.unbind_crtc_routing(crtc_id);
+        for (conn_id, enc_id) in routing {
+            if let Some(c) = self.connectors.iter_mut().find(|c| c.id == conn_id) {
+                c.current_encoder = Some(enc_id);
+            }
+            if let Some(e) = self.encoders.iter_mut().find(|e| e.id == enc_id) {
+                e.crtc = Some(crtc_id);
+            }
+        }
+        if let Some(p) = self.planes.iter_mut().find(|p| p.id == primary_plane) {
+            p.fb = Some(fb_id);
+            p.crtc = Some(crtc_id);
+            p.src_x = x;
+            p.src_y = y;
+            p.src_w = kernel_mode.hdisplay;
+            p.src_h = kernel_mode.vdisplay;
+            p.dst_x = 0;
+            p.dst_y = 0;
+            p.dst_w = kernel_mode.hdisplay;
+            p.dst_h = kernel_mode.vdisplay;
+        }
+        Ok(())
+    }
+
+    /// Detach every encoder currently routed to `crtc_id`, and every connector
+    /// feeding one of them.
+    ///
+    /// This is the bookkeeping half of turning a CRTC off or re-pointing it.
+    /// It exists because `GETCONNECTOR`'s `encoder_id` and `GETENCODER`'s
+    /// `crtc_id` are how a client discovers what is driving what: an encoder
+    /// left naming a CRTC that no longer scans it out is the same category of
+    /// falsehood as a `crtc.mode` that was never updated, and it misleads in a
+    /// worse direction — a client reading it concludes the display is already
+    /// configured and skips the `SETCRTC` that would have lit it.
+    ///
+    /// Connectors are cleared by *following the encoders*, not by matching on
+    /// the connector's own list, because `possible_encoders` says what could be
+    /// routed and `current_encoder` says what is. Only the second is a claim
+    /// about the present.
+    fn unbind_crtc_routing(&mut self, crtc_id: DrmObjectId) {
+        let mut detached: Vec<DrmObjectId> = Vec::new();
+        for e in &mut self.encoders {
+            if e.crtc == Some(crtc_id) {
+                e.crtc = None;
+                detached.push(e.id);
+            }
+        }
+        for c in &mut self.connectors {
+            if c.current_encoder.is_some_and(|eid| detached.contains(&eid)) {
+                c.current_encoder = None;
+            }
+        }
+    }
+
+    /// Page flip: swap the framebuffer on a CRTC's primary plane, without
+    /// changing the mode.
+    ///
+    /// The framebuffer must be **exactly** the size of the CRTC's programmed
+    /// mode, and the CRTC must have one. Both refusals were added on
+    /// 2026-08-21 at lane C's request; before that this checked only that the
+    /// three objects existed, and the three backends each invented a different
+    /// meaning for a mismatch — ATI silently performed a full mode-set,
+    /// virtio-gpu silently cropped to the top-left, and Limine silently cropped
+    /// too, while `GETCRTC` afterwards reported the boot mode on all three
+    /// because nothing ever wrote `crtc.mode`. The same sequence of ioctls
+    /// therefore changed the resolution on one machine and cropped the image on
+    /// another, with no way for the client to tell which had happened. Use
+    /// [`Self::set_crtc`] to change size. See `design-decisions.md` §270.
+    ///
+    /// # Errors
+    ///
+    /// * `NotFound` — no such CRTC, framebuffer, or backing GEM object.
+    /// * `InvalidArgument` — the CRTC is in no mode (never configured, or
+    ///   disabled), or `fb` is not the size of the mode it is in.
+    /// * Whatever the backend's `page_flip` returns.
+    pub fn page_flip(&mut self, crtc_id: DrmObjectId, fb_id: DrmObjectId) -> KernelResult<()> {
+        let crtc = self
+            .crtcs
+            .iter()
+            .find(|c| c.id == crtc_id)
+            .ok_or(KernelError::NotFound)?;
+        // A CRTC with no mode is not scanning anything out, so there is no
+        // "swap the front buffer" for this call to mean.
+        let mode = crtc.mode.ok_or(KernelError::InvalidArgument)?;
+        let fb = self
+            .framebuffers
+            .iter()
+            .find(|f| f.id == fb_id)
+            .ok_or(KernelError::NotFound)?;
+        if fb.width != mode.hdisplay || fb.height != mode.vdisplay {
+            return Err(KernelError::InvalidArgument);
+        }
+        let gem = self
+            .gem_objects
+            .iter()
+            .find(|g| g.handle == fb.gem_handle)
+            .ok_or(KernelError::NotFound)?;
+
+        let primary_plane = crtc.primary_plane;
+        match &mut self.backend {
             DrmBackend::Limine(b) => b.page_flip(crtc_id, fb, gem),
             DrmBackend::VirtioGpu(b) => b.page_flip(crtc_id, fb, gem),
             DrmBackend::Ati(b) => b.page_flip(crtc_id, fb, gem),
+        }?;
+        // Record what is now on screen. Without this the primary plane reports
+        // `fb_id = 0` forever — only `atomic.rs` ever wrote this field — so a
+        // client that asks which buffer is being scanned out is told "none"
+        // while looking at it.
+        if let Some(p) = self.planes.iter_mut().find(|p| p.id == primary_plane) {
+            p.fb = Some(fb_id);
         }
+        Ok(())
     }
 
     /// Flush a dirty region of a framebuffer to the display.
@@ -435,14 +739,87 @@ impl DrmDevice {
         }
     }
 
+    /// The mode a connector should be driven at absent any client preference:
+    /// the one it flags `PREFERRED`, or its first if none is flagged.
+    ///
+    /// "First" is not a sensible default on its own. The ATI backend orders its
+    /// list by area and flags the *last* entry, so taking the first would drive
+    /// a 1920x1080-capable card at 640x480 — which is why every caller that
+    /// wants "the right mode" must go through this rather than `modes.first()`.
+    fn preferred_mode(conn: &DrmConnector) -> Option<&DrmMode> {
+        conn.modes
+            .iter()
+            .find(|m| m.flags == mode::DrmModeFlags::PREFERRED)
+            .or_else(|| conn.modes.first())
+    }
+
     /// Get the current display dimensions (width, height) of the primary output.
+    ///
+    /// The CRTC's programmed mode when it has one, so a caller that allocates a
+    /// buffer this size can page-flip it — [`Self::page_flip`] requires an exact
+    /// match. Falls back to the first connector's preferred mode when no CRTC is
+    /// configured yet, which is the size [`Self::ensure_crtc_configured`] would
+    /// program.
     #[must_use]
     pub fn display_size(&self) -> (u32, u32) {
+        if let Some(m) = self.crtcs.first().and_then(|c| c.mode) {
+            return (m.hdisplay, m.vdisplay);
+        }
         self.connectors
             .first()
-            .and_then(|c| c.modes.first())
-            .map(|m| (m.hdisplay, m.vdisplay))
-            .unwrap_or((0, 0))
+            .and_then(Self::preferred_mode)
+            .map_or((0, 0), |m| (m.hdisplay, m.vdisplay))
+    }
+
+    /// Bring an unconfigured CRTC up at its connector's preferred mode, scanning
+    /// out `fb_id`.
+    ///
+    /// A no-op if the CRTC already has a mode — this is "make sure it is on",
+    /// not "reconfigure it", so it is safe to call before every flip and safe to
+    /// call from more than one buffer's constructor.
+    ///
+    /// This exists because [`Self::page_flip`] stopped carrying an implicit
+    /// mode-set on 2026-08-21 (see `design-decisions.md` §270). Two of the three
+    /// backends enumerate a CRTC that is already live — the bootloader or the
+    /// hypervisor timed it — but the ATI one cannot: it enumerates
+    /// `active: false, mode: None`, because claiming otherwise would tell a
+    /// compositor a flip is all that is needed when the CRTC has never been
+    /// timed at all. Something has to do the first mode-set, and in-kernel that
+    /// something is this.
+    ///
+    /// # Errors
+    ///
+    /// `NotFound` if the CRTC, or any connector routed to it, does not exist;
+    /// otherwise propagates [`Self::set_crtc`].
+    pub fn ensure_crtc_configured(
+        &mut self,
+        crtc_id: DrmObjectId,
+        fb_id: DrmObjectId,
+    ) -> KernelResult<()> {
+        let crtc = self
+            .crtcs
+            .iter()
+            .find(|c| c.id == crtc_id)
+            .ok_or(KernelError::NotFound)?;
+        if crtc.mode.is_some() {
+            return Ok(());
+        }
+        let crtc_bit = 1u32.checked_shl(crtc.index).unwrap_or(0);
+        // The first connector that can actually be routed here. Picking one that
+        // cannot would be refused by `set_crtc`, correctly but uselessly.
+        let (conn_id, want) = self
+            .connectors
+            .iter()
+            .filter(|c| {
+                c.possible_encoders.iter().any(|eid| {
+                    self.encoders
+                        .iter()
+                        .any(|e| e.id == *eid && (e.possible_crtcs & crtc_bit) != 0)
+                })
+            })
+            .find_map(|c| Self::preferred_mode(c).map(|m| (c.id, *m)))
+            .ok_or(KernelError::NotFound)?;
+        self.set_crtc(crtc_id, Some(fb_id), 0, 0, &[conn_id], Some(&want))
     }
 
     /// Return the HHDM-mapped virtual addresses of a GEM object's backing frames.
@@ -967,7 +1344,251 @@ pub fn self_test() -> KernelResult<()> {
         Ok(())
     })?;
 
-    // 11. ATI/AMD legacy register + timing arithmetic.
+    // 11. Mode-set and page-flip discipline.
+    //
+    // This is the regression test for the request lane C filed on 2026-08-21:
+    // `page_flip` used to accept a framebuffer of any size and let each backend
+    // invent a meaning for the mismatch — ATI silently mode-set, virtio-gpu
+    // silently cropped — so the same ioctl sequence changed the resolution on
+    // one machine and cropped the picture on another, with `GETCRTC` reporting
+    // the boot mode on both. Every assertion below fails if that behaviour is
+    // reintroduced.
+    //
+    // It performs a *real* mode-set on the primary display, which on a
+    // paravirtual backend means the console's pixels are replaced by a blank
+    // test buffer for the rest of boot. That is deliberate: an untested
+    // mode-set success path is how a driver first gets debugged on a black
+    // screen. The serial log is the boot contract, not the framebuffer.
+    with_primary_mut(|dev| {
+        let crtc_id = dev.first_crtc_id().ok_or(KernelError::InternalError)?;
+        let conn_id = dev
+            .connectors()
+            .first()
+            .map(|c| c.id)
+            .ok_or(KernelError::InternalError)?;
+        let (w, h) = dev.display_size();
+        let cur_mode = dev
+            .connectors()
+            .first()
+            .and_then(|c| c.modes.iter().find(|m| m.hdisplay == w && m.vdisplay == h))
+            .copied()
+            .ok_or(KernelError::InternalError)?;
+
+        // A correctly-sized buffer, and a deliberately wrong-sized one.
+        let good_gem = dev.gem_create(w, h, PixelFormat::Xrgb8888)?;
+        let good_pitch = dev.gem_pitch(good_gem)?;
+        let good_fb = dev.fb_create(good_gem, w, h, good_pitch, PixelFormat::Xrgb8888)?;
+        let (bw, bh) = (w.saturating_sub(16).max(16), h.saturating_sub(16).max(16));
+        let bad_gem = dev.gem_create(bw, bh, PixelFormat::Xrgb8888)?;
+        let bad_pitch = dev.gem_pitch(bad_gem)?;
+        let bad_fb = dev.fb_create(bad_gem, bw, bh, bad_pitch, PixelFormat::Xrgb8888)?;
+
+        // Everything from here on must clean up, so failures are collected
+        // rather than returned early: leaking video memory out of a self-test
+        // would make the *next* test fail for an unrelated reason.
+        let mut fail: Option<&'static str> = None;
+        fn check(fail: &mut Option<&'static str>, cond: bool, what: &'static str) {
+            if !cond && fail.is_none() {
+                serial_println!("[drm]   FAIL: {}", what);
+                *fail = Some(what);
+            }
+        }
+
+        // (a) A mode nobody advertises is refused.
+        let bogus = mode::DrmMode::from_resolution(w.saturating_add(1), h.saturating_add(1), 60);
+        check(
+            &mut fail,
+            matches!(
+                dev.set_crtc(crtc_id, Some(good_fb), 0, 0, &[conn_id], Some(&bogus)),
+                Err(KernelError::InvalidArgument)
+            ),
+            "set_crtc accepted a mode the connector does not advertise",
+        );
+
+        // (b) An enable with no framebuffer, and one with no connector, are
+        //     both refused — a timed CRTC fetching from nowhere is not a state
+        //     to leave the hardware in.
+        check(
+            &mut fail,
+            matches!(
+                dev.set_crtc(crtc_id, None, 0, 0, &[conn_id], Some(&cur_mode)),
+                Err(KernelError::InvalidArgument)
+            ),
+            "set_crtc accepted an enable with no framebuffer",
+        );
+        check(
+            &mut fail,
+            matches!(
+                dev.set_crtc(crtc_id, Some(good_fb), 0, 0, &[], Some(&cur_mode)),
+                Err(KernelError::InvalidArgument)
+            ),
+            "set_crtc accepted an enable with no connectors",
+        );
+
+        // (c) A disable that also names a framebuffer is self-contradictory.
+        check(
+            &mut fail,
+            matches!(
+                dev.set_crtc(crtc_id, Some(good_fb), 0, 0, &[], None),
+                Err(KernelError::InvalidArgument)
+            ),
+            "set_crtc accepted a disable that also named a framebuffer",
+        );
+
+        // (d) A framebuffer too small for the mode is refused, even at the
+        //     right origin — this is Linux's "Invalid fb size".
+        check(
+            &mut fail,
+            matches!(
+                dev.set_crtc(crtc_id, Some(bad_fb), 0, 0, &[conn_id], Some(&cur_mode)),
+                Err(KernelError::InvalidArgument)
+            ),
+            "set_crtc accepted a framebuffer smaller than the mode",
+        );
+
+        // (e) An unknown connector is ENOENT, not EINVAL.
+        let ghost = DrmObjectId::new(u32::MAX);
+        check(
+            &mut fail,
+            matches!(
+                dev.set_crtc(crtc_id, Some(good_fb), 0, 0, &[ghost], Some(&cur_mode)),
+                Err(KernelError::NotFound)
+            ),
+            "set_crtc did not report an unknown connector as NotFound",
+        );
+
+        // (f) The real thing. After it, the object model must describe what is
+        //     actually on screen — this is the half that used to be missing
+        //     entirely, since nothing ever wrote `crtc.mode` or (outside the
+        //     atomic path) `plane.fb`.
+        if fail.is_none() {
+            if let Err(e) = dev.set_crtc(crtc_id, Some(good_fb), 0, 0, &[conn_id], Some(&cur_mode)) {
+                serial_println!("[drm]   FAIL: set_crtc refused a valid configuration: {e:?}");
+                fail = Some("set_crtc refused a valid configuration");
+            }
+        }
+        let crtc = dev
+            .crtcs()
+            .iter()
+            .find(|c| c.id == crtc_id)
+            .map(|c| (c.active, c.mode, c.primary_plane));
+        check(
+            &mut fail,
+            crtc.is_some_and(|(active, m, _)| {
+                active && m.is_some_and(|m| m.hdisplay == w && m.vdisplay == h)
+            }),
+            "GETCRTC would not report the mode that was just programmed",
+        );
+        let primary = crtc.map(|(_, _, p)| p);
+        check(
+            &mut fail,
+            primary.is_some_and(|pid| {
+                dev.planes()
+                    .iter()
+                    .any(|p| p.id == pid && p.fb == Some(good_fb))
+            }),
+            "the primary plane does not name the framebuffer that was just bound",
+        );
+        // The routing is the other half of what `GETCONNECTOR`/`GETENCODER`
+        // report, and it is what tells a client the display is already
+        // configured. It must name this CRTC, not merely be non-null.
+        check(
+            &mut fail,
+            dev.connectors()
+                .iter()
+                .find(|c| c.id == conn_id)
+                .and_then(|c| c.current_encoder)
+                .is_some_and(|eid| {
+                    dev.encoders()
+                        .iter()
+                        .any(|e| e.id == eid && e.crtc == Some(crtc_id))
+                }),
+            "the connector is not routed to the CRTC that was just programmed",
+        );
+
+        // (g) A flip of the right size works; one of the wrong size does not.
+        //     This pair is the whole of lane C's Ask 2.
+        if fail.is_none() {
+            if let Err(e) = dev.page_flip(crtc_id, good_fb) {
+                serial_println!("[drm]   FAIL: page_flip refused a matching framebuffer: {e:?}");
+                fail = Some("page_flip refused a matching framebuffer");
+            }
+        }
+        check(
+            &mut fail,
+            matches!(
+                dev.page_flip(crtc_id, bad_fb),
+                Err(KernelError::InvalidArgument)
+            ),
+            "page_flip accepted a framebuffer whose size differs from the mode",
+        );
+
+        // (h) Turning the CRTC off is a success path, not an error one — a
+        //     compositor shutting down cleanly is its normal user — and a flip
+        //     afterwards is refused because there is no mode to flip within.
+        if fail.is_none() {
+            if let Err(e) = dev.set_crtc(crtc_id, None, 0, 0, &[], None) {
+                serial_println!("[drm]   FAIL: set_crtc refused a disable: {e:?}");
+                fail = Some("set_crtc refused a disable");
+            }
+        }
+        check(
+            &mut fail,
+            dev.crtcs()
+                .iter()
+                .any(|c| c.id == crtc_id && !c.active && c.mode.is_none()),
+            "the CRTC still reports a mode after being turned off",
+        );
+        check(
+            &mut fail,
+            matches!(
+                dev.page_flip(crtc_id, good_fb),
+                Err(KernelError::InvalidArgument)
+            ),
+            "page_flip succeeded on a CRTC that is in no mode",
+        );
+        check(
+            &mut fail,
+            dev.encoders().iter().all(|e| e.crtc != Some(crtc_id))
+                && dev
+                    .connectors()
+                    .iter()
+                    .find(|c| c.id == conn_id)
+                    .is_some_and(|c| c.current_encoder.is_none()),
+            "an encoder still names the CRTC after it was turned off",
+        );
+
+        // (i) Tear down in the one order that is correct on every backend: the
+        //     CRTC is already off from (h), so nothing is scanning these
+        //     buffers out when they are freed.
+        //
+        //     It is tempting to re-arm the mode first so the test does not
+        //     leave the screen dark — but that would point the CRTC at
+        //     `good_gem` and then free it, and a driver that can really
+        //     retime refuses exactly that (`AtiBackend::gem_destroy` returns
+        //     `DeviceBusy`). Freeing VRAM that the display engine is still
+        //     reading is the bug that check exists to catch; a self-test must
+        //     not be the thing that trips it.
+        //
+        //     The CRTC is therefore left off. That is a state the system
+        //     already knows how to leave: the compositor calls
+        //     `ensure_crtc_configured` before its first flip, which re-times
+        //     the CRTC against its own buffer. On both backends that can be
+        //     primary today (`limine-fb`, `virtio-gpu`) `disable_crtc` is a
+        //     no-op anyway, so the console keeps its pixels either way.
+        dev.fb_destroy(bad_fb)?;
+        dev.gem_destroy(bad_gem)?;
+        dev.fb_destroy(good_fb)?;
+        dev.gem_destroy(good_gem)?;
+
+        if fail.is_some() {
+            return Err(KernelError::InternalError);
+        }
+        serial_println!("[drm]   Mode-set and page-flip discipline ({w}x{h}): OK");
+        Ok(())
+    })?;
+
+    // 12. ATI/AMD legacy register + timing arithmetic.
     //
     // Pure arithmetic, so it runs on every boot regardless of what display
     // hardware is present — the machine need not have an ATI device in it.

@@ -32528,6 +32528,33 @@ keep a correct picture. It rises to medium alongside any real bare-metal
 bring-up, and it is the obvious next thing after
 `TD-COMPOSITOR-DRIVES-ONE-HEAD`.
 
+**Update 2026-08-21 — half (2), *propagate*, is done.**
+`Compositor::detach_display` exists (lib.rs, beside `attach_display`) with
+`DisplayManager::remove_display` under it, and design-decisions.md §516 records
+why it is not simply `attach_display` run backwards: it adopts the removal
+*first* and shrinks the surface after, because the monitor is already gone and a
+surface that stays too large still covers the desktop; and the surviving
+monitors keep the offsets they had, because §515 already decided the scanout
+will not re-flow its surviving heads and the two layouts have to agree pixel for
+pixel. Everything that re-places the stranded windows turned out to be §512's
+existing `relayout_for_desktop_change` — no new pass was needed, which is what
+§513's "reachable is a question about the whole desktop" bought. 10 tests, all
+proved by reintro markers (`detachnopromote`, `detachreflows`,
+`detachwrongdisplay`, `detachlastmonitor`, `detachnoshrink`, `detachnorelayout`,
+`detachhomeisdesktop`).
+
+**What is left is half (1), *detect*, and the seam.** Nothing calls
+`detach_display` yet, and nothing calls `attach_display` after startup either,
+so the observable behaviour is unchanged: hotplug is still ignored. What remains
+is (a) `DrmScanout` re-probing `GETCONNECTOR` periodically and diffing against
+its head list, and (b) a way for it to tell `Server::run_with` what changed —
+which is still the seam this entry describes, and still probably wants to be the
+same mechanism `TD-COMPOSITOR-HAS-NO-LOCAL-INPUT` needs. One further thing the
+wiring must fix: `main.rs` builds each `Display` with `id = <enumeration
+index>`, but `detach_display` names a display by id and the stable key on the
+scanout side is the **connector id** (§515), so the two have to be made the same
+number before a detach can name the right screen.
+
 ## TD-COMPOSITOR-HAS-NO-LOCAL-INPUT (lane C, 2026-08-21)
 
 **In short:** on SlateOS the desktop draws correctly and the keyboard and mouse

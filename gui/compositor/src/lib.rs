@@ -2481,6 +2481,39 @@ impl DisplayManager {
         self.displays.push(display);
     }
 
+    /// Remove the display with `id`, answering it, or `None` if no display has
+    /// that id.
+    ///
+    /// **The survivors keep the offsets they already had.** Removing the
+    /// leftmost of two monitors therefore leaves the other one at its old `x`,
+    /// so the virtual desktop starts part-way along and the space the departed
+    /// screen occupied stays in the bounding box as a hole that is composited
+    /// and scanned out nowhere. Re-flowing them leftwards is the tidier
+    /// arrangement and is deliberately not done: the *scanout* does not re-flow
+    /// its surviving heads when one dies (design-decisions.md §515), because a
+    /// head that fails mid-session must not drag the other monitors' pictures
+    /// sideways, and these two layouts have to agree pixel for pixel or every
+    /// window is drawn on the wrong screen. One of them has to be the authority
+    /// and it is the one holding the framebuffers.
+    ///
+    /// If the display removed was the primary, the first survivor is promoted.
+    /// Nothing tolerates a primary-less arrangement: [`Self::primary`] is the
+    /// fallback for every "which monitor is this?" question, and an arrangement
+    /// with monitors but no primary answers `None` to all of them.
+    ///
+    /// Prefer [`Compositor::detach_display`], which also resizes the scanout
+    /// surface and re-places the windows the departed monitor was holding.
+    pub fn remove_display(&mut self, id: u32) -> Option<Display> {
+        let index = self.displays.iter().position(|d| d.id == id)?;
+        let removed = self.displays.remove(index);
+        if removed.primary {
+            if let Some(first) = self.displays.first_mut() {
+                first.primary = true;
+            }
+        }
+        Some(removed)
+    }
+
     /// Get the total virtual desktop bounds (union of all displays).
     pub fn virtual_bounds(&self) -> Rect {
         self.bounds_folded(|d| d.bounds())
@@ -7272,6 +7305,82 @@ impl Compositor {
             .map_or_else(|| Rect::new(0, 0, 0, 0), Display::bounds);
         self.display_manager = manager;
         self.relayout_for_desktop_change(bounds);
+        Ok(())
+    }
+
+    /// Take a monitor off the desktop, shrink the scanout surface to what is
+    /// left, and re-place everything the departed screen was holding.
+    ///
+    /// The mirror of [`attach_display`](Self::attach_display), and the half of
+    /// monitor hotplug that does the work: a head that stops flipping is already
+    /// dropped by the scanout, which keeps the *other* monitors alive, but until
+    /// this is called the compositor still lists the display, still resolves
+    /// windows onto it, and still composites a rectangle of frame that nothing
+    /// copies out. A window maximised there is on a screen that no longer
+    /// exists — visible nowhere, and unreachable, because a maximised window has
+    /// no title bar edge left on any surviving monitor to drag it back by.
+    ///
+    /// Everything that re-places those windows is
+    /// [`relayout_for_desktop_change`](Self::relayout_for_desktop_change),
+    /// unchanged: with the display gone, `display_for` answers *primary* for any
+    /// window that no longer overlaps a real monitor, so a maximised or snapped
+    /// one is re-tiled onto the primary by the first pass, a fullscreen one is
+    /// re-fitted by the second, a hand-placed one is rescued by the third and
+    /// the pointer is pulled back by the fourth. That the removal case needed no
+    /// new pass is a consequence of the rescue having been written against the
+    /// virtual desktop rather than against one screen.
+    ///
+    /// **The order is the reverse of `attach_display`'s, on purpose.** Attaching
+    /// allocates the larger surface *first* and adopts the display only if that
+    /// succeeded, because a desktop wider than its framebuffer has a monitor
+    /// with no pixels behind it. Detaching adopts first and shrinks after,
+    /// because the monitor is already physically gone: refusing to acknowledge
+    /// that would leave the model describing a screen that does not exist, which
+    /// is the bug, whereas a surface that stays too large still covers the
+    /// desktop completely. A failed shrink wastes memory; it cannot draw
+    /// anything wrong.
+    ///
+    /// # Errors
+    ///
+    /// [`CompositorError::DisplayError`] if `id` names no attached display, or
+    /// if it names the last one. A desktop with no monitors has zero-sized
+    /// virtual bounds, no primary to fall back to, and every window on it
+    /// stranded with nowhere to be rescued to; there is no arrangement to adopt,
+    /// so the last monitor is kept and the caller told. A display server whose
+    /// only screen has been unplugged has nothing useful left to do either way.
+    pub fn detach_display(&mut self, id: u32) -> CompositorResult<()> {
+        if self.display_manager.displays.len() <= 1 {
+            return Err(CompositorError::DisplayError(format!(
+                "cannot detach display {id}: it is the only monitor left"
+            )));
+        }
+        if self.display_manager.remove_display(id).is_none() {
+            return Err(CompositorError::DisplayError(format!(
+                "cannot detach display {id}: no display has that id"
+            )));
+        }
+
+        let desktop = self.display_manager.virtual_bounds();
+        if self.resize_scanout_surface(desktop).is_err() {
+            // Handled rather than propagated, for the reason in the doc comment
+            // above: the arrangement has already changed and cannot be put back.
+            // The surface keeps the size it had, which still covers the smaller
+            // desktop, but it also still holds the departed monitor's last
+            // frame, so the full clear the successful path would have done has
+            // to happen here too or that picture stays on screen.
+            let (width, height) = self.backend.size();
+            self.full_recomposite = true;
+            self.damage.mark_full(width, height);
+        }
+
+        // The screen a stranded window is put on has to be one that exists, and
+        // after a removal the only one guaranteed to is the primary — which
+        // `remove_display` has just promoted if the departed monitor was it.
+        let home = self
+            .display_manager
+            .primary()
+            .map_or(desktop, Display::bounds);
+        self.relayout_for_desktop_change(home);
         Ok(())
     }
 
@@ -15382,6 +15491,234 @@ mod tests {
             comp.direct_scanout_window(),
             None,
             "the bypass took a window that covers one monitor of two"
+        );
+    }
+
+    // ---- a monitor leaving is a monitor arriving, in reverse ----
+
+    #[test]
+    fn detaching_a_monitor_shrinks_the_desktop_and_the_surface() {
+        let (mut comp, _, screens) = two_monitors(1);
+        assert_eq!(
+            comp.frame_size(),
+            (1824, 768),
+            "the fixture is not two-headed"
+        );
+
+        comp.detach_display(1).expect("detach");
+
+        assert_eq!(comp.display_manager.displays().len(), 1);
+        assert_eq!(
+            comp.display_manager.virtual_bounds(),
+            screens[0],
+            "the desktop still spans the monitor that left"
+        );
+        assert_eq!(
+            comp.frame_size(),
+            (800, 600),
+            "the surface still holds a rectangle nothing scans out"
+        );
+    }
+
+    #[test]
+    fn a_window_maximised_on_the_departed_monitor_comes_back() {
+        // The worst case of the lot, and the reason this is not merely untidy: a
+        // maximised window has no title bar edge sticking out anywhere, so if it
+        // is left on a screen that no longer exists there is nothing on any
+        // surviving monitor to drag it back by. It is gone until the session is.
+        let (mut comp, id, screens) = two_monitors(1);
+        comp.maximize_window(id).expect("maximize");
+        assert!(
+            comp.window_ref(id).expect("window").frame_rect().x >= screens[1].x,
+            "the fixture did not maximise the window onto the second monitor"
+        );
+
+        comp.detach_display(1).expect("detach");
+
+        let framed = comp.window_ref(id).expect("window").frame_rect();
+        assert_eq!(
+            framed,
+            work_rect(comp.work_area_for(screens[0])),
+            "a maximised window was left on the monitor that was unplugged"
+        );
+    }
+
+    #[test]
+    fn a_hand_placed_window_on_the_departed_monitor_is_rescued() {
+        // Not re-laid-out -- the user put it there -- but it does have to end up
+        // somewhere reachable, which is the same rule a shrinking mode change
+        // already follows.
+        let (mut comp, id, screens) = two_monitors(1);
+        comp.detach_display(1).expect("detach");
+        let framed = comp.window_ref(id).expect("window").frame_rect();
+        assert!(
+            framed.intersect(&screens[0]).is_some(),
+            "a window on the unplugged monitor was left off the desktop: {framed:?}"
+        );
+    }
+
+    #[test]
+    fn a_fullscreen_window_on_the_departed_monitor_is_refitted_and_the_client_told() {
+        let (mut comp, id, screens) = two_monitors(1);
+        comp.set_fullscreen(id, true).expect("fullscreen");
+        comp.pending_notifications.clear();
+
+        comp.detach_display(1).expect("detach");
+
+        assert_eq!(
+            comp.window_ref(id).expect("window").client_rect(),
+            screens[0],
+            "a fullscreen window kept the size of the monitor that left"
+        );
+        assert!(
+            comp.pending_notifications.iter().any(|n| matches!(
+                n,
+                EventNotification::WindowResized { window_id, width: 800, height: 600 }
+                    if *window_id == id
+            )),
+            "the client was never told its surface had changed size: {:?}",
+            comp.pending_notifications
+        );
+    }
+
+    #[test]
+    fn the_pointer_does_not_stay_on_a_monitor_that_left() {
+        // The cursor position is not derived from anything -- it is whatever the
+        // last motion event said -- so nothing brings it back on its own, and an
+        // invisible pointer hit-tests against nothing until the user moves the
+        // mouse and the input source volunteers a fresh position.
+        let (mut comp, _, screens) = two_monitors(0);
+        comp.handle_mouse_move(1500, 400);
+        comp.detach_display(1).expect("detach");
+        let (x, y) = comp.cursor_position();
+        assert!(
+            screens[0].contains(x, y),
+            "the pointer was left at ({x}, {y}), which is on the monitor that was \
+             unplugged"
+        );
+    }
+
+    #[test]
+    fn detaching_the_primary_promotes_a_survivor() {
+        // Every "which monitor is this?" question falls back to the primary, so
+        // an arrangement with monitors but no primary answers `None` to all of
+        // them -- a desktop that has screens and cannot say which one anything
+        // is on.
+        let (mut comp, _, screens) = two_monitors(1);
+        comp.detach_display(0).expect("detach");
+        let primary = comp.display_manager.primary().expect("no primary left");
+        assert_eq!(primary.id, 1, "the wrong display was promoted");
+        assert_eq!(
+            primary.bounds(),
+            screens[1],
+            "promoting the survivor also moved it"
+        );
+    }
+
+    #[test]
+    fn the_survivors_of_a_detach_keep_the_offsets_they_had() {
+        // The scanout does not re-flow its surviving heads when one dies
+        // (design-decisions.md §515), so this must not either: the two layouts
+        // are the same arrangement seen from two sides, and a re-flow on one
+        // side alone puts every window on the wrong screen. The visible cost is
+        // the hole -- the desktop starts at x = 800 and the surface keeps its
+        // full 1824 width with the left 800 columns scanned out nowhere -- and
+        // it is the cheaper of the two wrong answers.
+        let (mut comp, id, screens) = two_monitors(1);
+        let before = comp.window_ref(id).expect("window").frame_rect();
+
+        comp.detach_display(0).expect("detach");
+
+        assert_eq!(
+            comp.display_manager.displays()[0].bounds(),
+            screens[1],
+            "the surviving monitor slid left to fill the gap"
+        );
+        assert_eq!(
+            comp.display_manager.virtual_bounds(),
+            screens[1],
+            "the desktop is not the one monitor that is left"
+        );
+        assert_eq!(
+            comp.frame_size(),
+            (1824, 768),
+            "the surface no longer reaches the monitor's right edge"
+        );
+        assert_eq!(
+            comp.window_ref(id).expect("window").frame_rect(),
+            before,
+            "a window on the surviving monitor was moved by the other one leaving"
+        );
+    }
+
+    #[test]
+    fn a_window_maximised_on_a_monitor_taken_from_the_middle_comes_back() {
+        // Three monitors is where "the screen a stranded window is put on" stops
+        // being a synonym for "the desktop". Take the middle one away and the
+        // desktop is still the bounding box of the other two -- a rectangle
+        // spanning the hole, and one that is not any monitor's bounds. Passing
+        // *that* to the re-layout makes the re-tile's "windows on the screen
+        // that changed" filter match nothing at all, so a maximised window is
+        // silently left on the monitor that was unplugged: exactly the failure
+        // with no title bar to recover from, reached by a different route. The
+        // primary is a real screen and is the answer.
+        let mut comp = Compositor::new(800, 600, 2_000_000).expect("compositor");
+        comp.attach_display(Display::new(1, 640, 480, 60, 1.0, false))
+            .expect("attach middle");
+        comp.attach_display(Display::new(2, 1024, 768, 60, 1.0, false))
+            .expect("attach right");
+        let middle = comp.display_manager.displays()[1].bounds();
+        let mut spec = WindowSpec::new("In the middle", 200, 150);
+        spec.position = Some((middle.x + 100, middle.y + 100));
+        let id = comp.create_window_from_spec(&spec, 1);
+        comp.maximize_window(id).expect("maximize");
+
+        comp.detach_display(1).expect("detach");
+
+        let framed = comp.window_ref(id).expect("window").frame_rect();
+        assert_eq!(
+            framed.intersect(&middle),
+            None,
+            "a maximised window was left in the hole the middle monitor left: \
+             {framed:?}"
+        );
+        assert_eq!(
+            framed,
+            work_rect(comp.work_area_for(comp.display_manager.displays()[0].bounds())),
+            "the window did not come back to a monitor that exists"
+        );
+    }
+
+    #[test]
+    fn detaching_the_last_monitor_is_refused() {
+        // Not an arrangement: zero-sized virtual bounds, no primary to fall back
+        // to, and every window stranded with nowhere to be rescued to. Keeping
+        // the screen the compositor cannot paint on is strictly better than
+        // adopting a desktop it cannot describe.
+        let mut comp = Compositor::new(800, 600, 2_000_000).expect("compositor");
+        assert!(
+            comp.detach_display(0).is_err(),
+            "the only monitor was detached"
+        );
+        assert_eq!(
+            comp.display_manager.displays().len(),
+            1,
+            "the display went away even though the call failed"
+        );
+        assert_eq!(comp.frame_size(), (800, 600), "the surface went away too");
+    }
+
+    #[test]
+    fn detaching_a_display_that_is_not_there_is_an_error_and_not_a_panic() {
+        let (mut comp, _, _) = two_monitors(0);
+        assert!(
+            comp.detach_display(99).is_err(),
+            "a display that was never attached was detached anyway"
+        );
+        assert_eq!(
+            comp.display_manager.displays().len(),
+            2,
+            "a failed detach took a monitor with it"
         );
     }
 

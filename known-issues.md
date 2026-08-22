@@ -59450,11 +59450,46 @@ so a race stores the value that was already there. Left as is.
 
 `crt.rs`, `fdtable.rs`, `aio.rs`, `dirent.rs`, `pthread.rs` and `perthread.rs`
 reach their globals through the `perprocess!`/`perthread` macros, which is a
-separate mechanism with its own story and was not part of this pass. **Neither
-is covered by any automated check** — the next instance of this defect will
-again be found by a flake or by someone reading. A lint that flags a
-`static mut` reachable from more than one `#[test]` without an intervening lock
-or thread-local would close that, and does not exist.
+separate mechanism with its own story and was not part of this pass.
+
+### The check that now covers this
+
+All five instances were found by a flake or by someone reading, so the sixth
+would have been too. `scripts/raced-globals.py` closes that: it flags a
+*resettable* `static mut` / `static Atomic*` reachable from two or more
+`#[test]` functions with no lock and no thread-local between them, and
+`scripts/hooks/pre-push` gate 3 refuses a push that introduces one.
+
+Three things make it a check that survives contact rather than one that gets
+deleted:
+
+- **It is a ratchet.** `scripts/raced-globals-baseline.txt` records the 48
+  pre-existing instances, and `--check` fails only on a global that is *not* in
+  it, so the backlog can be worked down without the gate being red on the day it
+  lands. The file only ever shrinks. A false positive belongs in the script's
+  `IGNORE` table, which records *why*; the baseline records only *that*.
+- **A resetting write is required.** A `static COUNTER: AtomicU64` that is only
+  ever `fetch_add`ed is the pattern that *prevents* this bug — every caller gets
+  a distinct value and a race cannot lie. Demanding a `store`/`swap`/
+  `compare_exchange`/`addr_of_mut!`/assignment cut the report from 84 globals
+  to 48; the three largest entries it removed (106, 88 and 35 tests) were all
+  unique-id counters.
+- **The lock hint propagates one hop.** `getopt` and `environ` serialise via
+  `reset_getopt_state()` and `lock_env_for_test()`, whose *call sites* contain
+  no word resembling "lock". Following the same call graph used for
+  reachability is what stops the tool flagging the code that already did it
+  right — the failure mode that gets a linter switched off.
+
+It is scoped to `posix/` and `userspace/` for the same reason gate 2 is scoped
+to `userspace/`: a lane A or C push must never pay for, or be blocked by, a lane
+B check. Bypass is `ALLOW_RACED_GLOBAL=1`, separate from the other two gates'.
+
+Validated against the five known instances: the detector's per-global test
+counts match the hand analysis exactly (`DL_ERROR` 15, `HTAB` 7, `SAVED` 3,
+`UMASK_VALUE` 3), and all four fixed globals now classify as *serialised* —
+which is what demonstrates that both halves work, reachability and guard
+detection. The macro-based globals above remain unaudited, but they are now
+*visible*: they sit in the baseline rather than being invisible until they flake.
 
 ### Verification
 

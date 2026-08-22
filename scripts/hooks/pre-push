@@ -137,24 +137,38 @@ fi
 # Bypass: ALLOW_UNREACHABLE_ALIAS=1 git push origin <branch>
 # ---------------------------------------------------------------------------
 
+# Shared preconditions for gates 2 and 3. A missing repo root or interpreter
+# skips the *checks*, not the hook: `skip=1` rather than `exit 0`, so that one
+# unavailable checker can never silently disable the next gate. (This is the
+# same mistake the gate-1 bypass above is careful not to make.)
+skip=0
+repo_root=$(git rev-parse --show-toplevel 2>/dev/null) || skip=1
+py=$(command -v python3 || command -v python) || skip=1
+[ -n "${py:-}" ] || skip=1
+
+# Does this push add commits touching any of the given paths?
+touches() {
+    [ -n "$(git rev-list HEAD --not --remotes="$remote_name" -- "$@" 2>/dev/null | head -n 1)" ]
+}
+
 if [ "${ALLOW_UNREACHABLE_ALIAS:-0}" = "1" ]; then
     echo "pre-push: ALLOW_UNREACHABLE_ALIAS=1 set — alias check skipped." >&2
-    exit 0
+    skip_alias=1
+else
+    skip_alias=$skip
 fi
 
-repo_root=$(git rev-parse --show-toplevel 2>/dev/null) || exit 0
-checker="$repo_root/scripts/multicall-aliases.py"
-[ -f "$checker" ] || exit 0
-
-py=$(command -v python3 || command -v python) || exit 0
-[ -n "$py" ] || exit 0
-
+checker="${repo_root:-.}/scripts/multicall-aliases.py"
+[ -f "$checker" ] || skip_alias=1
 # Only lane B's tree can introduce one of these, so only pay for it there.
-touches_userspace=$(git rev-list HEAD --not --remotes="$remote_name" \
-                        -- userspace/ 2>/dev/null | head -n 1)
-[ -n "$touches_userspace" ] || exit 0
+touches userspace/ || skip_alias=1
 
-if ! "$py" "$checker" --check; then
+alias_failed=0
+if [ "$skip_alias" != "1" ] && ! "$py" "$checker" --check; then
+    alias_failed=1
+fi
+
+if [ "$alias_failed" = "1" ]; then
     cat >&2 <<EOF
 
 pre-push: REFUSING to push — a new command name exists that nothing can run.
@@ -176,6 +190,87 @@ reason, which is auditable, rather than to the baseline, which is not.
 
 To push anyway:
     ALLOW_UNREACHABLE_ALIAS=1 git push $remote_name ...
+
+EOF
+    exit 1
+fi
+
+# ---------------------------------------------------------------------------
+# Gate 3: refuse to publish a new process-global that its own tests race.
+#
+# `cargo test` runs tests concurrently on separate threads. A test that sets a
+# mutable global to a known value, provokes, and reads it back is only
+# meaningful if nothing else touches that global in between -- and five tests
+# in `posix` were doing exactly that (known-issues.md ->
+# B-POSIX-FOUR-MORE-PROCESS-GLOBALS-ARE-RACED-BY-THEIR-OWN-TESTS). One of them,
+# strtok's `SAVED`, is worse than a wrong assertion: it points into whichever
+# caller's buffer ran last and a NUL is written through it, so the failure mode
+# is corruption of another live thread's stack.
+#
+# Every one of those five was found by a flake or by someone reading the code,
+# which is why this exists. scripts/raced-globals.py flags a resettable
+# `static mut` / `static Atomic*` reachable from more than one `#[test]` with no
+# intervening lock or thread-local.
+#
+# Same ratchet as gate 2: the known set lives in
+# scripts/raced-globals-baseline.txt and this fails only on a global that is
+# *not* in it, so the 48-entry backlog can be worked down without the check
+# being red -- and therefore deleted -- on the day it lands.
+#
+# Scoped the same way, and for the same reason: it runs only when the push adds
+# commits touching `posix/` or `userspace/`, so a lane A or C push never pays
+# for it and can never be blocked by it.
+#
+# Bypass: ALLOW_RACED_GLOBAL=1 git push origin <branch>
+# ---------------------------------------------------------------------------
+
+if [ "${ALLOW_RACED_GLOBAL:-0}" = "1" ]; then
+    echo "pre-push: ALLOW_RACED_GLOBAL=1 set — raced-global check skipped." >&2
+    skip_raced=1
+else
+    skip_raced=$skip
+fi
+
+raced="${repo_root:-.}/scripts/raced-globals.py"
+[ -f "$raced" ] || skip_raced=1
+touches posix/ userspace/ || skip_raced=1
+
+raced_failed=0
+if [ "$skip_raced" != "1" ] && ! "$py" "$raced" --check; then
+    raced_failed=1
+fi
+
+if [ "$raced_failed" = "1" ]; then
+    cat >&2 <<EOF
+
+pre-push: REFUSING to push — a mutable global above is raced by its own tests.
+
+Two or more #[test] functions reach that global with no lock and no
+thread-local between them. libtest runs them concurrently, so whichever one
+asserts on the value is asserting on whatever the other thread left there.
+
+Do NOT add a line to scripts/raced-globals-baseline.txt to turn this green --
+the baseline records the existing backlog and is only ever meant to shrink.
+Pick the fix that matches *why* the state is shared:
+
+  * Shared by specification (POSIX mandates one strtok save pointer, one
+    umask, one hsearch table): it cannot stop being shared, so serialise it --
+    a \`static FOO_TEST_LOCK: Mutex<()>\` taken as the FIRST statement of every
+    touching test, covering the whole body. Recover poison
+    (\`unwrap_or_else(std::sync::PoisonError::into_inner)\`) so one real failure
+    reports once instead of poisoning its siblings.
+
+  * Shared only incidentally (a test counter that merely happens to live in a
+    \`static\`): stop sharing it -- \`thread_local!\` + \`Cell<T>\`. libtest gives
+    every test its own thread, so no lock is needed and the tests stay
+    concurrent. See posix::malloc::live_regions.
+
+If this is genuinely a false positive -- a global no test can observe a wrong
+value of -- add it to the IGNORE table in scripts/raced-globals.py with the
+reason, which is auditable, rather than to the baseline, which is not.
+
+To push anyway:
+    ALLOW_RACED_GLOBAL=1 git push $remote_name ...
 
 EOF
     exit 1

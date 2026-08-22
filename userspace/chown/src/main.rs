@@ -58,9 +58,14 @@ const SYS_FS_METADATA: u64 = 628;
 
 /// Change file owner and group (`SYS_FS_SET_OWNER`).
 ///
-/// arg0 = path pointer, arg1 = path length, arg2 = uid (u32), arg3 = gid (u32).
+/// arg0 = path pointer, arg1 = path length, arg2 = uid (u32), arg3 = gid (u32),
+/// arg4 bit 0 = NO_FOLLOW.
 /// A uid or gid of `u32::MAX` means "leave that field unchanged"; the kernel
 /// resolves the sentinel against the file's current owner.
+///
+/// arg4 is what libc's `lchown` passes (`posix/src/file.rs` →
+/// `set_owner_path_ex`): clear, the kernel resolves the final symlink and
+/// chowns its target; set, it chowns the link inode itself.
 const SYS_FS_SET_OWNER: u64 = 630;
 
 /// Change file permission mode bits (`SYS_FS_SET_PERMS`).
@@ -106,6 +111,36 @@ unsafe fn syscall4(nr: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> i64 {
             in("rsi") a2,
             in("rdx") a3,
             in("r10") a4,
+            lateout("rcx") _,
+            lateout("r11") _,
+            options(nostack),
+        );
+    }
+    ret
+}
+
+/// Issue a five-argument syscall. `a5` goes in r8, continuing the register
+/// mapping documented on [`syscall4`].
+///
+/// Needed for `SYS_FS_SET_OWNER`'s fifth argument, the NO_FOLLOW bit — the
+/// difference between changing a symbolic link and changing whatever it points
+/// at. Without it there is no way to express `lchown(2)`, and `chown -R` on a
+/// tree containing `link -> /etc/shadow` hands `/etc/shadow` to the new owner.
+#[cfg(target_arch = "x86_64")]
+unsafe fn syscall5(nr: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64) -> i64 {
+    let ret: i64;
+    // SAFETY: Caller ensures arguments are valid for the given syscall number.
+    // Identical contract to `syscall4`, plus arg4 in r8 as the Slate OS ABI
+    // specifies. rcx and r11 are clobbered per the hardware specification.
+    unsafe {
+        core::arch::asm!(
+            "syscall",
+            inlateout("rax") nr as i64 => ret,
+            in("rdi") a1,
+            in("rsi") a2,
+            in("rdx") a3,
+            in("r10") a4,
+            in("r8") a5,
             lateout("rcx") _,
             lateout("r11") _,
             options(nostack),
@@ -310,17 +345,23 @@ fn read_metadata(_path: &str) -> Result<FileMeta, String> {
 /// `uid` and `gid` are the new owner/group. Pass `u32::MAX` for either to
 /// leave it unchanged (the kernel interprets `0xFFFFFFFF` as "no change",
 /// resolving the sentinel against the file's current owner in the VFS layer).
+///
+/// `no_follow` selects `lchown(2)` semantics: the symbolic link itself is
+/// chowned rather than its target. Every caller must think about this — see
+/// [`follow_operand`] for which way round it goes and why.
 #[cfg(target_arch = "x86_64")]
-fn do_chown(path: &str, uid: u32, gid: u32) -> Result<(), String> {
+fn do_chown(path: &str, uid: u32, gid: u32, no_follow: bool) -> Result<(), String> {
     // SAFETY: SYS_FS_SET_OWNER reads `path.len()` bytes from `path.as_ptr()`
-    // and takes uid in arg2 and gid in arg3. The path slice outlives the call.
+    // and takes uid in arg2, gid in arg3 and the NO_FOLLOW bit in arg4. The
+    // path slice outlives the call.
     let ret = unsafe {
-        syscall4(
+        syscall5(
             SYS_FS_SET_OWNER,
             path.as_ptr() as u64,
             path.len() as u64,
             uid as u64,
             gid as u64,
+            u64::from(no_follow),
         )
     };
 
@@ -333,7 +374,7 @@ fn do_chown(path: &str, uid: u32, gid: u32) -> Result<(), String> {
 
 /// Host fallback so the crate compiles for tests on non-x86_64 hosts.
 #[cfg(not(target_arch = "x86_64"))]
-fn do_chown(_path: &str, _uid: u32, _gid: u32) -> Result<(), String> {
+fn do_chown(_path: &str, _uid: u32, _gid: u32, _no_follow: bool) -> Result<(), String> {
     Err("chown syscall unavailable on this platform".to_string())
 }
 
@@ -365,24 +406,61 @@ fn do_chmod(_path: &str, _mode: u32) -> Result<(), String> {
     Err("chmod syscall unavailable on this platform".to_string())
 }
 
+// ============================================================================
+// Recursive traversal — and the symlink rules that make it safe
+// ============================================================================
+//
+// `-R` walks a tree the caller named. Every other path in that tree was named
+// by whoever created the files, which under `/tmp`, a download directory or a
+// user's home is not the caller. A symbolic link is therefore a hostile edge,
+// and the two questions below decide whether it is also an exit.
+//
+//   1. Do we walk *into* it? POSIX's answer for `chown -R` with none of
+//      `-H`/`-L`/`-P` given is `-P`: no. `srv/x -> /etc` must not turn
+//      `chown -R alice srv/` into `chown -R alice /etc`.
+//   2. Do we chown the link or its target? `chown(2)` follows, so the naive
+//      answer hands `/etc/shadow` to alice via `srv/x -> /etc/shadow`. The
+//      answer is the link, i.e. `lchown(2)`.
+//
+// chmod has a third rule of its own: it does not touch symbolic links at all
+// during a recursive walk, because their mode bits are meaningless and the
+// only thing a chmod on one can do is change the target's.
+
+/// One entry from a recursive walk.
+///
+/// `is_symlink` comes from `read_dir`'s own `file_type()`, which is `lstat`-
+/// based and free — no extra syscall, and no window between the walk deciding
+/// what a name is and the caller acting on it.
+struct WalkEntry {
+    path: PathBuf,
+    is_symlink: bool,
+}
+
 /// Recursively collect all paths under a directory (depth-first).
 ///
 /// The directory itself is included as the last entry so that ownership/mode
 /// changes propagate from leaves to root (allowing the directory to remain
 /// readable during traversal).
-fn collect_recursive(base: &Path) -> Vec<PathBuf> {
+///
+/// Symbolic links are collected but never descended into, whatever they point
+/// at. This is `-P`, POSIX's default for `chown -R`, and it is the reason the
+/// walk cannot leave the tree it was pointed at.
+fn collect_recursive(base: &Path) -> Vec<WalkEntry> {
     let mut results = Vec::new();
     collect_recursive_inner(base, &mut results);
     results
 }
 
-fn collect_recursive_inner(dir: &Path, out: &mut Vec<PathBuf>) {
+fn collect_recursive_inner(dir: &Path, out: &mut Vec<WalkEntry>) {
     let entries = match fs::read_dir(dir) {
         Ok(e) => e,
         Err(_) => {
             // Cannot read this directory -- include it anyway so the caller
             // can report the error during the actual chown/chmod call.
-            out.push(dir.to_path_buf());
+            out.push(WalkEntry {
+                path: dir.to_path_buf(),
+                is_symlink: false,
+            });
             return;
         }
     };
@@ -392,20 +470,58 @@ fn collect_recursive_inner(dir: &Path, out: &mut Vec<PathBuf>) {
         let ft = match entry.file_type() {
             Ok(t) => t,
             Err(_) => {
-                out.push(path);
+                // Unknown type: treat it as a symlink, the conservative
+                // reading. The worst that costs is a link left unchanged;
+                // guessing the other way costs the target.
+                out.push(WalkEntry {
+                    path,
+                    is_symlink: true,
+                });
                 continue;
             }
         };
 
+        // `file_type()` is lstat-based, so `is_dir()` is false for a symlink
+        // to a directory and the recursion below cannot follow one.
         if ft.is_dir() {
             collect_recursive_inner(&path, out);
         } else {
-            out.push(path);
+            out.push(WalkEntry {
+                path,
+                is_symlink: ft.is_symlink(),
+            });
         }
     }
 
     // Directory itself comes last (leaf-first order).
-    out.push(dir.to_path_buf());
+    out.push(WalkEntry {
+        path: dir.to_path_buf(),
+        is_symlink: false,
+    });
+}
+
+/// Whether a **command-line operand** should be dereferenced.
+///
+/// Split out as a pure function so the rule is testable on the build host,
+/// where none of the syscalls above exist. The rule:
+///
+/// * `-h`/`--no-dereference` always wins — that is the whole point of it.
+/// * Without `-R`, a bare `chown alice link` follows, as POSIX requires: the
+///   operand was named by the caller, who can see what it is.
+/// * With `-R`, it does not. POSIX makes `-P` the default for recursion
+///   specifically so that a link cannot smuggle the walk out of the named
+///   tree, and that applies to the root of the walk as much as to its leaves.
+fn follow_operand(recursive: bool, no_deref: bool) -> bool {
+    !no_deref && !recursive
+}
+
+/// Whether an entry found *during* a recursive walk should be dereferenced.
+///
+/// Never. This binary implements neither `-H` nor `-L`, so there is no flag
+/// that could ask for it, and following here is exactly the escape described
+/// at the top of this section.
+const fn follow_child() -> bool {
+    false
 }
 
 // ============================================================================
@@ -1028,7 +1144,12 @@ fn parse_args(args: &[String], users: &UserDb, groups: &[GroupEntry]) -> Result<
 // ============================================================================
 
 /// Run chown on a single file. Returns (changed: bool, error: Option<String>).
-fn chown_one(path: &str, spec: &OwnerSpec, opts: &Options) -> (bool, Option<String>) {
+///
+/// `follow` decides whether a symbolic link at `path` is dereferenced. It is
+/// never inferred here: the caller knows whether this path is an operand the
+/// user named or a name the filesystem handed us, and only the caller can tell
+/// those apart. See [`follow_operand`].
+fn chown_one(path: &str, spec: &OwnerSpec, opts: &Options, follow: bool) -> (bool, Option<String>) {
     // Read current metadata (best-effort) for --from matching and accurate
     // change detection. If it fails we fall back to assuming a field changes
     // whenever it is specified.
@@ -1072,7 +1193,7 @@ fn chown_one(path: &str, spec: &OwnerSpec, opts: &Options) -> (bool, Option<Stri
     let uid = spec.uid.unwrap_or(u32::MAX);
     let gid = spec.gid.unwrap_or(u32::MAX);
 
-    match do_chown(path, uid, gid) {
+    match do_chown(path, uid, gid, !follow) {
         Ok(()) => {
             let owner_str = format_owner(spec.uid, spec.gid);
             if opts.json {
@@ -1110,16 +1231,6 @@ fn format_owner(uid: Option<u32>, gid: Option<u32>) -> String {
 
 /// Execute chown for all target files.
 fn run_chown(opts: &Options, users: &UserDb, groups: &[GroupEntry]) -> bool {
-    // -h / --no-dereference asks us to operate on the symlink itself. The
-    // Slate OS VFS set_owner path resolves symlinks (resolve_follow) and there is
-    // no lchown-equivalent syscall yet, so we cannot honor this. Warn rather
-    // than silently chown the target. (Tracked in todo.txt.)
-    if opts.no_deref && !opts.silent {
-        eprintln!(
-            "chown: warning: -h/--no-dereference is not supported on Slate OS; symlink targets will be affected"
-        );
-    }
-
     let spec = if let Some(ref refpath) = opts.reference {
         // --reference: copy owner/group from the reference file's metadata.
         match read_metadata(refpath) {
@@ -1145,24 +1256,37 @@ fn run_chown(opts: &Options, users: &UserDb, groups: &[GroupEntry]) -> bool {
     };
 
     let mut any_error = false;
+    let operand_follow = follow_operand(opts.recursive, opts.no_deref);
 
     for file in &opts.files {
-        let paths: Vec<PathBuf> = if opts.recursive {
-            let p = Path::new(file);
-            if p.is_dir() {
-                collect_recursive(p)
-            } else {
-                vec![p.to_path_buf()]
+        let p = Path::new(file);
+
+        // `p.is_dir()` would follow a symlink and start the walk in whatever
+        // tree it names. `symlink_metadata` is lstat: a link is a link, so
+        // `chown -R alice link-to-etc` changes the link and stops there.
+        let operand_is_walkable_dir =
+            opts.recursive && fs::symlink_metadata(p).is_ok_and(|m| m.is_dir());
+
+        if operand_is_walkable_dir {
+            for entry in collect_recursive(p) {
+                let path_str = entry.path.to_string_lossy();
+                // --from filtering is handled inside chown_one, which has
+                // access to the file's current metadata.
+                let follow = if entry.is_symlink {
+                    follow_child()
+                } else {
+                    // Not a link, so following is a no-op — but ask for
+                    // NO_FOLLOW anyway rather than leave a race in which the
+                    // name becomes one between the walk and the syscall.
+                    false
+                };
+                let (_, err) = chown_one(&path_str, &spec, opts, follow);
+                if err.is_some() {
+                    any_error = true;
+                }
             }
         } else {
-            vec![PathBuf::from(file)]
-        };
-
-        for path in &paths {
-            let path_str = path.to_string_lossy();
-            // --from filtering is handled inside chown_one, which has access
-            // to the file's current metadata.
-            let (_, err) = chown_one(&path_str, &spec, opts);
+            let (_, err) = chown_one(&p.to_string_lossy(), &spec, opts, operand_follow);
             if err.is_some() {
                 any_error = true;
             }
@@ -1244,19 +1368,37 @@ fn run_chmod(opts: &Options) -> bool {
     let mut any_error = false;
 
     for file in &opts.files {
-        let paths: Vec<PathBuf> = if opts.recursive {
+        // A command-line symlink *is* dereferenced here, matching GNU chmod
+        // (`fts` with `FTS_COMFOLLOW`): the operand is a name the caller typed
+        // and can see. Links met during the walk below are a different matter
+        // and are skipped outright.
+        let paths: Vec<WalkEntry> = if opts.recursive {
             let p = Path::new(file);
             if p.is_dir() {
                 collect_recursive(p)
             } else {
-                vec![p.to_path_buf()]
+                vec![WalkEntry {
+                    path: p.to_path_buf(),
+                    is_symlink: false,
+                }]
             }
         } else {
-            vec![PathBuf::from(file)]
+            vec![WalkEntry {
+                path: PathBuf::from(file),
+                is_symlink: false,
+            }]
         };
 
-        for path in &paths {
-            let path_str = path.to_string_lossy();
+        for entry in &paths {
+            // GNU chmod skips every symbolic link it meets while recursing,
+            // and so do we. A symlink has no useful mode bits of its own, so
+            // the only thing chmod on one can do is change its target's — and
+            // `srv/x -> /etc/shadow` would make `chmod -R 777 srv/` a way to
+            // make /etc/shadow world-writable.
+            if entry.is_symlink {
+                continue;
+            }
+            let path_str = entry.path.to_string_lossy();
 
             // Read the current mode (best-effort) for symbolic application and
             // change detection.
@@ -1416,6 +1558,41 @@ mod tests {
              \x20   username: \"alice\"\n\
              \x20   groups: [\"users\", \"staff\"]\n",
         )
+    }
+
+    // ---- symlink policy ----------------------------------------------------
+    //
+    // These are the only tests in this file that guard a security boundary, so
+    // they are stated as the rule rather than as the code: if one of them goes
+    // red, the question to ask is whether the *rule* changed, not whether the
+    // assertion needs updating. See known-issues.md →
+    // `B-chown-FOLLOWS-SYMLINKS-WHILE-RECURSING`.
+
+    #[test]
+    fn plain_chown_of_a_link_follows_it() {
+        // POSIX: without -R and without -h, chown acts on the target. The
+        // caller named this link and can see what it is.
+        assert!(follow_operand(false, false));
+    }
+
+    #[test]
+    fn dash_h_never_follows() {
+        assert!(!follow_operand(false, true));
+        assert!(!follow_operand(true, true));
+    }
+
+    #[test]
+    fn recursive_chown_does_not_follow_its_own_operand() {
+        // -P is POSIX's default for `chown -R`. `chown -R alice link-to-etc`
+        // must change the link, not walk /etc.
+        assert!(!follow_operand(true, false));
+    }
+
+    #[test]
+    fn nothing_found_during_a_walk_is_ever_followed() {
+        // This binary implements neither -H nor -L, so there is no flag that
+        // could ask to follow, and following is the escape itself.
+        assert!(!follow_child());
     }
 
     // ---- mode detection ----------------------------------------------------

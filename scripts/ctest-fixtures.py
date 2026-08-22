@@ -399,6 +399,28 @@ def _inputs(fixture: Path) -> list[tuple[str, Path, bool]]:
     names. Where a gate and a builder disagree about what an input is, the
     builder must be the more inclusive of the two.
 
+    **The fastpy compiler is an input too, and used not to be.** A fastpy
+    fixture's ELF is produced by `compiler.codegen` from source that never
+    changes, so a fastpy *codegen* fix rewrites the binary while every file
+    listed above stands still. Left out, the gate says "current" about an ELF
+    built by a compiler that has since been corrected — which is not a
+    hypothetical: `fastpy-minishell.elf` was built 2026-08-21 16:05, fastpy
+    fixed the list-element-kind defect that broke it at 18:03, and the gate went
+    on reporting the fixture as up to date. (The defect: `x = []` had a
+    fabricated `list:int` element kind written into its type tag, so a loop over
+    a list of appended *strings* compared them as ints, the minishell's
+    stage-counting loop counted zero, and it forked nothing —
+    `BUG-FASTPY-MINISHELL-EXITS-0-WITHOUT-FORKING`.)
+
+    What stands in for "the compiler" is the newest `.py` under its `compiler/`
+    package, which is the same instrument (`mtime` ordering) the rest of this
+    function uses, applied to the same kind of thing (a source file the output
+    is derived from). It is reported by name, so the answer says *which* file
+    moved rather than "fastpy changed". If the checkout cannot be found the
+    input is simply omitted — `build` reports a missing fastpy far better than
+    a staleness gate can, and a fixture that cannot be rebuilt is not made more
+    truthful by being called stale.
+
     The third element is "this is text": true for tracked sources, whose line
     endings differ between worktrees without differing between commits, and
     false for `libc.a`, which is a build product where every byte counts.
@@ -414,7 +436,49 @@ def _inputs(fixture: Path) -> list[tuple[str, Path, bool]]:
     for header in sorted(fixture.glob("*.h")):
         got.append((header.name, header, True))
     got.append(("toolchain/sysroot/lib/libc.a", LIBC, False))
+    if fixture.name.startswith("fastpy-"):
+        newest = _newest_compiler_source()
+        if newest is not None:
+            got.append((f"fastpy {newest.name}", newest, True))
     return got
+
+
+def _newest_compiler_source() -> Path | None:
+    """The most recently modified `.py` in fastpy's `compiler` package.
+
+    The stand-in for "the version of the compiler that built this ELF" — see
+    `_inputs`. `None` when no fastpy checkout can be found, or when it somehow
+    contains no Python at all; both are the build's problem to report, not this
+    gate's to guess about.
+
+    Cached, because `is_stale` runs once per fixture and there are 61 of them
+    against a package of a few hundred files. The cache is per-process and the
+    process is short-lived, so it cannot go stale within a run in any way that
+    matters: a compiler edited *during* a build run would already be a race
+    between the gate and the builder.
+    """
+    global _NEWEST_COMPILER_SOURCE
+    if _NEWEST_COMPILER_SOURCE is not _UNCACHED:
+        return _NEWEST_COMPILER_SOURCE
+    _NEWEST_COMPILER_SOURCE = None
+    fastpy = _fastpy_dir()
+    if fastpy is not None:
+        sources = list((fastpy / "compiler").rglob("*.py"))
+        if sources:
+            try:
+                _NEWEST_COMPILER_SOURCE = max(sources, key=lambda p: p.stat().st_mtime)
+            except OSError:
+                # A file that vanished between glob and stat; treat the compiler
+                # as unknown rather than crash a gate that is only advisory.
+                _NEWEST_COMPILER_SOURCE = None
+    return _NEWEST_COMPILER_SOURCE
+
+
+# Sentinel distinguishing "not looked up yet" from a cached `None` ("looked up,
+# found nothing"). A plain `None` default would re-run the rglob 61 times in the
+# no-fastpy case, which is the case where it is slowest to fail.
+_UNCACHED = object()
+_NEWEST_COMPILER_SOURCE: Path | None | object = _UNCACHED
 
 
 def is_stale(fixture: Path) -> str | None:

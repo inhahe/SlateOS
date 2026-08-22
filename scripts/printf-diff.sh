@@ -86,11 +86,12 @@ while [ $# -gt 0 ]; do
 done
 
 TARGET=x86_64-pc-windows-gnu
-# Whether `OURS` was chosen by the caller, which decides whether it is ours to
-# build. Checked before the default is applied, because after that they look
-# alike.
-OURS_IS_DEFAULT=${OURS+no}
-OURS=${OURS:-target/$TARGET/debug/printf.exe}
+# Built here, from the package named, rather than picked up out of `target/`.
+# This harness is where the stale-binary problem was first found; the shared
+# helper is that fix generalised to all twenty-seven harnesses, and it also
+# pins *which* crate's binary is meant. See `scripts/diff-subject.sh`.
+. "$(dirname "$0")/diff-subject.sh"
+OURS=$(DIFF_TARGET=$TARGET subject_binary coreutils printf "${OURS:-}") || exit 1
 GNU=${GNU:-printf}
 
 # Our printf is a native Windows binary, so MSYS would helpfully rewrite any
@@ -98,20 +99,6 @@ GNU=${GNU:-printf}
 # argument `/` into something with a drive letter in it.
 export MSYS2_ARG_CONV_EXCL='*'
 export LC_ALL=C.UTF-8
-
-# Built every run, not just when the binary is missing. `cargo build` is a
-# no-op on an unchanged tree, so the only thing the "is it there?" version
-# saved was correctness: `cargo test` and `cargo clippy` do not refresh
-# `printf.exe`, so a fix verified by a unit test and then measured here was
-# measured against the *previous* binary. That happened, and it read as a
-# genuine remaining difference in a report that was otherwise clean.
-if [ "${OURS_IS_DEFAULT:-yes}" = yes ]; then
-  cargo build -p coreutils --bin printf --target "$TARGET" || exit 1
-fi
-if [ ! -x "$OURS" ]; then
-  echo "no printf at $OURS" >&2
-  exit 1
-fi
 
 WORK=$(mktemp -d)
 cleanup() { [ "$KEEP" = 1 ] || rm -rf "$WORK"; }

@@ -75,11 +75,11 @@ while [ $# -gt 0 ]; do
 done
 
 TARGET=x86_64-pc-windows-gnu
-# Whether `OURS` was chosen by the caller, which decides whether it is ours to
-# build. Checked before the default is applied, because after that they look
-# alike.
-OURS_IS_DEFAULT=${OURS+no}
-OURS=${OURS:-target/$TARGET/debug/seq.exe}
+# Built here, from the package named, rather than picked up out of `target/`.
+# See `scripts/diff-subject.sh` for the two ways the old "just run the path"
+# form got the answer wrong.
+. "$(dirname "$0")/diff-subject.sh"
+OURS=$(DIFF_TARGET=$TARGET subject_binary coreutils seq "${OURS:-}") || exit 1
 GNU=${GNU:-seq}
 
 # Our seq is a native Windows binary, so MSYS would helpfully rewrite any
@@ -87,20 +87,6 @@ GNU=${GNU:-seq}
 # operand `-1` into something with a drive letter in it.
 export MSYS2_ARG_CONV_EXCL='*'
 export LC_ALL=C.UTF-8
-
-# Built every run, not just when the binary is missing. `cargo build` is a
-# no-op on an unchanged tree, so the only thing the "is it there?" version
-# saved was correctness: `cargo test` and `cargo clippy` do not refresh
-# `seq.exe`, so a fix verified by a unit test and then measured here would be
-# measured against the *previous* binary. That is not hypothetical -- it
-# happened in the printf harness, which was a copy of this one.
-if [ "${OURS_IS_DEFAULT:-yes}" = yes ]; then
-  cargo build -p coreutils --bin seq --target "$TARGET" || exit 1
-fi
-if [ ! -x "$OURS" ]; then
-  echo "no seq at $OURS" >&2
-  exit 1
-fi
 
 WORK=$(mktemp -d)
 cleanup() { [ "$KEEP" = 1 ] || rm -rf "$WORK"; }

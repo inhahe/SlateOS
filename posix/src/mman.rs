@@ -272,7 +272,11 @@ pub const MCL_ONFAULT: i32 = 4;
 /// Our OS uses 16 KiB pages.  Address arguments to mlock/munlock/msync/
 /// madvise must be aligned to this; lengths are rounded *up* to a
 /// page multiple by the kernel (matching Linux semantics).
-const MMAN_PAGE_SIZE: u64 = 16384;
+///
+/// Derived from [`crate::unistd::PAGE_SIZE`] rather than written out again, so
+/// that what this module *enforces* alignment against and what `getpagesize()`
+/// *tells* the caller to align to can never be two different numbers.
+const MMAN_PAGE_SIZE: u64 = crate::unistd::PAGE_SIZE as u64;
 
 /// Validate that an address is page-aligned.  Linux returns EINVAL for
 /// non-aligned addresses on mlock/munlock/msync/madvise.
@@ -677,6 +681,18 @@ mod tests {
         let ret = mlockall(MCL_ONFAULT);
         assert_eq!(ret, -1);
         assert_eq!(errno::get_errno(), errno::EINVAL);
+    }
+
+    /// The alignment this module enforces is the page size `unistd` reports.
+    ///
+    /// `MMAN_PAGE_SIZE` is private, so `unistd`'s
+    /// `every_spelling_of_the_page_size_agrees` cannot reach it; this is that
+    /// test's arm inside this module.  A mismatch would not raise an error
+    /// anywhere — it would make `mlock` reject addresses that `getpagesize()`
+    /// told the caller were correctly aligned.
+    #[test]
+    fn mman_page_size_matches_unistd() {
+        assert_eq!(MMAN_PAGE_SIZE, crate::unistd::PAGE_SIZE as u64);
     }
 
     #[test]

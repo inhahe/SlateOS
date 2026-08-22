@@ -1,5 +1,36 @@
 # coreutils bundle vs. standalone per-tool crates — design-merits answer
 
+> ## ⚠ Correction, 2026-08-22: this document's central factual claim is false
+>
+> **Everything below assumes `userspace/coreutils` is a multi-call binary — one
+> executable that dispatches on `argv[0]`, BusyBox-style. It is not, and never
+> was.** The reasoning about multi-call binaries is sound; it simply is not
+> about this crate. Measured on 2026-08-22:
+>
+> | Claim below | Reality |
+> |---|---|
+> | `coreutils` is one executable dispatching on `argv[0]` | `cargo metadata` reports **86 separate bin targets**. One tool = one file, already. |
+> | …so the kernel sees one identity for every tool | It sees 86, exactly as this document asks for. |
+> | Remedy: "factor the common logic into a shared **library crate**" | Already done, before this was written — `userspace/coreutils/src/lib.rs` plus `bignat`, `cfmt`, `errmsg`, `extfloat`, `filekind`, `getopt`, `human`, `quote`, `shell`, `tabstops`, `xnum`. |
+> | (implied) the standalone crates are the per-identity side | Four of them are the multi-call shape this document condemns: `stat` → `stat`/`touch`/`ln`/`readlink`/`realpath`/`mkfifo`; `sha256sum` → `md5sum`/`sha1sum`/`sha256sum`/`sha512sum`; `chown` → `chown`/`chmod`; `who` → `who`/`w`. |
+>
+> There has never been a `userspace/coreutils/src/main.rs` in this repository's
+> history; its first commit (`d469e23bb`, 2026-05-17) already had `src/bin/*.rs`.
+> The name "coreutils" appears to be the entire source of the error — it reads
+> like a BusyBox bundle and was never checked against the manifest.
+>
+> **Consequence:** the decisive argument below, applied to the real code, points
+> the *opposite* way — it argues for keeping `coreutils` and against the four
+> standalone crates that actually do `argv[0]` dispatch. This document was the
+> basis of `design-decisions.md` **§8**, an operator decision, so the correction
+> has been put back to the operator as `open-questions.md` → **B-Q7** rather
+> than acted on. §8 stands until that is answered.
+>
+> **What is still worth reading here:** §"The decisive axis" and the supporting
+> arguments are a good statement of *why a capability OS should not ship
+> multi-call binaries*. Read them as a standing rule about the shape, and apply
+> them to `stat`, `sha256sum`, `chown` and `who`, which have it.
+
 **You asked:** ignore *implementation effort* and *disk/network space*; tell me
 which option produces the **best end result for the OS design**, with pros/cons
 and a recommendation that don't lean on those two concerns.

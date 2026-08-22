@@ -7,11 +7,17 @@
 # about the rest. This runs the lot and reports each tail line, so a
 # regression anywhere shows up in a single screen.
 #
-# Arguments are harness names to skip, for the ones known to be red for a
-# reason already written down (`calc` -- see the three `bc` bugs in
-# `known-issues.md`):
+# Arguments are harness names to skip, for any known to be red for a reason
+# already written down:
 #
 #     sh scripts/all-diff.sh calc
+#
+# Nothing is skipped at present. `calc` was, for "the three `bc` bugs in
+# `known-issues.md`" -- which did not exist. The harness was running
+# `coreutils`'s bc rather than `userspace/bc`'s: both packages produce
+# `target/.../debug/bc.exe`, and whichever built last won. Every harness now
+# builds its own subject and names the package it comes from, so a red harness
+# here is a real difference again. See `scripts/diff-subject.sh`.
 #
 # Progress goes to stderr as each harness starts, because the slowest take
 # minutes and a run that prints nothing for that long is indistinguishable

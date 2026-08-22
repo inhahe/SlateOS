@@ -49,12 +49,19 @@ pub const HZ: u32 = 100;
 /// With our 16 KiB page size, there's less than one page per KB.
 /// This constant is 1 for compatibility; page-based calculations
 /// should use `getpagesize()` or `sysconf(_SC_PAGESIZE)`.
-pub const NBPG: usize = 16384;
+pub const NBPG: usize = crate::unistd::PAGE_SIZE;
 
 /// Page size (same as `getpagesize()`).
-pub const PAGE_SIZE: usize = 16384;
+///
+/// An alias of [`crate::unistd::PAGE_SIZE`] under the BSD `<sys/param.h>`
+/// spelling, not a second definition — see the doc comment there.
+pub const PAGE_SIZE: usize = crate::unistd::PAGE_SIZE;
 
-/// Shift count for page size (log2(16384) = 14).
+/// Shift count for page size (`log2(PAGE_SIZE)` = 14).
+///
+/// `PAGE_SIZE == 1 << PAGE_SHIFT` is checked by
+/// `every_spelling_of_the_page_size_agrees` in `unistd`, so this cannot drift
+/// away from the size it is supposed to be the log of.
 pub const PAGE_SHIFT: u32 = 14;
 
 /// Page mask for rounding (PAGE_SIZE - 1).

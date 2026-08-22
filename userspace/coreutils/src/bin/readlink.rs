@@ -103,7 +103,7 @@
 
 use coreutils::canon::{self, Fs, Mode, RealFs};
 use coreutils::errmsg::strerror;
-use coreutils::getopt::{self, Program, Takes};
+use coreutils::getopt::{self, Opt, Program, Takes};
 use coreutils::quote::{os_bytes, quotef_os};
 use std::ffi::OsString;
 use std::io::{self, Write};
@@ -111,6 +111,9 @@ use std::process::ExitCode;
 
 /// `readlink`'s usage status is 1 — measured: `readlink -x; echo $?` prints 1.
 const READLINK: Program = Program::new("readlink", 1);
+
+/// GNU `readlink`'s `getopt_long` string, exactly.
+const SHORT_OPTIONS: &str = "efmnqsvz";
 
 /// GNU `readlink`'s `longopts[]`, in its declaration order.
 const LONG_OPTIONS: &[(&str, Takes)] = &[
@@ -218,108 +221,39 @@ Print value of a symbolic link or canonical file name.
 fn parse_args(args: &[OsString]) -> Result<Request, getopt::Error> {
     let mut flags = Flags::default();
     let mut files: Vec<OsString> = Vec::new();
-    let mut only_operands = false;
 
-    for arg in args {
-        if only_operands {
-            files.push(arg.clone());
-            continue;
-        }
-        let bytes = os_bytes(arg.as_os_str());
-
-        if *bytes == *b"--" {
-            only_operands = true;
-        } else if *bytes == *b"-" || bytes.first() != Some(&b'-') {
-            // A lone `-` is a file called `-`. `readlink` has no
-            // standard-input operand for it to mean anything else.
-            files.push(arg.clone());
-        } else if let Some(body) = bytes.strip_prefix(b"--") {
-            if let Some(request) = parse_long(body, &bytes, &mut flags)? {
-                return Ok(request);
+    for item in READLINK.parse(args, SHORT_OPTIONS, LONG_OPTIONS) {
+        match item? {
+            // A lone `-` arrives as an operand: it is a file called `-`, and
+            // `readlink` has no standard-input operand for it to mean anything
+            // else.
+            Opt::Operand(file) => files.push(file.clone()),
+            Opt::Short(b'f', _) | Opt::Long("canonicalize", _) => {
+                flags.mode = Some(Mode::AllButLast);
             }
-        } else {
-            // Bytes, not `char`s: an option is a single byte, so iterating
-            // `char`s would report `invalid option -- 'é'` for something nobody
-            // could have typed, and would not survive a non-UTF-8 argument.
-            for &b in bytes.get(1..).unwrap_or_default() {
-                apply_short(b, &mut flags)?;
+            Opt::Short(b'e', _) | Opt::Long("canonicalize-existing", _) => {
+                flags.mode = Some(Mode::Existing);
             }
+            Opt::Short(b'm', _) | Opt::Long("canonicalize-missing", _) => {
+                flags.mode = Some(Mode::Missing);
+            }
+            Opt::Short(b'n', _) | Opt::Long("no-newline", _) => flags.no_newline = true,
+            Opt::Short(b'q' | b's', _) | Opt::Long("quiet" | "silent", _) => flags.verbose = false,
+            Opt::Short(b'v', _) | Opt::Long("verbose", _) => flags.verbose = true,
+            Opt::Short(b'z', _) | Opt::Long("zero", _) => flags.zero = true,
+            Opt::Long("help", _) => return Ok(Request::Help),
+            Opt::Long("version", _) => return Ok(Request::Version),
+            // Unreachable: the parser yields only names from the table, and
+            // every one is handled above. Refusing rather than ignoring, so a
+            // table entry added without a handler fails loudly.
+            Opt::Long(other, _) => {
+                return Err(READLINK.usage_referring(format!("option '--{other}' is unhandled")));
+            }
+            Opt::Short(other, _) => return Err(READLINK.invalid_option(other)),
         }
     }
 
     Ok(Request::Run(flags, files))
-}
-
-/// Handle one `--name[=value]` argument.
-///
-/// Returns `Some(request)` for the two options that end parsing immediately,
-/// and `None` for one that only sets a flag.
-///
-/// # Errors
-///
-/// The name resolving to nothing or to more than one option, or a value given
-/// to an option that takes none.
-fn parse_long(
-    body: &[u8],
-    whole: &[u8],
-    flags: &mut Flags,
-) -> Result<Option<Request>, getopt::Error> {
-    // Split before resolving: the name is what gets matched, and the argument
-    // *as typed* — `=VALUE` included — is what gets echoed back if it resolves
-    // to nothing.
-    let (typed, inline) = match body.iter().position(|&c| c == b'=') {
-        Some(at) => (
-            body.get(..at).unwrap_or_default(),
-            Some(body.get(at.saturating_add(1)..).unwrap_or_default()),
-        ),
-        None => (body, None),
-    };
-    // Every option name is ASCII, so a name that is not UTF-8 can match none of
-    // them. It takes the unrecognised path — reported as the bytes typed —
-    // rather than failing in some third way.
-    let typed = std::str::from_utf8(typed).map_err(|_| READLINK.unrecognized_option(whole))?;
-    let (name, takes) = READLINK.resolve_long(typed, whole, LONG_OPTIONS)?;
-
-    if inline.is_some() && takes == Takes::Nothing {
-        return Err(READLINK.long_unwanted_argument(name));
-    }
-
-    match name {
-        "help" => return Ok(Some(Request::Help)),
-        "version" => return Ok(Some(Request::Version)),
-        "canonicalize" => flags.mode = Some(Mode::AllButLast),
-        "canonicalize-existing" => flags.mode = Some(Mode::Existing),
-        "canonicalize-missing" => flags.mode = Some(Mode::Missing),
-        "no-newline" => flags.no_newline = true,
-        "quiet" | "silent" => flags.verbose = false,
-        "verbose" => flags.verbose = true,
-        "zero" => flags.zero = true,
-        // Unreachable: `resolve_long` returns only names from the table, and
-        // every one of them is handled above. Refusing rather than ignoring, so
-        // that a table entry added without a handler fails loudly.
-        other => return Err(READLINK.usage_referring(format!("option '--{other}' is unhandled"))),
-    }
-    Ok(None)
-}
-
-/// Handle one short option byte.
-///
-/// # Errors
-///
-/// A byte that is no option of `readlink`'s.
-fn apply_short(flag: u8, flags: &mut Flags) -> Result<(), getopt::Error> {
-    // GNU `readlink`'s `getopt_long` string is exactly `"efmnqsvz"`.
-    match flag {
-        b'f' => flags.mode = Some(Mode::AllButLast),
-        b'e' => flags.mode = Some(Mode::Existing),
-        b'm' => flags.mode = Some(Mode::Missing),
-        b'n' => flags.no_newline = true,
-        b'q' | b's' => flags.verbose = false,
-        b'v' => flags.verbose = true,
-        b'z' => flags.zero = true,
-        other => return Err(READLINK.invalid_option(other)),
-    }
-    Ok(())
 }
 
 // -------------------------------------------------------------- resolving ---

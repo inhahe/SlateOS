@@ -35,7 +35,12 @@ use alloc::vec::Vec;
 // ---------------------------------------------------------------------------
 
 /// Maximum entries per capability table.
-const MAX_ENTRIES: usize = 4096;
+///
+/// Public so that callers who *fill* a table can bound their input against the
+/// real limit instead of a number they picked (`SYS_PROCESS_SPAWN_EX2`'s
+/// capability subset does this). A cap larger than this cannot succeed anyway,
+/// so accepting it only means doing the copy before refusing.
+pub const MAX_ENTRIES: usize = 4096;
 
 // ---------------------------------------------------------------------------
 // Types

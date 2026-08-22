@@ -3308,7 +3308,7 @@ pub fn sys_process_spawn(args: &SyscallArgs) -> SyscallResult {
 ///
 /// Returns: process ID on success, negative error on failure.
 pub fn sys_process_spawn_ex(args: &SyscallArgs) -> SyscallResult {
-    use crate::proc::spawn::{FdMapEntry, SpawnExArgs, SpawnOptions, spawn_process};
+    use crate::proc::spawn::{CapInherit, SpawnExArgs};
 
     let args_ptr = args.arg0 as usize;
 
@@ -3323,6 +3323,30 @@ pub fn sys_process_spawn_ex(args: &SyscallArgs) -> SyscallResult {
         Ok(v) => v,
         Err(e) => return SyscallResult::err(e),
     };
+
+    spawn_ex_common(&spawn_args, CapInherit::All)
+}
+
+/// The body shared by `SYS_PROCESS_SPAWN_EX` and `SYS_PROCESS_SPAWN_EX2`.
+///
+/// Both syscalls differ only in how their argument struct is fetched and in the
+/// capability policy they end up choosing; everything from "chase the pointers"
+/// onwards is identical.  Sharing it is not merely tidiness — the two syscalls
+/// spawn the *same* kind of process, and a divergence between them would be the
+/// recurring failure this codebase keeps hitting: one operation with two
+/// implementations, an invariant that they agree, and nothing checking it.
+/// (`fork_create` vs `spawn_process` for capability cloning, and
+/// `sys_cap_request`'s hand-rolled `ResourceType` match vs the enum, were both
+/// exactly this.)
+///
+/// `spawn_args` must already be a kernel-owned copy: every pointer it carries is
+/// chased below, and re-reading a length from user memory between the check and
+/// the use is a TOCTOU window.
+fn spawn_ex_common(
+    spawn_args: &crate::proc::spawn::SpawnExArgs,
+    cap_inherit: crate::proc::spawn::CapInherit<'_>,
+) -> SyscallResult {
+    use crate::proc::spawn::{FdMapEntry, SpawnOptions, spawn_process_with_caps};
 
     let elf_len = spawn_args.elf_len as usize;
     let name_len = if spawn_args.name_ptr == 0 {
@@ -3430,13 +3454,177 @@ pub fn sys_process_spawn_ex(args: &SyscallArgs) -> SyscallResult {
         .argv(&argv_slices)
         .envp(&envp_slices);
 
-    match spawn_process(&elf_data, &options) {
+    match spawn_process_with_caps(&elf_data, &options, cap_inherit) {
         Ok(result) =>
         {
             #[allow(clippy::cast_possible_wrap)]
             SyscallResult::ok(result.pid as i64)
         }
         Err(e) => SyscallResult::err(e),
+    }
+}
+
+/// `SYS_PROCESS_SPAWN_EX2` — spawn a new process with extended options and an
+/// explicit capability policy.
+///
+/// `arg0`: pointer to a [`SpawnEx2Args`](crate::proc::spawn::SpawnEx2Args)
+/// struct in user memory, whose first field is its own size.
+///
+/// Returns: process ID on success, negative error on failure.
+///
+/// # Forward and backward compatibility
+///
+/// The leading `struct_size` is what makes a third syscall number unnecessary.
+/// A **shorter** struct than this kernel knows is an older caller: the missing
+/// tail is zero-filled, and every field's zero value is defined to be its
+/// version-1 behaviour, so such a call means exactly what `SYS_PROCESS_SPAWN_EX`
+/// meant.  A **longer** struct is a newer caller, and is accepted only if the
+/// bytes past the end of what this kernel understands are all zero — i.e. the
+/// caller asked for nothing it isn't getting.  Otherwise the call fails with
+/// `InvalidArgument` rather than proceeding, because silently ignoring a field
+/// the caller set is how a request to *restrict* a child gets dropped, and a
+/// dropped restriction is a privilege escalation that nobody sees.
+///
+/// # Capability policy
+///
+/// See [`SPAWN_CAP_MODE_INHERIT_ALL`](crate::proc::spawn::SPAWN_CAP_MODE_INHERIT_ALL)
+/// and [`SPAWN_CAP_MODE_SUBSET`](crate::proc::spawn::SPAWN_CAP_MODE_SUBSET).  An
+/// unrecognised `cap_mode` is rejected, never clamped to the permissive one.
+/// In subset mode, a requested capability the caller does not hold — or holds
+/// with narrower rights than it asked to delegate — fails the whole spawn with
+/// `PermissionDenied` and leaves no process behind.  It does not silently drop
+/// the entry: `BUG-SPAWNED-CHILDREN-INHERIT-NO-CAPABILITIES` showed what a
+/// quietly under-privileged child looks like from the outside (`make` parsed a
+/// makefile, then died inside `ld.so` for a reason that never named the spawn).
+pub fn sys_process_spawn_ex2(args: &SyscallArgs) -> SyscallResult {
+    use crate::cap::{CapEntryInfo, ResourceType, Rights};
+    use crate::proc::spawn::{
+        CapInherit, SPAWN_CAP_MAX, SPAWN_CAP_MODE_INHERIT_ALL, SPAWN_CAP_MODE_SUBSET, SpawnEx2Args,
+        SpawnExArgs,
+    };
+
+    if args.arg0 == 0 {
+        return SyscallResult::err(KernelError::InvalidArgument);
+    }
+
+    // Field 0 is the size, so it can be read on its own before any other byte of
+    // the struct is trusted — that is the entire point of putting it first.
+    let struct_size: u64 = match crate::mm::user::read_user_value(args.arg0) {
+        Ok(v) => v,
+        Err(e) => return SyscallResult::err(e),
+    };
+
+    // The size gate lives in `spawn` as pure arithmetic so it can be tested
+    // exhaustively without a ring-3 caller; see `ex2_copy_plan`.
+    let (copy_len, tail_len) = match crate::proc::spawn::ex2_copy_plan(struct_size) {
+        Ok(plan) => plan,
+        Err(e) => return SyscallResult::err(e),
+    };
+
+    // Copy in the part we understand, leaving any fields the caller stopped
+    // short of at zero.
+    let head = match crate::mm::user::read_user_vec(args.arg0, copy_len, copy_len) {
+        Ok(b) => b,
+        Err(e) => return SyscallResult::err(e),
+    };
+
+    // SAFETY: `SpawnEx2Args` is `#[repr(C)]` and every field is a `u64`, so the
+    // all-zero bit pattern is a valid value of the type (and is defined by the
+    // ABI to mean version-1 behaviour).
+    let mut ex2: SpawnEx2Args = unsafe { core::mem::zeroed() };
+
+    // SAFETY: `head` holds exactly `copy_len` bytes, `copy_len <= known_size ==
+    // size_of::<SpawnEx2Args>()`, and `ex2` is a live, properly aligned local of
+    // that type.  The two regions are distinct allocations, so they cannot
+    // overlap.  Every byte written lands inside a `u64` field, for which all bit
+    // patterns are valid, so `ex2` remains fully initialised.
+    unsafe {
+        core::ptr::copy_nonoverlapping(
+            head.as_ptr(),
+            core::ptr::from_mut::<SpawnEx2Args>(&mut ex2).cast::<u8>(),
+            copy_len,
+        );
+    }
+
+    // A caller newer than us may pass a longer struct, but only if it is asking
+    // for nothing in the part we would not read.
+    if tail_len > 0 {
+        let tail_ptr = args.arg0.wrapping_add(copy_len as u64);
+        let tail = match crate::mm::user::read_user_vec(tail_ptr, tail_len, tail_len) {
+            Ok(b) => b,
+            Err(e) => return SyscallResult::err(e),
+        };
+        if tail.iter().any(|&b| b != 0) {
+            return SyscallResult::err(KernelError::InvalidArgument);
+        }
+    }
+
+    // Re-project onto the version-1 struct so both syscalls run the identical
+    // body.  This is a field-for-field copy, not a reinterpret: `SpawnEx2Args`
+    // is `SpawnExArgs` shifted along by the size field, and letting the compiler
+    // check the names is worth more than saving twelve lines.
+    let spawn_args = SpawnExArgs {
+        elf_ptr: ex2.elf_ptr,
+        elf_len: ex2.elf_len,
+        name_ptr: ex2.name_ptr,
+        name_len: ex2.name_len,
+        fd_map_ptr: ex2.fd_map_ptr,
+        fd_map_count: ex2.fd_map_count,
+        argv_ptr: ex2.argv_ptr,
+        argv_len: ex2.argv_len,
+        argc: ex2.argc,
+        envp_ptr: ex2.envp_ptr,
+        envp_len: ex2.envp_len,
+        envc: ex2.envc,
+    };
+
+    match ex2.cap_mode {
+        SPAWN_CAP_MODE_INHERIT_ALL => spawn_ex_common(&spawn_args, CapInherit::All),
+        SPAWN_CAP_MODE_SUBSET => {
+            let cap_count = if ex2.cap_ptr == 0 {
+                0
+            } else {
+                ex2.cap_count as usize
+            };
+            let infos = match crate::mm::user::read_user_items::<CapEntryInfo>(
+                ex2.cap_ptr,
+                cap_count,
+                SPAWN_CAP_MAX,
+            ) {
+                Ok(v) => v,
+                Err(e) => return SyscallResult::err(e),
+            };
+
+            let mut requested: alloc::vec::Vec<(ResourceType, u64, Rights)> =
+                alloc::vec::Vec::new();
+            if requested.try_reserve_exact(infos.len()).is_err() {
+                return SyscallResult::err(KernelError::OutOfMemory);
+            }
+            for info in &infos {
+                // The reserved words are checked, not skipped: a field that is
+                // never validated can never later be given a meaning, because
+                // by then callers will already be putting junk in it.
+                if info._reserved != [0; 3] {
+                    return SyscallResult::err(KernelError::InvalidArgument);
+                }
+                let Some(resource_type) = ResourceType::from_raw(info.resource_type) else {
+                    return SyscallResult::err(KernelError::InvalidArgument);
+                };
+                // Undefined `Rights` bits need no mask here: the delegation
+                // check requires the parent to *hold* every bit requested, and
+                // no parent ever holds an undefined one, so such a request is
+                // already `PermissionDenied` — a rejection, not a grant.
+                requested.push((
+                    resource_type,
+                    info.resource_id,
+                    Rights::from_raw(info.rights),
+                ));
+            }
+
+            spawn_ex_common(&spawn_args, CapInherit::Subset(&requested))
+        }
+        // Not clamped and not defaulted — see the struct's `cap_mode` doc.
+        _ => SyscallResult::err(KernelError::InvalidArgument),
     }
 }
 

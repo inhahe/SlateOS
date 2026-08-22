@@ -325,6 +325,173 @@ pub struct SpawnExArgs {
     pub envc: u64,
 }
 
+/// Extended spawn arguments, **version 2**, passed from userspace via
+/// `SYS_PROCESS_SPAWN_EX2`.
+///
+/// [`SpawnExArgs`] with two things added: a leading `struct_size`, and a
+/// capability policy.
+///
+/// # Why a second syscall number rather than more fields on the first
+///
+/// `SpawnExArgs` is a bare `#[repr(C)]` struct with no length and no version,
+/// and the kernel reads `size_of::<SpawnExArgs>()` bytes from the pointer it is
+/// given.  Appending fields to it would make the kernel read 16 bytes past
+/// every existing caller's 96-byte struct — garbage that is then interpreted as
+/// a user pointer.  There is no in-band way to tell an old caller from a new
+/// one: `syscall1` sets only `rdi`, so `arg1` holds whatever the caller's `rsi`
+/// happened to contain, which rules out the `clone3` trick of passing the size
+/// in a register with 0 meaning "legacy".
+///
+/// So extending in place is a flag day across three lanes — and `design.txt`
+/// mandates versioned syscall tables for exactly this.  A new number costs one
+/// `u64` and breaks nobody.  See design-decisions.md §279.
+///
+/// # Why the size field, given a new number was needed anyway
+///
+/// So that a *third* number is never needed.  `struct_size` is field 0, so from
+/// here on the kernel can accept a struct shorter than it expects (an older
+/// caller: the missing tail is zero-filled, and every field's zero value is its
+/// old behaviour) and reject one longer whose extra bytes are non-zero (a newer
+/// caller asking for something this kernel cannot do — which must fail loudly,
+/// because silently ignoring a field named `no_new_privs` is how a sandbox
+/// stops being one).
+///
+/// Layout must match the userspace definition exactly (C ABI, all `u64`).
+#[derive(Debug, Clone, Copy)]
+#[repr(C)]
+pub struct SpawnEx2Args {
+    /// `size_of::<SpawnEx2Args>()` as the *caller* knows it, in bytes.
+    ///
+    /// Must be a multiple of 8 and at least [`SPAWN_EX2_MIN_SIZE`] (the size
+    /// of this struct up to and including `envc`, i.e. everything version 1
+    /// carried plus this field).
+    pub struct_size: u64,
+    /// Pointer to ELF data in memory.
+    pub elf_ptr: u64,
+    /// Length of ELF data in bytes.
+    pub elf_len: u64,
+    /// Pointer to process name string (UTF-8).
+    pub name_ptr: u64,
+    /// Length of name string in bytes.
+    pub name_len: u64,
+    /// Pointer to `FdMapEntry` array (0 = no fd inheritance).
+    pub fd_map_ptr: u64,
+    /// Number of `FdMapEntry` entries.
+    pub fd_map_count: u64,
+    /// Pointer to packed null-terminated argv string data.
+    pub argv_ptr: u64,
+    /// Total byte length of the packed argv data.
+    pub argv_len: u64,
+    /// Number of arguments.
+    pub argc: u64,
+    /// Pointer to packed null-terminated envp string data.
+    pub envp_ptr: u64,
+    /// Total byte length of the packed envp data.
+    pub envp_len: u64,
+    /// Number of environment variables.
+    pub envc: u64,
+    /// How much of the caller's capability table the child receives.
+    ///
+    /// * [`SPAWN_CAP_MODE_INHERIT_ALL`] (0) — everything, as `fork` does and as
+    ///   `SYS_PROCESS_SPAWN_EX` does.  Zero is this value so that a
+    ///   zero-initialised struct means "behave like version 1".
+    /// * [`SPAWN_CAP_MODE_SUBSET`] (1) — exactly the `cap_count` entries at
+    ///   `cap_ptr`, and nothing else.  `cap_count == 0` is legal and means the
+    ///   child gets **no** capabilities at all.
+    ///
+    /// Any other value is `InvalidArgument`.  It is not clamped or defaulted:
+    /// a caller who asked for a policy this kernel does not implement must not
+    /// be given a *wider* one, and "unrecognised" here is indistinguishable
+    /// from "written against a newer kernel".
+    pub cap_mode: u64,
+    /// Pointer to a [`crate::cap::CapEntryInfo`] array. Read only when
+    /// `cap_mode == SPAWN_CAP_MODE_SUBSET`.
+    ///
+    /// The same 24-byte struct `SYS_CAP_QUERY` writes out, deliberately: the
+    /// natural way to build a subset is to enumerate what you hold, drop what
+    /// the child should not have, and pass the remainder straight back. A
+    /// separate request type would have made that a transcription step, and a
+    /// transcription step between "what I hold" and "what I delegate" is a
+    /// place to get a field wrong.
+    pub cap_ptr: u64,
+    /// Number of entries at `cap_ptr`. Capped at [`SPAWN_CAP_MAX`].
+    pub cap_count: u64,
+}
+
+/// `cap_mode`: the child inherits the parent's entire capability table.
+///
+/// Zero so that a zero-filled tail (an older caller, or a shorter
+/// `struct_size`) reproduces `SYS_PROCESS_SPAWN_EX`'s behaviour exactly.
+pub const SPAWN_CAP_MODE_INHERIT_ALL: u64 = 0;
+
+/// `cap_mode`: the child inherits exactly the listed capabilities.
+pub const SPAWN_CAP_MODE_SUBSET: u64 = 1;
+
+/// Largest capability subset a single spawn may request.
+///
+/// Sized against `CapTable`'s own limit rather than picked round: a request
+/// larger than the child's table can hold cannot succeed, so accepting it only
+/// means doing the copy before saying no.
+pub const SPAWN_CAP_MAX: usize = crate::cap::table::MAX_ENTRIES;
+
+/// The shortest `struct_size` [`SpawnEx2Args`] accepts: through `envc`.
+///
+/// A caller may stop here and get version-1 behaviour with a size field. It is
+/// `13 * 8`: `struct_size` plus the twelve fields `SpawnExArgs` carries.
+pub const SPAWN_EX2_MIN_SIZE: u64 = 13 * 8;
+
+/// The longest `struct_size` [`SpawnEx2Args`] will even look at.
+///
+/// A caller newer than this kernel is allowed — its unknown tail is read and
+/// required to be all-zero — but "read the tail" needs a bound, or a caller
+/// could name a multi-gigabyte struct and make the kernel copy it in just to
+/// discover the answer is no.  One page is far beyond any plausible growth of a
+/// sixteen-field argument struct, and a value past it is a caller error rather
+/// than a future ABI: reject it without reading anything.
+pub const SPAWN_EX2_MAX_SIZE: u64 = 4096;
+
+/// Work out how many bytes of a caller's [`SpawnEx2Args`] to copy, and how many
+/// trailing bytes must be checked for zero, given the `struct_size` it declared.
+///
+/// Returns `(copy_len, tail_len)`:
+///
+/// * `copy_len` — bytes to copy from the caller's struct into a zeroed
+///   `SpawnEx2Args`.  Never more than `size_of::<SpawnEx2Args>()`, so a caller
+///   *shorter* than this kernel leaves its missing fields at zero, which the ABI
+///   defines to mean version-1 behaviour.
+/// * `tail_len` — bytes past the end of what this kernel understands.  Nonzero
+///   only for a caller *newer* than this kernel; the handler must read them and
+///   refuse the call unless they are all zero, because a set field this kernel
+///   would not read is a request it must not pretend to have honoured.
+///
+/// # Why this is a separate function
+///
+/// It is the whole size gate, expressed as arithmetic on one integer, so it can
+/// be tested exhaustively without a ring-3 caller — and it is precisely the part
+/// whose failure mode is memory-safety-adjacent: an off-by-one here means the
+/// kernel copies past the end of the caller's struct, or trusts bytes it never
+/// looked at.  Inline in the handler it would only be reachable from userspace.
+///
+/// # Errors
+///
+/// [`KernelError::InvalidArgument`] if `struct_size` is below
+/// [`SPAWN_EX2_MIN_SIZE`], above [`SPAWN_EX2_MAX_SIZE`], or not a multiple of 8.
+/// All three mean the pointer does not address the struct we were promised.
+pub const fn ex2_copy_plan(struct_size: u64) -> KernelResult<(usize, usize)> {
+    if struct_size < SPAWN_EX2_MIN_SIZE || struct_size > SPAWN_EX2_MAX_SIZE || struct_size % 8 != 0
+    {
+        return Err(KernelError::InvalidArgument);
+    }
+    let known = core::mem::size_of::<SpawnEx2Args>() as u64;
+    // `SPAWN_EX2_MAX_SIZE` bounds both, so neither cast can truncate and the
+    // subtraction cannot wrap (it only runs when `struct_size > known`).
+    if struct_size <= known {
+        Ok((struct_size as usize, 0))
+    } else {
+        Ok((known as usize, (struct_size - known) as usize))
+    }
+}
+
 /// Result of a successful process spawn.
 #[derive(Debug, Clone, Copy)]
 pub struct SpawnResult {
@@ -347,6 +514,33 @@ pub struct ExecResult {
     pub entry_rip: u64,
     /// The top of the fresh user stack (ring 3 RSP).
     pub user_rsp: u64,
+}
+
+/// How much of the parent's capability table the child receives.
+///
+/// This is a parameter of [`spawn_process_with_caps`], not a field of
+/// [`SpawnOptions`], and that is deliberate: `SpawnOptions` is built by struct
+/// literal at ~150 sites, every one of which passes `parent: 0` and is
+/// therefore unaffected by inheritance policy. Adding a field would have meant
+/// 150 edits saying `CapInherit::All` to describe a decision none of those
+/// sites make, burying the one call site that does make it. Same shape as
+/// `quarantine::scan_all` / `scan_all_from`: a thin wrapper keeps the common
+/// path unchanged and an extra argument serves the one caller that cares.
+#[derive(Debug, Clone, Copy)]
+pub enum CapInherit<'a> {
+    /// Every capability the parent holds, cloned exactly as `fork` clones it.
+    ///
+    /// The policy for `SYS_PROCESS_SPAWN` and `SYS_PROCESS_SPAWN_EX`, whose
+    /// ABI has no field in which to name anything narrower.
+    All,
+    /// Only the listed triples, and only where the parent holds that resource
+    /// with at least those rights. An unsatisfiable entry fails the spawn
+    /// rather than being dropped — see [`pcb::inherit_caps_subset`].
+    ///
+    /// `Subset(&[])` means the child inherits **nothing**, which is a real and
+    /// useful request (run this binary with no authority at all) and not an
+    /// error.
+    Subset(&'a [(ResourceType, u64, Rights)]),
 }
 
 /// Spawn options for customizing process creation.
@@ -586,7 +780,7 @@ pub(crate) struct UserEntryInfo {
 /// - [`KernelError::InvalidExecutable`] if the ELF binary is invalid.
 /// - [`KernelError::OutOfMemory`] if any allocation fails.
 pub fn spawn_process(elf_data: &[u8], options: &SpawnOptions<'_>) -> KernelResult<SpawnResult> {
-    spawn_process_inner(elf_data, options, None, &[])
+    spawn_process_inner(elf_data, options, None, &[], CapInherit::All)
 }
 
 /// Spawn a process, redirecting entries in its kernel-side Linux `fd` table
@@ -616,7 +810,7 @@ pub fn spawn_process_with_redirects(
     options: &SpawnOptions<'_>,
     linux_fd_redirects: &[(i32, u64, u32)],
 ) -> KernelResult<SpawnResult> {
-    spawn_process_inner(elf_data, options, None, linux_fd_redirects)
+    spawn_process_inner(elf_data, options, None, linux_fd_redirects, CapInherit::All)
 }
 
 /// Spawn a process, forcing it to run under an explicit syscall ABI
@@ -643,7 +837,7 @@ pub fn spawn_process_with_abi(
     options: &SpawnOptions<'_>,
     abi: pcb::AbiMode,
 ) -> KernelResult<SpawnResult> {
-    spawn_process_inner(elf_data, options, Some(abi), &[])
+    spawn_process_inner(elf_data, options, Some(abi), &[], CapInherit::All)
 }
 
 /// Spawn a process under an explicit ABI *and* with `linux_fd` redirects applied
@@ -662,7 +856,40 @@ pub fn spawn_process_with_abi_and_redirects(
     abi: pcb::AbiMode,
     linux_fd_redirects: &[(i32, u64, u32)],
 ) -> KernelResult<SpawnResult> {
-    spawn_process_inner(elf_data, options, Some(abi), linux_fd_redirects)
+    spawn_process_inner(
+        elf_data,
+        options,
+        Some(abi),
+        linux_fd_redirects,
+        CapInherit::All,
+    )
+}
+
+/// Spawn a process, handing the child a chosen slice of the parent's authority
+/// instead of all of it.
+///
+/// [`spawn_process`] and its siblings clone the parent's whole capability table
+/// ([`CapInherit::All`]), because their ABI gives userspace no way to name
+/// anything narrower.  `SYS_PROCESS_SPAWN_EX2` does, and this is where it
+/// lands: `CapInherit::Subset(&[])` starts a process with no authority at all,
+/// and a non-empty subset starts one holding exactly what was named — with
+/// rights narrowed to what was asked for, never widened past what the parent
+/// holds.
+///
+/// # Errors
+///
+/// Same as [`spawn_process`], plus the errors of
+/// [`pcb::inherit_caps_subset`]: `PermissionDenied` if the parent cannot
+/// satisfy a requested capability, `InvalidArgument` if the child's table
+/// fills.  An unsatisfiable request fails the spawn — the child is destroyed
+/// and no process is created — rather than starting a process that will fail
+/// later, elsewhere, for a reason that does not name the spawn.
+pub fn spawn_process_with_caps(
+    elf_data: &[u8],
+    options: &SpawnOptions<'_>,
+    cap_inherit: CapInherit<'_>,
+) -> KernelResult<SpawnResult> {
+    spawn_process_inner(elf_data, options, None, &[], cap_inherit)
 }
 
 fn spawn_process_inner(
@@ -672,6 +899,9 @@ fn spawn_process_inner(
     // Kernel-side Linux fd redirects `(fd, handle, status_flags)` applied before
     // the child is runnable (see `spawn_process_with_redirects`).
     linux_fd_redirects: &[(i32, u64, u32)],
+    // How much of `options.parent`'s capability table the child receives.  An
+    // argument rather than a `SpawnOptions` field: see [`CapInherit`].
+    cap_inherit: CapInherit<'_>,
 ) -> KernelResult<SpawnResult> {
     // This function OWNS the `linux_fd_redirects` handles (see
     // `spawn_process_with_redirects`): on success each is *moved* into the
@@ -1011,14 +1241,51 @@ fn spawn_process_inner(
     //
     // See `pcb::inherit_caps_from` for why cloning is not a widening of
     // authority, and design-decisions.md §278.
-    if options.parent != 0 {
-        let inherited = pcb::inherit_caps_from(options.parent, pid);
-        if inherited > 0 {
-            serial_println!(
-                "[spawn] Inherited {} capability(ies) from parent {}",
-                inherited,
-                options.parent
-            );
+    // `CapInherit::Subset` is honoured even for `parent == 0`, because it can
+    // still fail: `inherit_caps_subset` refuses a non-empty request from the
+    // kernel sentinel, which holds implicit authority and has no table to
+    // delegate from. Skipping it on `parent == 0` would silently start such a
+    // process with nothing — the exact failure the subset path exists to make
+    // loud.
+    match cap_inherit {
+        CapInherit::All => {
+            if options.parent != 0 {
+                let inherited = pcb::inherit_caps_from(options.parent, pid);
+                if inherited > 0 {
+                    serial_println!(
+                        "[spawn] Inherited {} capability(ies) from parent {}",
+                        inherited,
+                        options.parent
+                    );
+                }
+            }
+        }
+        CapInherit::Subset(requested) => {
+            match pcb::inherit_caps_subset(options.parent, pid, requested) {
+                Ok(granted) => {
+                    serial_println!(
+                        "[spawn] Delegated {} of parent {}'s capability(ies) (subset of {} \
+                         requested)",
+                        granted,
+                        options.parent,
+                        requested.len()
+                    );
+                }
+                Err(e) => {
+                    // Destroy before returning: the child exists at this point,
+                    // and every other post-create failure in this function
+                    // does the same. A half-privileged process left in the
+                    // table is worse than no process.
+                    serial_println!(
+                        "[spawn] Capability subset refused for child of parent {}: {:?} — \
+                         spawn aborted",
+                        options.parent,
+                        e
+                    );
+                    pcb::destroy(pid);
+                    return Err(e);
+                }
+            }
         }
     }
     for &(resource_type, resource_id, rights) in options.capabilities {
@@ -2287,6 +2554,8 @@ pub fn self_test() -> KernelResult<()> {
     test_spawn_invalid_elf()?;
     test_spawn_with_capabilities()?;
     test_spawn_inherits_parent_capabilities()?;
+    test_spawn_capability_subset()?;
+    test_ex2_copy_plan()?;
     test_spawn_records_parent()?;
     test_spawn_faulting_process()?;
     test_spawn_stack_growth()?;
@@ -30974,6 +31243,355 @@ fn test_spawn_inherits_parent_capabilities() -> KernelResult<()> {
     }
     serial_println!("[spawn]   Kernel-spawned child inherits nothing: OK");
 
+    Ok(())
+}
+
+/// Test 3b: a child spawned with [`CapInherit::Subset`] gets *exactly* what was
+/// asked for, and an unsatisfiable request fails the spawn outright.
+///
+/// This is the other half of the fix for
+/// `BUG-SPAWNED-CHILDREN-INHERIT-NO-CAPABILITIES`.  Test 3 above proved a child
+/// stops starting life with nothing; this one proves the cure did not overshoot
+/// into "every child gets everything its parent has", which for a shell spawning
+/// an untrusted binary is the ambient authority the capability model exists to
+/// abolish.
+///
+/// # Every check fails independently
+///
+/// Each assertion below catches a *different* wrong implementation, which is why
+/// none of them are folded together:
+///
+/// * **Narrowed rights are honoured** — a child asked to receive `READ` must not
+///   also get `WRITE`.  An implementation that inserted the *parent's* rights
+///   rather than the *requested* ones would pass a presence check and silently
+///   widen the grant.  Widening is the only direction that is a security bug:
+///   delegation may narrow, never expand.
+/// * **Unlisted capabilities are absent** — the parent holds a second, unrelated
+///   capability that the child never asked for.  An implementation that fell
+///   back to `inherit_caps_from` when the subset was "close enough" would pass
+///   the first check and fail this one.
+/// * **An unheld request fails the whole spawn** — not "is skipped".  A silently
+///   dropped entry starts a process that dies later, elsewhere, for a reason
+///   that never names the spawn; that is exactly how the original bug presented
+///   (`make` parsed its makefile, then died inside `ld.so`).
+/// * **A widening request fails too** — asking to delegate `EXECUTE` over a
+///   resource the parent holds only `READ|WRITE` on must be refused, or the
+///   subset mechanism becomes a way to mint rights.
+/// * **No process is left behind by a refusal** — the live-process count is
+///   compared across the failed spawn.  A refusal that leaked a half-built PCB
+///   would be a resource leak reachable from userspace, i.e. a DoS.
+/// * **An empty subset is legal and means nothing** — `Subset(&[])` must produce
+///   a child with a genuinely empty table, not be mistaken for "unspecified,
+///   therefore inherit all".
+fn test_spawn_capability_subset() -> KernelResult<()> {
+    let elf_data = elf::build_test_elf_public();
+
+    let parent = pcb::create("spawn-test-subset-parent", 0);
+    let marker_id = 0xC0FF_EE02_u64;
+    let secret_id = 0xC0FF_EE03_u64;
+
+    // Two capabilities: one the child will be given a narrowed slice of, and one
+    // it must never see.  A single-capability parent cannot distinguish
+    // "delegated the subset" from "delegated everything".
+    let granted = pcb::grant_capability(
+        parent,
+        ResourceType::File,
+        marker_id,
+        Rights::READ | Rights::WRITE,
+    )
+    .and_then(|_handle| {
+        pcb::grant_capability(parent, ResourceType::Channel, secret_id, Rights::WRITE)
+    });
+    if let Err(e) = granted {
+        serial_println!("[spawn]   FAIL: could not grant to test parent: {:?}", e);
+        pcb::destroy(parent);
+        return Err(KernelError::InternalError);
+    }
+
+    let opts = |name: &'static str| SpawnOptions {
+        name,
+        parent,
+        priority: DEFAULT_PRIORITY,
+        capabilities: &[],
+        fd_map: &[],
+        argv: &[],
+        envp: &[],
+        exe_path: None,
+        cwd: None,
+        uid_gid: None,
+    };
+
+    // --- Half 1: the child receives the narrowed slice, and only it. ---
+    let subset = [(ResourceType::File, marker_id, Rights::READ)];
+    let heir = match spawn_process_with_caps(
+        &elf_data,
+        &opts("spawn-test-subset-heir"),
+        CapInherit::Subset(&subset),
+    ) {
+        Ok(r) => r,
+        Err(e) => {
+            serial_println!("[spawn]   FAIL: subset spawn was refused: {:?}", e);
+            pcb::destroy(parent);
+            return Err(e);
+        }
+    };
+
+    let has_read = pcb::has_capability_for(heir.pid, ResourceType::File, marker_id, Rights::READ);
+    let has_write = pcb::has_capability_for(heir.pid, ResourceType::File, marker_id, Rights::WRITE);
+    let has_secret =
+        pcb::has_capability_for(heir.pid, ResourceType::Channel, secret_id, Rights::WRITE);
+    let heir_count = pcb::cap_count(heir.pid).unwrap_or(usize::MAX);
+
+    crate::sched::yield_now();
+    crate::sched::yield_now();
+    thread::on_thread_exit(heir.task_id);
+    pcb::destroy(heir.pid);
+
+    if !has_read || has_write || has_secret || heir_count != 1 {
+        serial_println!(
+            "[spawn]   FAIL: subset child holds the wrong authority \
+             (read={} write={} secret={} count={}); expected read-only over the \
+             one named resource",
+            has_read,
+            has_write,
+            has_secret,
+            heir_count
+        );
+        pcb::destroy(parent);
+        return Err(KernelError::InternalError);
+    }
+    serial_println!("[spawn]   Subset child gets exactly the narrowed slice: OK");
+
+    // --- Half 2: an unheld request, and a widening request, are both refused. ---
+    //
+    // Two separate probes because they exercise different arms of the check: the
+    // first has no matching entry at all, the second has one whose rights are
+    // too narrow.  An implementation that matched on `(type, id)` and ignored
+    // rights would refuse the first and grant the second.
+    //
+    // The leak check that follows brackets the probes with `peek_next_pid`
+    // rather than comparing `pcb::count()`.  A global count is perturbed by any
+    // other CPU creating or reaping a process while the probes run, which would
+    // make this test flaky — and a flaky test is one that gets ignored, i.e. a
+    // test that does not exist.  A PID window plus the parent field is exact:
+    // `parent` is a pid nothing else on the system knows about, so a PCB that
+    // names it as its parent can only have come from a probe below.
+    let first_pid = pcb::peek_next_pid();
+    let unheld = [(ResourceType::File, 0xDEAD_BEEF_u64, Rights::READ)];
+    let widened = [(
+        ResourceType::File,
+        marker_id,
+        Rights::READ.union(Rights::EXECUTE),
+    )];
+    for (name, request, what) in [
+        (
+            "spawn-test-subset-unheld",
+            &unheld[..],
+            "an unheld resource",
+        ),
+        (
+            "spawn-test-subset-widen",
+            &widened[..],
+            "wider rights than the parent holds",
+        ),
+    ] {
+        match spawn_process_with_caps(&elf_data, &opts(name), CapInherit::Subset(request)) {
+            Err(KernelError::PermissionDenied) => {}
+            Ok(r) => {
+                serial_println!(
+                    "[spawn]   FAIL: delegating {} succeeded (pid {}) — the subset \
+                     check is not gating on what the parent holds",
+                    what,
+                    r.pid
+                );
+                thread::on_thread_exit(r.task_id);
+                pcb::destroy(r.pid);
+                pcb::destroy(parent);
+                return Err(KernelError::InternalError);
+            }
+            Err(e) => {
+                serial_println!(
+                    "[spawn]   FAIL: delegating {} gave {:?}, expected PermissionDenied \
+                     (a distinct verdict would let a caller confuse 'refused' with 'malformed')",
+                    what,
+                    e
+                );
+                pcb::destroy(parent);
+                return Err(KernelError::InternalError);
+            }
+        }
+    }
+
+    // A refusal must not leave a half-built process behind.  Checked after both
+    // probes so a leak from either one shows up.
+    let last_pid = pcb::peek_next_pid();
+    let mut leaked = None;
+    let mut pid = first_pid;
+    while pid < last_pid {
+        if pcb::parent(pid) == Some(parent) {
+            leaked = Some(pid);
+            break;
+        }
+        pid = pid.saturating_add(1);
+    }
+    if let Some(pid) = leaked {
+        serial_println!(
+            "[spawn]   FAIL: a refused subset spawn left pid {} behind, still parented to {} \
+             — the abort path is leaking a PCB, which makes this a userspace-reachable \
+             resource exhaustion",
+            pid,
+            parent
+        );
+        pcb::destroy(pid);
+        pcb::destroy(parent);
+        return Err(KernelError::InternalError);
+    }
+    serial_println!("[spawn]   Unheld and widening requests refused, nothing leaked: OK");
+
+    // --- Half 3: an empty subset means empty, not unspecified. ---
+    let pauper = match spawn_process_with_caps(
+        &elf_data,
+        &opts("spawn-test-subset-pauper"),
+        CapInherit::Subset(&[]),
+    ) {
+        Ok(r) => r,
+        Err(e) => {
+            serial_println!("[spawn]   FAIL: empty-subset spawn was refused: {:?}", e);
+            pcb::destroy(parent);
+            return Err(e);
+        }
+    };
+    // `usize::MAX` is the "process vanished before we looked" sentinel, and is a
+    // failure rather than a pass: a test that could not observe the table must
+    // not report that the table was empty.
+    let pauper_count = pcb::cap_count(pauper.pid).unwrap_or(usize::MAX);
+
+    crate::sched::yield_now();
+    crate::sched::yield_now();
+    thread::on_thread_exit(pauper.task_id);
+    pcb::destroy(pauper.pid);
+    pcb::destroy(parent);
+
+    if pauper_count != 0 {
+        serial_println!(
+            "[spawn]   FAIL: empty subset produced a child holding {} capability(ies) \
+             — an empty request was treated as 'unspecified, inherit all'",
+            pauper_count
+        );
+        return Err(KernelError::InternalError);
+    }
+    serial_println!("[spawn]   Empty subset yields an empty table: OK");
+
+    Ok(())
+}
+
+/// Test 3c: [`ex2_copy_plan`] — the `SYS_PROCESS_SPAWN_EX2` size gate.
+///
+/// Checked here rather than through the syscall because the syscall reaches it
+/// only from ring 3: the gate runs before any user memory is touched, so a
+/// kernel-mode probe would be refused for the address long before the size was
+/// judged.  As pure arithmetic on one integer it can instead be swept
+/// exhaustively, which is what a boundary this shape deserves — every failure
+/// mode is an off-by-one, and the consequence of one is the kernel copying past
+/// the end of the caller's struct or trusting bytes it never read.
+fn test_ex2_copy_plan() -> KernelResult<()> {
+    let known = core::mem::size_of::<SpawnEx2Args>() as u64;
+
+    // The constants must describe the struct they gate, or every case below is
+    // testing the wrong boundary.  `SPAWN_EX2_MIN_SIZE` is "version 1 plus the
+    // size field"; the struct adds exactly `cap_mode`, `cap_ptr`, `cap_count`.
+    if known != SPAWN_EX2_MIN_SIZE + 3 * 8 {
+        serial_println!(
+            "[spawn]   FAIL: SpawnEx2Args is {} bytes but SPAWN_EX2_MIN_SIZE implies {} \
+             — a field was added without revisiting the minimum",
+            known,
+            SPAWN_EX2_MIN_SIZE + 3 * 8
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    // Rejections.  Zero and one are the obvious garbage; `MIN - 8` is the last
+    // well-formed size that is still too short (so the bound is `<`, not `<=`);
+    // `MIN + 4` is well-sized but unaligned; `MAX + 8` is the first size past
+    // the cap.  `u64::MAX` would also wrap the `struct_size - known` subtraction
+    // if the cap were ever removed, so it is kept as a standing witness.
+    for bad in [
+        0,
+        1,
+        SPAWN_EX2_MIN_SIZE - 8,
+        SPAWN_EX2_MIN_SIZE + 4,
+        SPAWN_EX2_MAX_SIZE + 8,
+        u64::MAX,
+    ] {
+        if ex2_copy_plan(bad).is_ok() {
+            serial_println!("[spawn]   FAIL: ex2_copy_plan accepted struct_size {}", bad);
+            return Err(KernelError::InternalError);
+        }
+    }
+
+    // Acceptances, each with the exact plan it must produce.
+    for (size, want) in [
+        // The shortest legal caller: version-1 fields only, nothing to zero-check.
+        (SPAWN_EX2_MIN_SIZE, (SPAWN_EX2_MIN_SIZE as usize, 0usize)),
+        // Exactly this kernel's struct: copy all of it, no tail.
+        (known, (known as usize, 0)),
+        // One field short of current: the tail of the *struct* is zero-filled,
+        // and there is still nothing to zero-*check* in user memory.
+        (known - 8, ((known - 8) as usize, 0)),
+        // A newer caller: copy what we know, and hand back the rest to be
+        // proven zero.  `copy_len` must stop at `known` — that is the check
+        // that stops the kernel reading fields it has no names for.
+        (known + 8, (known as usize, 8)),
+        (
+            SPAWN_EX2_MAX_SIZE,
+            (known as usize, (SPAWN_EX2_MAX_SIZE - known) as usize),
+        ),
+    ] {
+        match ex2_copy_plan(size) {
+            Ok(got) if got == want => {}
+            Ok(got) => {
+                serial_println!(
+                    "[spawn]   FAIL: ex2_copy_plan({}) = {:?}, expected {:?}",
+                    size,
+                    got,
+                    want
+                );
+                return Err(KernelError::InternalError);
+            }
+            Err(e) => {
+                serial_println!("[spawn]   FAIL: ex2_copy_plan({}) rejected: {:?}", size, e);
+                return Err(KernelError::InternalError);
+            }
+        }
+    }
+
+    // Sweep every legal size: `copy_len + tail_len` must reconstruct exactly
+    // what the caller declared, or some bytes of their struct are neither
+    // copied nor checked — the one outcome that silently ignores a field.
+    let mut size = SPAWN_EX2_MIN_SIZE;
+    while size <= SPAWN_EX2_MAX_SIZE {
+        match ex2_copy_plan(size) {
+            Ok((copy, tail)) => {
+                if copy as u64 + tail as u64 != size || copy as u64 > known {
+                    serial_println!(
+                        "[spawn]   FAIL: ex2_copy_plan({}) = ({}, {}) does not account for \
+                         every byte, or copies past the struct",
+                        size,
+                        copy,
+                        tail
+                    );
+                    return Err(KernelError::InternalError);
+                }
+            }
+            Err(e) => {
+                serial_println!("[spawn]   FAIL: ex2_copy_plan({}) rejected: {:?}", size, e);
+                return Err(KernelError::InternalError);
+            }
+        }
+        size += 8;
+    }
+
+    serial_println!("[spawn]   SYS_PROCESS_SPAWN_EX2 size gate (exhaustive sweep): OK");
     Ok(())
 }
 

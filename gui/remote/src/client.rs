@@ -36,6 +36,7 @@
 
 use std::collections::btree_map::Entry;
 use std::collections::{BTreeMap, VecDeque};
+use std::time::Duration;
 
 use guitk::event::Event;
 use guitk::render::RenderTree;
@@ -116,6 +117,30 @@ pub trait Transport {
     /// data is all present up front, need not implement a wait that would
     /// never be entered.
     fn wait(&mut self) -> Result<(), Self::Error> {
+        Ok(())
+    }
+
+    /// Cap how long [`Self::wait`] parks. `None` means park until something
+    /// arrives, which is the default and the right answer for an idle desktop.
+    ///
+    /// This is what lets a caller keep a deadline of its own — an animation
+    /// frame, a blinking caret — without giving up the blocking wait and
+    /// polling instead. `wait` must return no later than `timeout` once this
+    /// has been set, though it may of course return sooner because input
+    /// arrived.
+    ///
+    /// The default does nothing, and that is **sound rather than lax**: the
+    /// default `wait` returns immediately, and a wait that never blocks
+    /// trivially returns within any bound. The obligation is the same one
+    /// `wait` already carries — a transport that really blocks must implement
+    /// this too, or it will hold a caller past a deadline it promised to keep.
+    ///
+    /// # Errors
+    ///
+    /// Whatever the transport fails with. A duration the transport cannot
+    /// express should be an error rather than a silent rounding: a caller that
+    /// asked for a bound and did not get one has no way to find out otherwise.
+    fn set_wait_timeout(&mut self, _timeout: Option<Duration>) -> Result<(), Self::Error> {
         Ok(())
     }
 }
@@ -258,6 +283,25 @@ impl<T: Transport> Connection<T> {
     /// [`ClientError::Transport`] if the transport's wait fails.
     pub fn wait(&mut self) -> Result<(), ClientError<T::Error>> {
         self.transport.wait().map_err(ClientError::Transport)
+    }
+
+    /// Cap how long [`Self::wait`] parks. `None` restores parking until
+    /// something arrives.
+    ///
+    /// See [`Transport::set_wait_timeout`]. This is the seam an event loop uses
+    /// to keep a deadline of its own — an animation frame, a blinking caret —
+    /// without abandoning the blocking wait for a poll.
+    ///
+    /// # Errors
+    ///
+    /// [`ClientError::Transport`] if the transport rejects the duration.
+    pub fn set_wait_timeout(
+        &mut self,
+        timeout: Option<Duration>,
+    ) -> Result<(), ClientError<T::Error>> {
+        self.transport
+            .set_wait_timeout(timeout)
+            .map_err(ClientError::Transport)
     }
 
     /// How many replies arrived for a correlation id nobody was waiting on.

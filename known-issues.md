@@ -53711,7 +53711,7 @@ the failure surfaces the moment — and only the moment — something real is
 plugged into it.
 
 
-## TD-C-THE-SHELL-HAS-NO-FRAME-CLOCK (lane C, 2026-08-22)
+## TD-C-THE-SHELL-HAS-NO-FRAME-CLOCK (lane C, 2026-08-22) — RESOLVED 2026-08-22
 
 **In short:** Nothing on the desktop can move by itself. A menu cannot slide
 open, a window cannot fade, a progress spinner cannot spin — not because the
@@ -53841,3 +53841,59 @@ API that cannot run, and every one of them will pass its own unit tests,
 because a `tick(dt)` called directly by a test advances exactly as designed.
 That is the trap — the tests are not wrong, they are just answering a question
 nobody in production asks.
+
+---
+
+**RESOLVED 2026-08-22.** `EventLoop` now synthesises the tick locally, exactly
+as the three-step fix above proposed. See `design-decisions.md` §521 for the
+four choices behind it (local vs. compositor, one-shot vs. repeating, on-demand
+vs. fixed-rate, measured vs. assumed `elapsed_ms`) and for the verification.
+
+**What shipped.**
+
+- `Transport::set_wait_timeout(Option<Duration>)` (`gui/remote/src/client.rs`),
+  defaulting to `Ok(())`; `Connection::set_wait_timeout` forwards it. `Socket`'s
+  inherent method became the trait impl, unchanged. (This entry called the type
+  `SocketTransport` above — it is actually named `Socket`, aliased to `Link` in
+  `oswindow`.)
+- `EventLoop::wake_at(window, Instant)`, `wake_after(window, Duration)`,
+  `cancel_wake(window)`, `is_waking(window)`, `next_wakeup()`
+  (`gui/window/src/lib.rs`). One-shot; arming twice replaces rather than
+  accumulates; `close()` cancels.
+- `EventLoop::wait()` — now public — bounds the park by the nearest deadline,
+  floored at 1 ms so an already-past deadline never reaches the socket as a zero
+  timeout (which the platform reads as *never* time out, the exact opposite).
+  With nothing armed the bound is `None` and the loop blocks for ever, burning
+  nothing, exactly as before.
+- `poll()` mixes the due ticks into the ordinary pending queue, so a manual loop
+  driver gets them too, not just `run()`. `elapsed_ms` is measured from the
+  previous tick for that window, carried across the handler that re-armed, and
+  dropped when an animation stops so a restart does not report the pause.
+- `ShellSession` now parks through `EventLoop::wait` rather than
+  `Connection::wait`, and exposes `events_mut()` so a shell can register its own
+  wake-ups. **This was a real bypass, not a precaution**: without it the frame
+  clock would have worked everywhere except in the shell, and the only symptom
+  would have been an animation that stops.
+
+Seventeen tests added across `oswindow`, `guiremote` and `desktop`; fourteen
+defects were reintroduced one at a time into the real tree to prove sixteen of
+them fail against the defect they name, with every touched file verified
+restored byte-for-byte. `an_idle_loop_has_no_deadline` is recorded as additional
+coverage rather than a regression test — no marker made it fail. Full table in
+`design-decisions.md` §521.
+
+**What this does NOT close.**
+
+1. **`gui/desktop/src/animations.rs` still has no caller.** Cost 1 above is
+   unchanged: the 1036 lines are still dead. They are now dead for a fixable
+   reason — there is something to wire them to — rather than an unfixable one.
+   That wiring is the next task, and it is where the fix is actually cashed in;
+   until then this entry has built a heartbeat nothing listens to.
+2. **Rendering is still driven from input, not from the loop.** `paint_chrome`
+   is called in response to something the user did. An animation stepped by a
+   tick must be able to repaint from the tick, which is the re-entrancy note in
+   the fix above and is part of task 1, not of this one.
+3. **Nothing is vsync-locked.** Deliberate — see §521 §1. An animation that must
+   be in step with the display still cannot be; the wire can already carry a
+   `Tick`, so a compositor frame callback remains additive later.
+

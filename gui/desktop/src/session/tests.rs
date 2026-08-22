@@ -783,3 +783,30 @@ fn a_release_over_the_taskbar_is_not_mistaken_for_a_press() {
         "a release opened the start menu"
     );
 }
+
+// ---- the frame clock ----
+
+#[test]
+fn the_shell_s_park_is_bounded_by_a_wake_up_it_registered() {
+    // The shell drives the loop by hand — `pump`, then park — so it has its own
+    // chance to get this wrong, and would get it wrong in the quietest possible
+    // way: `Connection::wait` knows nothing about wake-ups, so a shell parking
+    // there sleeps straight through every deadline it set, and the only symptom
+    // is an animation that stops. The recorded bound is what says the park went
+    // through `EventLoop::wait` instead.
+    let (mut session, _desktop) = session();
+    let panel = session.panel().window();
+    session
+        .events_mut()
+        .wake_after(panel, std::time::Duration::from_millis(50));
+
+    // The harness hangs up once neither side has anything left to say, so this
+    // returns after one park rather than looping.
+    session.run().expect("the shell's own loop");
+
+    let asked = &session.events_mut().connection().transport().asked;
+    assert!(
+        asked.iter().flatten().next().is_some(),
+        "the shell parked with no bound at all: {asked:?}"
+    );
+}

@@ -191,27 +191,6 @@ impl Socket {
         self.stream.local_addr()
     }
 
-    /// Cap how long [`Transport::wait`] parks.
-    ///
-    /// Only useful to a client that has something to do on a timer — an
-    /// animation, a blinking caret — since input alone already wakes the wait.
-    ///
-    /// # Errors
-    ///
-    /// [`ErrorKind::InvalidInput`] for a zero duration, which the platform
-    /// would read as "no timeout" and which therefore means the opposite of
-    /// what a caller passing it intends.
-    pub fn set_wait_timeout(&mut self, timeout: Option<Duration>) -> io::Result<()> {
-        if timeout.is_some_and(|d| d.is_zero()) {
-            return Err(io::Error::new(
-                ErrorKind::InvalidInput,
-                "a zero wait timeout means 'never time out', which is not what a caller means",
-            ));
-        }
-        self.wait_timeout = timeout;
-        Ok(())
-    }
-
     /// Hang up, so both this side and the peer see the connection end.
     pub fn close(&mut self) {
         self.open = false;
@@ -384,6 +363,29 @@ impl Transport for Socket {
         let restored = self.stream.set_nonblocking(true);
         parked.and(restored)
     }
+
+    /// Cap how long [`Transport::wait`] parks.
+    ///
+    /// Only useful to a caller that has something to do on a timer — an
+    /// animation, a blinking caret — since input alone already wakes the wait.
+    /// [`EventLoop`](../../oswindow/struct.EventLoop.html) is that caller: it
+    /// sets this from the nearest registered wake-up before every park.
+    ///
+    /// # Errors
+    ///
+    /// [`ErrorKind::InvalidInput`] for a zero duration, which the platform
+    /// would read as "no timeout" and which therefore means the opposite of
+    /// what a caller passing it intends.
+    fn set_wait_timeout(&mut self, timeout: Option<Duration>) -> io::Result<()> {
+        if timeout.is_some_and(|d| d.is_zero()) {
+            return Err(io::Error::new(
+                ErrorKind::InvalidInput,
+                "a zero wait timeout means 'never time out', which is not what a caller means",
+            ));
+        }
+        self.wait_timeout = timeout;
+        Ok(())
+    }
 }
 
 /// How long a write will wait on a peer that has stopped reading.
@@ -497,6 +499,7 @@ mod tests {
     )]
 
     use std::thread;
+    use std::time::Instant;
 
     use guitk::event::Event;
 
@@ -611,6 +614,32 @@ mod tests {
         a.read(&mut buf).expect("read after wait");
         assert_eq!(buf, b"x");
         drop(writer.join().expect("writer thread"));
+    }
+
+    #[test]
+    fn a_bounded_wait_parks_for_the_bound_and_then_comes_back() {
+        // The one thing about the frame clock that a synthetic clock cannot
+        // check: that the park really is bounded, and really is a park. The
+        // peer is alive and silent, so an unbounded `wait` would block until
+        // the test harness killed it, and a `wait` that ignored the bound by
+        // returning at once would report an implausibly short interval.
+        //
+        // `oswindow::EventLoop` is the caller this exists for: it sets the
+        // bound from the nearest registered wake-up before every park, so an
+        // animation frame arrives on time without the loop polling for it.
+        let (mut a, _b) = connected_pair();
+        a.set_wait_timeout(Some(Duration::from_millis(60))).unwrap();
+        let started = Instant::now();
+        a.wait().expect("wait");
+        let parked = started.elapsed();
+        assert!(
+            parked >= Duration::from_millis(40),
+            "came back after {parked:?}, which is too soon to have parked at all"
+        );
+        assert!(
+            parked < Duration::from_secs(5),
+            "still parked after {parked:?}; the bound was ignored"
+        );
     }
 
     #[test]

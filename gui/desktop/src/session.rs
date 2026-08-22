@@ -441,11 +441,24 @@ impl<T: Transport> ShellSession<T> {
             // Block only when there was nothing to do: waiting after a burst
             // would add a frame of latency to the next one for nothing.
             if !self.pump()? {
-                self.events.connection().wait()?;
+                // `EventLoop::wait`, not `Connection::wait`. The connection
+                // knows nothing about wake-ups, so parking there would park
+                // straight past every deadline the shell registered — and the
+                // only symptom would be an animation that stops.
+                self.events.wait()?;
             }
         }
         self.running = false;
         Ok(())
+    }
+
+    /// The event loop underneath.
+    ///
+    /// Public so a shell can register frame-clock wake-ups
+    /// ([`EventLoop::wake_after`]) for whatever it is animating. Everything
+    /// else the session needs from the loop it does itself.
+    pub const fn events_mut(&mut self) -> &mut EventLoop<T> {
+        &mut self.events
     }
 
     /// Stop [`run`](Self::run) at the end of the current batch.

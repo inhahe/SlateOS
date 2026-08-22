@@ -84,6 +84,14 @@ fn release_queue_id(id: u16) {
 pub const VRING_DESC_F_NEXT: u16 = 1; // Descriptor chains to next.
 pub const VRING_DESC_F_WRITE: u16 = 2; // Device writes (vs. reads).
 
+/// Available-ring flag: "do not interrupt me when you consume a buffer".
+///
+/// Set in the avail ring's `flags` field (offset 0).  The field is zero after
+/// the frame is zeroed, and zero means *interrupts wanted* — so a driver that
+/// never registers a handler has to say so explicitly, or the device will
+/// assert its IRQ line for completions nobody will ever service.
+pub const VRING_AVAIL_F_NO_INTERRUPT: u16 = 1;
+
 /// A single virtqueue descriptor (16 bytes, repr(C) for device compatibility).
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
@@ -169,6 +177,13 @@ pub struct Virtqueue {
     avail_idx: u16,
     /// Last used ring index we've seen.
     last_used_idx: u16,
+    /// Whether this queue has asked the device not to raise interrupts.
+    ///
+    /// Kept here, rather than being written once at setup, because [`reset`]
+    /// zeroes the whole backing frame — including the avail ring's flags
+    /// field.  Without a remembered preference a device reset would silently
+    /// re-arm interrupts on a queue whose driver has no handler for them.
+    suppress_interrupts: bool,
 }
 
 impl Virtqueue {
@@ -266,9 +281,61 @@ impl Virtqueue {
             queue_id,
             avail_idx: 0,
             last_used_idx: 0,
+            suppress_interrupts: false,
         };
 
         Ok((vq, pfn))
+    }
+
+    /// Ask the device not to raise an interrupt when it consumes buffers from
+    /// this queue.
+    ///
+    /// Call this on every queue whose driver completes work by polling
+    /// [`poll_used`] and never registers an IRQ handler — virtio-gpu and
+    /// virtio-sound are both entirely poll-driven.  The avail ring's flags
+    /// field is zero after `new` zeroes the frame, and zero means *interrupts
+    /// wanted*, so a polling driver that stays silent gets an IRQ line
+    /// asserted for completions it will never acknowledge.  On a
+    /// level-triggered PCI INTx line, which stays asserted until someone
+    /// acknowledges it at the device, that is not merely wasteful.
+    ///
+    /// This is advisory in both directions: the spec permits a device to
+    /// interrupt anyway, and a device that ignores the hint is still handled
+    /// correctly because the driver polls regardless.  It removes the
+    /// *request*, not the possibility.
+    ///
+    /// The preference is remembered so [`reset`] can restore it — see
+    /// `suppress_interrupts`.
+    pub fn set_no_interrupt(&mut self) {
+        self.suppress_interrupts = true;
+        self.write_avail_flags();
+    }
+
+    /// Write the avail ring's flags field from `suppress_interrupts`.
+    ///
+    /// Shared by [`set_no_interrupt`] and [`reset`] so the two cannot drift.
+    fn write_avail_flags(&mut self) {
+        let flags = if self.suppress_interrupts {
+            VRING_AVAIL_F_NO_INTERRUPT
+        } else {
+            0
+        };
+        // SAFETY: `avail_offset` is `queue_size * 16`, the size of the
+        // descriptor table, so it lands at the start of the available ring
+        // within the exclusively-owned frame.  The ring's first field is its
+        // 2-byte `flags` at offset 0, so this writes entirely inside the
+        // avail region — it is strictly below the `4 + ring_slot * 2` entry
+        // arithmetic elsewhere in this file, which is already established to
+        // be in bounds.  The HHDM maps the frame as writable kernel memory,
+        // and the write is volatile because the device reads this field.
+        unsafe {
+            let avail_flags = self.virt_base.add(self.avail_offset).cast::<u16>();
+            core::ptr::write_volatile(avail_flags, flags);
+        }
+        // The device may read the flags field at any time; make the write
+        // visible before whatever the caller does next (publishing the queue
+        // to the device, or submitting the first buffer).
+        fence(Ordering::SeqCst);
     }
 
     /// Reset the virtqueue to its freshly-initialized state.
@@ -315,6 +382,11 @@ impl Virtqueue {
 
         self.avail_idx = 0;
         self.last_used_idx = 0;
+
+        // The frame zeroing above cleared the avail ring's flags field, so a
+        // queue that had asked not to be interrupted has just silently asked
+        // to be interrupted again.  Restore the driver's stated preference.
+        self.write_avail_flags();
     }
 
     /// Allocate a descriptor from the free list.

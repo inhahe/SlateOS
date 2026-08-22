@@ -502,6 +502,23 @@ pub fn sys_irq_register(args: &SyscallArgs) -> SyscallResult {
 
     crate::ioapic::irq_register_task(irq_u32, task_id);
 
+    // Registering for a line whose PCI functions have INTx disabled succeeds
+    // and then never delivers anything: we unmask at the IOAPIC, but the pin
+    // is off at the device, so the caller blocks in `sys_irq_wait` forever.
+    // That is indistinguishable from "the device is idle" without knowing a
+    // sweep ran during boot, so say so here rather than let it present as a
+    // hang.  Not fatal — the caller may hold a capability for a line whose
+    // other functions were legitimately silenced, and MSI/MSI-X devices do
+    // not use INTx at all.
+    let silenced = crate::pci::report_intx_silenced_on_irq(irq_u8);
+    if silenced > 0 {
+        crate::serial_println!(
+            "[syscall] WARNING: task {task_id} registered for irq {irq} but {silenced} \
+             PCI function(s) on that line have INTx disabled; no interrupt will arrive \
+             from those functions"
+        );
+    }
+
     // SAFETY: The corresponding IDT entry (vector 33 + irq) has an
     // ISR stub registered during idt::init().
     unsafe {

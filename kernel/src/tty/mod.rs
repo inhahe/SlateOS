@@ -1402,12 +1402,20 @@ fn console_write_bytes(bytes: &[u8]) {
 
 /// Boot-time self-test for the TTY/termios layer.
 ///
-/// The `#[cfg(test)]` unit tests below do not run on the bare-metal custom
-/// target, so this mirrors their assertions and is invoked from `main` during
-/// kernel bring-up.  It verifies the wire-format size, the canonical/echo
-/// defaults, the Linux `INIT_C_CC` control characters, byte round-tripping
-/// (including raw-mode flag clearing), and that `TIOCGWINSZ` reports a live,
-/// non-zero console size.
+/// Invoked from `main` during kernel bring-up.  Verifies the wire-format sizes,
+/// the canonical/echo defaults, the Linux `INIT_C_CC` control characters, byte
+/// round-tripping (including raw-mode flag clearing), that `TIOCGWINSZ` reports
+/// a live non-zero console size, and the line discipline end to end:
+/// erase/kill/EOF, the three ISIG signals and the line flush each performs,
+/// `NOFLSH`, `NOISIG`, echo rendering, chunked delivery, and foreground-pgrp
+/// ownership.
+///
+/// This used to be described as mirroring a `#[cfg(test)] mod tests` that
+/// followed it.  Those six tests were removed on 2026-08-22: the kernel binary
+/// sets `test = false` and has no lib target, so they had never compiled or run
+/// (`known-issues.md` → `A-KERNEL-UNIT-TESTS-NEVER-RUN`), and every property
+/// each one asserted is in fact checked here — verified case by case rather
+/// than taken from the comment's word.
 pub fn self_test() {
     crate::serial_println!("[tty] Running self-test...");
 
@@ -1618,80 +1626,4 @@ pub fn self_test() {
     }
 
     crate::serial_println!("[tty] Self-test passed.");
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn termios_roundtrip() {
-        let t = Termios::sane_default();
-        let bytes = t.to_bytes();
-        assert_eq!(bytes.len(), TERMIOS_BYTES);
-        let back = Termios::from_bytes(&bytes);
-        assert_eq!(t, back);
-    }
-
-    #[test]
-    fn default_is_canonical_with_echo() {
-        let t = Termios::sane_default();
-        assert!(t.is_canonical());
-        assert!(t.echo_enabled());
-        assert_eq!(t.vmin(), 1);
-        assert_eq!(t.vtime(), 0);
-    }
-
-    #[test]
-    fn control_chars_match_linux_init() {
-        let t = Termios::sane_default();
-        assert_eq!(t.c_cc[cc::VINTR], 3);
-        assert_eq!(t.c_cc[cc::VEOF], 4);
-        assert_eq!(t.c_cc[cc::VERASE], 127);
-        assert_eq!(t.c_cc[cc::VKILL], 21);
-    }
-
-    #[test]
-    fn raw_mode_clears_canon_and_echo() {
-        let mut t = Termios::sane_default();
-        t.c_lflag &= !(lflag::ICANON | lflag::ECHO);
-        let back = Termios::from_bytes(&t.to_bytes());
-        assert!(!back.is_canonical());
-        assert!(!back.echo_enabled());
-    }
-
-    #[test]
-    fn winsize_roundtrip() {
-        let w = WinSize {
-            ws_row: 24,
-            ws_col: 80,
-            ws_xpixel: 0,
-            ws_ypixel: 0,
-        };
-        let back = WinSize::from_bytes(&w.to_bytes());
-        assert_eq!(w, back);
-    }
-
-    #[test]
-    fn isig_flushes_line_unless_noflsh() {
-        let t = Termios::sane_default();
-
-        // Default (NOFLSH clear): ^C generates SIGINT and flushes the line.
-        let mut a = LineBuf::new();
-        let _ = step(&mut a, b'x', &t);
-        assert_eq!(step(&mut a, 3, &t), LineStep::Signal(2));
-        assert_eq!(a.as_slice(), b"");
-
-        // NOFLSH set: ^C generates SIGINT but preserves the line, which then
-        // completes normally on the next newline.
-        let mut nf = Termios::sane_default();
-        nf.c_lflag |= lflag::NOFLSH;
-        let mut b = LineBuf::new();
-        let _ = step(&mut b, b'a', &nf);
-        let _ = step(&mut b, b'b', &nf);
-        assert_eq!(step(&mut b, 3, &nf), LineStep::Signal(2));
-        assert_eq!(b.as_slice(), b"ab");
-        assert_eq!(step(&mut b, b'\n', &nf), LineStep::Line);
-        assert_eq!(b.as_slice(), b"ab\n");
-    }
 }

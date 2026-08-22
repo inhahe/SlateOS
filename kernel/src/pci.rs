@@ -50,7 +50,13 @@ const _CFG_CLASS: u8 = 0x0B;
 /// Subclass (8-bit, offset 0x0A).
 const _CFG_SUBCLASS: u8 = 0x0A;
 /// Header type (8-bit, offset 0x0E).
-const _CFG_HEADER_TYPE: u8 = 0x0E;
+const CFG_HEADER_TYPE: u8 = 0x0E;
+
+/// Header-type bit 7: this device has functions beyond function 0.
+///
+/// Clear means function 0 is the only one, and probing 1..8 would read
+/// floating config space rather than absent devices.
+const HEADER_TYPE_MULTIFUNCTION: u8 = 0x80;
 /// BAR0 (32-bit, offset 0x10).
 const CFG_BAR0: u8 = 0x10;
 /// Interrupt line (8-bit, offset 0x3C low byte).
@@ -269,8 +275,8 @@ pub fn scan_bus0() -> Vec<PciDevice> {
         scan_function(0, device, 0, &mut devices);
 
         // Check if this is a multi-function device (header type bit 7).
-        let header_type = config_read8(0, device, 0, 0x0E);
-        if header_type & 0x80 != 0 {
+        let header_type = config_read8(0, device, 0, CFG_HEADER_TYPE);
+        if header_type & HEADER_TYPE_MULTIFUNCTION != 0 {
             for function in 1..8u8 {
                 let vendor = config_read16(0, device, function, CFG_VENDOR_ID);
                 if vendor != 0xFFFF {
@@ -308,7 +314,7 @@ fn for_each_function(mut f: impl FnMut(PciAddress)) {
         });
 
         // Multi-function device (header type bit 7)?
-        if config_read8(0, device, 0, _CFG_HEADER_TYPE) & 0x80 != 0 {
+        if config_read8(0, device, 0, CFG_HEADER_TYPE) & HEADER_TYPE_MULTIFUNCTION != 0 {
             for function in 1..8u8 {
                 if config_read16(0, device, function, CFG_VENDOR_ID) != 0xFFFF {
                     f(PciAddress {
@@ -688,6 +694,58 @@ pub fn report_intx_asserting_on_irq(irq: u8) {
             }
         );
     });
+}
+
+/// Report every function on `irq` whose INTx pin is disabled, and return how
+/// many there were.
+///
+/// This exists because [`quiesce_unclaimed_intx`] and `sys_irq_register` can
+/// combine into a silent hang.  Registration unmasks the IOAPIC line and
+/// records the task, and both succeed — but if the sweep already silenced the
+/// functions routed to that line, INTx is off *at the device*, no interrupt is
+/// ever raised, and the driver blocks in `sys_irq_wait` forever with nothing
+/// in the log tying the hang back to a sweep that ran during boot.  Naming the
+/// functions at registration time is what makes that diagnosable.
+///
+/// Deliberately reports rather than re-enables, even though [`claim_intx`]
+/// un-silences itself in exactly this situation.  The asymmetry is forced:
+/// `claim_intx` is called by a driver that owns a specific function and passes
+/// its [`PciAddress`], whereas `sys_irq_register` receives only an IRQ number.
+/// On a shared line that number can name several functions, and the caller
+/// owns at most one of them — so re-enabling all of them would re-arm pins the
+/// caller has no claim to, including whatever storm source the sweep was
+/// quieting.  The syscall lacks the information needed to do this safely; the
+/// fix is an interface that names the function, not a bolder guess here.  See
+/// `known-issues.md` `TD-A-IRQ-REGISTER-CANNOT-NAME-THE-PCI-FUNCTION`.
+///
+/// Allocation-free via [`for_each_function`]: this runs from a syscall, and
+/// mirrors [`report_intx_asserting_on_irq`] next door.
+pub fn report_intx_silenced_on_irq(irq: u8) -> usize {
+    let mut silenced = 0usize;
+    for_each_function(|addr| {
+        if config_read8(addr.bus, addr.device, addr.function, CFG_INTERRUPT_LINE) != irq {
+            return;
+        }
+        if intx_is_enabled(addr) {
+            return;
+        }
+        silenced = silenced.saturating_add(1);
+        crate::serial_println!(
+            "[pci]   irq {} has INTx disabled on {:02x}:{:02x}.{} ({:04x}:{:04x}){}",
+            irq,
+            addr.bus,
+            addr.device,
+            addr.function,
+            config_read16(addr.bus, addr.device, addr.function, CFG_VENDOR_ID),
+            config_read16(addr.bus, addr.device, addr.function, CFG_DEVICE_ID),
+            if intx_is_claimed(addr) {
+                " [claimed by an in-kernel driver]"
+            } else {
+                " [silenced by the unclaimed-INTx sweep]"
+            }
+        );
+    });
+    silenced
 }
 
 // ---------------------------------------------------------------------------

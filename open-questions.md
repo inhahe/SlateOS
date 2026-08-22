@@ -1513,3 +1513,91 @@ These numbers are not to be extended; new questions use `A-Q<n>` / `B-Q<n>` /
   option C** (Claude recommended C): keep `nft`/`iptables` as an explicit
   parser/pretty-printer only, fix the docs, steer users to `fw`; defer full/minimal
   kernel wiring (§62).
+
+---
+
+## Q57 — Should the kernel run its own test suite on a user's boot? (lane A, 2026-08-22)
+
+**In short:** Right now, every time this OS starts, the kernel runs several
+hundred of its own built-in tests before handing the machine to the user —
+checking things like "is the backspace key still character 127". Most of those
+checks are written so that a failure **stops the machine dead** rather than
+printing a complaint and moving on. Nothing is failing today. The question is
+what *should* happen on a user's computer the first time one of them is wrong:
+refuse to boot, boot with a warning, or not run the checks there at all.
+
+Glossary, once: a **self-test** here is ordinary kernel code that checks some
+other kernel code and prints the result to the serial console. An **assertion**
+is a check written so that failing it panics — the kernel prints a message and
+halts. A **boot test** is what the developer runs in an emulator; a **production
+boot** is a user starting a real machine. Today these run the *same* code.
+
+### Why it is worth deciding
+
+The two audiences want opposite things and currently get the same behaviour:
+
+- On a **boot test**, halting is *good*. The panic names the file, the line and
+  the values that disagreed, which is better diagnostics than a log line, and
+  the run should fail loudly anyway.
+- On a **production boot**, halting is close to the worst option. A wrong
+  assertion about a terminal flag becomes a computer that will not start, and
+  the user has no way to skip it.
+
+Scale, for a sense of the exposure: 567 files under `kernel/src/` contain both a
+`self_test` function and assertions, 12 674 assertion sites in total. Only ~299
+sites use the alternative style that logs a failure and returns an error instead
+of panicking.
+
+### Options
+
+**A — Gate self-tests behind a boot flag; production boots skip them.**
+*What changes:* a user's machine starts faster and never halts over a self-test;
+the developer adds `selftest=1` (or the boot test does) to get today's
+behaviour.
+Cheapest by far — roughly one conditional around the self-test block in
+`kernel_main`. The cost is that a corrupted or mis-built kernel that a self-test
+would have caught now boots and misbehaves later instead.
+
+**B — Always run them, but never panic: convert assertions to logged failures.**
+*What changes:* a failing check prints `FAIL: ...` and the machine keeps
+booting, on developer and user machines alike.
+Keeps the coverage on real hardware, where it is arguably most valuable, since
+a production boot exercises drivers an emulator does not. The cost is 12 674
+edit sites, and each one *loses* information — an assertion reports the compared
+values and its own line number for free, whereas the replacement reports only
+what its author remembered to include. Realistically a slow migration, not a
+single change.
+
+**C — Run them on production boots and keep halting.** *What changes:* nothing;
+this is today's behaviour, made deliberate.
+Defensible on the "fail fast, never run a kernel that fails its own checks"
+argument. The objection is that the checks are not all equally load-bearing —
+halting the machine because `VERASE` is not 127 is not obviously better than
+booting with a warning.
+
+**D — Split the difference: keep assertions for checks about kernel integrity,
+log-and-continue for the rest.** *What changes:* a bad memory-manager invariant
+still halts; a cosmetic terminal-flag mismatch prints a warning and boots.
+Probably the right end state and the most work to get to, since it needs a
+judgement per self-test rather than a blanket rule.
+
+### My recommendation
+
+**A now, D eventually.** A is a one-line change that removes the user-facing
+risk immediately and costs nothing we are currently getting — the boot test,
+which is where these checks actually earn their keep, would still run them with
+the flag set. It also makes B-versus-D a much less urgent question, because
+after A the assertion style only affects developer boots, where panicking is the
+better behaviour anyway.
+
+### If this is never answered
+
+Safe for now — no self-test is failing, and the streak is 11 consecutive clean
+boots. It does not get worse on its own, but it gets *bigger*: the count grows
+every time someone adds a self-test, and A stays a one-line change forever while
+B and D get more expensive. Meanwhile new self-test code (`pathutil`, `net::raw`,
+`net::frag`) is being written in the log-and-continue style, which is the safe
+side of the question whichever way it goes.
+
+Background: `known-issues.md` →
+`TD-A-MOST-BOOT-SELF-TESTS-PANIC-THE-KERNEL-INSTEAD-OF-REPORTING`.

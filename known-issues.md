@@ -50335,7 +50335,7 @@ commands that carry the colour in question, and assert the two renders agree.
 Candidates: anything drawn on the wallpaper, on a video surface, on a
 thumbnail, or on any other content the palette does not own.
 
-**Part 2 progress. 17 of 49 modules converted.**
+**Part 2 progress. 18 of 49 modules converted.**
 
 - [x] `security_dialog.rs` — 29 constants, done 2026-08-22. The method above
   survived contact: the sweep lives in `gui/desktop/src/palette_check.rs` as
@@ -51097,6 +51097,58 @@ thumbnail, or on any other content the palette does not own.
     `network_settings`, with its own test for the same reason: the membership
     sweep compares RGB and ignores alpha by design.
   - **Deliberate non-change:** the switch knobs stay `p.text`, per
+    `TD-C-SWITCH-KNOBS-ARE-LOW-CONTRAST-ON-THE-ON-PILL`.
+- [x] `datetime_settings.rs` — 13 constants, done 2026-08-22. Harness defects
+  AAAAAAAAA–YYYYYYYYYY (fifty-one).
+  - **Pin an accent site by equality with the accent, never by inequality with
+    the literal it used to be.** Every module since `run_dialog` had written
+    `assert_ne!(pill, appearance::BLUE, "kept its hardcoded blue")` beside the
+    equality check, as a second belt. Here that assertion **failed on correct
+    code**, and it was right to: the test loops over a set of accents, the set
+    contains blue, and a correctly-converted pill on a blue-accented desktop
+    *is* `0x89B4FA`. The inequality was never a real check — it was an
+    assertion that the user had not chosen blue. `assert_eq!(site, accent)` run
+    over seven accents is strictly stronger (no fixed value satisfies all
+    seven) and cannot false-positive, so the `assert_ne!` half was deleted
+    outright rather than special-cased. **Generalisation for the remaining 31
+    modules: an assertion whose truth depends on which accent the user picked
+    is a bug in the test, not a safeguard.**
+  - **Geometry can collide *across* tabs rather than within one.** Sixteen
+    modules of grep-and-count had trained the check "are any two `FillRect`
+    dimensions equal *in this file*". They were, twice, and both pairs were
+    invisible to that question because the two members are never drawn
+    together: a full-width `height: 36.0` fill is a timezone row on the
+    Timezone tab **and** the sync-status card on the Sync tab, and a
+    `font_size: 10.0` text is the DST badge on one **and** the "Hidden" mark on
+    the other. A shape is only unambiguous once you know which tab drew it, so
+    every extractor here takes a render already scoped to a named tab and says
+    so in its doc comment. The grep must be per-render-path, not per-file.
+  - **A zone row carries two independent kinds of "current", and nothing
+    asserted they differed.** The keyboard cursor (`surface1`, a raised
+    surface) says *where you are looking*; the machine's configured zone (now
+    `p.accent`) says *what is in force*. Painting both the same would lose the
+    distinction silently, and no membership sweep can see it because both are
+    palette roles. `the_zone_you_are_looking_at_is_not_the_zone_in_force`
+    parks the cursor on a row that is not the configured one and asserts the
+    two rows disagree; defect `KKKKKKKKK` collapses them to prove it.
+  - **The clock-face judgement resolved a disagreement the module already had
+    with itself.** The main readout on the DateTime tab was `TEXT`; the
+    additional-clock readout on the Clocks tab was `BLUE` — the same kind of
+    value, two colours, with nothing written down to justify the split. A
+    displayed time is a **measurement**: it is neither a position nor an
+    invitation (so not the accent) nor a category (so not a fixed hue). Both
+    are now `p.text`, and the emphasis the world clock needs is already carried
+    by its weight and size. **Where two sites in one module contradict each
+    other, the conversion is the moment to resolve it** — "keep the same
+    pixels" cannot be applied to both sites at once, so the neutral option does
+    not exist.
+  - **`SAFE_ACCENTS` must exclude the hues the module freezes.** This panel has
+    two frozen scales (`NtpStatus::color`'s four sync states, and the DST
+    badge) using green/yellow/red/overlay0. An accent sweep that included those
+    hues would let a wrongly-accented site coincide with its frozen neighbour
+    on exactly the accent that matters. The set is the seven that collide with
+    nothing here: blue, peach, mauve, teal, pink, sapphire, sky.
+  - **Deliberate non-change:** the switch knob stays `p.text`, per
     `TD-C-SWITCH-KNOBS-ARE-LOW-CONTRAST-ON-THE-ON-PILL`.
 
 **Trigger:** this is not blocked on anything. It is sequenced after the shell

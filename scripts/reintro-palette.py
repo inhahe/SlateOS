@@ -66,6 +66,7 @@ NOTIF_SET = "gui/desktop/src/notification_settings.rs"
 BACKUP = "gui/desktop/src/backup_settings.rs"
 NET_SET = "gui/desktop/src/network_settings.rs"
 STARTUP = "gui/desktop/src/startup_settings.rs"
+DTS = "gui/desktop/src/datetime_settings.rs"
 
 # (name, file, [(old, new), ...], [packages], [tests expected to fail])
 DEFECTS = [
@@ -2133,6 +2134,492 @@ DEFECTS = [
         [("            cy += 62.0;", "            cy += 0.0;")],
         ["desktop"],
         ["the_panel_draws_nothing_that_is_immediately_erased"],
+    ),
+    # ---- datetime_settings.rs (module 18 of 49) ----------------------------
+    (
+        "AAAAAAAAA: the date & time panel's backdrop keeps Mocha's base",
+        DTS,
+        [("            color: p.base,", "            color: Color::from_hex(0x1E1E2E),")],
+        ["desktop"],
+        ["every_colour_the_panel_draws_comes_from_its_palette",
+         "the_panels_own_surfaces_come_from_the_palette"],
+    ),
+    (
+        "BBBBBBBBB: the panel title keeps Mocha's text",
+        DTS,
+        [("            font_size: 22.0,\n            color: p.text,",
+          "            font_size: 22.0,\n            color: Color::from_hex(0xCDD6F4),")],
+        ["desktop"],
+        ["every_colour_the_panel_draws_comes_from_its_palette"],
+    ),
+    (
+        "CCCCCCCCC: an unselected tab pill keeps Mocha's surface0",
+        DTS,
+        [("color: if active { p.accent } else { p.surface0 },",
+          "color: if active { p.accent } else { Color::from_hex(0x313244) },")],
+        ["desktop"],
+        ["every_colour_the_panel_draws_comes_from_its_palette",
+         "the_panels_own_surfaces_come_from_the_palette"],
+    ),
+    (
+        "DDDDDDDDD: the selected tab pill is pinned to blue again, so the "
+        "strip stops following the accent",
+        DTS,
+        [("color: if active { p.accent } else { p.surface0 },",
+          "color: if active { p.blue } else { p.surface0 },")],
+        ["desktop"],
+        ["every_control_that_offers_something_follows_the_accent",
+         "the_selected_tabs_label_is_legible_on_the_pill_beneath_it"],
+    ),
+    (
+        "EEEEEEEEE: the selected tab's label is a fixed near-black, legible "
+        "on a pale accent and gone on a dark one",
+        DTS,
+        [("color: if active { p.on_accent() } else { p.subtext0 },",
+          "color: if active { p.crust } else { p.subtext0 },")],
+        ["desktop"],
+        ["the_selected_tabs_label_is_legible_on_the_pill_beneath_it"],
+    ),
+    (
+        "FFFFFFFFF: the selected tab's label is painted in the accent it sits "
+        "on, so it vanishes into its own pill",
+        DTS,
+        [("color: if active { p.on_accent() } else { p.subtext0 },",
+          "color: if active { p.accent } else { p.subtext0 },")],
+        ["desktop"],
+        ["the_selected_tabs_label_is_legible_on_the_pill_beneath_it",
+         "every_control_that_offers_something_follows_the_accent"],
+    ),
+    (
+        "GGGGGGGGG: the clock card keeps Mocha's surface0",
+        DTS,
+        [("                height: 80.0,\n                color: p.surface0,",
+          "                height: 80.0,\n                color: Color::from_hex(0x313244),")],
+        ["desktop"],
+        ["every_colour_the_panel_draws_comes_from_its_palette",
+         "the_panels_own_surfaces_come_from_the_palette"],
+    ),
+    (
+        "HHHHHHHHH: the main clock face keeps Mocha's text",
+        DTS,
+        [("                font_size: 36.0,\n                color: p.text,",
+          "                font_size: 36.0,\n                color: Color::from_hex(0xCDD6F4),")],
+        ["desktop"],
+        ["every_colour_the_panel_draws_comes_from_its_palette",
+         "both_clock_faces_are_the_panels_body_text"],
+    ),
+    (
+        "IIIIIIIII: the main clock face follows the accent, so the time reads "
+        "as an invitation rather than a measurement",
+        DTS,
+        [("                font_size: 36.0,\n                color: p.text,",
+          "                font_size: 36.0,\n                color: p.accent,")],
+        ["desktop"],
+        ["both_clock_faces_are_the_panels_body_text",
+         "every_control_that_offers_something_follows_the_accent"],
+    ),
+    (
+        "JJJJJJJJJ: the zone caption under the clock keeps Mocha's subtext0",
+        DTS,
+        [("                    font_size: 13.0,\n                    color: p.subtext0,\n"
+          "                    font_weight: FontWeightHint::Regular,\n"
+          "                    max_width: Some(width),",
+          "                    font_size: 13.0,\n"
+          "                    color: Color::from_hex(0xA6ADC8),\n"
+          "                    font_weight: FontWeightHint::Regular,\n"
+          "                    max_width: Some(width),")],
+        ["desktop"],
+        ["every_colour_the_panel_draws_comes_from_its_palette"],
+    ),
+    (
+        "KKKKKKKKK: the Taskbar Clock heading keeps Mocha's lavender",
+        DTS,
+        [('text: "Taskbar Clock".into(),\n            font_size: 15.0,\n'
+          "            color: p.lavender,",
+          'text: "Taskbar Clock".into(),\n            font_size: 15.0,\n'
+          "            color: Color::from_hex(0xB4BEFE),")],
+        ["desktop"],
+        ["every_colour_the_panel_draws_comes_from_its_palette"],
+    ),
+    (
+        "LLLLLLLLL: the current-zone card keeps Mocha's surface1",
+        DTS,
+        [("                height: 44.0,\n                color: p.surface1,",
+          "                height: 44.0,\n                color: Color::from_hex(0x45475A),")],
+        ["desktop"],
+        ["every_colour_the_panel_draws_comes_from_its_palette",
+         "the_panels_own_surfaces_come_from_the_palette"],
+    ),
+    (
+        "MMMMMMMMM: the current-zone card's heading keeps Mocha's text",
+        DTS,
+        [("                font_size: 14.0,\n                color: p.text,\n"
+          "                font_weight: FontWeightHint::Bold,\n"
+          "                max_width: Some(width - 24.0),",
+          "                font_size: 14.0,\n"
+          "                color: Color::from_hex(0xCDD6F4),\n"
+          "                font_weight: FontWeightHint::Bold,\n"
+          "                max_width: Some(width - 24.0),")],
+        ["desktop"],
+        ["every_colour_the_panel_draws_comes_from_its_palette"],
+    ),
+    (
+        "NNNNNNNNN: the current-zone card's abbreviation line keeps Mocha's "
+        "subtext0",
+        DTS,
+        [('text: format!("{} — {}", tz.tz_id, tz.abbrev_at(self.current_utc)),\n'
+          "                font_size: 11.0,\n                color: p.subtext0,",
+          'text: format!("{} — {}", tz.tz_id, tz.abbrev_at(self.current_utc)),\n'
+          "                font_size: 11.0,\n"
+          "                color: Color::from_hex(0xA6ADC8),")],
+        ["desktop"],
+        ["every_colour_the_panel_draws_comes_from_its_palette"],
+    ),
+    (
+        "OOOOOOOOO: the search field keeps Mocha's surface0",
+        DTS,
+        [("            height: 30.0,\n            color: p.surface0,",
+          "            height: 30.0,\n            color: Color::from_hex(0x313244),")],
+        ["desktop"],
+        ["every_colour_the_panel_draws_comes_from_its_palette",
+         "the_panels_own_surfaces_come_from_the_palette"],
+    ),
+    (
+        "PPPPPPPPP: the search placeholder keeps Mocha's overlay0",
+        DTS,
+        [("            color: if self.tz_search.is_empty() {\n                p.overlay0",
+          "            color: if self.tz_search.is_empty() {\n"
+          "                Color::from_hex(0x6C7086)")],
+        ["desktop"],
+        ["every_colour_the_panel_draws_comes_from_its_palette"],
+    ),
+    (
+        "QQQQQQQQQ: the row under the keyboard cursor keeps Mocha's surface1",
+        DTS,
+        [("color: if is_selected { p.surface1 } else { p.surface0 },",
+          "color: if is_selected { Color::from_hex(0x45475A) } else { p.surface0 },")],
+        ["desktop"],
+        ["every_colour_the_panel_draws_comes_from_its_palette",
+         "the_panels_own_surfaces_come_from_the_palette",
+         "the_zone_you_are_looking_at_is_not_the_zone_in_force"],
+    ),
+    (
+        "RRRRRRRRR: the keyboard cursor stops raising its row, so the zone "
+        "you are looking at is indistinguishable from the rest",
+        DTS,
+        [("color: if is_selected { p.surface1 } else { p.surface0 },",
+          "color: p.surface0,")],
+        ["desktop"],
+        ["the_panels_own_surfaces_come_from_the_palette",
+         "the_zone_you_are_looking_at_is_not_the_zone_in_force"],
+    ),
+    (
+        "SSSSSSSSS: the marker strip beside the zone in force is pinned to "
+        "blue again",
+        DTS,
+        [("                    height: 28.0,\n                    color: p.accent,",
+          "                    height: 28.0,\n                    color: p.blue,")],
+        ["desktop"],
+        ["every_control_that_offers_something_follows_the_accent",
+         "the_zone_you_are_looking_at_is_not_the_zone_in_force"],
+    ),
+    (
+        "TTTTTTTTT: the name of the zone in force is pinned to blue again",
+        DTS,
+        [("color: if is_current { p.accent } else { p.text },",
+          "color: if is_current { p.blue } else { p.text },")],
+        ["desktop"],
+        ["every_control_that_offers_something_follows_the_accent",
+         "the_zone_you_are_looking_at_is_not_the_zone_in_force"],
+    ),
+    (
+        "UUUUUUUUU: the zone in force stops being named differently at all, "
+        "so the panel cannot say which zone the machine is on",
+        DTS,
+        [("color: if is_current { p.accent } else { p.text },", "color: p.text,")],
+        ["desktop"],
+        ["every_control_that_offers_something_follows_the_accent",
+         "the_zone_you_are_looking_at_is_not_the_zone_in_force"],
+    ),
+    (
+        "VVVVVVVVV: a zone row's offset keeps Mocha's subtext0",
+        DTS,
+        [("text: tz.offset_string(self.current_utc),\n                font_size: 13.0,\n"
+          "                color: p.subtext0,",
+          "text: tz.offset_string(self.current_utc),\n                font_size: 13.0,\n"
+          "                color: Color::from_hex(0xA6ADC8),")],
+        ["desktop"],
+        ["every_colour_the_panel_draws_comes_from_its_palette"],
+    ),
+    (
+        "WWWWWWWWW: the DST badge keeps Mocha's yellow",
+        DTS,
+        [("                    font_size: 10.0,\n                    color: p.yellow,",
+          "                    font_size: 10.0,\n"
+          "                    color: Color::from_hex(0xF9E2AF),")],
+        ["desktop"],
+        ["every_colour_the_panel_draws_comes_from_its_palette",
+         "the_dst_badge_does_not_follow_the_accent"],
+    ),
+    (
+        "XXXXXXXXX: the DST badge follows the accent, so whether a zone's "
+        "clock is shifted depends on the desktop's colour",
+        DTS,
+        [("                    font_size: 10.0,\n                    color: p.yellow,",
+          "                    font_size: 10.0,\n                    color: p.accent,")],
+        ["desktop"],
+        ["the_dst_badge_does_not_follow_the_accent",
+         "every_control_that_offers_something_follows_the_accent"],
+    ),
+    (
+        "YYYYYYYYY: the zone list stops advancing, so every row is painted "
+        "over by the next one",
+        DTS,
+        [("            cy += 40.0;\n        }\n    }\n\n    fn render_ntp_tab(",
+          "            cy += 0.0;\n        }\n    }\n\n    fn render_ntp_tab(")],
+        ["desktop"],
+        ["the_panel_draws_nothing_that_is_immediately_erased"],
+    ),
+    (
+        "ZZZZZZZZZ: the Time Synchronization heading keeps Mocha's lavender",
+        DTS,
+        [('text: "Time Synchronization".into(),\n            font_size: 15.0,\n'
+          "            color: p.lavender,",
+          'text: "Time Synchronization".into(),\n            font_size: 15.0,\n'
+          "            color: Color::from_hex(0xB4BEFE),")],
+        ["desktop"],
+        ["every_colour_the_panel_draws_comes_from_its_palette"],
+    ),
+    (
+        "AAAAAAAAAA: the sync-status card keeps Mocha's surface0",
+        DTS,
+        [("            height: 36.0,\n            color: p.surface0,",
+          "            height: 36.0,\n            color: Color::from_hex(0x313244),")],
+        ["desktop"],
+        ["every_colour_the_panel_draws_comes_from_its_palette",
+         "the_panels_own_surfaces_come_from_the_palette"],
+    ),
+    (
+        "BBBBBBBBBB: a disabled clock is reported in the accent, so a fact "
+        "about the machine follows a choice about the desktop",
+        DTS,
+        [("            Self::Disabled => p.overlay0,", "            Self::Disabled => p.accent,")],
+        ["desktop"],
+        ["no_sync_state_follows_the_accent",
+         "every_control_that_offers_something_follows_the_accent"],
+    ),
+    (
+        "CCCCCCCCCC: a failed sync is reported in the accent, so a broken "
+        "clock is green on a green desktop",
+        DTS,
+        [("            Self::Error => p.red,", "            Self::Error => p.accent,")],
+        ["desktop"],
+        ["no_sync_state_follows_the_accent",
+         "every_control_that_offers_something_follows_the_accent"],
+    ),
+    (
+        "DDDDDDDDDD: syncing collapses onto synchronized, so a clock that is "
+        "still trying reads as one that succeeded",
+        DTS,
+        [("            Self::Syncing => p.yellow,", "            Self::Syncing => p.green,")],
+        ["desktop"],
+        ["every_sync_state_stays_distinct_under_every_accent"],
+    ),
+    (
+        "EEEEEEEEEE: disabled collapses onto error, so a clock nobody asked "
+        "to sync reads as one that failed",
+        DTS,
+        [("            Self::Disabled => p.overlay0,", "            Self::Disabled => p.red,")],
+        ["desktop"],
+        ["every_sync_state_stays_distinct_under_every_accent"],
+    ),
+    (
+        "FFFFFFFFFF: the sync dot stops reporting the state, reading the "
+        "enabled flag instead",
+        DTS,
+        [("            color: status_color,", "            color: if ntp.enabled { p.green } else { p.overlay0 },")],
+        ["desktop"],
+        ["the_sync_dot_reports_the_state_it_is_in"],
+    ),
+    (
+        "GGGGGGGGGG: the sync-status line keeps Mocha's text",
+        DTS,
+        [('text: format!("Status: {}", ntp.status.label()),\n            font_size: 13.0,\n'
+          "            color: p.text,",
+          'text: format!("Status: {}", ntp.status.label()),\n            font_size: 13.0,\n'
+          "            color: Color::from_hex(0xCDD6F4),")],
+        ["desktop"],
+        ["every_colour_the_panel_draws_comes_from_its_palette"],
+    ),
+    (
+        "HHHHHHHHHH: an NTP server row keeps Mocha's surface0",
+        DTS,
+        [("                height: 28.0,\n                color: p.surface0,",
+          "                height: 28.0,\n                color: Color::from_hex(0x313244),")],
+        ["desktop"],
+        ["every_colour_the_panel_draws_comes_from_its_palette",
+         "the_panels_own_surfaces_come_from_the_palette"],
+    ),
+    (
+        "IIIIIIIIII: an NTP server's name keeps Mocha's text",
+        DTS,
+        [("text: server.clone(),\n                font_size: 13.0,\n                color: p.text,",
+          "text: server.clone(),\n                font_size: 13.0,\n"
+          "                color: Color::from_hex(0xCDD6F4),")],
+        ["desktop"],
+        ["every_colour_the_panel_draws_comes_from_its_palette"],
+    ),
+    (
+        "JJJJJJJJJJ: the empty-clocks caption keeps Mocha's overlay0",
+        DTS,
+        [("                font_size: 13.0,\n                color: p.overlay0,",
+          "                font_size: 13.0,\n"
+          "                color: Color::from_hex(0x6C7086),")],
+        ["desktop"],
+        ["every_colour_the_panel_draws_comes_from_its_palette"],
+    ),
+    (
+        "KKKKKKKKKK: a world-clock card keeps Mocha's surface0",
+        DTS,
+        [("                height: 60.0,\n                color: p.surface0,",
+          "                height: 60.0,\n                color: Color::from_hex(0x313244),")],
+        ["desktop"],
+        ["every_colour_the_panel_draws_comes_from_its_palette",
+         "the_panels_own_surfaces_come_from_the_palette"],
+    ),
+    (
+        "LLLLLLLLLL: a world-clock face goes back to the blue it shipped in, "
+        "disagreeing with the main clock face about the same kind of value",
+        DTS,
+        [("                    font_size: 20.0,\n                    color: p.text,",
+          "                    font_size: 20.0,\n                    color: p.blue,")],
+        ["desktop"],
+        ["both_clock_faces_are_the_panels_body_text"],
+    ),
+    (
+        "MMMMMMMMMM: a world-clock face follows the accent",
+        DTS,
+        [("                    font_size: 20.0,\n                    color: p.text,",
+          "                    font_size: 20.0,\n                    color: p.accent,")],
+        ["desktop"],
+        ["both_clock_faces_are_the_panels_body_text",
+         "every_control_that_offers_something_follows_the_accent"],
+    ),
+    (
+        "NNNNNNNNNN: a world clock's label keeps Mocha's text",
+        DTS,
+        [("text: clock.label.clone(),\n                font_size: 14.0,\n"
+          "                color: p.text,",
+          "text: clock.label.clone(),\n                font_size: 14.0,\n"
+          "                color: Color::from_hex(0xCDD6F4),")],
+        ["desktop"],
+        ["every_colour_the_panel_draws_comes_from_its_palette"],
+    ),
+    (
+        "OOOOOOOOOO: a world clock's zone line keeps Mocha's subtext0",
+        DTS,
+        [("                    font_size: 11.0,\n                    color: p.subtext0,",
+          "                    font_size: 11.0,\n"
+          "                    color: Color::from_hex(0xA6ADC8),")],
+        ["desktop"],
+        ["every_colour_the_panel_draws_comes_from_its_palette"],
+    ),
+    (
+        "PPPPPPPPPP: the Hidden mark on a world clock keeps Mocha's overlay0",
+        DTS,
+        [('text: "Hidden".into(),\n                    font_size: 10.0,\n'
+          "                    color: p.overlay0,",
+          'text: "Hidden".into(),\n                    font_size: 10.0,\n'
+          "                    color: Color::from_hex(0x6C7086),")],
+        ["desktop"],
+        ["every_colour_the_panel_draws_comes_from_its_palette"],
+    ),
+    (
+        "QQQQQQQQQQ: a toggle row's label keeps Mocha's text",
+        DTS,
+        [("            color: p.text,\n            font_weight: FontWeightHint::Regular,\n"
+          "            max_width: Some(width - 80.0),",
+          "            color: Color::from_hex(0xCDD6F4),\n"
+          "            font_weight: FontWeightHint::Regular,\n"
+          "            max_width: Some(width - 80.0),")],
+        ["desktop"],
+        ["every_colour_the_panel_draws_comes_from_its_palette"],
+    ),
+    (
+        "RRRRRRRRRR: the enable switch is pinned to green again, so it stops "
+        "following the accent",
+        DTS,
+        [("            color: if enabled { p.accent } else { p.surface2 },",
+          "            color: if enabled { p.green } else { p.surface2 },")],
+        ["desktop"],
+        ["every_control_that_offers_something_follows_the_accent"],
+    ),
+    (
+        "SSSSSSSSSS: the enable switch's off arm keeps Mocha's surface2",
+        DTS,
+        [("            color: if enabled { p.accent } else { p.surface2 },",
+          "            color: if enabled { p.accent } else { Color::from_hex(0x585B70) },")],
+        ["desktop"],
+        ["every_colour_the_panel_draws_comes_from_its_palette"],
+    ),
+    (
+        "TTTTTTTTTT: the switch knob keeps Mocha's text",
+        DTS,
+        [("            color: p.text,\n            corner_radii: CornerRadii::all(9.0),",
+          "            color: Color::from_hex(0xCDD6F4),\n"
+          "            corner_radii: CornerRadii::all(9.0),")],
+        ["desktop"],
+        ["every_colour_the_panel_draws_comes_from_its_palette"],
+    ),
+    (
+        "UUUUUUUUUU: a label/value row's label keeps Mocha's subtext0",
+        DTS,
+        [("            color: p.subtext0,\n            font_weight: FontWeightHint::Regular,\n"
+          "            max_width: Some(width * 0.4),",
+          "            color: Color::from_hex(0xA6ADC8),\n"
+          "            font_weight: FontWeightHint::Regular,\n"
+          "            max_width: Some(width * 0.4),")],
+        ["desktop"],
+        ["every_colour_the_panel_draws_comes_from_its_palette"],
+    ),
+    (
+        "VVVVVVVVVV: a label/value row's value keeps Mocha's text",
+        DTS,
+        [("            color: p.text,\n            font_weight: FontWeightHint::Regular,\n"
+          "            max_width: Some(width * 0.55),",
+          "            color: Color::from_hex(0xCDD6F4),\n"
+          "            font_weight: FontWeightHint::Regular,\n"
+          "            max_width: Some(width * 0.55),")],
+        ["desktop"],
+        ["every_colour_the_panel_draws_comes_from_its_palette"],
+    ),
+    (
+        "WWWWWWWWWW: the NTP Servers heading keeps Mocha's lavender",
+        DTS,
+        [('text: "NTP Servers".into(),\n            font_size: 15.0,\n'
+          "            color: p.lavender,",
+          'text: "NTP Servers".into(),\n            font_size: 15.0,\n'
+          "            color: Color::from_hex(0xB4BEFE),")],
+        ["desktop"],
+        ["every_colour_the_panel_draws_comes_from_its_palette"],
+    ),
+    (
+        "XXXXXXXXXX: the Additional Clocks heading keeps Mocha's lavender",
+        DTS,
+        [('text: "Additional Clocks".into(),\n            font_size: 15.0,\n'
+          "            color: p.lavender,",
+          'text: "Additional Clocks".into(),\n            font_size: 15.0,\n'
+          "            color: Color::from_hex(0xB4BEFE),")],
+        ["desktop"],
+        ["every_colour_the_panel_draws_comes_from_its_palette"],
+    ),
+    (
+        "YYYYYYYYYY: the clocks-configured count keeps Mocha's subtext0",
+        DTS,
+        [("            font_size: 12.0,\n            color: p.subtext0,",
+          "            font_size: 12.0,\n            color: Color::from_hex(0xA6ADC8),")],
+        ["desktop"],
+        ["every_colour_the_panel_draws_comes_from_its_palette"],
     ),
 ]
 

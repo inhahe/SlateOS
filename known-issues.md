@@ -61170,7 +61170,9 @@ leaves the subtree intact.
 
 ## ext4 `rename` has the same self-rename and subtree bugs memfs just had (lane A)
 
-**Status:** OPEN. `kernel/src/fs/ext4/vfs_impl.rs`, `fn rename` at line 509.
+**Status:** FIXED 2026-08-22 (`kernel/src/fs/ext4/vfs_impl.rs`), both bugs, along
+the lines sketched under "The proper fix" below. Verified in CI against the live
+`/mnt` ext4 mount — see "Regression test" at the end of this entry.
 
 **In short:** Renaming an ext4 file onto its own name — `rename("a", "a")`, which
 POSIX says must quietly do nothing — instead deletes the file's contents. And
@@ -61219,3 +61221,27 @@ Mirror what `MemFs::rename` now does, before either the unlink or the
 
 Extend the ext4 `vfs_impl` self-test with the same four cases the VFS self-test
 now covers for memfs.
+
+### Regression test
+
+`fs::ext4::self_test()` Phase 1 gained a *"rename semantics"* section, which runs
+against the live `/mnt` ext4 mount in every boot test. Six cases:
+
+| # | Case | Expected |
+|---|---|---|
+| 1 | rename over an existing file | replaces it, source gone |
+| 2 | `rename(x, x)` | no-op, content intact |
+| 3 | rename between two hard links to one inode | no-op, **both** names survive |
+| 4 | rename onto a directory | `IsADirectory` |
+| 5 | move a directory into its own subtree | `InvalidArgument`, tree intact |
+| 6 | move a directory to a *different* parent | succeeds |
+
+Case 3 is the one that justifies comparing inode numbers rather than path
+strings: two different paths, one file. memfs's equivalent check is a string
+comparison and would miss it — memfs has no hard links, so there it cannot
+arise, but the ext4 form is the one POSIX actually specifies.
+
+Case 6 exists to keep the fix from being over-broad: the loop check added for
+case 5 walks `..` upwards, and an ordinary cross-parent directory move is
+exactly the traffic it has to let through. A check that rejected case 5 by
+rejecting all directory moves would pass every other test here.

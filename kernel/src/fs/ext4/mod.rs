@@ -576,6 +576,129 @@ pub fn self_test() -> KernelResult<()> {
         serial_println!("[ext4]     hard link test files cleaned up OK");
     }
 
+    // --- Rename semantics tests ---
+    //
+    // Regression tests. `rename(x, x)` used to destroy the file: the replace
+    // path resolved the destination to the *same* inode as the source, dropped
+    // its link count to zero and freed its data blocks and inode, then re-linked
+    // the freed inode further down. And moving a directory into its own subtree
+    // was not checked at all, splicing the tree into a cycle.
+    serial_println!("[ext4]   Testing rename semantics...");
+    {
+        let rn_a = root.join("_ext4_rn_a");
+        let rn_b = root.join("_ext4_rn_b");
+        let rn_link = root.join("_ext4_rn_link");
+        // Best-effort pre-clean: absence is the normal case, so an error here
+        // means "nothing to remove" and is not a failure.
+        let _ = crate::fs::Vfs::remove(&rn_a);
+        let _ = crate::fs::Vfs::remove(&rn_b);
+        let _ = crate::fs::Vfs::remove(&rn_link);
+
+        // (1) rename over an EXISTING file replaces it.
+        crate::fs::Vfs::write_file(&rn_a, b"new")?;
+        crate::fs::Vfs::write_file(&rn_b, b"old")?;
+        crate::fs::Vfs::rename(&rn_a, &rn_b)?;
+        if crate::fs::Vfs::read_file(&rn_b)? != b"new" || crate::fs::Vfs::stat(&rn_a).is_ok() {
+            serial_println!("[ext4]   FAIL: rename did not replace the destination");
+            let _ = crate::fs::Vfs::remove(&rn_a);
+            let _ = crate::fs::Vfs::remove(&rn_b);
+            return Err(crate::error::KernelError::InternalError);
+        }
+        serial_println!("[ext4]     rename replaces existing destination OK");
+
+        // (2) rename onto ITSELF is a no-op that keeps the file. This used to
+        //     free the inode and leave a dangling directory entry.
+        crate::fs::Vfs::rename(&rn_b, &rn_b)?;
+        if crate::fs::Vfs::read_file(&rn_b)? != b"new" {
+            serial_println!("[ext4]   FAIL: self-rename destroyed the file");
+            let _ = crate::fs::Vfs::remove(&rn_b);
+            return Err(crate::error::KernelError::InternalError);
+        }
+        serial_println!("[ext4]     rename onto itself is a no-op OK");
+
+        // (3) The same through two HARD LINKS to one inode — different paths,
+        //     one file. POSIX defines the no-op by file identity, not by name,
+        //     which is why the check compares inode numbers and not strings.
+        crate::fs::Vfs::link(&rn_b, &rn_link)?;
+        crate::fs::Vfs::rename(&rn_b, &rn_link)?;
+        if crate::fs::Vfs::read_file(&rn_link)? != b"new" {
+            serial_println!("[ext4]   FAIL: rename between hard links destroyed the file");
+            let _ = crate::fs::Vfs::remove(&rn_b);
+            let _ = crate::fs::Vfs::remove(&rn_link);
+            return Err(crate::error::KernelError::InternalError);
+        }
+        // Both names must still be there: a no-op removes neither.
+        if crate::fs::Vfs::stat(&rn_b).is_err() || crate::fs::Vfs::stat(&rn_link).is_err() {
+            serial_println!("[ext4]   FAIL: rename between hard links dropped a name");
+            let _ = crate::fs::Vfs::remove(&rn_b);
+            let _ = crate::fs::Vfs::remove(&rn_link);
+            return Err(crate::error::KernelError::InternalError);
+        }
+        serial_println!("[ext4]     rename between hard links to one inode is a no-op OK");
+        crate::fs::Vfs::remove(&rn_link)?;
+
+        // (4) A DIRECTORY destination is refused.
+        let rn_dir = root.join("_ext4_rn_dir");
+        let _ = crate::fs::Vfs::remove_recursive(&rn_dir);
+        crate::fs::Vfs::mkdir(&rn_dir)?;
+        match crate::fs::Vfs::rename(&rn_b, &rn_dir) {
+            Err(crate::error::KernelError::IsADirectory) => {}
+            other => {
+                serial_println!(
+                    "[ext4]   FAIL: rename onto a directory -> {:?} (expected IsADirectory)",
+                    other
+                );
+                let _ = crate::fs::Vfs::remove(&rn_b);
+                let _ = crate::fs::Vfs::remove_recursive(&rn_dir);
+                return Err(crate::error::KernelError::InternalError);
+            }
+        }
+        serial_println!("[ext4]     rename onto a directory refused OK");
+
+        // (5) Moving a directory INTO ITS OWN SUBTREE must be refused, and must
+        //     leave the tree exactly as it was.
+        let rn_inner = rn_dir.join("inner");
+        crate::fs::Vfs::mkdir(&rn_inner)?;
+        match crate::fs::Vfs::rename(&rn_dir, &rn_inner.join("moved")) {
+            Err(crate::error::KernelError::InvalidArgument) => {}
+            other => {
+                serial_println!(
+                    "[ext4]   FAIL: rename dir into own subtree -> {:?} (expected InvalidArgument)",
+                    other
+                );
+                let _ = crate::fs::Vfs::remove(&rn_b);
+                let _ = crate::fs::Vfs::remove_recursive(&rn_dir);
+                return Err(crate::error::KernelError::InternalError);
+            }
+        }
+        if crate::fs::Vfs::stat(&rn_inner).is_err() {
+            serial_println!("[ext4]   FAIL: rejected subtree move damaged the tree");
+            let _ = crate::fs::Vfs::remove(&rn_b);
+            let _ = crate::fs::Vfs::remove_recursive(&rn_dir);
+            return Err(crate::error::KernelError::InternalError);
+        }
+        serial_println!("[ext4]     rename dir into own subtree refused OK");
+
+        // (6) A legitimate directory move to a DIFFERENT parent still works —
+        //     the loop check must not reject the ordinary case it guards.
+        let rn_dir2 = root.join("_ext4_rn_dir2");
+        let _ = crate::fs::Vfs::remove_recursive(&rn_dir2);
+        crate::fs::Vfs::rename(&rn_inner, &rn_dir2)?;
+        if crate::fs::Vfs::stat(&rn_dir2).is_err() || crate::fs::Vfs::stat(&rn_inner).is_ok() {
+            serial_println!("[ext4]   FAIL: legitimate directory move did not happen");
+            let _ = crate::fs::Vfs::remove(&rn_b);
+            let _ = crate::fs::Vfs::remove_recursive(&rn_dir);
+            let _ = crate::fs::Vfs::remove_recursive(&rn_dir2);
+            return Err(crate::error::KernelError::InternalError);
+        }
+        serial_println!("[ext4]     directory move to a different parent OK");
+
+        crate::fs::Vfs::remove(&rn_b)?;
+        crate::fs::Vfs::remove_recursive(&rn_dir)?;
+        crate::fs::Vfs::remove_recursive(&rn_dir2)?;
+        serial_println!("[ext4]     rename semantics test PASSED");
+    }
+
     // --- Fallocate tests ---
     serial_println!("[ext4]   Testing fallocate...");
     {

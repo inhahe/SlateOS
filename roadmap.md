@@ -654,6 +654,23 @@ Known-issues (open, kernel-owned):
   `proc::thread` test 11 (`test_exit_detaches_address_space`), and the WATCH was
   cleared after cycles 8/9/10 (`ab3d42901`, `b215b83c1`, `1422972ad`) each
   reached `BOOT_OK` with a green `REAL glibc forkexec`.
+- ~~`BUG-SPAWNED-CHILDREN-INHERIT-NO-CAPABILITIES`~~ — found by lane B,
+  **FIXED 2026-08-22** (`c58efa00d`). `fork_create` clones the parent's
+  `cap_table`; `spawn_process` did not, and neither `SYS_PROCESS_SPAWN` nor
+  `SYS_PROCESS_SPAWN_EX` has a field in which userspace could name a
+  capability — so every spawned child started with an empty table and the
+  first thing it touched returned `PermissionDenied`. `pcb::inherit_caps_from`
+  now runs in Step 5 before `options.capabilities` is applied; in-kernel
+  callers (`parent: 0`) are unaffected. Cloning is delegation, not ambient
+  authority, and anyone able to spawn was already able to `fork`+`execve`, so
+  the restriction had denied an attacker nothing while breaking every honest
+  caller (`design-decisions.md` 278). **This is what unblocked the boot-test
+  gate**: the two Path-Z `make` rungs had been red on every branch, so the
+  suite scored `SELFTEST_FAIL` and had to be read rather than trusted. Cycle 12
+  is the first `BOOT_OK` with both green — real GNU make dispatching a recipe
+  through `/bin/sh`, and make driving `tcc` to compile two TUs and link a
+  dynamic ELF that `ld.so` then ran. Remaining gap: spawn still cannot hand
+  over a *subset* (needs an ABI field; logged in `todo.txt`).
 - ~~`B-KASAN-INSTRUMENTED-BOOT-WEDGES-MID-PRINT-ON-A-PAGE-FAULT`~~ — **NOT A
   KERNEL BUG, closed 2026-08-19.** The "wedge" was never real: the instrumented
   boot was healthy and simply slower than the harness budget. Three instrumented

@@ -1816,69 +1816,65 @@ capture_guest_state() {
     return 0
 }
 
-# Resolve a hex address to the nearest preceding kernel symbol.
+# Resolve a hex address to the kernel symbol that *contains* it.
 #
-# There is no addr2line/llvm-symbolizer in any installed toolchain on this box,
-# only llvm-nm/llvm-objdump.  So we do nearest-symbol resolution ourselves:
-# dump the sorted defined symbol table with llvm-nm and pick the last symbol
-# whose address is <= RIP (that is the function the RIP lies within).  This is
-# exactly what addr2line's symbol column would report, minus line numbers.
+# This delegates to `scripts/symbolize.py`.  It used to be a second, independent
+# symbolizer written in awk right here, and that is worth recording because it
+# was wrong in a way that mattered more here than anywhere else in the tree.
+#
+# The awk version picked "the last defined symbol with addr <= RIP" and its own
+# comment asserted "that is the function the RIP lies within".  It is not.  A
+# symbol's extent is `st_size`, and nearest-preceding says nothing about it: an
+# address in the alignment padding after a 16-byte array resolved to that array
+# plus a 15 KiB offset -- confidently, with nothing to indicate a miss.  It also
+# ignored symbol *kind*, so a data object could out-rank a function.
+#
+# The single caller is the hang-capture path above: a boot that wedged, one RIP
+# from the QEMU monitor, and nothing else to go on.  That is the worst place in
+# the tree to print a plausible wrong function name, because there is no second
+# signal to contradict it -- the reader goes and reads the wrong subsystem.
+#
+# Two symbolizers was also the same shape as the capability bug fixed in
+# c58efa00d: two implementations of one operation, an invariant that they agree,
+# and nothing checking it.  `symbolize.py` has since been fixed (sized extents,
+# kind-aware search, `--self-test`); keeping a duplicate in awk would have left
+# that fix unapplied at exactly the site that needs it most.  So there is now
+# one symbolizer.
+#
+# If Python is missing we print the raw address and the command to run by hand.
+# A fallback that is known to be wrong is worse than no fallback: it looks like
+# an answer.
 resolve_kernel_symbol() {
     local rip="$1"
     if [ ! -f "$KERNEL_BIN" ]; then
         echo "  (kernel ELF missing; resolve 0x$rip manually)"
         return 1
     fi
-    # Locate an llvm-nm: PATH first, then any rustup toolchain sysroot bin.
-    local nm=""
-    if command -v llvm-nm &>/dev/null; then
-        nm="llvm-nm"
+    local py=""
+    if command -v python &>/dev/null; then
+        py=python
+    elif command -v python3 &>/dev/null; then
+        py=python3
     else
-        local sr
-        sr="$(rustc --print sysroot 2>/dev/null || true)"
-        if [ -n "$sr" ]; then
-            local cand
-            cand="$(ls "$sr"/lib/rustlib/*/bin/llvm-nm* 2>/dev/null | head -n1 || true)"
-            [ -n "$cand" ] && nm="$cand"
-        fi
-    fi
-    if [ -z "$nm" ]; then
-        echo "  (no llvm-nm found; resolve 0x$rip manually against $KERNEL_BIN)"
+        echo "  (no python; resolve 0x$rip by hand:)"
+        echo "     python scripts/symbolize.py --elf \"$KERNEL_BIN\" 0x$rip"
         return 1
     fi
-    # llvm-nm -nC: numeric-sort, demangled.  Rows: "<hexaddr> <type> <name>".
-    # awk finds the last defined symbol with addr <= target.  We compare
-    # zero-padded 16-digit hex STRINGS (lexicographic == numeric for equal
-    # length) rather than strtonum(), because higher-half kernel addresses
-    # (~1.8e19) exceed a double's 2^53 exact-integer range and would compare
-    # imprecisely.  awk emits "<name>\t<besta_hex>"; bash computes the byte
-    # offset in exact 64-bit arithmetic.
-    local row name besta
-    row="$("$nm" -nC --defined-only "$KERNEL_BIN" 2>/dev/null | awk -v tgt="$rip" '
-        function pad(h,  n){ h = tolower(h); n = 16 - length(h); while (n-- > 0) h = "0" h; return h }
-        BEGIN { t = pad(tgt); best = ""; besta = "" }
-        NF >= 3 && $1 ~ /^[0-9a-fA-F]+$/ {
-            a = pad($1)
-            if (a <= t && a >= besta) {
-                besta = a
-                araw = $1
-                $1 = ""; $2 = ""; sub(/^  */, "")
-                best = $0
-            }
-        }
-        END { if (best != "") printf "%s\t%s", best, araw }
-    ')"
-    name="${row%$'\t'*}"
-    besta="${row##*$'\t'}"
-    if [ -n "$name" ] && [ -n "$besta" ]; then
-        # Exact 64-bit offset (bash arithmetic is 64-bit; both operands share
-        # the sign bit in the higher half, so the difference is a small +ve).
-        local off
-        off="$(( 0x$rip - 0x$besta ))"
-        printf '  Symbol: %s (+0x%x)\n' "$name" "$off"
-    else
-        echo "  (0x$rip below all symbols — likely userspace/ring-3 RIP, not kernel)"
-    fi
+    # `--elf`, not `--profile`: $KERNEL_BIN already tracks --release, and the
+    # whole point is to symbolize against the binary that actually booted.
+    "$py" "$SCRIPT_DIR/symbolize.py" --elf "$KERNEL_BIN" "0x$rip" 2>/dev/null |
+        sed 's/^/  Symbol: /'
+
+    # Kept from the awk version this replaced: a RIP outside the higher half was
+    # never going to be in the kernel ELF, and saying so turns a bare `??` into
+    # a direction to look.  `symbolize.py` cannot say it -- it does not know
+    # this project's address-space split -- so the hint stays here.
+    case "$(printf '%s' "$rip" | tr 'A-F' 'a-f')" in
+        ffff*) ;;
+        *) echo "  (0x$rip is not a higher-half address -- likely a ring-3 RIP," \
+                "so the kernel ELF is the wrong binary to resolve it against)" ;;
+    esac
+    return 0
 }
 
 # Print the micro-benchmark result lines from the serial log.  The kernel emits

@@ -381,9 +381,19 @@ pub fn init(hhdm_offset: u64) -> KernelResult<()> {
     }
 
     // Setup controlq (queue 0).
-    let controlq = transport.setup_queue(0, hhdm_offset)?;
+    let mut controlq = transport.setup_queue(0, hhdm_offset)?;
     // Setup cursorq (queue 1).
-    let cursorq = transport.setup_queue(1, hhdm_offset)?;
+    let mut cursorq = transport.setup_queue(1, hhdm_offset)?;
+
+    // This driver completes every request by polling `poll_used` and never
+    // registers an IRQ handler, so tell the device not to raise one.  Left
+    // unset the avail flags are zero, which *requests* interrupts: the device
+    // would then assert its INTx line on every command completion and nothing
+    // would ever acknowledge it at the device, leaving a level-triggered line
+    // stuck asserted.  Done before DRIVER_OK so it holds from the first
+    // command the device may process.
+    controlq.set_no_interrupt();
+    cursorq.set_no_interrupt();
 
     // 8. Set DRIVER_OK — device is live.
     transport.add_status(STATUS_DRIVER_OK);

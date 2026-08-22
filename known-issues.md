@@ -60808,7 +60808,65 @@ provided it restores them:
    tolerated and not counted; the test fails if *no* function accepts a toggle.
 3. The claim table is empty before any driver initialises.
 
-## `A-KERNEL-UNIT-TESTS-NEVER-RUN` — open, found 2026-08-22 (lane A)
+## `TD-A-IRQ-REGISTER-CANNOT-NAME-THE-PCI-FUNCTION` — open, found 2026-08-22 (lane A)
+
+**In short:** A userspace driver asks the kernel "wake me when interrupt line N
+fires" by passing just the *number* of the line. But several devices can share
+one line, and the kernel has a boot-time step that switches off the interrupt
+pin on any device no driver has claimed. If that step already switched off the
+device this driver cares about, the request still succeeds — and then the driver
+waits forever for an interrupt that can never arrive. It now prints a warning
+saying so, which is all it can honestly do: because the request names only a
+line and not a device, the kernel cannot tell which of the devices on that line
+the caller actually meant, so it cannot safely switch the right one back on.
+
+### Where
+
+- `kernel/src/syscall/handlers.rs` — `sys_irq_register`, which takes only
+  `irq` in `arg0`.
+- `kernel/src/pci.rs` — `quiesce_unclaimed_intx` (the sweep),
+  `claim_intx` (the in-kernel path that does *not* have this problem), and
+  `report_intx_silenced_on_irq` (the warning added alongside this entry).
+
+### Why the in-kernel path is fine and this one is not
+
+`claim_intx(addr)` takes a `PciAddress`. A driver initialising after the sweep
+therefore re-enables *its own* function and nothing else, which is why the sweep
+is documented as safe to run early. `sys_irq_register(irq)` has no equivalent:
+
+| | identifies | can re-enable safely? |
+|---|---|---|
+| `claim_intx` | one function (bus:dev.fn) | yes — exactly that function |
+| `sys_irq_register` | one IRQ line | **no** — the line may map to several functions, and the caller owns at most one |
+
+Re-enabling every silenced function on the line would re-arm pins the caller has
+no claim to, including whatever unclaimed device the sweep was quieting — which
+is the storm the sweep exists to prevent. So the syscall warns and stops there.
+
+### What the proper fix looks like
+
+Give the interface the missing information, rather than making the kernel guess:
+
+1. A `DeviceIrq` capability that names a **PCI function**, not a bare IRQ
+   number, so the kernel can re-enable precisely the pin the holder owns. This
+   is the shape the capability system already uses elsewhere — the
+   `resource_id` is currently the IRQ number, which is what forces the guess.
+2. Or a separate syscall taking a `PciAddress` that a userspace driver calls to
+   claim its function's INTx, i.e. the userspace counterpart of `claim_intx`.
+
+(1) is the better fit: it keeps authority and identity in the same token instead
+of splitting them across two calls.
+
+### Impact today
+
+Low, and diagnosable rather than silent. No userspace PCI driver currently
+depends on INTx delivery — the in-tree virtio drivers are either interrupt-driven
+from inside the kernel (blk, net) or poll (gpu, sound). The warning is there so
+that when one does, the failure reads as a named cause in the log instead of a
+driver that simply never wakes up.
+
+
+## `A-KERNEL-UNIT-TESTS-NEVER-RUN` — found 2026-08-22 (lane A) — FIXED 2026-08-22
 
 **In short:** The kernel contains 54 blocks of code marked as automated tests,
 spread over 8 files. None of them has ever run. They are not merely skipped —
@@ -60842,25 +60900,24 @@ nothing ran.
 
 ### Where they are
 
-| File | dead `#[test]`s | has a `self_test()`? |
-|---|---|---|
-| `kernel/src/fs/ext4/vfs_impl.rs` | 13 | yes |
-| `kernel/src/fs/pathutil.rs` | 10 | **no** |
-| `kernel/src/net/frag.rs` | 7 | yes |
-| `kernel/src/net/httpd.rs` | 7 | yes |
-| `kernel/src/fs/ext4/driver.rs` | 6 | yes |
-| `kernel/src/tty/mod.rs` | 6 | yes |
-| `kernel/src/fs/ext4/balloc.rs` | 3 | yes |
-| `kernel/src/net/raw.rs` | 2 | **no** |
+| File | dead `#[test]`s | had a `self_test()`? | outcome |
+|---|---|---|---|
+| `kernel/src/fs/ext4/vfs_impl.rs` | 13 | yes | deleted; 4 gaps ported |
+| `kernel/src/fs/pathutil.rs` | 10 | **no** | **converted** |
+| `kernel/src/net/frag.rs` | 7 | yes (hermetic only) | **converted** |
+| `kernel/src/net/httpd.rs` | 7 | yes | deleted; 3 gaps ported |
+| `kernel/src/fs/ext4/driver.rs` | 6 | yes | deleted; 1 gap ported |
+| `kernel/src/tty/mod.rs` | 6 | yes | deleted; fully redundant |
+| `kernel/src/fs/ext4/balloc.rs` | 3 | yes | deleted; 1 gap ported |
+| `kernel/src/net/raw.rs` | 2 | **no** | **converted** |
 
-Six of the eight have a boot self-test, so the module is not wholly unchecked —
-but the self-test and the dead unit tests cover different things, and the dead
-ones are the finer-grained half.
-
-`pathutil.rs` and `raw.rs` have **no** other coverage. `pathutil.rs` is the
+Six of the eight had a boot self-test, so those modules were not wholly
+unchecked — but in four of the six the existing self-test turned out to be a
+strict superset of the dead tests, and the two that had *no* other coverage
+(`pathutil.rs`, `raw.rs`) were the ones that mattered. `pathutil.rs` was the
 priority: path handling is a trust boundary (`CLAUDE.md` self-review items 7 and
 8 — bytes not UTF-8, resolve before crossing), it is reached by every `open`,
-and its ten tests have never once executed.
+and its ten tests had never once executed.
 
 ### Why "never compiled" is worse than "never run"
 
@@ -60877,6 +60934,74 @@ Convert them to boot self-tests, which is the mechanism that actually runs. This
 also fixes lane B's `raw.rs` report for free: boot self-tests run sequentially on
 one CPU, so the `CLAIMED`/`OWNER` interleaving they traced is impossible by
 construction rather than by a mutex.
+
+The conversion is not mechanical, and three constraints keep recurring:
+
+- **A boot self-test cannot `assert!`.** A failed assertion is a panic and a
+  panic during boot is a dead machine, not a failed test. Every check has to log
+  its specific failure and return `Err`.
+- **The kernel state is real.** Unit tests could assume an empty process table
+  or an idle global; a boot self-test cannot. `raw.rs`'s two hardcoded PID 4242
+  and relied on it being absent — now searched for and skipped if unavailable.
+  Anything writing a live global has to restore it on every exit path.
+- **Re-read each test against the current API.** They have never been
+  type-checked, so treat compilation as an open question per file.
+
+### Resolution (54 of 54)
+
+| Date | Files | Result |
+|---|---|---|
+| 2026-08-22 | `pathutil.rs` (10), `raw.rs` (2) | converted; boot PASS 1674 s, both print `Self-test PASSED` |
+| 2026-08-22 | `frag.rs` (7) | converted; found `A-FRAG-REJECTED-FRAGMENTS-STILL-CLAIM-A-REASSEMBLY-SLOT` |
+| 2026-08-22 | `tty/mod.rs` (6) | **deleted** — every case already covered by the live self-test |
+| 2026-08-22 | `ext4/balloc.rs` (3) | deleted; ported 1 gap (`find_free` starting *on* the free bit) |
+| 2026-08-22 | `ext4/driver.rs` (6) | deleted; ported 1 gap (block far beyond the requested range) |
+| 2026-08-22 | `httpd.rs` (7) | deleted; ported 3 gaps (non-numeric status line, rate-limit table init, 429 content type) |
+| 2026-08-22 | `ext4/vfs_impl.rs` (13) | deleted; ported 4 gaps (error *variant* on both split failures, SOCK/UNKNOWN and BLK/FIFO fallbacks, `..` file_type byte) |
+
+`grep -rn '^#\[cfg(test)\]' kernel/src/` now returns nothing. The only remaining
+`#[test]` occurrences in the crate are inside doc comments that explain why the
+convention is boot self-tests.
+
+**19 of the 54 were worth keeping and 35 were not** — which is the useful
+finding, not the count. The five files whose dead tests were deleted were not
+under-tested; their live `self_test()` had simply outgrown the unit tests years
+earlier and nobody had removed the corpse. Two of those files
+(`httpd.rs`, `vfs_impl.rs`) had drifted so far they would no longer *compile*:
+both called functions with `&str` long after the signatures moved to byte-based
+`Path`/`&[u8]` so that non-UTF-8 filenames survive. That is the "never compiled
+is worse than never run" prediction above landing exactly as described.
+
+The nine ported gaps were all small and all real — the pattern in them is that a
+live self-test tends to check the cases someone was debugging at the time, and
+skip the boundary next to them: the free bit you are *standing on* rather than
+scanning toward, the block far past the window rather than one past it, the
+status line that is long enough but not numeric, the second of two nearly
+identical writers.
+
+The `frag.rs` conversion is the argument for doing the rest. Its seven dead
+tests all drove the module-level `add_fragment`, i.e. the global reassembly
+table — a layer the module's existing `self_test()` deliberately avoids in order
+to stay hermetic. Porting them therefore meant reading a code path nothing
+covered, and a remotely-triggerable table-exhaustion DoS was sitting in it. The
+value here is not only "the tests run now"; it is that porting a test forces
+someone to read the path it covers.
+
+`tty/mod.rs` is the counter-example, and worth knowing about before starting the
+next file. Its `self_test()` already carried a doc comment saying the unit tests
+below "do not run on the bare-metal custom target, so this mirrors their
+assertions" — the problem was known *there*, and handled, long before this issue
+was filed. All six properties really are checked by the running self-test, which
+also covers a good deal more (erase/kill/EOF, all three ISIG signals and the
+line flush each performs, `NOISIG`, echo rendering, chunked delivery, pgrp
+ownership). Verified case by case rather than taken on the comment's word; the
+six were deleted and the comment corrected.
+
+So: **check what the existing `self_test()` already covers before porting.**
+Duplicated coverage is not free — it is more code to keep correct, and it makes
+the real gaps harder to see. The two useful outcomes per file are "ported,
+because it covered something nothing else did" and "deleted, because it did
+not"; the one to avoid is "ported without checking".
 
 Two things to get right while converting:
 
@@ -60899,3 +61024,206 @@ the consequence, because the tests do not run. Checking that before applying the
 suggested mutex is what turned up the larger problem. Reply in
 `requests/a-b-raced-globals-flags-tests-that-cannot-run.md`, which also suggests
 the checker skip crates whose test target is disabled.
+
+## `A-FRAG-REJECTED-FRAGMENTS-STILL-CLAIM-A-REASSEMBLY-SLOT` — found 2026-08-22 (lane A) — FIXED 2026-08-22
+
+**In short:** When a machine receives a large network message split into pieces
+("fragments"), the kernel holds the pieces in a small table until the last one
+arrives and it can glue them back together. That table has **eight** slots. A
+piece that the kernel *rejects as invalid* still takes a slot and never gives it
+back for 30 seconds — so **eight junk packets from anywhere on the network
+occupy the whole table**, and every real split-up message arriving during those
+30 seconds gets thrown away to make room. Roughly one junk packet every four
+seconds keeps it that way forever. The attacker needs no credentials, no
+handshake, and no connection: these are unsolicited packets. Fix is a few lines
+— free the slot when the fragment that created it was rejected.
+
+### Where
+
+`kernel/src/net/frag.rs`:
+
+| Item | Line | Note |
+|---|---|---|
+| `MAX_REASSEMBLY_ENTRIES` | 66 | `= 8` — the whole table |
+| `add_fragment` (IPv4) | 293 | claims the slot at 354-357 |
+| `FragEntry::add_fragment` | 155 | rejects at 157 / 164 |
+| `add_fragment_v6` | 638 | same shape, `ENTRIES_V6` |
+| `tick_expire` | 396 | the only thing that frees a stuck slot, after 30 s |
+
+### The sequence
+
+The module-level `add_fragment` marks the slot live **before** it knows whether
+the fragment is any good:
+
+```rust
+let now = crate::hrtimer::now_ns();
+entries[slot].active = true;          // <-- committed here
+entries[slot].key = key;
+entries[slot].created_ns = now;
+...
+let complete = entry.add_fragment(byte_offset, data, more_fragments);
+```
+
+and `FragEntry::add_fragment` returns `false` from the top on two paths, having
+touched nothing at all:
+
+```rust
+if data.is_empty() { return false; }                 // empty payload
+let end = byte_offset.saturating_add(data.len());
+if end > MAX_PAYLOAD_V4 { return false; }            // offset+len past 65535
+```
+
+Nothing undoes the `active = true`. The slot now holds a key, a timestamp, an
+empty buffer and an empty bitmap. It cannot complete — no data will ever match
+it unless the attacker chooses to send more — so it sits until `tick_expire`
+reaps it at the 30 s mark.
+
+Because the key includes the 16-bit `identification` field, the attacker gets
+65 536 distinct keys for free; eight of them fill the table. From then on the
+allocator's fallback path runs on every legitimate fragment:
+
+```
+[frag] Evicting reassembly entry (id=...) to make room
+```
+
+which discards a real, partially-reassembled datagram. IPv6 is identical
+(`FragKeyV6`, 32-bit ID, so 4 billion keys).
+
+### Why the existing tests do not catch it
+
+Two of the dead `#[test]`s point straight at these paths —
+`test_oversized_fragment_rejected` and `test_empty_fragment_ignored` — and both
+assert only `result.is_none()`, which is true. The leak is in state they never
+look at. They also never ran (`A-KERNEL-UNIT-TESTS-NEVER-RUN`), so even that
+much was hypothetical.
+
+The `self_test()` at line 765 misses it for a different and more interesting
+reason: it is documented as exercising `FragEntry`/`FragEntryV6` methods
+"directly without touching global state or the timer". That is a reasonable way
+to keep a boot self-test hermetic, but it means **the entire slot-allocation
+layer — the table, the keying, the eviction policy — has no coverage at all**.
+The bug lives exactly in the layer that was skipped.
+
+### Fix
+
+After the inner call, release a slot that holds nothing:
+
+```rust
+// A rejected fragment must not leave a live entry behind: the slot was
+// claimed before we knew the fragment was any good, and an entry with an
+// empty buffer can never complete.  Leaving it costs a reassembly slot for
+// the full timeout, which is a remote DoS at eight packets.
+if !complete && entry.buffer.is_empty() {
+    entry.clear();
+}
+```
+
+`entry.buffer.is_empty()` is an exact test for "contributed nothing": an
+accepted fragment has non-empty `data`, so `end >= 1` and the buffer is resized
+to at least 1 byte. It is therefore a no-op for an existing entry that is
+legitimately still waiting. Apply to both `add_fragment` and `add_fragment_v6`.
+
+Then give the allocation layer coverage, since that is the real gap — the seven
+dead `#[test]`s in this module all drive the module-level `add_fragment`, which
+is precisely the untested layer, so converting them is the fix for the coverage
+hole as well as the vehicle for a regression test on this bug.
+
+### Provenance
+
+Found while converting this module's dead `#[test]`s to boot self-tests under
+`A-KERNEL-UNIT-TESTS-NEVER-RUN`. Reading the two rejection tests closely enough
+to port them is what exposed the slot leak they were sitting next to.
+
+### Fixed 2026-08-22
+
+Both `add_fragment` and `add_fragment_v6` now release a slot whose entry
+contributed nothing:
+
+```rust
+if entry.buffer.is_empty() {
+    entry.clear();
+}
+```
+
+on the `else` (not-complete) arm. `buffer.is_empty()` is an exact test for
+"contributed nothing" — an accepted fragment has non-empty `data`, so `end >= 1`
+and the buffer is grown to at least one byte — which makes it a no-op for an
+entry legitimately still waiting for more fragments.
+
+The regression test drives the actual attack rather than asserting on internals:
+`test_table_rejected_fragments_free_their_slot` pushes `MAX_REASSEMBLY_ENTRIES`
+empty fragments with distinct ids, then the same number of oversized ones,
+checking the table is empty after each sweep, and finally sends a real datagram
+and requires it to reassemble. Before the fix that last step could only succeed
+by evicting something.
+
+Boot test: PASS, 1656 s, 11th consecutive clean boot, 6 WARNING / 3 FAIL
+baseline unchanged. The serial log shows `[frag] table: rejected fragments free
+their slot (8 empty + 8 oversized): OK` and **zero** occurrences of `[frag]
+Evicting reassembly entry`, which is the observable the fix is about — the
+sixteen junk fragments forced no eviction at all.
+
+## `TD-A-MOST-BOOT-SELF-TESTS-PANIC-THE-KERNEL-INSTEAD-OF-REPORTING` — open, found 2026-08-22 (lane A)
+
+**In short:** The kernel runs its own test suite on every single boot, and most
+of those tests are written so that a failure **halts the machine** rather than
+printing "this test failed" and carrying on. On a developer's boot test that is
+fine and arguably better — you get an exact file and line. On a user's computer
+it means that one wrong flag byte in, say, the terminal layer turns into a
+machine that will not start. Nothing is broken today; this is about what happens
+the first time one of these checks is wrong on real hardware.
+
+### Scale
+
+`567` files under `kernel/src/` contain both a `self_test` function and
+`assert!`/`assert_eq!`/`assert_ne!`, totalling **12 674** assertion sites. The
+largest concentrations:
+
+| File | assert sites |
+|---|---|
+| `kernel/src/syscall/linux.rs` | 400 |
+| `kernel/src/container.rs` | 334 |
+| `kernel/src/oci.rs` | 217 |
+| `kernel/src/net/dashboard.rs` | 151 |
+| `kernel/src/net/httpd.rs` | 140 |
+| `kernel/src/ipc/namespace.rs` | 116 |
+
+Against roughly 299 sites that use the `KernelResult<()>` + `serial_println!`
+FAIL form instead. So the panicking style is the *majority* convention, not the
+exception, and the two have coexisted for a long time.
+
+### Why this is being written down rather than fixed
+
+Three separate questions are tangled here, and only the first is a bug:
+
+1. **Should self-tests run on a production boot at all?** They currently run
+   unconditionally from `kernel_main` — `tty::self_test()` at `main.rs:5972` is
+   typical. If the answer is "no, gate them behind a boot flag", then the
+   assertion style stops mattering for users and the whole issue shrinks to a
+   one-line change. This is the question to settle first.
+2. **Is `assert!` the wrong tool for a check that does run in production?** Yes,
+   for the same reason `unwrap` is (`CLAUDE.md`: no panics in non-test code) —
+   but only if (1) says they run.
+3. **Is it worth converting 12 674 sites?** Almost certainly not as a bulk
+   mechanical edit, and definitely not before (1) is answered. Converting them
+   also *loses* something: an assertion carries file, line and the compared
+   values for free, while the `KernelResult` form only reports what its author
+   remembered to log.
+
+Because (1) is a user-visible policy question with a real tradeoff — a
+production boot that self-tests is slower but catches a corrupt build, one that
+does not is faster but ships unverified — it is the operator's call rather than
+mine.
+
+### What was done instead
+
+New self-test code written under `A-KERNEL-UNIT-TESTS-NEVER-RUN` uses the
+`KernelResult<()>` form (`pathutil`, `net::raw`, `net::frag`), which is the safe
+side of the question whichever way it is decided. Existing assertion-based
+self-tests were left alone.
+
+### Provenance
+
+Noticed while converting `tty/mod.rs`, whose `self_test()` is a good example:
+74 assert sites, called unconditionally at boot, covering things as ordinary as
+whether `VERASE` is 127.

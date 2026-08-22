@@ -167,136 +167,294 @@ pub fn contains_bytes(haystack: &[u8], needle: &[u8]) -> bool {
     haystack.windows(needle.len()).any(|w| w == needle)
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+// ---------------------------------------------------------------------------
+// Self-test
+// ---------------------------------------------------------------------------
+//
+// These checks were written as a `#[cfg(test)] mod tests` and therefore never
+// ran: `kernel/Cargo.toml` sets `test = false` on the kernel binary and there
+// is no `lib.rs`, so `cargo test -p kernel` builds no test target at all.  That
+// is the correct call for a `#![no_std]` binary supplying its own `panic_impl`
+// — it genuinely cannot link a host harness — but it left ten checks on a trust
+// boundary that had never once executed.  They are boot self-tests now, which
+// is the mechanism this kernel actually runs.  See `known-issues.md`
+// → `A-KERNEL-UNIT-TESTS-NEVER-RUN`.
+//
+// Note the shape difference from a unit test: a boot self-test must not
+// `assert!`.  A failed assertion is a panic, and a panic during boot is a dead
+// machine rather than a failed test — so every check reports and returns `Err`,
+// and the caller logs and carries on.
 
-    #[test]
-    fn subtree_basic_boundary() {
-        assert!(path_in_subtree("/a/b", "/a"));
-        assert!(path_in_subtree("/a", "/a"));
-        assert!(!path_in_subtree("/ab", "/a"));
-        assert!(!path_in_subtree("/b/a", "/a"));
+/// Compare one predicate result against its expectation.
+fn expect_pred(
+    got: bool,
+    want: bool,
+    what: &str,
+    path: &str,
+    dir: &str,
+) -> crate::error::KernelResult<()> {
+    if got == want {
+        return Ok(());
+    }
+    crate::serial_println!("[pathutil]   FAIL: {what}({path:?}, {dir:?}) = {got}, expected {want}");
+    Err(crate::error::KernelError::InternalError)
+}
+
+/// [`path_in_subtree`] — component boundaries, trailing slashes, empty dir.
+fn check_in_subtree() -> crate::error::KernelResult<()> {
+    // (path, dir, expected)
+    const CASES: &[(&str, &str, bool)] = &[
+        // The match ends on a component boundary, so a shared *byte* prefix
+        // is not a subtree.
+        ("/a/b", "/a", true),
+        ("/a", "/a", true),
+        ("/ab", "/a", false),
+        ("/b/a", "/a", false),
+        // The bug class this module exists to kill: a dir that already ends
+        // in `/` must still match its real children.
+        ("/protected/secret.txt", "/protected/", true),
+        ("/protected", "/protected/", true),
+        ("/protectedX/file", "/protected/", false),
+        // An empty dir, and `/`, both mean "the whole tree".
+        ("/anything/here", "", true),
+        ("/", "", true),
+        ("/anything/here", "/", true),
+    ];
+    for &(path, dir, want) in CASES {
+        expect_pred(
+            path_in_subtree(path, dir),
+            want,
+            "path_in_subtree",
+            path,
+            dir,
+        )?;
     }
 
-    #[test]
-    fn subtree_trailing_slash_tolerated() {
-        // The exact bug class: a prefix with a trailing slash must still
-        // match real children.
-        assert!(path_in_subtree("/protected/secret.txt", "/protected/"));
-        assert!(path_in_subtree("/protected", "/protected/"));
-        assert!(!path_in_subtree("/protectedX/file", "/protected/"));
-        // Equivalence between slashed and unslashed forms.
-        for p in ["/d", "/d/x", "/d/x/y", "/dx", "/e"] {
-            assert_eq!(
-                path_in_subtree(p, "/d"),
-                path_in_subtree(p, "/d/"),
-                "slashed vs unslashed mismatch for {p}"
-            );
+    // Slashed and unslashed spellings of the same dir must be
+    // indistinguishable — the property, rather than a list of cases.
+    for p in ["/d", "/d/x", "/d/x/y", "/dx", "/e"] {
+        if path_in_subtree(p, "/d") != path_in_subtree(p, "/d/") {
+            crate::serial_println!("[pathutil]   FAIL: '/d' and '/d/' disagree for {p:?}");
+            return Err(crate::error::KernelError::InternalError);
         }
     }
 
-    #[test]
-    fn subtree_empty_and_root_match_all() {
-        assert!(path_in_subtree("/anything/here", ""));
-        assert!(path_in_subtree("/", ""));
-        assert!(path_in_subtree("/anything/here", "/"));
-    }
+    crate::serial_println!(
+        "[pathutil]   path_in_subtree: {} cases + slash equivalence OK",
+        CASES.len()
+    );
+    Ok(())
+}
 
-    #[test]
-    fn strictly_under_excludes_self() {
-        assert!(path_strictly_under("/a/b", "/a"));
-        assert!(!path_strictly_under("/a", "/a"));
-        assert!(!path_strictly_under("/a", "/a/"));
-        assert!(path_strictly_under("/a/b", "/a/"));
-        assert!(!path_strictly_under("/ab", "/a"));
+/// [`path_strictly_under`] — same boundaries, but excluding the dir itself.
+fn check_strictly_under() -> crate::error::KernelResult<()> {
+    const CASES: &[(&str, &str, bool)] = &[
+        ("/a/b", "/a", true),
+        ("/a", "/a", false),
+        ("/a", "/a/", false),
+        ("/a/b", "/a/", true),
+        ("/ab", "/a", false),
+        // Everything with a component is strictly under the root; the root
+        // is not strictly under itself.
+        ("/a", "/", true),
+        ("/a/b", "/", true),
+        ("/", "/", false),
+    ];
+    for &(path, dir, want) in CASES {
+        expect_pred(
+            path_strictly_under(path, dir),
+            want,
+            "path_strictly_under",
+            path,
+            dir,
+        )?;
     }
+    crate::serial_println!("[pathutil]   path_strictly_under: {} cases OK", CASES.len());
+    Ok(())
+}
 
-    #[test]
-    fn strictly_under_root() {
-        assert!(path_strictly_under("/a", "/"));
-        assert!(path_strictly_under("/a/b", "/"));
-        assert!(!path_strictly_under("/", "/"));
-    }
+/// Subtree matching on components that are not valid UTF-8.
+///
+/// This is the property the whole byte-`Path` conversion exists for: before it
+/// such a path could not even be *spelled*, so a subtree check involving one
+/// was unreachable code.
+fn check_non_utf8() -> crate::error::KernelResult<()> {
+    let dir = Path::new(b"/data/\xff");
+    let inside = Path::new(b"/data/\xff/file");
+    let other = Path::new(b"/data/\xfe/file");
 
-    /// A name that is not UTF-8 must still match by bytes.  This is the
-    /// property the whole byte-`Path` conversion exists for: before it, such
-    /// a path could not even be *spelled*, so a subtree check involving one
-    /// was unreachable code.
-    #[test]
-    fn subtree_matches_non_utf8_components() {
-        let dir = Path::new(b"/data/\xff");
-        assert!(path_in_subtree(Path::new(b"/data/\xff/file"), dir));
-        assert!(path_strictly_under(Path::new(b"/data/\xff/file"), dir));
+    if !path_in_subtree(inside, dir)
+        || !path_strictly_under(inside, dir)
         // A different trailing byte is a different directory.
-        assert!(!path_in_subtree(Path::new(b"/data/\xfe/file"), dir));
+        || path_in_subtree(other, dir)
+    {
+        crate::serial_println!("[pathutil]   FAIL: non-UTF-8 component matching");
+        return Err(crate::error::KernelError::InternalError);
     }
+    crate::serial_println!("[pathutil]   non-UTF-8 components match by bytes: OK");
+    Ok(())
+}
 
-    #[test]
-    fn confine_under_normal_joins() {
-        assert_eq!(
-            confine_under("/dest", "a/b.txt").unwrap(),
-            PathBuf::from("/dest/a/b.txt")
-        );
+/// [`confine_under`] — the joins that must succeed.
+fn check_confine_joins() -> crate::error::KernelResult<()> {
+    // (base, rel, expected result)
+    const CASES: &[(&str, &str, &str)] = &[
+        ("/dest", "a/b.txt", "/dest/a/b.txt"),
         // Trailing separators on either side collapse to exactly one.
-        assert_eq!(
-            confine_under("/dest/", "a/").unwrap(),
-            PathBuf::from("/dest/a")
-        );
-        // A leading slash on the member is stripped, not honoured.
-        assert_eq!(
-            confine_under("/dest", "/etc/passwd").unwrap(),
-            PathBuf::from("/dest/etc/passwd")
-        );
-        // `.` components are dropped.
-        assert_eq!(
-            confine_under("/dest", "./a/./b").unwrap(),
-            PathBuf::from("/dest/a/b")
-        );
-        // Bytes that are not UTF-8 survive intact.
-        assert_eq!(
-            confine_under("/dest", Path::new(b"re\xffport")).unwrap(),
-            PathBuf::from(b"/dest/re\xffport".as_slice())
-        );
+        ("/dest/", "a/", "/dest/a"),
+        // A leading `/` on the member is stripped, not honoured: a tar member
+        // named `/etc/passwd` denotes `etc/passwd` *inside* the archive, and
+        // treating it as absolute is the same escape by another spelling.
+        ("/dest", "/etc/passwd", "/dest/etc/passwd"),
+        // `.` components drop out.
+        ("/dest", "./a/./b", "/dest/a/b"),
+    ];
+    for &(base, rel, want) in CASES {
+        match confine_under(base, rel) {
+            Ok(got) if got == PathBuf::from(want) => {}
+            Ok(got) => {
+                crate::serial_println!(
+                    "[pathutil]   FAIL: confine_under({base:?}, {rel:?}) = {:?}, expected {want:?}",
+                    got.as_bytes()
+                );
+                return Err(crate::error::KernelError::InternalError);
+            }
+            Err(e) => {
+                crate::serial_println!(
+                    "[pathutil]   FAIL: confine_under({base:?}, {rel:?}) errored: {e:?}"
+                );
+                return Err(crate::error::KernelError::InternalError);
+            }
+        }
     }
 
-    #[test]
-    fn confine_under_rejects_escapes() {
-        // The Zip Slip case, in each of its spellings.
-        assert!(confine_under("/dest", "../etc/passwd").is_err());
-        assert!(confine_under("/dest", "a/../../etc/passwd").is_err());
-        assert!(confine_under("/dest", "/../etc/passwd").is_err());
-        assert!(confine_under("/dest", "a/..").is_err());
-        // Naming the base itself is not "something inside it".
-        assert!(confine_under("/dest", "").is_err());
-        assert!(confine_under("/dest", "/").is_err());
-        assert!(confine_under("/dest", ".").is_err());
-        // A NUL byte cannot appear in a path.
-        assert!(confine_under("/dest", Path::new(b"a\0b")).is_err());
-        // An empty base names nothing.
-        assert!(confine_under("", "a").is_err());
+    // Bytes that are not UTF-8 survive the join intact.
+    match confine_under("/dest", Path::new(b"re\xffport")) {
+        Ok(got) if got == PathBuf::from(b"/dest/re\xffport".as_slice()) => {}
+        _ => {
+            crate::serial_println!("[pathutil]   FAIL: confine_under lost non-UTF-8 bytes");
+            return Err(crate::error::KernelError::InternalError);
+        }
     }
 
-    #[test]
-    fn dot_entries() {
-        assert!(is_dot_entry(Path::new(".")));
-        assert!(is_dot_entry(Path::new("..")));
-        assert!(!is_dot_entry(Path::new("...")));
-        assert!(!is_dot_entry(Path::new(".a")));
-        assert!(!is_dot_entry(Path::new("")));
-        // A *path* ending in `..` is not a dot *entry*; the check is on a
-        // single component.
-        assert!(!is_dot_entry(Path::new("a/..")));
+    crate::serial_println!(
+        "[pathutil]   confine_under joins: {} cases + non-UTF-8 OK",
+        CASES.len()
+    );
+    Ok(())
+}
+
+/// [`confine_under`] — the inputs that must be refused.
+///
+/// This is the security half: every one of these is an attempt to write
+/// outside `base` (the "Zip Slip" class), or an input that names `base`
+/// itself rather than something inside it.
+fn check_confine_escapes() -> crate::error::KernelResult<()> {
+    // (base, rel, why it must be refused)
+    const CASES: &[(&str, &str, &str)] = &[
+        ("/dest", "../etc/passwd", "leading .."),
+        ("/dest", "a/../../etc/passwd", ".. after a real component"),
+        ("/dest", "/../etc/passwd", ".. behind a stripped leading slash"),
+        ("/dest", "a/..", "trailing .."),
+        ("/dest", "", "empty names the base itself"),
+        ("/dest", "/", "root names the base itself"),
+        ("/dest", ".", "dot names the base itself"),
+        ("", "a", "empty base names nothing"),
+    ];
+    for &(base, rel, why) in CASES {
+        if let Ok(got) = confine_under(base, rel) {
+            crate::serial_println!(
+                "[pathutil]   FAIL: confine_under({base:?}, {rel:?}) accepted ({why}) -> {:?}",
+                got.as_bytes()
+            );
+            return Err(crate::error::KernelError::InternalError);
+        }
     }
 
-    #[test]
-    fn contains_bytes_basics() {
-        assert!(contains_bytes(b"report.txt", b"port"));
-        assert!(contains_bytes(b"report.txt", b"report.txt"));
-        assert!(contains_bytes(b"report.txt", b""));
-        assert!(!contains_bytes(b"report.txt", b"Port"));
-        assert!(!contains_bytes(b"ab", b"abc"));
-        // A needle that straddles a non-UTF-8 byte still matches by bytes.
-        assert!(contains_bytes(b"re\xffport", b"\xffpo"));
+    // A NUL byte cannot appear in a path at all.
+    if confine_under("/dest", Path::new(b"a\0b")).is_ok() {
+        crate::serial_println!("[pathutil]   FAIL: confine_under accepted an embedded NUL");
+        return Err(crate::error::KernelError::InternalError);
     }
+
+    crate::serial_println!(
+        "[pathutil]   confine_under refuses escapes: {} cases + NUL OK",
+        CASES.len()
+    );
+    Ok(())
+}
+
+/// [`is_dot_entry`] and [`contains_bytes`].
+fn check_dot_and_substring() -> crate::error::KernelResult<()> {
+    // (name, expected)
+    const DOTS: &[(&str, bool)] = &[
+        (".", true),
+        ("..", true),
+        ("...", false),
+        (".a", false),
+        ("", false),
+        // A *path* ending in `..` is not a dot *entry*: the check is on a
+        // single component, so this must not be mistaken for one.
+        ("a/..", false),
+    ];
+    for &(name, want) in DOTS {
+        expect_pred(
+            is_dot_entry(Path::new(name)),
+            want,
+            "is_dot_entry",
+            name,
+            "",
+        )?;
+    }
+
+    // (haystack, needle, expected)
+    const SUBS: &[(&[u8], &[u8], bool)] = &[
+        (b"report.txt", b"port", true),
+        (b"report.txt", b"report.txt", true),
+        // An empty needle matches everything, as `str::contains("")` does.
+        (b"report.txt", b"", true),
+        // Case matters — these are bytes, not a locale-aware comparison.
+        (b"report.txt", b"Port", false),
+        // A needle longer than the haystack cannot match.
+        (b"ab", b"abc", false),
+        // A needle straddling a non-UTF-8 byte still matches by bytes.
+        (b"re\xffport", b"\xffpo", true),
+    ];
+    for &(haystack, needle, want) in SUBS {
+        if contains_bytes(haystack, needle) != want {
+            crate::serial_println!(
+                "[pathutil]   FAIL: contains_bytes({haystack:?}, {needle:?}) != {want}"
+            );
+            return Err(crate::error::KernelError::InternalError);
+        }
+    }
+
+    crate::serial_println!(
+        "[pathutil]   is_dot_entry ({}) and contains_bytes ({}): OK",
+        DOTS.len(),
+        SUBS.len()
+    );
+    Ok(())
+}
+
+/// Boot self-test for the path predicates.
+///
+/// Runs entirely on constants — no disk, no allocator pressure beyond a few
+/// short `PathBuf`s — so it can run early in boot, before any filesystem is
+/// mounted.
+///
+/// # Errors
+/// [`KernelError::InternalError`] if any predicate disagrees with its
+/// expectation.  The specific failing case is logged to the serial console
+/// first.
+pub fn self_test() -> crate::error::KernelResult<()> {
+    crate::serial_println!("[pathutil] Running self-test...");
+    check_in_subtree()?;
+    check_strictly_under()?;
+    check_non_utf8()?;
+    check_confine_joins()?;
+    check_confine_escapes()?;
+    check_dot_and_substring()?;
+    crate::serial_println!("[pathutil] Self-test PASSED");
+    Ok(())
 }

@@ -134,6 +134,13 @@ impl<'a> Reader<'a> {
         Ok(u32::from_le_bytes(self.take_array::<4>()?))
     }
 
+    /// The inverse of `crate::write_i32`: the four bytes a `u32` occupies,
+    /// reinterpreted as two's complement. Every bit pattern is a valid `i32`,
+    /// so this cannot fail for a reason a `u32` read would not.
+    pub(crate) fn read_i32(&mut self) -> Result<i32, DecodeError> {
+        Ok(self.read_u32()?.cast_signed())
+    }
+
     pub(crate) fn read_u64(&mut self) -> Result<u64, DecodeError> {
         Ok(u64::from_le_bytes(self.take_array::<8>()?))
     }

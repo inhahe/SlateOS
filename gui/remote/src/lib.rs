@@ -788,6 +788,18 @@ fn write_u32(out: &mut Vec<u8>, v: u32) {
     out.extend_from_slice(&v.to_le_bytes());
 }
 
+/// A signed 32-bit scalar, as the same four little-endian bytes a `u32` would
+/// occupy. Two's complement, so the pair round-trips every `i32` including
+/// negatives — which a window position genuinely is on a desktop whose origin
+/// is not the leftmost monitor's corner.
+///
+/// Lives here rather than beside its first caller because two codecs now need
+/// it, and two spellings of a scalar is how the two ends of a wire come to
+/// disagree about one.
+fn write_i32(out: &mut Vec<u8>, v: i32) {
+    write_u32(out, v.cast_unsigned());
+}
+
 fn write_u64(out: &mut Vec<u8>, v: u64) {
     out.extend_from_slice(&v.to_le_bytes());
 }

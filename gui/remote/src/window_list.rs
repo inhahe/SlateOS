@@ -54,6 +54,10 @@
 //!     layer   : u8                     Layer::as_byte
 //!     state   : u8                     bitfield, see STATE_* below
 //!     workspce: u32                    which virtual desktop it is filed on
+//!     x       : i32                    top-left, in desktop coordinates
+//!     y       : i32
+//!     width   : u32                    outer size, decorations included
+//!     height  : u32
 //!     title   : u32 length + UTF-8 bytes
 //! ```
 //!
@@ -74,7 +78,7 @@
 //! which desktop is showing, and the shell reads rather than remembers.
 
 use crate::control::Layer;
-use crate::{DecodeError, Reader, capacity_hint, write_string, write_u32, write_u64};
+use crate::{DecodeError, Reader, capacity_hint, write_i32, write_string, write_u32, write_u64};
 
 /// Window-list frame magic: `b"WLST"`.
 pub const WINDOW_LIST_MAGIC: [u8; 4] = *b"WLST";
@@ -87,7 +91,11 @@ pub const WINDOW_LIST_MAGIC: [u8; 4] = *b"WLST";
 ///   number. Not backward compatible on purpose: a v1 shell reading a v2 frame
 ///   would silently place every window on desktop 0, which looks exactly like a
 ///   working taskbar right up to the first switch.
-pub const WINDOW_LIST_VERSION: u8 = 2;
+/// - `3` — added each window's position and size. Same reasoning: a v2 shell
+///   reading a v3 frame would see zero-by-zero windows, and a zero-sized
+///   rectangle is not drawn and matches no click, so an overview built on one
+///   would look like an empty desktop rather than like a decoding error.
+pub const WINDOW_LIST_VERSION: u8 = 3;
 
 /// Window-list header: magic + version + flags + showing desktop + window count.
 const WINDOW_LIST_HEADER_LEN: usize = 4 + 1 + 1 + 4 + 4;
@@ -155,6 +163,17 @@ pub struct WindowInfo {
     /// ignores it. Refusing to store it would push the stickiness rule out to
     /// every caller that moves "all of my windows" somewhere.
     pub workspace: u32,
+    /// Top-left corner in desktop coordinates, decorations included.
+    ///
+    /// Signed because the desktop origin is the primary monitor's corner, and a
+    /// monitor arranged to its left has negative coordinates.
+    pub x: i32,
+    /// Top-left corner in desktop coordinates, decorations included.
+    pub y: i32,
+    /// Outer width in pixels, decorations included.
+    pub width: u32,
+    /// Outer height in pixels, decorations included.
+    pub height: u32,
 }
 
 impl WindowInfo {
@@ -172,7 +191,23 @@ impl WindowInfo {
             maximized: false,
             focused: false,
             workspace: 0,
+            x: 0,
+            y: 0,
+            width: 0,
+            height: 0,
         }
+    }
+
+    /// The same window, placed. A separate step from [`Self::new`] because a
+    /// caller that does not care about geometry should not have to invent four
+    /// numbers, and one that does care should not be able to forget any.
+    #[must_use]
+    pub const fn at(mut self, x: i32, y: i32, width: u32, height: u32) -> Self {
+        self.x = x;
+        self.y = y;
+        self.width = width;
+        self.height = height;
+        self
     }
 
     fn state_byte(&self) -> u8 {
@@ -236,10 +271,13 @@ impl WindowList {
 /// creation.
 #[must_use]
 pub fn encode_window_list(list: &WindowList) -> Vec<u8> {
+    // 38 fixed bytes per window (id, pid, layer, state, workspace, x, y, width,
+    // height) plus a 4-byte title length, so 60 leaves room for an 18-character
+    // title before the vector has to grow. A hint, not a bound.
     let mut out = Vec::with_capacity(capacity_hint(
         WINDOW_LIST_HEADER_LEN,
         list.windows.len(),
-        44,
+        60,
     ));
     encode_window_list_into(&mut out, list);
     out
@@ -261,6 +299,10 @@ pub fn encode_window_list_into(out: &mut Vec<u8>, list: &WindowList) {
         out.push(win.layer.as_byte());
         out.push(win.state_byte());
         write_u32(out, win.workspace);
+        write_i32(out, win.x);
+        write_i32(out, win.y);
+        write_u32(out, win.width);
+        write_u32(out, win.height);
         write_string(out, &win.title);
     }
 }
@@ -343,6 +385,10 @@ fn decode_one(r: &mut Reader<'_>) -> Result<WindowInfo, DecodeError> {
         return Err(DecodeError::ReservedFlags(state));
     }
     let workspace = r.read_u32()?;
+    let x = r.read_i32()?;
+    let y = r.read_i32()?;
+    let width = r.read_u32()?;
+    let height = r.read_u32()?;
     let title = r.read_string()?;
     Ok(WindowInfo {
         id,
@@ -354,6 +400,10 @@ fn decode_one(r: &mut Reader<'_>) -> Result<WindowInfo, DecodeError> {
         maximized: state & STATE_MAXIMIZED != 0,
         focused: state & STATE_FOCUSED != 0,
         workspace,
+        x,
+        y,
+        width,
+        height,
     })
 }
 
@@ -386,6 +436,13 @@ mod tests {
                     // to the showing desktop, so a codec that confused the two
                     // numbers cannot pass.
                     workspace: 0,
+                    // No two windows below share a coordinate or a size, and
+                    // two of them start at a negative origin -- a swapped x/y,
+                    // or an x narrowed to unsigned, fails on one of them.
+                    x: 0,
+                    y: 0,
+                    width: 1920,
+                    height: 1080,
                 },
                 WindowInfo {
                     id: 2,
@@ -397,6 +454,11 @@ mod tests {
                     maximized: true,
                     focused: true,
                     workspace: 2,
+                    // A monitor arranged to the left of the primary one.
+                    x: -1920,
+                    y: 24,
+                    width: 1600,
+                    height: 900,
                 },
                 WindowInfo {
                     id: 3,
@@ -408,6 +470,10 @@ mod tests {
                     maximized: false,
                     focused: false,
                     workspace: 7,
+                    x: 37,
+                    y: -12,
+                    width: 640,
+                    height: 480,
                 },
                 WindowInfo {
                     id: 4,
@@ -419,6 +485,10 @@ mod tests {
                     maximized: false,
                     focused: false,
                     workspace: 1,
+                    x: 12,
+                    y: 1040,
+                    width: 1920,
+                    height: 40,
                 },
             ],
         )
@@ -479,6 +549,71 @@ mod tests {
         let (back, _) = decode_window_list(&bytes).expect("decodes");
         assert_eq!(back.current_workspace, 4);
         assert_eq!(back.windows[0].workspace, 9);
+    }
+
+    #[test]
+    fn a_window_left_of_the_primary_monitor_keeps_its_negative_origin() {
+        // The desktop origin is the primary monitor's top-left corner, so every
+        // window on a monitor arranged to its left — or above it — has a
+        // negative coordinate. Encoding the position as unsigned would turn
+        // x = -1920 into 4_293_047_296, which is off-screen by two million
+        // pixels: the overview would draw nothing and the window would look
+        // closed. `assert_eq!(back, list)` in the round-trip test above would
+        // also catch that, but it would report "a list did not survive" without
+        // saying which of nine fields went; this one names the sign.
+        let placed = WindowInfo::new(1, 1, "Left monitor").at(-1920, -100, 800, 600);
+        let bytes = encode_window_list(&WindowList::new(0, vec![placed]));
+        let (back, _) = decode_window_list(&bytes).expect("decodes");
+        assert_eq!(back.windows[0].x, -1920);
+        assert_eq!(back.windows[0].y, -100);
+    }
+
+    #[test]
+    fn the_extremes_of_every_geometry_field_survive() {
+        // A codec that read a position as an `i16`, or a size as one, would pass
+        // every test above — desktop coordinates in the low thousands fit. The
+        // bounds are where a narrowed field shows itself.
+        //
+        // Note what this deliberately does *not* claim: `i32::MIN` is not a
+        // witness against a sign-magnitude encoding. It looks like one, and an
+        // earlier draft of this comment said so, but it is the one negative
+        // value where the two encodings agree — `i32::MIN.unsigned_abs()` is
+        // `0x8000_0000`, which is already the sign bit and nothing else. The
+        // reintroduction run settled it: the `i32signmagnitude` marker failed
+        // the negative-origin test above and left this one passing.
+        let extreme = WindowInfo::new(1, 1, "Edges").at(i32::MIN, i32::MAX, 0, u32::MAX);
+        let bytes = encode_window_list(&WindowList::new(0, vec![extreme]));
+        let (back, _) = decode_window_list(&bytes).expect("decodes");
+        assert_eq!(back.windows[0].x, i32::MIN);
+        assert_eq!(back.windows[0].y, i32::MAX);
+        // Zero width is legal on the wire: a window mid-resize genuinely has
+        // one, and a decoder that rejected it would drop the whole list — every
+        // other window included — over one window's transient state.
+        assert_eq!(back.windows[0].width, 0);
+        assert_eq!(back.windows[0].height, u32::MAX);
+    }
+
+    #[test]
+    fn position_and_size_are_not_interchangeable() {
+        // x/y and width/height are adjacent pairs of the same width on the wire,
+        // which is exactly the shape of mistake that transposes them. Given a
+        // window whose four numbers are all distinct, a swap of either pair —
+        // or of the pairs with each other — lands a value in the wrong field.
+        let w = WindowInfo::new(1, 1, "Distinct").at(11, 22, 33, 44);
+        let bytes = encode_window_list(&WindowList::new(0, vec![w]));
+        let (back, _) = decode_window_list(&bytes).expect("decodes");
+        let got = &back.windows[0];
+        assert_eq!((got.x, got.y, got.width, got.height), (11, 22, 33, 44));
+    }
+
+    #[test]
+    fn a_window_that_nobody_placed_is_at_the_origin_with_no_size() {
+        // `WindowInfo::new` leaves geometry to `at`, so the default has to be a
+        // value a drawing shell can recognise as "not placed" rather than one it
+        // would happily draw. Zero-by-zero is that value: it is nothing to
+        // rasterise and matches no click.
+        let w = WindowInfo::new(1, 1, "Unplaced");
+        assert_eq!((w.x, w.y, w.width, w.height), (0, 0, 0, 0));
     }
 
     #[test]

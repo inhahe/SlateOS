@@ -7975,6 +7975,16 @@ impl Compositor {
                     // the window it describes if the two ever drift apart.
                     focused: w.focused,
                     workspace: w.workspace,
+                    // Reported, never accepted back. Nothing in `ShellControl`
+                    // takes a rectangle — a snap names an edge (§505) and a
+                    // maximize names nothing — so this is something a shell
+                    // draws with, not something it can move a window by. That
+                    // is the whole difference between this and the per-window
+                    // geometry §506 deleted from the shell's own list.
+                    x: w.x,
+                    y: w.y,
+                    width: w.width,
+                    height: w.height,
                 })
                 .collect(),
         )
@@ -16423,6 +16433,59 @@ mod tests {
             comp.window_list().windows.iter().any(|w| w.id == id.raw()),
             "a window on another desktop disappeared from the window list"
         );
+    }
+
+    #[test]
+    fn the_window_list_reports_where_each_window_actually_is() {
+        // An overview draws thumbnails in proportion to the real windows, so
+        // the rectangle in the list has to be the window's own -- not a
+        // placeholder, and not the previous frame's. A list that reported
+        // zero-by-zero would draw an empty desktop over a full one, which reads
+        // as "nothing is running" rather than as a bug.
+        let mut comp = ungated_compositor(1920, 1080);
+        let id = comp.create_window("Placed".to_string(), 640, 480, 1);
+        comp.move_window(id, -100, 250).expect("move");
+
+        let list = comp.window_list();
+        let w = list
+            .windows
+            .iter()
+            .find(|w| w.id == id.raw())
+            .expect("the window is listed");
+        let real = comp.window_ref(id).expect("window");
+        assert_eq!(
+            (w.x, w.y, w.width, w.height),
+            (real.x, real.y, real.width, real.height),
+            "the list's rectangle is not the window's"
+        );
+        // Stated separately from the equality above, because that one would
+        // still hold if both sides were zero. The move must be visible.
+        assert_eq!((w.x, w.y), (-100, 250));
+    }
+
+    #[test]
+    fn moving_a_window_moves_it_in_the_next_window_list() {
+        // The list is rebuilt per call rather than cached, and this is the test
+        // that says so: a cache that filled once at creation would pass every
+        // other geometry assertion here and go stale the instant a user dragged
+        // a window.
+        let mut comp = ungated_compositor(1920, 1080);
+        let id = comp.create_window("Dragged".to_string(), 300, 200, 1);
+        comp.move_window(id, 10, 20).expect("move");
+        let before = comp.window_list();
+        comp.move_window(id, 700, 400).expect("move again");
+        let after = comp.window_list();
+
+        let pos = |list: &WindowList| {
+            let w = list
+                .windows
+                .iter()
+                .find(|w| w.id == id.raw())
+                .expect("listed");
+            (w.x, w.y)
+        };
+        assert_eq!(pos(&before), (10, 20));
+        assert_eq!(pos(&after), (700, 400), "the list did not follow the move");
     }
 
     #[test]

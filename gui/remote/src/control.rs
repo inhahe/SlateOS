@@ -58,7 +58,9 @@
 
 use crate::reserve::PanelEdge;
 use crate::zones::SnapSlot;
-use crate::{DecodeError, Reader, capacity_hint, write_f32, write_string, write_u32, write_u64};
+use crate::{
+    DecodeError, Reader, capacity_hint, write_f32, write_i32, write_string, write_u32, write_u64,
+};
 
 /// Request-frame magic: `b"CREQ"` (client → compositor).
 pub const REQUEST_MAGIC: [u8; 4] = *b"CREQ";
@@ -861,10 +863,6 @@ fn write_header(out: &mut Vec<u8>, magic: [u8; 4], count: usize) {
     write_u32(out, u32::try_from(count).unwrap_or(u32::MAX));
 }
 
-fn write_i32(out: &mut Vec<u8>, v: i32) {
-    write_u32(out, v.cast_unsigned());
-}
-
 fn write_optional_point(out: &mut Vec<u8>, p: Option<(i32, i32)>) {
     match p {
         Some((x, y)) => {
@@ -1091,10 +1089,6 @@ fn read_header(input: &[u8], magic: [u8; 4]) -> Result<(Reader<'_>, u32), Decode
     Ok((r, n))
 }
 
-fn read_i32(r: &mut Reader<'_>) -> Result<i32, DecodeError> {
-    Ok(r.read_u32()?.cast_signed())
-}
-
 fn read_bool(r: &mut Reader<'_>) -> Result<bool, DecodeError> {
     // Any non-zero byte is true rather than an error: this is a boolean, and
     // there is no encoder in this crate that can produce a 2. Rejecting it
@@ -1104,8 +1098,8 @@ fn read_bool(r: &mut Reader<'_>) -> Result<bool, DecodeError> {
 
 fn read_optional_point(r: &mut Reader<'_>) -> Result<Option<(i32, i32)>, DecodeError> {
     if read_bool(r)? {
-        let x = read_i32(r)?;
-        let y = read_i32(r)?;
+        let x = r.read_i32()?;
+        let y = r.read_i32()?;
         Ok(Some((x, y)))
     } else {
         Ok(None)
@@ -1163,8 +1157,8 @@ fn decode_request_body(r: &mut Reader<'_>) -> Result<RequestBody, DecodeError> {
         }
         RequestTag::Move => {
             let window = r.read_u64()?;
-            let x = read_i32(r)?;
-            let y = read_i32(r)?;
+            let x = r.read_i32()?;
+            let y = r.read_i32()?;
             RequestBody::Move { window, x, y }
         }
         RequestTag::Resize => {
@@ -1275,8 +1269,8 @@ fn decode_response_body(r: &mut Reader<'_>) -> Result<ResponseBody, DecodeError>
             })
         }
         ResponseTag::WorkArea => {
-            let x = read_i32(r)?;
-            let y = read_i32(r)?;
+            let x = r.read_i32()?;
+            let y = r.read_i32()?;
             let width = r.read_u32()?;
             let height = r.read_u32()?;
             ResponseBody::WorkArea {

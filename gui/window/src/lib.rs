@@ -1782,6 +1782,13 @@ mod tests {
                 // desktop, so nothing should ever compare this against the one
                 // showing. It is here to be carried, not obeyed.
                 workspace: 0,
+                // Negative, because the fixture's contract is that no field
+                // matches the other window's and a sign is a field a codec can
+                // lose on its own.
+                x: -100,
+                y: -50,
+                width: 1920,
+                height: 1080,
             },
             WindowInfo {
                 id: 9,
@@ -1793,6 +1800,10 @@ mod tests {
                 maximized: true,
                 focused: true,
                 workspace: 3,
+                x: 64,
+                y: 32,
+                width: 800,
+                height: 600,
             },
         ]
     }

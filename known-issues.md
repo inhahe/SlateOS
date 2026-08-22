@@ -53428,27 +53428,26 @@ model, all covered by tests that pass. Every test drives the module directly, so
 same failure mode as `TD-C-VIRTUAL-DESKTOPS-HIDE-NOTHING` — a self-consistent
 component whose tests prove it correct with respect to inputs no one supplies.
 
-**Two things are missing, and they are not the same size.**
+**Three things are missing, and they are not the same size.**
 
-1. *A data source, and it needs a wire change first.* `WindowThumbnail` wants
-   `window_id`, `desktop_id`, `title`, focus, minimized — all of which
-   `guiremote::window_list::WindowInfo` now carries, with `DesktopLane::is_current`
-   being the header's `current_workspace` — **and geometry, which it does not
-   carry at all.** That is not a detail. `compute_grid_layout` calls
+1. *A data source. The wire change it needed is now done (`WLST` v3,
+   design-decisions.md §519); the projection is not.* `WindowThumbnail` wants
+   `window_id`, `desktop_id`, `title`, focus, minimized and a rectangle. All of
+   those are now on `guiremote::window_list::WindowInfo`, with
+   `DesktopLane::is_current` being the header's `current_workspace`. The
+   rectangle was the blocker and is why this entry originally said the wire had
+   to change first: `compute_grid_layout` calls
    `fit_aspect(thumb.width, thumb.height, …)`, and `fit_aspect` returns
-   `(0.0, 0.0)` for a zero input, so wiring the overview to today's window list
-   gives every thumbnail a zero-by-zero rectangle: nothing drawn, and
-   `on_mouse_click` hit-tests against nothing. That is the exact failure
-   `Hit::WindowContent` had before §506 deleted it, for the exact same reason —
-   a rectangle nobody supplies. So the overview needs `WLST` v3 with `x`, `y`,
-   `width`, `height` on `WindowInfo` before any projection is worth writing.
-   Adding them is consistent with §506 rather than a reversal of it: what §506
-   removed was geometry the shell *wrote* and used to decide placement, whereas
-   this is geometry the shell only *reads*, replaced wholesale by every list,
-   with no verb that accepts a rectangle back (§505 deliberately sends a named
-   edge, not a rect). Uniform boxes are not an acceptable substitute — an Exposé
-   whose thumbnails do not have their windows' proportions is a list, which is
-   the taskbar.
+   `(0.0, 0.0)` for a zero input, so a projection written against the v2 list
+   would have given every thumbnail a zero-by-zero rectangle — nothing drawn,
+   and `on_mouse_click` hit-testing against nothing. That is the exact failure
+   `Hit::WindowContent` had before §506 deleted it, for the exact same reason: a
+   rectangle nobody supplies. Uniform boxes were rejected as the substitute — an
+   Exposé whose thumbnails do not have their windows' proportions is a list,
+   which is the taskbar. What remains is the projection itself: a
+   `DesktopShell` → `OverviewState` function driven by the same `WindowList`
+   that `apply_window_list` already takes, so the overview cannot disagree with
+   the taskbar about which desktop is showing.
    The *thumbnail image* is separately absent and is the part that should stay
    absent for now: the module lays out rectangles and draws titles, and never
    asks the compositor for window contents. Live thumbnails need a verb that
@@ -53468,6 +53467,26 @@ component whose tests prove it correct with respect to inputs no one supplies.
    `DesktopShell::num_desktops` is fixed at construction and is the only bound
    either side enforces (design-decisions.md §518). Making the desktop count
    mutable is a real decision, not a wiring detail.
+3. *A field nothing in the system can fill.* `WindowThumbnail::app_name` is
+   rendered as a second label under each title (`overview.rs:757`) and is one of
+   the two things type-to-search matches (`overview.rs:183`). Nothing in the
+   shell knows it. `guiremote::window_list::WindowInfo` carries `id`, `pid`,
+   `layer`, `title`, four state bits, a desktop number and (as of `WLST` v3) a
+   rectangle — no application identity; a tree-wide search finds `app_name` only
+   in `context_ext.rs`, `focus_assist.rs` and `notif_pane.rs`, all of which are
+   given the string by whoever registers with them, and none of which is
+   reachable from a window id. Only the three test fixtures inside `overview.rs`
+   ever set it, always to the literal `"app"`, which is exactly why the tests do
+   not notice. A projection written today would have to pass the empty string,
+   and then the overview would render a blank line under every title and
+   type-to-search would silently match half of what its doc comment promises.
+   The honest fix is to *delete* the field rather than invent a value for it:
+   an application's name is a property of the program, which means it comes from
+   the package/desktop-entry metadata keyed by executable, and the compositor
+   would have to learn an app identity per window before the wire could carry
+   one. Until that exists, a titled rectangle is the whole of what the shell
+   knows. (Deleting it also removes the second search key, so `update_search`'s
+   doc comment has to stop promising it.)
 
 **Proper fix:** (a) a `DesktopShell` → `OverviewState` projection driven by the
 same `WindowList` `apply_window_list` already takes, so the overview cannot
@@ -53475,7 +53494,10 @@ disagree with the taskbar about which desktop is showing; (b) `OverviewAction`
 collapsed into `Option<ShellRequest>` with the three duplicate variants deleted;
 (c) a hotkey in `handle_hotkey` to open it and `Esc` to close; (d) thumbnails
 left as titled rectangles until the compositor can serve window contents under a
-capability, with the module doc saying so rather than implying pictures.
+capability, with the module doc saying so rather than implying pictures;
+(e) `app_name` deleted from `WindowThumbnail` and `ThumbnailLayout`, and
+`update_search` reduced to matching titles, until an application identity exists
+to put there.
 
 **If never fixed:** 1856 lines of dead weight that reads as a shipped feature.
 The concrete cost is not the disk space — it is that the next person to want an

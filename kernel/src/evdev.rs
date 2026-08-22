@@ -565,20 +565,6 @@ impl EvdevClient {
 
     /// Take the next event, or [`Next::Empty`] if the client is caught up.
     fn next_event(&mut self) -> Next {
-        // A drop that was detected on a previous call is reported before any
-        // further real event, so the client learns of the gap in stream order.
-        if self.syn_dropped_pending {
-            self.syn_dropped_pending = false;
-            let (sec, usec) = stamp(now_ns(), self.clockid);
-            return Next::Event(InputEvent {
-                sec,
-                usec,
-                etype: EV_SYN,
-                code: SYN_DROPPED,
-                value: 0,
-            });
-        }
-
         let ring = self.device.ring();
 
         // Bounded retry. Each iteration either returns or advances past a slot
@@ -587,7 +573,33 @@ impl EvdevClient {
         // here in a syscall would be worse than reporting Empty and letting
         // the caller poll again.
         for _ in 0..4 {
+            // Resync *before* answering the owed `SYN_DROPPED`, not after. A
+            // lap discovered on this very call has to be announced ahead of
+            // the events that follow the gap: `SYN_DROPPED` means "everything
+            // you knew is stale, re-query state and resume from the next
+            // record", so a client that receives one real event first applies
+            // it to the state it is about to be told to throw away. Checking
+            // the flag first — as this did — delivered the gap marker one
+            // record late for exactly the case it exists to describe.
             let head = self.resync(ring.head.load(Ordering::Acquire));
+
+            // A gap is reported before any further real event, whether it was
+            // detected just now or on an earlier call, so the client learns of
+            // it in stream order. This precedes the caught-up test because a
+            // grab that ended with `discard_pending` leaves the cursor level
+            // with the head and the marker still owed.
+            if self.syn_dropped_pending {
+                self.syn_dropped_pending = false;
+                let (sec, usec) = stamp(now_ns(), self.clockid);
+                return Next::Event(InputEvent {
+                    sec,
+                    usec,
+                    etype: EV_SYN,
+                    code: SYN_DROPPED,
+                    value: 0,
+                });
+            }
+
             if self.cursor >= head {
                 return Next::Empty;
             }
@@ -1292,26 +1304,49 @@ pub fn self_test() -> KernelResult<()> {
         "client B sees it too, not a consumed-once queue"
     );
 
-    // --- being lapped yields SYN_DROPPED, exactly once ---------------------
+    // --- being lapped yields SYN_DROPPED, exactly once, and first ----------
     let mut slow = EvdevClient::new(InputDevice::Keyboard);
     check!(slow.drop_count() == 0, "no drop before being lapped");
     // Three events per press, so this overruns the ring with room to spare.
-    for _ in 0..(RING_CAP / 3 + 4) {
+    let presses = RING_CAP / 3 + 4;
+    for _ in 0..presses {
         push_key(InputDevice::Keyboard, 30, 0x1E, true);
     }
     let n = slow.read_into(&mut buf)?;
     check!(n >= 48, "a lapped client still reads events");
+    // Type and code asserted together, not one after the other. `EV_SYN` is 0
+    // and every keyboard group ends in `EV_SYN`/`SYN_REPORT`, so a gap marker
+    // delivered one record late still satisfies a type-only assertion — which
+    // is precisely how the late-marker bug survived a type check and was
+    // caught only by the code check.
+    let mut want_dropped = [0u8; 4];
+    if let Some(d) = want_dropped.get_mut(0..2) {
+        d.copy_from_slice(&EV_SYN.to_le_bytes());
+    }
+    if let Some(d) = want_dropped.get_mut(2..4) {
+        d.copy_from_slice(&SYN_DROPPED.to_le_bytes());
+    }
     check!(
-        buf.get(16..18) == Some(&EV_SYN.to_le_bytes()[..]),
-        "the first record after a lap is EV_SYN"
-    );
-    check!(
-        buf.get(18..20) == Some(&SYN_DROPPED.to_le_bytes()[..]),
-        "...specifically SYN_DROPPED"
+        buf.get(16..20) == Some(&want_dropped[..]),
+        "the very first record after a lap is EV_SYN/SYN_DROPPED, ahead of any resumed event"
     );
     check!(slow.drop_count() == 1, "the lap was counted once");
-    // The next record is a real event: a client is told once per gap, not once
-    // per lost event, or a burst would bury the stream in notifications.
+    // The second record is the resumed stream itself: the oldest event the
+    // ring still holds, which is `lost` events into the burst. Pinning its
+    // type proves the client resumed where the ring actually starts rather
+    // than at a group boundary that happened to look plausible — and that a
+    // client is told once per gap, not once per lost event, which a burst
+    // would otherwise bury the stream under.
+    let lost = presses.saturating_mul(3).saturating_sub(RING_CAP);
+    let resumed_type = match lost % 3 {
+        0 => EV_MSC,
+        1 => EV_KEY,
+        _ => EV_SYN,
+    };
+    check!(
+        buf.get(40..42) == Some(&resumed_type.to_le_bytes()[..]),
+        "the second record is the oldest surviving event, not a second marker"
+    );
     check!(
         buf.get(42..44) != Some(&SYN_DROPPED.to_le_bytes()[..]),
         "SYN_DROPPED is not repeated"

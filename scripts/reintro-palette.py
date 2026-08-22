@@ -64,6 +64,7 @@ NET = "gui/desktop/src/network_indicator.rs"
 CLIP = "gui/desktop/src/clipboard_viewer.rs"
 NOTIF_SET = "gui/desktop/src/notification_settings.rs"
 BACKUP = "gui/desktop/src/backup_settings.rs"
+NET_SET = "gui/desktop/src/network_settings.rs"
 
 # (name, file, [(old, new), ...], [packages], [tests expected to fail])
 DEFECTS = [
@@ -685,7 +686,8 @@ DEFECTS = [
     (
         "HHH: the status banner's background goes back to Mocha mantle",
         UPD,
-        [("            color: p.mantle,", "            color: Color::from_hex(0x181825),")],
+        [("            height: 36.0,\n            color: p.mantle,",
+          "            height: 36.0,\n            color: Color::from_hex(0x181825),")],
         ["desktop"],
         ["every_colour_the_panel_draws_comes_from_its_palette"],
     ),
@@ -699,7 +701,10 @@ DEFECTS = [
     (
         "JJJ: the schedule heading goes back to Mocha lavender",
         UPD,
-        [("            color: p.lavender,", "            color: Color::from_hex(0xB4BEFE),")],
+        [("            text: \"Update schedule\".into(),\n"
+          "            font_size: 14.0,\n            color: p.lavender,",
+          "            text: \"Update schedule\".into(),\n"
+          "            font_size: 14.0,\n            color: Color::from_hex(0xB4BEFE),")],
         ["desktop"],
         ["every_colour_the_panel_draws_comes_from_its_palette"],
     ),
@@ -1537,6 +1542,330 @@ DEFECTS = [
         ["desktop"],
         ["the_backup_outcomes_stay_distinct_under_every_accent"],
     ),
+    # ---- module 16: network_settings.rs -------------------------------------
+    #
+    # Fourteen constants, eight accent sites, five categorical scales and two
+    # pre-existing layout bugs that the conversion happened to expose. The
+    # accent sites are listed one per defect rather than as a group because a
+    # single `assert_ne!` over their union proves only that *at least one*
+    # moved: n sites need n negative assertions, and n defects to prove them.
+    (
+        "JJJJJJ: the panel's own backdrop keeps Mocha base",
+        NET_SET,
+        [("            height,\n            color: p.base,",
+          "            height,\n            color: Color::from_hex(0x1E1E2E),")],
+        ["desktop"],
+        ["every_colour_the_panel_draws_comes_from_its_palette",
+         "the_panels_own_surfaces_come_from_the_palette"],
+    ),
+    (
+        # The structural hole in the two-mode membership sweep, made concrete.
+        # `assert_drawn_from` must allow 0x11111B at any alpha, because that is
+        # one of the two colours `readable_on` can return and a label drawn on
+        # a pale accent legitimately is it. But 0x11111B is *also* Mocha crust,
+        # so a content well reverted to the literal produces a render the sweep
+        # is obliged to accept — in light mode as much as in dark.
+        #
+        # Expect this caught ONLY by the surfaces test, which asks the stronger
+        # question: not "is this colour in the palette" but "is it the role it
+        # is supposed to be", in both modes.
+        "KKKKKK: the tab content well keeps Mocha crust, which the membership "
+        "sweep is structurally unable to see",
+        NET_SET,
+        [("            height: content_h,\n            color: p.crust,",
+          "            height: content_h,\n"
+          "            color: Color::from_hex(0x11111B),")],
+        ["desktop"],
+        ["the_panels_own_surfaces_come_from_the_palette"],
+    ),
+    (
+        # Reachable only with Wi-Fi switched off *and* no networks listed. A
+        # state matrix that renders one populated Wi-Fi tab never touches it.
+        "LLLLLL: the \"Wi-Fi is disabled\" caption keeps Mocha overlay0",
+        NET_SET,
+        [("                    \"Wi-Fi is disabled\".to_string()\n"
+          "                },\n"
+          "                font_size: 12.0,\n                color: p.overlay0,",
+          "                    \"Wi-Fi is disabled\".to_string()\n"
+          "                },\n"
+          "                font_size: 12.0,\n"
+          "                color: Color::from_hex(0x6C7086),")],
+        ["desktop"],
+        ["every_colour_the_panel_draws_comes_from_its_palette"],
+    ),
+    (
+        "MMMMMM: the \"No Ethernet interfaces detected\" caption keeps Mocha "
+        "overlay0",
+        NET_SET,
+        [("                text: \"No Ethernet interfaces detected\".to_string(),\n"
+          "                font_size: 14.0,\n                color: p.overlay0,",
+          "                text: \"No Ethernet interfaces detected\".to_string(),\n"
+          "                font_size: 14.0,\n"
+          "                color: Color::from_hex(0x6C7086),")],
+        ["desktop"],
+        ["every_colour_the_panel_draws_comes_from_its_palette"],
+    ),
+    (
+        "NNNNNN: the \"None configured\" search-domain caption keeps Mocha "
+        "overlay0",
+        NET_SET,
+        [("                text: \"None configured\".to_string(),\n"
+          "                font_size: 11.0,\n                color: p.overlay0,",
+          "                text: \"None configured\".to_string(),\n"
+          "                font_size: 11.0,\n"
+          "                color: Color::from_hex(0x6C7086),")],
+        ["desktop"],
+        ["every_colour_the_panel_draws_comes_from_its_palette"],
+    ),
+    (
+        "OOOOOO: the empty-firewall caption keeps Mocha overlay0",
+        NET_SET,
+        [("                text: \"No custom rules. Using default policies.\".to_string(),\n"
+          "                font_size: 12.0,\n                color: p.overlay0,",
+          "                text: \"No custom rules. Using default policies.\".to_string(),\n"
+          "                font_size: 12.0,\n"
+          "                color: Color::from_hex(0x6C7086),")],
+        ["desktop"],
+        ["every_colour_the_panel_draws_comes_from_its_palette"],
+    ),
+    (
+        # The colour that never was a constant: Mocha surface0's three channels
+        # written out at the call site behind an alpha. Emptying the block of
+        # `const`s at the top of the file would have walked straight past it.
+        "PPPPPP: the disabled-rule wash is Mocha surface0's channels typed out "
+        "by hand",
+        NET_SET,
+        [("                    Color::rgba(p.surface0.r, p.surface0.g, p.surface0.b, 128)",
+          "                    Color::rgba(49, 50, 68, 128)")],
+        ["desktop"],
+        ["every_colour_the_panel_draws_comes_from_its_palette"],
+    ),
+    # ---- the eight accent sites, one defect each ----------------------------
+    (
+        "QQQQQQ: the active tab's label is frozen blue instead of the accent",
+        NET_SET,
+        [("                font_size: 13.0,\n"
+          "                color: if is_active { p.accent } else { p.subtext0 },",
+          "                font_size: 13.0,\n"
+          "                color: if is_active { p.blue } else { p.subtext0 },")],
+        ["desktop"],
+        ["every_control_that_offers_something_follows_the_accent"],
+    ),
+    (
+        "RRRRRR: the status tab's four quick toggles are frozen blue",
+        NET_SET,
+        [("            let toggle_x = x + width - 56.0;\n"
+          "            let toggle_bg = if *enabled { p.accent } else { p.surface2 };",
+          "            let toggle_x = x + width - 56.0;\n"
+          "            let toggle_bg = if *enabled { p.blue } else { p.surface2 };")],
+        ["desktop"],
+        ["every_control_that_offers_something_follows_the_accent"],
+    ),
+    (
+        "SSSSSS: the DNS mode picker's active segment is frozen blue",
+        NET_SET,
+        [("                width: bw,\n                height: 32.0,\n"
+          "                color: if is_active { p.accent } else { p.surface0 },",
+          "                width: bw,\n                height: 32.0,\n"
+          "                color: if is_active { p.blue } else { p.surface0 },")],
+        ["desktop"],
+        ["every_control_that_offers_something_follows_the_accent"],
+    ),
+    (
+        "TTTTTT: the DNS-over-HTTPS toggle is frozen blue",
+        NET_SET,
+        [("        let doh_toggle_bg = if self.settings.dns.dns_over_https {\n"
+          "            p.accent",
+          "        let doh_toggle_bg = if self.settings.dns.dns_over_https {\n"
+          "            p.blue")],
+        ["desktop"],
+        ["every_control_that_offers_something_follows_the_accent"],
+    ),
+    (
+        "UUUUUU: the proxy type picker's active segment is frozen blue",
+        NET_SET,
+        [("                width: btn_w,\n                height: 32.0,\n"
+          "                color: if is_active { p.accent } else { p.surface0 },",
+          "                width: btn_w,\n                height: 32.0,\n"
+          "                color: if is_active { p.blue } else { p.surface0 },")],
+        ["desktop"],
+        ["every_control_that_offers_something_follows_the_accent"],
+    ),
+    (
+        "VVVVVV: the proxy authentication toggle is frozen blue",
+        NET_SET,
+        [("                let auth_bg = if self.settings.proxy.requires_auth {\n"
+          "                    p.accent",
+          "                let auth_bg = if self.settings.proxy.requires_auth {\n"
+          "                    p.blue")],
+        ["desktop"],
+        ["every_control_that_offers_something_follows_the_accent"],
+    ),
+    (
+        "WWWWWW: the three firewall option toggles are frozen blue",
+        NET_SET,
+        [("            let toggle_bg = if *enabled { p.accent } else { p.surface2 };\n"
+          "            cmds.push(RenderCommand::FillRect {\n"
+          "                x: x + width - 56.0,",
+          "            let toggle_bg = if *enabled { p.blue } else { p.surface2 };\n"
+          "            cmds.push(RenderCommand::FillRect {\n"
+          "                x: x + width - 56.0,")],
+        ["desktop"],
+        ["every_control_that_offers_something_follows_the_accent"],
+    ),
+    (
+        "XXXXXX: the \"+ Add rule\" button is frozen blue",
+        NET_SET,
+        [("            height: 24.0,\n            color: p.accent,",
+          "            height: 24.0,\n            color: p.blue,")],
+        ["desktop"],
+        ["every_control_that_offers_something_follows_the_accent"],
+    ),
+    # ---- the four labels chosen from the fill beneath them ------------------
+    (
+        "YYYYYY: the DNS picker's active label is fixed to crust instead of "
+        "being chosen for its own fill",
+        NET_SET,
+        [("                font_size: 13.0,\n"
+          "                color: if is_active { p.on_accent() } else { p.text },",
+          "                font_size: 13.0,\n"
+          "                color: if is_active { p.crust } else { p.text },")],
+        ["desktop"],
+        ["each_label_is_legible_on_the_fill_beneath_it"],
+    ),
+    (
+        "ZZZZZZ: the proxy picker's active label is fixed to crust",
+        NET_SET,
+        [("                font_size: 12.0,\n"
+          "                color: if is_active { p.on_accent() } else { p.text },",
+          "                font_size: 12.0,\n"
+          "                color: if is_active { p.crust } else { p.text },")],
+        ["desktop"],
+        ["each_label_is_legible_on_the_fill_beneath_it"],
+    ),
+    (
+        "AAAAAAA: the \"+ Add rule\" label is fixed to crust",
+        NET_SET,
+        [("            text: \"+ Add rule\".to_string(),\n"
+          "            font_size: 11.0,\n            color: p.on_accent(),",
+          "            text: \"+ Add rule\".to_string(),\n"
+          "            font_size: 11.0,\n            color: p.crust,")],
+        ["desktop"],
+        ["each_label_is_legible_on_the_fill_beneath_it"],
+    ),
+    (
+        # The one that is right by *coincidence* and so looks like nothing.
+        # A firewall action badge is a categorical fill, not the accent, and
+        # `p.crust` stays legible on all six of its values across the two
+        # palettes purely because Mocha's green/red/yellow are pale (dark text
+        # reads) while Latte's are deep (light text reads) and crust flips with
+        # the mode alongside them. Nothing enforces that; it is an accident of
+        # which two palettes we happen to ship. `readable_on(fill)` is what
+        # turns it into a property, and this defect is what proves the test
+        # asks for the property rather than for the accident.
+        "BBBBBBB: a firewall action badge's label is fixed to crust rather "
+        "than chosen for the categorical fill under it",
+        NET_SET,
+        [("                    color: readable_on(rule.action.color(p)),",
+          "                    color: p.crust,")],
+        ["desktop"],
+        ["each_label_is_legible_on_the_fill_beneath_it"],
+    ),
+    # ---- the five categorical scales ---------------------------------------
+    (
+        "CCCCCCC: a connecting interface is painted the user's accent instead "
+        "of yellow",
+        NET_SET,
+        [("            Self::Connecting => p.yellow,", "            Self::Connecting => p.accent,")],
+        ["desktop"],
+        ["no_category_follows_the_accent"],
+    ),
+    (
+        "DDDDDDD: a good signal is painted the user's accent",
+        NET_SET,
+        [("            Self::Good => p.yellow,", "            Self::Good => p.accent,")],
+        ["desktop"],
+        ["no_category_follows_the_accent"],
+    ),
+    (
+        "EEEEEEE: connecting and connected collapse onto the same green",
+        NET_SET,
+        [("            Self::Connecting => p.yellow,", "            Self::Connecting => p.green,")],
+        ["desktop"],
+        ["every_category_stays_distinct_under_every_accent"],
+    ),
+    (
+        "FFFFFFF: two rungs of the Wi-Fi security ladder collapse onto peach",
+        NET_SET,
+        [("            2 => p.yellow,", "            2 => p.peach,")],
+        ["desktop"],
+        ["every_category_stays_distinct_under_every_accent"],
+    ),
+    (
+        "GGGGGGG: a firewall Ask rule is coloured as if it were a Block rule",
+        NET_SET,
+        [("            Self::Ask => p.yellow,", "            Self::Ask => p.red,")],
+        ["desktop"],
+        ["every_category_stays_distinct_under_every_accent"],
+    ),
+    # ---- the two layout bugs the conversion exposed -------------------------
+    (
+        # The bug as it actually shipped: the DNS picker advanced no x at all,
+        # so "Automatic" was painted at the same rect as "Manual" and covered
+        # outright. The option existed, was never visible, and could not be
+        # picked.
+        "HHHHHHH: the DNS picker draws both of its segments at the same x",
+        NET_SET,
+        [("            let (bx, bw) = segment_bounds(x, width, i, modes.len());",
+          "            let (bx, bw) = segment_bounds(x, width, 0, modes.len());")],
+        ["desktop"],
+        ["no_picker_segment_hides_another_or_leaves_the_row",
+         "the_panel_draws_nothing_that_is_immediately_erased"],
+    ),
+    (
+        # The other direction of the same bug: sized as if there were no gaps,
+        # so `n` segments plus `n - 1` gaps run past the row's right edge —
+        # invisibly at two segments, by twenty pixels at six.
+        "IIIIIII: segment_bounds sizes segments without taking the gaps out of "
+        "the total first",
+        NET_SET,
+        [("    let seg_w = (width - SEGMENT_GAP * (n_f - 1.0)) / n_f;",
+          "    let seg_w = width / n_f;")],
+        ["desktop"],
+        ["no_picker_segment_hides_another_or_leaves_the_row"],
+    ),
+    (
+        # Also as it shipped: four of ProxyType's six variants were offered, so
+        # a user on Https or Socks4 saw a picker with nothing selected and no
+        # way back to where they were.
+        "JJJJJJJ: the proxy picker offers four of ProxyType's six variants",
+        NET_SET,
+        [("        let types = [\n"
+          "            ProxyType::None,\n"
+          "            ProxyType::Http,\n"
+          "            ProxyType::Https,\n"
+          "            ProxyType::Socks4,\n"
+          "            ProxyType::Socks5,\n"
+          "            ProxyType::Auto,\n"
+          "        ];",
+          "        let types = [\n"
+          "            ProxyType::None,\n"
+          "            ProxyType::Http,\n"
+          "            ProxyType::Socks5,\n"
+          "            ProxyType::Auto,\n"
+          "        ];")],
+        ["desktop"],
+        ["no_picker_segment_hides_another_or_leaves_the_row"],
+    ),
+    (
+        "KKKKKKK: a disabled firewall rule's row is washed at full alpha, "
+        "erasing the row beneath it instead of dimming it",
+        NET_SET,
+        [("                    Color::rgba(p.surface0.r, p.surface0.g, p.surface0.b, 128)",
+          "                    Color::rgba(p.surface0.r, p.surface0.g, p.surface0.b, 255)")],
+        ["desktop"],
+        ["a_disabled_rule_is_the_enabled_row_made_translucent"],
+    ),
 ]
 
 
@@ -1577,16 +1906,32 @@ def check(snap):
     takes no toolchain, and answers the only question that rots.
     """
     bad = 0
+    amb = 0
     for name, path, edits, _pkgs, _expect in DEFECTS:
         text = snap[path].decode("utf-8")
+        # A defect may list the same edit twice on purpose, to wound both of an
+        # identical pair; only an ambiguity the defect does *not* acknowledge
+        # is a problem, so count the listed copies and subtract them.
+        listed = {}
+        for old, _new in edits:
+            listed[old] = listed.get(old, 0) + 1
         for i, (old, new) in enumerate(edits):
             if old not in text:
                 print(f"PATTERN NOT FOUND  {name}\n    edit {i} in {path}")
                 bad += 1
                 break
+            # Reported once per defect, on the first edit, against the
+            # untouched file: an unacknowledged second match means the defect
+            # silently patches whichever copy happens to come first, and will
+            # move to the other one the day someone reorders the module.
+            if i == 0:
+                n = snap[path].decode("utf-8").count(old)
+                if n > listed[old]:
+                    print(f"AMBIGUOUS ({n} matches, {listed[old]} listed)  {name}")
+                    amb += 1
             text = text.replace(old, new, 1)
-    print(f"\n{len(DEFECTS)} defects, {bad} stale")
-    return 1 if bad else 0
+    print(f"\n{len(DEFECTS)} defects, {bad} stale, {amb} ambiguous")
+    return 1 if bad or amb else 0
 
 
 def main():

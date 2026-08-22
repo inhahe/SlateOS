@@ -391,7 +391,15 @@ pub fn encrypt(data: &[u8], key_name: &str) -> KernelResult<Vec<u8>> {
     output.extend_from_slice(&(data.len() as u64).to_le_bytes()); // 52-59: orig size
     output.extend_from_slice(&ciphertext); // 60+: ciphertext
 
-    STATE.lock().files_encrypted = STATE.lock().files_encrypted.saturating_add(1);
+    // One acquisition, not two. `STATE.lock().x = STATE.lock().x + 1` deadlocks
+    // on a non-reentrant spinlock: Rust evaluates the right-hand side first, but
+    // the guard it produces is a temporary that lives until the end of the
+    // statement, so the left-hand side asks for a lock the same thread is still
+    // holding and spins forever. This hung the boot the first time anything
+    // called `encrypt()`.
+    let mut state = STATE.lock();
+    state.files_encrypted = state.files_encrypted.saturating_add(1);
+    drop(state);
 
     Ok(output)
 }
@@ -441,7 +449,10 @@ pub fn decrypt(data: &[u8], key_name: &str) -> KernelResult<Vec<u8>> {
     // Decrypt.
     let plaintext = chacha20_crypt(&key, &nonce, ciphertext);
 
-    STATE.lock().files_decrypted = STATE.lock().files_decrypted.saturating_add(1);
+    // Single acquisition — see the note in `encrypt()` above.
+    let mut state = STATE.lock();
+    state.files_decrypted = state.files_decrypted.saturating_add(1);
+    drop(state);
 
     Ok(plaintext)
 }

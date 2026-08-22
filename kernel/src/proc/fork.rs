@@ -337,6 +337,15 @@ fn dup_one(rtype: ResourceType, id: u64) -> KernelResult<Option<(ResourceType, u
             crate::drm::card_fd::dup(crate::drm::card_fd::DrmCardHandle::from_raw(id))?;
             Ok(Some((rtype, id)))
         }
+        ResourceType::InputDevice => {
+            // Bump the evdev instance refcount so parent and child each own one
+            // reference to the same open — same id, and therefore the same
+            // read cursor.  An event read by either is not re-delivered to the
+            // other, matching Linux's shared `struct evdev_client` across fork:
+            // an inherited fd is one open file description, not two.
+            crate::evdev_fd::dup(crate::evdev_fd::EvdevHandle::from_raw(id))?;
+            Ok(Some((rtype, id)))
+        }
         ResourceType::NetSocket => {
             // Bump the socket-slot refcount so parent and child each own one
             // reference to the same daemon connection (open-file-description
@@ -434,6 +443,9 @@ fn close_one(rtype: ResourceType, id: u64) {
         }
         ResourceType::Drm => {
             crate::drm::card_fd::close(crate::drm::card_fd::DrmCardHandle::from_raw(id));
+        }
+        ResourceType::InputDevice => {
+            crate::evdev_fd::close(crate::evdev_fd::EvdevHandle::from_raw(id));
         }
         ResourceType::NetSocket => {
             crate::net::socket::close(crate::net::socket::SocketHandle::from_raw(id));

@@ -992,6 +992,35 @@ fn spawn_process_inner(
     }
 
     // Step 5: Grant initial capabilities.
+    //
+    // Two sources, in this order.  First the parent's own table, cloned exactly
+    // as `fork_create` clones it; then whatever `options.capabilities` names on
+    // top.  In-kernel callers set `parent: 0` and pass an explicit list, so for
+    // them the first half is a no-op and nothing changes.
+    //
+    // The inheritance exists because a spawn from *userspace* had no way to ask
+    // for any capability at all: neither `SYS_PROCESS_SPAWN` nor
+    // `SYS_PROCESS_SPAWN_EX` carries a capability array, so every such child
+    // started with an empty table and the first thing it touched returned
+    // `PermissionDenied`.  That is how `make` could parse a makefile and then
+    // die on its own recipe — the shell it spawned had no `File` capability, so
+    // ld.so's `openat("libc.so.6")` was refused and glibc reported "cannot open
+    // shared object file: Permission denied".  Meanwhile `fork` + `execve`
+    // worked throughout, because fork clones the table, which is why the
+    // difference read as a userspace bug for as long as it did.
+    //
+    // See `pcb::inherit_caps_from` for why cloning is not a widening of
+    // authority, and design-decisions.md §278.
+    if options.parent != 0 {
+        let inherited = pcb::inherit_caps_from(options.parent, pid);
+        if inherited > 0 {
+            serial_println!(
+                "[spawn] Inherited {} capability(ies) from parent {}",
+                inherited,
+                options.parent
+            );
+        }
+    }
     for &(resource_type, resource_id, rights) in options.capabilities {
         if let Err(e) = pcb::grant_capability(pid, resource_type, resource_id, rights) {
             serial_println!(
@@ -2257,6 +2286,7 @@ pub fn self_test() -> KernelResult<()> {
     test_spawn_from_elf()?;
     test_spawn_invalid_elf()?;
     test_spawn_with_capabilities()?;
+    test_spawn_inherits_parent_capabilities()?;
     test_spawn_records_parent()?;
     test_spawn_faulting_process()?;
     test_spawn_stack_growth()?;
@@ -20381,6 +20411,111 @@ pub fn self_test_linux_fchmodat2() -> KernelResult<()> {
     Ok(())
 }
 
+/// Ring-3 regression test for the **`/dev/input/event0` evdev node** — the
+/// whole path a real input client walks, from userspace.
+///
+/// Two processes are spawned from [`elf::build_linux_evdev_test_elf`]:
+///
+/// 1. **Granted** `(InputDevice, class, READ)` — opens the node and issues the
+///    interrogation sequence libinput/evtest/SDL issue (`EVIOCGVERSION`,
+///    `EVIOCGID`, `EVIOCGNAME`, `EVIOCGBIT`, `EVIOCGKEY`, `EVIOCGUNIQ`), then
+///    a non-blocking `read`, a deliberately-too-small `read`, a grab/ungrab
+///    pair, `EVIOCSCLOCKID`, and a foreign-magic ioctl. Exit 0 means every one
+///    answered the way the Linux ABI says it must.
+/// 2. **Denied** — no capabilities at all; the `open` must fail with `EACCES`.
+///
+/// The second half is not a formality. Reading the keyboard is the authority
+/// to observe every keystroke typed into every application, so a gate that
+/// silently admits everyone is the most consequential possible failure here —
+/// and a test that only ever runs *with* the capability cannot tell a working
+/// gate from an absent one.
+///
+/// Exit sentinels (granted): `0xE1` open, `0xE2`/`0xE3` `EVIOCGVERSION`,
+/// `0xE4`/`0xE5` `EVIOCGID`, `0xE6`/`0xE7` `EVIOCGNAME`, `0xE8`/`0xE9`
+/// `EVIOCGBIT`, `0xEA` `EVIOCGKEY`, `0xEB` `EVIOCGUNIQ`, `0xEC` non-blocking
+/// `read`, `0xED` sub-record `read`, `0xEE`/`0xEF` grab/ungrab, `0xF0`
+/// `EVIOCSCLOCKID`, `0xF1` foreign-magic ioctl, `0xF2` `close`. Denied:
+/// `0x21` the open did not fail with `EACCES`.
+pub fn self_test_linux_evdev() -> KernelResult<()> {
+    const MAX_YIELDS: usize = 256;
+
+    serial_println!("[spawn] Running evdev input-device test (ring 3, /dev/input/event0)...");
+
+    // `run_one` spawns one of the two payloads and asserts a clean exit.
+    let run_one = |expect_denied: bool, label: &str| -> KernelResult<()> {
+        let exe_elf = elf::build_linux_evdev_test_elf(expect_denied);
+        let argv: &[&[u8]] = &[b"spawn-test-linux-evdev"];
+        let envp: &[&[u8]] = &[b"PATH=/bin"];
+        // The class grant (`resource_id == 0`) is what a compositor gets; the
+        // denied run gets nothing, which is the whole point of it.
+        let caps = [(ResourceType::InputDevice, 0u64, Rights::READ)];
+        let granted: &[(ResourceType, u64, Rights)] = if expect_denied { &[] } else { &caps };
+        let options = SpawnOptions {
+            name: "spawn-test-linux-evdev",
+            parent: 0,
+            priority: DEFAULT_PRIORITY,
+            capabilities: granted,
+            fd_map: &[],
+            argv,
+            envp,
+            exe_path: None,
+            cwd: None,
+            uid_gid: None,
+        };
+
+        let result = match spawn_process(&exe_elf, &options) {
+            Ok(r) => r,
+            Err(e) => {
+                serial_println!("[spawn]   FAIL: evdev ({}) spawn returned {:?}", label, e);
+                return Err(e);
+            }
+        };
+
+        for _ in 0..MAX_YIELDS {
+            crate::sched::yield_now();
+            if pcb::state(result.pid) == Some(pcb::ProcessState::Zombie) {
+                break;
+            }
+        }
+
+        let state = pcb::state(result.pid);
+        let exit_code = pcb::exit_code(result.pid);
+
+        thread::on_thread_exit(result.task_id);
+        pcb::destroy(result.pid);
+
+        if state != Some(pcb::ProcessState::Zombie) {
+            serial_println!(
+                "[spawn]   FAIL: evdev ({}) — process not a zombie after {} yields, got {:?}",
+                label,
+                MAX_YIELDS,
+                state
+            );
+            return Err(KernelError::InternalError);
+        }
+
+        if exit_code != Some(0) {
+            serial_println!(
+                "[spawn]   FAIL: evdev ({}) — expected exit 0, got {:?} (see \
+                 self_test_linux_evdev's doc comment for the sentinel map)",
+                label,
+                exit_code
+            );
+            return Err(KernelError::InternalError);
+        }
+        Ok(())
+    };
+
+    run_one(false, "granted")?;
+    run_one(true, "denied")?;
+
+    serial_println!(
+        "[spawn]   evdev input device (ring 3: EVIOCGVERSION/GID/GNAME/GBIT/GKEY/GUNIQ, \
+         non-blocking read, grab+ungrab, SCLOCKID, ENOTTY; and EACCES without the capability): OK"
+    );
+    Ok(())
+}
+
 /// Ring-3 regression test for the **virtio-gpu `DRM_IOCTL_VIRTGPU_GETPARAM`**
 /// render ioctl — the honest "no-3D" reporting landed for Q18
 /// (design-decisions §59).
@@ -30710,6 +30845,135 @@ fn test_spawn_with_capabilities() -> KernelResult<()> {
     pcb::destroy(result.pid);
 
     serial_println!("[spawn]   Spawn with capabilities: OK");
+    Ok(())
+}
+
+/// Test: a spawned child inherits its parent's capabilities, exactly as a
+/// forked one does — and a kernel-spawned one (`parent: 0`) inherits nothing.
+///
+/// # What this pins, and why it is a regression test rather than a new feature
+///
+/// `spawn_process` used to grant a child only `options.capabilities`.  That is
+/// fine for the in-kernel callers in this file, which all name what they want.
+/// It was silently catastrophic for userspace: neither `SYS_PROCESS_SPAWN` nor
+/// `SYS_PROCESS_SPAWN_EX` has a capability array in its ABI, so every child
+/// spawned by a user process began life with an empty table, and the first
+/// operation it attempted returned `PermissionDenied`.
+///
+/// The symptom was three removes from the cause and read as a userspace bug for
+/// a day: the Path-Z `real make` rung got as far as running its recipe, spawned
+/// `/bin/sh`, and glibc's loader reported `libc.so.6: cannot open shared object
+/// file: Permission denied` — because `openat` is gated on `Rights::READ` over
+/// `ResourceType::File` and the shell held no capability of any kind.  `fork` +
+/// `execve` was unaffected the whole time, since `fork_create` clones the
+/// parent's `cap_table`, which is precisely why the two paths disagreeing was
+/// hard to see.
+///
+/// # The two halves fail independently
+///
+/// Inheriting and *not over-inheriting* are separate mistakes, so they get
+/// separate assertions.  A fix that cloned unconditionally would pass the first
+/// and fail the second, and a kernel-spawned process picking up authority from
+/// PID 0 — which holds implicit authority and no table — is the shape of an
+/// ambient-authority regression, the one thing the capability model exists to
+/// prevent.
+fn test_spawn_inherits_parent_capabilities() -> KernelResult<()> {
+    let elf_data = elf::build_test_elf_public();
+
+    // A stand-in parent.  `pcb::create` is enough: inheritance reads the
+    // parent's capability table and nothing else, so the parent does not need
+    // an address space, a thread, or to have ever run.
+    let parent = pcb::create("spawn-test-cap-parent", 0);
+    let marker_id = 0xC0FF_EE01_u64;
+    if let Err(e) =
+        pcb::grant_capability(parent, ResourceType::File, marker_id, Rights::READ | Rights::WRITE)
+    {
+        serial_println!("[spawn]   FAIL: could not grant to test parent: {:?}", e);
+        pcb::destroy(parent);
+        return Err(KernelError::InternalError);
+    }
+
+    // --- Half 1: a child of that parent inherits the marker capability. ---
+    let options = SpawnOptions {
+        name: "spawn-test-cap-heir",
+        parent,
+        priority: DEFAULT_PRIORITY,
+        capabilities: &[],
+        fd_map: &[],
+        argv: &[],
+        envp: &[],
+        exe_path: None,
+        cwd: None,
+        uid_gid: None,
+    };
+    let heir = match spawn_process(&elf_data, &options) {
+        Ok(r) => r,
+        Err(e) => {
+            pcb::destroy(parent);
+            return Err(e);
+        }
+    };
+
+    // `has_capability_for` asks the same question the syscall gates ask, rather
+    // than counting entries: a count can be satisfied by the wrong capability.
+    let inherited =
+        pcb::has_capability_for(heir.pid, ResourceType::File, marker_id, Rights::READ);
+    // Rights must survive the copy too — a capability narrowed to nothing would
+    // still be present and still fail every gate that reads it.
+    let kept_write =
+        pcb::has_capability_for(heir.pid, ResourceType::File, marker_id, Rights::WRITE);
+
+    crate::sched::yield_now();
+    crate::sched::yield_now();
+    thread::on_thread_exit(heir.task_id);
+    pcb::destroy(heir.pid);
+
+    if !inherited || !kept_write {
+        serial_println!(
+            "[spawn]   FAIL: spawned child did not inherit parent's File cap \
+             (read={}, write={}) — spawn_process is not calling inherit_caps_from",
+            inherited,
+            kept_write
+        );
+        pcb::destroy(parent);
+        return Err(KernelError::InternalError);
+    }
+    serial_println!("[spawn]   Spawned child inherits parent capabilities: OK");
+
+    // --- Half 2: a kernel-spawned child (parent 0) inherits nothing. ---
+    //
+    // PID 0 is the "spawned by the kernel" sentinel and has implicit authority
+    // with no table to copy.  A child of it must start empty; anything else
+    // would be authority conjured from a process that does not exist.
+    let orphan_opts = SpawnOptions::new("spawn-test-cap-orphan");
+    let orphan = match spawn_process(&elf_data, &orphan_opts) {
+        Ok(r) => r,
+        Err(e) => {
+            pcb::destroy(parent);
+            return Err(e);
+        }
+    };
+    let orphan_caps = pcb::cap_count(orphan.pid).unwrap_or(usize::MAX);
+
+    crate::sched::yield_now();
+    crate::sched::yield_now();
+    thread::on_thread_exit(orphan.task_id);
+    pcb::destroy(orphan.pid);
+    pcb::destroy(parent);
+
+    // `usize::MAX` is the "process vanished before we looked" sentinel from the
+    // `unwrap_or` above, and is a failure rather than a pass: a test that could
+    // not observe the table must not report that the table was empty.
+    if orphan_caps != 0 {
+        serial_println!(
+            "[spawn]   FAIL: kernel-spawned process holds {} capability(ies), expected 0 \
+             (inheritance must not treat PID 0 as a grantor)",
+            orphan_caps
+        );
+        return Err(KernelError::InternalError);
+    }
+    serial_println!("[spawn]   Kernel-spawned child inherits nothing: OK");
+
     Ok(())
 }
 

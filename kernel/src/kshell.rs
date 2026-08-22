@@ -9804,6 +9804,7 @@ fn ls_list_dir(
                 crate::fs::EntryType::File => '-',
                 crate::fs::EntryType::Symlink => 'l',
                 crate::fs::EntryType::VolumeLabel => 'v',
+                crate::fs::EntryType::CharDevice => 'c',
             };
 
             if let Some(Some(meta)) = metas.get(i) {
@@ -9872,6 +9873,7 @@ fn ls_list_dir(
                 crate::fs::EntryType::File => "         ",
                 crate::fs::EntryType::Symlink => "<LINK>   ",
                 crate::fs::EntryType::VolumeLabel => "<VOL>    ",
+                crate::fs::EntryType::CharDevice => "<CHR>    ",
             };
             let size_str = if human_sizes {
                 alloc::format!("{:>8}", format_size_human(entry.size))
@@ -10093,6 +10095,7 @@ fn cmd_stat(args: &str) {
                 crate::fs::EntryType::Directory => "directory",
                 crate::fs::EntryType::Symlink => "symbolic link",
                 crate::fs::EntryType::VolumeLabel => "volume label",
+                crate::fs::EntryType::CharDevice => "character special file",
             };
             crate::console_println!("  File: {}", path);
             crate::console_println!(
@@ -18218,6 +18221,7 @@ fn cmd_lsplus(args: &str) {
                     crate::fs::EntryType::Directory => "DIR ",
                     crate::fs::EntryType::Symlink => "LINK",
                     crate::fs::EntryType::VolumeLabel => "VOL ",
+                    crate::fs::EntryType::CharDevice => "CHR ",
                 };
                 let size = entry.meta.as_ref().map_or(0, |m| m.size);
                 shell_println!("  {:4} {:>10} {}", type_str, size, entry.name.display());
@@ -83211,6 +83215,9 @@ fn cmd_file(args: &str) {
         crate::fs::EntryType::VolumeLabel => {
             shell_println!("{}: volume label", path);
         }
+        crate::fs::EntryType::CharDevice => {
+            shell_println!("{}: character special", path);
+        }
     }
 }
 
@@ -83673,6 +83680,7 @@ fn find_recurse_filtered(path: &Path, filter: &FindFilter<'_>, count: &mut u64, 
                 crate::fs::EntryType::Directory => "/",
                 crate::fs::EntryType::Symlink => "@",
                 crate::fs::EntryType::VolumeLabel => "*",
+                crate::fs::EntryType::CharDevice => "",
             };
             shell_println!("{}{}", child_path.display(), type_str);
             *count = count.saturating_add(1);
@@ -84629,6 +84637,7 @@ fn cmd_lsp(args: &str) {
                         crate::fs::vfs::EntryType::Directory => "DIR",
                         crate::fs::vfs::EntryType::Symlink => "LINK",
                         crate::fs::vfs::EntryType::VolumeLabel => "VOL",
+                        crate::fs::vfs::EntryType::CharDevice => "CHR",
                     };
                     crate::console_println!(
                         "{:<5} {:<8} {}",
@@ -85393,8 +85402,17 @@ fn cmd_gpu(args: &str) {
                 crate::console_println!("  Status:     active");
                 crate::console_println!("  Resolution: {}x{}", w, h);
                 crate::console_println!("  Format:     B8G8R8A8 (32-bit)");
-                if let Some(addr) = crate::virtio::gpu::framebuffer_addr() {
-                    crate::console_println!("  FB addr:    {:#x}", addr);
+                if let Some(addr) = crate::virtio::gpu::first_frame_addr() {
+                    // Reported as a frame *count* plus the first frame, not as
+                    // "FB addr": the scanout is a list of unrelated 16 KiB
+                    // frames, and printing a single base address is what
+                    // invited the flat-buffer arithmetic behind
+                    // B-VIRTIO-GPU-FLAT-SCANOUT-WILD-WRITE.
+                    crate::console_println!(
+                        "  FB frames:  {} (first at {:#x})",
+                        crate::virtio::gpu::scanout_frame_count(),
+                        addr
+                    );
                 }
             } else {
                 crate::console_println!("Virtio-GPU: not present");

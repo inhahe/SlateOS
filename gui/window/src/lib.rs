@@ -830,6 +830,27 @@ impl<T: Transport> EventLoop<T> {
         self.conn.confirm(RequestBody::ReloadAppearance)
     }
 
+    /// Tell the compositor the user's input settings have changed on disk.
+    ///
+    /// The counterpart of [`appearance_changed`](Self::appearance_changed), on
+    /// exactly the same terms and for exactly the same reasons — a
+    /// notification rather than a setter, so that a client cannot swap the
+    /// user's mouse buttons or stretch the double-click window by asking. For
+    /// Settings to call after it has written `input.yaml`, so that the next
+    /// double click uses the new window rather than the one from last login.
+    ///
+    /// It is a separate call from `appearance_changed` because they are
+    /// separate files: a colour change has no business re-reading the pointer
+    /// configuration, and a double-click change has no business repainting the
+    /// screen.
+    ///
+    /// # Errors
+    ///
+    /// As [`Connection::confirm`].
+    pub fn input_changed(&mut self) -> Result<(), Error<T>> {
+        self.conn.confirm(RequestBody::ReloadInput)
+    }
+
     /// Every window on the desktop, bottom-to-top, as of the last update.
     ///
     /// Empty until the first list arrives — which, for a client that never
@@ -1465,6 +1486,61 @@ pub mod testing {
             self.seen.extend(pending);
             self.submitted.clone()
         }
+
+        /// Every control request seen so far, named, in arrival order.
+        ///
+        /// [`Self::seen`] carries the decoded `Request` itself, which is the
+        /// right thing for a test *of this crate* and the wrong thing for a
+        /// test of an **application**: matching on `RequestBody` means the
+        /// application's test code names `guiremote` types, which is the exact
+        /// coupling `oswindow` exists to prevent — an application should no
+        /// more name the display protocol in its tests than in its `main`.
+        /// A name is enough for what an application test actually asserts:
+        /// *that* it asked the desktop to reload the appearance, once, and not
+        /// once per mouse move.
+        ///
+        /// Like [`Self::drawn`], this first absorbs whatever is waiting, so a
+        /// request sent since the last turn is visible without a further
+        /// [`Self::serve`].
+        ///
+        /// # Panics
+        ///
+        /// As [`Self::serve`]: on a frame that will not decode.
+        pub fn asked(&mut self) -> Vec<&'static str> {
+            let pending = self.absorb();
+            self.seen.extend(pending);
+            self.seen.iter().map(|r| Self::name_of(&r.body)).collect()
+        }
+
+        /// The wire name of a request, for [`Self::asked`].
+        ///
+        /// Spelled out rather than derived from `Debug`, because `Debug` prints
+        /// the payload too — a test asserting `"SetTitle"` should not have to
+        /// know the title, and should not start failing when a field is added.
+        fn name_of(body: &RequestBody) -> &'static str {
+            match body {
+                RequestBody::CreateWindow(_) => "CreateWindow",
+                RequestBody::DestroyWindow { .. } => "DestroyWindow",
+                RequestBody::SetTitle { .. } => "SetTitle",
+                RequestBody::Move { .. } => "Move",
+                RequestBody::Resize { .. } => "Resize",
+                RequestBody::Minimize { .. } => "Minimize",
+                RequestBody::Maximize { .. } => "Maximize",
+                RequestBody::Restore { .. } => "Restore",
+                RequestBody::SetVisible { .. } => "SetVisible",
+                RequestBody::SetCursor { .. } => "SetCursor",
+                RequestBody::SetFullscreen { .. } => "SetFullscreen",
+                RequestBody::SetOpacity { .. } => "SetOpacity",
+                RequestBody::GetDisplayInfo => "GetDisplayInfo",
+                RequestBody::SubscribeWindowList { .. } => "SubscribeWindowList",
+                RequestBody::ReloadAppearance => "ReloadAppearance",
+                RequestBody::ReloadInput => "ReloadInput",
+                RequestBody::ShellControl { .. } => "ShellControl",
+                RequestBody::ReserveEdge { .. } => "ReserveEdge",
+                RequestBody::SwitchWorkspace { .. } => "SwitchWorkspace",
+                RequestBody::SetWindowWorkspace { .. } => "SetWindowWorkspace",
+            }
+        }
     }
 
     /// A transport that gives the other end a turn when the client blocks.
@@ -2087,6 +2163,36 @@ mod tests {
         // does not, and which is not incidental: the application that has cause
         // to send it is a settings dialog, and requiring it to have opened a
         // window first would be requiring it for no reason the protocol has.
+        assert_eq!(events.window_count(), 0);
+    }
+
+    #[test]
+    fn telling_the_compositor_the_input_settings_changed_is_its_own_request() {
+        // Both halves matter. That `input_changed` reaches the wire at all is
+        // the same claim as for appearance: a Settings application that writes
+        // `input.yaml` and tells nobody leaves the pointer behaving the old way
+        // until the next login, and a local no-op would look identical.
+        let (mut events, server) = wired();
+        events.input_changed().unwrap();
+        assert!(
+            server
+                .borrow()
+                .seen
+                .iter()
+                .any(|r| matches!(r.body, RequestBody::ReloadInput)),
+            "input_changed should have asked the compositor to re-read input.yaml"
+        );
+        // And that it is *not* the appearance request wearing a different name:
+        // routing it there would make every double-click change repaint the
+        // whole desktop and every colour change re-read the mouse.
+        assert!(
+            !server
+                .borrow()
+                .seen
+                .iter()
+                .any(|r| matches!(r.body, RequestBody::ReloadAppearance)),
+            "input_changed must not send ReloadAppearance"
+        );
         assert_eq!(events.window_count(), 0);
     }
 

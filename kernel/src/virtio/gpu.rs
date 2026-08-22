@@ -1025,12 +1025,175 @@ pub fn dimensions() -> (u32, u32) {
     )
 }
 
-/// Get the virtual address of the first framebuffer byte.
-pub fn framebuffer_addr() -> Option<u64> {
+/// Virtual address of the **first frame** of the scanout framebuffer.
+///
+/// # This is not a framebuffer pointer
+///
+/// The scanout is backed by [`FRAME_SIZE`]-sized frames taken one at a time
+/// from the buddy allocator ([`VirtioGpuDevice::fb_frames`]), so it is
+/// physically discontiguous in general: at 1280×800 it is 250 unrelated
+/// frames. Only the first `FRAME_SIZE` bytes from this address belong to the
+/// framebuffer. Byte `FRAME_SIZE` is not the framebuffer's byte `FRAME_SIZE`,
+/// it is whatever the allocator placed next — other frames, heap slabs, page
+/// cache.
+///
+/// The name says `first_frame` rather than `framebuffer` because the old name
+/// (`framebuffer_addr`) invited exactly that arithmetic and got it: both
+/// virtio-gpu blit paths in `drm::driver` computed `base + row * pitch` and
+/// wrote ~4 MiB of pixels across arbitrary kernel memory. See
+/// `known-issues.md` → `B-VIRTIO-GPU-FLAT-SCANOUT-WILD-WRITE`.
+///
+/// **To write pixels, use [`with_scanout`]**, which walks the frame list and
+/// clamps to the end of the buffer. This accessor exists only for a bounded
+/// read or write *within the first frame* (the self-test's pixel read-back)
+/// and for reporting the address to a human.
+#[must_use]
+pub fn first_frame_addr() -> Option<u64> {
     let guard = DEVICE.lock();
     let dev = guard.as_ref()?;
     let first = dev.fb_frames.first()?;
-    Some(first.addr() + dev.hhdm_offset)
+    first.addr().checked_add(dev.hhdm_offset)
+}
+
+/// How many frames back the scanout framebuffer.
+#[must_use]
+pub fn scanout_frame_count() -> usize {
+    let guard = DEVICE.lock();
+    guard.as_ref().map_or(0, |dev| dev.fb_frames.len())
+}
+
+/// A borrowed, bounds-checked view of the scanout framebuffer's backing store.
+///
+/// Handed to the closure passed to [`with_scanout`]. It exists so that the one
+/// fact callers keep getting wrong — that the framebuffer is a *list of
+/// frames*, not a flat buffer — is expressed once, here, instead of being
+/// re-derived (and mis-derived) at every blit site.
+pub struct ScanoutMem<'a> {
+    frames: &'a [PhysFrame],
+    hhdm: u64,
+    width: u32,
+    height: u32,
+}
+
+impl ScanoutMem<'_> {
+    /// Display width in pixels.
+    #[must_use]
+    pub const fn width(&self) -> u32 {
+        self.width
+    }
+
+    /// Display height in pixels.
+    #[must_use]
+    pub const fn height(&self) -> u32 {
+        self.height
+    }
+
+    /// Bytes per row. The scanout is always 32 bits per pixel.
+    #[must_use]
+    pub const fn pitch(&self) -> usize {
+        (self.width as usize).saturating_mul(4)
+    }
+
+    /// Total addressable size of the framebuffer, in bytes.
+    #[must_use]
+    pub const fn len(&self) -> usize {
+        self.pitch().saturating_mul(self.height as usize)
+    }
+
+    /// Whether the framebuffer has no addressable bytes.
+    ///
+    /// Present because `clippy::len_without_is_empty` requires it beside
+    /// [`Self::len`], not because anything calls it: a scanout with no bytes
+    /// means no device, which callers learn from [`with_scanout`] returning
+    /// `None`.
+    #[must_use]
+    #[allow(dead_code)]
+    pub const fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// Copy `len` bytes from `src` into the framebuffer at byte offset
+    /// `dst_offset`, splitting the copy at every frame boundary it crosses.
+    ///
+    /// Bytes that would fall past the end of the framebuffer — or into a frame
+    /// the list does not have — are **discarded, not written**. A caller that
+    /// gets its arithmetic wrong therefore draws a wrong picture rather than
+    /// corrupting the kernel, which is the whole point of routing blits
+    /// through here.
+    ///
+    /// Returns the number of bytes actually written.
+    ///
+    /// # Safety
+    ///
+    /// `src` must be valid for reads of `len` bytes and must not alias the
+    /// framebuffer.
+    #[allow(clippy::arithmetic_side_effects)]
+    pub unsafe fn write_at(&self, dst_offset: usize, src: *const u8, len: usize) -> usize {
+        let total = self.len();
+        if dst_offset >= total {
+            return 0;
+        }
+        // Saturating, not wrapping: `len` comes from pixel arithmetic that a
+        // caller could overflow, and the clamp to `total` is the bound that
+        // matters.
+        let end = dst_offset.saturating_add(len).min(total);
+        let mut off = dst_offset;
+        let mut done = 0usize;
+        while off < end {
+            let idx = off / FRAME_SIZE;
+            let within = off % FRAME_SIZE;
+            let Some(pf) = self.frames.get(idx) else {
+                break;
+            };
+            let n = (FRAME_SIZE - within).min(end - off);
+            // SAFETY: `src + done` is within the caller's `len` bytes because
+            // `done < len`. The destination is `pf`'s HHDM mapping at
+            // `within < FRAME_SIZE`, and `n <= FRAME_SIZE - within`, so the
+            // write stays inside that one frame. The caller guarantees no
+            // aliasing.
+            unsafe {
+                core::ptr::copy_nonoverlapping(
+                    src.add(done),
+                    (pf.addr() + self.hhdm + within as u64) as *mut u8,
+                    n,
+                );
+            }
+            off += n;
+            done += n;
+        }
+        done
+    }
+}
+
+/// Run `f` with a bounds-checked view of the scanout framebuffer.
+///
+/// Returns `None` if there is no device.
+///
+/// ## The device lock is held for the whole of `f`
+///
+/// `f` must not call back into this module — in particular it must not flush;
+/// do that after this returns. `DEVICE` is a plain spin lock and would
+/// deadlock, not re-enter.
+///
+/// Holding it across a full-surface blit is deliberate. The frame list it
+/// lends out is `dev.fb_frames`, and the previous API handed out a bare
+/// address under the lock and then wrote through it after releasing — so a
+/// concurrent mode-set that replaced `fb_frames` would have left the blit
+/// writing into freed frames. Nothing in an interrupt or panic path touches
+/// this device (the only callers outside `drm::driver` are `kshell`, in task
+/// context), and `flush_rect`/`flush_full` already hold the same lock across a
+/// virtqueue round-trip to the host, which is far longer than a memcpy — so
+/// this widens no window that was not already wider elsewhere.
+pub fn with_scanout<R>(f: impl FnOnce(&ScanoutMem<'_>) -> R) -> Option<R> {
+    let guard = DEVICE.lock();
+    let dev = guard.as_ref()?;
+    let view = ScanoutMem {
+        frames: &dev.fb_frames,
+        hhdm: dev.hhdm_offset,
+        width: dev.width,
+        height: dev.height,
+    };
+    Some(f(&view))
 }
 
 /// Write a pixel. Does NOT auto-flush.
@@ -1059,6 +1222,30 @@ pub fn set_pixel(x: u32, y: u32, color: u32) {
             core::ptr::write_volatile(virt.add(frame_offset) as *mut u32, color);
         }
     }
+}
+
+/// Read a pixel back out of the scanout, walking the frame list the same way
+/// [`set_pixel`] does.
+///
+/// Returns `None` if there is no device or the coordinate is off-screen. This
+/// is a verification path, not a drawing one: it exists so a self-test can
+/// prove a blit landed where it claimed to, including in the *last* frame.
+#[must_use]
+#[allow(clippy::arithmetic_side_effects)]
+pub fn read_pixel(x: u32, y: u32) -> Option<u32> {
+    let guard = DEVICE.lock();
+    let dev = guard.as_ref()?;
+    if x >= dev.width || y >= dev.height {
+        return None;
+    }
+    let offset = ((y as usize) * (dev.width as usize) + (x as usize)) * 4;
+    let frame = dev.fb_frames.get(offset / FRAME_SIZE)?;
+    let within = offset % FRAME_SIZE;
+    let virt = (frame.addr() + dev.hhdm_offset) as *const u8;
+    // SAFETY: `within + 4 <= FRAME_SIZE` because a pixel offset is 4-aligned
+    // and `FRAME_SIZE` is a multiple of 4, so the read stays inside the frame
+    // the index selected. Volatile because the device also reads this memory.
+    Some(unsafe { core::ptr::read_volatile(virt.add(within).cast::<u32>()) })
 }
 
 /// Flush a rectangular region to host.
@@ -1470,14 +1657,18 @@ pub fn self_test() {
     let (w, h) = dimensions();
     serial_println!("[virtio-gpu]   Dimensions: {}x{}", w, h);
 
-    if let Some(addr) = framebuffer_addr() {
-        serial_println!("[virtio-gpu]   FB addr: {:#x}", addr);
+    if let Some(addr) = first_frame_addr() {
+        serial_println!(
+            "[virtio-gpu]   FB: {} frame(s), first at {:#x}",
+            scanout_frame_count(),
+            addr
+        );
 
         // Write a pixel, read back.
         set_pixel(0, 0, 0xFF_FF0000);
-        // SAFETY: addr is the HHDM-mapped framebuffer base returned by
-        // framebuffer_addr().  Reading the first u32 is within the first
-        // frame's bounds.
+        // SAFETY: `addr` is the HHDM mapping of the framebuffer's *first*
+        // frame. Pixel (0, 0) is at byte 0, so reading the first u32 is inside
+        // that frame — the one offset for which this raw address is valid.
         let pixel = unsafe { core::ptr::read_volatile(addr as *const u32) };
         if pixel == 0xFF_FF0000 {
             serial_println!("[virtio-gpu]   Pixel write/read: OK");
@@ -1485,6 +1676,58 @@ pub fn self_test() {
             serial_println!("[virtio-gpu]   Pixel write/read: FAIL ({:#x})", pixel);
         }
         set_pixel(0, 0, 0xFF_000000);
+
+        // The regression test for B-VIRTIO-GPU-FLAT-SCANOUT-WILD-WRITE: write
+        // through the blit API at an offset in the *last* frame and read it
+        // back with `set_pixel`'s frame walk. A `write_at` that treated the
+        // buffer as flat would deposit these bytes ~4 MiB past the first frame
+        // — in someone else's memory — and the read-back would find zeros.
+        let (w, h) = dimensions();
+        if w > 0 && h > 0 {
+            let marker: u32 = 0xFF_00_BE_EF;
+            let (last_x, last_y) = (w.saturating_sub(1), h.saturating_sub(1));
+            let last_px_off = (last_y as usize)
+                .saturating_mul(w as usize)
+                .saturating_add(last_x as usize)
+                .saturating_mul(4);
+            let wrote = with_scanout(|sc| {
+                // SAFETY: `marker` is a live local, valid for 4 bytes, and is
+                // not part of the framebuffer.
+                unsafe {
+                    sc.write_at(
+                        last_px_off,
+                        core::ptr::addr_of!(marker).cast::<u8>(),
+                        core::mem::size_of::<u32>(),
+                    )
+                }
+            });
+            let back = read_pixel(last_x, last_y);
+            if wrote == Some(4) && back == Some(marker) {
+                serial_println!("[virtio-gpu]   Scanout blit reaches the last frame: OK");
+            } else {
+                serial_println!(
+                    "[virtio-gpu]   Scanout blit reaches the last frame: FAIL (wrote {wrote:?}, read {back:?})"
+                );
+            }
+            // A write past the end must be dropped, not spill into the next
+            // allocation.
+            let past = with_scanout(|sc| {
+                // SAFETY: as above.
+                unsafe {
+                    sc.write_at(
+                        sc.len(),
+                        core::ptr::addr_of!(marker).cast::<u8>(),
+                        core::mem::size_of::<u32>(),
+                    )
+                }
+            });
+            if past == Some(0) {
+                serial_println!("[virtio-gpu]   Blit past the end is refused: OK");
+            } else {
+                serial_println!("[virtio-gpu]   Blit past the end is refused: FAIL ({past:?})");
+            }
+            set_pixel(last_x, last_y, 0xFF_000000);
+        }
     }
 
     match flush_rect(0, 0, 1, 1) {

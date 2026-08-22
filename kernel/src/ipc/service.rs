@@ -1305,30 +1305,35 @@ fn test_socket_activation() -> KernelResult<()> {
     let client_ep = connect(name)?;
 
     // Verify the connection was pre-queued (activation should be Starting).
-    {
+    //
+    // Copy the two facts out under the lock and judge them after releasing it.
+    // The cleanup this test does on a failed check — `unregister_socket_activation`
+    // — takes `SOCKET_ACTIVATIONS` itself, so running it inside the guard's scope
+    // would re-acquire a non-reentrant lock the same task already holds and wedge
+    // the CPU. That is a nasty shape for a *test* to have: it only bites when a
+    // check has already failed, so the machine hangs precisely instead of
+    // reporting which expectation was wrong. (`channel::close` under the lock was
+    // the same shape one lock over: a second lock taken while holding this one.)
+    let observed = {
         let activations = SOCKET_ACTIVATIONS.lock();
         let entry = activations
             .iter()
             .find(|e| e.name == name)
             .ok_or(KernelError::InternalError)?;
-        if entry.status != ActivationStatus::Starting {
-            serial_println!(
-                "[service]   FAIL: expected Starting, got {:?}",
-                entry.status
-            );
-            channel::close(client_ep);
-            unregister_socket_activation(name).ok();
-            return Err(KernelError::InternalError);
-        }
-        if entry.pre_queue.len() != 1 {
-            serial_println!(
-                "[service]   FAIL: expected 1 pre-queued, got {}",
-                entry.pre_queue.len()
-            );
-            channel::close(client_ep);
-            unregister_socket_activation(name).ok();
-            return Err(KernelError::InternalError);
-        }
+        (entry.status, entry.pre_queue.len())
+    };
+
+    if observed.0 != ActivationStatus::Starting {
+        serial_println!("[service]   FAIL: expected Starting, got {:?}", observed.0);
+        channel::close(client_ep);
+        unregister_socket_activation(name).ok();
+        return Err(KernelError::InternalError);
+    }
+    if observed.1 != 1 {
+        serial_println!("[service]   FAIL: expected 1 pre-queued, got {}", observed.1);
+        channel::close(client_ep);
+        unregister_socket_activation(name).ok();
+        return Err(KernelError::InternalError);
     }
 
     // Simulate the service starting: it calls register().

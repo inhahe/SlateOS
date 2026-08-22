@@ -470,6 +470,13 @@ impl<T> Mutex<T> {
     #[cold]
     #[inline(never)]
     fn lock_contended(&self) -> spin::MutexGuard<'_, T> {
+        // Before spending 30 s finding out the slow way: if this task already
+        // holds the lock, no number of retries can help. See
+        // `fail_if_recursive`. (lockdep's `report_recursive` also covers this
+        // type, but only while lockdep is enabled and its class table has room;
+        // this check has neither dependency.)
+        fail_if_recursive(self.name, self.addr(), &self.owner);
+
         // Compute the stall threshold in TSC cycles once. If the TSC is not
         // yet calibrated (very early boot), `tsc_freq()` returns 0 and we
         // fall back to a raw iteration count.
@@ -495,7 +502,7 @@ impl<T> Mutex<T> {
                 };
                 if stalled {
                     warned = true;
-                    self.report_stall(iters);
+                    self.report_stall(iters, crate::bench::rdtsc().saturating_sub(start_tsc));
                 }
             }
         }
@@ -508,8 +515,8 @@ impl<T> Mutex<T> {
     /// [`Mutex`] and [`PreemptSpinMutex`] produce identical stall diagnostics.
     #[cold]
     #[inline(never)]
-    fn report_stall(&self, iters: u64) {
-        report_spin_stall(self.name, self.addr(), &self.owner, iters);
+    fn report_stall(&self, iters: u64, elapsed_cycles: u64) {
+        report_spin_stall(self.name, self.addr(), &self.owner, iters, elapsed_cycles);
     }
 
     /// Try to acquire the lock without blocking.
@@ -780,7 +787,13 @@ impl<T> Drop for MutexIrqGuard<'_, T> {
 /// scheduler / cgroup-table / teardown locks, not serial.
 #[cold]
 #[inline(never)]
-fn report_spin_stall(name: &'static [u8], addr: usize, owner: &AtomicU64, iters: u64) {
+fn report_spin_stall(
+    name: &'static [u8],
+    addr: usize,
+    owner: &AtomicU64,
+    iters: u64,
+    elapsed_cycles: u64,
+) {
     use crate::serial_println;
 
     let n = STALL_REPORTS.fetch_add(1, Ordering::Relaxed);
@@ -792,18 +805,46 @@ fn report_spin_stall(name: &'static [u8], addr: usize, owner: &AtomicU64, iters:
     let tid = crate::sched::current_task_id();
     let name = core::str::from_utf8(name).unwrap_or("<non-utf8>");
     let owner = owner.load(Ordering::Relaxed);
-    serial_println!(
-        "[sync] *** SPINLOCK STALL *** lock '{}' @ {:#x} still not acquired after ~{}s of \
-         spinning (cpu {}, task {}, {} iters). Likely self-deadlock or lock convoy; \
-         the timer-driven liveness watchdog is blind to this if interrupts are \
-         disabled.",
-        name,
-        addr,
-        STALL_SECONDS,
-        cpu,
-        tid,
-        iters
-    );
+
+    // Report how long this spin *actually* ran, not the default threshold.
+    // `spin_with_stall_threshold` takes a caller-supplied threshold — the
+    // self-test uses ~10 ms — so printing the `STALL_SECONDS` default here made
+    // the log claim a 30-second stall for a 10-millisecond one.  A diagnostic
+    // that misstates the magnitude of what it detected is worse than none: the
+    // number is the first thing anyone reading a stall report reasons from.
+    let cycles_per_ms = crate::bench::tsc_freq().checked_div(1000).unwrap_or(0);
+    let elapsed_ms = if cycles_per_ms != 0 && elapsed_cycles != 0 {
+        elapsed_cycles.checked_div(cycles_per_ms)
+    } else {
+        // TSC uncalibrated (very early boot): the loop was counting iterations,
+        // not time, so there is no honest wall-clock figure to print.
+        None
+    };
+    match elapsed_ms {
+        Some(ms) => serial_println!(
+            "[sync] *** SPINLOCK STALL *** lock '{}' @ {:#x} still not acquired after ~{}ms of \
+             spinning (cpu {}, task {}, {} iters). Likely self-deadlock or lock convoy; \
+             the timer-driven liveness watchdog is blind to this if interrupts are \
+             disabled.",
+            name,
+            addr,
+            ms,
+            cpu,
+            tid,
+            iters
+        ),
+        None => serial_println!(
+            "[sync] *** SPINLOCK STALL *** lock '{}' @ {:#x} still not acquired after {} spin \
+             iterations (cpu {}, task {}; TSC uncalibrated, so no wall-clock figure). Likely \
+             self-deadlock or lock convoy; the timer-driven liveness watchdog is blind to this \
+             if interrupts are disabled.",
+            name,
+            addr,
+            iters,
+            cpu,
+            tid
+        ),
+    }
     // Name the holder: if `owner == tid`, this is a recursive self-deadlock
     // (the spinning task already holds the lock); if `owner` is some other
     // (possibly since-dead) task, the guard was leaked / the holder never
@@ -840,6 +881,90 @@ fn report_spin_stall(name: &'static [u8], addr: usize, owner: &AtomicU64, iters:
     crate::lockdep::dump_held_locks(cpu);
 }
 
+/// Fail immediately on a *provable* self-deadlock, instead of discovering it
+/// 30 seconds later — or, as actually happened, not at all.
+///
+/// Called once at the top of both lock types' contended paths, i.e. only after
+/// `try_lock` has already failed, so an uncontended acquire never runs it.
+///
+/// If the recorded owner is the very task now asking for the lock, the acquire
+/// can never succeed. A task runs on one CPU at a time, and both lock types
+/// disable preemption for the whole hold, so the holder cannot be scheduled
+/// elsewhere to release it. Every iteration of the spin below is therefore
+/// known-futile before the first one runs.
+///
+/// This also gives the right answer for the interrupt case: an ISR that takes a
+/// non-`irqsave` lock held by the task it interrupted does not change
+/// `CURRENT_TASK_IDS`, so `owner == current_task_id()` still holds and the
+/// diagnosis "this CPU already owns it" is still exactly true.
+///
+/// ## Why this exists when three other detectors already did
+///
+/// `fs::encrypt` shipped `STATE.lock().x = STATE.lock().x.saturating_add(1)`,
+/// which takes a non-reentrant lock twice in one statement (the right-hand
+/// guard is a temporary that outlives the left-hand acquire). The first boot
+/// that ever called it froze for 20 minutes and printed **nothing** about a
+/// lock — only the liveness watchdog's generic "no forward progress". All three
+/// existing nets missed it:
+///
+/// - **lockdep's `report_recursive`** is precise and correct, but
+///   [`PreemptSpinMutex`] deliberately does not register with lockdep (it is
+///   documented as the no-tracking sibling for leaf locks), and `fs::encrypt`
+///   imports `PreemptSpinMutex as Mutex`. Ordering checks genuinely add nothing
+///   for a leaf lock — but *recursion* detection is not an ordering check, and
+///   opting out of one silently opted out of the other.
+/// - **[`report_spin_stall`]** does diagnose `owner == tid` as recursive, but
+///   only after [`STALL_SECONDS`], and it never fired in that boot.
+/// - The **liveness watchdog** fired, but it reports that the system is stuck,
+///   not what it is stuck on.
+///
+/// So the check that mattered ran only on the lock type that had opted out of
+/// it, behind a 30-second timer that did not go off. This one is unconditional,
+/// type-independent, and immediate.
+///
+/// ## Why it panics
+///
+/// The condition is proven, not heuristic, and it is not survivable: the
+/// alternative is spinning until the boot test's timeout with no indication of
+/// which lock was involved. A panic names the lock and yields a backtrace
+/// through the offending call path. The false-positive cases all require an
+/// already-broken kernel (a leaked guard, so the lock is permanently held and
+/// would wedge at the next acquire regardless).
+///
+/// Same limitation as [`report_spin_stall`]: it reports over serial, so a
+/// recursive acquire of the *serial* lock itself cannot announce itself. That
+/// case is no worse than today's silent hang.
+#[cold]
+#[inline(never)]
+fn fail_if_recursive(name: &'static [u8], addr: usize, owner: &AtomicU64) {
+    let owner_tid = owner.load(Ordering::Relaxed);
+    if owner_tid == OWNER_NONE {
+        return; // Held by nobody we know of — a convoy or a leaked guard.
+    }
+    if owner_tid != crate::sched::current_task_id() {
+        return; // Genuine contention with another task: spin, as before.
+    }
+
+    let cpu = crate::sched::current_cpu_id();
+    let display = core::str::from_utf8(name).unwrap_or("<non-utf8>");
+    crate::serial_println!(
+        "[sync] *** SELF-DEADLOCK *** lock '{}' @ {:#x} is already held by task {} on \
+         cpu {} — the same task that is now trying to acquire it. This acquire can \
+         never succeed. Common cause: two acquires in one statement, e.g. \
+         `X.lock().n = X.lock().n + 1`, where the right-hand guard is a temporary \
+         that lives until the end of the statement.",
+        display,
+        addr,
+        owner_tid,
+        cpu
+    );
+    crate::lockdep::dump_held_locks(cpu);
+    panic!(
+        "self-deadlock: task {} re-acquiring lock '{}' @ {:#x} that it already holds",
+        owner_tid, display, addr
+    );
+}
+
 /// Bounded-spin acquisition loop with stall detection, shared by the contended
 /// paths of both lock types.
 ///
@@ -854,9 +979,43 @@ fn spin_with_stall<G>(
     name: &'static [u8],
     addr: usize,
     owner: &AtomicU64,
+    try_acquire: impl FnMut() -> Option<G>,
+) -> G {
+    spin_with_stall_threshold(
+        name,
+        addr,
+        owner,
+        crate::bench::tsc_freq().saturating_mul(STALL_SECONDS),
+        try_acquire,
+    )
+}
+
+/// The body of [`spin_with_stall`], with the stall threshold passed in rather
+/// than derived from [`STALL_SECONDS`].
+///
+/// The split exists so the detector can be *tested*. With the threshold baked
+/// in at 30 s, the only way to observe whether a stall report ever fires is to
+/// deadlock a real boot for half a minute — which is precisely the experiment
+/// that went wrong: a boot did hang here for ten minutes on a genuine
+/// self-deadlock and no report appeared, and there was no way to tell whether
+/// the detector was broken or the hang was somewhere else. `self_test_stall`
+/// runs this same loop with a ~10 ms threshold and asserts the report fires,
+/// so the question is answered on every boot in milliseconds instead of being
+/// re-opened by every hang.
+///
+/// A `threshold_cycles` of 0 means the TSC is not calibrated yet and the
+/// fallback iteration count applies.
+fn spin_with_stall_threshold<G>(
+    name: &'static [u8],
+    addr: usize,
+    owner: &AtomicU64,
+    threshold_cycles: u64,
     mut try_acquire: impl FnMut() -> Option<G>,
 ) -> G {
-    let threshold_cycles = crate::bench::tsc_freq().saturating_mul(STALL_SECONDS);
+    // Before spending 30 s finding out the slow way: if this task already holds
+    // the lock, no number of retries can help. See `fail_if_recursive`.
+    fail_if_recursive(name, addr, owner);
+
     let start_tsc = crate::bench::rdtsc();
     let mut iters: u64 = 0;
     let mut warned = false;
@@ -874,7 +1033,13 @@ fn spin_with_stall<G>(
             };
             if stalled {
                 warned = true;
-                report_spin_stall(name, addr, owner, iters);
+                report_spin_stall(
+                    name,
+                    addr,
+                    owner,
+                    iters,
+                    crate::bench::rdtsc().saturating_sub(start_tsc),
+                );
             }
         }
     }
@@ -1202,5 +1367,87 @@ pub fn self_test() {
     }
     serial_println!("[sync]   PreemptSpinMutex try_lock: OK");
 
+    // Test 7: the spin-stall detector actually fires.
+    self_test_stall();
+
     serial_println!("[sync] Self-test PASSED");
+}
+
+/// Prove that a spin lasting past the stall threshold emits a stall report.
+///
+/// **Why this test exists.** The stall detector is the kernel's only net for a
+/// lock convoy, a leaked guard, or a task wedged on a lock another (possibly
+/// dead) task holds — the failure modes `fail_if_recursive` does *not* cover,
+/// because it only catches a task re-entering a lock it holds itself. A net
+/// that has never been shown to work is not a net. And there is direct reason
+/// to doubt this one: a boot hung for ten minutes on a genuine self-deadlock in
+/// `fs::encrypt`, which spun in exactly this loop, and no stall report ever
+/// reached the serial log. Every explanation offered for that has since been
+/// disproved (the TSC is calibrated to 3.66 GHz at boot line 133, long before
+/// the filesystem self-tests run, so the uncalibrated-fallback path was not in
+/// play; neither report budget had been touched). Until this test runs, "does
+/// the detector work?" is answered only by an absence of evidence.
+///
+/// **Why it takes milliseconds, not thirty seconds.** It calls
+/// `spin_with_stall_threshold` — the same loop the real contended paths use —
+/// with a threshold of ~10 ms instead of [`STALL_SECONDS`]. Everything under
+/// test is shared with production: the iteration throttle, the `rdtsc`
+/// comparison, the one-shot `warned` latch, and `report_spin_stall` itself.
+///
+/// **Why it cannot hang.** A broken detector would leave the closure returning
+/// `None` forever, which is the very hang this test is meant to diagnose. So
+/// the closure also gives up after 100× the threshold and reports failure
+/// through the return value, turning "silent hang" into "named assertion
+/// failure" — the same reason `fail_if_recursive` panics rather than warns.
+#[allow(dead_code)]
+fn self_test_stall() {
+    use crate::serial_println;
+
+    let freq = crate::bench::tsc_freq();
+    assert!(
+        freq != 0,
+        "TSC is not calibrated, so every stall check in the kernel is running on \
+         the raw-iteration fallback instead of wall-clock time"
+    );
+
+    // ~10 ms. Long enough that the 4096-iteration throttle checks many times,
+    // short enough to be free on every boot. Floored at 1 because a threshold of
+    // 0 means "TSC uncalibrated" to the loop and would silently switch it to the
+    // five-billion-iteration fallback, i.e. test something else entirely.
+    let threshold = freq.checked_div(100).unwrap_or(0).max(1);
+    // 100x the threshold (~1 s) is the give-up bound: far past any plausible
+    // scheduling hiccup, so reaching it means the detector genuinely failed.
+    let deadline = crate::bench::rdtsc().saturating_add(threshold.saturating_mul(100));
+
+    // `OWNER_NONE`: no task holds this synthetic lock, so `fail_if_recursive`
+    // returns immediately and we exercise the spin path rather than panicking.
+    let owner = AtomicU64::new(OWNER_NONE);
+    let reports_before = STALL_REPORTS.load(Ordering::Relaxed);
+
+    serial_println!(
+        "[sync]   (self-test) forcing a ~10ms spin stall; the 'SPINLOCK STALL' line \
+         below is expected and not a real event:"
+    );
+
+    let fired = spin_with_stall_threshold(b"selftest-stall", 0, &owner, threshold, || {
+        if STALL_REPORTS.load(Ordering::Relaxed) != reports_before {
+            return Some(true); // the report fired — stop spinning
+        }
+        if crate::bench::rdtsc() >= deadline {
+            return Some(false); // gave up; the detector did not fire
+        }
+        None
+    });
+
+    // Hand back the report budget. This test is not a real stall, and consuming
+    // one of the eight slots would make a genuine convoy later in the boot that
+    // much more likely to be silently truncated.
+    STALL_REPORTS.store(reports_before, Ordering::Relaxed);
+
+    assert!(
+        fired,
+        "spin-stall detector did not report after spinning ~100x its threshold — \
+         a real lock convoy or leaked guard would wedge the machine silently"
+    );
+    serial_println!("[sync]   Spin-stall detector fires: OK");
 }

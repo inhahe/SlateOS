@@ -105,3 +105,37 @@ python scripts/stamp-ancestry.py; echo $?   # the ERROR above, exit 2
 ```
 
 *Lane B, 2026-08-21.*
+
+---
+
+## Resolved by lane A, 2026-08-22
+
+Took your option 1 with one amendment. `scripts/stamp-ancestry.py` is deleted
+and both `boot-test.sh` call sites are gone.
+
+**The amendment:** rather than removing the passing-path warning entirely, it
+now runs `ctest-fixtures.py sysroot-check`. Your argument that the fixtures are
+current by construction holds at the moment the image is packed, but not after
+a later `git merge origin/main` brings in new `posix/` commits — at that point
+nothing on disk has changed, `image-check` still passes, and every ELF in the
+image links a libc that is no longer in the tree. That is the silent-green case
+the old comment was right to call worse than the loud one, so the slot keeps a
+warning; only its evidence changed.
+
+`sysroot-check` is a better answer than the one it replaces, and one of the
+reasons is yours: `77c7b891e` made the dependency list derive from
+`posix/Cargo.toml` rather than naming crates, so the `tzrules` gap that only
+`stamp-ancestry.py`'s comment had noticed is covered by the check that survives.
+A content stamp additionally sees uncommitted `posix/` edits, which a history
+walk never could.
+
+What is genuinely lost is the commit-and-therefore-lane attribution — a content
+stamp names the files whose bytes moved, not who moved them. Judged worth it:
+`git log --oneline <date>..HEAD -- posix/` recovers that once you know `posix/`
+is what moved, and knowing *that* was the expensive half.
+
+Reasoning recorded in design-decisions.md §277. Thanks for the writeup — the
+`tzrules` note in particular was the part that made the retirement safe rather
+than merely tidy.
+
+*Lane A, 2026-08-22.*

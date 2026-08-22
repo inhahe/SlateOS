@@ -10365,7 +10365,7 @@ is the worst possible place to discover that your code can fault, and only a
 boot test finds it — this would have shipped clean under a "it compiles and
 clippy is quiet" standard.
 
-### B-FORKEXEC-BOOT-HANG. Intermittent silent boot hang at the glibc `fork()`+`execl()`+`waitpid()` self-test — WATCH (rare, non-fatal to a re-run) 2026-07-15
+### [RESOLVED 2026-08-22] B-FORKEXEC-BOOT-HANG. Intermittent silent boot hang at the glibc `fork()`+`execl()`+`waitpid()` self-test — a freed PML4 was still live in CR3; fixed in `0ecd5ff03`, WATCH cleared after three consecutive clean boots — 2026-07-15
 
 **Symptom (1 occurrence, 2026-07-15):** During
 `self_test_linux_real_glibc_forkexec` (`spawn-test-glibc-forkexec`,
@@ -10499,6 +10499,125 @@ where the silence argument above is *not* evidence of innocence: a wedge on an
 output lock cannot report itself. Note this does **not** by itself explain
 this hang's silence, because the diagnostics that went missing were
 `serial_println!`, and serial is independent of console.
+
+**[A] CORRECTION to the 2026-08-14c prune (2026-08-22).** That audit's
+conclusion — "a >400 s silent wedge cannot have been spinning on a
+`crate::sync::Mutex` or a `PreemptSpinMutex`" — rests entirely on the premise
+that the 30 s stall detector *does* fire. We now have direct evidence of it
+**not** firing: the `fs::encrypt` self-deadlock
+(`B-A-SELF-DEADLOCK-DETECTORS-ALL-MISSED-A-TEXTBOOK-SELF-DEADLOCK`) spun for
+~600 s on a `PreemptSpinMutex` and printed nothing at all. So the prune was
+unsound as written, and the two lock types were never actually excluded. The
+detector has since been given a self-test (`sync::self_test_stall`, which
+drives `spin_with_stall_threshold` at a ~10 ms threshold and asserts a report
+lands), so from the next green boot onward the premise is *checked* rather
+than assumed — but do not lean on the 2026-08-14c prune for reasoning about
+any hang that predates that self-test passing.
+
+**[A] ROOT CAUSE FOUND 2026-08-22 — a use-after-free of the process page
+tables. Fixed in `0ecd5ff03`.** Reproduced on boot cycle 6 with the same
+signature as 2026-07-15 (silence immediately after `[sched] Task N exiting`,
+900 s timeout, no panic, no stall report). The new narrowing that cracked it:
+
+1. **The harness's poll loop is bounded** — `for _ in 0..MAX_YIELDS` with
+   `MAX_YIELDS = 262_144` (`spawn.rs:22881`) — **and every path after the loop
+   prints**, including the loop-exhausted path. So the absence of output proves
+   the wedge is *not* in "waiting for the process to exit"; the loop had
+   already broken with `reaped = true`, and the wedge is in one of the six
+   post-loop steps (`pcb::state`, `pcb::exit_code`, `Vfs::read_file(CAPTURE)`,
+   `thread::on_thread_exit`, `pcb::destroy`, `Vfs::remove(CAPTURE)`).
+2. **`pcb::destroy` is the one that frees memory another CPU may be using.**
+   It calls `destroy_process_resources` → `destroy_user_address_space`, whose
+   `// SAFETY:` comment (`pcb.rs:6064`) asserts *"no threads are running in
+   this address space, and no CPU has this PML4 loaded in CR3"*. **Nothing in
+   the kernel established either half of that.**
+
+The race, in full:
+
+- The zombie transition lives *inside* `proc::thread::on_thread_exit`
+  (`thread.rs`), which runs **on the dying thread itself**. It prints
+  `"Process N has no threads left — now zombie"`, calls `sched::wake` on the
+  task parked in `wait4()`, and posts `SIGCHLD`. The reaper is released
+  **here** — but the dying thread still has work to do: return through
+  `on_thread_exit`, run `sched::task_exit()` (another `serial_println!`),
+  `notify_exit_hooks`, take `SCHED`, mark itself `Dead`, and only then
+  `schedule_inner` away.
+- That window is *milliseconds*, not microseconds: two serial lines at
+  115200 baud are ~8 ms of output, and the timer tick is 10 ms. A preemption
+  landing inside it is common, not exotic.
+- Preempted there, the dying task is still `Running` and still records
+  `Task::pml4_phys = <process PML4>`. The reaper runs, sees `Zombie`, calls
+  `pcb::destroy`, and the PML4 frame is freed.
+- When the scheduler switches the dying task back in to finish exiting,
+  `schedule_inner` (`sched/mod.rs`) does
+  `if old_pml4 != new_pml4 { write_cr3(new_pml4) }` — loading a **freed**
+  frame into CR3. If that frame has since been handed out and overwritten
+  (the harness allocates heavily right after: `Vfs::remove`, then the next
+  self-test), its kernel half is garbage and the machine cannot even report
+  the fault, because the tables that map the fault handler are the ones that
+  were freed.
+
+That accounts for every property of the symptom that made it hard: the
+silence (no working page tables ⇒ no diagnostic path), the absence of a stall
+report (nothing was spinning on a lock), the intermittency (it needs a tick
+in the window *and* the freed frame to be destructively reused before the
+switch-back), and why it clusters on the fork/exec test (it is the test whose
+harness reaps a process the instant it zombifies).
+
+**Fix:** `sched::detach_address_space(task_id)` — the analogue of Linux's
+`exit_mm()` → `switch_mm(&init_mm)`. It clears `Task::pml4_phys` (so no later
+switch-in can reload the frame) *and* writes CR3 to the kernel PML4 (so the
+current execution stops depending on it). Both halves are required; neither is
+sufficient alone. `proc::thread::on_thread_exit` calls it immediately after
+`on_thread_exit_hook` — the last step in the exit path that needs the thread's
+user memory — and therefore *before* anything can publish the process as
+reapable. `sched::task_exit` calls it again as an idempotent backstop for exit
+paths that never reach `on_thread_exit`.
+
+**Regression test:** `proc::thread` test 11
+(`test_exit_detaches_address_space`) pins the invariant `pcb::destroy`
+actually needs — *at the instant a process becomes `Zombie`, no task still
+names its PML4*. The victim is spawned suspended and never admitted, so the
+test is deterministic instead of depending on the narrow preemption window
+that made the original failure intermittent.
+
+**Status (2026-08-22): RESOLVED — WATCH cleared.** The condition the WATCH was
+waiting on has been met: three consecutive boot cycles after `0ecd5ff03` each
+executed `self_test_linux_real_glibc_forkexec` to a green
+`REAL glibc forkexec` line and went on to reach `BOOT_OK`, with no silent stop
+and no timeout:
+
+| Cycle | Commit | Verdict | `REAL glibc forkexec` |
+|---|---|---|---|
+| 8 | `ab3d42901` | BOOT_OK | pass |
+| 9 | `b215b83c1` | BOOT_OK | pass |
+| 10 | `1422972ad` | BOOT_OK | pass |
+
+Three is the right number to stop at rather than an arbitrary one. The hang
+was never a coin flip on every boot — across the whole recorded history it
+appeared a handful of times in dozens of runs, so three clean runs alone would
+be weak evidence taken by themselves. What makes them sufficient here is that
+they are corroborating a *mechanism* that is independently pinned down: the
+page-table path was derived from the code and the log rather than guessed, and
+`proc::thread` test 11 (`test_exit_detaches_address_space`) now fails
+deterministically if the invariant regresses. The boots confirm the fix did
+not introduce a new intermittency; the unit test, not the boot count, is what
+keeps it fixed.
+
+**If it ever recurs**, do not re-derive the page-table path — that one is
+closed and regression-tested. The remaining post-loop suspects from narrowing
+(1) above are `Vfs::read_file`/`Vfs::remove` on the capture file and the
+console-lock lead below; start there.
+
+**Generalisable lesson.** A `// SAFETY:` comment that states a *whole-system*
+precondition — "no CPU has this loaded in CR3" — and is reached from a public
+function anyone may call is not a proof, it is an unenforced request. Two
+things would have caught this earlier: writing such preconditions as something
+the *callee* establishes (which is what `detach_address_space` now does)
+rather than something the caller is trusted to have arranged, and treating
+"the state that publishes an object as reclaimable" and "the last instant that
+object is in use" as one atomic step. Here they were separated by two serial
+prints.
 
 ### D-SHM-MAP-NOCAP. `SYS_SHM_MAP`/`SYS_SHM_SIZE`/`SYS_SHM_CLOSE` do not verify the caller owns the handle — RESOLVED 2026-07-14
 
@@ -32092,6 +32211,31 @@ step (e) applied to Settings — an `oswindow` event loop, a window, and one
 `appearance_changed()` call after `AppearanceFile::save()` in
 `save_appearance` (`apps/settings/src/main.rs`, ~line 880).
 
+**Update 2026-08-22 — Settings is wired; 136 to go.** `apps/settings` now has a
+real `main()` that dials the compositor with `oswindow::connect()`/`connect_to()`,
+a real window, and a real event loop (`run`), and the `appearance_changed()`
+call this paragraph asked for is in place — with one correction to the recipe
+above. It is *not* "one `appearance_changed()` call after `AppearanceFile::save()`
+in `save_appearance`": `save_appearance` has no access to the event loop, and
+putting the notification there would either thread the loop into the model or
+notify from a function that cannot report a transport failure. Instead
+`save_appearance` sets a private `appearance_dirty` flag and the loop drains it
+with `take_appearance_change()`, which also makes the notification track *the
+file changing* rather than *an event being consumed* — the two are not the same,
+and both mistakes are pinned by tests. `design-decisions.md` §523 has the
+reasoning.
+
+Fifteen new tests, all proved regression tests by reintroducing the defect each
+names (eighteen markers, every test earned at least one). Four of them are
+`mod against_the_real_compositor`, which puts the shipped `Compositor` on one end
+of a real socket and Settings' shipped `run` on the other: a physical mouse click
+at a theme card changes the appearance the compositor draws with, end to end,
+with no stand-in on either side.
+
+Settings was the application this entry singled out because it had something
+specific it could not call. That is closed. The entry stays open for the other
+136 unwired applications.
+
 ## TD-ONLY-ONE-KEYBOARD-LAYOUT (lane C, 2026-08-17)
 
 **What.** `gui/compositor/src/keymap.rs` holds one hard-coded US-QWERTY
@@ -32504,6 +32648,35 @@ has landed, so the caller exists. That request also carries a second, separate
 bug found while writing it — see `BUG-DRM-PAGE-FLIP-ACCEPTS-A-MISMATCHED-FB`
 below.
 
+**Update 2026-08-21 — the kernel half is done too (lane A).**
+`DRM_IOCTL_MODE_SETCRTC` exists: `DrmDevice::set_crtc` in `kernel/src/drm/mod.rs`
+validates the requested mode against the connector's advertised list, checks the
+connector is routable to that CRTC through its encoder, checks the framebuffer
+covers `mode + (x, y)`, dispatches `set_mode` to the backend, and updates
+`crtc.active`, `crtc.mode` and the primary plane's `fb`/`src_*`/`dst_*` only
+after the backend reports success. `fb_id == 0` with no connectors is the
+supported "turn this CRTC off" form and succeeds rather than returning `EINVAL`.
+The ioctl is wired at `kernel/src/syscall/linux.rs` and is refused with `EACCES`
+on a render node, since programming a display timing is modeset authority.
+
+Two caveats for the compositor half:
+
+* **Only the mode the backend already has is accepted on `limine-fb` and
+  `virtio-gpu`.** Both return `EINVAL` for any other mode — Limine cannot retime
+  a framebuffer the bootloader programmed, and virtio-gpu creates its scanout
+  resource once at probe and never replaces it (see
+  `TD-DRM-VIRTIO-GPU-CANNOT-RETIME` below). So "Display settings → Resolution"
+  becomes genuinely possible on the ATI backend now, and remains impossible in
+  QEMU until virtio-gpu grows a resource-recreate path. It fails loudly in both
+  cases, which is the change that matters: the compositor can now *tell*.
+* **The buffer re-allocation is still lane C's.** `SETCRTC` refuses a
+  framebuffer smaller than the mode, so `DrmScanout` must allocate the new pair
+  of dumb buffers at the new size *before* the `SETCRTC` that adopts them, not
+  after.
+
+Details and the reasoning: `design-decisions.md` §270. Reply request filed as
+`requests/a-c-drm-setcrtc-has-landed-and-page-flip-is-now-strict.md`.
+
 ## BUG-DRM-PAGE-FLIP-ACCEPTS-A-MISMATCHED-FB (found by lane C 2026-08-21; lives in lane A's tree)
 
 **In short:** the kernel lets a program hand the graphics card a picture that is
@@ -32553,6 +32726,106 @@ card is fitted.
 
 **Not lane C's to fix** — `kernel/**` is lane A's. Filed as Ask 2 of
 `requests/c-a-drm-setcrtc-and-a-page-flip-that-refuses-a-mismatched-framebuffer.md`.
+
+**FIXED 2026-08-21 (lane A).** `DrmDevice::page_flip` now resolves the CRTC,
+requires it to have a programmed mode, and returns `InvalidArgument` when
+`fb.width != mode.hdisplay || fb.height != mode.vdisplay` — before any backend
+is reached, so all three inherit the one answer. ATI's implicit mode-set was
+removed and replaced by a real `set_mode`; virtio-gpu's crop is now unreachable
+for a mismatch because the mismatch never gets that far. Lane C's "the answer
+depends on which card is fitted" is closed: the answer is `EINVAL` on all of
+them. The option debate is recorded in `design-decisions.md` §270.
+
+Three further object-model lies in the same area were found and fixed while
+here, none of which lane C had reported:
+
+* **`plane.fb` was never written by `page_flip`** — only by the atomic path — so
+  `GETPLANE` reported `fb_id = 0` forever on the legacy path. It is now updated
+  on every successful flip and mode-set.
+* **`fb_destroy` left dangling plane references.** A plane kept naming a
+  destroyed framebuffer id, and `fb_create` reuses ids, so a plane could appear
+  bound to an unrelated buffer it had never seen. `fb_destroy` now unbinds every
+  plane that names the id. (Linux's `drm_framebuffer_remove` also disables the
+  CRTC; ours deliberately does not — see the doc comment for why.)
+* **`atomic_commit` wrote `crtc.mode` without programming any hardware.** That
+  was merely inaccurate before; it became dangerous the moment `page_flip`
+  started trusting `crtc.mode` for its size check, because a fabricated mode
+  would wave through a buffer the display engine reads with a different stride.
+  Mode changes in the atomic path now route through `set_crtc`, so a mode the
+  hardware refuses fails the commit instead of being recorded as fact.
+
+**Regression test.** `drm::self_test()` item 11, "Mode-set and page-flip
+discipline", runs on every boot: nine sub-tests covering an unadvertised mode,
+an enable with no framebuffer, an enable with no connectors, a disable that also
+names a framebuffer, an undersized framebuffer, an unknown connector, a real
+mode-set followed by verifying `crtc.mode` and `plane.fb` describe it, a
+matching flip against a mismatched one, and a disable after which a flip is
+refused. Every assertion fails if the old behaviour is reintroduced.
+
+## TD-DRM-VIRTIO-GPU-CANNOT-RETIME (lane A, 2026-08-21)
+
+**In short:** in a virtual machine, SlateOS cannot change the screen resolution.
+It now says so with an error instead of quietly showing a cropped picture, which
+is the important half — but the resolution still cannot actually be changed.
+
+**Where.** `VirtioGpuBackend::set_mode`, `kernel/src/drm/driver.rs`. It returns
+`InvalidArgument` unless `mode.hdisplay == self.width && mode.vdisplay ==
+self.height`.
+
+**Why.** The scanout resource is created once during probe, sized from
+`GET_DISPLAY_INFO`, and never replaced. Everything downstream — the transfer
+rectangle, the flush region, the pitch — is derived from that one size.
+
+**Proper fix.** A resource-recreate path: `RESOURCE_CREATE_2D` at the new size,
+`RESOURCE_ATTACH_BACKING`, `SET_SCANOUT` to point the scanout at it, then
+release the old resource — with the old one kept alive until the new one is
+scanning out, so a failure half-way leaves a working display rather than a
+black one. `set_mode` is the entry point that gains it and nothing else has to
+change; the object-model bookkeeping in `DrmDevice::set_crtc` is already
+backend-agnostic.
+
+**Severity.** Low, and it only became visible today. Before `SETCRTC` existed
+there was no way to ask for a different mode at all, so nothing could be
+refused. This is the honest report of a limitation that was previously hidden
+behind a silent crop.
+
+## TD-DRM-ATOMIC-ACTIVE-IS-COSMETIC (lane A, 2026-08-21)
+
+**In short:** the newer of the two ways to configure a display has a
+"turn this screen on/off" switch that does not actually turn anything off. It
+updates the kernel's record and nothing else, so a program that flips it sees
+the record change but the monitor keeps showing the same picture.
+
+**Where.** `atomic_commit` in `kernel/src/drm/atomic.rs`: the `cs.active` arm
+sets `crtc.active` on the object and never calls the backend. Two code comments
+point at this entry by name.
+
+**Why it was left this way rather than half-fixed.** Making it real was
+attempted and deliberately backed out. Turning a CRTC off has to be reversible,
+and turning it back on means re-programming a display timing — which needs a
+framebuffer that a bare `active: true` commit does not carry. The atomic
+self-test (Test 8) deactivates and then reactivates the *primary* CRTC during
+boot, with `mode: None` in both commits. A real disable there would clear
+`crtc.mode`, leave the CRTC untimed after the supposed reactivation, and end the
+boot on a black screen when the compositor's first `page_flip` was refused for
+having no mode. Trading a harmless inaccuracy for a boot failure is not a fix.
+
+For the same reason `DrmDevice::page_flip` deliberately does **not** require
+`crtc.active` — only `crtc.mode`. A cosmetic bit must not be able to gate a real
+operation.
+
+**Proper fix.** Give `CrtcState` a way to express "off, and here is what to
+restore when you come back": either the commit carries the framebuffer for the
+re-enable, or the backend caches the last programmed timing and `active: true`
+means "re-apply it". Then `active: false` calls `disable_crtc`, `active: true`
+calls `set_mode`, and Test 8 is rewritten to supply a framebuffer on the way
+back up. Also worth doing at the same time: real DPMS, which is the same
+mechanism.
+
+**Severity.** Low. Nothing in the tree currently sets `active` expecting
+hardware to respond; the atomic path's only real user is the compositor, which
+uses the mode and plane fields. It becomes wrong the moment a client tries to
+blank a screen for power saving.
 
 ## TD-COMPOSITOR-PICKS-CARD0 (lane C, 2026-08-21) - **(1) and (2) fixed 2026-08-21; (3) open**
 
@@ -49905,7 +50178,44 @@ the feature is not near enough to specify an interface against.
 program the user runs, silently and continuously. The desktop works; the
 privacy property a user would assume it has is simply absent.
 
-## TD-C-FORTY-NINE-SHELL-MODULES-CARRY-THEIR-OWN-COPY-OF-THE-PALETTE
+## TD-C-FORTY-NINE-SHELL-MODULES-CARRY-THEIR-OWN-COPY-OF-THE-PALETTE — PART 1 DONE 2026-08-22, PART 2 OPEN
+
+**Status, 2026-08-22.** Part 1 below is **done**: `appearance::Palette` exists,
+carries the light ladder as well as the dark one, and `DecorationColors` and
+`DesktopTheme` are rewritten to read roles out of it instead of repeating its
+values. Part 2 — threading `&Palette` through the 49 modules and deleting the
+549 constants — is **still open**, and is now unblocked in the sense the entry
+originally meant: the type it needed to thread exists.
+
+Three things worth carrying forward from doing part 1:
+
+- **The "33 distinct values" figure below was wrong**, and low. The survey that
+  part 1 started from counted **91 distinct constant names** across the 549
+  declarations, collapsing to **18 roles** (10 rungs of the surface/text ladder
+  plus 8 named hues) once composites and near-duplicates were resolved. The
+  original 33 appears to have counted values rather than names and to have
+  missed the modules that spell the same role differently.
+- **Two names carried genuinely conflicting values,** so part 2 cannot be a
+  blind substitution of role for name. `BASE` is opaque in 26 modules and
+  `rgba(30, 30, 46, 240)` in 2 — the translucent ones are panels, and become
+  `Palette::panel_bg()`. `SHADOW` is declared at three different alphas
+  (100/120/160) plus a separate `LABEL_SHADOW` at 180; the first three are one
+  role at 120 (`shadow()`), and `LABEL_SHADOW` stays separate as
+  `text_shadow()` because its job is legibility over an arbitrary wallpaper
+  rather than elevation over a known surface.
+- **Catppuccin's own Latte `subtext0` is not legible enough to ship.** It
+  measures 4.37:1 on the Latte base, under the 4.5:1 body-text floor, while
+  Mocha's counterpart is 7.37:1. `LIGHT_SUBTEXT0` is therefore `#686B80`, not
+  upstream's `#6C6F85` — see design-decisions §525.
+
+Part 1 is proved by `scripts/reintro-palette.py`, which reintroduces 19
+defects one at a time and confirms each is caught by the test that names it.
+That harness found a real latent defect while doing so (defect Q): the first
+version of `DecorationColors::from_settings` built its frame from
+`Palette::for_mode` and painted the accent on afterwards, so a frame was
+always assembled from a palette carrying the *default* accent. Fixed by
+`from_palette(&Palette)` being the single body, with the mode path and the
+settings path each passing the palette they mean.
 
 **In short:** The desktop has a settings page where the user picks light or
 dark mode, an accent colour, and how transparent panels should be. Almost
@@ -49945,7 +50255,7 @@ anything.
 
 **Proper fix, in two parts — the second is the easy one:**
 
-1. **`gui/appearance` cannot currently answer the question.** It resolves
+1. **[DONE 2026-08-22] `gui/appearance` cannot currently answer the question.** It resolves
    *accents* for both schemes (`color` / `color_light`) but the base, surface,
    overlay and text colours exist only as the hardcoded dark values. Nothing in
    the tree knows what a window background is in light mode. So the fix starts
@@ -49954,9 +50264,56 @@ anything.
    `TransparencyLevel` (Catppuccin Latte for light, Mocha for dark, which is
    what the existing constants already are). Until that type exists there is
    nothing to thread.
-2. Then thread `&Palette` through the render functions of the 49 modules and
-   delete the 549 constants. Mechanical, large, and safe: a module that no
-   longer declares a colour cannot disagree about one.
+2. **[OPEN]** Then thread `&Palette` through the render functions of the 49
+   modules and delete the 549 constants. Mechanical, large, and safe: a module
+   that no longer declares a colour cannot disagree about one. Read the three
+   findings at the top of this entry first — `BASE` and `SHADOW` each mean two
+   different things depending on the module, so this is not a blind rename.
+
+**Method for part 2, surveyed 2026-08-22.** Two things make it much smaller
+than the 549 figure suggests:
+
+- **No module's render function has a caller outside its own file.** Checked
+  across `gui/` and `apps/`: nothing references `security_dialog::`,
+  `login_screen::`, `print_manager::` and so on — these are state machines
+  built ahead of the shell binary that will drive them, and their `render()`s
+  are exercised only by their own `#[cfg(test)]` modules. So adding a
+  `p: &Palette` parameter is a *within-file* change, not a signature change
+  that ripples through the crate. Only `lib.rs` mentions `DesktopTheme` or
+  `Palette` at all today.
+- **The colour uses cluster in a handful of functions per module.**
+  `security_dialog.rs` is the worst file at 29 constants, and its 44 `theme::`
+  references sit in five functions — `render`, `render_shield_icon`,
+  `render_detail_row`, `render_button`, `render_checkbox` — plus
+  `RiskLevel::color`, which becomes `color(self, p: &Palette)`.
+
+**The verification, which is the part worth getting right.** Do not eyeball 549
+substitutions. Each converted module gets a sweep that renders its state
+*twice*, once per mode, and asserts that every colour the light render emits is
+drawn from the light palette: the set of `Palette` fields for that mode, their
+alpha variants, black at any alpha (scrims and shadows are an absence of light,
+§525 decision 3), and the two `readable_on` endpoints. A constant left behind is
+by definition a *Mocha* value, so it fails that membership check in light mode
+and names itself. This catches a missed replacement mechanically, which is the
+only way a change this size can be trusted.
+
+One wrinkle to encode rather than rediscover: `readable_on` returns `0x11111B`
+or `0xEFF1F5`, and `0x11111B` *is* Mocha `crust`. It has to be allowed in a
+light render — it is the deliberate dark extreme, not a leftover — which means
+the sweep cannot catch a stray literal `CRUST`. Everything else it catches.
+
+Mapping for the alias names, which recur across modules and are the only part
+that needs judgement rather than substitution:
+
+| Declared as | Becomes | Note |
+|---|---|---|
+| `SHIELD_BG`, `BUTTON_BG`, `DETAILS_BORDER` = `0x45475A`/`0x313244` | `p.surface0` / `p.surface1` | plain role aliases |
+| `BUTTON_HOVER` = `0x585B70` | `p.surface2` | |
+| `DETAILS_BG` = `0x181825` | `p.mantle` | |
+| `RISK_LOW`/`MEDIUM`/`HIGH`/`CRITICAL` | `p.green`/`p.yellow`/`p.peach`/`p.red` | categorical, must **not** follow the accent |
+| `SHADOW` = `rgba(0,0,0,160)` | `p.shadow()` | one value replaces the shell's three (100/120/160) |
+| `DIMMER` = `rgba(0,0,0,120)` | `p.scrim()` | 140; deliberately unified |
+| `ALLOW_TEXT`, `DENY_TEXT` = `0x1E1E2E` | `readable_on(p.green)`, `readable_on(p.red)` | **the one trap** — see item 2 below |
 
 Do **not** do part 2 without part 1 — threading a struct whose light variant
 does not exist yet just relocates the hardcoding into the struct's
@@ -49974,6 +50331,194 @@ defect observed from the settings end.
 picks Light gets a desktop that is light in five places and dark in every
 other, which reads as a broken theme rather than an unimplemented one — worse
 than having no setting at all.
+---
+
+### TD-C-THE-TOOLKIT-HOLDS-A-THIRD-COPY-OF-THE-PALETTE-AND-DISAGREES-WITH-ITSELF-ABOUT-IT — 2026-08-22 — OPEN
+
+**In short.** Widgets (buttons, text fields, scrollbars — the controls apps are
+built from) get their colours from `gui/toolkit`, which keeps its own
+hand-written table of the same Catppuccin values the shell was keeping 549
+copies of. That is a third copy, after the shell's and `gui/appearance`'s. It
+is not currently *wrong* on screen, but it is already drifting in the one way
+that matters: the comments in it name roles that do not match the values beside
+them, so the next person to edit it by role will pick the wrong hex.
+
+**Where:** `gui/toolkit/src/theme.rs` — `Theme::catppuccin_mocha` (~:190) and
+`Theme::catppuccin_latte` (:232). The Latte table is the clearer case:
+
+| Line | Value | Comment says | Latte actually calls it |
+|---|---|---|---|
+| :238 | `0xE6E9EF` | `Surface0` | `mantle` |
+| :239 | `0xDCE0E8` | `Surface1 (Crust)` | `crust` |
+| :258 | `0xBCC0CC` | `Surface2` | `surface1` |
+| :260 | `0xCCD0DA` | `Surface1` | `surface0` |
+| :262 | `0xE6E9EF` | `Surface0 (Mantle)` | `mantle` |
+
+Two comments (`:239`, `:262`) name *two* roles for one value, which is a
+comment author noticing the disagreement and recording both rather than
+resolving it. The ladder is shifted by one rung throughout, so "Surface1"
+means three different colours in this one function.
+
+**The concrete defect inside it:** `:243` `text_secondary: 0x6C6F85`. That is
+upstream Latte `subtext0`, and it measures **4.37:1** on `background`
+(`0xEFF1F5`) — under the 4.5:1 WCAG floor for body text, which is what
+secondary label text is. `gui/appearance` rejected exactly this value when the
+light palette was built and uses `0x686B80` (4.64:1) instead; see
+design-decisions §525. So the toolkit currently ships a light theme whose
+secondary text is measurably illegible, and the crate next door already knows
+the right answer.
+
+**Reproduce:** compute the WCAG contrast of `0x6C6F85` against `0xEFF1F5`
+(relative luminance, `(L1+0.05)/(L2+0.05)`) — 4.37. Or read `:238`–`:239`
+against Catppuccin Latte's published palette and note the roles named in the
+comments are not the roles the values are.
+
+**Why it shipped:** the toolkit predates `appearance::Palette` and could not
+have depended on it — and it still has a genuine reason to keep a type of its
+own, because `Theme` carries widget-level roles (`primary_hover`,
+`scrollbar_track`, `border_focus`) that are not palette roles and should not
+become them. What it does not need is its own *values*.
+
+**Proper fix:** keep `Theme` as the widget-role type, and derive both
+constructors from `appearance::Palette` — `catppuccin_latte()` becomes
+`Theme::from_palette(&Palette::for_mode(true))`, mapping each widget role onto
+a palette role once, the same shape `DesktopTheme::from_palette` now has. That
+deletes the hand-written hex, makes the ladder-off-by-one impossible to write,
+and makes the legibility fix propagate rather than needing to be applied twice.
+The dependency direction is right: `appearance` is below `toolkit` and already
+in its graph.
+
+**Trigger:** best done as part 2 of
+`TD-C-FORTY-NINE-SHELL-MODULES-CARRY-THEIR-OWN-COPY-OF-THE-PALETTE` or
+immediately after it, while the mapping is fresh. Not urgent on its own, with
+one exception: the `text_secondary` contrast is a shipped accessibility defect
+and can be fixed on its own in one line without waiting for the refactor.
+
+**If never fixed:** a user on the light theme reads secondary labels at 4.37:1,
+and the next edit to the toolkit's ladder lands one rung off because the
+comments say it should.
+---
+
+### TD-C-EVERY-APPLICATION-CARRIES-ITS-OWN-COPY-OF-THE-PALETTE-TOO — 2026-08-22 — OPEN
+
+**In short.** The same defect as
+`TD-C-FORTY-NINE-SHELL-MODULES-CARRY-THEIR-OWN-COPY-OF-THE-PALETTE`, four times
+larger, in `apps/` rather than the shell. **2,258** `const NAME: Color`
+declarations across **135 files** in **~90 applications**, all of them the dark
+theme written out by hand. So a user who picks Light gets a light shell (once
+that entry's part 2 lands) containing entirely dark applications — which is a
+worse-looking result than today, where at least everything is uniformly wrong.
+
+**Where:** `apps/**/src/*.rs`. 240 distinct names, and the top of the list is
+the same ladder the shell had: `BASE` 103, `BLUE` 103, `SURFACE0` 102,
+`SUBTEXT0` 102, `GREEN` 102, `PEACH` 101, `OVERLAY0`/`RED`/`YELLOW` 100 each,
+`MANTLE` 99, `SURFACE1` 97, `TEAL` 86, `LAVENDER` 82, `MAUVE` 81, `CRUST` 79.
+Worst single files: `apps/mahjong/src/main.rs` (28), `apps/checkers` (27),
+`apps/reversi` (27), `apps/gomoku` (26), `apps/sysinfo` (26).
+
+**Measured, so it can be re-measured:** match
+`^\s*(?:pub )?const ([A-Z0-9_]+)\s*:\s*Color\s*=\s*(.+?);\s*$` over
+`apps/**/*.rs`, excluding `target/`.
+
+**The copies mostly agree — but not entirely, and the exception is in the
+authority.** Grouping each name by value shows nearly every "disagreement" is
+one colour spelled two ways: `BASE` is `Color::from_hex(0x1E1E2E)` in 98 places
+and `Color::rgb(30, 30, 46)` in 4 (`apps/benchmark` spells the whole ladder in
+decimal). One name is a genuine special case rather than a disagreement —
+`apps/launcher/src/main.rs` has `BASE = Color::rgba(30, 30, 46, 240)`, a
+translucent panel, the identical case the shell had, resolving the same way to
+`Palette::panel_bg()`.
+
+And one is simply **wrong**: `SKY`. Catppuccin Mocha's Sky is `#89DCEB`, which
+is what `apps/calendar`, `apps/charmap`, `apps/diagram`, `apps/finance`,
+`apps/ircclient`, `apps/logviewer` and `gui/toolkit/src/theme.rs` all say. But
+`gui/appearance/src/lib.rs:61` — the crate that *owns* the answer — says
+`0x89DCFE`, and that value had already propagated into `apps/alarmclock`,
+`apps/emojipicker` and `apps/unitconverter`. It is a one-character
+transposition (`EB` → `FE`), and it means `AccentColor::Sky.color()` returns a
+colour Catppuccin does not contain, so a user who picks the Sky accent gets a
+slightly-off blue everywhere the setting actually reaches. In
+`apps/unitconverter` it was not merely declared but *drawn*: the
+`Category::DigitalStorage` label renders in it.
+
+**All four fixed 2026-08-22, and the fix was scoped by measurement rather than
+by grep-for-`SKY`.** The same independent transcription that found it was run
+over the whole lane: every `const NAME: Color = Color::from_hex(0x……)` whose
+name is a published Mocha role, compared against a hand-transcribed copy of the
+published palette. **1,566 such declarations across `apps/`, 389 across `gui/`;
+exactly one name mismatched, in exactly those three files.** So the duplication
+problem this entry describes is real, but the *divergence* problem turned out
+to be a single transposed byte pair — which is worth knowing before part 2,
+because it means the conversion can treat the existing constants as faithful
+copies and does not need a per-file value audit on top of the rename.
+
+`gui/appearance` is now protected against the recurrence by
+`every_dark_constant_is_the_published_catppuccin_mocha_value`, which pins all
+24 declared values against an independent transcription. It is the only test in
+that crate whose expected values do not come from the tree, and it is the only
+one that could have caught this — every other test compares one part of the
+tree against another, which by construction cannot see an error the whole tree
+shares. Proved by reintroduction (harness defect T).
+
+That the wrong copy is the *authority's* is this entry's point in miniature:
+2,258 duplicates agreeing with each other is not evidence that any of them is
+right, and the one place a mistake actually matters is the place that has no
+copy to be checked against.
+
+**Two things this changes about the shell entry's part 2, which is why it is
+filed now rather than when someone gets to it:**
+
+1. **`Palette` needs `teal` and `sky`.** [DONE 2026-08-22] It carried eight
+   named hues; the applications use `TEAL` 86 times and `SKY` 18, and neither
+   existed on the struct. Catppuccin defines 14 accents and `AccentColor`
+   already names all of them, so the shortfall was in `Palette`'s field list,
+   not in the model underneath it. Added immediately rather than when `apps/`
+   is converted, because every mode-flip and legibility sweep in that crate
+   iterates a hand-written list of the fields — so a hue added later has to be
+   threaded back through all of them, and a sweep that silently skips a field
+   is the precise failure those sweeps were written to detect. `roles()` is now
+   21 wide and `every_named_hue_agrees_with_the_accent_of_the_same_name` covers
+   ten hues.
+2. **The "text on a coloured button" constants are wrong in light mode and
+   will silently stay wrong.** `ALLOW_TEXT`, `DENY_TEXT` and
+   `BUTTON_PRIMARY_TEXT` in the shell — and their equivalents across the apps —
+   are all `0x1E1E2E`, i.e. the Mocha *base*, chosen because dark text reads on
+   a pale green button. Translating them to `p.base` is the obvious move and is
+   a bug: Latte's base is `#EFF1F5`, so a light-mode Allow button would be pale
+   text on a pale green fill. They must become `readable_on(p.green)` and
+   friends. This is the one place in the whole sweep where a mechanical
+   name-to-role substitution produces a *new* defect rather than preserving the
+   current one.
+
+**Why it shipped:** the applications were written against the shell's
+convention, which was to declare the palette locally, because there was nothing
+to declare it from — `gui/appearance` could not answer what a window background
+is in light mode until 2026-08-22. Each app copying the previous app's header
+block is the mechanism; `#[allow(dead_code)]` is not implicated here the way it
+was in `gui/desktop` (see `TD-C-DEAD-CODE-IS-ALLOWED-WHOLESALE`), because these
+constants are mostly used.
+
+**Proper fix:** the same as the shell's part 2 — take `&Palette` in the render
+path and delete the constants — but sequenced *after* it, and after the two
+changes above, because an application should be adopting a type the shell has
+already proved rather than the two of them converging on it separately. Some
+per-app colour is legitimate and must **not** be collapsed: a chessboard's
+light and dark squares, a card back, a syntax-highlighting scheme, and a
+resource graph's categorical series are the application's own decisions and
+merely happen to be drawn from Catppuccin today. The test to apply, per
+colour: *would a user who changed their accent expect this to move?* If no, it
+stays a constant — but it should then be named for what it is (`BOARD_DARK`,
+not `SURFACE1`), because a role name on a value that must not follow the theme
+is how the next person collapses it by mistake.
+
+**Trigger:** immediately after
+`TD-C-FORTY-NINE-SHELL-MODULES-CARRY-THEIR-OWN-COPY-OF-THE-PALETTE` part 2.
+Nothing else blocks it.
+
+**If never fixed:** the appearance settings reach the desktop and stop at the
+window edge. Every application stays dark on a light desktop, which reads as
+each application being broken rather than the theme being unimplemented — the
+same misdiagnosis the shell entry describes, multiplied by ninety.
 ---
 
 ### B-THE-NATIVE-LIBC-AND-THE-LINUX-ABI-DISAGREE-ABOUT-WHAT-EXISTS, AND LIBC'S DOC COMMENTS EXPLAIN IT WITH A REASON THAT STOPPED BEING TRUE — 2026-08-21 — OPEN
@@ -50782,10 +51327,92 @@ about where input transformation belongs and should not be bundled in.
 **Trigger:** do this when `apps/settings` gains a compositor connection — the
 same moment `ReloadAppearance` gets its first real caller. Both are lane C's.
 
+**Update 2026-08-22 — the trigger is met, and the job is bigger than this entry
+said.** `apps/settings` now has a compositor connection and a real event loop,
+and `ReloadAppearance` has its first real caller (see
+`TD-NO-APP-CONNECTS-TO-THE-COMPOSITOR` and `design-decisions.md` §523). So the
+blocker named above is gone. Two corrections to this entry's own description
+turned up on checking it, and both make the remaining work larger:
+
+1. **There is no file.** This entry says the slider "changes a number in a file".
+   It does not. `gui/desktop/src/mouse_settings.rs` has **no persistence
+   whatsoever** — no save, no load, no path, no serialisation. It is an
+   in-memory struct with clamps. So the mouse settings do not survive a logout,
+   never mind reach the compositor. The appearance settings had
+   `appearance::AppearanceFile` to build on; this has nothing equivalent.
+2. **It is in the wrong crate for the panel that would edit it.**
+   `mouse_settings` lives in `gui/desktop` (the shell), and the settings
+   application is `apps/settings`. Nothing outside its own module references it
+   — the only two mentions in the tree are its `pub mod` line and a comment in
+   the compositor saying nothing wires it through. `apps/settings` has a
+   "Mouse & Pointer" *section*, but it is on the Accessibility page and holds
+   one toggle (Mouse Keys); there is no double-click-speed control in the
+   settings application at all.
+
+**So the proper fix is now four pieces, not one call:**
+
+- **(a) A shared `gui/inputsettings` crate**, the counterpart of `appearance` —
+  the struct, the YAML file, load/save, and the clamps, owned by neither the
+  shell nor the compositor. It must be a third crate for the same reason
+  `appearance` is: the shell, the compositor and the settings application all
+  need to read it, and any two of them depending on the third is a cycle waiting
+  to happen. Note that `gui/*` is globbed in the workspace manifest, so a new
+  crate there needs **no** edit to the workspace-root `Cargo.toml` — which lane
+  C may not touch. `gui/desktop`'s `mouse_settings` then becomes a re-export or
+  is deleted.
+- **(b) A `ReloadInput` control verb**, as this entry already recommended —
+  same shape as `ReloadAppearance` (no payload, no `link.resolve`), and the
+  reasoning against folding pointer behaviour into `AppearanceSettings` stands
+  unchanged.
+- **(c) A real mouse page in `apps/settings`** with the double-click-speed
+  control, writing (a) and notifying (b) — exactly the pattern §523 established
+  for appearance, including the "the change is in force before anyone is told"
+  rule and the dirty flag drained by the loop.
+- **(d) The compositor reads (a) on `ReloadInput`** and calls its existing
+  `set_double_click_ms`.
+
+Only double-click is in scope; the pointer-speed/acceleration question in
+"Scope beyond double-click" above is unchanged and still deferred.
+
 **If never fixed:** a slider that lies. The user moves it, the panel writes the
 file, and the double-click speed is whatever the compositor's constant says.
 Worse than an absent setting, because an absent one cannot be misread as tried
 and rejected.
+
+### Update 2026-08-22 — FIXED. All four pieces are in.
+
+| | What landed |
+|---|---|
+| **(a)** | `gui/inputsettings` — the model, the YAML format, load/save, the clamps. It also became the **single owner of the double-click numbers**: `MIN_DOUBLE_CLICK_MS`, `MAX_DOUBLE_CLICK_MS` and `DEFAULT_DOUBLE_CLICK_MS` are `pub` there, and the compositor's private copies were deleted. |
+| **(b)** | `RequestBody::ReloadInput`, tag `0x14`, no payload — a second verb, as this entry recommended. `oswindow` exposes it as `EventLoop::input_changed`. |
+| **(c)** | A Mouse page in `apps/settings`, between Sound and Notifications, with the double-click slider. It saves `input.yaml` and notifies (b). |
+| **(d)** | `Compositor::reload_input` re-reads the file and applies the double-click window. |
+
+Rationale for the three judgement calls — who owns the range, why `ReloadInput`
+is its own verb rather than a payload or a shared one, and why the page shows
+one control — is `design-decisions.md` §524.
+
+**One correction to this entry's own "Where" table:** it said the two clamp
+ranges "were deliberately made to match". They did match, but nothing enforced
+it — three processes each held a private copy and any one could have moved
+without a single test failing. That is now impossible by construction rather
+than by care: `SliderId::DoubleClickMs::range()`, `MouseConfig::set_double_click_ms`
+and `Compositor::set_double_click_ms` all read the same three constants.
+
+**Still deferred, unchanged:** pointer speed, acceleration, button mapping,
+scroll direction and cursor size. The compositor reads them and drops them on
+purpose — it has no local input source to apply them to
+(`TD-COMPOSITOR-HAS-NO-LOCAL-INPUT`) — and the Mouse page deliberately draws no
+control for them, because a control that saves a value nothing applies is the
+same defect this entry was filed about. Each gets its slider in the commit that
+gives it a consumer.
+
+**Verification.** 21 reintroduction proofs across the four pieces —
+`scripts/reintro-mouse-page.py` (11) and `scripts/reintro-reload-input.py` (10)
+— each reintroducing one defect and confirming the suite goes red and names it
+back, restoring by byte snapshot verified with SHA-256. Workspace gate green
+(46,443 passed) apart from lane B's `posix`, filed separately as
+`B-POSIX-HSEARCH-TESTS-RACE-ONE-GLOBAL-TABLE-AND-SEGFAULT`.
 
 ## B-SSHD-EXEC-REPLIED-WITH-THE-COMMAND-INSTEAD-OF-RUNNING-IT — 2026-08-21 — FIXED
 
@@ -53990,7 +54617,48 @@ in sort order. `split-diff.sh` had no case that reached it yet; it was fixed
 anyway rather than left as a trap.
 
 
-## BUG-SPAWNED-CHILDREN-INHERIT-NO-CAPABILITIES — a ring-3 process cannot spawn a child that can open a file (lane B found; lane A owns the fix)
+## [FIXED 2026-08-22] BUG-SPAWNED-CHILDREN-INHERIT-NO-CAPABILITIES — a ring-3 process cannot spawn a child that can open a file (lane B found; fixed by lane A)
+
+**FIXED 2026-08-22 by lane A.** Option 1, as lane B recommended: `spawn_process`
+Step 5 now calls the new `pcb::inherit_caps_from(parent, child)`, which clones
+the parent's valid capability entries into the child before applying
+`options.capabilities` on top. In-kernel callers pass `parent: 0` and are
+unaffected — PID 0 is the kernel sentinel, holds implicit authority and has no
+table, so it grants nothing.
+
+**On the security question you flagged.** It is real but it resolves cleanly,
+and the argument is worth recording because it is what made this a one-way door
+rather than a judgment call: the restriction bought nothing even before the
+change. Any process that can call `spawn` can equally call `fork` + `execve`,
+which clones the table in full. So "spawn grants nothing" denied an attacker not
+one capability; it only broke the honest caller, and pushed callers toward the
+path that inherits *everything* with no option to narrow. A boundary one syscall
+away from being bypassed is not a boundary.
+
+**Option 3 is still wanted and is now the only gap.** A spawned child gets the
+parent's entire table with no way to hand over a subset, which is exactly how
+you would want to drop authority before running untrusted code. That needs an
+ABI field on `SpawnExArgs` to name the subset to keep — `SpawnExArgs` has twelve
+fields and not one is a capability array, which is the root reason userspace
+could not express this in the first place. Logged in `todo.txt`; when it lands,
+inheritance stays the default (POSIX requires `posix_spawn` to be fork-
+equivalent) and the field narrows rather than replaces.
+
+**Tests.** `test_spawn_inherits_parent_capabilities` in `kernel/src/proc/spawn.rs`
+is the small in-kernel test you asked for. Its two halves fail independently:
+half 1 grants a marker `File` capability to a stand-in parent, spawns a child,
+and asserts the child holds it *with both rights intact* (a capability narrowed
+to no rights would still be present and still fail every gate that reads it);
+half 2 asserts a kernel-spawned process (`parent: 0`) holds exactly zero, since
+"inherit more" and "inherit less" are independent mistakes and a test that
+checks one direction licenses the other. The integration proof is the rung that
+found it — `real make` and `make-drives-tcc` in the boot test.
+
+Reasoning recorded in design-decisions.md §278. Thanks for filing this as a
+report with the three options laid out rather than patching it — the
+discriminator table (which creation path, which result) is what made the cause
+findable, and the recommendation was right.
+
 
 **In short:** When a program already running on SlateOS starts another program,
 the new program is given *no permission to open any file at all*. It can be
@@ -54104,14 +54772,24 @@ it: `self_test_linux_real_glibc_make` must go green, and a smaller in-kernel
 test should assert directly that a child of `SYS_PROCESS_SPAWN` holds a `File`
 capability.
 
-### Until it is fixed
+### What it cost while it was open, and the one thing to take from it
 
-Two boot self-tests are red on every branch (`real make`, `make-drives-tcc`),
-so the whole boot test scores `SELFTEST_FAIL` and cannot be used as a
-pass/fail gate — you have to read the failure list and compare it against the
-known three. That is the actual cost: a red suite that everyone learns to
-ignore. It does not block lane B's userland work, and it is not a regression
-from any recent lane-B change (see the timeline note below).
+Two boot self-tests were red on every branch (`real make`, `make-drives-tcc`),
+so the whole boot test scored `SELFTEST_FAIL` and could not be used as a
+pass/fail gate: you had to read the failure list and compare it against the
+known three. That is the real cost of a bug like this — not the broken
+feature, but a red suite that everyone learns to skim. Boot cycle 12
+(`c58efa00d`) is the first `BOOT_OK` with both rungs green, so the gate works
+again.
+
+The lesson worth keeping is not about capabilities. It is that **when one
+operation has two implementations, the invariant is that they agree, and
+nothing in the type system checks it.** `fork_create` and `spawn_process` both
+create a process; each was individually documented, individually correct-
+looking, and neither doc mentioned the other. The divergence was invisible
+until a program exercised both paths in one run and only one of them worked.
+Wherever a second constructor for an existing kind of object gets added, the
+question to ask is which invariants of the first one it silently opted out of.
 
 
 ## BUG-FASTPY-MINISHELL-EXITS-0-WITHOUT-FORKING (lane B)
@@ -56561,6 +57239,280 @@ full diagnosis. Distinct from the resolved
 `B-FTPD-SSHD-AUTH-TESTS-SHARE-TEMP-FILES-AND-FLAKE` — that was shared temp
 files and lane B's `ScratchDir` fix holds; this is wall-clock timing.
 
+## B-VIRTIO-GPU-FLAT-SCANOUT-WILD-WRITE (lane A, 2026-08-21) — FIXED 2026-08-21
+
+**In short:** the virtio-gpu display driver stores the screen's pixels in 250
+separate 16 KiB chunks scattered around RAM, but the code that copied a picture
+onto the screen assumed those chunks were one continuous 4 MiB block. So it
+wrote the first 16 KiB into the screen and the remaining ~4 MiB straight over
+whatever else the kernel happened to have put next in memory. It is fixed, and
+it is very likely the cause of the intermittent heap corruption that has been
+chased since July under the name **B-KNULLJUMP**.
+
+### What was wrong
+
+`virtio::gpu` builds the scanout out of frames taken one at a time from the
+buddy allocator:
+
+```rust
+let frames_needed = fb_bytes.div_ceil(FRAME_SIZE);
+for i in 0..frames_needed {
+    let f = frame::alloc_frame()?;   // <- unrelated frames, in allocation order
+    fb_frames.push(f);
+}
+```
+
+There is no contiguity request anywhere in that loop, so `fb_frames` is a list
+of 250 physically unrelated frames at 1280×800.
+
+`framebuffer_addr()` returned `fb_frames.first()?.addr() + hhdm` — the base of
+**one** of those frames — and both blit paths in `kernel/src/drm/driver.rs`
+then did flat-buffer arithmetic on it:
+
+```rust
+let dst_base = crate::virtio::gpu::framebuffer_addr()?;   // first frame only
+let dst_row  = dst_base + (row * dst_pitch) as u64;       // rows 0..800
+copy_nonoverlapping(src_virt as *const u8, dst_row as *mut u8, to_copy);
+```
+
+Rows 0–3 land in the framebuffer. Rows 4–799 land in the ~4 MiB of physical
+memory that follows the first frame, which is other GEM frames, kernel heap
+slabs, page-cache pages — whatever the allocator placed there.
+
+`VirtioGpuBackend::flush_region` had the identical defect, plus two of its own:
+`copy_w_bytes` was never clamped to the destination's right edge, and a source
+row crossing a GEM frame boundary silently lost its tail (`page_flip` handled
+exactly *one* such crossing, which is enough only while a row is ≤ 16 KiB).
+
+`set_pixel` in the same file has always done it correctly —
+`frame_idx = offset / FRAME_SIZE`, then `fb_frames.get(frame_idx)` — so the
+right idiom was sitting twenty lines below the accessor that made the wrong one
+easy.
+
+### How it was found, and why it stayed hidden
+
+Nothing at boot ever called `VirtioGpuBackend::page_flip`. The kernel console
+draws through `set_pixel`, which is correct; the compositor's path had not run
+by the time the DRM self-test does. The `SETCRTC`/`page_flip` self-test added
+on 2026-08-21 (`drm::self_test` item 11) performs a *real* mode-set and a real
+full-surface flip on the primary display — making it the first full-surface
+virtio-gpu blit in the boot — and the boot then panicked, deterministically,
+about 300 serial lines later:
+
+```
+panicked at alloc/src/collections/btree/navigate.rs:231:55:
+unsafe precondition(s) violated: hint::unreachable_unchecked must never be reached
+  kmain -> kernel_main -> oom::self_test -> oom::handle_oom
+        -> mm::pressure::notify -> mm::page_cache::shrink
+        -> BTreeMap Iter::next -> next_unchecked -> init_front
+```
+
+`navigate.rs:231` is the `LazyLeafHandle::Root(_) => unreachable_unchecked()`
+arm of `init_front`: reaching it means the page-cache `BTreeMap`'s own nodes no
+longer agree with each other. That is a corrupted heap, and the ~4 MiB of pixel
+data sprayed over it a moment earlier is where it came from.
+
+Two properties made the diagnosis solid rather than plausible:
+
+* **It was deterministic across two different binaries.** Two builds that
+  differed by an unrelated fix panicked at the same serial line (39337/39338)
+  and the identical relative stack offset. Layout luck does not do that.
+* **Gating item 11 off — and changing nothing else — made the boot green.**
+  `[oom] Self-test PASSED`, `BOOT_OK`. That is what turned "my change is
+  implicated" into "this code path is the trigger".
+
+### The fix
+
+The accessor was the trap, so the accessor is what went away. Patching the two
+callers would have left the next one to make the same mistake — and two of the
+three existing callers already had.
+
+* `framebuffer_addr()` → **`first_frame_addr()`**, documented as "only the
+  first `FRAME_SIZE` bytes belong to the framebuffer", kept solely for a
+  bounded read inside frame 0 and for printing an address to a human.
+* New **`with_scanout(|sc| …)`** lends a `ScanoutMem` view under the device
+  lock. Its `write_at(dst_offset, src, len)` walks `fb_frames`, splits the copy
+  at every frame boundary, and **clamps to the end of the buffer** — bytes past
+  the end are discarded, so a caller with wrong arithmetic now draws a wrong
+  picture instead of corrupting the kernel. It returns the byte count actually
+  written, which is what the regression test asserts on.
+* New `blit_run()` in `drm/driver.rs` walks the *source* GEM frame list in the
+  same general way, so neither side is assumed flat and a row may cross any
+  number of boundaries on either.
+* `flush_region` additionally clamps the run to the right edge of both
+  surfaces.
+* `kshell`'s `gpu status` now prints the frame *count* alongside the first
+  frame's address, because printing one bare base address is what invited the
+  arithmetic in the first place.
+
+### Regression test
+
+`virtio::gpu::self_test` now writes a marker through `write_at` at the offset
+of the **last** pixel and reads it back with `read_pixel`'s frame walk. Under
+the old flat-buffer arithmetic those four bytes would land ~4 MiB past frame 0,
+in someone else's memory, and the read-back would find zeros. It also asserts
+that a `write_at` starting at `sc.len()` writes **0** bytes.
+
+### Relationship to B-KNULLJUMP
+
+Not proven identical, and this entry does not close B-KNULLJUMP. But
+B-KNULLJUMP is an intermittent, hard-to-reproduce corruption of kernel heap
+structures, and this is a multi-megabyte wild write in the display path that
+fires whenever a full-surface virtio-gpu flip happens — which is exactly the
+compositor's steady state. Anyone re-opening B-KNULLJUMP should first check
+whether it still reproduces on a tree containing this fix.
+
+### Direct confirmation (2026-08-22): caught in the act, one frame past the end
+
+A KASAN-instrumented boot of the **pre-fix** kernel was left running as
+independent evidence. It did not need to produce a KASAN report — it produced
+something better, a hardware page fault at the exact instruction, with
+arithmetic that admits only one explanation:
+
+```
+[drm]   Cursor operations: OK
+EXCEPTION: Page Fault (#PF) at 0xffffffff824b96a3, address=0xffff80007feb0000, error=0x2
+  Cause: not-present, write, kernel
+  bytes @RIP (16): [f3, 48, a5, 83, e2, 07, 48, 89, d1, f3, a4, c3, ...]
+```
+
+Four facts, each independently checkable from the log:
+
+1. **The faulting instruction is `memcpy`.** `f3 48 a5` is `rep movsq`, and the
+   bytes that follow (`and edx,7` / `mov rcx,rdx` / `rep movsb` / `ret`) are the
+   tail of a bulk copy. Nothing else in the kernel has that byte sequence.
+2. **The destination was a single 16 KiB frame, and the fault is exactly one
+   frame past its base.** `0xffff80007feac000` appears four times in the stack
+   scan; the fault address is `0xffff80007feb0000`. The difference is `0x4000`
+   — `FRAME_SIZE`, to the byte. The copy walked to the end of one frame and
+   took one step more.
+3. **That step left mapped RAM.** The boot memory map in the same log reads
+   `[0x007fe46000 - 0x007feb0000] usable` — the usable region ends at
+   `0x7feb0000`, the faulting physical address, with a reserved hole before the
+   next region at `0x7feb6000`. The frame at `0x7feac000` is the *last* frame
+   of its region, so the flat arithmetic's first step past it had nowhere to
+   land.
+4. **It happened in the DRM path.** The line immediately before is
+   `[drm]   Cursor operations: OK`.
+
+This is the same bug as the `BTreeMap` panic that started the hunt, seen under
+a different heap layout. KASAN's shadow shifts every allocation, so on this
+boot the frame that `framebuffer_addr()` returned happened to be the last one
+in its region and the overrun hit an unmapped hole immediately; on the
+uninstrumented boot it landed in live page-cache structures and corrupted them
+silently, surfacing thousands of lines later inside `BTreeMap`. Same wild
+write, two symptoms — which is exactly why it was intermittent.
+
+Worth keeping as a diagnostic lesson: **a page fault whose address is a round
+multiple of `FRAME_SIZE` above a value on the stack is an overrun of a single
+frame, and the memory map says whether that frame was the last one in its
+region.** That triangulation took minutes; the symptom-chasing before it took
+days.
+
+## TD-A-SYMBOLIZE-PY-RESOLVES-CODE-ADDRESSES-TO-DATA-SYMBOLS (lane A, 2026-08-21) — OPEN
+
+**In short:** `scripts/symbolize.py` is the tool for turning the hex addresses
+in a kernel panic back into function names. Given a valid return address it
+sometimes answers with the name of a *variable* instead of a function — e.g.
+`kernel::KERNEL_BOOT_STACK+0xcc323 [b]` for an address that is plainly inside
+`.text`. The answer is confidently wrong rather than absent, which is worse: it
+sends whoever is reading a crash down the wrong subsystem.
+
+**Where:** `scripts/symbolize.py`. Observed while symbolizing the panic in
+`B-VIRTIO-GPU-FLAT-SCANOUT-WILD-WRITE` against the matching unstripped ELF.
+Two of thirteen frames came back as `.bss`/`.rodata` symbols
+(`KERNEL_BOOT_STACK`, `font::FONT_DATA`) with offsets in the hundreds of KiB.
+
+**Cause:** it appears to take the nearest preceding symbol of *any* type rather
+than filtering to `t`/`T` (text). A `.bss` object that happens to sit at a
+lower address than the queried text address then wins the nearest-preceding
+search.
+
+**Proper fix:** filter the symbol table to `t`/`T` before the bisect, and
+reject a hit whose offset lies past the symbol's recorded size (`llvm-nm
+--print-size` provides it) rather than reporting it anyway. Printing
+`?? (no symbol covers this address)` is a correct answer; naming a variable is
+not. A ~40-line replacement doing exactly this was written ad hoc during the
+diagnosis above and produced a coherent 13-frame stack where `symbolize.py` did
+not; it was deleted as scratch rather than left as a second tool, because the
+right outcome is one working symbolizer.
+
+**Also worth knowing:** `llvm-symbolizer` is **not** present in the
+`nightly-x86_64-pc-windows-gnu` toolchain's `bin/`, so the obvious fallback is
+not available. And `awk`'s `strtonum` silently yields nothing for 64-bit kernel
+addresses (they exceed double precision) — use Python for any address
+arithmetic in these scripts.
+
+## TD-A-QUARANTINE-SELF-TEST-PRINTS-AN-INDISTINGUISHABLE-CORRUPTION-REPORT (lane A, 2026-08-21) — OPEN
+
+**In short:** the memory-corruption detector runs a self-test at boot that
+deliberately corrupts its own scratch buffer to prove the detector works. The
+report it prints when it finds that deliberate corruption is worded and
+formatted exactly like a real one — `*** CORRUPTION ***` with an address — so
+anyone grepping a serial log for corruption finds a false positive every boot.
+
+**Where:** `kernel/src/mm/quarantine.rs`, the self-test path. Cost about an
+hour during the `B-VIRTIO-GPU-FLAT-SCANOUT-WILD-WRITE` diagnosis: the reported
+slot was inside `KERNEL_BOOT_STACK`, which looked like the allocator had handed
+out a slot inside the live boot stack — a spectacular bug, and not a real one.
+The giveaway is only in the surrounding lines (`scan_all (corrupted): OK (1
+found)` before it, `Self-test PASSED` after).
+
+**Proper fix:** the self-test should pass a flag that makes the report print
+under a distinct, obviously-synthetic prefix — `[quarantine] (self-test)
+expected corruption at …` — so the real string `*** CORRUPTION ***` appears in
+a log only when something is actually wrong. A log line that means two
+different things is not a diagnostic.
+
+---
+
+## B-LIMINE-FLUSH-REGION-UNCLAMPED-WIDTH (lane A, 2026-08-22) — FIXED 2026-08-22
+
+**What it was:** `LimineBackend::flush_region` in `kernel/src/drm/driver.rs`
+clamped the rectangle's `x`, `y` and `h` against both the source framebuffer
+and the display, and did not clamp `w` at all. `copy_w_bytes` came straight
+from the caller as `w * bpp`. A client that asked to flush a rectangle wider
+than the display therefore wrote past the right edge of every row — harmlessly
+into the next row for rows above the last, and past the end of the firmware
+framebuffer entirely on the last one.
+
+Found while auditing all three DRM backends for the bug class behind
+`B-VIRTIO-GPU-FLAT-SCANOUT-WILD-WRITE`. It is a different bug with the same
+shape: an unbounded destination write derived from caller-supplied geometry.
+
+**Why it was never observed:** the compositor is the only in-tree caller and it
+derives damage rectangles from the surface it is drawing, so `w` was always
+within the display. The bug needed a client that got its own geometry wrong —
+which is precisely the client a kernel must not trust.
+
+**Second, quieter bug in the same two functions:** both Limine paths advanced
+into the GEM object's frame list once per row and copied
+`min(row_bytes, FRAME_SIZE - frame_offset)`, i.e. they handled at most one
+source frame crossing per row. A row wider than one 16 KiB frame — 4096 px at
+32bpp — crosses two or more, and every crossing past the first was dropped.
+Not a memory-safety bug (it copies less, never more), but at 5K and above the
+right of every row would have stayed stale, which is the kind of artifact that
+gets blamed on the compositor.
+
+**Fix:** `blit_run_flat`, the flat-destination counterpart to `blit_run`. It
+walks the source frame list generally, once per boundary, and truncates the run
+against `dst_len` before copying anything. Both Limine paths use it;
+`flush_region` additionally clamps `w` against
+`min(fb.width, self.width) - x_start`. Commit `b050e0bd5`.
+
+**Why it discards rather than errors:** same reasoning as
+`design-decisions.md` §271 — an over-wide rectangle now yields a visibly
+clipped picture, which gets reported as a display bug, rather than corruption
+in whatever the firmware mapped after the framebuffer, which gets blamed on a
+subsystem three layers away.
+
+**Backend audit result, for the record:**
+
+| Backend | Destination | Verdict |
+|---|---|---|
+| virtio-gpu | 250 discontiguous 16 KiB frames | was wrong on both sides — `B-VIRTIO-GPU-FLAT-SCANOUT-WILD-WRITE` |
+| Limine | genuinely linear firmware aperture | destination safe; unclamped width + dropped source crossings — this entry |
+| ATI | zero-copy VRAM, no blit at all | clean |
 
 ---
 
@@ -56925,3 +57877,963 @@ coverage rather than a regression test — no marker made it fail. Full table in
    compositor (§519), so the shell throws the stepped rectangles away and those
    two are for callers that render the result themselves.
 
+
+## TD-C-A-TEST-BINARY-CAN-BE-BROKEN-WITHOUT-ANYONE-NOTICING (lane C, 2026-08-22)
+
+**What.** A crate whose test binary fails to *compile* reports no test
+failures. It reports nothing at all — no `test result` line — and in a filtered
+build log that is indistinguishable from a crate with no problems. Because the
+per-task gate on this lane has usually been `cargo test -p <the crate I edited>`,
+a change in one crate can break a *sibling* crate's tests and nobody finds out
+until something else happens to build the workspace.
+
+**It already happened, and it lasted a day.** `apps/editor`'s
+`mod against_the_real_compositor` — the four tests that put the shipped editor
+on one end of a real socket and the shipped compositor on the other, i.e. the
+most valuable tests in that crate — **had not compiled since commit
+`7d1667856` (2026-08-21, the frame clock, `design-decisions.md` §521)**. That
+change moved `set_wait_timeout` from an inherent method on
+`guiremote::socket::Socket` onto the `Transport` trait, so every transport could
+park with a deadline. `apps/editor`'s test module calls it and does not
+otherwise name the trait, so it stopped resolving:
+
+```
+error[E0599]: no method named `set_wait_timeout` found for struct
+              `guiremote::socket::Socket` in the current scope
+```
+
+§521's own gate was `cargo test -p oswindow -p guiremote -p desktop`, which is a
+perfectly reasonable-looking set, and `apps/editor` is not in it. It was found
+on 2026-08-22 only because the Settings event-loop task happened to run
+`cargo test --workspace` at the end.
+
+**The one-line fix is in** (`use oswindow::ConnectionTransport as _;` in
+`apps/editor/src/main.rs`, with a comment pointing here). This entry is about
+the *process hole*, which is still open.
+
+**Why it is worse than an ordinary silent failure.** A test that fails is loud.
+A test that does not exist is at least visibly absent from the count. A test
+binary that does not compile *claims nothing* — and the crates most likely to
+break this way are exactly the ones whose tests reach across crate boundaries,
+which is to say the integration tests that are the whole reason
+`TD-NO-APP-CONNECTS-TO-THE-COMPOSITOR` was worth closing. The tests that
+protect the seams are the tests most exposed to a change on the other side of a
+seam.
+
+**Reproducing it.** Delete the `use oswindow::ConnectionTransport as _;` line
+from `apps/editor/src/main.rs`, then run
+`cargo test -p oswindow -p guiremote -p desktop --target x86_64-pc-windows-gnu`.
+It is green. `cargo test --workspace` is not.
+
+**The proper fix**, in the order the cost forces:
+
+1. **Make the workspace the gate, not the crate.** Done as practice from
+   2026-08-22: `cargo test --workspace --target x86_64-pc-windows-gnu` before
+   any commit that touches a crate other crates depend on — which, for anything
+   in `gui/`, is all of them. It costs a few minutes and it is the only check
+   that actually covers this.
+   **Use `--no-fail-fast`.** Found the same day, and it is the second half of
+   the same hazard: `cargo test --workspace` stops at the *first* failing test
+   binary, so every crate scheduled after it is never run and reports nothing —
+   which reads, once again, exactly like "no problems". A flaky test in
+   `userspace/polkit` aborted the run before `apps/settings` was reached; the
+   re-run with `--no-fail-fast` then found two *more* flaky tests, in
+   `userspace/ftpd` and `posix`, that the first run had never got far enough to
+   reach. All three are lane B's and are filed as
+   `requests/c-b-three-flaky-tests-fail-the-workspace-gate.md`. A gate that can
+   be silenced by an unrelated crate's unrelated failure is not a gate.
+2. **Do not filter a build log in a way that can hide a compile error.**
+   Grepping for `test result|FAILED` is exactly the filter that made this
+   invisible, because a crate that did not build produces neither. Any filter
+   must include `^error` and the runner's exit status must be checked; a
+   `test result` tally with no `error` line and a zero exit is the only green.
+3. **A `cargo check --workspace --all-targets` in CI** would catch it in a
+   fraction of the time of a full test run, since it is a compile problem and
+   not a behavioural one. There is no CI on this project yet; when there is,
+   this is the cheapest possible guard and should be the first job.
+
+**Severity.** Medium, and it is a *meta*-defect: it does not itself break
+anything a user can see, it removes the evidence that something else did. The
+specific instance is closed; the hole that let it persist for a day is only
+closed by (1) being kept up, which is a habit rather than a mechanism until (3)
+exists.
+
+**Where.** Not a location in the code — a property of how this lane runs its
+gate. The instance was `apps/editor/src/main.rs`'s
+`mod against_the_real_compositor`; the cause was `gui/remote/src/client.rs:143`
+(`Transport::set_wait_timeout`).
+
+## B-POLKIT-FAILLOCK-TEST-RACES-ITS-OWN-ONE-SECOND-DELAY (found by lane C, 2026-08-22 — lane B's crates)
+
+**In short:** One test in `userspace/polkit` earns a rate-limit delay of exactly
+one second and then does a deliberately-slow password hash inside that second
+before checking the delay is still in force. On a busy machine the hash outlasts
+the delay and the test fails. It passes every time when run alone.
+
+**Where.** `userspace/polkit/src/main.rs:1806`,
+`tests::polkit_honours_a_delay_earned_at_another_prompt`. The delay arithmetic is
+`authlib::delay_for` (`userspace/authlib/src/lib.rs:413`) and the clock is
+`wall_clock_secs` (`:429`), both lane B's.
+
+**Why one second.** The test's loop is
+`while elsewhere.rate_limited("alice").is_none() { elsewhere.note_failure("alice") }`,
+which stops at the *first* iteration that produces a delay — `FREE_ATTEMPTS + 1`
+failures, so `delay_for` computes `1 << 0` = 1 s. The clock has whole-second
+granularity, so the real window is 0–1 s depending on where in the current second
+the loop landed. `admin_with_password` → `set_password_with_salt` then runs a real
+KDF inside it.
+
+**How it was found, and why it mattered to lane C.** `cargo test --workspace`
+stops at the first failing binary, so this failure meant `apps/settings` — the
+crate under test in the task that ran the gate — was never run at all. See
+`TD-C-A-TEST-BINARY-CAN-BE-BROKEN-WITHOUT-ANYONE-NOTICING`; this is a second,
+independent way for a workspace gate to report nothing and look green-ish.
+
+**The same bug is in `ftpd`.** `ftpd::tests::repeated_guesses_are_rate_limited`
+(`userspace/ftpd/src/main.rs:3230`) writes the same count out longhand —
+`for _ in 0..=authlib::FREE_ATTEMPTS` — and so also earns exactly one second,
+then spends it on `FREE_ATTEMPTS + 1` real shadow verifications before asserting
+the limit is still in force. It failed on the run where `polkit` passed, which is
+how the family was identified rather than the instance.
+
+**Filed to the owning lane** as
+`requests/c-b-three-flaky-tests-fail-the-workspace-gate.md`, with three suggested
+fixes — the right one being to inject a frozen clock, since the property under
+test in both crates ("a delay earned at another prompt is honoured here", "the
+limit is daemon-wide and survives reconnecting") has nothing to do with wall
+time. Lane C has not touched either file.
+
+**Also noted there, not the cause:** the test's scratch directory is a *fixed*
+path, `temp_dir()/polkit-faillock-share-test`, which it opens by deleting. Two
+concurrent `polkit` runs would delete each other's fixture mid-test.
+
+**Workaround until fixed:** run the gate as
+`cargo test --workspace --no-fail-fast --target x86_64-pc-windows-gnu`.
+
+## B-TWO-POSIX-TDESTROY-TESTS-SHARE-ONE-COUNTER (found by lane C, 2026-08-22 — lane B's crate)
+
+**In short:** Two tests in `posix/src/search.rs` reset and read the same
+process-wide counter, and `cargo test` runs them on different threads at the
+same time. When one's reset lands in the middle of the other's measurement, the
+other reads zero and fails. Nothing is wrong with `tdestroy`.
+
+**Where.** `posix/src/search.rs:919` declares
+`static DESTROY_COUNT: AtomicI32`; `test_tdestroy_empty` (`:929`) and
+`test_tdestroy_calls_free_fn` (`:944`) both `store(0)` into it and both read it.
+
+**The observed failure is exactly the predicted interleaving:**
+
+```
+thread 'search::tests::test_tdestroy_calls_free_fn' panicked at posix\src\search.rs:946:9:
+assertion `left == right` failed: tdestroy should call free_fn for each node
+  left: 0
+ right: 5
+```
+
+`left: 0` is what you get when `test_tdestroy_empty`'s `store(0)` lands *after*
+the five `fetch_add`s and before the `load`.
+
+**Fix.** One static and one `extern "C"` callback per test — two lines, no
+synchronisation and no ordering assumption. A `Mutex` around both would also
+work and is worse, because it makes each test depend on its relationship to the
+other, which is the thing that just bit. `test_tdestroy_empty` in fact needs no
+counter at all: it asserts *no* calls, so a callback that panics on entry is a
+stronger assertion.
+
+**Filed to the owning lane** in
+`requests/c-b-three-flaky-tests-fail-the-workspace-gate.md`. Lane C has not
+touched the file.
+
+**How it was found.** The same `cargo test --workspace --no-fail-fast` run that
+turned up the `ftpd` half of
+`B-POLKIT-FAILLOCK-TEST-RACES-ITS-OWN-ONE-SECOND-DELAY`. Two consecutive full
+runs failed on *different* subsets of the three, which is what identified all of
+them as load-sensitive races rather than regressions.
+
+## B-POSIX-HSEARCH-TESTS-RACE-ONE-GLOBAL-TABLE-AND-SEGFAULT (found by lane C, 2026-08-22 — lane B's crate)
+
+**In short:** Seven tests in `posix/src/search.rs` all drive one process-wide
+hash table at the same time, on different threads. One test frees the table
+while another is reading it, so the reader dereferences freed memory and the
+whole test process dies. Because it dies rather than failing, all 20,500 test
+results in that binary are lost, not just the one.
+
+**Where.** `posix/src/search.rs:370` — `static mut HTAB: HashTable`. `hcreate`
+(`:465`) allocates `HTAB.buckets`, `hdestroy` (`:495`) frees it and nulls the
+pointer, `hsearch` (`:513`) checks it for null and then dereferences it at
+`:520`. Those last two are not one atomic step. The seven concurrent tests are
+`test_hcreate_basic` (`:1042`), `test_hdestroy_no_table` (`:1053`),
+`test_hsearch_no_table` (`:1059`), `test_hsearch_enter_and_find` (`:1071`),
+`test_hsearch_find_nonexistent` (`:1104`), `test_hsearch_enter_multiple`
+(`:1121`) and `test_hsearch_enter_duplicate_returns_existing` (`:1159`).
+
+**Observed:**
+
+```
+error: test failed, to rerun pass `-p posix --lib`
+Caused by:
+  process didn't exit successfully: ...\deps\posix-9b221ba97ec3f918.exe
+  (exit code: 0xc0000005, STATUS_ACCESS_VIOLATION)
+```
+
+The last test to print before the process died was `search::tests::test_fnv1a_empty`.
+
+**Why this matters more than its sibling above.** A panicking test costs one
+result; a segfault costs the whole binary. `cargo test` reports the crate as
+failed and can say nothing about the other 20,499 tests, so a green-looking
+workspace run and a crashed one are equally uninformative about `posix`.
+
+**Ruled out.** Not the truncated-artifact phantom described under *"A full disk
+does not fail the build — it corrupts it silently"*: D: had 218 GB free and the
+binary had been relinked the same day. Three isolated reruns of `-p posix --lib`
+gave one `test_tdestroy_calls_free_fn` failure and two clean passes, which is
+the signature of a load-sensitive race.
+
+**Fix.** A `static HTAB_LOCK: Mutex<()>` in the test module, held for the whole
+body of each of the seven tests — taken before `hcreate` and held past
+`hdestroy`, so no test can observe a half-built or half-freed table. Use
+`lock().unwrap_or_else(PoisonError::into_inner)` so one panicking test does not
+cascade into six poisoned-lock failures.
+
+Note this is deliberately the *opposite* prescription from
+`B-TWO-POSIX-TDESTROY-TESTS-SHARE-ONE-COUNTER` directly above, and the
+difference is the point: those counters are *incidentally* shared and should
+simply stop being shared, whereas `HTAB` is *deliberately* shared because the
+POSIX `hsearch` API it implements genuinely has one table per process. You
+cannot give each test its own, so the only thing left to fix is the concurrency.
+
+**Also worth doing in the same pass.** `WALK_COUNT` (`:867`) has the same shape
+and exposure as `DESTROY_COUNT` — `test_twalk_multiple` (`:900`) resets and
+reads it, and any sibling `twalk` test that does the same will race it. It has
+not been seen to fail yet.
+
+**Filed to the owning lane** as item 4 of
+`requests/c-b-three-flaky-tests-fail-the-workspace-gate.md`. Lane C has not
+touched the file.
+
+## TD-C-A-ZONE-BUILD-FAILS-UNLESS-YOU-KNOW-TO-SAY-NIGHTLY (lane C, 2026-08-22)
+
+**In short:** Every zone's `.cargo/config.toml` tells you to build by running
+`cargo build` from inside the zone directory. Do exactly that and you get
+`error: `.json` target specs require -Zjson-target-spec` — a message naming a
+flag that, per `CLAUDE.md`, you are specifically told *not* to pass. The missing
+word is `+nightly`. Nothing is misconfigured; the instructions are incomplete.
+
+**Reproduce** (any zone — checked in `apps/`, `gui/` and `userspace/`):
+
+```
+cd gui/window && cargo build -p oswindow
+error: `.json` target specs require -Zjson-target-spec
+
+cd gui/window && cargo +nightly build -p oswindow
+    Finished `dev` profile ... in 5.38s
+```
+
+**Why.** The workspace-root `.cargo/config.toml` sets
+`[unstable] json-target-spec = true` (`:54`), which is what makes
+`build.target = "../toolchain/x86_64-slateos.json"` in each zone config legal.
+But **cargo on a stable toolchain ignores the entire `[unstable]` table**, without
+warning. The default toolchain in this checkout is
+`stable-x86_64-pc-windows-gnu`, so `json-target-spec` never takes effect and the
+`.json` spec is rejected. `build-std` in the same table is silently dropped for
+the same reason — the `.json` error just happens to fire first.
+
+**Why the error message is actively misleading.** It says the spec "requires
+-Zjson-target-spec", so the obvious next move is to pass `-Zjson-target-spec` on
+the command line. `CLAUDE.md` line 41 says in as many words that this is *not*
+how it is set ("NOT via env var or CLI flag"). Both statements are true and
+neither mentions the toolchain, so the reader is left with a contradiction and no
+route out. The route out is one word.
+
+**What was fixed.** The header comments of `apps/.cargo/config.toml` and
+`gui/.cargo/config.toml` — the two zones lane C owns — now state the `+nightly`
+requirement, quote the exact error, and say plainly that the fix is not a `-Z`
+flag. `gui/`'s header also said *"Zone config for apps/"*, copied verbatim from
+`apps/`, and now names its own zone.
+
+**Still open, and why lane C did not do it:**
+
+- `userspace/.cargo/config.toml`, `net/.cargo/config.toml` and
+  `init/.cargo/config.toml` carry the identical incomplete header. Those are
+  lanes A and B's trees.
+- `CLAUDE.md` line 41 should gain "and only on a nightly toolchain", and the
+  `build-slateos` alias comment at `.cargo/config.toml:62` already shows
+  `cargo +nightly build-slateos` in its example but does not say why the
+  `+nightly` is load-bearing. `CLAUDE.md` may only be edited on an explicit
+  operator instruction, and the workspace-root `.cargo/` is not lane C's.
+
+**Alternative fix not taken:** adding `json-target-spec = true` to each zone
+config would not help — it is the *toolchain*, not the config location, that
+ignores it. A `rust-toolchain.toml` pinning nightly at the workspace root
+**would** fix it properly and for every zone at once, and is the right answer if
+the operator wants one; it is a workspace-root file and a decision with
+consequences for every lane, so it is not lane C's to make unilaterally.
+
+**Severity.** Low as a defect — nothing is broken and the workaround is one
+word — but it costs every newcomer (human or session) the same ten minutes, and
+it cost this one, which is why it is written down rather than remembered.
+
+---
+
+## B-A-EVDEV-SYN-DROPPED-ARRIVES-ONE-RECORD-LATE (lane A, 2026-08-22) — FIXED 2026-08-22
+
+**In short:** when a program reading the keyboard or mouse falls so far behind
+that the kernel has to throw away events it never delivered, the kernel is
+supposed to tell it "your picture of the device is stale — ask the device what
+state it is in and start again from here." That message was being sent one event
+too late: the program received one real event *first*, and only then the
+warning. So it would apply that event to the very state it was about to be told
+to discard — a key that stays stuck down, or a mouse button that latches the
+wrong way, for as long as the program runs.
+
+**Where:** `kernel/src/evdev.rs`, `EvdevClient::next_event`. The function
+answered an owed `SYN_DROPPED` before calling `resync()`, so a lap discovered on
+that same call set the flag *after* it had already been tested.
+
+**Fix:** `resync()` moved to the top of the retry loop, ahead of both the
+pending-marker test and the caught-up test. The caught-up test has to stay below
+the marker test, because a grab released via `discard_pending()` leaves the
+cursor level with the head with a marker still owed, and that read must return
+the marker rather than "nothing available". Commit `de5e9743b`.
+
+**How it was found, and why it took a boot to find it:** `evdev::self_test`
+existed in `46e69a1c1` but was only wired into `main.rs` as a fatal check in
+`f37616f4c`, so the first boot that actually ran it failed hard —
+`[evdev] SELF-TEST FAILED: ...specifically SYN_DROPPED`. The test was itself
+weak enough to have nearly missed it: it asserted the first record's type and
+its code in two separate `check!`s, and `EV_SYN` is 0, so the trailing
+`SYN_REPORT` of the resumed group satisfied the type assertion on its own. Both
+are now asserted as a single four-byte pair, and the second record is pinned to
+the oldest event the ring still holds (derived from `RING_CAP` and the
+three-events-per-press shape, not hardcoded).
+
+**Lesson worth keeping:** a self-test that is written but not *called* is not a
+test. Grep for `self_test` functions with no caller before trusting a "tested"
+claim in a commit message.
+
+---
+
+## B-A-READDIR-AT-TYPE-BYTE-DISAGREED-WITH-EVERY-OTHER-ENCODER (lane A, 2026-08-22) — FIXED 2026-08-22
+
+**In short:** the kernel tells a program what kind of thing each directory entry
+is with a single number — 0 for a file, 1 for a folder, and so on. Four places
+in the kernel write that number, and one of them had two of the values swapped:
+it called a shortcut (symlink) 3 where everything else called it 2. Anything
+reading a directory through that one call would have seen shortcuts reported as
+disk labels and vice versa.
+
+**Where:** `kernel/src/syscall/handlers.rs`, `sys_fs_readdir_at` (~line 10537).
+It encoded `Symlink => 2, VolumeLabel => 3`, while `sys_fs_readdir` (~8333),
+`encode_fs_stat_result` (~8509) and the second stat encoder (~9659) all use
+`VolumeLabel => 2, Symlink => 3`. All four already agreed on `File => 0`,
+`Directory => 1` and (as of `40404447a`) `CharDevice => 4`, which is the most
+dangerous shape an ABI byte can take: a decoder written against either syscall
+looks correct on every ordinary file and is wrong only on the two rare kinds.
+
+**Fix:** aligned `sys_fs_readdir_at` to the other three, and documented the
+encoding on the syscall's doc comment so the next encoder has something to copy
+from. Safe to change silently because nothing outside the kernel decodes this
+record yet — `userspace/strace` only names the syscall, and no libc or app path
+reaches it.
+
+**Not fixed, and deliberately:** `sys_fs_readdir_at` still emits a FAT volume
+label as a record, where `sys_fs_readdir` skips it. It is paginated by an offset
+into the directory, so dropping an entry would make `entries_written` disagree
+with how far the offset actually advanced and the caller's next page would step
+over a real neighbour. Filtering belongs where the offset is computed, in
+`Vfs::readdir_at_resolved`, not where the record is packed. Low priority: FAT
+volume labels appear only in the root of a FAT volume.
+
+## B-A-FORTY-ONE-SELF-TESTS-HAD-NEVER-RUN (lane A, 2026-08-22) — FIXED 2026-08-22
+
+**In short:** 41 `self_test` functions in `kernel/src` could not be called by
+any code path in the kernel. They compiled, they were counted as coverage in
+commit messages, and none had ever executed. All 41 are now wired into the boot
+path, and `scripts/check-self-tests-wired.py` runs before every build to keep
+the number at zero.
+
+**How it was found.** `evdev::self_test` was committed without a caller. One
+commit later it was wired in fatally, and the *first* boot that ran it failed
+on `B-A-EVDEV-SYN-DROPPED-ARRIVES-ONE-RECORD-LATE` — a real input-stack
+ordering bug that had been in the tree unnoticed. A test that finds a genuine
+defect the instant it first runs is an argument that the other unrun tests are
+worth running, so the tree was audited.
+
+**The 41.** 38 under `fs/` (`archive`, `backup`, `batch`, `changetrack`,
+`contextmenu`, `cpufreq`, `cputopo`, `dedup`, `deskicons`, `dirsync`, `diskio`,
+`encrypt`, `fcompress`, `fileselect`, `filetype`, `fswalk`, `health`, `ioprio`,
+`iso9660`, `linkcheck`, `openwith`, `policy`, `powerwake`, `properties`,
+`readdir_plus`, `reclaim`, `search`, `sidebar`, `snapshot`, `splice`,
+`statusbar`, `sysctlfs`, `sysuptime`, `tags`, `thermal`, `transaction`,
+`undelete`, `usage`), plus `sockact`, `sync` and `virtio::blk`.
+
+**`virtio::blk::self_test` was a different shape of dead.** It takes
+`&mut VirtioBlkDevice` and was written against `virtio::blk::with_device`,
+which reads a global populated only by `virtio::blk::init()` — the
+single-device probe path that `blkdev::init_multi`/`probe_all` superseded and
+that nothing has called since. Wiring it via `with_device` would have produced
+a test that silently skips on every boot, which is the same disease with better
+manners. It is now called from `blkdev::init_multi`, the one point on the live
+boot path where a concrete `VirtioBlkDevice` is owned — one line later it is
+boxed as `dyn BlockDevice` and the driver-specific test is unreachable by
+construction. It runs once per registered disk and is non-fatal, so a dead
+virtqueue is reported without turning one bad disk into an unbootable kernel.
+
+**Why the compiler could not have caught it.** An uncalled `pub fn` in a
+library crate is not dead code as far as `rustc` is concerned — something
+outside the crate might call it. Several also carried `#[allow(dead_code)]`.
+Nothing in the toolchain separates "exported for callers" from "exported and
+forgotten", so the predicate had to be written down: see
+`scripts/check-self-tests-wired.py` and design-decisions.md §273.
+
+**A caveat that is not fixed, and is not this bug.** A further **258**
+self-tests are reachable *only* from `kshell.rs`, as interactive `test`
+subcommands of the kernel shell. They are runnable but the boot test never runs
+them, so a regression in one is caught only if a human happens to type the
+command. The checker reports that count on every run rather than failing on it
+— see §273 for why. Shrinking it is open work, not a defect with a fix.
+
+## B-A-CHANGE-JOURNAL-REPORTED-ITS-OWN-BOOKKEEPING-AS-CHANGES (lane A, 2026-08-22) — FIXED 2026-08-22
+
+**In short:** The filesystem change journal — the thing a backup agent, indexer
+or sync daemon asks "what changed?" — reported its own record-keeping files as
+changes. Because those files are written *by* the act of answering the
+question, every answer created the next one. `changetrack::changes()` could
+never return empty, so an agent polling until the filesystem went quiet would
+poll forever, doing real disk writes on every round.
+
+**Found by** wiring `fs::changetrack::self_test` into the boot path for the
+first time (`B-A-FORTY-ONE-SELF-TESTS-HAD-NEVER-RUN`). It panicked on
+`changetrack.rs:614`, "expected 0 changes after advance" — an assertion that had
+been correct and unrun since the module was written.
+
+**Mechanism.** `changetrack::query_impl` advances the caller's cursor to
+`current_seq` and then persists the cursor table with
+`Vfs::write_file("/_CHANGE_CURSORS", …)`. Every `Vfs` write calls
+`journal::record` (`vfs.rs:2014` and eight siblings). So the persist is
+journalled at a sequence *greater* than the one just handed to the caller, and
+the next `changes()` call returns it — then persists again, arming the call
+after that. A fixed point does not exist.
+
+`/_JOURNAL` had the same shape one level down: the journal's own auto-flush
+writes it via `Vfs::write_file`, re-entering `record` and dirtying the journal
+it had just flushed. That one does not recurse — `unflushed` is zeroed before
+the write — but it does mean the journal was never actually flushed-clean.
+
+**Fix.** `journal::record_with_old_path` now drops events for the three private
+bookkeeping paths (`/_JOURNAL`, `/_CHANGE_CURSORS`, `/_TRASH/_INDEX`) before
+taking the lock. Fixing it at the recorder rather than in `changetrack` matters:
+the loop was visible to *every* registered cursor, not only the one whose
+`changes()` call did the write, so filtering at the query would have left every
+other consumer looping.
+
+Matched exactly, not by an `_` prefix: a prefix rule would silently swallow a
+real user file called `/_notes.txt`, and losing a genuine change is the more
+expensive direction of error. The journal self-test now asserts both halves —
+the three internal paths produce no entries and consume no sequence number,
+while `/_JOURNAL.bak` is still reported as the ordinary user file it is.
+
+**Severity.** Real, and worse the longer a system runs: `/_TRASH/_INDEX` aside,
+both loops burn disk writes proportional to how often anyone asks what changed.
+Nothing consumed change-tracking at boot, which is why it was never observed —
+the subsystem's only user so far was a self-test that had never been called.
+
+## B-A-STAT-COUNTER-INCREMENTS-DEADLOCKED-ON-THEIR-OWN-LOCK (lane A, 2026-08-22) — FIXED 2026-08-22
+
+**In short:** Four statistics counters were incremented with a one-line
+statement that takes the same lock twice. A lock that is already held by *you*
+is not a lock you can take — the thread waits for itself, forever. So the first
+call to `fs::encrypt::encrypt()` hung the machine dead: not a slow boot, a
+permanent freeze with the watchdog reporting no forward progress.
+
+**Found by** wiring `fs::encrypt::self_test` into the boot path for the first
+time (`B-A-FORTY-ONE-SELF-TESTS-HAD-NEVER-RUN`). Boot cycle 3 printed
+`[encrypt]   hmac-sha256: ok` and then nothing at all, followed by three
+`[liveness] SYSTEM HANG` reports and an `(OVERDUE - the ISR scan is not
+draining)` hrtimer. Serial output stopped at that line and never resumed.
+
+**Mechanism.**
+
+```rust
+STATE.lock().files_encrypted = STATE.lock().files_encrypted.saturating_add(1);
+```
+
+Rust evaluates the right-hand side of an assignment first, so the RHS
+`STATE.lock()` succeeds. But its guard is a *temporary*, and a temporary lives
+until the end of the enclosing statement — it has not dropped when the
+left-hand side's `STATE.lock()` runs. `STATE` is a non-reentrant spinlock, so
+the second acquisition spins with interrupts still enabled and the lock's owner
+being the very CPU that is spinning. Nothing can ever release it.
+
+This reads as an ordinary read-modify-write and is easy to write by accident;
+what makes it lethal rather than merely wrong is the non-reentrancy, and what
+made it invisible is that all four sites were on paths nothing had ever called.
+
+**Sites.** `fs/encrypt.rs:394` (`files_encrypted`) and `:444`
+(`files_decrypted`); `fs/fcompress.rs:314` and `:330` (`stats.files_skipped`,
+twice in one function — which gets it *right* thirty lines later at :352 with a
+`let mut state = STATE.lock();` block, so both spellings sat side by side).
+
+**Fix.** All four now bind the guard to a named local, which acquires exactly
+once. The two `fcompress` sites were additionally collapsed into a
+`note_skipped()` helper so there is one place left that could get it wrong
+rather than two. Both carry a comment explaining the temporary-lifetime rule,
+because the broken form is the shorter and more natural-looking one.
+
+**Audit.** The whole of `kernel/src` was swept for the pattern, line-scoped and
+across line breaks, for `.lock()`, `.read()`, `.write()`, `.borrow()` and
+`.borrow_mut()`. These four were the only same-lock cases. Several multi-lock
+statements remain (`fs/filetype.rs:523`, `fs/openwith.rs:339`,
+`ipc/namespace.rs:236`, `kshell.rs:2983`) — those hold one guard while taking a
+*different* one, which is a lock-ordering question rather than a self-deadlock,
+and none of them is on a path that also takes those locks in the reverse order.
+Two files (`fs/cas.rs:176`, `fs/integrity.rs:610`) already carry comments
+warning about exactly this bug, so it has been hit and fixed here before.
+
+**Severity.** Was a guaranteed total system hang on first use of file
+encryption or transparent compression. Both subsystems were unreachable at boot
+until this week, which is the only reason it had not been seen.
+
+## B-A-DIRSYNC-NEVER-CONVERGED-BECAUSE-COPIES-LOST-THEIR-TIMESTAMPS (lane A, 2026-08-22) — FIXED 2026-08-22
+
+**In short:** Directory sync copied a file but stamped the copy "now" instead of
+carrying over the original's modification time. Since sync decides what to copy
+by comparing modification times, the copy never matched its source — so the next
+sync copied it again, and so would every sync after that. A backup of an
+unchanged tree would re-copy the entire tree, every time, forever.
+
+**Found by** reading a *passing* test's output rather than a failure.
+`dirsync::self_test`'s `test_compare_identical` logged `Compare: 0 new, 1
+modified` under a line that said `compare identical: ok`, because the test
+asserted only on the new-file count and carried the comment `// Modified check
+depends on timestamps; they may differ.` — which is precisely the bug, written
+down and excused.
+
+**Mechanism.** `compare` treats a file as modified when its size *or* its
+`modified_ns` differs (`dirsync.rs:190`). `copy_file` called
+`Vfs::write_file(dst, &data)`, and a write sets `modified_ns` to the current
+time. So immediately after a successful sync, every copied file differs from its
+source in `modified_ns` and compares as modified. There is no fixed point.
+
+**Fix.** `copy_file` now reads `Vfs::metadata(src)` *before* the write and
+applies `Vfs::set_times(dst, accessed_ns, modified_ns)` after it. Reading before
+matters for the degenerate src == dst case, where reading after would stamp the
+file with the time the copy itself just created. A failure to read or apply the
+times is non-fatal but logs a warning naming the consequence ("it will be
+re-copied on every sync") rather than passing silently, because a silent
+timestamp failure is indistinguishable from this bug.
+
+`test_compare_identical` now syncs and then re-compares, asserting that zero
+files remain modified and that the file compares *unchanged* — i.e. asserting
+convergence directly, which is the property the excusing comment gave up on.
+
+**Severity.** Real for any consumer: unbounded redundant I/O proportional to
+tree size on every sync, and `compare` could never report a tree as in sync.
+Nothing consumed dirsync at boot before this week.
+
+## B-A-SELF-DEADLOCK-DETECTORS-ALL-MISSED-A-TEXTBOOK-SELF-DEADLOCK (lane A, 2026-08-22) — FIXED 2026-08-22
+
+**In short:** When a thread asks for a lock it is already holding, it waits for
+itself forever. The kernel had three separate mechanisms meant to catch that,
+and when it finally happened for real, all three said nothing — the machine just
+froze for 20 minutes and the log never named a lock. The detectors were fine
+individually; each was simply switched off, too slow, or looking elsewhere.
+
+**Trigger.** `B-A-STAT-COUNTER-INCREMENTS-DEADLOCKED-ON-THEIR-OWN-LOCK`. Boot
+cycle 3 printed `[encrypt]   hmac-sha256: ok` and then nothing for 600 s.
+
+**Why each net missed it.**
+
+| Detector | Why it was silent |
+|---|---|
+| `lockdep::report_recursive` (`lockdep.rs:466`) | Precise and correct — but only `sync::Mutex` reports to lockdep. `PreemptSpinMutex` deliberately does not register (documented as the untracked sibling for leaf locks, design-decisions §70), and `fs/encrypt.rs:47` says `use crate::sync::PreemptSpinMutex as Mutex`. |
+| `sync::report_spin_stall` (`sync.rs:821`) | Does diagnose `owner == tid` as recursive, but only after `STALL_SECONDS` = 30. It never fired in that boot; the report budget (8) was untouched and no `SPINLOCK STALL` line ever appeared. Root cause of *that* silence is still open — see below. |
+| liveness watchdog | Fired correctly, three times. But it reports *that* the system is stuck, not *what* it is stuck on. |
+
+The load-bearing point: `PreemptSpinMutex` opted out of lockdep to skip lock
+*ordering* checks, which genuinely add nothing for a leaf lock. Recursion
+detection is not an ordering check, but it lived in the same code path, so
+opting out of one silently opted out of the other. The lock type chosen for
+being simple and safe was the one type with no recursion detection at all.
+
+**Fix.** New `sync::fail_if_recursive`, called at the top of *both* lock types'
+contended paths — i.e. only after `try_lock` has already failed, so an
+uncontended acquire is unaffected. If the recorded owner is the task now asking,
+the acquire provably cannot succeed (a task runs on one CPU at a time, and both
+lock types disable preemption for the whole hold, so the holder cannot be
+scheduled elsewhere to release it). It names the lock and panics, converting a
+20-minute silent freeze into an immediate located failure with a backtrace.
+
+It also gives the right answer for an ISR that takes a non-`irqsave` lock held
+by the task it interrupted: that does not change `CURRENT_TASK_IDS`, so
+`owner == current_task_id()` still holds and "this CPU already owns it" is still
+exactly true.
+
+Sound because all four lock constructors initialise `owner` to `OWNER_NONE`,
+both guards clear it on drop *before* the physical unlock, and per-CPU idle
+tasks get distinct ids (`register_ap_idle`), so no two live tasks share one.
+
+**Still open.** Why `report_spin_stall` did not fire after 30 s is not
+explained. The global budget was unconsumed (0 of 8 emitted that boot) and the
+`warned` flag is per-call, so neither rate-limit applies.
+
+*Leading hypothesis, now disproved (2026-08-22).* The suspicion was
+`bench::tsc_freq()` returning 0 at that point, which drops the check to the
+`STALL_FALLBACK_ITERS` = 5e9 iteration path — far more than 600 s of QEMU TCG.
+It does not hold: a boot log shows `[bench] TSC calibrated: … 3662.1 MHz` at
+log line 133, emitted from `main.rs:700`, whereas the filesystem self-tests
+that deadlocked run from `main.rs:5199`. The TSC was calibrated to a sane value
+thousands of log lines before the hang, so the wall-clock branch — not the
+fallback — was the one in play, and `threshold_cycles` was ~1.1e11 cycles,
+reached in 30 real seconds.
+
+*What replaced the guesswork (2026-08-22).* The reason this stayed a hypothesis
+is that the detector could only be observed by deadlocking a real boot for half
+a minute, which is a terrible experiment. `spin_with_stall` is now a thin
+wrapper over `spin_with_stall_threshold`, which takes the threshold as an
+argument, and `sync::self_test_stall` drives that same loop with a ~10 ms
+threshold and asserts a report is emitted. It exercises everything shared with
+production — the 4096-iteration throttle, the `rdtsc` comparison, the one-shot
+`warned` latch, and `report_spin_stall` itself — in milliseconds, on every
+boot. It gives up after 100x the threshold and fails by assertion rather than
+hanging, and it restores `STALL_REPORTS` afterwards so it does not spend one of
+the eight real report slots.
+
+The question is therefore no longer "does the detector work?" — that is now
+answered on every boot — but "what was different about that particular spin?".
+If the self-test passes while a real 30 s spin still goes unreported, the
+difference lies in the *context* of the spin (preempt depth, IF state, which
+CPU) rather than in the detector, and that is a far narrower thing to hunt.
+
+This matters beyond the bug that prompted it: `fail_if_recursive` makes the
+30 s path irrelevant for *recursive* deadlocks, but the stall detector remains
+the only net for the other classes it covers — convoys, leaked guards, and
+cross-task wedges — so its reliability is load-bearing on its own.
+
+**Severity.** The bug it failed to catch was fatal; the failure to catch it cost
+a 20-minute boot and gave no location. Every future instance of the same class —
+and 28 modules' worth of never-executed self-tests were queued behind it — would
+have cost the same.
+
+## B-A-TWO-LOCK-GUARDS-HELD-ACROSS-A-CALL-THAT-RETAKES-THEM (lane A, 2026-08-22) — FIXED 2026-08-22
+
+**In short:** Same fatal shape as the counter bug — a thread asking for a lock it
+already holds — but split across two functions, so no single line mentions the
+lock twice and no text search can see it. Found by a new script rather than by
+booting into them.
+
+**Found by** `scripts/check-recursive-locks.py`, added here. It parses each file,
+builds a same-file call graph, works out which locks each function may acquire
+transitively, and reports any guard bound to a named local that is still live
+when a call to a re-acquiring function runs. Two findings across 799 files.
+
+**Finding 1 — `ipc/service.rs`, `test_socket_activation`.** Held
+`SOCKET_ACTIVATIONS` across `unregister_socket_activation(name)`, which takes the
+same lock. Only on the *failure* paths, which is the worst possible placement:
+the test would hang the machine precisely when a check had failed, instead of
+printing which expectation was wrong. (`channel::close` was called under the
+same guard too — a different lock, so an ordering hazard rather than a
+self-deadlock.) Fixed by copying the two observed facts out under the lock and
+judging them after release.
+
+**Finding 2 — `svcstart.rs`, `boot_services`.** Held `STATE` and called `init()`,
+which takes `STATE`. Guarded by `if !state.initialized`, so the normal path never
+hit it — `initproc` calls `svcstart::init()` before `boot_services()`. But the
+kernel shell's `boot` command (`kshell.rs:45788`) calls `boot_services()`
+directly, and that is exactly the caller for which `initialized` is false. Fixed
+by hoisting the check into a bound local so the release is a visible statement
+rather than an inference about temporary lifetimes.
+
+**Limits of the checker.** Deliberately a within-file heuristic: it resolves
+calls only to functions defined in the same file and locks only via ALL-CAPS
+static receivers. That covers the module-private `static STATE: Mutex<_>` pattern
+this kernel uses everywhere, and needs no import or trait-dispatch resolution. It
+has false negatives by construction (a call into another module that reaches back
+is invisible). `try_lock()` is never reported — it returns `None` rather than
+spinning. Two reports over 799 files, both genuine, so the false-positive rate is
+low enough to be worth running.
+
+**Severity.** Finding 2 is a live hang reachable by typing `boot` at the kernel
+shell. Finding 1 is a test that converts a legible failure into a freeze.
+
+## B-A-FCOMPRESS-ROUND-TRIP-TESTS-DEMANDED-A-COMPRESSION-RATIO-THAT-IS-IMPOSSIBLE (lane A, 2026-08-22) — FIXED 2026-08-22
+
+**In short:** Five tests compressed a ~110-byte string and asserted the result
+came back compressed. It cannot: the compressed-file format spends 27 bytes on
+headers and checksums before a single byte of data, and the module correctly
+refuses to "compress" anything it would make bigger. The tests were demanding
+the bug.
+
+**Found by** wiring `fs::fcompress::self_test` into the boot path
+(`B-A-FORTY-ONE-SELF-TESTS-HAD-NEVER-RUN`). Boot cycle 4 panicked at
+`fcompress.rs:598`, "should have compressed".
+
+**Mechanism.** `compress_for_write` returns `None` when the compressed form is
+not smaller — that is the incompressible-skip path, and it is correct.
+`crate::fs::lz4::compress` emits the LZ4 **frame** format: 4 magic + 11
+descriptor + 4 block header + 4 end mark + 4 content checksum = 27 fixed bytes.
+A 113-byte mostly-English payload with three 10-byte runs cannot save that much,
+so the block is stored verbatim and the frame comes out ~140 bytes. `None` is
+arithmetic, not a bug. Gzip (18 fixed bytes) and zstd tests had the same shape.
+
+Notably the overhead *was* understood when this was written —
+`test_incompressible_skip` carries the comment "Small enough that LZ4 overhead
+makes compressed >= original" — the round-trip tests simply landed on the wrong
+side of the same threshold, and never ran to reveal it.
+
+**Fix.** A shared `compressible_sample()` returning 4 KiB of repeating text, used
+by the lz4/gzip/zstd round-trip tests, `test_rule_matching` and `test_stats`.
+That amortises any of the three headers and lets the tests assert what they exist
+to assert: that data survives compress → decompress unchanged *and* that it
+actually got smaller (a new assertion — `Some` is a promise that the stored form
+is smaller, and nothing checked it).
+
+`test_rule_matching` was changed for a second reason: it is about prefix and
+extension matching, but with a small payload its `is_some()` was also a bet on
+the gzip ratio, so a ratio regression would have failed a matching test.
+
+`test_incompressible_skip` accepted *either* answer, noting "The important thing
+is it doesn't panic" — so the skip path had no coverage at all. It now asserts
+`None` deterministically (32 distinct bytes cannot shrink, and 27 bytes of frame
+go on top) and asserts the skip counter incremented. That matters beyond
+tidiness: the skip path is where `note_skipped` lives, and the two inlined copies
+it replaced each took `STATE` twice in one statement and would have deadlocked
+the moment they ran. A test that cannot fail never ran them.
+
+**Severity.** Test-only; no production defect. But five of the eight tests in the
+module were unrunnable, including the only coverage of a path that contained a
+fatal deadlock.
+
+### [RESOLVED 2026-08-22] TD-A-REAP-WINDOW-BETWEEN-SET-CURRENT-AND-SWITCH. `set_current_task` retires a dying task from the reaper's exclusion set while it is still running on its own kernel stack — SMP-only, latent 2026-08-22
+
+**RESOLVED** the same day it was logged, with exactly the fix this entry
+specified: a cache-padded per-CPU `PREV_TASK_IDS`, stored between
+`set_current_task` and `switch_context` at **both** switch sites (the main
+`schedule_inner` path and the idle fallback — the latter matters more, not
+less, since it is reached from `task_exit` and so its outgoing task is
+frequently already `Dead`), cleared by the incoming task, and unioned into
+`reap_dead_tasks`'s exclusion set. Design rationale, the alternatives, and the
+memory-ordering argument for why the two coverage windows *overlap* rather than
+abut are in `design-decisions.md` §276.
+
+**One thing the plan in this entry did not mention, and it is load-bearing.**
+"The first thing the incoming task does after the switch returns is clear it"
+covers a *resumed* task only. A task running for the **first** time never
+returns from `switch_context` — it arrives at `task_entry_trampoline` instead —
+so the trampoline needed its own `call sched_finish_task_switch`, placed before
+`call rbx` (safe: it clobbers only caller-saved registers, and the trampoline's
+two live values `rbx`/`r12` are callee-saved). Without it the predecessor stays
+pinned until the next context switch on that CPU, which on an idle CPU is
+never, turning the intended bounded delay into a permanent leak of one stack
+per CPU.
+
+Also worth recording: the clear re-reads the CPU index rather than using the
+`cpu` local already in `schedule_inner`'s frame. A resumed task can come back
+on a different CPU than it blocked on, in which case that local is the *old*
+CPU's index — clearing it would leak this CPU's pin and drop a live pin on the
+other one at the same time.
+
+**Regression test:** `sched::test_prev_task_pins_outgoing_stack`, with two
+independently-failing halves because the race itself is unprovokable under a
+uniprocessor boot test (a soak would pass forever and prove nothing): a `Dead`
+task named in `PREV_TASK_IDS` must survive a reap *and* be reaped once released
+— without the second leg the test also passes against a reaper that never reaps
+anything — and a brand-new task must observe a cleared slot, which is the only
+thing that would fail if the trampoline's one asm line were deleted. Verified
+in boot cycle 11: `Pinned Dead task survives reap: OK`, `Released Dead task is
+reaped: OK`, `First-run task clears the pin: OK`, `Scheduler self-test PASSED`.
+
+**What it was.** `reap_dead_tasks` (`sched/mod.rs:4667`) frees a `Dead` task's
+kernel stack, and it correctly refuses to reap any task that is *current* on
+any CPU — it builds `active_ids` from `CURRENT_TASK_IDS` across all online
+CPUs, with a comment explaining that reaping a task another CPU is running is
+a use-after-free. That exclusion is right, but it stops covering the task one
+step too early.
+
+In `schedule_inner` the sequence is:
+
+```
+set_current_task(cpu, next_id);   // <-- the outgoing task leaves active_ids HERE
+… write_cr3 …
+… wrmsr FS_BASE / GS_BASE …
+switch_context(old_ctx_ptr, new_ctx_ptr);   // <-- and only HERE does it leave its stack
+```
+
+Every instruction between those two lines executes **on the outgoing task's
+kernel stack**, and `switch_context` itself pushes the outgoing register set
+onto it. But from `set_current_task` onward the outgoing task is no longer in
+any CPU's `CURRENT_TASK_IDS` slot, so a concurrent `reap_dead_tasks` on
+another CPU sees a `Dead` task that nobody is running and frees the stack out
+from under it.
+
+**Why it is latent today.** The boot test runs uniprocessor (`cpu0` only, no
+APs brought up), so no second CPU exists to run the reaper concurrently. Every
+current `reap_dead_tasks` caller is a self-test or a bench harness on the boot
+CPU. The window is real but unreachable until SMP is exercised, which is
+exactly the kind of bug that surfaces the first time someone turns APs on and
+then gets blamed on the AP bring-up.
+
+**Same class as `B-FORKEXEC-BOOT-HANG`** (fixed 2026-08-22): a resource is
+published as reclaimable at a point that precedes its genuine last use. There
+it was the process PML4 versus the dying thread's CR3; here it is the kernel
+stack versus the outgoing task's `switch_context`. Both come from treating a
+bookkeeping update as if it were the moment the hardware stopped depending on
+the object.
+
+**Proper fix** — Linux's `finish_task_switch` / `put_task_struct` shape: hand
+the outgoing task off to the *incoming* one rather than declaring it free.
+Concretely, add a per-CPU `PREV_TASK_ID` slot; `schedule_inner` writes the
+outgoing id into it just before `switch_context`, and the first thing the
+incoming task does after the switch returns is clear it. `reap_dead_tasks`
+then excludes the union of `CURRENT_TASK_IDS` and `PREV_TASK_ID` across all
+CPUs. That closes the window structurally — there is no instant at which a
+task is off both lists while a CPU is still on its stack — instead of relying
+on the reaper being called from the right places.
+
+**Do not "fix" it by having the reaper skip recently-dead tasks on a timer.**
+That converts a correctness bug into a probabilistic one and makes the failure
+rarer and harder to attribute, which is strictly worse.
+
+### [RESOLVED 2026-08-22] TD-A-LOCKDEP-VIOLATION-REPORT-NAMES-NO-ADDRESS. `Vfs::unmount` and four other sites took a per-mount filesystem lock while holding the global VFS lock, inverting the order the overlay depends on — found 2026-08-22 (reported for weeks as unreadable `lock "?"` warnings)
+
+**RESOLVED.** Fixed in `1422972ad` (vfs), after `b215b83c1` (lockdep prints
+addresses) made the reports readable and `70794b766` (symbolize picks the ELF
+that was actually built) made the addresses resolvable.
+
+Verified by boot cycle 10: `BOOT_OK`, and **all four violations are gone** —
+the only `Holding lock` lines left are lockdep's own self-test pairs at
+`0xdead000{1,2,3}`. No regressions: the FAIL count is unchanged at 5 (the 2
+known lane-B `make` failures and 3 `drm-atomic` negative tests, all
+pre-existing), overlay's 13 tests, container's 61 and OCI's 23 all pass, and
+the `[vfs] Unmounted <fstype> from '<path>'` lines still name the right
+filesystem, which exercises the rewritten two-phase `fs_type` capture.
+
+Worth recording *why* one fix cleared four reports: only the `VFS -> per-mount`
+direction was wrong. Removing that single edge broke every cycle in the order
+graph, so the overlay's `per-mount -> VFS` / `-> OVERLAYS` edges — which are
+the design working as §43 intends — stopped being reported as inversions
+because there was no longer a reverse edge for them to invert against. This is
+the confirmation that the analysis below was right; had the overlay's edges
+been independently wrong, they would still be firing.
+
+**Owner: lane A** (`kernel/src/lockdep.rs`, plus whichever subsystems the
+inversions turn out to be in).
+
+**In short.** The lock-order validator is doing its job: on every boot it
+prints several "potential deadlock" warnings for real inversions in real
+kernel code, not in its own self-test. But the warning identifies each lock by
+a short name, and most locks in this tree are created with `sync::Mutex::new`,
+whose default name is the single character `?`. So the report reads
+"holding lock `?`, acquiring lock `?`" and there is no way to tell which
+two locks it means. The bug being reported is invisible behind the report.
+
+**The reports, from boot cycles 7 and 8 on 2026-08-22** (`build/serial-test.txt`;
+the `test-A`/`test-B`/`test-C` pairs near line 2109 are lockdep's own self-test
+and are excluded here). Each is followed by `But the reverse order was observed
+previously.`:
+
+| Held → acquiring | cycle 7 | cycle 8 | Where |
+|---|---|---|---|
+| `sysctl-reg` (12) → `?` (9) | line 20932 | **absent** | mid Path-Z ring-3 run, amid `[mmap]` traffic |
+| `?` (18) → `?` (110) | line 37124 | line 37119 | inside `overlay`'s VFS mount adapter |
+| `?` (130) → `?` (55) | line 39224 | line 39229 | late boot |
+| `?` (130) → `?` (18) | line 39228 | line 39233 | late boot |
+
+Two facts from that table matter more than the individual rows:
+
+- **Class 18 appears on both sides** — held in row 2, acquired in row 4. These
+  are not four isolated pairs but a connected order graph over classes
+  {130, 18, 110, 55}, so they should be resolved together, not one at a time.
+- **The `sysctl-reg` row is intermittent**: it fired in cycle 7 and not in
+  cycle 8, even though the surrounding `[mmap]` lines are byte-identical
+  between the two logs. That does *not* mean it fixed itself. lockdep prints
+  only the *escalation* — the acquire that completes a cycle whose reverse
+  edge was already recorded — so whether it prints depends on which order the
+  two acquires happened to occur in earlier in the same boot. An inversion
+  that stays silent for a boot is still present in the code. It also means a
+  report may be seen once and never again, which is precisely why the report
+  has to be self-describing the one time it does fire.
+
+Every one of these is an escalation, so the reverse-order acquire also
+happened at some earlier, un-reported point — the report names the second half
+of the inversion only.
+
+**Why the names are `?`.** `sync::Mutex::new` (`sync.rs:381`) sets
+`name: b"?"`; only `Mutex::named` supplies a real one. That default is
+reasonable — naming every lock is a per-site cost — but it means the *report*
+must carry something else that identifies the lock, and it does not.
+
+**The diagnostic half is now FIXED** (this commit). `dump_held_locks`
+(`lockdep.rs:781`) hit this exact wall and solved it by printing
+`{name} @ {addr:#x}`; its comment spells out the reasoning ("entries that
+cannot be told apart from each other"). `report_violation` and
+`report_recursive` were not given the same treatment and now are, via a new
+`class_addr` helper that applies `class_name`'s "admit the unknown" readiness
+gate on top of the existing `class_id` read. `LockClass::id` *is* the lock
+address and was already in hand, so this was a formatting change, not a
+plumbing one. With addresses in the log, the locks resolve
+to their statics with `python scripts/symbolize.py 0x<addr>` — which already
+reports non-text symbols and tags each hit with its kind, and the debug kernel
+ELF carries 2,310 `STT_OBJECT` symbols for it to hit. The kernel's *own*
+resolver cannot do this: `ksyms::parse_elf_symbols` (`ksyms.rs:372`) skips
+every symbol that is not `STT_FUNC`, so a runtime `ksyms::resolve` of a lock
+address returns `None`. That is a deliberate size tradeoff, not a bug, but it
+is why the resolution step is offline.
+
+**RESOLVED — the locks are now named, and the culprit is identified.** From the
+cycle-9 boot (the first with addresses), via `python scripts/symbolize.py`:
+
+| Class | Address | Identity |
+|---|---|---|
+| 18 | `0xffffffff82782620` | `kernel::fs::vfs::VFS` +0x10 — the global VFS lock |
+| 55 | `0xffffffff827fe8b0` | `kernel::fs::overlay::OVERLAYS` +0x10 |
+| 110 | `0xffff80007d6e80a0` | heap — a per-mount `MountPoint::fs` lock |
+| 130 | `0xffff80007d6ea120` | heap — a per-mount `MountPoint::fs` lock (overlay) |
+
+(110 and 130 are heap addresses, so they do not appear in the ELF; they were
+identified from the call sites instead. `MountedFs = Arc<Mutex<Box<dyn
+FileSystem>>>`, `vfs.rs:967`.)
+
+**One of the two directions is the design, and the other is a bug.**
+`MountPoint::fs`'s own doc comment (`vfs.rs:972`, citing design-decisions §43)
+states the invariant: *"the global VFS lock is released the moment the mount
+table lookup is done"*, explicitly so that *"stacked filesystems (e.g. the
+overlay) can re-enter the VFS to read their backing layers without
+deadlocking"*. So:
+
+- **per-mount `fs` lock → VFS / OVERLAYS is the intended order** — it is the
+  overlay re-entering the VFS to reach its lower layer, which §43 designs for.
+  That is rows 3 and 4 of the report table (class 130 → 55, 130 → 18), fired
+  from the container-delete path in the OCI self-test.
+- **VFS → per-mount `fs` lock is the violation** — row 2 (class 18 → 110),
+  fired from `Vfs::unmount`, which takes `VFS.lock()` at `vfs.rs:1490` and is
+  still holding it at `vfs.rs:1519` when it calls
+  `vfs.mounts[idx].fs.lock().sync()`. That is the documented invariant broken
+  literally, in the function whose own struct documents it.
+
+**Five sites take a per-mount `fs` lock under the VFS lock**, not one —
+`vfs.rs` lines 1519 (`sync()` in `unmount`), 1532 (`fs_type()`), 2809 and 2821
+(`fs_type()` in mount listings), 3410 (`device_name()` in a device lookup).
+Only 1519 has been caught so far because only it runs while another lock order
+is live, but every one of them is the inverted order and the same deadlock
+against a stacked filesystem re-entering the VFS. The last four call trivial
+accessors that cannot themselves re-enter, which is why they have not hung
+anything — but they still create the edge, and the risk is real the moment a
+second CPU holds that `fs` lock and waits on `VFS`.
+
+**The fix** is to honour §43 at all five: clone the `Arc<Mutex<..>>` (cheap —
+it is an `Arc`, and cloning keeps the filesystem alive) under the VFS lock,
+drop the VFS guard, then take the `fs` lock. `unmount` additionally has to
+re-acquire and re-find its index afterwards, since the mount table can move
+while it is unlocked.
+
+Note that
+an inversion reported once may be benign in practice (the two orders may be
+unreachable concurrently on a uniprocessor boot) — but that judgement needs
+the call sites, and "we could not identify it" is not the same finding as "we
+looked and it was fine."
+
+**Do not fix this by naming every lock.** Renaming ~800 `Mutex::new` sites to
+`Mutex::named` is a large diff that would still leave the report unable to
+identify a lock whose name was mistyped or duplicated. The address is unique
+by construction and costs one format argument.

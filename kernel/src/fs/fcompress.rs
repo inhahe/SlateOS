@@ -299,6 +299,20 @@ pub fn reset_stats() {
 // Core compression / decompression
 // ---------------------------------------------------------------------------
 
+/// Count one file that was considered for compression and left alone.
+///
+/// A function rather than an inline statement because the inline version was
+/// written twice as `STATE.lock().stats.files_skipped =
+/// STATE.lock().stats.files_skipped.saturating_add(1)`, which deadlocks: Rust
+/// evaluates the right-hand side first, but its lock guard is a temporary that
+/// lives to the end of the statement, so the left-hand side waits on a
+/// non-reentrant lock the same thread already holds. Every caller now shares
+/// this one correct acquisition.
+fn note_skipped() {
+    let mut state = STATE.lock();
+    state.stats.files_skipped = state.stats.files_skipped.saturating_add(1);
+}
+
 /// Check if data should be compressed for a given path, and if so,
 /// return the compressed data with header.
 ///
@@ -311,7 +325,7 @@ pub fn compress_for_write(path: &str, data: &[u8]) -> Option<Vec<u8>> {
 
     let min = MIN_SIZE.load(Ordering::Relaxed);
     if (data.len() as u64) < min {
-        STATE.lock().stats.files_skipped = STATE.lock().stats.files_skipped.saturating_add(1);
+        note_skipped();
         return None;
     }
 
@@ -327,7 +341,7 @@ pub fn compress_for_write(path: &str, data: &[u8]) -> Option<Vec<u8>> {
 
     // Skip if compressed size >= original (incompressible data).
     if compressed.len() >= data.len() {
-        STATE.lock().stats.files_skipped = STATE.lock().stats.files_skipped.saturating_add(1);
+        note_skipped();
         return None;
     }
 
@@ -564,6 +578,35 @@ fn test_header_format() {
     serial_println!("[fcompress]   header format: ok");
 }
 
+/// A payload large and repetitive enough that a *framed* compressor can win.
+///
+/// All three round-trip tests below used to pass a ~110-byte string and assert
+/// that `compress_for_write` returned `Some`. It cannot, and the assertion was
+/// demanding a bug. LZ4 here is the **frame** format, which spends 27 bytes
+/// before a single payload byte — 4 magic, 11 descriptor, 4 block header, 4 end
+/// mark, 4 content checksum — and gzip and zstd carry their own fixed headers.
+/// `compress_for_write` returns `None` whenever the compressed form is not
+/// smaller (that is exactly the incompressible-skip path this module documents
+/// and counts), so on an input that small `None` is the correct answer.
+///
+/// The one test in this file that got it right said so out loud —
+/// `test_incompressible_skip` notes "Small enough that LZ4 overhead makes
+/// compressed >= original" — so the overhead was understood; the round-trip
+/// tests just never ran to reveal that they were on the wrong side of it.
+///
+/// 4 KiB of repeating text amortises any of the three headers many times over,
+/// which lets these tests assert the thing they exist to assert: that data
+/// survives compress → decompress unchanged, *and* that it actually got smaller.
+fn compressible_sample() -> Vec<u8> {
+    const UNIT: &[u8] = b"The quick brown fox jumps over the lazy dog. ";
+    let mut data = Vec::with_capacity(4096);
+    while data.len() < 4096 {
+        data.extend_from_slice(UNIT);
+    }
+    data.truncate(4096);
+    data
+}
+
 fn test_compress_decompress_lz4() {
     // Enable and set up a rule.
     let was_enabled = is_enabled();
@@ -577,19 +620,26 @@ fn test_compress_decompress_lz4() {
     })
     .expect("add rule");
 
-    let original = b"The quick brown fox jumps over the lazy dog. Repeated data helps compression: AAAAAAAAAA BBBBBBBBBB CCCCCCCCCC";
+    let original = compressible_sample();
 
     // Compress.
-    let compressed = compress_for_write("/tmp/fcomp_test/file.txt", original);
+    let compressed = compress_for_write("/tmp/fcomp_test/file.txt", &original);
     assert!(compressed.is_some(), "should have compressed");
     let compressed = compressed.expect("checked above");
     assert!(is_compressed(&compressed));
+    assert!(
+        compressed.len() < original.len(),
+        "compress_for_write returned Some, which promises the stored form is \
+         smaller: {} >= {}",
+        compressed.len(),
+        original.len()
+    );
 
     // Decompress.
     let decompressed = decompress_for_read(&compressed);
     assert!(decompressed.is_some(), "should have decompressed");
     let decompressed = decompressed.expect("checked above");
-    assert_eq!(&decompressed, original.as_ref());
+    assert_eq!(decompressed, original);
 
     // Cleanup.
     remove_rules("/tmp/fcomp_test");
@@ -611,15 +661,16 @@ fn test_compress_decompress_gzip() {
     })
     .expect("add rule");
 
-    let original = b"Gzip test data with enough repetition to compress well: XXXXXXXXXX YYYYYYYYYY ZZZZZZZZZZ XXXXXXXXXX YYYYYYYYYY";
+    let original = compressible_sample();
 
-    let compressed = compress_for_write("/tmp/fcomp_gz/data.bin", original);
-    assert!(compressed.is_some());
+    let compressed = compress_for_write("/tmp/fcomp_gz/data.bin", &original);
+    assert!(compressed.is_some(), "should have compressed");
     let compressed = compressed.expect("checked");
+    assert!(compressed.len() < original.len(), "stored form must be smaller");
 
     let decompressed = decompress_for_read(&compressed);
     assert!(decompressed.is_some());
-    assert_eq!(&decompressed.expect("checked"), original.as_ref());
+    assert_eq!(decompressed.expect("checked"), original);
 
     remove_rules("/tmp/fcomp_gz");
     set_min_size(DEFAULT_MIN_SIZE);
@@ -640,15 +691,16 @@ fn test_compress_decompress_zstd() {
     })
     .expect("add rule");
 
-    let original = b"Zstd test: repetitive content compresses well. Repeat repeat repeat repeat repeat repeat repeat!";
+    let original = compressible_sample();
 
-    let compressed = compress_for_write("/tmp/fcomp_zst/test.dat", original);
-    assert!(compressed.is_some());
+    let compressed = compress_for_write("/tmp/fcomp_zst/test.dat", &original);
+    assert!(compressed.is_some(), "should have compressed");
     let compressed = compressed.expect("checked");
+    assert!(compressed.len() < original.len(), "stored form must be smaller");
 
     let decompressed = decompress_for_read(&compressed);
     assert!(decompressed.is_some());
-    assert_eq!(&decompressed.expect("checked"), original.as_ref());
+    assert_eq!(decompressed.expect("checked"), original);
 
     remove_rules("/tmp/fcomp_zst");
     set_min_size(DEFAULT_MIN_SIZE);
@@ -669,20 +721,31 @@ fn test_incompressible_skip() {
     })
     .expect("add rule");
 
-    // Random-looking data that won't compress well.
-    // Small enough that LZ4 overhead makes compressed >= original.
+    // 32 distinct bytes: nothing repeats, so the LZ4 block cannot shrink and is
+    // stored verbatim, and the frame then adds its fixed 27 bytes on top. The
+    // result is necessarily larger than the input, so the skip is not a
+    // "may or may not" — it is arithmetic, and this test now asserts it.
+    //
+    // It used to accept either answer, with the note "The important thing is it
+    // doesn't panic". That gave the skip path no coverage at all, which mattered
+    // more than it looks: the skip path is where `note_skipped` lives, and the
+    // two inlined copies it replaced each took `STATE` twice in one statement
+    // and would have deadlocked the moment they ran. A test that tolerates both
+    // outcomes cannot fail, so it never ran them.
     let data: Vec<u8> = (0u8..32).collect();
+    let before = stats().files_skipped;
 
     let result = compress_for_write("/tmp/fcomp_rand/random.bin", &data);
-    // May or may not be None depending on LZ4 overhead for 32 bytes.
-    // The important thing is it doesn't panic.
-    if let Some(compressed) = result {
-        // Tiny data might still fit with overhead — verify it round-trips.
-        let decompressed = decompress_for_read(&compressed);
-        assert!(decompressed.is_some());
-        assert_eq!(&decompressed.expect("checked"), &data);
-    }
-    // None is also fine — skipped because incompressible.
+    assert!(
+        result.is_none(),
+        "32 incompressible bytes cannot fit in an LZ4 frame with 27 bytes of \
+         fixed overhead, so the write must be skipped"
+    );
+    assert_eq!(
+        stats().files_skipped,
+        before.saturating_add(1),
+        "a skipped write must be counted"
+    );
 
     remove_rules("/tmp/fcomp_rand");
     set_min_size(DEFAULT_MIN_SIZE);
@@ -704,17 +767,22 @@ fn test_rule_matching() {
     })
     .expect("add rule");
 
+    // Comfortably compressible, so a `None` here can only mean the rule failed
+    // to match. With a ~110-byte payload the `is_some()` below would have been
+    // partly a bet on the gzip ratio clearing its 18-byte header — a second
+    // reason to fail, in a test that is about prefix and extension matching.
+    let data = compressible_sample();
+
     // Should match.
-    let data = b"Log line repeated many times: ERROR something went wrong ERROR something went wrong ERROR something went wrong";
-    let r1 = compress_for_write("/var/log/syslog.log", data);
+    let r1 = compress_for_write("/var/log/syslog.log", &data);
     assert!(r1.is_some(), ".log under /var/log should match");
 
     // Should NOT match (wrong extension).
-    let r2 = compress_for_write("/var/log/data.bin", data);
+    let r2 = compress_for_write("/var/log/data.bin", &data);
     assert!(r2.is_none(), ".bin under /var/log should not match");
 
     // Should NOT match (wrong prefix).
-    let r3 = compress_for_write("/home/user/file.log", data);
+    let r3 = compress_for_write("/home/user/file.log", &data);
     assert!(r3.is_none(), ".log under /home should not match");
 
     remove_rules("/var/log");
@@ -771,9 +839,10 @@ fn test_stats() {
     })
     .expect("add rule");
 
-    let data = b"Stats test data with repetition for compression. XXXXXXXXXXXX YYYYYYYYYYYY";
-    let compressed = compress_for_write("/tmp/fcomp_stats/test.txt", data);
-    assert!(compressed.is_some());
+    // Must be big enough to beat the LZ4 frame header — see `compressible_sample`.
+    let data = compressible_sample();
+    let compressed = compress_for_write("/tmp/fcomp_stats/test.txt", &data);
+    assert!(compressed.is_some(), "should have compressed");
     let _ = decompress_for_read(&compressed.expect("checked"));
 
     let s = stats();

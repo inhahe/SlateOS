@@ -63,5 +63,10 @@ yamldoc = { path = "../../yamldoc" }
 # from it (DesktopTheme::from_settings) and hosts the panel that edits it.
 appearance = { path = "../appearance" }
 
+# The input settings model, on the same terms as `appearance` above: the
+# compositor applies these values, the Settings application edits them, and the
+# panel in `mouse_settings` renders them, so none of the three can own them.
+inputsettings = { path = "../inputsettings" }
+
 [lints]
 workspace = true

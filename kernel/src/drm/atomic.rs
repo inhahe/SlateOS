@@ -23,7 +23,14 @@
 //! ## Commit
 //!
 //! `atomic_commit()` applies all validated changes atomically:
-//! - CRTC active state + mode changes → backend `mode_set()`.
+//! - CRTC **mode** changes → [`DrmDevice::set_crtc`], which programs the
+//!   backend and updates the object model together. A mode change that the
+//!   hardware refuses fails the commit rather than being recorded.
+//! - CRTC **active** state → internal state update only. This is a known gap,
+//!   tracked as `TD-DRM-ATOMIC-ACTIVE-IS-COSMETIC`: no backend is asked to
+//!   blank, so `active: false` means "the object model says off" and nothing
+//!   more. Fixing it properly means making the re-enable path work, which
+//!   needs a framebuffer that an `active: true` commit does not carry.
 //! - Plane FB/CRTC assignment + src/dst rects → internal state update.
 //! - Connector CRTC binding → internal state update.
 //!
@@ -170,7 +177,6 @@ pub fn atomic_check(dev: &DrmDevice, state: &AtomicState) -> KernelResult<()> {
         }
 
         // If a mode is being set, it must match a connector's supported mode.
-        // For now we only validate that the mode dimensions are reasonable.
         if let Some(Some(mode)) = &cs.mode {
             if mode.hdisplay == 0 || mode.vdisplay == 0 || mode.vrefresh == 0 {
                 serial_println!(
@@ -178,6 +184,37 @@ pub fn atomic_check(dev: &DrmDevice, state: &AtomicState) -> KernelResult<()> {
                     mode.hdisplay,
                     mode.vdisplay,
                     mode.vrefresh,
+                );
+                return Err(KernelError::InvalidArgument);
+            }
+            // …and it must be one some connector routed to this CRTC actually
+            // advertises. This module's own header has claimed since it was
+            // written that check does this; until 2026-08-21 it did not, and
+            // the only validation was that the numbers were non-zero — so
+            // `atomic_check` would pass a 3840x2160 request on a card whose
+            // connector offers 1024x768 and nothing would object until the
+            // commit reached a backend, or (before `set_crtc` existed) ever.
+            let advertised = dev.crtcs().iter().find(|c| c.id == cs.id).is_some_and(|c| {
+                #[allow(clippy::arithmetic_side_effects)]
+                let bit = 1u32 << c.index;
+                dev.connectors().iter().any(|conn| {
+                    let routable = conn.possible_encoders.iter().any(|eid| {
+                        dev.encoders()
+                            .iter()
+                            .any(|e| e.id == *eid && (e.possible_crtcs & bit) != 0)
+                    });
+                    routable
+                        && conn.modes.iter().any(|m| {
+                            m.hdisplay == mode.hdisplay && m.vdisplay == mode.vdisplay
+                        })
+                })
+            });
+            if !advertised {
+                serial_println!(
+                    "[drm-atomic] check FAIL: mode {}x{} not advertised by any connector on CRTC {}",
+                    mode.hdisplay,
+                    mode.vdisplay,
+                    cs.id,
                 );
                 return Err(KernelError::InvalidArgument);
             }
@@ -325,13 +362,39 @@ pub fn atomic_commit(dev: &mut DrmDevice, state: &AtomicState) -> KernelResult<(
     }
 
     // Apply CRTC changes.
+    //
+    // A mode change goes through `DrmDevice::set_crtc`, which programs the
+    // backend. Until 2026-08-21 this wrote `crtc.mode` directly and touched no
+    // hardware at all, despite this module's header saying "CRTC active state +
+    // mode changes → backend `mode_set()`" — so an atomic commit reported a
+    // resolution change that never happened. That was merely untrue then; it
+    // became dangerous the moment `DrmDevice::page_flip` started trusting
+    // `crtc.mode` to decide whether a framebuffer is the right size, because a
+    // fabricated mode would make it wave through a buffer the display engine
+    // reads with a different stride. See `design-decisions.md` §270.
     for cs in &state.crtc_changes {
-        if let Some(crtc) = dev.crtc_mut(cs.id) {
-            if let Some(active) = cs.active {
+        if let Some(mode_opt) = &cs.mode {
+            let (fb_id, x, y, conns) = if mode_opt.is_some() {
+                let (fb, x, y) = crtc_target_fb(dev, state, cs.id);
+                (fb, x, y, crtc_target_connectors(dev, state, cs.id))
+            } else {
+                // A disable names neither a framebuffer nor connectors.
+                (None, 0, 0, Vec::new())
+            };
+            dev.set_crtc(cs.id, fb_id, x, y, &conns, mode_opt.as_ref())?;
+        }
+        if let Some(active) = cs.active {
+            // Applied after the mode, so an explicit `active` in the same
+            // commit wins over the `true` that a successful `set_crtc` implies.
+            //
+            // NOTE: this is an object-model bit only — no backend is asked to
+            // blank its output. That is a real gap (`TD-DRM-ATOMIC-ACTIVE-IS-COSMETIC`
+            // in `known-issues.md`), left rather than half-fixed because DPMS-off
+            // has to be *reversible*, and re-enabling means re-programming a
+            // timing, which needs a framebuffer that a bare `active: true`
+            // commit does not supply.
+            if let Some(crtc) = dev.crtc_mut(cs.id) {
                 crtc.active = active;
-            }
-            if let Some(mode_opt) = &cs.mode {
-                crtc.mode = *mode_opt;
             }
         }
     }
@@ -394,6 +457,91 @@ pub fn atomic_commit(dev: &mut DrmDevice, state: &AtomicState) -> KernelResult<(
     );
 
     Ok(())
+}
+
+/// Which framebuffer, and at what origin within it, a CRTC should scan out
+/// after this commit.
+///
+/// A legacy `SETCRTC` names its framebuffer directly; an atomic commit instead
+/// assigns one to the CRTC's *primary plane*, so this reassembles the pair.
+/// The plane change in this same state wins if there is one — that is the
+/// caller's stated intent — and otherwise the plane keeps what it already had,
+/// which is what makes a commit that changes only the mode work.
+fn crtc_target_fb(
+    dev: &DrmDevice,
+    state: &AtomicState,
+    crtc_id: DrmObjectId,
+) -> (Option<DrmObjectId>, u32, u32) {
+    let Some(primary) = dev.crtcs().iter().find(|c| c.id == crtc_id).map(|c| c.primary_plane) else {
+        return (None, 0, 0);
+    };
+    let pending = state.plane_changes.iter().find(|ps| ps.id == primary);
+    let current = dev.planes().iter().find(|p| p.id == primary);
+    let fb = pending
+        .and_then(|ps| ps.fb_id)
+        .unwrap_or_else(|| current.and_then(|p| p.fb));
+    let (x, y) = pending
+        .and_then(|ps| ps.src_rect)
+        .map_or_else(|| current.map_or((0, 0), |p| (p.src_x, p.src_y)), |r| (r.x, r.y));
+    (fb, x, y)
+}
+
+/// Which connectors a CRTC should be driven out of after this commit.
+///
+/// Three sources in falling order of authority: what this commit explicitly
+/// binds, what is already bound, and — for a CRTC nothing has ever been routed
+/// to — every connector the hardware allows. The last is not a guess about
+/// intent; it is the only answer that lets a first mode-set on a freshly
+/// enumerated device succeed without the caller having to discover the encoder
+/// graph first.
+fn crtc_target_connectors(
+    dev: &DrmDevice,
+    state: &AtomicState,
+    crtc_id: DrmObjectId,
+) -> Vec<DrmObjectId> {
+    let explicit: Vec<DrmObjectId> = state
+        .connector_changes
+        .iter()
+        .filter(|cs| cs.crtc_id == Some(Some(crtc_id)))
+        .map(|cs| cs.id)
+        .collect();
+    if !explicit.is_empty() {
+        return explicit;
+    }
+    let bound: Vec<DrmObjectId> = dev
+        .connectors()
+        .iter()
+        .filter(|conn| {
+            conn.current_encoder.is_some_and(|eid| {
+                dev.encoders()
+                    .iter()
+                    .any(|e| e.id == eid && e.crtc == Some(crtc_id))
+            })
+        })
+        .map(|conn| conn.id)
+        .collect();
+    if !bound.is_empty() {
+        return bound;
+    }
+    let Some(bit) = dev
+        .crtcs()
+        .iter()
+        .find(|c| c.id == crtc_id)
+        .and_then(|c| 1u32.checked_shl(c.index))
+    else {
+        return Vec::new();
+    };
+    dev.connectors()
+        .iter()
+        .filter(|conn| {
+            conn.possible_encoders.iter().any(|eid| {
+                dev.encoders()
+                    .iter()
+                    .any(|e| e.id == *eid && (e.possible_crtcs & bit) != 0)
+            })
+        })
+        .map(|conn| conn.id)
+        .collect()
 }
 
 /// Find a compatible encoder for a connector → CRTC binding.

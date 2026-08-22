@@ -342,6 +342,7 @@ name = "appearance"
 version = "0.1.0"
 dependencies = [
  "guitk",
+ "settingsfile",
  "yamldoc",
 ]
 
@@ -1763,6 +1764,7 @@ dependencies = [
  "appearance",
  "guiremote",
  "guitk",
+ "inputsettings",
  "osfont",
 ]
 
@@ -2297,6 +2299,7 @@ dependencies = [
  "appearance",
  "guiremote",
  "guitk",
+ "inputsettings",
  "oswindow",
  "tzrules",
  "yamldoc",
@@ -4649,6 +4652,14 @@ version = "0.1.0"
 [[package]]
 name = "inotify"
 version = "0.1.0"
+
+[[package]]
+name = "inputsettings"
+version = "0.1.0"
+dependencies = [
+ "settingsfile",
+ "yamldoc",
+]
 
 [[package]]
 name = "insightly-cli"
@@ -9477,7 +9488,17 @@ name = "settings"
 version = "0.1.0"
 dependencies = [
  "appearance",
+ "compositor",
  "guitk",
+ "inputsettings",
+ "oswindow",
+]
+
+[[package]]
+name = "settingsfile"
+version = "0.1.0"
+dependencies = [
+ "yamldoc",
 ]
 
 [[package]]

@@ -370,23 +370,112 @@ impl AtiBackend {
         }
     }
 
-    /// Display a buffer, retiming the CRTC first if it is not already in the
-    /// framebuffer's mode.
+    /// Retime the CRTC to `mode` and scan `fb` out of it.
     ///
-    /// The trait has no separate "set mode" entry point, so this carries both:
-    /// a flip within the current mode is one register write, and a flip to a
-    /// framebuffer of a different size is a full mode-set. Which one happened
-    /// is not guesswork — [`Self::mode`] records the last timing programmed.
+    /// This is the driver's only entry point that changes a timing.
+    /// [`Self::page_flip`] used to carry an implicit mode-set — it looked the
+    /// framebuffer's size up in [`DMT_MODES`] and retimed if the answer differed
+    /// from [`Self::mode`] — and that was removed on 2026-08-21 in favour of
+    /// this. The reason is not tidiness: a page flip that silently changes the
+    /// resolution is indistinguishable, to the client issuing it, from one that
+    /// does not, and the other two backends answered the same call by cropping
+    /// and by doing nothing. See `design-decisions.md` §270.
+    ///
+    /// The mode is validated by [`ModeSetPlan::new`], which is the same
+    /// authority [`Self::enumerate`] filters the advertised mode list through —
+    /// so a mode that came out of this connector's list and fits the buffer
+    /// cannot be refused here.
     ///
     /// # Errors
     ///
-    /// - `NotSupported` if this card holds the console (see [`Self::owns_console`]),
-    ///   or if the object is not VRAM-resident.
-    /// - `NotFound` if the framebuffer's size matches no timing this driver
-    ///   knows. Refused rather than approximated: a CRTC programmed with a
-    ///   timing that merely resembles the one the monitor expects is the
-    ///   failure that looks like a hang.
-    /// - Propagates [`modeset::apply`] and [`modeset::page_flip`].
+    /// - `NotSupported` if this card holds the console (see
+    ///   [`Self::owns_console`]), or if the object is not VRAM-resident.
+    /// - `NotFound` if `mode` matches no timing this driver knows. Refused
+    ///   rather than approximated: a CRTC programmed with a timing that merely
+    ///   resembles the one the monitor expects is the failure that looks like a
+    ///   hang.
+    /// - `InvalidArgument` if the framebuffer is not the mode's size — the
+    ///   CRTC would read it with the wrong stride, which is a diagonally
+    ///   sheared picture.
+    /// - Propagates [`modeset::apply`] and [`modeset::verify_applied`].
+    pub fn set_mode(
+        &mut self,
+        _crtc_id: DrmObjectId,
+        mode: &DrmMode,
+        fb: &DrmFramebuffer,
+        gem: &GemObject,
+    ) -> KernelResult<()> {
+        if self.owns_console {
+            return Err(KernelError::NotSupported);
+        }
+        let GemBacking::Vram { offset, len } = gem.backing else {
+            return Err(KernelError::NotSupported);
+        };
+        if fb.width != mode.hdisplay || fb.height != mode.vdisplay {
+            return Err(KernelError::InvalidArgument);
+        }
+        let want =
+            timing::lookup(mode.hdisplay, mode.vdisplay, mode.vrefresh).ok_or(KernelError::NotFound)?;
+
+        // Order matters: the buffer's contents must be in memory before the
+        // CRTC is pointed at it, and the CRTC is pointed at it by `apply`.
+        self.ap.flush(offset, len)?;
+
+        let total = u32::try_from(self.ap.len()).map_err(|_| KernelError::InvalidArgument)?;
+        let plan = ModeSetPlan::new(want, fb.format, offset, total)?;
+        modeset::apply(&self.dev.mmio, &plan)?;
+        modeset::verify_applied(&self.dev.mmio, &plan)?;
+        // Only recorded once the hardware has been read back and agrees. A
+        // `self.mode` set from the plan rather than from the registers would
+        // make a failed mode-set look like a successful one to the very next
+        // page flip, which would then take the one-register-write path.
+        self.mode = Some(*want);
+        self.scanout = Some(offset);
+        Ok(())
+    }
+
+    /// Stop scanning out and blank the output.
+    ///
+    /// Clears [`Self::mode`] as well as the registers, so the next flip cannot
+    /// take the "already in the right mode" path against a CRTC that is off.
+    /// [`Self::scanout`] is cleared too, which is what releases
+    /// [`Self::gem_destroy`]'s `DeviceBusy` hold on the buffer that was being
+    /// displayed — a compositor shutting down wants to free its buffers
+    /// immediately after turning the CRTC off, and would otherwise be refused.
+    ///
+    /// # Errors
+    ///
+    /// `NotSupported` if this card holds the console — blanking it would take
+    /// the operator's only screen. Otherwise propagates [`modeset::disable`].
+    pub fn disable_crtc(&mut self, _crtc_id: DrmObjectId) -> KernelResult<()> {
+        if self.owns_console {
+            return Err(KernelError::NotSupported);
+        }
+        modeset::disable(&self.dev.mmio)?;
+        self.mode = None;
+        self.scanout = None;
+        Ok(())
+    }
+
+    /// Display a buffer in the mode the CRTC is already in: one register write.
+    ///
+    /// Deliberately will **not** retime. A framebuffer whose size differs from
+    /// the programmed mode is refused rather than accommodated, and a CRTC that
+    /// has never been timed is refused rather than timed here — use
+    /// [`Self::set_mode`] for both. [`super::super::DrmDevice::page_flip`]
+    /// makes the same check against its own object model before calling this,
+    /// so reaching either refusal means the driver's private state and the DRM
+    /// object model have diverged; the check is kept anyway, because the cost
+    /// of being wrong is the CRTC reading a buffer with the previous mode's
+    /// stride.
+    ///
+    /// # Errors
+    ///
+    /// - `NotSupported` if this card holds the console (see
+    ///   [`Self::owns_console`]), or if the object is not VRAM-resident.
+    /// - `InvalidArgument` if the CRTC is in no mode, or if `fb` is not the
+    ///   size of the mode it is in.
+    /// - Propagates [`modeset::page_flip`].
     pub fn page_flip(
         &mut self,
         _crtc_id: DrmObjectId,
@@ -399,6 +488,12 @@ impl AtiBackend {
         let GemBacking::Vram { offset, len } = gem.backing else {
             return Err(KernelError::NotSupported);
         };
+        let Some(cur) = self.mode else {
+            return Err(KernelError::InvalidArgument);
+        };
+        if fb.width != cur.hdisplay || fb.height != cur.vdisplay {
+            return Err(KernelError::InvalidArgument);
+        }
 
         // Everything written through the aperture must be in memory before the
         // CRTC is pointed at it. A no-op on an uncacheable mapping, and not one
@@ -406,16 +501,7 @@ impl AtiBackend {
         // aperture refuses to assume away.
         self.ap.flush(offset, len)?;
 
-        let want = timing::lookup(fb.width, fb.height, 60).ok_or(KernelError::NotFound)?;
-        if self.mode.as_ref() != Some(want) {
-            let total = u32::try_from(self.ap.len()).map_err(|_| KernelError::InvalidArgument)?;
-            let plan = ModeSetPlan::new(want, fb.format, offset, total)?;
-            modeset::apply(&self.dev.mmio, &plan)?;
-            modeset::verify_applied(&self.dev.mmio, &plan)?;
-            self.mode = Some(*want);
-        } else {
-            modeset::page_flip(&self.dev.mmio, offset)?;
-        }
+        modeset::page_flip(&self.dev.mmio, offset)?;
         self.scanout = Some(offset);
         Ok(())
     }

@@ -3172,6 +3172,342 @@ pub fn build_linux_virtgpu_getparam_test_elf() -> alloc::vec::Vec<u8> {
     buf
 }
 
+/// Build a **Linux-ABI** `ET_EXEC` test ELF that interrogates
+/// `/dev/input/event0` from ring 3 exactly the way a real input client does.
+///
+/// This is the only test that exercises the evdev node the way it will
+/// actually be used. The kernel-internal self-tests
+/// ([`crate::evdev::self_test`], [`crate::evdev_fd::self_test`]) call Rust
+/// functions directly, so they cannot catch anything that lives *between* the
+/// two: a missing `ioctl` dispatch arm, a capability gate that rejects the
+/// wrong thing, an `_IOC` number the syscall layer decodes differently from
+/// the way userspace encoded it, a copy-out that faults. Those are precisely
+/// the failures a client would hit first and we would never see.
+///
+/// The order below is not arbitrary — it is the order `libinput`,
+/// `evtest` and SDL interrogate a device in, so a break shows up here in the
+/// same step it would break for them:
+///
+/// ```text
+///   open("/dev/input/event0", O_RDONLY|O_NONBLOCK)
+///   ioctl(EVIOCGVERSION)     -> 0, *arg == EV_VERSION
+///   ioctl(EVIOCGID)          -> 0, id.bustype == BUS_I8042
+///   ioctl(EVIOCGNAME(64))    -> >0, name[0] == 'A'   ("AT Translated …")
+///   ioctl(EVIOCGBIT(0,4))    -> 4,  bit EV_KEY set
+///   ioctl(EVIOCGKEY(96))     -> 96
+///   ioctl(EVIOCGUNIQ(64))    -> -ENOENT (no serial on a PS/2 device)
+///   read(fd, buf, 24)        -> -EAGAIN when idle (never blocks)
+///   read(fd, buf, 8)         -> -EINVAL (sub-record buffer)
+///   ioctl(EVIOCGRAB, 1)      -> 0      (argument used BY VALUE)
+///   ioctl(EVIOCGRAB, 0)      -> 0      (ungrab)
+///   ioctl(EVIOCSCLOCKID,&1)  -> 0      (this one IS a pointer)
+///   ioctl(fd, 0x1234)        -> -ENOTTY (foreign magic)
+///   close(fd)                -> 0
+///   exit(0)
+/// ```
+///
+/// Every stage loads its own sentinel into `edi` *before* the comparison that
+/// might jump, so the harness can name the failing step from the exit code
+/// alone rather than reporting "the evdev test failed".
+///
+/// With `expect_denied` the program instead only opens, requires `-EACCES`,
+/// and exits 0 — proving the `ResourceType::InputDevice` gate actually denies
+/// a process that was not granted it. A test that only ever runs *with* the
+/// capability cannot tell a working gate from an absent one.
+///
+/// The `EVIOC*` request numbers are built with [`crate::evdev::ioc`], the same
+/// encoder the self-test pins against the real Linux literals, so this program
+/// asks with the identical bit pattern a C client would.
+#[must_use]
+#[allow(
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects,
+    clippy::cast_possible_truncation,
+    clippy::too_many_lines
+)]
+pub fn build_linux_evdev_test_elf(expect_denied: bool) -> alloc::vec::Vec<u8> {
+    use crate::evdev;
+    use alloc::vec;
+    use alloc::vec::Vec;
+
+    /// Emit `mov edi, imm32` — the exit sentinel for the check that follows.
+    /// `mov` leaves the flags alone, which is why it can precede the compare.
+    fn sentinel(code: &mut Vec<u8>, value: u32) {
+        code.push(0xBF);
+        code.extend_from_slice(&value.to_le_bytes());
+    }
+    /// Emit a `rel32` conditional jump and record the displacement's offset so
+    /// the caller can patch it once the target's position is known. `rel32`
+    /// rather than `rel8` because the body is far longer than 127 bytes and a
+    /// silently-truncated `rel8` would jump into the middle of an instruction.
+    fn jcc(code: &mut Vec<u8>, sites: &mut Vec<usize>, cc: u8) {
+        code.extend_from_slice(&[0x0F, cc, 0, 0, 0, 0]);
+        sites.push(code.len() - 4);
+    }
+    /// Emit `ioctl(r8, request, <rdx set by `set_rdx`>)`.
+    fn ioctl_call(code: &mut Vec<u8>, request: u32, set_rdx: &[u8]) {
+        code.extend_from_slice(&[0x4C, 0x89, 0xC7]); // mov rdi, r8
+        code.push(0xBE); // mov esi, imm32 (zero-extends into rsi)
+        code.extend_from_slice(&request.to_le_bytes());
+        code.extend_from_slice(set_rdx);
+        code.extend_from_slice(&[0xB8, 0x10, 0x00, 0x00, 0x00, 0x0F, 0x05]); // mov eax,16; syscall
+    }
+
+    /// `EVIOCG*(size)` — every read-direction request this program issues.
+    fn gread(nr: u32, size: u32) -> u32 {
+        crate::evdev::ioc(crate::evdev::IOC_READ, nr, size)
+    }
+
+    /// Length of the `EVIOCGKEY` bitmap, used both as the request's size field
+    /// and as the `cmp` immediate the return value is checked against. One
+    /// constant, so the two cannot drift into a test that always passes.
+    const KEY_BITMAP_LEN: u32 = evdev::KEY_BYTES as u32;
+
+    // Condition codes for the 0x0F-prefixed rel32 forms.
+    const JS: u8 = 0x88;
+    const JNZ: u8 = 0x85;
+    const JZ: u8 = 0x84;
+    const JLE: u8 = 0x8E;
+
+    // Scratch frame: [rsp+0x00] small result (u32 / struct input_id),
+    // [rsp+0x08] the int EVIOCSCLOCKID points at, [rsp+0x10 .. 0x70] the
+    // 96-byte general buffer.  Everything stays inside a signed disp8 so no
+    // addressing mode needs a 4-byte displacement.
+    const SET_RDX_RSP: &[u8] = &[0x48, 0x8D, 0x14, 0x24]; // lea rdx, [rsp]
+    const SET_RDX_RSP08: &[u8] = &[0x48, 0x8D, 0x54, 0x24, 0x08]; // lea rdx, [rsp+8]
+    const SET_RDX_RSP10: &[u8] = &[0x48, 0x8D, 0x54, 0x24, 0x10]; // lea rdx, [rsp+16]
+
+    let phdr_offset: u64 = 64;
+    let code_offset: u64 = 120;
+    let load_vaddr: u64 = 0x0000_0040_0000_0000;
+
+    let mut code: Vec<u8> = Vec::new();
+    let mut fail_sites: Vec<usize> = Vec::new();
+
+    // sub rsp, 0x80 — imm32 form; 0x80 does not fit a signed imm8.
+    code.extend_from_slice(&[0x48, 0x81, 0xEC, 0x80, 0x00, 0x00, 0x00]);
+
+    // --- open("/dev/input/event0", O_RDONLY|O_NONBLOCK) ---------------------
+    code.extend_from_slice(&[0x48, 0xBF]); // movabs rdi, &path
+    let path_imm = code.len();
+    code.extend_from_slice(&[0u8; 8]);
+    code.extend_from_slice(&[0xBE, 0x00, 0x08, 0x00, 0x00]); // mov esi, 0o4000
+    code.extend_from_slice(&[0x31, 0xD2]); // xor edx, edx (mode 0)
+    code.extend_from_slice(&[0xB8, 0x02, 0x00, 0x00, 0x00, 0x0F, 0x05]); // mov eax,2; syscall
+
+    if expect_denied {
+        // Without the InputDevice capability the open must fail with EACCES.
+        // Any other answer — a success above all — means the gate is not
+        // doing its job, so it exits with the sentinel rather than 0.
+        sentinel(&mut code, 0x21);
+        code.extend_from_slice(&[0x48, 0x83, 0xF8, 0xF3]); // cmp rax, -13
+        jcc(&mut code, &mut fail_sites, JNZ);
+    } else {
+        sentinel(&mut code, 0xE1);
+        code.extend_from_slice(&[0x48, 0x85, 0xC0]); // test rax, rax
+        jcc(&mut code, &mut fail_sites, JS);
+        code.extend_from_slice(&[0x49, 0x89, 0xC0]); // mov r8, rax (save fd)
+
+        // --- EVIOCGVERSION --------------------------------------------------
+        code.extend_from_slice(&[0xC7, 0x04, 0x24, 0, 0, 0, 0]); // mov dword [rsp], 0
+        ioctl_call(&mut code, gread(evdev::EVIOC_NR_GVERSION, 4), SET_RDX_RSP);
+        sentinel(&mut code, 0xE2);
+        code.extend_from_slice(&[0x48, 0x85, 0xC0]); // test rax, rax
+        jcc(&mut code, &mut fail_sites, JNZ);
+        sentinel(&mut code, 0xE3);
+        code.extend_from_slice(&[0x8B, 0x04, 0x24]); // mov eax, [rsp]
+        code.push(0x3D); // cmp eax, imm32
+        code.extend_from_slice(&evdev::EV_VERSION.to_le_bytes());
+        jcc(&mut code, &mut fail_sites, JNZ);
+
+        // --- EVIOCGID: the bus must be i8042, not a default-zero struct -----
+        code.extend_from_slice(&[0x48, 0xC7, 0x04, 0x24, 0, 0, 0, 0]); // mov qword [rsp], 0
+        ioctl_call(&mut code, gread(evdev::EVIOC_NR_GID, 8), SET_RDX_RSP);
+        sentinel(&mut code, 0xE4);
+        code.extend_from_slice(&[0x48, 0x85, 0xC0]);
+        jcc(&mut code, &mut fail_sites, JNZ);
+        sentinel(&mut code, 0xE5);
+        code.extend_from_slice(&[0x0F, 0xB7, 0x04, 0x24]); // movzx eax, word [rsp]
+        code.extend_from_slice(&[0x83, 0xF8, evdev::BUS_I8042 as u8]); // cmp eax, imm8
+        jcc(&mut code, &mut fail_sites, JNZ);
+
+        // --- EVIOCGNAME(64): "AT Translated Set 2 keyboard" -----------------
+        code.extend_from_slice(&[0xC6, 0x44, 0x24, 0x10, 0x00]); // mov byte [rsp+16], 0
+        ioctl_call(&mut code, gread(evdev::EVIOC_NR_GNAME, 64), SET_RDX_RSP10);
+        sentinel(&mut code, 0xE6);
+        code.extend_from_slice(&[0x48, 0x85, 0xC0]);
+        jcc(&mut code, &mut fail_sites, JLE); // must be a positive length
+        sentinel(&mut code, 0xE7);
+        code.extend_from_slice(&[0x80, 0x7C, 0x24, 0x10, b'A']); // cmp byte [rsp+16], 'A'
+        jcc(&mut code, &mut fail_sites, JNZ);
+
+        // --- EVIOCGBIT(0, 4): the EV_* map, which must claim EV_KEY ---------
+        code.extend_from_slice(&[0xC7, 0x44, 0x24, 0x10, 0, 0, 0, 0]); // mov dword [rsp+16], 0
+        ioctl_call(
+            &mut code,
+            gread(evdev::EVIOC_NR_GBIT_BASE, 4),
+            SET_RDX_RSP10,
+        );
+        sentinel(&mut code, 0xE8);
+        code.extend_from_slice(&[0x48, 0x83, 0xF8, 0x04]); // cmp rax, 4
+        jcc(&mut code, &mut fail_sites, JNZ);
+        sentinel(&mut code, 0xE9);
+        code.extend_from_slice(&[0xF6, 0x44, 0x24, 0x10, 0x02]); // test byte [rsp+16], EV_KEY
+        jcc(&mut code, &mut fail_sites, JZ);
+
+        // --- EVIOCGKEY(96): the full key-state bitmap comes back ------------
+        ioctl_call(
+            &mut code,
+            gread(evdev::EVIOC_NR_GKEY, KEY_BITMAP_LEN),
+            SET_RDX_RSP10,
+        );
+        sentinel(&mut code, 0xEA);
+        code.extend_from_slice(&[0x48, 0x83, 0xF8, KEY_BITMAP_LEN as u8]); // cmp rax, 96
+        jcc(&mut code, &mut fail_sites, JNZ);
+
+        // --- EVIOCGUNIQ(64): refused, so the client falls back to GPHYS -----
+        ioctl_call(&mut code, gread(evdev::EVIOC_NR_GUNIQ, 64), SET_RDX_RSP10);
+        sentinel(&mut code, 0xEB);
+        code.extend_from_slice(&[0x48, 0x83, 0xF8, 0xFE]); // cmp rax, -ENOENT
+        jcc(&mut code, &mut fail_sites, JNZ);
+
+        // --- read(24) on an idle non-blocking fd ----------------------------
+        // EAGAIN is the expected answer, but a keystroke arriving mid-test
+        // would legitimately produce data instead, so a positive length is
+        // accepted too. What must never happen is 0 (which a client reads as
+        // EOF and closes the device on) or any other error.
+        code.extend_from_slice(&[0x4C, 0x89, 0xC7]); // mov rdi, r8
+        code.extend_from_slice(&[0x48, 0x8D, 0x74, 0x24, 0x10]); // lea rsi, [rsp+16]
+        code.extend_from_slice(&[0xBA, 0x18, 0x00, 0x00, 0x00]); // mov edx, 24
+        code.extend_from_slice(&[0x31, 0xC0, 0x0F, 0x05]); // xor eax,eax; syscall
+        sentinel(&mut code, 0xEC);
+        code.extend_from_slice(&[0x48, 0x83, 0xF8, 0xF5]); // cmp rax, -EAGAIN
+        let mut read_ok_sites: Vec<usize> = Vec::new();
+        jcc(&mut code, &mut read_ok_sites, JZ);
+        code.extend_from_slice(&[0x48, 0x85, 0xC0]); // test rax, rax
+        jcc(&mut code, &mut fail_sites, JLE);
+        let read_ok = code.len();
+        for site in &read_ok_sites {
+            let disp = (read_ok as isize) - (*site as isize + 4);
+            code[*site..*site + 4].copy_from_slice(&(disp as i32).to_le_bytes());
+        }
+
+        // --- read(8): a sub-record buffer is EINVAL, never a short read -----
+        code.extend_from_slice(&[0x4C, 0x89, 0xC7]); // mov rdi, r8
+        code.extend_from_slice(&[0x48, 0x8D, 0x74, 0x24, 0x10]); // lea rsi, [rsp+16]
+        code.extend_from_slice(&[0xBA, 0x08, 0x00, 0x00, 0x00]); // mov edx, 8
+        code.extend_from_slice(&[0x31, 0xC0, 0x0F, 0x05]); // xor eax,eax; syscall
+        sentinel(&mut code, 0xED);
+        code.extend_from_slice(&[0x48, 0x83, 0xF8, 0xEA]); // cmp rax, -EINVAL
+        jcc(&mut code, &mut fail_sites, JNZ);
+
+        // --- EVIOCGRAB(1) then EVIOCGRAB(0) ---------------------------------
+        // The argument is passed BY VALUE, exactly as libinput passes it
+        // (`ioctl(fd, EVIOCGRAB, (void *)1)`). If the kernel ever went back to
+        // dereferencing it, this would fault on address 1 and fail here.
+        let grab = evdev::ioc(evdev::IOC_WRITE, evdev::EVIOC_NR_GRAB, 4);
+        ioctl_call(&mut code, grab, &[0xBA, 0x01, 0x00, 0x00, 0x00]); // mov edx, 1
+        sentinel(&mut code, 0xEE);
+        code.extend_from_slice(&[0x48, 0x85, 0xC0]);
+        jcc(&mut code, &mut fail_sites, JNZ);
+        ioctl_call(&mut code, grab, &[0x31, 0xD2]); // xor edx, edx
+        sentinel(&mut code, 0xEF);
+        code.extend_from_slice(&[0x48, 0x85, 0xC0]);
+        jcc(&mut code, &mut fail_sites, JNZ);
+
+        // --- EVIOCSCLOCKID(CLOCK_MONOTONIC) ---------------------------------
+        // This one really is a pointer to an int — the asymmetry with
+        // EVIOCGRAB above is Linux's, and both halves of it are pinned here.
+        code.extend_from_slice(&[0xC7, 0x44, 0x24, 0x08]); // mov dword [rsp+8], imm32
+        code.extend_from_slice(&evdev::CLOCK_MONOTONIC.to_le_bytes());
+        let sclockid = evdev::ioc(evdev::IOC_WRITE, evdev::EVIOC_NR_SCLOCKID, 4);
+        ioctl_call(&mut code, sclockid, SET_RDX_RSP08);
+        sentinel(&mut code, 0xF0);
+        code.extend_from_slice(&[0x48, 0x85, 0xC0]);
+        jcc(&mut code, &mut fail_sites, JNZ);
+
+        // --- an ioctl of foreign magic is ENOTTY, not a wild dispatch -------
+        ioctl_call(&mut code, 0x1234, &[0x31, 0xD2]); // xor edx, edx
+        sentinel(&mut code, 0xF1);
+        code.extend_from_slice(&[0x48, 0x83, 0xF8, 0xE7]); // cmp rax, -ENOTTY
+        jcc(&mut code, &mut fail_sites, JNZ);
+
+        // --- close(fd) ------------------------------------------------------
+        code.extend_from_slice(&[0x4C, 0x89, 0xC7]); // mov rdi, r8
+        code.extend_from_slice(&[0xB8, 0x03, 0x00, 0x00, 0x00, 0x0F, 0x05]); // mov eax,3; syscall
+        sentinel(&mut code, 0xF2);
+        code.extend_from_slice(&[0x48, 0x85, 0xC0]);
+        jcc(&mut code, &mut fail_sites, JNZ);
+    }
+
+    // exit(0)
+    code.extend_from_slice(&[0x31, 0xFF]); // xor edi, edi
+    code.extend_from_slice(&[0xB8, 0x3C, 0x00, 0x00, 0x00, 0x0F, 0x05]);
+
+    // fail: exit(edi) — every check jumps here with its own sentinel loaded.
+    let fail = code.len();
+    code.extend_from_slice(&[0xB8, 0x3C, 0x00, 0x00, 0x00, 0x0F, 0x05]);
+    code.push(0xCC); // int3 — unreachable trap
+
+    for site in &fail_sites {
+        let disp = (fail as isize) - (*site as isize + 4);
+        code[*site..*site + 4].copy_from_slice(&(disp as i32).to_le_bytes());
+    }
+
+    // --- Data layout (same PT_LOAD, after the code) ---
+    let path: &[u8] = b"/dev/input/event0\0";
+    let code_len = code.len();
+    let data_base = code_offset as usize + code_len;
+    let path_off = data_base;
+    let path_end = path_off + path.len();
+    let file_size = path_end;
+
+    let vaddr_of = |fo: usize| -> u64 { load_vaddr + (fo as u64 - code_offset) };
+    let path_vaddr = vaddr_of(path_off);
+    code[path_imm..path_imm + 8].copy_from_slice(&path_vaddr.to_le_bytes());
+
+    // --- File image ---
+    let seg_len = file_size - code_offset as usize;
+    let mut buf = vec![0u8; file_size];
+
+    buf[0] = 0x7F;
+    buf[1] = b'E';
+    buf[2] = b'L';
+    buf[3] = b'F';
+    buf[EI_CLASS] = ELFCLASS64;
+    buf[EI_DATA] = ELFDATA2LSB;
+    buf[EI_VERSION] = EV_CURRENT;
+    buf[EI_OSABI] = ELFOSABI_GNU;
+    write_u16(&mut buf, 16, ET_EXEC);
+    write_u16(&mut buf, 18, EM_X86_64);
+    write_u32(&mut buf, 20, u32::from(EV_CURRENT));
+    write_u64(&mut buf, 24, load_vaddr); // e_entry
+    write_u64(&mut buf, 32, phdr_offset); // e_phoff
+    write_u64(&mut buf, 40, 0);
+    write_u32(&mut buf, 48, 0);
+    write_u16(&mut buf, 52, ELF64_EHDR_SIZE as u16);
+    write_u16(&mut buf, 54, ELF64_PHDR_SIZE as u16);
+    write_u16(&mut buf, 56, 1);
+    write_u16(&mut buf, 58, ELF64_SHDR_SIZE as u16);
+    write_u16(&mut buf, 60, 0);
+    write_u16(&mut buf, 62, 0);
+
+    let ph = phdr_offset as usize;
+    write_u32(&mut buf, ph, PT_LOAD);
+    write_u32(&mut buf, ph + 4, PF_R | PF_X);
+    write_u64(&mut buf, ph + 8, code_offset);
+    write_u64(&mut buf, ph + 16, load_vaddr);
+    write_u64(&mut buf, ph + 24, 0);
+    write_u64(&mut buf, ph + 32, seg_len as u64);
+    write_u64(&mut buf, ph + 40, seg_len as u64);
+    write_u64(&mut buf, ph + 48, 0x1000);
+
+    buf[code_offset as usize..code_offset as usize + code_len].copy_from_slice(&code);
+    buf[path_off..path_end].copy_from_slice(path);
+
+    buf
+}
+
 /// Build a **Linux-ABI** `ET_EXEC` test ELF that drives a full **virtio-gpu
 /// render-node round trip** on `/dev/dri/renderD128` from ring 3 — the 2D
 /// resource path that base virtio-gpu services without `VIRTIO_GPU_F_VIRGL`:
@@ -3227,8 +3563,8 @@ pub fn build_linux_virtgpu_getparam_test_elf() -> alloc::vec::Vec<u8> {
     clippy::too_many_lines
 )]
 pub fn build_linux_virtgpu_resource_test_elf() -> alloc::vec::Vec<u8> {
-    use alloc::vec;
     use crate::drm::virtgpu_uapi as vg;
+    use alloc::vec;
 
     let phdr_offset: u64 = 64;
     let code_offset: u64 = 120;

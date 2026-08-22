@@ -989,6 +989,78 @@ worth correcting whichever way this goes); `userspace/coreutils/` (86 bins,
 `known-issues.md` → `B-FORTY-TWO-BINARY-NAMES-ARE-BUILT-BY-TWO-PACKAGES`;
 `scripts/dup-bins-survey.py` (the triage).
 
+---
+
+## Q57 — [A] Should a program be able to pop up a prompt asking you for permission to read the keyboard, the microphone or the camera? — Status: OPEN
+
+**In short:** SlateOS has a mechanism where a program that lacks permission for
+something can ask *you* for it — the system shows the program's stated reason and
+you say yes or no. This is the familiar "SomeApp would like to use your
+microphone" prompt. Right now that mechanism only covers fifteen kinds of
+permission, all of them internal plumbing (pipes, timers, processes), and it
+covers **none** of the ones a user would actually recognise: keyboard input,
+sound recording, the graphics card, raw network access, setting the clock. Those
+were all added later and the list was never extended. So today the answer is
+accidentally "no prompts for anything you'd care about" — permission for those
+has to be handed out when a program is launched, by whoever launches it, with no
+way to ask later. The question is whether that accident should become the rule,
+or be fixed.
+
+**How this surfaced:** the keyboard and mouse became readable devices today
+(`/dev/input/event0`, `event1`), gated on a new permission type. Checking whether
+a program could obtain that permission at run time turned up the fifteen-entry
+list, which stops at 15; the keyboard is 30, so the request is refused with
+"invalid argument" — not "denied", which would at least be an honest answer.
+
+**Glossary:** *capability / permission token* — a thing a process must hold to do
+something, rather than being allowed because of who it is. *resource type* — the
+kind of thing a token is about (a file, a pipe, the keyboard); each has a number.
+*grant at spawn* — the launcher hands the token over at start-up; the only route
+that works today for the newer types. *instance type* vs *class type* — some
+tokens name one specific already-open thing (this pipe, this socket), others name
+a whole capability (any keyboard, raw networking). Only the second kind makes
+sense to ask a human about — "may I have a pipe?" is not a question a person can
+answer.
+
+**The list, concretely:** `sys_cap_request` (`kernel/src/syscall/handlers.rs:6181`)
+matches resource types 1–15 by hand and returns `InvalidArgument` for anything
+else. Types 16–30 exist. Most of 16–21 and 25–26 are instance types and belong
+out of the list on the merits. But **23 `Drm` (the graphics card), 22 `AlsaPcm`
+(sound), 24 `NetRaw` (raw network), 27 `SystemClock` (setting the time), 28
+`PrivilegedPort`, 29 `ResourceLimit` and 30 `InputDevice` (the keyboard)** are
+exactly the human-recognisable ones, and all seven are unreachable.
+
+| Option | *What changes* |
+|---|---|
+| **A. Extend the list to every class type** | A program with no keyboard permission can put a prompt on your screen saying why it wants one, and you decide. The seven types above become requestable. Also means a hostile program can *ask* for keylogging — the defence is that you see the request and the reason, which is exactly what the mechanism is for |
+| **B. Extend it to the tame ones only** — sound, clock, ports, limits — and keep keyboard/graphics/raw-network grant-only | Prompts appear for the things where a wrong yes is recoverable; the three where a wrong yes is a total compromise stay launcher-only, so no program can ever ask you for them |
+| **C. Leave it, and say so** — the request mechanism is for the original fifteen; everything newer is grant-at-launch | No behaviour changes. We write down that the newer permissions are deliberately not requestable, and fix the error so a refused request says "not requestable" instead of "invalid argument" |
+
+**My recommendation: A, with the error message fixed regardless.** The whole
+point of a consent prompt is that it covers the things worth consenting to; a
+prompt system that can ask about pipes but not about the microphone has it
+exactly backwards. The "hostile program can ask" objection applies equally to
+every phone and desktop OS and is answered the same way — you are shown who is
+asking and what for, and saying no is free. B's line looks principled but is hard
+to hold: the moment a screen reader legitimately needs keyboard access, B has no
+route for it either.
+
+Independently of which option wins, `InvalidArgument` for a well-formed request
+about a real resource type is wrong and misleading, and lane A will fix that to a
+distinct error either way.
+
+**If this is never answered:** nothing breaks. Every newer permission continues
+to be handed out at launch by init, which works — this is how the compositor will
+get keyboard access. The cost is that the consent-prompt machinery stays
+decorative, and it gets quietly more wrong with each new resource type added
+(three were added this month, none of them requestable). It is also the kind of
+thing that is much cheaper to decide now than after applications have been
+written assuming one answer.
+
+**Where it bites:** `kernel/src/syscall/handlers.rs:6181` (the fifteen-entry
+match), `kernel/src/cap/mod.rs:194-360` (types 16–30), `kernel/src/cap/request.rs`
+(the broker itself).
+
 
 # Resolved
 

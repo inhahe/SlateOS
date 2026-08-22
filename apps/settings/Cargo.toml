@@ -9,6 +9,22 @@ guitk = { path = "../../gui/toolkit" }
 # from, so they share one model and one file rather than each keeping a copy.
 # See known-issues.md TD-THREE-INDEPENDENT-APPEARANCE-MODELS.
 appearance = { path = "../../gui/appearance" }
+# The Mouse page, on exactly the same terms: the compositor is what decides
+# whether two clicks are one double click, so the value has to travel through a
+# file both processes read rather than living in this application.
+inputsettings = { path = "../../gui/inputsettings" }
+# The window and the event loop. Settings names `oswindow`, never `guiremote` —
+# an application should no more name the display protocol than a Unix program
+# names the socket layer.
+oswindow = { path = "../../gui/window" }
+
+# The real compositor, for the one test module that puts the shipped code on
+# *both* ends of the display protocol. A test against a stand-in compositor and
+# a test against a stand-in client can both pass while the two real halves
+# disagree; this is what closes that gap. A dev-dependency, so the shipped
+# Settings binary does not link a display server.
+[dev-dependencies]
+compositor = { path = "../../gui/compositor" }
 
 [lints]
 workspace = true

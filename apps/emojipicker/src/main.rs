@@ -52,7 +52,10 @@ mod mocha {
     pub const RED: Color = Color::from_hex(0xF38BA8);
     pub const PINK: Color = Color::from_hex(0xF5C2E7);
     pub const FLAMINGO: Color = Color::from_hex(0xF2CDCD);
-    pub const SKY: Color = Color::from_hex(0x89DCFE);
+    // `0x89DCEB`. Was `0x89DCFE` — a transposed byte pair copied from
+    // `gui/appearance`. See known-issues.md
+    // TD-C-EVERY-APPLICATION-CARRIES-ITS-OWN-COPY-OF-THE-PALETTE-TOO.
+    pub const SKY: Color = Color::from_hex(0x89DCEB);
     pub const ROSEWATER: Color = Color::from_hex(0xF5E0DC);
 }
 

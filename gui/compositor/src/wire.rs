@@ -353,11 +353,13 @@ fn to_compositor_request(
             opacity,
         },
         RequestBody::GetDisplayInfo => CompositorRequest::GetDisplayInfo,
-        // Unlike every window request above there is no `link.resolve` here,
-        // and nothing to resolve: a reload names no window and carries no
-        // settings, so there is no ownership question to ask. It is the one
-        // request whose whole safety argument is what it does *not* contain.
+        // Unlike every window request above there is no `link.resolve` on
+        // either of these, and nothing to resolve: a reload names no window and
+        // carries no settings, so there is no ownership question to ask. They
+        // are the two requests whose whole safety argument is what they do
+        // *not* contain.
         RequestBody::ReloadAppearance => CompositorRequest::ReloadAppearance,
+        RequestBody::ReloadInput => CompositorRequest::ReloadInput,
         // Handled by `answer_requests` before it reaches here, because it
         // changes the *link*, not the compositor: nothing about a subscription
         // belongs in the window/display state a `CompositorRequest` describes,
@@ -1749,6 +1751,46 @@ mod tests {
                     }]
                 ),
                 "a windowless client's reload was refused: {responses:?}"
+            );
+        });
+    }
+
+    #[test]
+    fn an_input_reload_request_off_the_wire_reaches_the_users_settings_file() {
+        // The same end-to-end claim as for appearance, and worth making
+        // separately rather than trusting the symmetry: the two verbs are two
+        // tags, two decode arms and two mappings, and a new one is exactly the
+        // thing that gets half-wired. A `ReloadInput` that silently decoded to
+        // `ReloadAppearance` would pass every test in `guiremote` and every
+        // test in `lib.rs`, and would still leave the double-click speed
+        // unreachable while repainting the desktop for no reason.
+        inputsettings::config::testing::with_scratch_config("wire-reload-input", |_root| {
+            let (mut comp, mut link) = wired();
+            assert_eq!(
+                comp.double_click_ms(),
+                400,
+                "the compositor should start from the defaults"
+            );
+
+            let mut file = inputsettings::InputFile::new();
+            file.settings.mouse.set_double_click_ms(1200);
+            file.save().expect("write scratch input.yaml");
+
+            let responses = exchange(&mut comp, &mut link, vec![RequestBody::ReloadInput]);
+            assert!(
+                matches!(
+                    responses.as_slice(),
+                    [Response {
+                        body: ResponseBody::Ok,
+                        ..
+                    }]
+                ),
+                "an input reload is answered Ok, got {responses:?}"
+            );
+            assert_eq!(
+                comp.double_click_ms(),
+                1200,
+                "the reload request did not reach the interval the compositor measures with"
             );
         });
     }

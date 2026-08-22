@@ -679,6 +679,23 @@ pub enum RequestBody {
     /// window -- an ordinary race against a window that closed between the
     /// snapshot and the click.
     SetWindowWorkspace { window: u64, workspace: u32 },
+    /// Tell the compositor its copy of the user's input settings is out of
+    /// date, so that it re-reads `input.yaml`.
+    ///
+    /// The exact counterpart of [`ReloadAppearance`](Self::ReloadAppearance),
+    /// carrying no data for the same reason: a request that *set* the input
+    /// settings would let any process able to open this socket swap the
+    /// pointer's buttons or set the double-click window to two seconds. A
+    /// notification cannot, because the compositor goes and reads the *user's*
+    /// file. It is a separate verb rather than a payload on the appearance one
+    /// because they are separate files with separate owners — `input.yaml` is
+    /// `inputsettings`, `appearance.yaml` is `appearance` — and because a
+    /// double-click change should not repaint the screen, nor a colour change
+    /// re-read the pointer configuration.
+    ///
+    /// Answered with [`ResponseBody::Ok`], including when the file turns out
+    /// not to have changed, exactly as for appearance.
+    ReloadInput,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -703,6 +720,7 @@ enum RequestTag {
     ReserveEdge = 0x11,
     SwitchWorkspace = 0x12,
     SetWindowWorkspace = 0x13,
+    ReloadInput = 0x14,
 }
 
 impl RequestTag {
@@ -727,6 +745,7 @@ impl RequestTag {
             0x11 => Self::ReserveEdge,
             0x12 => Self::SwitchWorkspace,
             0x13 => Self::SetWindowWorkspace,
+            0x14 => Self::ReloadInput,
             _ => return None,
         })
     }
@@ -963,6 +982,7 @@ fn encode_request_body(out: &mut Vec<u8>, body: &RequestBody) {
             out.push(u8::from(*subscribe));
         }
         RequestBody::ReloadAppearance => out.push(RequestTag::ReloadAppearance as u8),
+        RequestBody::ReloadInput => out.push(RequestTag::ReloadInput as u8),
         RequestBody::ShellControl { window, action } => {
             out.push(RequestTag::ShellControl as u8);
             write_u64(out, *window);
@@ -1214,6 +1234,7 @@ fn decode_request_body(r: &mut Reader<'_>) -> Result<RequestBody, DecodeError> {
             subscribe: read_bool(r)?,
         },
         RequestTag::ReloadAppearance => RequestBody::ReloadAppearance,
+        RequestTag::ReloadInput => RequestBody::ReloadInput,
         RequestTag::ShellControl => {
             let window = r.read_u64()?;
             let b = r.read_u8()?;
@@ -1404,6 +1425,7 @@ mod tests {
             Request::new(14, RequestBody::SubscribeWindowList { subscribe: true }),
             Request::new(15, RequestBody::SubscribeWindowList { subscribe: false }),
             Request::new(16, RequestBody::ReloadAppearance),
+            Request::new(17, RequestBody::ReloadInput),
         ];
         assert_eq!(round_trip_requests(&reqs), reqs);
     }
@@ -1582,13 +1604,18 @@ mod tests {
         // entirely on the request having no payload, so it is asserted on the
         // bytes rather than left to the enum's shape — the day someone adds
         // "just a corner radius, to save a file read" this fails and says why.
-        let bytes = encode_requests(&[Request::new(1, RequestBody::ReloadAppearance)]);
-        assert_eq!(
-            bytes.len(),
-            CONTROL_HEADER_LEN + 4 + 1,
-            "a reload request should be a header, a seq and a tag byte — nothing \
-             else; a payload here is a client dictating how the desktop looks"
-        );
+        // Both reload verbs, because the argument is identical for input
+        // settings: a payload there would let a client swap the user's mouse
+        // buttons or make a double click a two-second affair.
+        for body in [RequestBody::ReloadAppearance, RequestBody::ReloadInput] {
+            let bytes = encode_requests(&[Request::new(1, body)]);
+            assert_eq!(
+                bytes.len(),
+                CONTROL_HEADER_LEN + 4 + 1,
+                "a reload request should be a header, a seq and a tag byte — nothing \
+                 else; a payload here is a client dictating how the desktop behaves"
+            );
+        }
     }
 
     #[test]

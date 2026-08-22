@@ -31610,6 +31610,135 @@ otherwise go unnoticed — and lane B mirrors these numbers by hand in
 
 ---
 
+## §270 — A page flip may not change the resolution, and `SETCRTC` is the call that may
+
+**Date:** 2026-08-21
+**Decided by:** Claude (autonomous), on a request filed by lane C
+(`requests/c-a-drm-setcrtc-and-a-page-flip-that-refuses-a-mismatched-framebuffer.md`).
+Lane C described the symptom and named the two options; the choice between them
+was not put to the operator because one of them was not tenable — see below.
+
+**In short:** A program that draws the screen hands the kernel a picture and
+says "show this one now". Until today, if the picture it handed over was a
+different size than the screen, the kernel did something different depending on
+which graphics card was fitted: an ATI card silently changed the screen
+resolution to match the picture, and a virtual machine's card silently showed
+only the top-left corner of it. Neither told the program anything had happened,
+and afterwards, when the program asked "what resolution am I in?", both
+answered with the resolution the machine booted at — which by then was wrong on
+one of them and right on the other, for reasons the program had no way to see.
+Now a wrong-sized picture is refused outright with an error, and there is a
+separate call — the one Linux programs already use, `SETCRTC` — for a program
+that actually *wants* to change the resolution.
+
+### The option that was not tenable
+
+There were three ways out, and only two of them were real:
+
+| | What changes | |
+|---|---|---|
+| **A. Refuse the mismatch; add `SETCRTC`** | A wrong-sized flip returns `EINVAL`; changing resolution needs an explicit call. | **chosen** |
+| **B. Make the implicit mode-set official** | All three backends retime on a mismatched flip; documented as a SlateOS extension. | rejected |
+| **C. Leave it** | Behaviour keeps depending on the fitted card. | not an option |
+
+C is not a conservative choice, it is the absence of a choice. The current
+behaviour is not one behaviour with a rough edge; it is two incompatible
+behaviours selected by hardware the program cannot query. A compositor
+developed against virtio-gpu and shipped to a machine with an ATI card changes
+the user's resolution as a side effect of a routine frame. Lane C put this
+plainly and correctly: *"the one option that is not tenable is the current one,
+where the answer depends on which card is fitted."*
+
+Between A and B, A wins on three grounds:
+
+1. **It is what every Linux client already expects.** `DRM_IOCTL_MODE_PAGE_FLIP`
+   returning `EINVAL` on a size mismatch is `drm_mode_page_flip_ioctl`'s
+   behaviour, and clients are written against it. B would mean a client that
+   works everywhere else silently behaves differently here — the worst kind of
+   incompatibility, because it produces a wrong picture rather than an error.
+2. **B cannot actually be implemented on all three backends.** The Limine
+   backend scans out a framebuffer the bootloader programmed and has no register
+   access to retime it; virtio-gpu creates its scanout resource once at probe
+   from `GET_DISPLAY_INFO` and never replaces it. "All three backends retime"
+   would in practice be "one backend retimes and two return an error from a call
+   that is documented not to fail" — the same divergence, moved.
+3. **A mode change is not free and should not be invisible.** It reprograms a
+   PLL, blanks the panel for tens of milliseconds and invalidates every cursor
+   and overlay position. A call that may do that should be a call the program
+   knowingly makes.
+
+### The cost A carries, and why it is paid up front
+
+Strictness has a real price: the ATI backend's CRTC enumerates with no mode
+programmed at all (`active: false, mode: None`), and the implicit mode-set
+inside `page_flip` is what used to bring it up. Making `page_flip` strict
+without more would mean the ATI card's *first ever* flip fails instead of
+lighting the display.
+
+So `SETCRTC` is not an addition alongside the fix — it is a prerequisite of it,
+and this change lands both. `DrmDevice::ensure_crtc_configured` performs the
+first mode-set explicitly, and `ScanoutBuffer::new` calls it before its first
+flip. That has the useful secondary effect of putting `SETCRTC` on the boot
+path, so the code that replaced the implicit mode-set is exercised on every
+boot rather than only when a client happens to call it.
+
+### Four smaller calls made inside this one
+
+**A stated refresh rate is binding; an unstated one is a wildcard.** `SETCRTC`
+matches the requested mode against the connector's advertised list on
+`hdisplay`/`vdisplay`, and on `vrefresh` only when the caller supplied a
+non-zero one. Linux's `drm_mode_equal` ignores `vrefresh` entirely, because it
+is a field derived from the timing rather than part of it — but ignoring it
+means a client that explicitly asks for 60 Hz can be silently given 75, which is
+the class of silence this whole entry is about. Treating zero as "don't care"
+keeps the Linux behaviour available to clients that don't fill the field in,
+without making an explicit request unenforceable.
+
+**The kernel stores its own copy of the mode, never the caller's.**
+`drm_mode_to_uapi` writes zeros for `hsync_start`, `hsync_end`, `hskew`,
+`vsync_start`, `vsync_end`, `vscan` and `flags`. A client that reads a mode from
+`GETCONNECTOR` and hands it straight back to `SETCRTC` is therefore *not*
+returning what it was given, and honouring the struct as written would program a
+timing with no sync pulses — a blank display. So the caller's struct selects a
+mode; the kernel's own copy of that mode is what gets programmed and what
+`GETCRTC` subsequently reports.
+
+**`disable_crtc` is a no-op that reports success on the shared-console
+backends.** On `limine-fb` and `virtio-gpu` the only way to darken the display
+is to zero the framebuffer — and that surface is the kernel console's. A
+compositor exiting cleanly would therefore erase the panic output explaining
+why it exited. Returning an error instead is worse: turning the display off is
+the normal last act of a well-behaved client, and a client that gets an error
+from it has no correct response. So it succeeds and does nothing, which is
+exactly true of what the *display* does, and the object model is updated so
+`GETCRTC` reports the CRTC as off.
+
+**The object model is updated only after the hardware agrees.** Every write to
+`crtc.mode`, `crtc.active` and `plane.fb` happens after the backend returns
+`Ok`, so a failed mode-set leaves `GETCRTC` describing what is genuinely still
+being scanned out. On ATI this goes one step further: `self.mode` is recorded
+only after `modeset::verify_applied` has read the registers back, because a
+`self.mode` taken from the plan rather than the hardware would make a failed
+mode-set look successful to the very next `page_flip` — which, seeing a mode it
+believes is already programmed, would take the single-register fast path.
+
+### What was left half-done on purpose
+
+`atomic_commit`'s `active` flag remains cosmetic: it updates `crtc.active` in
+the object model without touching hardware, tracked as
+`TD-DRM-ATOMIC-ACTIVE-IS-COSMETIC` in `known-issues.md`. Making it real was
+attempted and backed out. The reason is that DPMS-off has to be reversible, and
+re-enabling a CRTC means re-programming a timing, which needs a framebuffer that
+a bare `active: true` commit does not carry. The existing atomic self-test
+deactivates and reactivates the *primary* CRTC during boot with `mode: None` in
+both commits; a real disable there would clear `crtc.mode`, leave the CRTC
+untimed after the supposed reactivation, and end the boot on a black screen when
+the compositor's first flip was refused. Half-fixing it would have traded a
+harmless inaccuracy for a boot failure. For the same reason `page_flip`
+deliberately does *not* require `crtc.active`.
+
+---
+
 ## §348 — A libc function that gnulib also defines must own its archive member, and the guard now asserts that instead of guessing which callers matter
 
 **Date:** 2026-08-21
@@ -34308,6 +34437,137 @@ tests green; clippy clean on `x86_64-pc-windows-gnu` (`--all-targets`) and on
 `x86_64-unknown-linux-gnu` (`--bins`, which is the only way the Linux-only arm
 of `main.rs` is compiled at all); fmt clean.
 
+## §271 — A framebuffer that is not contiguous does not get to expose a base pointer
+
+**Date:** 2026-08-21
+**Decided by:** Claude (autonomous)
+
+**In short:** the virtio-gpu screen buffer is stored as 250 separate chunks of
+memory, not one block, but the driver offered callers a single "here is the
+framebuffer address" function. Two of its three callers then did the obvious
+thing — address + row × width — and wrote four megabytes of pixels over
+unrelated kernel memory. The choice was between fixing those two callers and
+removing the function that made the mistake natural. The function was removed.
+
+### What was on the table
+
+**Option A — fix the two blit sites, keep `framebuffer_addr()`.** Smallest
+change. Rejected: the accessor's contract is "a pointer to the framebuffer",
+its actual meaning is "a pointer to 1/250th of the framebuffer", and nothing in
+its type expresses the difference. Two of the three call sites in the tree had
+already got it wrong; there is no reason to expect the fourth to do better.
+Fixing the callers leaves the trap armed.
+
+**Option B — make the scanout physically contiguous.** Then the base pointer
+would be honest and every caller's arithmetic would be correct as written.
+Rejected on two grounds. It asks the buddy allocator for a 4 MiB contiguous
+run at probe time, which is a request that can fail after uptime and would make
+display init fragmentation-sensitive for no user-visible gain; and at 4K it
+becomes a 32 MiB contiguous request, which is worse. Meanwhile the device does
+not need contiguity — `attach_backing` already hands the host a scatter list —
+so this would be paying a real allocation constraint purely to make one
+pointer's arithmetic work out.
+
+**Option C (taken) — replace the accessor with a bounds-checked view.**
+`with_scanout(|sc| …)` lends a `ScanoutMem` whose `write_at` walks the frame
+list and clamps to the end of the buffer. The frame layout stops being
+something every caller must know and re-derive; it is stated once, in the
+module that owns it.
+
+### Why the clamp discards rather than errors
+
+`write_at` returns the number of bytes it wrote and silently drops anything
+past the end, instead of returning `Err`. A blit is a per-row inner loop and
+threading a `Result` out of it would either abort a half-drawn frame partway or
+be ignored at the call site — and an ignored error is the state we just came
+from. Discarding converts a class of caller arithmetic bugs from *kernel
+memory corruption* into *a visibly wrong picture*, which is the failure mode
+that gets reported and fixed rather than blamed on something else three
+subsystems away. The byte count is there so a test can assert the strong
+property, and `virtio::gpu::self_test` does: a write at `sc.len()` must return
+`0`, and a write at the last pixel's offset must return `4` and be readable
+back through an independent frame walk.
+
+### The cost that was accepted
+
+`with_scanout` holds the device spin lock for the whole blit, where the old
+code took it only to read the base address. This is a widening of the hold
+time, and it was accepted rather than worked around: the old release-then-write
+pattern meant a concurrent mode-set replacing `fb_frames` would leave the blit
+writing into freed frames, which is the same bug class again. Nothing in an
+interrupt or panic path touches this device, and `flush_full` already holds the
+same lock across a virtqueue round-trip to the host — longer than the memcpy
+this now covers — so no window was widened past one that already existed.
+
+Full diagnosis, including how the bug was localised and its likely identity
+with B-KNULLJUMP: `known-issues.md` →
+`B-VIRTIO-GPU-FLAT-SCANOUT-WILD-WRITE`.
+
+## §272 — `/dev` grows subdirectories and a character-device entry type, because "openable but invisible" is not a state a real client survives
+
+**Date:** 2026-08-21
+**Decided by:** Claude (autonomous)
+
+**In short:** the kernel has working keyboard, mouse, graphics and sound device
+files at paths like `/dev/input/event0`. Until now they could be opened only by
+a program that already knew the exact path — nothing that *looked* in `/dev`
+could see them, because our `/dev` had no folders at all, and anything that
+asked "what kind of file is this?" was told "an ordinary file" rather than "a
+device". Both answers are ones the standard Linux libraries treat as *no
+hardware present*: libinput lists the folder and gives up, and it also rejects
+any entry that does not report itself as a device. So a machine whose keyboard
+demonstrably works would have reported no keyboard. This change gives `/dev`
+real subdirectories and adds a "character device" file type, so the libraries
+find what is actually there.
+
+### What changed
+
+* `fs::vfs::EntryType` gains a `CharDevice` variant. It is produced by devfs
+  alone; `stat` maps it to `S_IFCHR`, `getdents64` to `DT_CHR`.
+* devfs stops being a flat list of twelve names and becomes a table of 22 nodes
+  whose paths may contain a `/`. `readdir` of a directory node lists its
+  children; `readdir` of a file is `NotADirectory`; `readdir` of a missing path
+  is `NotFound` (it used to be `NotADirectory` for both, which is the wrong
+  signal — `NotADirectory` is how a scanning client learns to stop descending).
+* `/dev/input`, `/dev/dri` and `/dev/snd` and their seven device nodes are now
+  visible to `readdir`, `stat` and `metadata`.
+
+### The nodes are listed by a filesystem that does not serve them
+
+This is the part with a genuine tradeoff. `open("/dev/input/event0")` never
+reaches devfs — it is intercepted in `syscall/linux.rs`, which mints a device
+handle instead of a VFS file. So devfs now advertises paths whose contents come
+from somewhere else, and the table here has to be kept in step with the
+interception table there by hand: adding a device in one place and not the other
+gives either an invisible device (as before) or a phantom one.
+
+The alternative was to have the syscall layer own the namespace too — devfs
+would ask it what exists. That removes the duplication, and it was rejected
+because it inverts the dependency: the filesystem would have to call into the
+syscall layer, which is the layer above it, to answer `readdir`. A pseudo-fs
+whose contents are decided by its caller is a much harder thing to reason about
+than two lists that must agree, and the lists are short, fixed and covered by a
+self-test that walks every directory and stats every entry it finds.
+
+The duplication is bounded by that self-test, not by discipline: it asserts the
+count in each directory and that every entry stats back as a character device,
+so a node added to one table and not the other fails the boot test rather than
+failing silently in a library six months later.
+
+### Reading a device node through the VFS is `NotSupported`, not `NotFound`
+
+`stat` now says `/dev/input/event0` is there, so a read of it that answers "no
+such file" contradicts the `stat` that just succeeded and sends whoever hits it
+looking for a missing entry that is sitting right in front of them.
+`NotSupported` — "not that way" — is the honest answer, and directories get
+`IsADirectory` for the same reason.
+
+### No `BlockDevice` sibling
+
+Deliberate. This kernel has no block device nodes to name: storage is reached
+through the VFS, not through `/dev/sdaN`. A variant with no producer is one that
+every `match` in the tree must answer for, and its presence would tell the next
+reader that block device nodes exist somewhere in this system. They do not.
 ## 518. A virtual desktop is a number on a window that the compositor reads, not a filter the taskbar applies
 
 **Decided by:** Claude (autonomous)
@@ -35653,3 +35913,1232 @@ it is why the old value was a bug.
 something does, the cheap answer is that it almost certainly wants `GNU/Linux`,
 in which case this is a one-constant change. Recorded as a Claude decision
 precisely so it stays cheap to reverse.
+
+---
+
+## 523. Settings tells the compositor the *file changed*, not that an *event was consumed* — and the change is in force before anyone is told
+
+**Date:** 2026-08-22
+**Decided by:** Claude (autonomous)
+
+**In short:** Settings had a complete user interface and no way to run: no
+`main` that opened a window, no event loop, no connection to the compositor. It
+now has all three. The design question that took the thought was not the loop —
+that is twenty lines — but *when the compositor gets told the appearance
+changed*. The answer is: when `appearance.yaml` is actually written, which is
+not the same moment as "the user clicked something", and not the same moment as
+"an event was consumed". Getting that distinction wrong produces a setting that
+appears to work and does not, which is worse than one that plainly does nothing.
+
+### Why Settings has to tell the compositor anything at all
+
+Settings is the one application that edits `appearance.yaml`. Window corner
+radius, drop shadows, title-bar colours and the accent are drawn by the
+*compositor*, from that same file. Settings drawing its own preview correctly
+proves nothing about the screen.
+
+Without a notification the user would change the corner radius, watch the
+preview in the Settings window update immediately, and see every *real* window
+on the desktop keep its old corners until the next login. The preview would be
+telling the truth about the file and a lie about the desktop.
+
+`oswindow::EventLoop::appearance_changed()` already existed for this
+(`gui/window/src/lib.rs`), sending `ReloadAppearance`. It is a **notification,
+not a setter**: it carries no payload, and the compositor answers it by
+re-reading the user's own file. That matters for what follows — the compositor
+never learns *what* changed from Settings, so Settings can never desynchronise
+it by describing a change wrongly. The worst a bad notification can do is cost a
+file read.
+
+### The flag is a message to the driver, not a precondition for the change
+
+`SettingsState` grew one private `bool`, `appearance_dirty`, set by
+`save_appearance` and drained by `take_appearance_change`. The rule governing it
+is a direct application of §522's resting-state doctrine, transplanted from
+animations to a different subsystem:
+
+> **The change is saved and in force before the flag is read. A caller that
+> never drains the flag still gets a correct file and a correct Settings
+> window; all it loses is the *liveness* of the update on other windows.**
+
+Concretely: `handle_event` writes `appearance.yaml` itself and updates the
+in-process model itself. `appearance_dirty` is set *afterwards*, as a message to
+whoever is driving the loop, and nothing downstream of it is load-bearing for
+correctness. This is the same shape as §522's "an animation that nobody ticks is
+*finished*, not *invisible*": the no-clock, no-driver, nobody-is-listening path
+must land on the working state, not the broken one.
+
+Two consequences were written down as tests rather than left as intentions
+(`a_change_is_saved_and_in_force_whether_or_not_anyone_drains_the_flag`, and
+`taking_the_appearance_change_clears_it`).
+
+There is a third, subtler one. `save_appearance` sets the flag **even when the
+write failed**. That looks wrong for about a second. It is right: the compositor
+responds to the notification by re-reading the file, so "look again" is an
+honest and harmless thing to say after a failed write — the compositor will read
+whatever is actually on disk, which is the truth. Suppressing the notification
+on failure would instead leave the compositor showing state that may not match
+the file at all, if the write failed *partway*.
+
+### Why the notification tracks the file, not the event
+
+The obvious implementation is to notify whenever `handle_event` returns
+`Consumed`. It is wrong in both directions, and the two failure modes are the
+reason the flag exists at all rather than the loop just reading the return
+value:
+
+| | What actually happens |
+|---|---|
+| Notify on `Consumed` | Every scroll, every dropdown open, every keystroke in a text field asks the compositor to re-read and re-apply a file that did not change. A drag across a slider becomes hundreds of file reads. |
+| Notify only on `Consumed` | A control that writes the file but reports `Ignored` loses its notification entirely. |
+
+The second is hypothetical *today* — there is no such control. It is exactly the
+kind of thing a future control will do by accident, and the ordering that
+protects against it costs nothing, so the loop drains the flag **before** the
+redraw check and independently of `result`:
+
+```rust
+let result = state.handle_event(&event);
+if state.take_appearance_change()
+    && let Err(e) = events.appearance_changed()
+{ … }
+if result == EventResult::Consumed { … submit … }
+```
+
+Both directions are pinned:
+`an_event_that_changes_no_appearance_setting_asks_for_no_reload` and
+`one_change_produces_one_notification_and_not_one_per_later_event`.
+
+### The loop draws once at start-up, and thereafter only on change
+
+`run` submits a frame before entering `EventLoop::run`, because nothing has
+happened yet and so no event is going to ask for the first one. After that a
+frame is submitted only when the event was consumed. The alternative — repaint
+every event — was rejected for the reason a compositor exists: an idle
+application that submits frames costs the compositor a composite pass per mouse
+move across its own window.
+
+A resize is a special case worth stating: it must be *applied to the model*
+before the frame that answers it, or the answering frame is drawn to the old
+size and the window shows a stale layout for one frame at every drag step.
+`Event::Resize` therefore updates `window_width`/`window_height` **and** returns
+`Consumed`, and the test
+`a_resize_is_applied_before_the_frame_that_answers_it` pins both halves — the
+two ways to break it (apply without repainting, repaint without applying) each
+have their own marker.
+
+### Errors out of a handler that cannot return one
+
+`EventLoop::run`'s handler returns `EventResponse`, not `Result`. A failed
+`submit` or a failed `appearance_changed` therefore has nowhere to be reported
+from inside it. Swallowing them was not acceptable — it leaves a Settings window
+that runs on happily while the screen no longer changes, the single most
+confusing failure an application can have.
+
+So `run` keeps a `failure: Option<Error<T>>` outside the closure, the handler
+stores into it and returns `EventResponse::Exit`, and `run` returns it after
+the loop. The loop stops on the first transport error rather than continuing
+blind.
+
+### `TestDesktop::asked()` returns names, not `RequestBody`
+
+The tests need to assert *that* Settings asked the desktop to reload, once, and
+not once per mouse move. `TestDesktop` already exposed `seen: Vec<Request>`,
+which would do it — by making `apps/settings`' test code match on
+`guiremote::RequestBody`.
+
+That is the exact coupling `oswindow` exists to prevent. The crate deliberately
+does not re-export `RequestBody`: an application should no more name the display
+protocol in its tests than in its `main`, any more than a Unix program names the
+socket layer. Adding a `guiremote` dev-dependency to `apps/settings` to get
+around that would have been a hole in the abstraction opened for the
+convenience of a test.
+
+So `TestDesktop` grew `asked(&mut self) -> Vec<&'static str>` — the wire names
+of the requests, in order. Two deliberate details:
+
+- **General, not single-purpose.** A `reload_count()` would have been shorter
+  and would have had to be joined by a `title_count()` the next time. A list of
+  names answers every question of this shape.
+- **Spelled out, not derived from `Debug`.** `Debug` prints the payload too, so
+  a test asserting `"SetTitle"` would have to know the title, and would start
+  failing when a field was added. The `match` is exhaustive with no wildcard, so
+  a new request variant fails to compile there and gets a name deliberately.
+
+### The end-to-end test uses an undecorated, pinned window — on purpose
+
+`mod against_the_real_compositor` runs the shipped `Compositor` on a thread
+behind a real socket and drives Settings' shipped `run` against it. The click
+test's chain is: a hardware mouse event → the compositor's hit test → the wire
+encoder → `oswindow`'s event loop → `SettingsState::handle_event` → the YAML
+writer → the `ReloadAppearance` notification → the compositor re-reading the
+file. No stand-in anywhere.
+
+For that to assert anything exact, the test has to know where in *desktop*
+coordinates a control drawn at *page* coordinates lands. Three ways to get that:
+
+1. Read `WindowInfo.x/y` from the window list. **Wrong** — that is the *outer*
+   rect, decorations included, so it is off by the frame inset.
+2. Hard-code the frame inset. Fragile: it is a compositor detail the test has no
+   business knowing, and it changes when the title bar does.
+3. Open the window with `.position(AT).decorations(false).resizable(false)`.
+
+Option 3 was taken. With no frame, `client_rect` *is* the window rect,
+`title_bar_rect` and `close_button_rect` are `None` so a press falls straight
+through to the client area, `detect_border_drag` returns `None` for a
+non-resizable window, and desktop coordinates become page coordinates by
+subtracting `AT` and nothing else. The translation is then a fact of the
+geometry rather than a number the test hopes is still right.
+
+The click target itself comes from `center_of(…)` over the page's own hit
+bands, not a literal coordinate — `hit_bands` and `center_of` were widened to
+`pub(super)` for this. Reaching a control *by name* is the only way a test of
+the loop can be a test of the loop: one that clicked a hard-coded coordinate
+would start passing for the wrong reason the day the layout moved.
+
+### Two drafted tests were deleted rather than kept
+
+Both are recorded because "we wrote a test and threw it away" is the kind of
+decision that gets silently re-made:
+
+- **`a_click_that_changes_nothing_leaves_the_compositors_appearance_alone.`**
+  The defect it named — a spurious `reload_appearance()` — is genuinely
+  *unobservable at the compositor*, because `set_appearance` no-ops when the
+  file is unchanged. The test would have asserted something it could not see,
+  and would have passed with the bug present. The property it was reaching for
+  is real and *is* covered, one layer down, by
+  `an_event_that_changes_no_appearance_setting_asks_for_no_reload`, which
+  observes the request rather than its effect.
+- **`the_translation_is_a_translation_and_not_a_coincidence.`** It duplicated a
+  loop test, and it would have written to the real `$HOME`.
+
+A test that cannot fail for the reason it names is worse than no test: it is a
+claim of coverage that is not there.
+
+### Proof
+
+All fifteen new tests were proved regression tests by the usual method —
+reintroduce the defect the test names, confirm a deterministic failure that
+names it back, restore the file from a byte snapshot, verify by SHA-256.
+Eighteen markers over `apps/settings/src/main.rs` and `gui/window/src/lib.rs`;
+all eighteen produced a failure, and every one of the fifteen tests earned at
+least one marker. None had to be recorded as merely additional coverage.
+
+Two pre-existing tests were caught as collateral, which is its own small
+confirmation that the markers are real defects and not test-shaped ones:
+`tests::test_resize_event` (by `resizeisnotapplied` and `resizedrawsnothing`)
+and `tests::test_a_click_that_changes_an_accent_reaches_the_file` (by
+`nothingissaved`).
+
+### A process finding, not a code one
+
+Running `cargo test --workspace` rather than `cargo test -p settings` at the end
+of this task revealed that `apps/editor`'s **test binary had not compiled since
+§521** — the frame clock moved `set_wait_timeout` from an inherent method on
+`Socket` onto the `Transport` trait, and `apps/editor`'s real-compositor test
+module, which does not otherwise name the trait, stopped building. Nothing
+noticed for a day, because every task in between gated on the crate it was
+editing.
+
+A crate whose test binary does not compile reports no failures. It reports
+nothing at all, which reads identically to "no problems" in a filtered log. The
+gate is now the workspace, not the crate; the fix (one `use` line) is in, and
+the underlying process hazard is logged as
+`TD-C-A-TEST-BINARY-CAN-BE-BROKEN-WITHOUT-ANYONE-NOTICING`.
+
+## 524. One crate owns the double-click numbers, `ReloadInput` is its own verb, and the Mouse page offers exactly the settings something consumes
+
+**Date:** 2026-08-22
+**Decided by:** Claude (autonomous)
+
+**In short:** The desktop had a Mouse settings panel whose double-click slider
+moved, showed a number, saved nothing and reached nothing — the value was gone
+at the next login and had never been seen by the compositor at any point in
+between. Fixing it needed four pieces, and three of them turned on judgement
+calls rather than mechanics: which process *owns* the range of legal values,
+whether the compositor should be told "input changed" or just "something
+changed", and how much of the mouse configuration the new page is allowed to
+show. This records those.
+
+Terms used below, once each: *the compositor* is the display server — the
+process that draws window frames and decides whether two clicks on a title bar
+are one double click. *`input.yaml`* is the user's mouse and keyboard
+preferences file. A *verb* here is one of the fixed set of request kinds a
+client may send the compositor over its socket.
+
+### The problem, concretely
+
+`gui/desktop/src/mouse_settings.rs` drew a double-click slider bound to a
+`MouseConfig` that existed only in the shell's memory. Nothing wrote it to disk
+and nothing read it back. Meanwhile the compositor timed double clicks against a
+private constant of its own. Two numbers, no connection.
+
+Four pieces were needed: **(a)** a shared `gui/inputsettings` crate holding the
+model and the file format; **(b)** a `ReloadInput` control verb; **(c)** a real
+Mouse page in `apps/settings`; **(d)** the compositor re-reading (a) when it
+receives (b).
+
+### Decision 1: `inputsettings` owns the range, and the other two read it
+
+**What was true before.** Three processes each held their own copy of the
+double-click bounds. `inputsettings` clamped a value being stored; the
+compositor clamped the value it had been handed before timing anything against
+it; the Settings slider's two ends *were* that range, written as literals. The
+three copies did agree.
+
+**Why that was still wrong.** Nothing anywhere would have failed if one of them
+had moved. A slider whose track runs wider than the setter's clamp has a dead
+zone at each end — the handle slides, the number stops — and no test on either
+side of the boundary can see it, because each side is individually correct. The
+whole point of the reload path being added alongside was that the number the
+user chose, the number the file clamps to, and the number the compositor
+compares two timestamps against are *one* number.
+
+**What was decided.** `MIN_DOUBLE_CLICK_MS`, `MAX_DOUBLE_CLICK_MS` and
+`DEFAULT_DOUBLE_CLICK_MS` became `pub` in `inputsettings`, the crate that owns
+the file. The compositor's private copies were deleted, and
+`SliderId::DoubleClickMs::range()` returns the constants rather than literals.
+The ordering invariant (`MIN < DEFAULT < MAX`) is a `const _: () = assert!(…)`
+rather than a test, because there is no run in which it could hold here and fail
+somewhere else.
+
+*The alternative was* leaving the literals in place and adding a test that
+compares them. Rejected: that is a test which exists only to detect a
+duplication that need not exist, and it fires *after* the divergence rather than
+preventing it.
+
+*The cost:* `inputsettings` is now a dependency of the compositor. That is not
+free — a display server linking a settings crate is a real coupling — but the
+crate depends only on `guitk`, `settingsfile` and `yamldoc`, so there is no
+cycle, and the compositor was already reading the file's *contents*. It was
+reading them with its own private idea of what they mean, which is the worse
+coupling of the two: an undeclared one.
+
+### Decision 2: `ReloadInput` is a second verb, not a payload and not a shared one
+
+Two sub-decisions, pulling in opposite directions.
+
+**Why not a payload.** `ReloadAppearance` and `ReloadInput` carry no data, and
+that is the entire security argument for both. A verb that *set* the values
+would let any process able to open the display socket restyle the machine or
+swap the user's mouse buttons — or make a double click a two-second affair. A
+verb that merely *notifies* makes the compositor re-read the *user's own file*,
+so the worst a hostile client achieves is making it read a file it already
+trusts, at some rate. `control.rs` asserts the emptiness on the encoded bytes
+rather than trusting the enum's shape, so the day someone adds "just a corner
+radius, to save a file read", that assertion fails and says why.
+
+**Why not one shared verb.** A single `ReloadSettings` would be less code. It
+was rejected because the two reloads have very different costs: an appearance
+reload sets `full_recomposite`, repainting every window on screen, while an
+input reload changes a `Duration` that no pixel depends on. Sharing the verb
+means a user dragging the double-click slider repaints the entire desktop on
+every motion event, and a user picking an accent colour makes the compositor
+re-read its pointer configuration. Both are invisible in ordinary testing and
+both are wrong.
+
+The tests therefore assert the *negative* in each direction — a double-click
+change must produce no `ReloadAppearance`, and a colour change no `ReloadInput`
+— because a `ReloadInput` accidentally wired to the appearance path passes every
+positive test anyone would think to write.
+
+### Decision 3: the compositor applies only what it consumes
+
+`reload_input` reads the *whole* file — the model has one owner, and parsing
+half of it is how two readers begin to disagree — and applies the one setting
+the compositor is actually the consumer of: the double-click window.
+
+Pointer speed, acceleration, button mapping and scroll mode are deliberately
+read and dropped. They have to be applied where raw device deltas arrive, and
+the compositor has no local input source yet (`known-issues.md`
+`TD-COMPOSITOR-HAS-NO-LOCAL-INPUT`); cursor size and scroll mode belong to the
+toolkit.
+
+*The alternative was* storing them in the compositor now, ready for later.
+Rejected as strictly worse than ignoring them: a stored value invites a getter,
+and a getter would report that a preference was in force while the pointer went
+on behaving the old way. Ignoring a setting is a gap; reporting an unapplied one
+is a lie — and it is the same lie this whole task was filed to remove.
+
+### Decision 4: the Mouse page shows one control, and that is a finished state
+
+`input.yaml` holds fifteen mouse fields and three keyboard ones. The new page
+offers one.
+
+That is not an unfinished page — it is the page refusing to repeat the defect it
+was written to fix. A pointer-speed slider today would save a value to a file,
+look exactly as though it had worked, and change nothing: precisely the bug
+described at the top of this entry. Each setting gets its control when it gets a
+consumer, and not before.
+
+This is asserted rather than merely commented.
+`the_mouse_page_offers_only_settings_that_reach_something` checks the page's hit
+bands as an *exact set*, not as "contains the double-click slider" — because a
+control added without a consumer is the same bug, and a containment check cannot
+see it.
+
+*The tension worth naming:* a settings panel exposing one of eighteen settings
+looks broken to a user who came looking for pointer speed, and "looks broken" is
+a real cost. It was accepted because the alternative is not "looks complete" but
+"looks complete and lies", and because the fix — wiring a consumer — is work
+that was going to be needed anyway.
+
+### How this was verified
+
+Every test added across the four pieces was put through a reintroduction proof:
+`scripts/reintro-mouse-page.py` (11 defects) and
+`scripts/reintro-reload-input.py` (10 defects) each reintroduce, one at a time,
+the exact bug some test claims to guard, then check that the suite goes red and
+names it back. Both restore by unconditional byte-snapshot write-back verified
+by SHA-256, per §522.
+
+That found one thing worth recording.
+`a_hand_edited_input_file_cannot_make_a_double_click_impossible` carried a
+comment saying the value was clamped "twice over", by `InputSettings::read_from`
+and again by `set_double_click_ms` — but its assertion could not distinguish the
+two, because the first clamp alone satisfies it. Deleting the compositor's clamp
+left that test green. The clamp *is* guarded, by
+`the_double_click_interval_is_clamped_to_a_performable_range`; the comment now
+says which layer each test proves. A test whose comment claims more than its
+assertion is how a defence quietly stops being defended.
+
+## §273 — A self-test the build cannot reach is a build failure, and "reachable from the kernel shell" is a third answer, not a pass
+
+**Date:** 2026-08-22
+**Decided by:** Claude (autonomous)
+
+**In short:** The kernel had 41 test functions that no code anywhere could
+call. They compiled, they looked like coverage in commit messages, and not one
+of them had ever run — some for three months. We now check, before every build,
+that every `self_test` function can actually be reached from the kernel's
+startup path, and refuse to build if one cannot. The check reports a third
+category too: tests that only run when a human types a command into the kernel
+shell. Those are not broken, but they are not coverage either, and calling them
+"tested" would be the same lie in a quieter voice.
+
+**What went wrong.** `evdev::self_test` was written and committed without a
+caller. One commit later it was wired in, and the very first boot that executed
+it failed on a real bug — `SYN_DROPPED`, the marker that tells an input client
+"discard your state", was being delivered one record *after* the first stale
+event, so a client could latch a key down forever
+(`B-A-EVDEV-SYN-DROPPED-ARRIVES-ONE-RECORD-LATE`). The test found a genuine
+defect the instant it ran. That prompted the obvious question — how many other
+tests are sitting there unrun? — and the answer was 41.
+
+**Why a script and not a code review.** Rust will not help here. An uncalled
+`pub fn` in a library crate is not dead code by the compiler's reckoning, since
+something outside the crate might call it; `#[allow(dead_code)]` was on several
+of them anyway. Nothing in the toolchain distinguishes "exported for callers" from
+"exported and forgotten". So the predicate has to be written down explicitly.
+
+**Reachability, not mere mention — this is the part that matters.** The first
+version of the audit asked "is this symbol named anywhere in the tree?" and
+found 27. A fixpoint reachability analysis rooted at `main.rs` found 300. The
+gap is entirely self-tests called *only from other self-tests that are
+themselves unreachable*: whole islands of test code that reference each other
+and are entered from nowhere. An audit that accepts any mention validates those
+islands and reports the tree as almost clean. This is the same error as
+treating a strongly-connected component of dead code as live because its
+members have inbound edges.
+
+**The third bucket, and why it is not a failure.** Of those 300, 258 turned out
+to be reachable from `kshell.rs` — interactive `test` subcommands of the kernel
+shell (`taskbar test`, `http test`). They are runnable. The boot test never
+runs them. Lumping them in with genuinely dead code would have produced a
+failure message that was factually wrong about 86% of what it listed, and a
+guard that is wrong about most of its output is a guard that gets `--quiet`-ed
+and then deleted. So the check reports three states — *runs at boot*, *manual
+only*, *reachable from nothing* — and fails on the third alone. The 258 are
+printed as a standing count, which is an honest measure of a real gap without
+pretending it is the same gap.
+
+*The alternative considered:* fail on the manual-only ones too, forcing every
+kshell test into the boot path. Rejected for now — some are genuinely
+interactive (they want a keypress, or a device a boot test has no way to
+provide), and a 258-entry failure on day one would have been ignored rather
+than fixed. The count being visible is what will make it shrink.
+
+**Why re-exports are followed exactly rather than approximated.** `pub use
+dispatch::self_test;` genuinely renames a symbol, and `main.rs` calls it as
+`syscall::self_test()`. Without following that, the check reports a
+well-wired test as dead. A false negative here costs an unrun test that we
+would probably have found anyway; a false positive costs the credibility of the
+whole check on its first run. There is exactly one such re-export in the tree,
+so following them is cheap and bounded.
+
+**Where the gate lives.** `scripts/boot-test.sh`, immediately after
+`check_prerequisites` and *before* the build. It costs milliseconds; the build
+costs ten minutes. A script that exits 2 because it could not run at all counts
+as a failure, for the standing reason that a check which cannot fire must never
+be indistinguishable from a check that passed.
+
+**The allowlist is deliberately hostile to growth.** One entry today
+(`hardlockup::self_test_fire`, which forces the watchdog to fire, costing a
+~15 s stall on every boot and latching the one-shot NMI dump that a real catch
+needs). Each entry must carry a reason that would satisfy someone who did not
+write it. A growing allowlist is the signal that the check has stopped being
+useful, and should be read that way rather than as a maintenance chore.
+
+## §274 — A lock that re-enters itself panics immediately, and the reason it went undetected is that opting out of ordering checks silently opted out of recursion detection
+
+**Date:** 2026-08-22
+**Decided by:** Claude (autonomous)
+
+**In short:** A kernel lock is a token only one task may hold at a time; a task
+that asks for one it is already holding will wait for itself forever, and the
+machine freezes with no output at all. That just happened four times over —
+`STATE.lock().n = STATE.lock().n + 1`, which reads like an ordinary "add one to
+a counter" but takes the lock twice. The kernel had three separate mechanisms
+that were each supposed to catch this, and all three missed it. This entry
+records the two calls made in response: the lock now **panics** the instant it
+detects a task re-entering a lock it already holds, rather than warning or
+waiting; and the reason all three nets had holes gets written down, because the
+cause is a pattern that will recur.
+
+**Why all three detectors missed it.** They were:
+
+1. **lockdep's recursion check.** It exists and is correct. But it lives behind
+   `lockdep::lock_acquire`, and `PreemptSpinMutex` — the lock type all four
+   deadlock sites used — never calls it. §70 deliberately made that lock skip
+   lockdep, on the reasoning that lock-*ordering* checks add no value for a leaf
+   lock that is never held across another acquire. That reasoning was sound for
+   ordering. It was never examined for recursion, because recursion detection
+   happened to be implemented in the same function. **Opting out of one check
+   silently opted out of a different, unrelated one.**
+2. **The 30-second spin-stall report.** It never fired, for reasons still open
+   (see `known-issues.md`); the leading suspect is a fallback iteration count
+   calibrated against a TSC frequency that reads as zero under emulation.
+3. **A test that covered the path.** `test_incompressible_skip` ran the exact
+   code containing two of the four deadlocks, and accepted either outcome —
+   "The important thing is it doesn't panic". A test that cannot fail does not
+   execute the code it names in any sense that matters.
+
+**Decision: panic, not warn.** The check (`fail_if_recursive` in
+`kernel/src/sync.rs`) fires on the contended path when the recorded owner is the
+current task, and it panics.
+
+*Alternative considered — log loudly and keep spinning.* Its appeal is that a
+false positive would be survivable: a bad detector would print noise rather than
+kill a boot. That appeal is illusory here. The acquire it fires on **can never
+succeed** — the only task that could release the lock is the one now blocked
+waiting for it. Continuing to spin does not buy a chance of recovery; it buys a
+silent hang, which is exactly the failure mode being fixed. A panic converts an
+unbounded freeze with no output into a stack trace naming the lock, the task and
+the address, and that is the entire value of the change.
+
+*What makes the false-positive risk acceptable* is that the predicate is not
+heuristic. `owner` is set only by a successful acquire and cleared by the guard
+before the physical unlock; a mismatch means the same task id genuinely holds
+it. Three facts were verified before wiring it in: all four `Mutex`
+constructors initialise `owner` to `OWNER_NONE`; both guard types clear `owner`
+*before* releasing the lock word, so no window exists where a released lock
+still names an owner; and `register_ap_idle` gives each CPU's idle task a
+distinct id, so two idle tasks on two CPUs cannot alias.
+
+**Decision: a static checker for the cross-function form, not more boot cycles.**
+The four sites fixed were the single-statement form, which a grep can find. The
+form that a grep cannot find is a guard held across a call that re-takes the
+same lock — no single line mentions the lock twice.
+`scripts/check-recursive-locks.py` resolves calls within one file and reports
+guards live across a call whose transitive callees re-acquire. It found 2 in
+799 files, both genuine, one of them reachable by typing `boot` at the kernel
+shell.
+
+*Why within-file and not whole-program.* A cross-module analysis needs import
+and trait-dispatch resolution, and would arrive with a false-positive rate that
+gets it ignored. The module-private `static STATE: Mutex<..>` pattern is where
+the risk actually lives in this tree, and it is entirely visible inside one
+file. The cost is false negatives by construction, which is the right side to
+err on for a check whose findings are read by a human before anything changes.
+It never reports `try_lock`, which returns `None` rather than spinning and so
+cannot deadlock.
+
+**The generalisable lesson.** When a subsystem is given an opt-out from a
+safety check, the opt-out is scoped to whatever the check's *implementation*
+happens to bundle together, not to what the opt-out's rationale actually
+covered. §70's rationale addressed ordering; the code it disabled also did
+recursion. Any future "this lock skips X" should enumerate what X does, not
+just what X is called.
+
+## §275 — A dying thread steps off its process page tables before anyone is told the process can be reaped, rather than the reaper waiting for the thread
+
+**Date:** 2026-08-22
+**Decided by:** Claude (autonomous)
+
+**In short:** When the last thread of a program finishes, the kernel frees the
+"page tables" — the tables the CPU uses to translate the program's memory
+addresses into real memory. It was freeing them while that very thread was
+still running, because the announcement "this program is finished, its memory
+can be reclaimed" was made several milliseconds before the thread actually
+stopped. Another task could hear the announcement in that gap and hand the
+tables back to the memory allocator; the still-running thread would then be
+put back on tables that had been reused for something else, and the machine
+would stop dead with no error message — there were no working tables left to
+run the error handler with. The fix makes the dying thread move itself onto
+the kernel's own page tables *before* the announcement, so by the time anyone
+can reclaim the program's tables, nothing is using them. The alternative — a
+usage counter that makes the reclaimer wait — was rejected as more machinery
+for the same guarantee.
+
+### What was wrong
+
+`pcb::destroy` frees a process's PML4 page (the root page table) and states
+its precondition in a `// SAFETY:` comment: *"no threads are running in this
+address space, and no CPU has this PML4 loaded in CR3"*. Nothing established
+it.
+
+The zombie transition — the moment a process becomes reapable — happens inside
+`proc::thread::on_thread_exit`, which runs **on the dying thread**. It wakes
+the task parked in `wait4()` and posts `SIGCHLD`, and only *then* returns, so
+the thread still has to run `sched::task_exit()`, the exit hooks, and a
+`SCHED` acquisition before it switches away. Two `serial_println!` calls alone
+cover ~8 ms at 115200 baud against a 10 ms timer tick, so a preemption inside
+that window is ordinary. Preempted there, the thread is still `Running` and
+its `Task` still records the process PML4, so the scheduler's switch-in path
+reloads that (by then freed, possibly reused) frame into CR3.
+
+### The options
+
+**(a) Detach the dying thread from the address space before publishing the
+zombie** — clear `Task::pml4_phys` and write CR3 to the kernel PML4.
+
+*What changes:* nothing observable when things work; a class of silent,
+unreportable machine stops disappears.
+
+- **For:** it makes the precondition true by construction at the only place
+  that can know it — the thread itself. It is one function, called from one
+  place (plus an idempotent backstop), and it is testable synchronously: after
+  the last thread exits, no task names the PML4. It is exactly what Linux does
+  (`exit_mm()` → `switch_mm(&init_mm)`), so the shape is precedented rather
+  than invented.
+- **Against:** it is a *convention* — a future exit path that publishes a
+  zombie without going through `on_thread_exit` would reopen the hole. It also
+  costs a TLB flush per thread exit that a lazy scheme could sometimes avoid.
+
+**(b) Reference-count the address space** (`mm_users`/`mm_count`), and make
+`pcb::destroy` refuse or defer while the count is non-zero.
+
+*What changes:* also nothing observable; the reclaim happens slightly later,
+whenever the last user drops its reference.
+
+- **For:** it enforces the invariant rather than arranging it, so it survives
+  new exit paths and SMP without anyone remembering the rule. It is the more
+  general answer, and it is also what Linux has (a and b are not exclusive
+  there).
+- **Against:** every acquire/release site is a place to get the count wrong,
+  and getting it wrong yields a *leak* (silent, unbounded) or a *premature
+  free* (the exact bug we are fixing) — with no natural test that fails
+  loudly. It needs the counter threaded through fork, exec, clone, the
+  reaper, and the kernel-thread borrow path, i.e. every place that touches a
+  PML4, to buy a guarantee that (a) already provides for the one shape that
+  actually occurs here (a dying thread and a reaper).
+
+### Decision
+
+**(a).** The bug is not "many holders, unclear lifetime" — it is "exactly one
+holder, and it announced its own death too early." Refcounting is the right
+tool for the former and overkill for the latter, and its failure modes are
+quieter than the one it would replace. Choosing (a) is also not a bet against
+(b): if the kernel later grows genuine multi-holder address-space sharing
+(`CLONE_VM` across processes, a reaper that must touch a dead process's
+memory), the counter becomes necessary and (a) remains correct underneath it.
+
+The residual risk of (a) — a future exit path that forgets — is mitigated
+rather than ignored: `sched::task_exit` calls the detach a second time as an
+idempotent backstop, so any path that reaches the scheduler's exit at all is
+covered even if it bypassed `on_thread_exit`.
+
+### The generalisable lesson
+
+A `// SAFETY:` comment that states a whole-system precondition — "no CPU has
+this loaded in CR3" — and sits behind a public function anyone may call is not
+a proof; it is an unenforced request addressed to nobody in particular. Write
+such preconditions as something the *callee* establishes, or make the state
+that publishes an object as reclaimable and the last instant that object is in
+use the same step. Here they were two serial prints apart, which was enough.
+
+## §276 — A CPU hands the task it just left to the task it just entered, rather than declaring it free the moment it stops being "current"
+
+**Date:** 2026-08-22
+**Decided by:** Claude (autonomous)
+
+**In short:** When the scheduler switches from one task to another, there is a
+short stretch where the CPU has already announced "I am now running task B" but
+is still physically using task A's memory — its kernel stack. A cleanup routine
+on *another* CPU, looking only at that announcement, could see task A as
+belonging to nobody and free the stack while the first CPU was still writing to
+it. The fix is to have the CPU keep naming task A in a second, separate slot
+until it is genuinely off A's stack, and to have the cleanup routine respect
+both slots. The alternative — "don't clean up anything that died in the last
+few milliseconds" — was rejected because it makes the failure rarer instead of
+impossible, which is the worst of both worlds for a bug you cannot reproduce.
+
+**The window.** `schedule_inner` runs, in order:
+
+```
+set_current_task(cpu, next_id);   // outgoing task leaves CURRENT_TASK_IDS here
+… write_cr3, wrmsr FS_BASE/GS_BASE, set TSS.RSP0 …
+switch_context(old_ctx, new_ctx); // and only HERE does it leave its stack
+```
+
+Every instruction between those two lines executes on the *outgoing* task's
+kernel stack, and `switch_context` itself pushes the outgoing callee-saved
+registers onto it before loading the incoming RSP. `reap_dead_tasks` builds its
+exclusion set from `CURRENT_TASK_IDS` across all online CPUs — correctly, and
+with a comment saying why — but that set stops covering the outgoing task one
+step too early. A `Dead` task in this window is on no CPU's current list while
+a CPU is standing on its stack.
+
+**Decision: a per-CPU `PREV_TASK_IDS` slot, written before the switch and
+cleared by the incoming task.** This is Linux's `finish_task_switch` /
+`put_task_struct` shape. The reaper excludes the union of both arrays, so there
+is no instant at which a task is absent from both while a CPU is still
+executing on its stack. The stores are `Release` and the reaper's loads
+`Acquire`, so a reaper that has not yet observed the `PREV` store necessarily
+still observes the task in `CURRENT` — the two coverage windows *overlap*
+rather than abut, which is what makes the handoff gap-free rather than merely
+narrow.
+
+**Why the incoming task clears it, and not the outgoing one.** The outgoing
+task cannot: by the time the pin is safe to drop, that task is not running. The
+information "the previous occupant of this CPU has finished leaving" is only
+available to whoever arrived. That is the whole content of Linux's
+`finish_task_switch`, and it is why the clear re-reads the CPU index instead of
+using the `cpu` local already in scope — a resumed task may come back on a
+*different* CPU than the one it blocked on, and clearing the old CPU's slot
+would simultaneously leak this CPU's pin and drop a live pin elsewhere.
+
+**Alternatives considered.**
+
+| Option | Why not |
+|---|---|
+| Reaper skips tasks that died within the last *N* ms | Converts a correctness bug into a probabilistic one. The failure becomes rarer, harder to reproduce, and — because it now depends on timing — likely to be attributed to whatever else changed. Strictly worse than the bug. |
+| Hold the scheduler lock across `switch_context` | The switch is deliberately outside the lock; taking a lock across a context switch means the lock is released by a *different* task than took it, and any reaper would then block on the switching CPU rather than skip one task. |
+| Retire the outgoing task from `CURRENT_TASK_IDS` *after* the switch instead of before | There is no "after" on the outgoing CPU — control does not return to that code until the task is resumed, possibly never (a `Dead` task is never switched back to). |
+| Reference-count the stack | Correct, but a counter on every switch on the hottest path in the kernel, to express a relationship that is always exactly "zero or one CPU", and with a decrement that has the same "who runs it?" problem solved above. |
+
+**The cost, stated plainly.** A stale non-zero `PREV` entry delays a reap by one
+context switch on that CPU. On a CPU that goes idle immediately after, that is
+until the CPU next runs anything — potentially indefinitely, for one task's
+stack per CPU. That asymmetry is deliberate: the failure mode is a bounded
+delay, never an early free. It is also why `task_entry_trampoline` gained a
+`sched_finish_task_switch` call. A task running for the *first* time never
+returns from `switch_context` — it arrives at the trampoline instead — so
+without that call the first-run path would leak the pin permanently on an
+otherwise-idle CPU. It is one instruction in the asm trampoline and it is the
+only reason the "bounded" in "bounded delay" is true.
+
+**Testing an SMP-only bug from a uniprocessor boot test.** The boot test brings
+up no APs, so the race cannot be *provoked*: a soak would pass forever and prove
+nothing. `test_prev_task_pins_outgoing_stack` therefore pins the mechanism, in
+the two halves that regress independently — a `Dead` task named in `PREV` must
+survive a reap *and* be reaped once released (without the second leg the test
+would also pass against a reaper that never reaps anything), and a brand-new
+task must observe a cleared slot (without which deleting the one asm line above
+is invisible, since a leaked pin only ever *delays* a reap and nothing in the
+tree fails). The observation is stored offset by one so that "the helper task
+never ran" is distinguishable from "the helper correctly saw zero" — otherwise
+a test that silently failed to schedule its helper reads exactly like a pass.
+
+**Generalisable lesson, and it is the same one as §275.** A bookkeeping update
+is not the moment the hardware stopped depending on the object. There it was a
+process's PML4 versus a dying thread's CR3; here it is a task's kernel stack
+versus the outgoing task's `switch_context`. Both bugs are "published as
+reclaimable at a point that precedes the genuine last use", and both fixes have
+the same shape: make the *last user* hand the object off, rather than making the
+reclaimer guess when the last use ended.
+
+## §277 — A staleness check that can only fail is retired, not repaired: the content stamp already answers its question, and better
+
+**Date:** 2026-08-22
+**Decided by:** Claude (autonomous)
+
+**In short:** the boot test used to print a red warning saying "the compiled
+test programs in the disk image are out of date, so treat their results as
+covering old code." Since 2026-08-21 that warning has printed on *every* run,
+including runs where the programs were freshly built moments earlier — the
+check behind it lost the files it was watching and started reporting "I cannot
+tell" on every invocation, which the boot test rendered as "they are stale."
+The choice was whether to repair that check or delete it. It is deleted, and
+the one boot-test slot that genuinely needed an answer now calls a different
+check that was already in the tree and answers the question more completely.
+
+### What the check was for
+
+Every ring-3 test program in `services/ctest-*` links `toolchain/sysroot/lib/
+libc.a`, which is built from `posix/`. `libc.a` is a build artifact, not
+tracked in git, so a `git merge` that brings in new `posix/` commits leaves it
+behind without saying anything. From that moment the whole shelf of test
+programs exercises a libc that is not in the tree — and every content check
+stays green, because the programs and their recorded inputs still agree with
+each other. They agree about a stale input.
+
+That had happened four times, each time discovered by a different lane one to
+three days later than the lane that caused it. `scripts/stamp-ancestry.py` was
+lane A's answer: for each committed artifact it read a committed `.stamp` file
+recording the commit it was built at, then walked git history for later commits
+touching the sources that artifact declared. History, not content — the
+argument being that a content check "cannot see past its own recorded inputs".
+
+### Why it stopped working
+
+Lane B's §355 (2026-08-21) stopped committing the 70 compiled fixtures and the
+`.stamp` files that dated them; they are gitignored and built on demand now.
+`stamp-ancestry.py` knew exactly one family, matched by
+`:(glob)services/ctest-*/*.stamp`. `git ls-files` matches nothing for it.
+
+The script has a deliberate and correct branch for that case — refuse to report
+*clean* for a family it cannot see, because "could not verify" must never
+render as "fine". With one family and no stamps, that branch became its only
+reachable outcome. Lane B filed
+`requests/b-a-stamp-ancestry-now-only-ever-errors.md` naming both consequences:
+the warning's text says "the posix/ commits named above" while naming nothing
+(the script errored before computing a list), and it asserts staleness that is
+false — the fixtures at that moment are current *by construction*, because the
+only thing that builds them refuses to build against a stale libc.
+
+### The decision
+
+Delete `scripts/stamp-ancestry.py`. In `scripts/boot-test.sh`, replace both
+call sites with `ctest-fixtures.py sysroot-check`.
+
+`sysroot-check` asks the same question by content: it hashes the 2312 sources
+`libc.a` is built from and compares them against `toolchain/sysroot/
+.sysroot.stamp`, written by `build-sysroot.ps1` on every run. That is a direct
+answer to "is `libc.a` behind the tree", which is the question the reader
+actually has. The premise that made history necessary — "a content check cannot
+see past its own recorded inputs" — was true of the *fixture* stamps, which
+record `libc.a`'s hash and so can only confirm the fixtures match whatever libc
+is on disk. It is not true of a stamp that records the libc's own *sources*.
+
+### Alternatives considered
+
+| Option | Why not |
+|---|---|
+| Repoint the family at the ELFs | They are gitignored too; there is nothing tracked left to date them by. Lane B ranked this last for the same reason. |
+| Keep the script, drop its only family | Leaves a script with zero families whose correct behaviour is to succeed silently — i.e. a file that exists to do nothing. |
+| Delete both call sites outright (lane B's suggestion 1) | Nearly right, but see below: it would have left a real hole. |
+| Keep the warning, suppress it when it cannot verify | This is how a check that reports nothing gets to keep looking like a check. If it cannot answer, it should not be called. |
+
+### Why the passing-path slot was rewired rather than removed
+
+Lane B's suggestion was to delete the script *and* its call site, on the
+grounds that the rootfs script now rebuilds anything missing or out of date, so
+the fixtures are current by construction. That is true **at the moment the
+image is packed** and not afterwards. The sequence that still bites:
+
+1. Build the fixtures and pack `rootfs.ext4` while `libc.a` is fresh.
+2. `git merge origin/main`, which `CLAUDE.md` requires at the start of every
+   task, brings in new `posix/` commits.
+3. Nothing on disk changed, so `image-check` passes: the image genuinely does
+   match the ELFs in the tree.
+4. Every ELF in it nonetheless links a libc that is no longer in the tree.
+
+That is a green boot test whose Path-Z rungs covered a system this tree cannot
+build — the silent version of the failure, and the one the long comment in
+`boot-test.sh` was right to say is worse than the loud one. So the slot keeps a
+warning; only its evidence changed. It remains a warning and not a failure for
+the reason already recorded there: repairing it means rebuilding `services/**`,
+which is lane B's tree, and failing would block every lane-A boot test on a
+repair lane A must not make.
+
+The replacement is also strictly stronger in one respect nobody asked for: a
+content stamp sees **uncommitted** `posix/` edits. A history walk cannot see
+those at all, so the original check would have called a working tree with
+half-finished libc changes perfectly clean.
+
+### The cost, stated plainly
+
+We lose the ability to say *which commit, and therefore which lane*, invalidated
+the fixtures — a history walk could name `d5a23c2f9` and its author; a content
+stamp can only name the files whose bytes moved. That was a genuine convenience
+in the cross-lane case, since the lane that trips over the staleness is never
+the lane that caused it.
+
+It is worth losing anyway. `git log --oneline <stamp-date>..HEAD -- posix/`
+recovers the commit list in one command once you know `posix/` is what moved,
+and knowing *that* is the part the reader could not previously get without
+hashing `libc.a` across four worktrees by hand. The attribution was the cheap
+half of the answer, and it was being paid for with a permanent false alarm.
+
+### Generalisable lesson
+
+**A detector whose "I cannot tell" branch has become unconditional is no longer
+expressing doubt about the run; it is expressing a fact about itself.** The
+rule it was following — never render *could not verify* as *fine* — is right,
+and this is not a case against it. But that rule is about a check that
+*sometimes* cannot see; applied to one that *never* can, it produces a banner
+that fires every time, and a banner that fires every time is read as
+decoration. The failure is not in the branch, it is in leaving the check wired
+up after the thing it watched stopped existing. When a check's subject is
+removed, the check goes with it in the same change — otherwise its output
+outlives its meaning, and readers learn to skip the region of the log it prints
+in, which costs more than the check ever bought.
+
+`scripts/boot-history.py` carries a rider to this effect next to the rule it
+shares, since it is the other place in the tree that reasons about
+unvalidatable evidence.
+
+## §278 — A process created by `spawn` inherits its parent's capabilities, because a forked one already does and the two must not disagree
+
+**Date:** 2026-08-22
+**Decided by:** Claude (autonomous)
+
+**In short:** there are two ways to start a new program on this system, and they
+were handing the new program wildly different amounts of authority. Starting one
+with `fork` gave it a copy of everything its parent was allowed to do; starting
+one with `spawn` gave it *nothing at all*, so the very first file it tried to
+open was refused. That is why `make` could read its makefile and then die
+running its own recipe: the shell it started could not open the C library. The
+decision is that `spawn` now copies the parent's permissions, exactly as `fork`
+does.
+
+### The asymmetry
+
+`fork_create` clones the parent's `cap_table` wholesale — `CapTable`'s own doc
+comment says that is what fork needs, and it has always done it.
+`spawn_process` instead calls `pcb::create`, which hands back a fresh empty
+`CapTable`, and then grants only what `SpawnOptions::capabilities` names.
+
+For the ~150 in-kernel callers in `spawn.rs` that is correct and deliberate:
+each names the authority its test subject should have, which is the delegation
+model the field's doc describes ("the parent must have these capabilities to
+delegate them").
+
+For userspace it was not a policy at all, because **there is no way to express
+it.** `SpawnExArgs` has twelve fields — ELF pointer and length, name, fd map,
+argv, envp — and not one of them is a capability array. `sys_process_spawn_ex`
+therefore builds `SpawnOptions::new(name).parent(caller_pid())` and stops. Every
+child spawned by a user process started with an empty capability table, and
+`openat`'s `require_cap_type(File, READ)` refused its first file.
+
+### How it presented, which is most of why it survived
+
+The visible failure was three removes from the cause:
+
+```
+/bin/sh: error while loading shared libraries: libc.so.6:
+         cannot open shared object file: Permission denied
+make: /bin/sh: Permission denied
+make: *** [/Makefile:2: all] Error 127
+```
+
+Three things conspired to point away from the kernel:
+
+1. **The message is glibc's**, and names a shared library, so it reads as a
+   loader or a rootfs-permissions problem.
+2. **`ld.so` itself loaded fine** — the log shows
+   `loaded interpreter '/lib64/ld-linux-x86-64.so.2' at base=…` — because the
+   *kernel's* ELF loader reads the interpreter with kernel authority. Only the
+   loader's own ring-3 `openat` was refused. So the same file path worked and
+   then did not, within one process startup.
+3. **`fork` + `execve` was unaffected throughout**, and so was every directly
+   kernel-spawned Path-Z test, including one that exercises this exact code:
+   `REAL glibc dynamic execution (ring 3: ld.so mapped libc.so.6, …): OK`. A
+   mechanism that fails only for grandchildren, and only via one of two process
+   creation paths, has almost no surface to be noticed on.
+
+An earlier form of the failure had been logged as a downstream consequence of
+lane B's `BUG-POSIX-SPAWN-FILE-ACTIONS-IS-4624-BYTES-IN-AN-80-BYTE-SLOT`. Lane B
+fixed that bug on 2026-08-21; the `make` rungs stayed red -- with a *different*
+exit code (2, an `EACCES` path, rather than -8, a fault) -- which is what
+disproved the attribution.
+
+**Credit where it is due:** lane B had already tracked this to the right line
+and filed it as `BUG-SPAWNED-CHILDREN-INHERIT-NO-CAPABILITIES`, deliberately as
+a report rather than a patch, on the grounds that a change to the capability
+model belongs to whoever owns the capability model. Their write-up names the
+`spawn.rs` Step 5 site, the `require_cap_type(File, READ)` gate in `openat`, and
+the discriminator table above; it lists the same three options considered here
+and recommends option 1 now with option 3 later, which is exactly what was
+implemented. It also asked for "a smaller in-kernel test that asserts directly
+that a child of `SYS_PROCESS_SPAWN` holds a `File` capability" -- that is
+`test_spawn_inherits_parent_capabilities`. This entry reaches lane B's
+conclusion independently and adds the argument for why the answer was not in
+fact a difficult security call; the diagnosis was theirs.
+
+Lane B also recorded the observation worth carrying forward: this is the
+*second* capability-shaped failure in the same self-test, and the two are
+distinct bugs with the same symptom shape -- the first was a too-narrow grant
+*to the parent* (`METADATA` missing), this one no grant at all *to the child*.
+When a Path-Z rung reports something implausible like "file does not exist",
+capabilities are the place to look first.
+
+### The decision
+
+`pcb::inherit_caps_from(parent, child)` copies the parent's valid entries into
+the child, and `spawn_process` calls it before applying
+`options.capabilities` — so explicit grants still layer on top, and in-kernel
+callers (`parent: 0`) are untouched.
+
+### Why this is not a widening of authority
+
+The architectural rule is **no ambient authority**: authority must come from
+holding an unforgeable token, not from being yourself. Inheritance is not that.
+The child receives copies of tokens its parent demonstrably held, and can
+receive nothing the parent lacked. It is the same delegation `fork` performs.
+
+The decisive argument is that the restriction bought nothing even before the
+change. Any process that can call `spawn` can equally call `fork` + `execve`,
+which clones the table in full. So "spawn grants nothing" did not deny an
+attacker a single capability — it only broke the caller who used the newer
+syscall. A security boundary that is one syscall away from being bypassed is not
+a boundary; it is a bug with a rationale attached.
+
+POSIX forces the same answer independently: `posix_spawn` is specified as
+equivalent to `fork` + `exec`, and lane B's libc implements it on
+`SYS_PROCESS_SPAWN_EX`. A child that cannot open a file is not equivalent to a
+forked one.
+
+### Alternatives considered
+
+| Option | Why not |
+|---|---|
+| Add a capability array to `SpawnExArgs` and require explicit delegation | The principled long-term answer, and it is still wanted (see below) — but it is an ABI change across two lanes, and it *still* needs a default for `posix_spawn`, which by specification must be fork-equivalent. So it would default to inheriting anyway. This decision does not preclude it. |
+| Inherit only `ResourceType::File` | Fixes the observed symptom and nothing else. The next spawn that needs a channel or a timer fails the same way, with a symptom equally far from its cause. Fixing the mechanism rather than the reported instance is the habit `FIXED-A-PATH-Z-REAL-MAKE-STAT-OF-MAKEFILE-RETURNS-EACCES` was written to instil, one bug earlier in this very code path. |
+| Grant a blanket `File` capability to every process | Ambient authority, straightforwardly. Rejected. |
+| Leave it and fix the callers | There is no caller-side fix. The ABI has no field to fix it with. |
+
+### The cost, stated plainly
+
+A spawned child now gets the parent's **entire** table, including any `Process`
+capabilities the parent holds over unrelated processes. `fork` has always done
+this, so it introduces no case that did not already exist by another route — but
+it does mean spawn cannot currently be used to *drop* authority before running
+untrusted code, which is a real thing to want.
+
+That is the one genuine gap, and it needs an ABI field to name the subset to
+keep. Recorded in `todo.txt`; the honest default until then is "same as fork"
+rather than "nothing", because "nothing" is not a safer default, it is an
+unusable one, and it drove callers toward `fork` + `execve` — which inherits
+everything anyway, with no option to narrow either.
+
+### Generalisable lesson
+
+**When one operation has two implementations, the invariant is that they agree —
+and nothing in the type system was ever going to check it.** `fork` and `spawn`
+both create a process; they diverged on the single most security-relevant
+property of a new process, and the divergence lived for as long as it did
+because each path looked correct in isolation. `fork`'s clone is documented on
+`CapTable`; `spawn`'s explicit-grant model is documented on
+`SpawnOptions::capabilities`. Both docs are true. Neither mentions the other,
+and no reader of one is prompted to check the other.
+
+The regression test therefore asserts the *agreement*, not either behaviour on
+its own — and its second half asserts the converse (a kernel-spawned process
+inherits nothing from PID 0), because "inherit more" and "inherit less" are
+independent mistakes and a test that only checks one direction licenses the
+other.
+
+---
+
+## 525. One resolved `Palette`, with roles rather than colours — and the five judgement calls inside it
+
+**Date:** 2026-08-22
+**Decided by:** Claude (autonomous)
+
+**In short:** The desktop's settings page lets a user pick light or dark mode,
+an accent colour, and how see-through panels should be. Almost nothing obeyed
+it, because 49 of the shell's modules each carried their own private list of
+colour constants — 549 of them — that happened to match the dark theme. The fix
+needs one place that answers "what colour is a window background right now",
+and this records the five decisions inside building that place, each of which
+had a defensible answer on both sides. Part 1 (the type, and the two consumers
+rewritten onto it) is done; part 2 (the other 49 modules) is not.
+
+Terms used below, once each: a *role* is what a colour is *for* — "the window's
+background", "text on it" — as opposed to a hex value like `0x1E1E2E`. *Latte*
+and *Mocha* are the light and dark variants of Catppuccin, the colour scheme
+the shell already used. *Alpha* is how opaque a colour is, 0 fully transparent
+to 255 fully solid. *Contrast ratio* is the WCAG measure of how legible one
+colour is on another; 4.5:1 is the published floor for body text.
+
+### Why a resolved struct, and not a lookup function
+
+The alternative was `fn color(role: Role, mode: ThemeMode, accent: AccentColor)
+-> Color` — no new type, nothing to keep in sync. It was rejected because every
+call site would then have to carry the mode and the accent in order to ask,
+which is three arguments threaded through the render functions instead of one,
+and because a renderer that holds a `&Palette` cannot ask for a colour in the
+wrong mode by accident. The struct is 21 fields resolved once at the top of a
+frame; the function is a question asked several hundred times a frame, each
+time with a fresh opportunity to pass a stale mode.
+
+The cost is that adding a role means adding a field, and a field can be added
+and then not used. That is the failure the tests are shaped against: `roles()`
+in the test module is a hand-written array of all 19 colour fields, deliberately
+*not* derived by macro, because the point of several tests is that a field added
+later is not silently skipped — and a macro would skip it for exactly the reason
+a renderer would.
+
+### Decision 1: the named hues stay separate from the accent
+
+The shell used `BLUE` for two jobs that look identical and are not: "the colour
+this desktop is themed around" and "the blue one" of a fixed categorical set —
+CPU drawn next to memory in green and temperature in peach on a resource graph.
+Collapsing both onto `accent` is tempting, one field instead of nine, and it is
+wrong: a user who themes their desktop Red gets a graph whose CPU line and
+temperature line are the same colour, and no amount of care at the call site
+recovers the distinction once the values are equal.
+
+So `Palette` carries `blue`, `green`, `red`, `yellow`, `peach`, `lavender`,
+`mauve`, `sapphire` *and* `accent`. `accent` moves with the user's choice; the
+eight hues never do. The test
+`the_accent_setting_moves_the_accent_and_leaves_the_categorical_hues_alone`
+states exactly this, and the reintroduction harness confirms it catches the
+collapse (defect F).
+
+**Against:** nine colour fields where one theme-aware one would do is more
+surface, and a call site can still reach for `blue` when it meant `accent`.
+That is true, but it is a mistake with a visible symptom in one place, whereas
+the collapse is invisible until someone changes their accent.
+
+### Decision 2: a scrim is black, not the palette's own base
+
+A *scrim* is the dimming laid over the desktop behind a modal dialog. The shell
+dimmed with its own `BASE` at alpha, which is fine in Mocha because Mocha's base
+is nearly black. Latte's base is `#EFF1F5` — so carried over literally, "dim the
+desktop" in light mode would have *brightened* it.
+
+`scrim()` therefore returns `Color::rgba(0, 0, 0, 140)` in both modes and does
+not read the palette at all. The reasoning is that a scrim is not a colour the
+theme chooses; it is an absence of light, and absence of light is black wherever
+you are. The same holds for `shadow()` and `text_shadow()`.
+
+**Against:** a method on `Palette` that ignores `self` looks like a mistake, and
+someone will eventually "fix" it. Mitigated by the doc comment saying why, and
+by `the_scrim_and_the_shadows_darken_whichever_palette_they_fall_on`, which
+fails if any of the three starts varying by mode (defect J).
+
+### Decision 3: one shadow value, but two shadow *roles*
+
+The shell declared `SHADOW` at three different alphas — 100, 120 and 160 — plus
+a separate `LABEL_SHADOW` at 180. The three `SHADOW`s are one role whose value
+drifted, and they collapse to `shadow()` at 120.
+
+`LABEL_SHADOW` does **not** collapse into it, and this is the call worth
+recording, because 180-versus-120 looks exactly like more drift. It is not: a
+panel's shadow exists to suggest the panel floats above a surface the shell
+chose, so it can be subtle. A label's shadow exists to keep white text readable
+over a wallpaper the *user* chose, which may be anything, including white. One
+is depth, the other is legibility, and only one of them has a worst case. So
+`text_shadow()` is 180 and stays its own method. Defect K — quietly making them
+equal — is caught.
+
+### Decision 4: `LIGHT_SUBTEXT0` departs from upstream Catppuccin
+
+Measured on the Latte base, upstream's Latte `subtext0` (`#6C6F85`) gives
+**4.37:1** — below the 4.5:1 floor — while Mocha's counterpart gives 7.37:1. The
+role is body text: secondary labels, the unfocused window title. Shipping it
+means the light theme is measurably less legible than the dark one at the exact
+place a user reads most.
+
+`LIGHT_SUBTEXT0` is therefore `#686B80`: each channel scaled to 96.5%, which
+holds the hue and reaches 4.64:1. This follows a precedent already in the crate
+— the `LIGHT_*` accent constants are likewise darkened from upstream, for the
+same reason.
+
+**Against:** diverging from a published palette means the desktop is no longer
+"Catppuccin Latte" in the strict sense, and someone comparing against upstream
+will find a value that does not match and may take it for a bug. What it buys is
+that the legibility invariant in the tests
+(`every_role_a_user_reads_is_legible_on_the_base_of_its_own_palette`) can be a
+flat rule over both modes instead of carrying an exception — and an exception in
+a legibility floor is how the floor stops being one. Defect A restores upstream's
+value and the test rejects it, which is that property made concrete.
+
+### Decision 5: `panel_alpha` is carried, not applied
+
+Transparency arrives as a field on the palette and is applied by exactly two
+methods, `panel_bg()` and `panel_hover()`. The rejected alternative was to apply
+it during construction, so that `base` itself is translucent and everything
+drawn from it inherits the setting for free.
+
+That is wrong because transparency belongs to the surface that *floats*, not to
+the palette. A list row inside a translucent menu must stay opaque: if it is
+not, the wallpaper shows through the row rather than through the menu containing
+it, and the row stops looking like part of the menu. Applying alpha at
+construction makes that impossible to express, because there is no longer an
+opaque base to reach for. Defect I does precisely this, and
+`transparency_reaches_panels_and_nothing_behind_them` catches it.
+
+### What the reintroduction proof changed about the design
+
+`scripts/reintro-palette.py` reintroduces 19 defects one at a time and checks
+each is caught by the test that names it. Defect Q — a window's close button
+following the accent instead of staying red — came back **uncaught**, and the
+reason was not the test. `DecorationColors::from_settings` built its frame from
+`Palette::for_mode` and then painted the accent on top afterwards, so the
+palette a frame was assembled from always carried the *default* accent:
+`p.accent` was blue whatever the user had chosen, and the defect produced blue
+on both sides of the comparison.
+
+The fix was structural rather than a patched line. `from_palette(&Palette)` is
+now the single body that says which role each part of a frame is, and the two
+entry points each pass the palette they actually mean — `for_mode` passes the
+mode's, `from_settings` passes the user's. `DesktopTheme` was restructured the
+same way for the same reason. This is the design's answer to "how do we know the
+right palette was used": there is exactly one place where the wrong one could be
+passed, and it is three lines long.
+
+Worth stating because it recurs: the harness's value here was not confirming
+that the tests work. It was that a test which *should* have failed and did not
+pointed at a defect in the code beneath it, rather than at itself.
+
+### Addendum, same day: two fields more, one constant wrong, and a sweep that was half a sweep
+
+Surveying `apps/` to size the next stage turned up three things that belong in
+this decision rather than in the one that will consume them.
+
+**`teal` and `sky` were added to `Palette` immediately, not when `apps/` is
+converted.** The shell declares neither; the applications declare `TEAL` 86
+times and `SKY` 18. The argument for waiting is that a field with no caller is
+dead weight and this crate's own tests exist to catch exactly that. The
+argument for adding them now, which won, is that every mode-flip and legibility
+sweep in the test module iterates a hand-written list of the palette's fields —
+so a hue added later has to be threaded back through all of them, and a sweep
+that silently skips a field is the precise failure those sweeps were written to
+detect. Paying that cost once, while the light ladder is being written and
+every value is being checked anyway, is cheaper and safer than paying it under
+a large mechanical conversion where a missed row would look like noise.
+
+**`SKY` was wrong, in the crate that owns the answer.** Catppuccin Mocha's Sky
+is `#89DCEB`; `gui/appearance/src/lib.rs` said `0x89DCFE` — a transposed byte
+pair, present since the constant was written — so `AccentColor::Sky.color()`
+returned a colour the scheme does not contain, and the wrong value had already
+been copied into `apps/alarmclock` and `apps/emojipicker`. Six other
+applications and `gui/toolkit` had the right one.
+
+The fix is one character. The interesting part is that **nothing in the tree
+could have found it**, and the reason generalises past this bug: every test in
+this crate compares one part of the tree against another, which by construction
+cannot see an error the whole tree shares — and 2,258 duplicated declarations
+agreeing with each other is not evidence, since agreement is what copying
+produces whether or not the original was right. So
+`every_dark_constant_is_the_published_catppuccin_mocha_value` transcribes the
+published palette *independently* and pins all 24 declared values against it.
+That is the only test in the file whose expected values do not come from the
+tree, and it is the only one that could have caught this.
+
+Two things it deliberately does not do. It does not pin the `LIGHT_*` accents,
+because those depart from published Latte on purpose — they are darkened to
+carry text, per Decision 4 above — so pinning them would assert the negation of
+a decision recorded twenty lines earlier. And it does not list `overlay1` and
+`overlay2`: they are published but not declared here, and an entry pairing
+`Color::from_hex(0x7F849C)` with `0x7F849C` asserts a value against itself,
+which is the vacuous shape the reintroduction harness for this work exists to
+rule out. A constant the crate does not have is not a constant a test can check.
+
+**The categorical-hue sweep was only testing half of what it claimed**, and the
+harness is what said so. `the_accent_setting_moves_the_accent_and_leaves_the_categorical_hues_alone`
+compared against `Palette::for_mode(false)` using the default settings — which
+are dark — so the entire light arm was unexercised. A reintroduced defect that
+collapsed a hue onto the accent *only in light mode* was reported as
+`NO TEST FAILED`. It now sweeps both modes and all ten named hues.
+
+Worth recording as a rule rather than an anecdote: a mode-dependent type wants
+its tests written as a loop over the modes from the start, because the arm a
+reader checks less is also the arm a test forgets, and both defaults point the
+same way — the dark arm is older, is what the tree already agreed with, and is
+what `Default` returns. Every unswept test in a two-mode type will be unswept
+on the same side.

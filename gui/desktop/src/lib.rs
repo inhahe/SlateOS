@@ -137,7 +137,8 @@ mod pointer_tests;
 
 use appearance::config;
 use appearance::{
-    AppearanceSettings, DecorationColors, TaskbarStyle, TransparencyLevel, emphasized, readable_on,
+    AppearanceSettings, DecorationColors, Palette, TaskbarStyle, TransparencyLevel, emphasized,
+    readable_on,
 };
 // The protocol's words, not its wire. `ShellControlAction` is what a taskbar
 // button asks for and `WindowInfo` is what a taskbar is drawn from; re-exported
@@ -862,66 +863,61 @@ impl Default for DesktopTheme {
 }
 
 impl DesktopTheme {
-    /// The dark palette (Catppuccin Mocha), before any setting is applied.
+    /// The palette for a mode, before any of the user's other choices apply.
+    ///
+    /// Every field is a *role* read out of [`Palette`] rather than a hex
+    /// value: the taskbar is `base`, its text is `text`, a pressed button is
+    /// `surface1`. That is what makes the two modes structurally the same
+    /// rather than the-same-if-someone-kept-two-lists-in-step, which is what
+    /// they were — two hand-written tables whose correspondence was asserted
+    /// only by a doc comment.
     ///
     /// The border and desktop fields are not this crate's to choose — see
-    /// [`frame_fields_from`](Self::frame_fields_from).
+    /// [`from_palette`](Self::from_palette).
     #[must_use]
-    pub fn dark() -> Self {
-        let frame = DecorationColors::for_mode(false);
+    pub fn for_mode(light: bool) -> Self {
+        Self::from_palette(&Palette::for_mode(light), DecorationColors::for_mode(light))
+    }
+
+    /// Which role of `palette` each surface of the shell is.
+    ///
+    /// Two of the twelve fields come from `frame` rather than from `palette`,
+    /// and that is the point of taking both. Neither is the shell's to choose:
+    /// the desktop background is painted by the compositor and merely
+    /// *reported* here, and the border is the one drawn around every window on
+    /// that desktop — a start menu outlined in a different shade from the
+    /// window beside it looks like a bug, and would be, because two processes
+    /// had each picked a colour. Deriving them from the palette here would be
+    /// that second derivation. Everything else — the taskbar, the menu
+    /// surfaces, the overlays — is drawn by this process alone and is a role.
+    #[must_use]
+    fn from_palette(p: &Palette, frame: DecorationColors) -> Self {
         Self {
-            taskbar_bg: Color::from_hex(0x1E1E2E),
-            taskbar_fg: Color::from_hex(0xCDD6F4),
-            taskbar_active_bg: Color::from_hex(0x45475A),
-            taskbar_accent: Color::from_hex(0x89B4FA),
+            taskbar_bg: p.base,
+            taskbar_fg: p.text,
+            taskbar_active_bg: p.surface1,
+            taskbar_accent: p.accent,
             panel_border_color: frame.border_focused,
             desktop_bg: frame.desktop_bg,
-            accent_color: Color::from_hex(0x89B4FA),
-            start_menu_bg: Color::from_hex(0x1E1E2E),
-            start_menu_fg: Color::from_hex(0xCDD6F4),
-            overlay_bg: Color::from_hex(0x1E1E2E),
-            overlay_fg: Color::from_hex(0xCDD6F4),
-            overlay_selected_bg: Color::from_hex(0x45475A),
+            accent_color: p.accent,
+            start_menu_bg: p.base,
+            start_menu_fg: p.text,
+            overlay_bg: p.base,
+            overlay_fg: p.text,
+            overlay_selected_bg: p.surface1,
         }
+    }
+
+    /// The dark palette (Catppuccin Mocha), before any setting is applied.
+    #[must_use]
+    pub fn dark() -> Self {
+        Self::for_mode(false)
     }
 
     /// The light palette (Catppuccin Latte), before any setting is applied.
-    ///
-    /// Surface for surface, this is the same structure as [`dark`](Self::dark)
-    /// — base, surface0, surface1, surface2, crust — so that a setting applied
-    /// on top lands on the same role in either mode.
     #[must_use]
     pub fn light() -> Self {
-        let frame = DecorationColors::for_mode(true);
-        Self {
-            taskbar_bg: Color::from_hex(0xEFF1F5),
-            taskbar_fg: Color::from_hex(0x4C4F69),
-            taskbar_active_bg: Color::from_hex(0xBCC0CC),
-            taskbar_accent: Color::from_hex(0x1E66F5),
-            panel_border_color: frame.border_focused,
-            desktop_bg: frame.desktop_bg,
-            accent_color: Color::from_hex(0x1E66F5),
-            start_menu_bg: Color::from_hex(0xEFF1F5),
-            start_menu_fg: Color::from_hex(0x4C4F69),
-            overlay_bg: Color::from_hex(0xEFF1F5),
-            overlay_fg: Color::from_hex(0x4C4F69),
-            overlay_selected_bg: Color::from_hex(0xBCC0CC),
-        }
-    }
-
-    /// Take the two colours the compositor also uses from `frame`, leaving the
-    /// shell's own surfaces alone.
-    ///
-    /// Neither is the shell's to choose. The desktop background is painted by
-    /// the compositor and merely *reported* here, and the border is the one
-    /// drawn around every window on that desktop — a start menu outlined in a
-    /// different shade from the window beside it looks like a bug, and would
-    /// be, because two processes had each picked a colour. Everything else in
-    /// the theme — the taskbar, the menu surfaces, the overlays — is drawn by
-    /// this process alone and stays here.
-    fn frame_fields_from(&mut self, frame: DecorationColors) {
-        self.panel_border_color = frame.border_focused;
-        self.desktop_bg = frame.desktop_bg;
+        Self::for_mode(true)
     }
 
     /// Resolve a full palette from what the user chose.
@@ -932,15 +928,15 @@ impl DesktopTheme {
     /// that has already been given its colour.
     #[must_use]
     pub fn from_settings(settings: &AppearanceSettings) -> Self {
-        let mut theme = if settings.theme_mode.is_light() {
-            Self::light()
-        } else {
-            Self::dark()
-        };
-
-        let accent = settings.effective_accent();
-        theme.accent_color = accent;
-        theme.taskbar_accent = accent;
+        // The mode *and* the accent, in one resolution. Building from
+        // `for_mode` and then assigning the accent over the top would work
+        // today and would stop working the moment any other field came to
+        // depend on the accent, because the default one would already have
+        // been baked in — the shape of the defect the reintroduction proof for
+        // `DecorationColors` turned up.
+        let palette = Palette::from_settings(settings);
+        let accent = palette.accent;
+        let mut theme = Self::from_palette(&palette, DecorationColors::from_settings(settings));
 
         if settings.accent_taskbar {
             theme.taskbar_bg = accent;
@@ -948,13 +944,8 @@ impl DesktopTheme {
             theme.taskbar_active_bg = emphasized(accent);
             // The start glyph is drawn in the accent; on an accent-coloured
             // panel it has to become the contrasting colour or it disappears.
-            theme.taskbar_accent = readable_on(accent);
+            theme.taskbar_accent = palette.on_accent();
         }
-
-        // Not derived here. The border and the desktop belong to the frames the
-        // compositor draws; deriving them twice is how the two processes come
-        // to disagree. See [`DesktopTheme::frame_fields_from`].
-        theme.frame_fields_from(DecorationColors::from_settings(settings));
 
         theme.taskbar_bg = with_alpha(theme.taskbar_bg, taskbar_alpha(settings));
         let overlay = settings.transparency.panel_alpha();
@@ -3203,6 +3194,40 @@ mod theme_tests {
     fn the_default_theme_is_the_dark_one() {
         assert_eq!(DesktopTheme::default(), DesktopTheme::dark());
         assert_eq!(DesktopShell::new(800, 600).theme, DesktopTheme::dark());
+    }
+
+    #[test]
+    fn every_surface_of_the_theme_is_a_role_out_of_the_shared_palette() {
+        // The shell must not have its own idea of what a background is. This
+        // crate held two hand-written colour tables — one per mode — and the
+        // only thing claiming they described the same surfaces was a comment;
+        // `gui/desktop` then went on to grow 549 more constants for the same
+        // reason (known-issues.md
+        // `TD-C-FORTY-NINE-SHELL-MODULES-CARRY-THEIR-OWN-COPY-OF-THE-PALETTE`).
+        //
+        // Asserting the mapping rather than the values is what makes the test
+        // survive a palette change: recolouring Catppuccin would break a test
+        // that named hexes, and should not, whereas a taskbar that quietly
+        // stopped being `base` is exactly what should fail here.
+        for light in [false, true] {
+            let p = Palette::for_mode(light);
+            let t = DesktopTheme::for_mode(light);
+            assert_eq!(t.taskbar_bg, p.base);
+            assert_eq!(t.taskbar_fg, p.text);
+            assert_eq!(t.taskbar_active_bg, p.surface1);
+            assert_eq!(t.taskbar_accent, p.accent);
+            assert_eq!(t.accent_color, p.accent);
+            assert_eq!(t.start_menu_bg, p.base);
+            assert_eq!(t.start_menu_fg, p.text);
+            assert_eq!(t.overlay_bg, p.base);
+            assert_eq!(t.overlay_fg, p.text);
+            assert_eq!(t.overlay_selected_bg, p.surface1);
+            // The two the compositor also draws stay the frame's, not the
+            // palette's read a second time — see `from_palette`.
+            let frame = DecorationColors::for_mode(light);
+            assert_eq!(t.panel_border_color, frame.border_focused);
+            assert_eq!(t.desktop_bg, frame.desktop_bg);
+        }
     }
 
     #[test]

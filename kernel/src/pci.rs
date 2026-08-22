@@ -50,7 +50,13 @@ const _CFG_CLASS: u8 = 0x0B;
 /// Subclass (8-bit, offset 0x0A).
 const _CFG_SUBCLASS: u8 = 0x0A;
 /// Header type (8-bit, offset 0x0E).
-const _CFG_HEADER_TYPE: u8 = 0x0E;
+const CFG_HEADER_TYPE: u8 = 0x0E;
+
+/// Header-type bit 7: this device has functions beyond function 0.
+///
+/// Clear means function 0 is the only one, and probing 1..8 would read
+/// floating config space rather than absent devices.
+const HEADER_TYPE_MULTIFUNCTION: u8 = 0x80;
 /// BAR0 (32-bit, offset 0x10).
 const CFG_BAR0: u8 = 0x10;
 /// Interrupt line (8-bit, offset 0x3C low byte).
@@ -269,8 +275,8 @@ pub fn scan_bus0() -> Vec<PciDevice> {
         scan_function(0, device, 0, &mut devices);
 
         // Check if this is a multi-function device (header type bit 7).
-        let header_type = config_read8(0, device, 0, 0x0E);
-        if header_type & 0x80 != 0 {
+        let header_type = config_read8(0, device, 0, CFG_HEADER_TYPE);
+        if header_type & HEADER_TYPE_MULTIFUNCTION != 0 {
             for function in 1..8u8 {
                 let vendor = config_read16(0, device, function, CFG_VENDOR_ID);
                 if vendor != 0xFFFF {
@@ -308,7 +314,7 @@ fn for_each_function(mut f: impl FnMut(PciAddress)) {
         });
 
         // Multi-function device (header type bit 7)?
-        if config_read8(0, device, 0, _CFG_HEADER_TYPE) & 0x80 != 0 {
+        if config_read8(0, device, 0, CFG_HEADER_TYPE) & HEADER_TYPE_MULTIFUNCTION != 0 {
             for function in 1..8u8 {
                 if config_read16(0, device, function, CFG_VENDOR_ID) != 0xFFFF {
                     f(PciAddress {

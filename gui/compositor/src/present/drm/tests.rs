@@ -30,6 +30,7 @@
 
 use std::cell::RefCell;
 use std::rc::Rc;
+use std::time::Duration;
 
 use super::sys::{
     CardPath, CardSource, EBUSY, ENODEV, ENOENT, Errno, KmsSys, MAX_CARDS, Mapped, OutArray,
@@ -38,7 +39,9 @@ use super::uapi::{
     self, ModeCardRes, ModeCreateDumb, ModeCrtcPageFlip, ModeDestroyDumb, ModeFbCmd2,
     ModeGetConnector, ModeGetEncoder, ModeMapDumb, ModeModeinfo,
 };
-use super::{DrmScanout, HeadInfo, Present, ScanoutError, Viewport, blit, open_display};
+use super::{
+    DrmScanout, HeadInfo, MonitorInfo, Present, ScanoutError, Viewport, blit, open_display,
+};
 
 /// Invalid argument, which is what the kernel says to a malformed request.
 const EINVAL: Errno = 22;
@@ -1079,6 +1082,7 @@ fn heads_are_reported_left_to_right_so_the_compositor_can_place_them() {
                 y: 0,
                 width: 1024,
                 height: 768,
+                refresh_hz: 60,
             },
             // Abutting the first, not overlapping it and not on top of it.
             HeadInfo {
@@ -1088,9 +1092,252 @@ fn heads_are_reported_left_to_right_so_the_compositor_can_place_them() {
                 y: 0,
                 width: 1366,
                 height: 768,
+                refresh_hz: 60,
             },
         ]
     );
+}
+
+// ------------------------------------------------- a cable that moves later --
+
+/// Probe on every call, which is what a test wants and a frame loop does not.
+fn eager<S: KmsSys>(scanout: &mut DrmScanout<S>) {
+    scanout.set_probe_interval(Duration::ZERO);
+}
+
+/// The monitor ids a scanout reports, in order.
+fn reported<S: KmsSys>(scanout: &mut DrmScanout<S>) -> Vec<u32> {
+    scanout
+        .monitors()
+        .expect("a card always has an opinion about its own connectors")
+        .iter()
+        .map(|m| m.id)
+        .collect()
+}
+
+#[test]
+fn a_monitor_plugged_in_after_startup_becomes_a_head() {
+    // The bug: `new` enumerated the connectors once, so a screen plugged in
+    // afterwards stayed dark until the display server was restarted. Nothing
+    // asked the card a second question for the rest of the session.
+    let card = FakeCard::desktop();
+    let mut scanout = DrmScanout::new(card.clone()).unwrap();
+    eager(&mut scanout);
+    assert_eq!(
+        reported(&mut scanout),
+        vec![31],
+        "the one plugged in at boot"
+    );
+
+    card.edit(|s| {
+        s.connectors[0].connection = uapi::CONNECTED;
+        s.connectors[0].modes = vec![mode(1024, 768, true)];
+    });
+
+    assert_eq!(
+        scanout.monitors().unwrap(),
+        vec![
+            MonitorInfo {
+                id: 31,
+                width: 1366,
+                height: 768,
+                refresh_hz: 60,
+            },
+            MonitorInfo {
+                id: 30,
+                width: 1024,
+                height: 768,
+                refresh_hz: 60,
+            },
+        ],
+        "reported by connector id, which is the key the compositor reconciles \
+         on -- an index would name a different monitor after the first unplug"
+    );
+    assert_eq!(
+        scanout.heads()[1].x,
+        1366,
+        "the arriving monitor goes to the right of the ones already there, \
+         which is the rule `DisplayManager::add_display` uses -- any other \
+         offset puts every window on it in the wrong place"
+    );
+    assert_eq!(
+        scanout.size(),
+        (1366 + 1024, 768),
+        "and the frame reaches it"
+    );
+}
+
+#[test]
+fn a_monitor_unplugged_stops_being_a_head_and_gives_its_buffers_back() {
+    // Not merely marked dead, as a flip failure does. A probe runs every second
+    // for the life of the session, and a cable working loose in its socket
+    // would otherwise grow the head list -- and the card's buffer count -- once
+    // per unplug for hours.
+    let card = FakeCard::two_monitors();
+    let mut scanout = DrmScanout::new(card.clone()).unwrap();
+    eager(&mut scanout);
+    let (fbs, dumbs) = card.read(|s| (s.fbs.len(), s.dumb.len()));
+    assert_eq!((fbs, dumbs), (4, 4), "two buffers each");
+
+    card.edit(|s| s.connectors[1].connection = 2);
+    assert_eq!(
+        reported(&mut scanout),
+        vec![30],
+        "31 is still on the desktop"
+    );
+    card.read(|s| {
+        assert_eq!(s.removed.len(), 2, "its framebuffer ids went back");
+        assert_eq!(s.destroyed.len(), 2, "and its GEM handles");
+    });
+    assert!(scanout.is_open(), "the other monitor is still there");
+}
+
+#[test]
+fn the_survivor_of_an_unplug_keeps_the_offset_it_had() {
+    // The scanout is the authority on where each monitor is: the compositor
+    // does not re-flow its displays when one leaves (design-decisions.md §515,
+    // §516) and the two layouts have to agree pixel for pixel. Sliding the
+    // survivor left here -- the tidier arrangement, and the one `lay_out_heads`
+    // would produce if it were called again -- would draw every window on it
+    // 1024 pixels from where the compositor thinks it is.
+    let card = FakeCard::two_monitors();
+    let mut scanout = DrmScanout::new(card.clone()).unwrap();
+    eager(&mut scanout);
+    assert_eq!(scanout.heads()[1].x, 1024);
+
+    card.edit(|s| s.connectors[0].connection = 2);
+    assert_eq!(reported(&mut scanout), vec![31]);
+    assert_eq!(
+        scanout.heads()[0].x,
+        1024,
+        "the survivor was re-flowed leftwards"
+    );
+    assert_eq!(
+        scanout.size(),
+        (1024 + 1366, 768),
+        "and the frame still spans the hole the departed monitor left, which is \
+         composited and scanned out nowhere"
+    );
+}
+
+#[test]
+fn a_monitor_moved_to_another_port_gets_the_crtc_the_old_one_gave_back() {
+    // Why retirements run before adoptions. This machine has two CRTCs and the
+    // second is the only one either of these connectors can reach, so a cable
+    // moved from port 31 to port 32 needs 31's CRTC released before 32 can be
+    // lit. Adopting first leaves the new port dark until the *next* probe --
+    // or for ever, on a card where the old head never fully retires.
+    let card = FakeCard::desktop();
+    card.edit(|s| {
+        s.connectors.push(FakeConnector {
+            id: 32,
+            connection: 2,
+            current_encoder: 0,
+            encoders: vec![52],
+            modes: Vec::new(),
+        });
+        s.encoders.push(FakeEncoder {
+            id: 52,
+            crtc_id: 0,
+            possible_crtcs: 0b10,
+        });
+    });
+    let mut scanout = DrmScanout::new(card.clone()).unwrap();
+    eager(&mut scanout);
+    assert_eq!(scanout.heads()[0].crtc_id, 2);
+
+    card.edit(|s| {
+        s.connectors[1].connection = 2;
+        s.connectors[2].connection = uapi::CONNECTED;
+        s.connectors[2].modes = vec![mode(1280, 1024, true)];
+    });
+
+    assert_eq!(
+        reported(&mut scanout),
+        vec![32],
+        "the cable's new port is lit"
+    );
+    assert_eq!(
+        scanout.heads()[0].crtc_id,
+        2,
+        "on the CRTC the old port gave back"
+    );
+}
+
+#[test]
+fn a_monitor_whose_first_frame_never_reaches_it_is_not_adopted() {
+    // Same rule as `new`: a head that cannot show a frame is not part of the
+    // desktop. Leaving it in would reserve a strip of the composited frame that
+    // nothing scans out and put windows on a monitor that is not there.
+    let card = FakeCard::desktop();
+    let mut scanout = DrmScanout::new(card.clone()).unwrap();
+    eager(&mut scanout);
+    let destroyed = card.read(|s| s.destroyed.len());
+    card.edit(|s| {
+        s.connectors[0].connection = uapi::CONNECTED;
+        s.connectors[0].modes = vec![mode(1024, 768, true)];
+        // The zeroth flip was the surviving head's first frame, in `new`.
+        s.fail_nth.push((uapi::PAGE_FLIP, 1, ENODEV));
+    });
+
+    assert_eq!(
+        reported(&mut scanout),
+        vec![31],
+        "and not the one that failed"
+    );
+    assert_eq!(scanout.size(), (1366, 768), "the frame did not grow for it");
+    assert_eq!(
+        card.read(|s| s.destroyed.len()),
+        destroyed + 2,
+        "its buffers went straight back rather than waiting for `Drop`"
+    );
+}
+
+#[test]
+fn the_probe_is_rate_limited_so_a_frame_does_not_pay_for_it() {
+    // `GETCONNECTOR` with a zero mode count makes the kernel re-probe the
+    // connector, which is DDC traffic to the monitor and tens of milliseconds
+    // per head on real hardware. Asking once a frame would spend most of a
+    // 144Hz budget on a question whose answer changes about once a week.
+    let card = FakeCard::desktop();
+    let mut scanout = DrmScanout::new(card.clone()).unwrap();
+    let calls = card.read(|s| s.log.len());
+
+    card.edit(|s| {
+        s.connectors[0].connection = uapi::CONNECTED;
+        s.connectors[0].modes = vec![mode(1024, 768, true)];
+    });
+    assert_eq!(
+        reported(&mut scanout),
+        vec![31],
+        "the default interval has not elapsed, so the answer is the cached one"
+    );
+    assert_eq!(
+        card.read(|s| s.log.len()),
+        calls,
+        "and it cost the card nothing at all"
+    );
+
+    eager(&mut scanout);
+    assert_eq!(reported(&mut scanout), vec![31, 30], "once it is due");
+}
+
+#[test]
+fn a_probe_the_card_refuses_leaves_the_arrangement_exactly_as_it_was() {
+    // A poll, not a transaction: the next one is a second away, so a card that
+    // will not answer this time is a reason to do nothing rather than a reason
+    // to tear the desktop down.
+    let card = FakeCard::two_monitors();
+    let mut scanout = DrmScanout::new(card.clone()).unwrap();
+    eager(&mut scanout);
+    card.edit(|s| s.fail.push((uapi::GETRESOURCES, ENODEV)));
+
+    assert_eq!(
+        reported(&mut scanout),
+        vec![30, 31],
+        "both monitors survived"
+    );
+    assert_eq!(scanout.size(), (1024 + 1366, 768));
 }
 
 #[test]

@@ -84,7 +84,9 @@
 pub mod sys;
 pub mod uapi;
 
-use super::Present;
+use std::time::{Duration, Instant};
+
+use super::{MonitorInfo, Present};
 use sys::{EAGAIN, EBUSY, EINTR, ENOENT, Errno, KmsSys, Mapped, OutArray};
 use uapi::{
     ModeCardRes, ModeCreateDumb, ModeCrtcPageFlip, ModeDestroyDumb, ModeFbCmd2, ModeGetConnector,
@@ -104,6 +106,20 @@ const MAX_MODES: usize = 256;
 
 /// Bytes per pixel in [`uapi::FORMAT_XRGB8888`].
 const BYTES_PER_PIXEL: usize = 4;
+
+/// How long [`Present::monitors`] waits before re-probing the connectors.
+///
+/// This is a poll and not an interrupt because nothing here has udev: the
+/// kernel's hotplug uevent has no reader in this tree, so the only way to learn
+/// that a cable moved is to ask. Asking is not free — `GETCONNECTOR` with a zero
+/// mode count makes the kernel re-probe the connector, which means DDC traffic
+/// to the monitor and tens of milliseconds per head on real hardware — so asking
+/// once a frame would spend most of a 144 Hz frame budget on a question whose
+/// answer changes about once a week.
+///
+/// A second is chosen because it is below what anyone notices after pushing a
+/// plug in, and far above what the probe costs.
+const PROBE_INTERVAL: Duration = Duration::from_secs(1);
 
 /// Why scanout could not be set up, or why it stopped working.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -280,6 +296,13 @@ struct Head {
     width: u32,
     /// The mode's height in pixels.
     height: u32,
+    /// The mode's refresh rate in Hz, as the display reported it.
+    ///
+    /// Carried rather than assumed because it is what paces the compositor's
+    /// frame loop, and a 144 Hz panel driven at a nominal 60 wastes two frames
+    /// in three while a 30 Hz projector driven at 60 is asked for frames it
+    /// cannot show.
+    refresh_hz: u32,
     /// Cleared when a flip fails for a reason that is not "try again", which
     /// is what *this* display going away looks like from here. The other heads
     /// carry on: one monitor unplugged is not a reason to stop drawing on the
@@ -319,6 +342,8 @@ pub struct HeadInfo {
     pub width: u32,
     /// Its height in pixels.
     pub height: u32,
+    /// Its refresh rate in Hz, as the display reported it.
+    pub refresh_hz: u32,
 }
 
 /// Every display on one card, driven directly.
@@ -339,6 +364,11 @@ pub struct DrmScanout<S: KmsSys> {
     width: u32,
     /// The composited frame's height.
     height: u32,
+    /// How long [`Present::monitors`] waits between re-probes. See
+    /// [`Self::set_probe_interval`].
+    probe_interval: Duration,
+    /// When the connectors were last re-probed.
+    last_probe: Instant,
 }
 
 impl<S: KmsSys> DrmScanout<S> {
@@ -387,6 +417,12 @@ impl<S: KmsSys> DrmScanout<S> {
             heads,
             width: 0,
             height: 0,
+            probe_interval: PROBE_INTERVAL,
+            // The enumeration just done *is* the first probe, so the clock
+            // starts here rather than at the epoch: a `monitors()` call in the
+            // first frame would otherwise re-probe every connector immediately
+            // to learn what this constructor has already established.
+            last_probe: Instant::now(),
         };
         // Put something defined on every screen straight away. Without this a
         // display scans out whatever the boot framebuffer left, until the
@@ -433,6 +469,170 @@ impl<S: KmsSys> DrmScanout<S> {
             .unwrap_or(0);
     }
 
+    /// Recompute the composited frame's size from where the live heads already
+    /// are.
+    ///
+    /// Unlike [`Self::lay_out_heads`] this **moves nothing**. After the first
+    /// enumeration the survivors' offsets are fixed for the life of the process:
+    /// a monitor that dies or is unplugged must not drag the ones next to it
+    /// sideways, because the compositor's `DisplayManager` does not re-flow
+    /// either (`design-decisions.md` §515, §516) and the two arrangements have
+    /// to agree pixel for pixel or every window is drawn on the wrong screen.
+    /// So the bounding box may keep a hole in the middle where a monitor used to
+    /// be, which is composited and scanned out nowhere, and that is the intended
+    /// outcome rather than a defect.
+    fn resize_to_heads(&mut self) {
+        self.width = self.live_right_edge();
+        self.height = self
+            .heads
+            .iter()
+            .filter(|h| h.alive)
+            .map(|h| h.y.saturating_add(h.height))
+            .max()
+            .unwrap_or(0);
+    }
+
+    /// The right edge of the rightmost live head — where the next monitor to
+    /// arrive goes.
+    ///
+    /// The same rule `DisplayManager::add_display` uses, which is what makes a
+    /// monitor plugged in mid-session land at the same place on both sides
+    /// without either being told where the other put it.
+    fn live_right_edge(&self) -> u32 {
+        self.heads
+            .iter()
+            .filter(|h| h.alive)
+            .map(|h| h.x.saturating_add(h.width))
+            .max()
+            .unwrap_or(0)
+    }
+
+    /// How long [`Present::monitors`] waits between re-probing the card's
+    /// connectors.
+    ///
+    /// Defaults to [`PROBE_INTERVAL`]. Worth lowering on a machine where the
+    /// cable moves often — a laptop that lives on a dock — and worth raising on
+    /// one where it never does, because the probe costs DDC traffic to every
+    /// monitor. Zero means "probe on every call", which is what a test wants and
+    /// what a frame loop does not.
+    pub const fn set_probe_interval(&mut self, interval: Duration) {
+        self.probe_interval = interval;
+    }
+
+    /// Ask the card what is plugged in now, adopting monitors that have arrived
+    /// and retiring ones that have gone.
+    ///
+    /// The *detect* half of hotplug (`known-issues.md` →
+    /// `TD-COMPOSITOR-IGNORES-MONITOR-HOTPLUG`). [`Present::monitors`] reports
+    /// what this leaves behind and `Server::reconcile_monitors` brings the
+    /// compositor's arrangement into line with it.
+    ///
+    /// Retirements come first, for the same reason the compositor applies them
+    /// first: a connector whose monitor left frees the CRTC that was driving it,
+    /// and a monitor moved from one port to another in the same second needs
+    /// that CRTC back before it can be adopted on the new one.
+    ///
+    /// **A retired head is destroyed here, not merely marked.** Everywhere else
+    /// in this module a dead head keeps its buffers so `Drop` can give the ids
+    /// back; that is affordable because a head dies at most once. A polled probe
+    /// is different — a cable worked loose in a socket can retire and re-adopt a
+    /// head every second for hours — so this is the one place that reaps them,
+    /// which also makes the head list bounded by the number of monitors rather
+    /// than by the number of times they have been plugged in.
+    ///
+    /// Every failure is dropped rather than propagated: this is a poll, the next
+    /// one is a second away, and a card that will not answer `GETRESOURCES` this
+    /// time simply leaves the arrangement as it was.
+    fn reprobe(&mut self) {
+        self.last_probe = Instant::now();
+        let Ok((crtcs, connectors)) = resources(&mut self.sys) else {
+            return;
+        };
+
+        // Retire, then reap. Split because the check needs `&mut self.sys` for
+        // `get_connector` while the head list is being read.
+        let live: Vec<u32> = self
+            .heads
+            .iter()
+            .filter(|h| h.alive)
+            .map(|h| h.connector_id)
+            .collect();
+        for connector_id in live {
+            let still_there = connectors.contains(&connector_id)
+                && get_connector(&mut self.sys, connector_id)
+                    .is_ok_and(|c| c.info.connection == uapi::CONNECTED);
+            if !still_there {
+                if let Some(index) = self.live_head(connector_id) {
+                    if let Some(head) = self.heads.get_mut(index) {
+                        head.alive = false;
+                    }
+                }
+            }
+        }
+        self.reap_dead_heads();
+
+        let mut taken: Vec<u32> = self.heads.iter().map(|h| h.crtc_id).collect();
+        for &connector_id in &connectors {
+            if self.heads.iter().any(|h| h.connector_id == connector_id) {
+                continue;
+            }
+            let Ok(conn) = get_connector(&mut self.sys, connector_id) else {
+                continue;
+            };
+            if conn.info.connection != uapi::CONNECTED {
+                continue;
+            }
+            let Some(mode) = best_mode(&conn.modes) else {
+                continue;
+            };
+            let Some(crtc_id) = resolve_crtc(&mut self.sys, &crtcs, &conn, &taken) else {
+                continue;
+            };
+            let pick = Chosen {
+                connector_id,
+                mode,
+                crtc_id,
+            };
+            let Ok(mut head) = make_head(&mut self.sys, &pick) else {
+                continue;
+            };
+            head.x = self.live_right_edge();
+            head.y = 0;
+            taken.push(crtc_id);
+            self.heads.push(head);
+            let index = self.heads.len().saturating_sub(1);
+            if self.flip_head(index).is_err() {
+                // It never showed a frame, so it is not part of the desktop:
+                // leaving it in would reserve a strip of the composited frame
+                // that nothing scans out and put windows on a monitor that is
+                // not there. Same rule as `new`, and the reap gives its buffers
+                // straight back.
+                if let Some(head) = self.heads.get_mut(index) {
+                    head.alive = false;
+                }
+                self.reap_dead_heads();
+            }
+        }
+        self.resize_to_heads();
+    }
+
+    /// Give back the buffers of every head that is no longer alive and forget
+    /// them.
+    fn reap_dead_heads(&mut self) {
+        let mut index = 0;
+        while index < self.heads.len() {
+            let dead = self.heads.get(index).is_some_and(|h| !h.alive);
+            if !dead {
+                index = index.saturating_add(1);
+                continue;
+            }
+            let head = self.heads.remove(index);
+            for buffer in &head.buffers {
+                release_buffer(&mut self.sys, buffer.fb_id, buffer.handle);
+            }
+        }
+    }
+
     /// The composited frame's size in pixels: the bounding box of every monitor.
     ///
     /// The compositor is built at this size rather than the other way round —
@@ -460,6 +660,7 @@ impl<S: KmsSys> DrmScanout<S> {
                 y: h.y,
                 width: h.width,
                 height: h.height,
+                refresh_hz: h.refresh_hz,
             })
             .collect()
     }
@@ -640,6 +841,30 @@ impl<S: KmsSys> Present for DrmScanout<S> {
 
     fn is_open(&self) -> bool {
         self.heads.iter().any(|h| h.alive)
+    }
+
+    fn monitors(&mut self) -> Option<Vec<MonitorInfo>> {
+        if self.last_probe.elapsed() >= self.probe_interval {
+            self.reprobe();
+        }
+        // Always an answer, even between probes and even when it is empty. This
+        // is a card with connectors, so it always has an opinion — `None` here
+        // would mean "not the sort of display that has monitors", which is what
+        // `Headless` and the host window are. The empty case is a card whose
+        // every monitor has gone, which `is_open` reports as closed and which
+        // `Server::reconcile_monitors` declines to adopt.
+        Some(
+            self.heads
+                .iter()
+                .filter(|h| h.alive)
+                .map(|h| MonitorInfo {
+                    id: h.connector_id,
+                    width: h.width,
+                    height: h.height,
+                    refresh_hz: h.refresh_hz,
+                })
+                .collect(),
+        )
     }
 }
 
@@ -981,6 +1206,14 @@ fn make_head(sys: &mut dyn KmsSys, pick: &Chosen) -> Result<Head, ScanoutError> 
         y: 0,
         width,
         height,
+        // Zero means the display did not say, and a display that does not say
+        // is treated as 60 rather than as "never refresh": every consumer of
+        // this divides by it.
+        refresh_hz: if pick.mode.vrefresh == 0 {
+            60
+        } else {
+            pick.mode.vrefresh
+        },
         alive: true,
     })
 }

@@ -33047,3 +33047,737 @@ allocation per node.
 4096 slots is megabytes permanently resident to serve a queue that normally
 holds under 64 entries. They grow on demand instead; the ceiling still refuses
 beyond 4096, which is what bounds the memory.
+
+## 512. A display resize re-derives everything placed by a rule, and rescues only what the user could no longer reach
+
+**Date:** 2026-08-21
+**Decided by:** Claude (autonomous)
+
+**In short:** When the screen resolution changes, the desktop has to be put back
+in order. A maximised window remembers the *rectangle* it was given, not the
+fact that it was maximised, so on a smaller screen it keeps its old oversized
+rectangle with its close button in pixels that no longer exist. The question is
+how much of the desktop a resize is allowed to rearrange. The answer taken here:
+rearrange everything the compositor itself placed, and of the windows the *user*
+placed, move only the ones that ended up completely off the screen — and those
+by the smallest amount that brings them back.
+
+**Context.** `Compositor::resize_display` resized the framebuffer, updated the
+primary display's dimensions and marked the screen fully damaged. It did nothing
+else, which left four separate failures:
+
+1. **A maximised or snapped window kept the old screen's rectangle.** This is the
+   same fact `retile_for_work_area_change` already exists to handle when a
+   taskbar appears or changes height — its own doc says it: *"A window that is
+   maximized or snapped holds a rectangle, not the rule that produced it."* A
+   mode switch is that problem at its largest.
+2. **A fullscreen window kept the old framebuffer's dimensions**, because
+   `set_fullscreen` sizes from `self.backend.size()` at the moment it is called
+   and nothing re-asserts it afterwards.
+3. **Re-tiling would have shrunk a fullscreen window**, because
+   `retile_for_work_area_change` matches `maximized || snapped` and `maximized`
+   stays set underneath fullscreen. A game whose window was maximised before it
+   went fullscreen would visibly pull away from the screen edges when a taskbar
+   appeared behind it, permanently — and, having stopped being exactly
+   display-sized, would silently lose the direct-scanout bypass.
+4. **A window near the old bottom-right corner ended up entirely off the new
+   screen**, with no title bar on it to drag it back by and no pointer position
+   that exists. The pointer itself had the same problem: it is not derived from
+   anything, so a screen that shrinks under it leaves it at a coordinate the
+   display no longer has, invisible and hit-testing against nothing, until the
+   user moves the mouse.
+
+**Decision.** `resize_display` runs four passes in a fixed order: re-tile,
+re-fit fullscreen, rescue stranded windows, clamp the pointer. Three questions
+had real answers on both sides.
+
+**(a) How much is a resize allowed to move?** The alternative — re-flow the
+whole desktop, the way a tiling window manager would — was rejected. A user who
+dragged a window somewhere chose that spot; a resolution change is not a request
+to undo that choice, and a desktop that scrambles itself every time a projector
+is plugged in is worse than one that leaves a window half off an edge. So the
+rescue test is *no part of the frame intersects the new bounds*, which is
+deliberately as strict as it can be: a window hanging half off the edge is still
+visible and still has a title bar to grab, so it stands; a window with nothing
+at all on screen cannot be dragged, cannot be clicked, and is gone until the
+display is made large again. Only the second is a rescue rather than a
+re-layout. The cost of the strictness is a genuine one — a window whose title
+bar is off the *top* is unreachable while three pixels of its bottom edge remain
+on screen, and this does not rescue it. That is a smaller, separable bug about
+title-bar reachability rather than about resizing, and pretending to fix it here
+would have meant moving windows their owners can see.
+
+**(b) Where does a window too big for the new screen go?** `pulled_onto` pins the
+top-left rather than centring or pinning any other corner. It cannot make an
+oversized rectangle fit — it never changes the size — so it has to choose which
+part falls off, and the top-left is where the title bar is. Any other anchor
+pushes the title bar off the top or left edge and leaves the window exactly as
+ungrabbable as it started, which defeats the entire point of the rescue.
+
+**(c) Does fullscreen outrank maximised?** Yes, and the re-tile now excludes
+fullscreen windows outright. Fullscreen is defined against the whole *scanout
+surface*, which is what earns it the direct-scanout bypass; the work area is the
+screen minus the panels, which is a different rectangle by definition. The
+`maximized` flag is deliberately left *set* rather than cleared, so that leaving
+fullscreen still finds a tiling state to fall back to — the exclusion is in the
+filter, not in the state.
+
+**Also decided:** the pointer is clamped to the *virtual* bounds (the union of
+all displays) rather than to the resized monitor, because the pointer crosses
+monitors and clamping it to the primary would teleport it off a second screen
+that a resize of the first did not touch. And the rescue drops the
+`WindowNotFound` from `move_window` rather than propagating it: every id came
+from a list built two statements earlier, so it is unreachable, and a caller
+adopting a new display mode has no useful answer to "one window declined to
+move" and must not abandon the rest of the resize over it.
+
+**Consequences.** `Compositor` is now genuinely resizable after construction,
+which was the missing half of `TD-COMPOSITOR-CANNOT-CHANGE-MODE`; the kernel
+half (`DRM_IOCTL_MODE_SETCRTC`) is filed to lane A as
+`requests/c-a-drm-setcrtc.md`, which was held back until a caller existed. The
+same `pulled_onto` helper is the right fix for the neighbouring
+un-maximise/un-fullscreen case, where a stored `restore_rect` can point off the
+current display — that is a separate change, because it also has to cover a
+monitor being unplugged, which `resize_display` never sees.
+
+**Verification.** 12 tests, each proved to be a regression test by reintroducing
+the defect it names — via the guarded reversible patcher, one at a time — and
+confirming a deterministic failure that names the test back. Eleven
+reintroductions were needed to cover them, including two whose only purpose is
+to prove the *negative* tests: that a window still on screen is not moved, and
+that a pointer already on screen is not teleported. A guard nobody can break is
+not a guard.
+
+## 513. A window is never placed where it cannot be reached, and "reachable" is a question about the whole desktop
+
+**Date:** 2026-08-21
+**Decided by:** Claude (autonomous)
+
+**In short:** §512 stopped a *resize* from leaving a window off the screen. It
+did not stop the two other ways that happens: un-maximising a window puts it
+back at the rectangle it had before it was maximised, and if the screen changed
+size in between, that rectangle may be nowhere. §512 also, on its own, contained
+a bug of exactly the kind it existed to prevent — with two monitors it asked
+"is this window on the screen that just resized?", so shrinking the first
+monitor dragged every window off the second one and onto the first.
+
+**Context.** A window has two saved rectangles: `restore_rect`, written when it
+is maximised or snapped, and `fs_restore_rect`, written when it goes fullscreen.
+Both are recorded against the desktop *as it was at that moment*, and both are
+**consumed** by the restore — `take()`n out of the window. So a bad restore has
+no second chance: after it, nothing in the compositor knows the window was ever
+anywhere else. `resize_display`'s rescue does not help, because it runs at resize
+time, when the window is still maximised and therefore not stranded at all; what
+is stranded is a rectangle in a field.
+
+Three reachable failures:
+
+1. Maximise a window near the bottom-right, change resolution downward,
+   un-maximise. The window lands entirely off the screen. This is the ordinary
+   "I plugged in a projector" sequence.
+2. The same with fullscreen — worse in practice, because a game is exactly the
+   sort of program that changes the resolution while it is fullscreen.
+3. Two monitors, resize the first. Every window on the second is yanked onto the
+   first, because `bring_stranded_windows_back` tested against the bounds of the
+   display that changed rather than against the desktop.
+
+**Decision.** One helper, `kept_reachable(frame, desktop, fallback)`, used by all
+three sites: the frame is returned unchanged if any part of it falls on
+`desktop`, and otherwise pulled onto `fallback` by `pulled_onto`.
+
+**Why two rectangles rather than one.** The two questions are genuinely
+different, and collapsing them is precisely what caused failure 3. *Can the user
+see this window?* is asked of the whole virtual desktop — a window on the second
+monitor is not stranded because the first shrank. *Where does a window nobody can
+see go?* has to name a screen that actually exists, and the union of several
+monitors is not necessarily one: an L-shaped arrangement has a hole in its
+bounding box, and a window dropped in the hole is as lost as it was. So the test
+is against the union and the destination is a single real screen.
+
+**Which screen is the fallback.** For the resize rescue it is the display that
+just changed — a screen known to exist, and the one most likely to have stranded
+the window. For a restore it is the display the window is on *right now*, which
+is well-defined precisely because a window being restored is currently maximised
+or fullscreen and therefore demonstrably covering a real monitor. The alternative
+— always the primary — is simpler and wrong: un-maximising a window on the second
+monitor would teleport it to the first, which is the same class of bug as failure
+3, just triggered by a different action.
+
+**Strictness is unchanged from §512**, deliberately: *no part of the frame on any
+screen*. A restore rectangle hanging off an edge is still visible and still has a
+title bar to grab, so it is used exactly as saved. That rule now has its own test
+and its own reintroduction, because it is the rule most likely to be "improved"
+later into a tidy-everything-up pass.
+
+**A supporting change:** `Window::frame_rect` is now the special case of a new
+`frame_rect_for_client(client)`. Every reachability question is a question about
+the *decorated* box — it is the title bar that must be on screen to be grabbed —
+but the saved rectangles are client geometry, and they belong to a window that is
+not currently at them. `frame_rect` cannot answer that; the general form can, and
+stating the inset arithmetic once keeps it the exact inverse of
+`client_geometry_for_frame`.
+
+**Verification.** 8 new tests, 8 reintroductions. Four of the tests have a
+reintroduction that breaks them and nothing else: the multi-monitor evacuation,
+the fullscreen restore, the hanging-off-an-edge guard, and the fallback-screen
+choice. Three of the remaining are broken only by `restoreframeisclient` — a
+marker that also breaks five *pre-existing* restore tests, so those three are
+additional coverage of an invariant that was already guarded rather than the sole
+guard on a new one. That is stated rather than glossed: a test whose only proof
+is a marker that breaks eight tests has not been shown to be load-bearing, and
+pretending otherwise is how a suite fills up with tests nobody can delete because
+nobody knows what they cover.
+
+## 514. The composited surface *is* the virtual desktop; a monitor is a viewport onto it, and fullscreen covers one monitor rather than the surface
+
+**Date:** 2026-08-21
+**Decided by:** Claude (autonomous)
+
+**In short:** SlateOS's compositor already believed it could drive two monitors —
+it kept a list of them, gave each an offset, and would happily place a window on
+the second one. Nothing ever appeared there. The picture the compositor draws
+into (the *scanout surface* — one big rectangle of pixels that the graphics card
+reads out to the screen) was still the size of the first monitor alone, so every
+window on the second screen was drawn past the end of it and thrown away. This
+entry records the fix and the arrangement it commits to: **one picture covering
+every monitor, with each monitor copying out its own rectangle of it.** The
+alternative — one picture per monitor — is rejected below.
+
+**Context: two rectangles that were allowed to disagree.** `DisplayManager`
+tracks a list of `Display`s, each with an offset and a size, and answers
+`virtual_bounds()` — the union of them, the whole desktop. `Compositor` draws
+into `self.backend`, a framebuffer with its own width and height. Nothing tied
+the two together. `add_display` extended the desktop and left the framebuffer
+alone; `resize_display` resized the framebuffer from the *primary* monitor's new
+size and so cut off every other monitor. A window at x = 900 on a second screen
+starting at x = 800 was clipped away entirely by an 800-wide surface, and the
+model reported it as visible on screen 2 the whole time. This is the worst shape
+a bug can have: the system's own description of itself is confidently wrong.
+
+Two consequences fell out of the same crack:
+
+* **Fullscreen sized itself from the framebuffer.** `set_fullscreen` read
+  `self.backend.size()`. On one monitor at the origin that is the monitor, which
+  is why it went unnoticed for as long as it did. On two, a window fullscreened
+  on the second monitor jumped to the first and spanned both — while
+  `maximize_window`, one line away in the same file, asked `work_bounds_for` and
+  correctly stayed put. Two commands a user thinks of as the same gesture
+  disagreed about which monitor they act on.
+* **The fullscreen re-fit after a mode change moved every fullscreen window.**
+  `refit_fullscreen_windows(width, height)` took the resized framebuffer's
+  dimensions and applied them to all of them, so changing the resolution of one
+  screen dragged a game that was fullscreen on another onto it and told its
+  client it was now a size it is not.
+
+**Decision.** The scanout surface is exactly the virtual desktop's bounding box,
+maintained as an invariant by the only two functions that can change either:
+`resize_display` and a new `attach_display`. Both compute the *prospective*
+desktop first, resize the surface, and only then adopt the new arrangement — so
+a surface that cannot be allocated leaves the display list exactly as it was.
+Fullscreen and the fullscreen re-fit both resolve against the window's own
+monitor via `work_bounds_for`, the same function `maximize_window` uses; the two
+now differ only in that maximising yields the panels their reserved strips and
+fullscreen covers them.
+
+**The alternative: one composed frame per monitor.** Each head gets its own
+buffer at its own size, and the compositor runs its whole pipeline once per head
+with that head's origin subtracted.
+
+| | one frame for the desktop (chosen) | one frame per head |
+|---|---|---|
+| a window straddling the seam | one rectangle in one buffer; nothing special happens | composited twice, clipped differently each time; the two halves can tear against each other |
+| the compositing pipeline | never learns what a head is | every rectangle, every damage region and every blit grows a head parameter |
+| per-head scale factor / rotation | **not possible** — one surface has one pixel grid | natural: each head composites at its own scale |
+| an L-shaped or vertically-offset arrangement | composites a gap that is scanned out nowhere | costs nothing |
+| memory | one buffer, bounding-box sized | N buffers, exactly sized |
+| damage tracking | one region, already implemented | one region per head, and a window moving between heads dirties both |
+
+The gap is the honest cost and it is bounded by the arrangement the user chose —
+two 1920x1080 screens offset vertically by 200 px waste 1920x200 of clear per
+frame, which is a `memset`, not per-window work. Per-head scaling is the real
+limitation, and it is deferred rather than denied: it is a change to the scanout
+and the input mapping, not to this decision, because a scaled head can blit
+through a filter on the way out. Against that, the per-head design pays on every
+frame of every window, forever, for a capability that only matters when the two
+monitors have different pixel densities.
+
+The deciding argument is which shape makes the *wrong* answer impossible. With
+one desktop-sized surface, "is this window visible?" has one answer, computed in
+one place, in one coordinate system — the virtual desktop's. That is the
+coordinate system the input events, the window rectangles, the snap zones and
+the panel reservations are already in. Adding a second one, per head, would give
+every existing test a chance to be right about the wrong space.
+
+**The surface's origin is the desktop's origin**, so a display at a negative
+offset would be unaddressable. Nothing produces one — `add_display` only ever
+places to the right of what is already there — and `resize_scanout_surface`
+takes `right()`/`bottom()` rather than `width`/`height` precisely because those
+are the extent that has to exist and they agree with the size only while the
+origin is where it is documented to be. If dragging monitors into arbitrary
+positions is ever added, that is the line that has to change: the surface would
+need to be sized from the bounding box and every window rectangle offset by its
+origin.
+
+**The direct-scanout bypass is now, correctly, a single-head optimisation.** It
+hands one client's buffer to the scanout entire, so on a two-headed desktop it
+would put the game's pixels on the *other* monitor in place of the desktop. The
+guard that prevents this is the pre-existing "the window must cover the whole
+framebuffer" test, which a one-monitor fullscreen window no longer satisfies —
+so the fix costs nothing and the test that pins it
+(`the_direct_scanout_bypass_declines_a_second_monitor`) exists to record that the
+guard is load-bearing rather than incidentally true.
+
+**A latent defect found on the way, and fixed here.** `Rect::union` and
+`Rect::intersect` computed their far edges as `self.x + self.width as i32`.
+`u32::MAX as i32` is `-1`, so a rectangle wider than 2^31 put its right edge to
+the *left* of its own origin: the union of an over-wide rectangle with a normal
+one came out **narrower than either input**, and the intersection of one with
+anything came out empty. `Rect::right()` and `Rect::bottom()` had already been
+written to saturate instead, with a doc comment explaining this exact hazard, and
+the two functions simply did not use them. They do now. This was not theoretical
+— it was found because `a_surface_that_cannot_be_allocated_leaves_the_arrangement_alone`
+passed a `u32::MAX`-wide display and the surface allocation *succeeded*, at
+800x768, because the union had shrunk.
+
+**Verification.** 10 new tests, each proved to be a regression test by
+reintroducing the defect it names through the guarded patcher and confirming a
+deterministic failure that names it back: `fullscreenisframebuffer`,
+`refitallfullscreen`, `surfaceisprimary`, `resizesurfaceisdisplay`,
+`rectunioncast`, `rectintersectcast`, plus the pre-existing
+`resizenofullscreen`. Five markers from §512 (`resizenoretile`,
+`resizenofullscreen`, `resizenoresizeevent`, `resizenorescue`,
+`resizenopointer`) were repaired against the refactor, since a marker that no
+longer applies is a proof that has quietly stopped being run.
+
+**Addendum, 2026-08-21 — the eleventh test.** Closing
+`TD-C-FULLSCREEN-IGNORES-WHICH-MONITOR-AND-WHAT-IS-RESERVED` (which this entry
+had in fact already fixed) turned up one property from its own checklist with no
+test behind it: that fullscreen resolves the monitor's **bounds** where maximize
+resolves its **work area**. Every fullscreen test here ran on a screen with
+nothing reserved, and on such a screen `work_bounds_for` and `work_area_for`
+return the same rectangle — so routing `set_fullscreen` through `work_area_for`,
+which is the tidy-up an unwary reader would make since every *other* tiling path
+does exactly that, passed all 427 of them while leaving a band of taskbar across
+the bottom of every full-screen video. `fullscreen_covers_the_taskbar_that_maximize_stops_at`
+asserts both halves in one test — maximize stops at `screen.bottom() - 40`, then
+the same window fullscreened covers the whole 800x600 — so the contrast cannot
+decay into a tautology if the fixture ever loses its reservation. Proved by the
+marker `fullscreenspareasthetaskbar`, and it failed **alone**, which is the
+evidence that the gap was real rather than incidentally covered elsewhere.
+
+One new test — `leaving_fullscreen_on_the_second_monitor_stays_on_it` — is
+**additional coverage rather than the sole guard on a new invariant**: the
+fullscreen round trip is lossless whether fullscreen sizes from the monitor or
+from the framebuffer, so it survives every marker above. It is kept because it
+pins the interaction between §513's restore-reachability rule and multiple
+monitors, but it is recorded here as what it is, for the same reason §513
+recorded three of its own.
+
+**What this does not do.** The scanout still drives one head: `DrmScanout` picks
+one CRTC and one connector, so the second monitor is modelled, composited and
+then not scanned out. That is the next commit — a `Head` per CRTC, each with its
+own buffer pair and its own source rectangle in this one frame — and it is now a
+mechanical follow-on rather than a redesign, which is the point of doing the
+model first.
+
+## 515. A CRTC drives at most one monitor, each monitor copies out its own rectangle of the one composited frame, and a monitor that fails is dropped rather than fatal
+
+**Date:** 2026-08-21
+**Decided by:** Claude (autonomous)
+
+**In short:** §514 taught the compositor that a second monitor exists; this
+entry makes one actually light up. Before it, the code that hands finished
+pictures to the graphics card (the *scanout*) picked a single monitor, drove
+it, and ignored every other one plugged in — so the desktop was composited at
+the full two-screen width and only the left screen ever showed anything. Now
+every connected monitor gets its own pair of buffers and its own flip, and each
+one copies out the part of the desktop it occupies. Three rules make that work,
+and each is recorded below because each had a plausible alternative.
+
+**Context.** `DrmScanout::new` walked the card's connectors, stopped at the
+first one it could drive, and built one buffer pair for it. `size()` — which is
+what the binary builds the compositor at — was that one monitor's mode. §514
+had already fixed the model above it, so the *combination* was worse than
+either half alone: with §514 in place and this not, `main.rs` would compose a
+desktop the width of one screen while `DisplayManager` believed there were two.
+
+**Decision, in three parts.**
+
+**1. One frame, a viewport per head.** `Present::show` still takes a single
+buffer — the whole desktop — and each head blits the rectangle at its own
+`(x, y)`. This is §514's decision arriving at the other end of the pipeline and
+it is what keeps `Present` a three-method trait: adding a second monitor
+changed no signature. The arithmetic that makes it true is four lines in
+`blit`, which is a free function precisely so it can be tested without a
+graphics card.
+
+**2. Heads are laid out left to right in enumeration order — the same rule the
+compositor already used, not a rule communicated to it.** `DrmScanout::new`
+places each head to the right of the last; `DisplayManager::add_display` does
+exactly the same with the displays `main.rs` attaches in the order `heads()`
+returns them. So the two agree *by construction* rather than by protocol.
+
+The alternative was to make the scanout authoritative: pass each head's offset
+into `attach_display` and have the compositor honour it. That is more general —
+it is what a future "drag your monitors into any arrangement" feature needs —
+and it was rejected for now because §514's surface-origin invariant (the
+surface's pixel (0,0) is the desktop's (0,0)) does not yet permit a display at
+a negative offset. Publishing an offset the compositor cannot honour would be a
+worse lie than not publishing one. `main.rs` therefore cross-checks
+`compositor.frame_size()` against `screen.size()` and warns loudly if they ever
+disagree, which is the guard that turns "agree by construction" from an
+assumption into something observable.
+
+**3. A CRTC drives at most one connector.** A CRTC (the hardware that reads a
+framebuffer out to a cable) scans out one framebuffer at a time. The
+pre-existing `resolve_crtc` preferred the CRTC a connector was already bound to
+at boot, and on a machine where the firmware left two connectors sharing one,
+that returned the same CRTC twice. The result would not be a second monitor
+lighting up: it would be the *first* monitor's picture being replaced by the
+second's, alternating every frame. So `choose_displays` now carries a `taken`
+list, and a connector it cannot find a free CRTC for is declined.
+
+Declining is the interesting half. The alternatives were to fail the whole
+setup (one unroutable monitor blanks a working one — plainly wrong) or to share
+the CRTC anyway and let the driver sort it out (it cannot). Declining leaves
+one working monitor instead of two broken ones, and the number of heads is then
+bounded by the card's CRTC count — a tighter and more meaningful bound than any
+constant this module could have picked, and the hardware's own limit on how
+many pictures it can scan out at once.
+
+**A failing monitor is dropped, not fatal.** This is the third place the "one
+head" assumption was load-bearing, and the least obvious. The single-head code
+closed the display on the first real flip error, which is correct when there is
+one screen and catastrophic when there are two: unplugging a DisplayPort cable
+would have blanked the *other* monitor and exited the display server. Now:
+
+* a head whose **first** flip fails never enters the layout, so the desktop is
+  sized as if it were not there and the surviving heads shift left to fill the
+  gap;
+* a head whose flips start failing **mid-session** is marked dead and stops
+  being drawn on, while the others carry on at their existing offsets — the
+  layout deliberately does *not* re-flow, because the compositor's idea of the
+  desktop has not changed and a scanout that silently moved the remaining
+  monitor would put every window on the wrong screen;
+* `is_open()` is false only when no head is left, which is when
+  `Server::run_with` should exit.
+
+Either way the head **stays in the vector**, holding its two dumb buffers and
+two framebuffer ids, so `Drop` still gives them back. Removing it on failure
+was the obvious implementation and leaks four kernel objects for the life of
+the process — which matters because this type does not own the card and a
+second scanout can share it.
+
+**A monitor whose *buffers* will not allocate is declined on the same terms.**
+This was caught reviewing the diff above rather than by a test, and it is worth
+recording because the first draft got it wrong in a way that reads as correct:
+a head that could not *flip* was declined, but a head that could not *allocate*
+returned `Err` from `new()` and so blanked the monitor next to it that had
+allocated fine. That is the same wrong answer sharing a CRTC gives, arrived at
+from the other direction. `new()` now records the first such failure and
+carries on, returning it only when **no** head was built — so a card on which
+nothing works still reports why rather than reporting "no display".
+
+The half-allocated head is the sharper edge. A head is all-or-nothing (it
+cannot flip with one buffer), so when the second `CREATE_DUMB` fails the first
+buffer is owned by nobody: the head never reaches `DrmScanout::heads`, which is
+what `Drop` walks. It has to be handed back at the point of failure or its
+framebuffer id and GEM handle leak for the life of the process. Hence
+`make_head`, whose entire reason to exist is that failure path, and
+`release_buffer`, extracted so the constructor's teardown and `Drop`'s cannot
+drift apart — including the ordering rule that `RMFB` precedes `DESTROY_DUMB`,
+because the other order asks the kernel to free an object a framebuffer still
+points at.
+
+**Keeping a dead head costs an index space, so the per-head accessors are keyed
+on the connector id.** This falls straight out of the decision above and is the
+one place it bites. Because a dead head stays in `self.heads` so `Drop` can give
+its buffers back, but `heads()` reports only the live ones, a *position* means
+two different things depending on which of the two you got it from. A caller
+doing the obvious thing — `for (i, h) in scanout.heads().iter().enumerate()`,
+then passing `i` back to ask that head's pitch — reads the wrong monitor the
+moment one dies, and reads it silently. So `pitch_for(connector_id)` and
+`scanned_out_for(connector_id)` replaced `pitch_of(i)`/`scanned_out_on(i)`: a
+connector id is the same in both worlds, is already carried by `HeadInfo`, and
+answers "nothing" rather than "the neighbour" for a monitor that has gone.
+
+The single-head accessors (`crtc_id`, `connector_id`, `pitch`, `scanned_out`)
+are the same bug in miniature — they read position zero, which after a failure
+is the corpse. They now resolve through one `first_live()` helper, which exists
+in the singular so the four cannot drift apart. The alternative — dropping dead
+heads from the vector so the two index spaces coincide — is the leak this entry
+already rejected.
+
+**Verification.** 18 new tests. 17 were proved to be regression tests by
+reintroducing the defect each names through the guarded patcher and confirming
+a deterministic failure that names it back, with the file verified restored
+byte-for-byte after each: `firstconnectoronly`, `sharedcrtcbitmask`,
+`sharedcrtcbound`, `headblitsfromorigin`, `blitrowignoresorigin`,
+`headpitchisfirst`, `onedeadheadkillsall`, `dropdeadhead`,
+`blitclipsatviewport`, `allocfailurefatal`, `partialheadleaks`,
+`deadheadisstillthefirst`, `deadheadstillreadable`.
+
+The last two needed a capability the fake card did not have: its failure queue
+matched only its front entry, so "fail the *second* monitor's allocation" was
+inexpressible — the first monitor's ioctls sat in front of it. `fail_nth`
+injects at a *counted* occurrence instead, which is what lets a test say "the
+fourth `CREATE_DUMB`" and mean the second head's second buffer. Without it
+`partialheadleaks` could not have been proved at all, and an untestable leak is
+one that comes back.
+
+Two of those markers are worth naming for what they catch that nothing else
+did. `headpitchisfirst` — writing every head at the *first* head's row stride —
+is invisible on any pair of monitors whose widths pad to the same pitch, which
+is why the fake card's two heads are 1024 wide (4096 bytes, unpadded) and 1366
+wide (5464, padded to 5504). `sharedcrtcbound` is reachable only through
+`resolve_crtc`'s early return, so a test that exercises only the bitmask path
+would have passed while the boot-bound path handed the same CRTC out twice.
+
+The eighteenth — `a_viewport_starting_past_the_end_of_the_frame_copies_nothing`
+— **survives every marker above and is recorded as additional coverage rather
+than the sole guard on an invariant**, for the same reason §513 and §514
+recorded theirs. It is double-guarded: the copy width saturates to zero *and*
+the row read goes through `src.get()`, whose absence is already pinned by
+`a_frame_shorter_than_it_claims_to_be_does_not_take_the_display_server_down`. It
+is kept because it pins the documented contract for a monitor the composited
+desktop does not reach, which is a real state during a resize.
+
+**What this does not do.** Per-head scale factor and rotation remain out of
+reach, for the reason §514 gives: one surface has one pixel grid. Monitors can
+only be arranged in a row, because the surface's origin is the desktop's
+origin. And there is still no `SETCRTC` in the kernel, so each monitor runs at
+the mode it came up in — `TD-COMPOSITOR-CANNOT-CHANGE-MODE`. None of these are
+newly true; they are §514's deferred costs, now paid at both ends of the
+pipeline instead of one.
+
+## 516. A monitor leaving is a monitor arriving in reverse, but the order is inverted and the survivors do not move
+
+**Decided by:** Claude (autonomous)
+
+**In short:** unplugging one of two monitors used to do nothing to the desktop's
+model of itself. The surviving screen kept working, but the compositor still
+believed the departed monitor was there, still composited a rectangle of frame
+that nothing copied out, and still left windows sitting on it — including
+maximised ones, which have no title bar edge on any surviving screen to drag
+back by, so they were gone until the session was. `detach_display` is the
+missing half. It removes the display, shrinks the composited surface, and lets
+the existing re-layout machinery put everything back on a screen that exists.
+
+**The order is the reverse of `attach_display`'s, and that is the decision.**
+Attaching allocates the larger surface *first* and adopts the display only if
+that succeeded, because a desktop wider than its framebuffer has a monitor with
+no pixels behind it (§514). Detaching adopts first and shrinks after. The
+asymmetry is not an oversight: the monitor is already physically gone, so
+refusing to acknowledge it — which is what propagating a failed shrink would
+do — leaves the model describing a screen that does not exist, and *that* is the
+bug being fixed. A surface that stays too large still covers the smaller
+desktop completely. A failed shrink wastes memory; it cannot draw anything
+wrong. The failure path does still have work to do, though, and it is not
+nothing: the over-large surface holds the departed monitor's last frame, so the
+full clear the successful path performs has to be repeated by hand or that
+picture stays on screen.
+
+**The survivors keep the offsets they already had.** Take the leftmost of two
+monitors away and the other one stays at x = 800: the virtual desktop starts
+part-way along, and the space the departed screen occupied remains in the
+bounding box as a hole that is composited and scanned out nowhere. Re-flowing
+them leftwards is plainly the tidier arrangement, and it is deliberately not
+done.
+
+The reason is that there are two layouts, not one. `DisplayManager` holds the
+compositor's, `DrmScanout` holds the scanout's, and they agree only because both
+lay monitors out left-to-right in enumeration order — agreement by construction
+rather than by protocol, which is what let §515's multi-head scanout land
+without a single trait signature changing. §515 also decided that a head which
+*fails* mid-session does not re-flow the others, because a monitor going dark
+must not drag its neighbours' pictures sideways. So the scanout will not
+re-flow, which means the compositor must not either: a re-flow on one side alone
+puts every window on the wrong screen, silently, with both sides internally
+consistent. One of the two has to be the authority and it is the one holding the
+framebuffers.
+
+*The alternative considered and rejected:* re-flow both sides together, since a
+*detach* — unlike a mid-session flip failure — is a deliberate act we drive from
+one place and could sequence. It would cost every window on every monitor to the
+right of the departed one being displaced by its width, which is a far more
+visible event than a hole, and it would make the two layouts agree only while
+the detach path is the *only* way a head disappears. It is not: a flip failure
+still marks a head dead without telling anyone. Two rules that must be kept in
+step are worse than one rule applied twice.
+
+**Nothing new re-places the stranded windows.** With the display removed,
+`display_for` answers *primary* for any window that no longer overlaps a real
+monitor, so `relayout_for_desktop_change` — written for §512's resize case and
+untouched here — does the whole job: the re-tile picks up maximised and snapped
+windows, `refit_fullscreen_windows` re-fits fullscreen ones and tells their
+clients, `bring_stranded_windows_back` rescues hand-placed ones, and
+`pull_pointer_onto_the_desktop` retrieves the cursor. That the removal case
+needed no new pass is a consequence of §513 having defined "reachable" against
+the whole virtual desktop rather than against one screen.
+
+**What it is aimed at is the primary, not the desktop.** For two monitors those
+are the same rectangle and the choice looks arbitrary. For three they are not:
+take the *middle* monitor away and the desktop's bounding box spans the hole, so
+it is not any monitor's bounds — and the re-tile's "windows on the screen that
+changed" filter, which compares against a monitor's bounds, then matches nothing
+at all and leaves a maximised window in the gap. That is the no-title-bar
+failure again, reached by a different route.
+`a_window_maximised_on_a_monitor_taken_from_the_middle_comes_back` is the only
+test that separates the two, and it exists because the distinction is invisible
+in every two-monitor case.
+
+**Detaching the last monitor is refused.** A desktop with no monitors has
+zero-sized virtual bounds, no primary to fall back to, and every window stranded
+with nowhere to be rescued to; `pull_pointer_onto_the_desktop` already carries
+an explicit guard against the malformed clamp such an arrangement produces.
+There is no arrangement to adopt, so the display is kept and the caller told. A
+display server whose only screen has been unplugged has nothing useful left to do
+either way, and keeping a screen it cannot paint on is strictly better than
+adopting a desktop it cannot describe.
+
+**What this does not do yet: notice.** Nothing calls `detach_display` — that is
+the *detect* half of `TD-COMPOSITOR-IGNORES-MONITOR-HOTPLUG`, which needs
+`DrmScanout` to re-probe its connectors and a seam through `Present` to report
+what changed. It is deliberately a separate change: the model half is testable on
+a machine with no graphics card, and pairing it with the DRM half would have made
+one commit whose interesting half could only be exercised by the other.
+
+**Verification.** 10 new tests, each proved a regression test by reintroducing
+the defect it names through the guarded patcher and confirming a deterministic
+failure that names it back: `detachnopromote`, `detachreflows`,
+`detachwrongdisplay`, `detachlastmonitor`, `detachnoshrink`, `detachnorelayout`
+(which proves four at once — the four re-layout passes have one call site
+between them) and `detachhomeisdesktop`. Compositor 449 + 18 green, clippy and
+fmt clean.
+
+## 517. Monitor hotplug is a polled whole-set reconciliation keyed on the connector id
+
+**Decided by:** Claude (autonomous)
+
+**In short:** the compositor could add a monitor (§514) and drop one (§516), and
+the scanout could drive several at once (§515) — but nothing ever *noticed* that
+a cable had moved. Both halves had to be told by hand. Plug a second monitor in
+after boot and it stayed dark for the life of the session; unplug one and the
+desktop kept a screen-sized hole full of windows nobody could reach. This
+section is the wiring that joins the two: once a second the compositor asks the
+graphics card which monitors are actually attached, and changes its arrangement
+to match. Three terms recur below. A *connector* is one physical socket on the
+card (a particular HDMI or DisplayPort jack); its *connector id* is the small
+number the kernel gives that socket, stable for as long as the machine is up. A
+*CRTC* is the card's scanout engine — the thing that reads pixels out of memory
+and drives a cable — and there are fewer of them than sockets. A *head* is our
+name for one live connector-plus-CRTC pair.
+
+**The answer is polled, not pushed.** The card can raise a hotplug event, and
+using it would be the obvious design: the kernel already knows the instant a
+cable moves, so why ask? Because a pushed message describes a *difference*, and
+a difference is only meaningful against the state the sender believed the
+receiver had. Drop one, mis-order two, or fail to apply one because a CRTC was
+momentarily busy, and every later message is being applied to an arrangement
+that is not the one it was computed for — and nothing ever notices, because
+there is no point at which the two sides compare totals. A poll returns the
+*whole set*. Asking twice gives the same answer, a tick that fails is simply
+retried a second later, and `reconcile_monitors` computes the difference itself,
+at the moment it acts, against the arrangement it is actually holding. The cost
+is the reason polling is not free: reading a connector's state with
+`count_modes == 0` makes the kernel re-probe it, which is real DDC traffic down
+the cable and tens of milliseconds per head — far more than a frame. So the
+probe is rate-limited to once a second (`PROBE_INTERVAL`, overridable via
+`set_probe_interval`, which the tests set to zero), and `monitors()` returns the
+cached head list on every other call. One second of blackness on a screen that
+was just plugged in is not perceptible as a fault; a frame that misses vsync
+because it stopped to talk to a monitor is.
+
+**`None` and an empty list are different answers.** `Present::monitors` returns
+`Option<Vec<MonitorInfo>>`, and the two negative cases mean opposite things.
+`None` is *no opinion*: a headless test recorder or a host window has no
+connectors to enumerate and no business overruling whatever displays the
+compositor was configured with. `Some(vec![])` is a card that had monitors and
+has none left. Both are declined today, and — this is worth stating plainly
+rather than glossing — they are declined by two separate guards with *identical*
+observable behaviour, so no test can currently tell them apart. The empty case
+is declined because detaching every display to match would leave a compositor
+with a zero-sized desktop and no surface to composite into; a machine whose last
+monitor is unplugged is expected to end its session, not to keep running as a
+zero-by-zero desktop. Keeping the distinction in the type costs nothing and
+means the day one of them wants to behave differently, the information is still
+there.
+
+**Reconciled by connector id, and only by connector id.** The compositor's
+`Display::id` is set to the connector id of the socket the monitor is plugged
+into, which is what makes the two sets comparable at all — hence
+`Compositor::rename_display`, which exists solely so the first display, created
+before any connector is known, can be renamed from `0` to its real connector id
+at startup. Get that wrong and the failure is not subtle: a first screen still
+called `0` is simultaneously a display no connector claims *and* a connector no
+display claims, so every tick detaches it and attaches a duplicate, once a
+second, for ever.
+
+Sizes are compared nowhere. A monitor whose *mode* changed under a live
+connector is deliberately left alone: the id still matches, so reconciliation
+sees nothing to do. Doing otherwise would mean detaching and re-attaching, which
+would destroy that screen's window arrangement and move the monitor to the right
+end of the row — a spectacularly destructive way to change a resolution.
+Changing a mode in place is `TD-COMPOSITOR-CANNOT-CHANGE-MODE` and stays out of
+scope.
+
+**Removals happen before additions, on both sides.** Peak resource use is then
+the *smaller* of the two arrangements rather than their union, which matters
+because a CRTC is exclusive: a monitor moved from one socket to another needs
+the old head to give its CRTC back before the new one can take it. The scanout's
+re-probe does the same in the same order, for the same reason, and a test builds
+exactly that case — two sockets that share one CRTC, cable moved between them.
+
+**A retired head is destroyed, not merely marked dead.** Everywhere else in the
+scanout a head that fails is left in place with `alive = false`, keeping its
+buffers until `Drop`. That is affordable because a head fails at most once. A
+*polled* probe is different in kind: a cable working loose can retire and
+re-adopt a head every second for hours, and a head list that grows once per plug
+event is a leak with a physical trigger. So `reprobe` is the one place that
+reaps — it removes dead heads from the list and releases their framebuffers back
+to the card immediately, bounding the list by the number of monitors rather than
+by the number of times somebody wiggled a cable.
+
+**The survivors still do not move — now on the scanout side too.** §516 decided
+that detaching a display does not re-flow the remaining ones, and the same rule
+had to be re-established inside `DrmScanout`, where the existing `lay_out_heads`
+*does* re-flow and is called only from `new()`. `resize_to_heads` is its
+non-moving sibling: it recomputes the framebuffer's bounding box from the live
+heads without touching any head's position. Both sides now place an arriving
+monitor at the right edge of the ones already present and neither ever moves
+one, so the compositor's layout and the scanout's agree pixel-for-pixel by
+construction, with no protocol between them. That agreement is also why
+`MonitorInfo` carries no position: a position that travelled would be a second
+source of truth for something both sides already derive identically.
+
+**What this does not do.** It does not change a mode under a live connector (see
+above). It does not read EDID, so a monitor is identified by the socket it is in
+and not by which monitor it is — move two monitors' cables to each other's
+sockets and each takes on the other's place in the row. And it remembers
+nothing: unplug a monitor and plug it back in and it returns at the right-hand
+end, not where it was. All three want an identity that outlives a cable, which
+is a larger design than this one.
+
+**Verification.** Sixteen new tests, every one proved a regression test by
+reintroducing the defect it names and confirming a deterministic failure that
+names it back, with the source restored byte-for-byte (SHA-256) afterwards.
+Nineteen markers, because several defects are only reachable in combination:
+the seam's six (`seamadoptsanyreply`, `seamemptyisarrangement`, `seamnoreconcile`,
+`seamsizeisidentity`, `seamreattachesknown`, `seamnewmonitorisprimary`), the
+re-probe's nine (`probenever`, `probeeverytime`, `probereportsindex`,
+`probearrivesatorigin`, `probereflows`, `probekeepsdeparted`, `probeadoptsfirst`,
+`probekeepsdarkhead`, `probefailureisempty`), and the connector-id naming's four
+(`renamenoop`, `renamedemotes`, `renamecollides`, `renamewrongdisplay`).
+`seamadoptsanyreply` removes the `None` guard and the empty guard together,
+because as noted above a defect that removes only one of them is not
+distinguishable from one that removes the other.
+
+One of these tests had to be strengthened before it was honest.
+`an_empty_monitor_list_is_not_an_arrangement_to_adopt` originally used a single
+display, and passed with the empty-list guard deleted — `detach_display` refuses
+to remove the last monitor, so the desktop survived a missing guard by accident.
+With two displays the guard is the only thing standing between an empty reply
+and a half-dismantled desktop, and the test fails as it should. Compositor 465
+tests green; clippy clean on `x86_64-pc-windows-gnu` (`--all-targets`) and on
+`x86_64-unknown-linux-gnu` (`--bins`, which is the only way the Linux-only arm
+of `main.rs` is compiled at all); fmt clean.

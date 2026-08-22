@@ -32,6 +32,10 @@
 /// A kernel error, as a positive `errno`.
 pub type Errno = i32;
 
+/// No such file — from `open`, means this `/dev/dri/cardN` does not exist.
+/// The ordinary answer for every index past the machine's last card, so it is
+/// the end of a search rather than a fault.
+pub const ENOENT: Errno = 2;
 /// Interrupted by a signal — the call did nothing and can be repeated.
 pub const EINTR: Errno = 4;
 /// Would block. From `PAGE_FLIP`, means the previous flip is still pending.
@@ -118,14 +122,109 @@ pub trait KmsSys {
     fn map(&mut self, offset: u64, len: usize) -> Result<Box<dyn Mapped>, Errno>;
 }
 
-/// The path of the first DRM card. Scanout looks only here: a desktop with two
-/// graphics cards is a real thing, but choosing between them is a policy
-/// question (`known-issues.md` → `TD-COMPOSITOR-PICKS-CARD0`) and picking the
-/// first is what every compositor does until asked otherwise.
-pub const CARD0: &[u8] = b"/dev/dri/card0\0";
+/// How many `/dev/dri/cardN` nodes are worth trying.
+///
+/// Linux's own minor-number range for the primary node is 0..64, but a machine
+/// with more than a handful of GPUs is not a desktop, and every index costs an
+/// `open` that will fail. Sixteen covers every real configuration and keeps a
+/// no-display machine's failure path to sixteen failed syscalls.
+pub const MAX_CARDS: u32 = 16;
+
+/// The longest `/dev/dri/cardN\0` for `N < 100`.
+const CARD_PATH_LEN: usize = 17;
+
+/// A NUL-terminated `/dev/dri/cardN` path, without allocating.
+///
+/// Returned by value rather than as a `Vec<u8>` because [`CardSource::open`]
+/// may be called on a path that must outlive nothing — and because the whole
+/// point of this module is that the syscall layer does not depend on the
+/// allocator being in a working state.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CardPath {
+    /// The bytes, NUL-terminated at `len - 1`.
+    bytes: [u8; CARD_PATH_LEN],
+    /// How many bytes are used, including the NUL.
+    len: usize,
+}
+
+impl CardPath {
+    /// The path of `/dev/dri/card{index}`.
+    ///
+    /// Indices at or above 100 are clamped to 99, which cannot happen: the only
+    /// caller bounds itself by [`MAX_CARDS`]. Clamping rather than returning an
+    /// `Option` keeps this infallible, since a path that cannot be formed is
+    /// not a case any caller has a sensible answer for.
+    #[must_use]
+    pub fn card(index: u32) -> Self {
+        const PREFIX: &[u8] = b"/dev/dri/card";
+        let mut bytes = [0u8; CARD_PATH_LEN];
+        let mut len = 0usize;
+        for &b in PREFIX {
+            if let Some(slot) = bytes.get_mut(len) {
+                *slot = b;
+                len = len.saturating_add(1);
+            }
+        }
+        let index = index.min(99);
+        if index >= 10 {
+            if let Some(slot) = bytes.get_mut(len) {
+                *slot = b'0'.saturating_add(u8::try_from(index / 10).unwrap_or(0));
+                len = len.saturating_add(1);
+            }
+        }
+        if let Some(slot) = bytes.get_mut(len) {
+            *slot = b'0'.saturating_add(u8::try_from(index % 10).unwrap_or(0));
+            len = len.saturating_add(1);
+        }
+        // The NUL. `bytes` is zeroed, so this only advances the length.
+        len = len.saturating_add(1);
+        Self { bytes, len }
+    }
+
+    /// The path including its trailing NUL, as the kernel wants it.
+    #[must_use]
+    pub fn as_c_bytes(&self) -> &[u8] {
+        self.bytes.get(..self.len).unwrap_or(&[])
+    }
+
+    /// The path without its trailing NUL, for a diagnostic.
+    #[must_use]
+    pub fn as_display_bytes(&self) -> &[u8] {
+        self.bytes.get(..self.len.saturating_sub(1)).unwrap_or(&[])
+    }
+}
+
+impl core::fmt::Display for CardPath {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        // Every byte this type can hold is ASCII, so the lossy conversion is
+        // exact. It is used rather than `from_utf8` because a formatter cannot
+        // return the error a `from_utf8` failure would produce, and there is no
+        // input that could produce one.
+        f.write_str(&String::from_utf8_lossy(self.as_display_bytes()))
+    }
+}
+
+/// Something that can open a DRM card by index.
+///
+/// The seam that makes card *selection* testable. Opening a device node is a
+/// syscall and cannot happen on the development machine, but "try each card in
+/// turn and keep the first with a display attached" is policy, and policy with
+/// no test is policy that is wrong on the machine nobody can run it on.
+pub trait CardSource {
+    /// What an opened card is.
+    type Sys: KmsSys;
+
+    /// Open `/dev/dri/card{index}`.
+    ///
+    /// # Errors
+    ///
+    /// The kernel's `errno` — `ENOENT` when there is no such node, which is the
+    /// ordinary answer for every index past the last real card.
+    fn open(&mut self, index: u32) -> Result<Self::Sys, Errno>;
+}
 
 #[cfg(target_os = "linux")]
-pub use target::Card;
+pub use target::{Card, Cards};
 
 /// The real thing: a `/dev/dri/cardN` file descriptor and raw system calls.
 ///
@@ -235,7 +334,8 @@ mod target {
     impl Card {
         /// Open a card by path.
         ///
-        /// `path` must be NUL-terminated; [`super::CARD0`] is.
+        /// `path` must be NUL-terminated;
+        /// [`CardPath::as_c_bytes`](super::CardPath::as_c_bytes) is.
         ///
         /// # Errors
         ///
@@ -260,6 +360,21 @@ mod target {
             Ok(Self {
                 fd: i32::try_from(fd).unwrap_or(-1),
             })
+        }
+    }
+
+    /// The real [`CardSource`](super::CardSource): opens `/dev/dri/cardN`.
+    ///
+    /// A unit struct rather than a free function so that card *selection* can
+    /// be written once, generically, and driven by a fake in a test.
+    #[derive(Clone, Copy, Debug, Default)]
+    pub struct Cards;
+
+    impl super::CardSource for Cards {
+        type Sys = Card;
+
+        fn open(&mut self, index: u32) -> Result<Self::Sys, Errno> {
+            Card::open(super::CardPath::card(index).as_c_bytes())
         }
     }
 

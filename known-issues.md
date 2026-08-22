@@ -32315,21 +32315,133 @@ the mode we keep. The compositor binary reports `--size` as ignored on this path
 rather than silently obeying it, since obeying it would compose frames the
 display cannot show.
 
-**What is missing:** `SETCRTC` in lane A's `kernel/src/drm/`, and then the
-matching call here, plus a `Compositor` that can be resized after construction —
-which is a second, separate piece of work: `Compositor::new` takes a size and
-everything downstream of it assumes that size for its lifetime.
+**What is missing:** `SETCRTC` in lane A's `kernel/src/drm/`, a re-allocation of
+the pair of dumb buffers at the new mode's size in `DrmScanout`, and the call
+that sequences the two.
 
 **Severity.** Low. A display running its own native mode is the right default,
 and it is what the user is already looking at. This bites only when the native
 mode is wrong for the user (a projector, a scaled-down mode for performance, a
 panel whose EDID lies).
 
-**Filed to lane A?** Not yet — deliberately. A `SETCRTC` with no caller is worse
-than none, and the caller needs compositor resize first, which is lane C's work
-and not started. File it when resize lands.
+**Update 2026-08-21 — the compositor half is done.** What this entry used to
+call "a second, separate piece of work" — `Compositor::new` takes a size and
+everything downstream assumes it for its lifetime — is finished.
+`Compositor::resize_display` now re-derives, against the new size, everything
+that was placed *by a rule* rather than by the user: maximised and snapped
+windows are re-tiled through the work area (so they land above a taskbar, not
+under it), fullscreen windows are re-fitted to the new framebuffer and told
+about it, any window the shrink left entirely off-screen is pulled back by the
+smallest movement that recovers it, and the pointer is clamped onto the virtual
+desktop. A window the user placed themselves and can still reach is left exactly
+where it was — a resize is not permission to re-lay-out the desktop. 12 tests,
+each proved a regression test by reintroducing the defect it names. Rationale
+and the four separate failures it fixes: `design-decisions.md` §512.
 
-## TD-COMPOSITOR-PICKS-CARD0 (lane C, 2026-08-21)
+**Filed to lane A?** Yes —
+`requests/c-a-drm-setcrtc-and-a-page-flip-that-refuses-a-mismatched-framebuffer.md`
+(2026-08-21). It was deliberately *not* filed before now: a `SETCRTC` with no
+caller is worse than none, and the caller needed compositor resize first. Resize
+has landed, so the caller exists. That request also carries a second, separate
+bug found while writing it — see `BUG-DRM-PAGE-FLIP-ACCEPTS-A-MISMATCHED-FB`
+below.
+
+## BUG-DRM-PAGE-FLIP-ACCEPTS-A-MISMATCHED-FB (found by lane C 2026-08-21; lives in lane A's tree)
+
+**In short:** the kernel lets a program hand the graphics card a picture that is
+the wrong size for the screen, and then each of the three supported cards does
+something *different* with it — one quietly changes the resolution, one quietly
+crops the picture, and both then report the old resolution when asked. The same
+sequence of calls therefore produces a different result on different hardware,
+and the program that made them cannot tell which happened.
+
+**Where.** `DrmDevice::page_flip` (`kernel/src/drm/mod.rs:385`), reached from
+`drm_card_ioctl_mode_page_flip` (`kernel/src/syscall/linux.rs:11125`). It checks
+that the CRTC id, the framebuffer id and the backing GEM object *exist*, and
+nothing else. Linux's `drm_mode_page_flip_ioctl` compares the framebuffer's
+dimensions against the CRTC's current mode and returns `EINVAL`; we do not.
+
+**The three divergent behaviours:**
+
+* **ATI** silently performs a full mode-set. `ati/backend.rs:409` does
+  `timing::lookup(fb.width, fb.height, 60)` and applies the result if it differs
+  from `self.mode`. A page flip changes the resolution.
+* **virtio-gpu** silently crops. `drm/driver.rs:500` computes
+  `copy_h = fb.height.min(self.height)` and
+  `copy_w_bytes = fb.width.min(self.width) * bpp`, so an oversized framebuffer
+  loses its right and bottom edges and an undersized one leaves stale pixels
+  around itself. The display never changes size.
+* **`GETCRTC` lies afterwards on both.** ATI updates its own private
+  `self.mode` (`backend.rs:415`), but nothing writes `dev.crtcs[i].mode`, so the
+  DRM object model keeps reporting the boot mode after the hardware has been
+  reprogrammed.
+
+**Severity.** Medium, and latent. No current client triggers it — the
+compositor's `DrmScanout` builds its buffers from the connector's preferred mode
+and has only ever flipped matching-size framebuffers, so the check would have
+been a no-op for every flip we have issued. It becomes live the moment anything
+tries to change resolution, which is precisely what
+`TD-COMPOSITOR-CANNOT-CHANGE-MODE` is about; and it is the sort of defect that,
+left alone, gets *depended on* — a client that discovers ATI's implicit mode-set
+will use it, and then be silently cropped in QEMU.
+
+**Proper fix.** `EINVAL` in `DrmDevice::page_flip` when the framebuffer's size
+differs from the CRTC's mode, so all three backends inherit one answer. Keeping
+ATI's implicit mode-set as a deliberate SlateOS extension is also defensible —
+but then it must be the documented behaviour of *all three* backends, virtio-gpu
+must grow it, and `dev.crtcs[i].mode` must be updated when it fires. The one
+option that is not tenable is the present one, where the answer depends on which
+card is fitted.
+
+**Not lane C's to fix** — `kernel/**` is lane A's. Filed as Ask 2 of
+`requests/c-a-drm-setcrtc-and-a-page-flip-that-refuses-a-mismatched-framebuffer.md`.
+
+## TD-COMPOSITOR-PICKS-CARD0 (lane C, 2026-08-21) - **(1) and (2) fixed 2026-08-21; (3) open**
+
+**Status 2026-08-21: the screen no longer stays black, and there is now a way to
+tell it otherwise. What remains open is only item (3) below — real multi-GPU
+*preference*, as opposed to finding a card that works at all.**
+
+`DrmScanout::card0()` is gone. In its place:
+
+* `DrmScanout::open(wanted: Option<u32>)` and, under it, the generic
+  `open_display<C: CardSource>(source, wanted)` in
+  `gui/compositor/src/present/drm.rs`. With `None` it tries `card0..card15` and
+  keeps the first that is not `NoConnectedDisplay`; with `Some(n)` it opens that
+  card and only that card, reporting its failure rather than quietly falling
+  back — a `--card 1` that silently gives card 0 is worse than an error, because
+  the wrong monitor lights and the flag appears to have been ignored.
+* `--card N` / `--card=N` on the compositor, and `$SLATE_DRM_CARD` for the
+  service definition that starts it at boot. The flag is a hard error when it
+  names something out of range; the variable is a **warning and then ignored**,
+  because an inherited variable may be years stale and must not be able to keep
+  the desktop from starting. That asymmetry is deliberate and is tested.
+* Three failure kinds are now kept apart in the report: "nothing is plugged into
+  any card" (`NoConnectedDisplay`), "there is no such card" (`ENOENT`, which is
+  the ordinary end of the list and never becomes the reported error), and a real
+  failure such as `EACCES`. When several cards fail, the **first** real failure
+  is reported — the last would always be `ENOENT` on `/dev/dri/card15`, true and
+  useless. A card that fails for a real reason does not stop the search, so a
+  broken first card cannot keep a working second one dark.
+* `sys::CardPath` builds `/dev/dri/cardN\0` without allocating, and
+  `sys::CardSource` is the seam that makes all of the above testable on a
+  machine with no graphics card at all — the same trick `KmsSys` plays for the
+  ioctls. 13 tests in `present/drm/tests.rs` plus 8 in `main.rs`; every one was
+  proved to fail with the defect it names put back (reintroduction markers
+  `drmcardzero`, `drmenoentreal`, `drmlasterror`, `drmdarkreal`,
+  `drmnamedfallback`, `drmkeeplooking`, `drmpathshort`, `drmpathonedigit`,
+  `carddefaultzero`, `cardboundoff`, `cardenvunbounded`, `cardenvnotrim`).
+
+**What is still open — item (3).** The search answers "which card *can* I
+drive?", not "which card *should* I drive?". On a laptop where both the
+integrated and the discrete GPU have a display attached, the first that works
+wins, and that may be the power-hungry one. Real policy needs information DRM
+does not hand over cheaply (which adapter is physically wired to the internal
+panel, which is on battery-friendly silicon), so it is deferred until there is
+hardware to test it on. It is not blocking anything: `--card` covers the case by
+hand, and QEMU presents one card.
+
+The original entry follows, unchanged.
 
 **In short:** on a machine with two graphics cards the compositor always uses the
 first one, and if a monitor is plugged into the second one the screen stays
@@ -32352,10 +32464,12 @@ information DRM does not hand over cheaply.
 **Severity.** Low today — QEMU presents one card — and it rises the moment this
 runs on real hardware. Do (1) and (2) together before any bare-metal bring-up.
 
-## TD-COMPOSITOR-DRIVES-ONE-HEAD (lane C, 2026-08-21)
+## TD-COMPOSITOR-DRIVES-ONE-HEAD (lane C, 2026-08-21) — ✅ RESOLVED 2026-08-21
 
 **In short:** with two monitors plugged in, one shows the desktop and the other
 stays dark. Not a bug in what exists — the second screen was never implemented.
+*(Both halves are now done; see the two updates at the end. The original
+diagnosis below turned out to be half wrong, and is kept for that reason.)*
 
 **What.** `choose_display` returns the *first* connected connector that has a
 usable mode and a CRTC that can reach it, and `DrmScanout` owns exactly one
@@ -32366,14 +32480,241 @@ connectors, allocate a buffer pair per head, flip each. The hard half is
 upstream — `Compositor` composes *one* frame at *one* size, and a second monitor
 is not a second copy of that frame but a second viewport onto one desktop with
 its own resolution, its own position in a virtual screen, and windows that can
-straddle the boundary. `gui/compositor/src/display.rs` already models multiple
-displays, modes and refresh rates faithfully; it is the compositing pipeline
-that assumes one.
+straddle the boundary. `DisplayManager` (in `gui/compositor/src/lib.rs`, not a
+`display.rs` — an earlier revision of this entry named a file that does not
+exist) already models multiple displays, modes and refresh rates faithfully; it
+is the compositing pipeline that assumes one.
 
 **Severity.** Low as a defect, medium as a missing feature. Multi-monitor is
 table stakes for a desktop OS, but a one-headed desktop is fully usable and
 nothing about the current design has to be unwound to add the second — the
 per-head state is already a struct.
+
+**Update 2026-08-21 — the compositor half is done, and it was not a missing
+feature but a live bug.** The claim above that the model "already models
+multiple displays faithfully" was wrong. `DisplayManager::add_display` extended
+the virtual desktop and *nothing extended the surface being composited into*, so
+a window placed on the second monitor was drawn past the end of the framebuffer
+and clipped away entirely — while the model went on reporting it as visible on
+screen 2. Two more followed from the same crack: `set_fullscreen` sized from
+`backend.size()` rather than from the window's own monitor (so fullscreening on
+the second screen jumped the window to the first and spanned both, disagreeing
+with `maximize_window` one line away), and `refit_fullscreen_windows` applied the
+resized framebuffer's dimensions to *every* fullscreen window (so a mode change
+on one monitor dragged the games on all the others onto it).
+
+Fixed by making the scanout surface exactly the virtual desktop's bounding box,
+as an invariant of the only two functions that can change either
+(`resize_display` and a new `attach_display`, both of which allocate before they
+adopt, so a surface that cannot be allocated leaves the arrangement alone), and
+by resolving fullscreen against `work_bounds_for` like maximise does. Rationale
+and the rejected per-head-frame alternative: `design-decisions.md` §514. 10 new
+tests, each proved by defect reintroduction.
+
+A latent `Rect` defect fell out of that work and is fixed in the same change:
+`union` and `intersect` computed far edges with `self.width as i32`, so a
+rectangle wider than 2^31 unioned to a bounding box *narrower than either input*
+and intersected with anything to nothing. They now use the already-saturating
+`right()`/`bottom()`.
+
+**Update 2026-08-21 (2) — RESOLVED; the scanout half is done too.**
+`DrmScanout` now holds a `Vec<Head>`, one per connected connector that has a
+usable mode and a CRTC no earlier connector claimed, each with its own buffer
+pair and its own page flip. `blit` takes a `Viewport` — pitch, size and the
+head's `(src_x, src_y)` within the composited frame — so each monitor copies out
+its own rectangle of the one desktop-sized picture, and `Present` did not gain a
+method or a parameter. `main.rs` builds the compositor at head 0 and declares
+the rest with `attach_display`, then cross-checks `frame_size()` against
+`screen.size()` and warns if they disagree.
+
+Three things that were latent in the single-head code and became defects the
+moment there were two, all fixed here:
+
+* **CRTC exclusivity.** `resolve_crtc`'s preference for the CRTC a connector was
+  already bound to at boot would hand the same one to two connectors, which does
+  not light the second monitor — it replaces the first monitor's picture with
+  the second's, every frame. `choose_displays` now carries a `taken` list and
+  declines a connector it cannot give a free CRTC to.
+* **A flip failure closed the whole display.** Unplugging one monitor
+  mid-session would have blanked the other and exited the display server. A
+  failing head is now marked dead individually; `is_open()` goes false only when
+  none is left.
+* **The destination row stride.** Writing every head at the first head's pitch
+  skews any monitor whose width pads differently — invisible on one head, and on
+  two whose widths happen to pad alike.
+* **An allocation failure was fatal, and a partial one leaked.** A head whose
+  flip failed was declined, but a head whose *buffers* would not allocate
+  returned `Err` from `new()` and blanked the monitor next to it that had
+  allocated fine. Worse, when the second of a head's two `CREATE_DUMB`s failed,
+  the first buffer was owned by nobody — the head never reaches
+  `DrmScanout::heads`, which is what `Drop` walks — so its framebuffer id and
+  GEM handle leaked for the life of the process. `make_head` now releases the
+  orphan at the point of failure and `new()` declines the head, returning an
+  error only when no head was built at all.
+* **The per-head accessors indexed a different list from the one `heads()`
+  reports.** Dead heads stay in the vector so `Drop` can return their buffers,
+  but `heads()` filters them out, so a caller enumerating `heads()` and passing
+  the loop index back to `pitch_of(i)` read the wrong monitor once one died.
+  They are now keyed on the connector id — `pitch_for` / `scanned_out_for` —
+  and the single-head accessors (`crtc_id`, `connector_id`, `pitch`,
+  `scanned_out`) resolve through one `first_live()` helper instead of reading
+  position zero, which after a failure is the head that just went away.
+
+A head that fails stays in the vector so `Drop` still returns its two dumb
+buffers and two framebuffer ids; dropping it would leak four kernel objects,
+which matters because this type does not own the card. Rationale, and the
+rejected alternatives for each of the three rules: `design-decisions.md` §515.
+18 new tests, 17 proved by defect reintroduction and the eighteenth recorded
+there as additional coverage.
+
+**What remains, and is filed elsewhere.** Per-head scale factor and rotation are
+not possible under the one-surface arrangement (`design-decisions.md` §514) and
+monitors can only be arranged in a row, because the surface's origin is the
+desktop's origin. Each monitor runs at the mode it came up in —
+`TD-COMPOSITOR-CANNOT-CHANGE-MODE`. Hotplug of a monitor *after* startup is not
+handled: heads are enumerated once in `DrmScanout::new`, so plugging a screen in
+does nothing until the display server restarts. That last one is new debt and is
+filed below as `TD-COMPOSITOR-IGNORES-MONITOR-HOTPLUG` — since resolved, on
+2026-08-21, by the polled re-probe in `design-decisions.md` §517.
+
+## TD-COMPOSITOR-IGNORES-MONITOR-HOTPLUG (lane C, 2026-08-21) — RESOLVED 2026-08-21
+
+**Resolution.** Both halves and the seam between them are done, in four commits;
+`design-decisions.md` §517 records the reasoning and §516 the detach half.
+
+- `773455e29` — *the seam.* `Present::monitors() -> Option<Vec<MonitorInfo>>`
+  (default `None`, meaning "no opinion" — a headless recorder or a host window
+  has no connectors to enumerate) and `Server::reconcile_monitors`, called at the
+  top of `run_with`'s loop. It is a **poll of the whole set**, not a pushed
+  difference: asking twice gives the same answer, a tick that fails is retried a
+  second later, and the difference is computed against the arrangement actually
+  held rather than the one a sender assumed. Removals run before additions, so
+  peak surface is the smaller arrangement and a moved cable's CRTC is free before
+  the new head asks for it.
+- `382ae7a64` — *detect.* `DrmScanout::reprobe` re-reads `GETCONNECTOR` for every
+  connector and diffs against the head list, rate-limited to `PROBE_INTERVAL`
+  (1 s, `set_probe_interval` for tests) because a `count_modes == 0` probe makes
+  the kernel do real DDC traffic — tens of ms, far more than a frame.
+  `resize_to_heads` recomputes the framebuffer bounding box *without* moving any
+  head, unlike the pre-existing `lay_out_heads`, keeping §515/§516's "survivors
+  do not move" true on the scanout side too. This is also the one place that
+  *reaps*: a retired head is removed and its buffers released rather than left
+  `alive = false`, because a polled probe can retire a head every second for
+  hours and a head list that grows per plug event is a leak with a physical
+  trigger.
+- `842026285` — *the shared key.* `Compositor::rename_display` plus `main.rs`
+  naming every `Display` after its **connector id** instead of its enumeration
+  index, and passing each head's real refresh rate instead of a hardcoded
+  constant. This was the last item the original entry listed as outstanding, and
+  it is load-bearing: a first screen still called `0` is both a display no
+  connector claims and a connector no display claims, so reconciliation would
+  detach it and attach a duplicate once a second, for ever.
+
+Sixteen tests, every one proved a regression test by reintroducing the defect it
+names and confirming a deterministic failure that names it back, source restored
+byte-for-byte afterwards. Nineteen markers: `seamadoptsanyreply`,
+`seamemptyisarrangement`, `seamnoreconcile`, `seamsizeisidentity`,
+`seamreattachesknown`, `seamnewmonitorisprimary`; `probenever`,
+`probeeverytime`, `probereportsindex`, `probearrivesatorigin`, `probereflows`,
+`probekeepsdeparted`, `probeadoptsfirst`, `probekeepsdarkhead`,
+`probefailureisempty`; `renamenoop`, `renamedemotes`, `renamecollides`,
+`renamewrongdisplay`. One test had to be strengthened before it was honest —
+`an_empty_monitor_list_is_not_an_arrangement_to_adopt` used one display and
+passed with its guard deleted, because `detach_display` refuses the last monitor
+anyway; with two displays the guard is the only thing holding the desktop
+together. Compositor 465 green, clippy clean on `x86_64-pc-windows-gnu`
+(`--all-targets`) and `x86_64-unknown-linux-gnu` (`--bins`, the only build that
+compiles the Linux arm of `main.rs` at all), fmt clean.
+
+**What is deliberately still out of scope,** and filed elsewhere: a **mode
+change** under a live connector is ignored, because reconciliation compares ids
+and never sizes — detaching and re-attaching to resize would destroy that
+screen's window arrangement and move the monitor to the end of the row
+(`TD-COMPOSITOR-CANNOT-CHANGE-MODE`). **EDID is not read**, so a monitor is
+identified by the socket it is in and not by which monitor it is; swap two
+cables and each takes the other's place in the row. And **nothing is
+remembered**: unplug a monitor and plug it back in and it returns at the
+right-hand end rather than where it was. All three want an identity that
+outlives a cable, which is a larger design than this one.
+
+<details><summary>Original entry (describes pre-<code>773455e29</code> code)</summary>
+
+**In short:** plugging a second monitor in while the desktop is running does
+nothing — it stays dark until the display server is restarted. Unplugging one
+works, in the sense that the remaining screen keeps going, but the desktop does
+not shrink back and windows stranded on the departed monitor stay stranded.
+
+**What.** `DrmScanout::new` enumerates connectors once and builds the head list
+from that. Nothing re-reads `GETCONNECTOR` afterwards, so a connector that
+becomes `CONNECTED` later is never noticed. On the way out, a head whose flips
+start failing is marked dead (`head.alive = false`) and stops being drawn on,
+which keeps the *other* monitors alive — but the composited frame keeps its
+size, `Compositor` is never told the display went away, and so
+`DisplayManager` still lists it, `work_bounds_for` still resolves to it, and a
+window maximised there is on a screen that no longer exists.
+
+**Where.** `gui/compositor/src/present/drm.rs` — `DrmScanout::new`,
+`lay_out_heads`, and the `Err(_)` arm of `Present::show`.
+
+**What the proper fix looks like.** Two halves, and the second is the load-
+bearing one:
+
+1. *Detect.* DRM signals hotplug with a uevent on a netlink socket, which
+   SlateOS's kernel does not expose. The portable fallback is to re-probe every
+   connector periodically (a `GETCONNECTOR` per connector per second is cheap)
+   and diff against the head list. Polling is the right first implementation
+   here because it needs nothing from lane A.
+2. *Propagate.* A head appearing or disappearing has to reach `Compositor` as
+   an `attach_display` / a new `detach_display`, which must re-run
+   `relayout_for_desktop_change` so the surface is resized, fullscreen windows
+   are re-fitted and stranded windows are rescued — the machinery §512 and §513
+   built, which already does exactly this for a *resize* and has never been
+   asked to do it for a removal. `detach_display` does not exist yet and is the
+   real work: it is `attach_display` in reverse, and it must decide what happens
+   to a window whose only monitor left, which `bring_stranded_windows_back`
+   already answers for the resize case.
+
+Note that `Present` currently has no way to tell its caller anything except
+"still open", so the seam for (2) has to be added: either a method that returns
+the head list and is polled by `Server::run_with`, or the same
+`Present::input`-shaped channel that `TD-COMPOSITOR-HAS-NO-LOCAL-INPUT` needs.
+Doing both through one mechanism is probably right and is a reason to do them
+together.
+
+**Severity.** Low. It costs a restart, on hardware SlateOS does not yet run on
+(QEMU presents one card), and nothing is corrupted — the surviving monitors
+keep a correct picture. It rises to medium alongside any real bare-metal
+bring-up, and it is the obvious next thing after
+`TD-COMPOSITOR-DRIVES-ONE-HEAD`.
+
+**Update 2026-08-21 — half (2), *propagate*, is done.**
+`Compositor::detach_display` exists (lib.rs, beside `attach_display`) with
+`DisplayManager::remove_display` under it, and design-decisions.md §516 records
+why it is not simply `attach_display` run backwards: it adopts the removal
+*first* and shrinks the surface after, because the monitor is already gone and a
+surface that stays too large still covers the desktop; and the surviving
+monitors keep the offsets they had, because §515 already decided the scanout
+will not re-flow its surviving heads and the two layouts have to agree pixel for
+pixel. Everything that re-places the stranded windows turned out to be §512's
+existing `relayout_for_desktop_change` — no new pass was needed, which is what
+§513's "reachable is a question about the whole desktop" bought. 10 tests, all
+proved by reintro markers (`detachnopromote`, `detachreflows`,
+`detachwrongdisplay`, `detachlastmonitor`, `detachnoshrink`, `detachnorelayout`,
+`detachhomeisdesktop`).
+
+**What is left is half (1), *detect*, and the seam.** Nothing calls
+`detach_display` yet, and nothing calls `attach_display` after startup either,
+so the observable behaviour is unchanged: hotplug is still ignored. What remains
+is (a) `DrmScanout` re-probing `GETCONNECTOR` periodically and diffing against
+its head list, and (b) a way for it to tell `Server::run_with` what changed —
+which is still the seam this entry describes, and still probably wants to be the
+same mechanism `TD-COMPOSITOR-HAS-NO-LOCAL-INPUT` needs. One further thing the
+wiring must fix: `main.rs` builds each `Display` with `id = <enumeration
+index>`, but `detach_display` names a display by id and the stable key on the
+scanout side is the **connector id** (§515), so the two have to be made the same
+number before a detach can name the right screen.
+
+</details>
 
 ## TD-COMPOSITOR-HAS-NO-LOCAL-INPUT (lane C, 2026-08-21)
 
@@ -32403,6 +32744,39 @@ already turns scan-code-set-1 into characters, and the fix is additive.
 "expose input somehow" is not a request lane A can act on. Determine first
 whether the kernel's existing keyboard path can be given a second consumer, or
 whether this wants a new device; that reading is lane C's to do before filing.
+
+**Update 2026-08-21 — that reading is done, and it is now filed:**
+`requests/c-a-userspace-cannot-read-the-keyboard-or-the-mouse-at-all.md`. What
+the drivers turned out to say:
+
+* **The mouse has no userspace door of any kind.** `kernel/src/mouse.rs` keeps a
+  128-entry lock-free ring of `MouseEvent { buttons, dx, dy, dz }` and exposes
+  `try_read_event()`/`read_event()` to *kernel* callers only. Nothing under
+  `kernel/src/syscall/` or `kernel/src/fs/` reads it; the only matches for
+  "mouse" there are accessibility *settings* (`mouse_keys`, `mouse_speed`). So
+  the pointer cannot move, as opposed to moving badly.
+* **The keyboard's existing consumer cannot be reused, because the information
+  is destroyed before the queue.** `handle_scancode`
+  (`kernel/src/keyboard.rs:289`) computes `(extended, code, pressed)`, uses
+  `pressed` to update the modifier statics, and then keeps only the ASCII
+  character — for the keys that have one. `SYS_CONSOLE_TRY_READ_CHAR` therefore
+  hands back a `u8`: no release events, no keycode, nothing for F-keys, arrows,
+  Home/Insert or the keypad. Giving it "a second consumer" would hand that
+  consumer the same lossy `u8`. The raw push has to happen inside the ISR, which
+  is lane A's tree.
+* **The ask is Linux `struct input_event` on `/dev/input/event0`/`event1`**, with
+  `EV_KEY`/`EV_REL`/`EV_SYN`, `BTN_LEFT`-style button codes, and `O_NONBLOCK`.
+  Every other kernel door this compositor uses is the Linux one — the scanout
+  path issues real `open`/`ioctl`/`mmap` numbers on purpose — and input is also
+  where every future port (SDL, GTK, Chromium, an X server) will look first.
+  The request explicitly offers to own the set-1 → Linux-keycode table in lane C
+  if that is what makes the kernel half small enough to land.
+
+**No interim is being built, deliberately.** Driving the compositor from
+`SYS_CONSOLE_TRY_READ_CHAR` would give typing and nothing else, and would need
+its own event synthesis, focus rules and tests — all of which get deleted when
+the real device lands. That is exactly the band-aid accumulation `CLAUDE.md`
+names. This entry stays open and honest instead.
 
 ## TD-COMPOSITOR-COPIES-EVERY-FRAME-TWICE (lane C, 2026-08-21)
 
@@ -53003,7 +53377,36 @@ That is the whole difference between this entry and the bug it replaces.
 contradiction and asked which of the two numbers should move.
 ---
 
-## TD-C-FULLSCREEN-IGNORES-WHICH-MONITOR-AND-WHAT-IS-RESERVED (lane C, 2026-08-21) — OPEN
+## TD-C-FULLSCREEN-IGNORES-WHICH-MONITOR-AND-WHAT-IS-RESERVED (lane C, 2026-08-21) — RESOLVED 2026-08-21
+
+**Resolution.** Already fixed by `c85729f62` (design-decisions.md §514), which
+landed between this entry being written and being picked up — the entry below
+describes code that no longer exists. `set_fullscreen` reads
+`self.work_bounds_for(w.frame_rect())` and sizes from *that* (lib.rs ~5216), and
+`work_bounds_for` returns `Display::bounds` — the monitor, not its work area —
+which is exactly what step 1 asks for. Step 2's blocker was resolved in the same
+commit and recorded in §514: the direct-scanout bypass is deliberately a
+single-head optimisation, and the guard that makes it so is the pre-existing
+"the window must cover the whole framebuffer" test, which a one-monitor
+fullscreen window no longer satisfies. `the_direct_scanout_bypass_declines_a_second_monitor`
+(lib.rs ~15366) pins that the guard is load-bearing rather than incidentally
+true.
+
+Step 3's checklist had two of its three tests —
+`fullscreen_fills_the_windows_own_monitor_and_not_every_monitor` and
+`leaving_fullscreen_on_the_second_monitor_stays_on_it`. The third, the contrast
+against a reservation, was genuinely missing and is now
+`fullscreen_covers_the_taskbar_that_maximize_stops_at`: it maximizes a window
+over a 40-row bottom reservation and asserts it stops at `screen.bottom() - 40`,
+then fullscreens the *same* window and asserts it covers the whole 800x600. The
+gap mattered — with nothing reserved the two helpers return the same rectangle,
+so swapping `work_bounds_for` for `work_area_for` in `set_fullscreen` passed all
+427 other tests while leaving a strip of taskbar across every full-screen video.
+Proved by the reintro marker `fullscreenspareasthetaskbar`, which fails that one
+test and no other. Compositor 428 + 18 green.
+
+<details><summary>Original entry (describes pre-<code>c85729f62</code> code)</summary>
+
 
 **In short:** Putting a window fullscreen always makes it fill the *first*
 monitor, starting at the top-left corner of the whole desktop — no matter which
@@ -53066,3 +53469,40 @@ tested today. On two it is a visible misfeature the first time anyone
 fullscreens anything on the secondary screen. It does not corrupt state — the
 restore rectangle is captured before the move, so leaving fullscreen still
 returns the window to where it was — and it does not get worse with time.
+
+</details>
+
+## B-AUTH-DAEMON-RATE-LIMIT-TESTS-RACE-A-ONE-SECOND-WINDOW (lane B, filed by lane C 2026-08-21) — OPEN, filed as a request
+
+**In short:** four userspace daemons test their password rate limiter by making
+four wrong guesses and asserting the fifth is refused. The refusal lasts exactly
+one *real* second, and the four guesses each run a real password hash, so on a
+loaded machine the window is already over by the time the fifth guess happens
+and the test fails. Observed once in a lane-C full-workspace run.
+
+**Where it lives:** `userspace/sshd/src/main.rs` (observed),
+`userspace/ftpd/src/main.rs`, `userspace/doas/src/main.rs`,
+`userspace/logind/src/main.rs` — all four build the authenticator with the real
+clock. `userspace/authlib/src/lib.rs` ~line 520 is the window
+(`now < last_failure_secs + delay_for(failures)`; `delay_for(4) == 1`).
+
+**Reproduce:** `cargo test --workspace --target x86_64-pc-windows-gnu` under
+load. Green in isolation (`sshd` 140/140). Observed:
+`sshd/src/main.rs:4902: expected a rate limit, got Rejected`.
+
+**Proper fix:** pin the clock, as `authlib`'s own copy of the same test already
+does — `Authenticator::with_clock(...)` over an `AtomicU64` the test steps
+deliberately. This also strengthens the assertions: a frozen clock lets them
+check `RateLimited { retry_after_secs: 1 }` at a known instant instead of
+`matches!(.., RateLimited { .. })` at whatever instant the scheduler provided.
+
+**Why it matters more than a flake:** the failing direction is noisy but the
+*passing* direction is quietly weak. A pass proves only "refused within a second
+of the fourth failure", which a mis-computed delay would also satisfy. The tests
+are worth less than their names claim even when green.
+
+**Not lane C's tree.** Filed as
+`requests/c-b-auth-daemon-rate-limit-tests-race-a-one-second-window.md` with the
+full diagnosis. Distinct from the resolved
+`B-FTPD-SSHD-AUTH-TESTS-SHARE-TEMP-FILES-AND-FLAKE` — that was shared temp
+files and lane B's `ScratchDir` fix holds; this is wall-clock timing.

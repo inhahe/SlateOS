@@ -91,6 +91,28 @@ const MV: Program = Program::new("mv", 1);
 /// order. Every entry is here whether or not this implementation acts on it —
 /// see the module docs for why leaving one out is a silent wrong answer rather
 /// than a missing feature.
+///
+/// Measured with `mv --=x`, which an empty prefix makes print the whole table:
+///
+/// ```text
+/// mv: option '--=x' is ambiguous; possibilities: '--backup' '--context'
+/// '--debug' '--force' '--interactive' '--no-clobber' '--no-copy'
+/// '--no-target-directory' '--strip-trailing-slashes' '--suffix'
+/// '--target-directory' '--update' '--verbose' '--help' '--version'
+/// ```
+///
+/// **This table was originally written from recall and was wrong in both
+/// directions**, which is the reason `scripts/getopt-ambiguity-check.py` now
+/// exists — it found this by asking GNU about every prefix. It carried an
+/// `("exchange", …)` that the reference does not have (it is a later upstream
+/// addition) and lacked `("no-copy", …)` that it does, so `mv --no-c` resolved
+/// to `--no-clobber` here where GNU calls it ambiguous. Nothing user-visible
+/// went wrong only because this `mv` refuses `--no-clobber` anyway; the day it
+/// implements it, `mv --no-c` would have silently meant `--no-clobber`.
+///
+/// The rule the mistake teaches: **the table tracks the reference we can
+/// measure, not the newest upstream we can remember.** A table half from one
+/// release and half from another matches no getopt anywhere.
 const LONG_OPTIONS: &[(&str, Takes)] = &[
     ("backup", Takes::Optional),
     ("context", Takes::Optional),
@@ -98,13 +120,13 @@ const LONG_OPTIONS: &[(&str, Takes)] = &[
     ("force", Takes::Nothing),
     ("interactive", Takes::Nothing),
     ("no-clobber", Takes::Nothing),
+    ("no-copy", Takes::Nothing),
     ("no-target-directory", Takes::Nothing),
     ("strip-trailing-slashes", Takes::Nothing),
     ("suffix", Takes::Required),
     ("target-directory", Takes::Required),
     ("update", Takes::Optional),
     ("verbose", Takes::Nothing),
-    ("exchange", Takes::Nothing),
     ("help", Takes::Nothing),
     ("version", Takes::Nothing),
 ];
@@ -588,11 +610,29 @@ mod tests {
         assert!(e.sentence.contains("--version"), "{:?}", e.sentence);
     }
 
-    /// Likewise `--n`, between `--no-clobber` and `--no-target-directory`.
+    /// Likewise `--n`, across all three `no-` options.
     #[test]
     fn ambiguous_no_prefix_is_refused() {
         let e = fail(&["--n"]);
-        assert!(e.sentence.contains("ambiguous"), "{:?}", e.sentence);
+        assert_eq!(
+            e.sentence,
+            "option '--n' is ambiguous; possibilities: '--no-clobber' \
+             '--no-copy' '--no-target-directory'"
+        );
+    }
+
+    /// The prefix that caught the table being wrong. `--no-c` reaches
+    /// `--no-clobber` and `--no-copy`; before `("no-copy", …)` was added it
+    /// resolved here and was ambiguous in GNU, which is the exact shape of
+    /// silently acting on an option the user did not unambiguously name.
+    #[test]
+    fn ambiguous_no_c_prefix_is_refused() {
+        let e = fail(&["--no-c"]);
+        assert_eq!(
+            e.sentence,
+            "option '--no-c' is ambiguous; possibilities: '--no-clobber' \
+             '--no-copy'"
+        );
     }
 
     #[test]
@@ -645,7 +685,7 @@ mod tests {
             "--strip-trailing-slashes",
             "--update",
             "--verbose",
-            "--exchange",
+            "--no-copy",
             "--debug",
             "--context",
         ] {

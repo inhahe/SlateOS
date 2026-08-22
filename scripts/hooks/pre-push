@@ -1,11 +1,12 @@
 #!/bin/sh
-# Four gates at the push boundary. Any one of them aborts the push.
+# Five gates at the push boundary. Any one of them aborts the push.
 #
 #   1. Refuse to publish the operator's private files (`todo2.txt`).
 #   2. Refuse to publish a command name that nothing can produce an executable
 #      for.
 #   3. Refuse to publish a mutable process-global that its own tests race.
 #   4. Refuse to publish a utility that panics on a legal (non-UTF-8) filename.
+#   5. Refuse to publish a long-option table that disagrees with GNU's.
 #
 # Each has a full comment above it, further down; each has its own bypass
 # variable, so silencing one never silences another; and each is scoped to the
@@ -374,6 +375,125 @@ baseline, which is not.
 
 To push anyway:
     ALLOW_ARGV_UTF8=1 git push $remote_name ...
+
+EOF
+    exit 1
+fi
+
+# ---------------------------------------------------------------------------
+# Gate 5: refuse to publish a long-option table that disagrees with GNU's.
+#
+# Every converted coreutils bin carries a LONG_OPTIONS table copied from GNU,
+# and it must list options the utility does not implement, because the table --
+# not the set of options we handle -- is what decides whether an abbreviation
+# like `--v` is ambiguous. Drop `--verbose` from `rm`'s table and `rm --v file`
+# prints a version banner and deletes nothing.
+#
+# Copying it from memory does not work, and we have the scars: `mv` carried
+# `--exchange` (a newer upstream's option) and lacked `--no-copy` (the
+# reference's), `cp` carried `--keep-directory-symlink` (which is a *tar*
+# option), `rm` and `split` were each missing an entry whose name begins with a
+# hyphen, and `csplit` held exactly the right names in an order no getopt
+# produces. Five bins, five different ways to be wrong, none of them visible by
+# reading the file.
+#
+# scripts/getopt-ambiguity-check.py measures instead. It reads GNU's own table
+# out of `<util> --=x` and compares ours to it as a sequence, then compares our
+# verdict against GNU's for every abbreviation of every name.
+#
+# Unlike gates 2-4 this has no baseline, because it starts at zero: all 24
+# tables agreed when it landed. A ratchet exists to let an inherited backlog be
+# worked down; there is no backlog here, so the gate is simply strict.
+#
+# Scoping matters more here than for the others, because each probe is a WSL
+# round trip: a full sweep is ~35s, one bin is ~2s. So it checks only the bins
+# whose files this push actually rewrites -- unless the push touches getopt.rs
+# itself, whose resolution rules every table depends on, in which case it sweeps
+# all of them.
+#
+# A machine with no GNU userland (no WSL, not Linux) is a skip, not a failure:
+# the script exits 0 saying so. A check that cannot run has nothing to say, and
+# a hook that blocks pushing on such a machine is a hook that gets uninstalled.
+#
+# Bypass: ALLOW_GETOPT_DRIFT=1 git push origin <branch>
+# ---------------------------------------------------------------------------
+
+if [ "${ALLOW_GETOPT_DRIFT:-0}" = "1" ]; then
+    echo "pre-push: ALLOW_GETOPT_DRIFT=1 set — option-table check skipped." >&2
+    skip_getopt=1
+else
+    skip_getopt=$skip
+fi
+
+gopt="${repo_root:-.}/scripts/getopt-ambiguity-check.py"
+[ -f "$gopt" ] || skip_getopt=1
+
+# The bin files this push rewrites. `--name-only` over just the commits being
+# added keeps this to the push's own contents rather than the whole branch.
+changed=$(git log --name-only --pretty=format: HEAD --not --remotes="$remote_name" \
+              -- userspace/coreutils/src/bin/ userspace/coreutils/src/getopt.rs \
+              2>/dev/null | sort -u)
+
+run_all=0
+bins=""
+case "$changed" in
+    # Shared resolution logic: every table's verdicts depend on it, so a change
+    # here is not scoped to any one bin.
+    *userspace/coreutils/src/getopt.rs*) run_all=1 ;;
+    *)
+        # `bin/foo.rs` -> `foo`, `bin/foo/main.rs` -> `foo`, matching how the
+        # checker names a utility.
+        bins=$(printf '%s\n' "$changed" \
+               | sed -n 's|^userspace/coreutils/src/bin/||p' \
+               | sed 's|/main\.rs$||; s|\.rs$||' \
+               | sort -u | tr '\n' ' ')
+        ;;
+esac
+
+getopt_failed=0
+if [ "$skip_getopt" != "1" ]; then
+    if [ "$run_all" = "1" ]; then
+        "$py" "$gopt" || getopt_failed=1
+    elif [ -n "$bins" ]; then
+        # Deliberately unquoted: `$bins` is a list of utility names to pass as
+        # separate arguments, and they are shell-safe by construction (they are
+        # Rust source file stems).
+        # shellcheck disable=SC2086
+        "$py" "$gopt" $bins || getopt_failed=1
+    fi
+fi
+
+if [ "$getopt_failed" = "1" ]; then
+    cat >&2 <<EOF
+
+pre-push: REFUSING to push — a long-option table disagrees with GNU's.
+
+The table above does not match the one the real utility carries. That is not a
+cosmetic difference: the table is what decides whether an abbreviation is
+ambiguous, and which option an ambiguous one names first.
+
+  * "GNU has --x, LONG_OPTIONS does not" is the dangerous direction. Every
+    abbreviation of the missing name is one we resolve to some *other* option
+    and act on, where GNU would have refused it.
+  * "LONG_OPTIONS has --x, GNU does not" usually means the entry was written
+    from memory of a newer release than the one we measure against.
+  * "same names, different order" changes which candidate a diagnostic names
+    first, because glibc reports the first table entry that matched.
+
+Fix the table, not the check. Read GNU's own copy with:
+
+    <util> --=x
+
+The empty prefix matches every entry, so the ambiguity message lists the whole
+table in declaration order -- names, and order, in one measurement.
+
+If a difference is genuine (\`--context\` is compiled out of a build without
+SELinux, say), exempt that one name explicitly in
+scripts/getopt-ambiguity-check.py with the reason. Do not loosen the
+comparison: it starts at zero disagreements and is meant to stay there.
+
+To push anyway:
+    ALLOW_GETOPT_DRIFT=1 git push $remote_name ...
 
 EOF
     exit 1

@@ -57657,6 +57657,106 @@ into a version banner. `--p` is measured as *unambiguous* (`mkdir --p q` works),
 and there is a test for that too, since it is the abbreviation a user is most
 likely to type.
 
+### The option tables were wrong in five bins, and now there is a gate (2026-08-22)
+
+**In short:** Each converted utility carries a copy of the real GNU program's
+list of long options (`--verbose`, `--parents`, …). The copy has to be exact,
+including options we deliberately do not implement, because that list — not the
+set of options we handle — is what decides whether a shortened option like
+`--v` is an error or a command. We had been writing those lists from memory.
+Five of them were wrong, in five different ways, and none of the mistakes was
+visible by reading the file. There is now a script that asks the real utility
+for its list and compares, and a push gate that runs it.
+
+**Why the list must include options we do not implement.** `getopt_long` lets a
+user shorten a long option to any prefix that names exactly one entry. Whether
+`--v` names exactly one entry depends on *every* entry, so an option missing
+from the list does not merely go unrecognised — it stops making its neighbours
+ambiguous. Drop `--verbose` from `rm`'s list and `rm --v file` no longer fails;
+it matches `--version`, prints a banner, and deletes nothing.
+
+**How they were wrong.** All five were found by measurement, none by review:
+
+| Bin | The mistake | What a user would have seen |
+|---|---|---|
+| `mv` | had `--exchange`, which is a *newer* upstream's option; lacked `--no-copy`, which the reference has | `mv --no-c` acted on `--no-clobber` where GNU calls it ambiguous |
+| `cp` | had `--keep-directory-symlink`, which is a **`tar`** option and has never been a `cp` one | an accepted abbreviation of an option `cp` does not have |
+| `rm` | lacked `-presume-input-tty` | `rm ---p` unrecognised where GNU resolves it |
+| `split` | lacked `-io-blksize` | `split ---i` unrecognised where GNU resolves it |
+| `csplit` | exactly the right names, in an order no getopt produces | `csplit --s` listed `'--suffix-format'` first where GNU lists `'--silent'` |
+
+Two of those deserve enlarging on.
+
+**Option names may begin with a hyphen.** GNU's `rm` table literally holds the
+name `-presume-input-tty`, so it is typed `---presume-input-tty`, with three
+dashes. `split` has `-io-blksize` the same way. These are internal knobs
+deliberately made awkward to spell, and the leading hyphen is not a typo in
+this file — it is the name. They cannot collide with any ordinary `--name`
+(nothing else starts with `-`), so listing them changes nothing except that a
+`---` prefix now resolves as GNU resolves it. `rm.rs` carries a test in each
+direction: `---p` reaches the hyphen-named option, and `--p` still means
+`--preserve-root` alone.
+
+**Order is observable, not cosmetic.** glibc reports `pfound` — the *first*
+table entry that matched — so two tables holding the same names in different
+orders name different options in their diagnostics. `csplit`'s list had been
+sorted into a plausible-looking order rather than GNU's, which changed nothing
+about *what* resolved and everything about what the error message said.
+
+**The gate.** `scripts/getopt-ambiguity-check.py` runs two comparisons per bin:
+
+1. **The table.** `<util> --=x` prints GNU's whole table — the empty prefix
+   matches every entry, so the ambiguity message lists all of them in
+   declaration order. Ours is compared to that as a *sequence*.
+2. **Every abbreviation.** For each distinct proper prefix of each name, our
+   verdict (resolves / ambiguous / unrecognised) is compared with GNU's.
+
+The second cannot find everything on its own, which is why the first exists:
+the prefixes it probes are generated from *our* names, so an option GNU has and
+we lack is never typed and never measured. That blind spot is exactly what hid
+`rm`'s and `split`'s missing entries through an earlier, prefix-only version of
+the script — it reported zero disagreements on all 24 tables.
+
+Run it with `python scripts/getopt-ambiguity-check.py [util…]`. It needs a GNU
+userland, finds WSL itself on this host, and exits 0 with a note where there is
+none. **Unlike the other pre-push gates it has no baseline**: all 24 tables
+agreed once these five were fixed, so it starts at zero and is simply strict.
+It is pre-push gate 5, scoped to the bins a push actually rewrites (~2s each)
+unless `getopt.rs` itself changed, in which case it sweeps all of them (~35s).
+
+### `getopt` called an alias ambiguous against itself (2026-08-22)
+
+**In short:** Some utilities have two spellings of one option — `rmdir --path`
+and `rmdir --parents` are the same thing. Our option matcher treated them as two
+different options, so it refused `rmdir --p` as "ambiguous" when the real
+`rmdir` accepts it. Fixed, with the fix driven by measurement rather than by
+guessing what "ambiguous" ought to mean.
+
+**What glibc actually does.** It judges ambiguity by `struct option`'s `val`
+field, not by name: two spellings sharing a `val` are one option, and a prefix
+matching only those resolves. Three measurements pinned the behaviour, and each
+one contradicted a plausible guess:
+
+| Measured | Result | The guess it kills |
+|---|---|---|
+| `rmdir --p` | resolves | "two matching names is ambiguous" |
+| `cp --p` | `ambiguous; possibilities: '--parents' '--preserve'` | "aliases are hidden" — `--path` matched, and is simply not a second *candidate* |
+| `rmdir --pa=1` → `'--path'`, `cp --pa=1` → `'--parents'` | disagree | "the alias resolves to its target" |
+
+That last row is the subtle one. The two utilities name *different* spellings
+for the same abbreviation, purely because their tables are in different orders:
+glibc returns the first entry that matched and never the alias's target. So the
+fix must **not** canonicalise — reporting the target would be one line shorter
+and would silently name an option the user did not type.
+
+`Program::resolve_long_aliased` takes an extra `&[(&str, &str)]` mapping a
+spelling to the option it *is*, compares each later match against the first
+one's identity (which is what glibc does, and is what decides the shape of the
+list), and returns the entry it matched. `resolve_long` delegates to it with an
+empty map, so the 23 call sites with no aliases needed no change and there is
+still only one implementation. `cp` was the one live bin affected; `rmdir` would
+have been wrong the same way the moment it was converted.
+
 ---
 
 ## TD-C-COMPOSITOR-TILES-UNDER-THE-TASKBAR (lane C, 2026-08-21) — MOSTLY RESOLVED 2026-08-21, step 4 blocked

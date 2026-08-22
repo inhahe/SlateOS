@@ -181,6 +181,26 @@ fn named_long(resolved: &str) -> String {
     quote_glibc(format!("--{resolved}").as_bytes())
 }
 
+/// Which option a spelling *is*, for the ambiguity test in
+/// [`Program::resolve_long_aliased`]. Our stand-in for GNU's `struct option`
+/// `val`, which is what `getopt_long` actually compares.
+///
+/// A spelling that is nobody's alias is its own identity, so a table with no
+/// aliases behaves exactly as it did before this existed. The map is not
+/// followed transitively — GNU has no chain of aliases, and a one-step lookup
+/// cannot loop.
+///
+/// The result is only ever *compared*, never printed. What gets printed is the
+/// table entry itself, which is why the resolved name stays the spelling the
+/// table declared rather than the alias's target; see
+/// [`Program::resolve_long_aliased`].
+fn identity<'a>(name: &'a str, aliases: &'a [(&'a str, &'a str)]) -> &'a str {
+    aliases
+        .iter()
+        .find(|(spelling, _)| *spelling == name)
+        .map_or(name, |&(_, target)| target)
+}
+
 /// A utility's name and usage status, bound once so that every diagnostic it
 /// produces carries the right ones.
 ///
@@ -341,25 +361,95 @@ impl Program {
         whole: &[u8],
         table: &'t [(&'t str, T)],
     ) -> Result<(&'t str, T), Error> {
+        self.resolve_long_aliased(typed, whole, table, &[])
+    }
+
+    /// [`resolve_long`](Self::resolve_long), for a table in which two spellings
+    /// name **one** option.
+    ///
+    /// GNU's `struct option` carries a `val` — the integer the option resolves
+    /// to — and `getopt_long` judges ambiguity by *that*, not by the name. Our
+    /// table is keyed by name and so has no `val`; for the handful of tables
+    /// where a second spelling exists, `aliases` supplies what `val` would have
+    /// told us. Each entry is `(spelling, the option that spelling *is*)`.
+    ///
+    /// Without it, a deprecated alias makes its own option unabbreviatable.
+    /// `rmdir`'s table holds both `--path` and `--parents`, which are the same
+    /// option, and GNU accepts `rmdir --p`:
+    ///
+    /// ```text
+    /// $ rmdir --p a/b        # measured: succeeds, removes b then a
+    /// $ cp --p x y
+    /// cp: option '--p' is ambiguous; possibilities: '--parents' '--preserve'
+    /// ```
+    ///
+    /// The `cp` line is the one that pins the rule, and it is worth reading
+    /// twice: `--p` is a prefix of `--parents`, `--path` **and** `--preserve`,
+    /// yet only two are listed. `--path` is dropped because it is the same
+    /// option as `--parents`, and `--preserve` is listed because it is not — so
+    /// this is not "aliases are hidden", it is "an alias is not a second
+    /// candidate".
+    ///
+    /// **The resolved name is the first *table* match, not the alias's target.**
+    /// glibc returns `pfound`, the earliest entry that matched, and names it in
+    /// any later diagnostic — measured, and the two utilities disagree because
+    /// their tables are ordered differently:
+    ///
+    /// ```text
+    /// $ rmdir --pa=1        # table order: … '--path' '--parents' …
+    /// rmdir: option '--path' doesn't allow an argument
+    /// $ cp --pa=1           # table order: … '--parents' '--path' …
+    /// cp: option '--parents' doesn't allow an argument
+    /// ```
+    ///
+    /// So a caller with an alias in its table must handle **both** spellings —
+    /// `"path" | "parents" => …` — rather than expecting one canonical name.
+    /// That is deliberate: canonicalising here would be one line, and would
+    /// silently make the message above name an option the user did not type.
+    ///
+    /// # Errors
+    ///
+    /// The typed name matching no option, or more than one *distinct* option.
+    pub fn resolve_long_aliased<'t, T: Copy>(
+        self,
+        typed: &str,
+        whole: &[u8],
+        table: &'t [(&'t str, T)],
+        aliases: &[(&str, &str)],
+    ) -> Result<(&'t str, T), Error> {
         if let Some(hit) = table.iter().find(|(n, _)| *n == typed) {
             return Ok(*hit);
         }
         let matches: Vec<_> = table.iter().filter(|(n, _)| n.starts_with(typed)).collect();
-        match matches.as_slice() {
-            [] => Err(self.unrecognized_option(whole)),
-            [only] => Ok(**only),
-            many => {
-                let list: Vec<String> = many.iter().map(|(n, _)| named_long(n)).collect();
-                Err(sentence(
-                    self,
-                    &format!(
-                        "option {} is ambiguous; possibilities: {}",
-                        named(whole),
-                        list.join(" ")
-                    ),
-                ))
-            }
+        let Some(first) = matches.first() else {
+            return Err(self.unrecognized_option(whole));
+        };
+        // glibc compares every later match against `pfound` — the first one —
+        // and never against each other, so a table `[A, B, B']` where `B'`
+        // aliases `B` lists all three. Mirroring that exactly matters: the list
+        // is user-visible output.
+        let first_id = identity(first.0, aliases);
+        let ambiguous: Vec<_> = matches
+            .iter()
+            .filter(|(n, _)| identity(n, aliases) != first_id)
+            .collect();
+        if ambiguous.is_empty() {
+            return Ok(**first);
         }
+        let mut list: Vec<String> = vec![named_long(first.0)];
+        list.extend(ambiguous.iter().map(|(n, _)| named_long(n)));
+        // Back into table order: `first` is the earliest match by construction,
+        // and `ambiguous` preserves the table's order among the rest, so
+        // prepending `first` is already sorted. Stated rather than assumed
+        // because the order is asserted on in tests.
+        Err(sentence(
+            self,
+            &format!(
+                "option {} is ambiguous; possibilities: {}",
+                named(whole),
+                list.join(" ")
+            ),
+        ))
     }
 
     /// gnulib's `argmatch`: resolve an option's *argument* against its list of
@@ -499,10 +589,20 @@ mod tests {
         ("key", Takes::Required),
     ];
 
+    /// The sentence alone, having first checked that the referral is there.
+    ///
+    /// The referral is `sort`'s for every test that uses `SORT`, which is most
+    /// of them; the alias tests build their own `Program` to reproduce a
+    /// measured `cp` or `rmdir` table, so the expected name is a parameter with
+    /// a default rather than the hard-coded `"sort"` it began as.
     fn without_referral(err: &Error) -> String {
+        without_referral_of("sort", err)
+    }
+
+    fn without_referral_of(program: &str, err: &Error) -> String {
         assert_eq!(
             err.referral,
-            Some("sort"),
+            Some(program),
             "every diagnostic here ends with the referral"
         );
         err.sentence.clone()
@@ -564,6 +664,110 @@ mod tests {
         // that had been "tidied" into alphabetical order.
         let m = &err.sentence;
         assert!(m.find("'--random-sort'") < m.find("'--random-source'"));
+    }
+
+    /// `rmdir`'s table, whose `--path` and `--parents` are one option under two
+    /// spellings — GNU's `struct option` gives them the same `val`. Measured
+    /// with `rmdir --=x`.
+    const RMDIR_LONGS: &[(&str, Takes)] = &[
+        ("ignore-fail-on-non-empty", Takes::Nothing),
+        ("path", Takes::Nothing),
+        ("parents", Takes::Nothing),
+        ("verbose", Takes::Nothing),
+        ("help", Takes::Nothing),
+        ("version", Takes::Nothing),
+    ];
+    const RMDIR_ALIASES: &[(&str, &str)] = &[("path", "parents")];
+    const RMDIR: Program = Program::new("rmdir", 1);
+
+    /// The bug this pair of functions was added for: a deprecated alias made
+    /// its own option unabbreviatable. Measured — `rmdir --p a/b` succeeds.
+    #[test]
+    fn an_alias_is_not_a_second_candidate() {
+        let (name, _) = RMDIR
+            .resolve_long_aliased("p", b"--p", RMDIR_LONGS, RMDIR_ALIASES)
+            .unwrap();
+        // `pfound`: the *first* table entry that matched, which for `rmdir` is
+        // the deprecated spelling. Measured: `rmdir --pa=1` answers
+        // `option '--path' doesn't allow an argument`.
+        assert_eq!(name, "path");
+        // Without the alias map the same table is ambiguous, which is exactly
+        // what `rmdir` did before and what GNU does not do.
+        assert!(RMDIR.resolve_long("p", b"--p", RMDIR_LONGS).is_err());
+    }
+
+    /// An exact match still wins outright and is returned as itself, alias or
+    /// not: `rmdir --path` is `--path`, not `--parents`.
+    #[test]
+    fn an_exact_alias_resolves_to_the_spelling_typed() {
+        let (name, _) = RMDIR
+            .resolve_long_aliased("path", b"--path", RMDIR_LONGS, RMDIR_ALIASES)
+            .unwrap();
+        assert_eq!(name, "path");
+    }
+
+    /// The rule is "an alias is not a second candidate", **not** "aliases are
+    /// hidden". `cp`'s `--p` matches `--parents`, `--path` and `--preserve`,
+    /// and GNU lists two of the three. Measured:
+    ///
+    /// ```text
+    /// cp: option '--p' is ambiguous; possibilities: '--parents' '--preserve'
+    /// ```
+    ///
+    /// This is the assertion that fails if someone implements the alias rule by
+    /// dropping aliases from the table, or from the message, instead.
+    #[test]
+    fn a_real_ambiguity_survives_an_alias_in_the_same_prefix() {
+        const CP_LONGS: &[(&str, Takes)] = &[
+            ("parents", Takes::Nothing),
+            ("path", Takes::Nothing),
+            ("preserve", Takes::Optional),
+        ];
+        const CP_ALIASES: &[(&str, &str)] = &[("path", "parents")];
+        let cp = Program::new("cp", 1);
+        let err = cp
+            .resolve_long_aliased("p", b"--p", CP_LONGS, CP_ALIASES)
+            .unwrap_err();
+        assert_eq!(
+            without_referral_of("cp", &err),
+            "option '--p' is ambiguous; possibilities: '--parents' '--preserve'"
+        );
+    }
+
+    /// glibc compares each later match against `pfound` and never against the
+    /// others, so when the alias pair is *not* first both of its spellings are
+    /// listed. Mirroring that exactly matters because the list is output.
+    #[test]
+    fn an_alias_pair_that_is_not_first_is_listed_in_full() {
+        const T: &[(&str, Takes)] = &[
+            ("pear", Takes::Nothing),
+            ("plum", Takes::Nothing),
+            ("prune", Takes::Nothing),
+        ];
+        const A: &[(&str, &str)] = &[("prune", "plum")];
+        let p = Program::new("t", 1);
+        let err = p.resolve_long_aliased("p", b"--p", T, A).unwrap_err();
+        assert_eq!(
+            without_referral_of("t", &err),
+            "option '--p' is ambiguous; possibilities: '--pear' '--plum' '--prune'"
+        );
+    }
+
+    /// A table with no aliases must behave exactly as it did before the alias
+    /// rule existed — every already-converted bin depends on that.
+    #[test]
+    fn an_empty_alias_map_changes_nothing() {
+        for typed in ["k", "r", "random-sort", "fo", "stable"] {
+            let whole = format!("--{typed}");
+            let plain = SORT.resolve_long(typed, whole.as_bytes(), SORT_LONGS);
+            let aliased =
+                SORT.resolve_long_aliased(typed, whole.as_bytes(), SORT_LONGS, &[]);
+            match (plain, aliased) {
+                (Ok(a), Ok(b)) => assert_eq!(a.0, b.0, "{typed}"),
+                (Err(a), Err(b)) => assert_eq!(a.sentence, b.sentence, "{typed}"),
+                (a, b) => panic!("{typed}: disagreed: {a:?} vs {b:?}"),
+            }
+        }
     }
 
     #[test]

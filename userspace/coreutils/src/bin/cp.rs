@@ -89,6 +89,12 @@ const CP: Program = Program::new("cp", 1);
 /// entry is here whether or not this implementation acts on it — see the module
 /// docs for why leaving one out is a silent wrong answer rather than a missing
 /// feature.
+///
+/// Measured with `cp --=x`, which an empty prefix makes print the whole table.
+/// It once also held `("keep-directory-symlink", …)`, which is a `tar` option
+/// and has never been a `cp` one; `scripts/getopt-ambiguity-check.py` now
+/// compares this list against that readout on every run, because the same
+/// mistake had independently reached `mv` as `--exchange`.
 const LONG_OPTIONS: &[(&str, Takes)] = &[
     ("archive", Takes::Nothing),
     ("attributes-only", Takes::Nothing),
@@ -105,8 +111,12 @@ const LONG_OPTIONS: &[(&str, Takes)] = &[
     ("no-target-directory", Takes::Nothing),
     ("one-file-system", Takes::Nothing),
     ("parents", Takes::Nothing),
-    // Deprecated upstream but still in the table, and still ambiguous with
-    // `--parents`: `cp --pa` is an error in GNU because of this entry.
+    // Deprecated upstream but still in the table. It is the *same option* as
+    // `--parents` — same `val` in GNU's `struct option` — which is why it is
+    // named in [`ALIASES`] below and why `cp --pa` resolves rather than being
+    // ambiguous. An earlier revision of this file asserted the opposite in a
+    // comment here; measuring it (`cp --pa=1` answers `option '--parents'
+    // doesn't allow an argument`) settled it the other way.
     ("path", Takes::Nothing),
     ("preserve", Takes::Optional),
     ("recursive", Takes::Nothing),
@@ -119,11 +129,19 @@ const LONG_OPTIONS: &[(&str, Takes)] = &[
     ("target-directory", Takes::Required),
     ("update", Takes::Optional),
     ("verbose", Takes::Nothing),
-    ("keep-directory-symlink", Takes::Nothing),
     ("context", Takes::Optional),
     ("help", Takes::Nothing),
     ("version", Takes::Nothing),
 ];
+
+/// The one pair of spellings in [`LONG_OPTIONS`] that name a single option.
+///
+/// See [`Program::resolve_long_aliased`]: without this, `--path` would count as
+/// a second candidate for the prefix `--pa` and make `--parents` impossible to
+/// abbreviate — which GNU allows. It does **not** make `--p` unambiguous, and a
+/// test below pins that: `--p` still matches `--preserve`, which is a genuinely
+/// different option.
+const ALIASES: &[(&str, &str)] = &[("path", "parents")];
 
 #[derive(Default)]
 #[cfg_attr(test, derive(Debug, PartialEq, Eq))]
@@ -264,7 +282,7 @@ fn parse_long(
     // them. It takes the unrecognised path — reported as the bytes typed —
     // rather than failing in some third way.
     let typed = std::str::from_utf8(typed).map_err(|_| CP.unrecognized_option(whole))?;
-    let (name, takes) = CP.resolve_long(typed, whole, LONG_OPTIONS)?;
+    let (name, takes) = CP.resolve_long_aliased(typed, whole, LONG_OPTIONS, ALIASES)?;
 
     if inline.is_some() && takes == Takes::Nothing {
         return Err(CP.long_unwanted_argument(name));
@@ -764,12 +782,80 @@ mod tests {
         assert!(e.sentence.contains("--reflink"), "{:?}", e.sentence);
     }
 
-    /// `--pa` is ambiguous between `--parents` and its deprecated alias
-    /// `--path`, which is the only reason the alias is in the table.
+    /// `--pa` is **not** ambiguous, because `--path` and `--parents` are one
+    /// option under two spellings. An earlier revision of this test asserted the
+    /// opposite from recall; the measurement says otherwise:
+    ///
+    /// ```text
+    /// $ cp --pa=1 a b
+    /// cp: option '--parents' doesn't allow an argument
+    /// ```
+    ///
+    /// which is `getopt_long` having resolved it, then complaining about the
+    /// value. So the alias resolves, and the name it resolves to is the first
+    /// *table* entry that matched — `--parents`, which precedes `--path` in
+    /// `cp`'s table (it is the other way round in `rmdir`'s).
+    ///
+    /// Only `--pa` actually reaches both spellings; `--pat` is already past
+    /// `--parents` and `--paren` already past `--path`. Each is listed with the
+    /// name GNU answers with, measured the same way, because the interesting
+    /// claim is not "it resolves" but *which* of the two it names:
+    ///
+    /// ```text
+    /// --pa     cp: option '--parents' doesn't allow an argument
+    /// --pat    cp: option '--path'    doesn't allow an argument
+    /// --paren  cp: option '--parents' doesn't allow an argument
+    /// ```
     #[test]
-    fn the_deprecated_alias_still_makes_a_prefix_ambiguous() {
-        let e = fail(&["--pa"]);
-        assert!(e.sentence.contains("ambiguous"), "{:?}", e.sentence);
+    fn the_deprecated_alias_does_not_make_its_own_option_ambiguous() {
+        for (typed, named) in [
+            ("--pa", "--parents"),
+            ("--pat", "--path"),
+            ("--paren", "--parents"),
+        ] {
+            let e = fail(&[typed, "a", "b"]);
+            assert!(
+                !e.sentence.contains("ambiguous"),
+                "{typed}: {:?}",
+                e.sentence
+            );
+            // It resolves, and is then refused for the separate reason that
+            // this `cp` implements neither spelling.
+            assert!(
+                e.sentence.contains(&format!("'{named}' is not implemented")),
+                "{typed}: {:?}",
+                e.sentence
+            );
+        }
+    }
+
+    /// The other half of the rule, and the half that a naive "hide the aliases"
+    /// implementation gets wrong: `--p` matches `--parents`, `--path` **and**
+    /// `--preserve`, and is ambiguous — but the message lists two, not three.
+    /// Measured:
+    ///
+    /// ```text
+    /// cp: option '--p' is ambiguous; possibilities: '--parents' '--preserve'
+    /// ```
+    #[test]
+    fn a_prefix_that_reaches_past_the_alias_is_still_ambiguous() {
+        assert_eq!(
+            fail(&["--p", "a", "b"]).sentence,
+            "option '--p' is ambiguous; possibilities: '--parents' '--preserve'"
+        );
+    }
+
+    /// An exact alias resolves to itself, not to what it aliases — `getopt_long`
+    /// returns the entry it matched.
+    #[test]
+    fn the_exact_alias_spelling_is_reported_as_typed() {
+        assert!(
+            fail(&["--path", "a", "b"])
+                .sentence
+                .contains("'--path' is not implemented"),
+            "{:?}",
+            fail(&["--path", "a", "b"]).sentence
+        );
     }
 
     #[test]
@@ -835,7 +921,10 @@ mod tests {
             "--symbolic-link",
             "--update",
             "--verbose",
-            "--keep-directory-symlink",
+            // Given values inline so the option cannot swallow an operand and
+            // turn a rejection test into an arity test.
+            "--sparse=always",
+            "--reflink=always",
         ] {
             let e = fail(&[name, "a", "b"]);
             assert!(

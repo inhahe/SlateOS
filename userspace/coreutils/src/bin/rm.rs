@@ -36,7 +36,8 @@
 //! # Options this implementation does not have
 //!
 //! `-i`, `-I`, `--interactive`, `-d`/`--dir`, `-v`/`--verbose`,
-//! `--one-file-system`, `--preserve-root` and `--no-preserve-root` are all
+//! `--one-file-system`, `--preserve-root`, `--no-preserve-root` and
+//! `---presume-input-tty` (three dashes; the name itself begins with one) are
 //! recognised and rejected with a message saying they are not implemented,
 //! rather than ignored. They are listed in [`LONG_OPTIONS`] anyway because the
 //! table is what decides whether an abbreviation is ambiguous: drop
@@ -66,12 +67,32 @@ const RM: Program = Program::new("rm", 1);
 /// Every entry is here whether or not this implementation acts on it — see the
 /// module docs for why leaving one out is a silent wrong answer rather than a
 /// missing feature.
+///
+/// Measured with `rm --=x`, which an empty prefix makes print the whole table:
+///
+/// ```text
+/// rm: option '--=x' is ambiguous; possibilities: '--force' '--interactive'
+/// '--one-file-system' '--no-preserve-root' '--preserve-root'
+/// '---presume-input-tty' '--recursive' '--dir' '--verbose' '--help'
+/// '--version'
+/// ```
 const LONG_OPTIONS: &[(&str, Takes)] = &[
     ("force", Takes::Nothing),
     ("interactive", Takes::Optional),
     ("one-file-system", Takes::Nothing),
     ("no-preserve-root", Takes::Nothing),
     ("preserve-root", Takes::Optional),
+    // The leading hyphen is part of the *name*, not a typo: GNU's table really
+    // holds `-presume-input-tty`, so it is typed with three dashes. It is
+    // deliberately unspellable-by-accident because it is `rm`'s own internal
+    // handle for "pretend stdin is a terminal", not a user-facing option.
+    //
+    // It earns its place here for the usual reason — it is a candidate that
+    // decides ambiguity — but with a twist worth stating: because the name
+    // begins with `-`, it is reachable only from a `---` prefix, so it can
+    // never collide with a normal `--name`. `rm ---p` resolves to it in GNU,
+    // and did not here until this entry existed.
+    ("-presume-input-tty", Takes::Nothing),
     ("recursive", Takes::Nothing),
     ("dir", Takes::Nothing),
     ("verbose", Takes::Nothing),
@@ -570,6 +591,7 @@ mod tests {
             "--preserve-root",
             "--dir",
             "--verbose",
+            "---presume-input-tty",
         ] {
             let e = fail(&[name, "a"]);
             assert!(
@@ -579,6 +601,34 @@ mod tests {
             );
             assert!(e.sentence.contains(name), "{name}: {:?}", e.sentence);
         }
+    }
+
+    /// The hyphen-named entry is reachable only through a `---` prefix, and it
+    /// is the sole candidate there, so it resolves from a single letter. GNU
+    /// answers `rm ---p` with `missing operand`, i.e. it resolved; the check is
+    /// that we resolve it too rather than calling it unrecognised.
+    #[test]
+    fn a_triple_dash_prefix_reaches_the_hyphen_named_option() {
+        let e = fail(&["---p", "a"]);
+        assert!(
+            e.sentence.contains("'---presume-input-tty' is not implemented"),
+            "{:?}",
+            e.sentence
+        );
+    }
+
+    /// And it stays out of the way of the ordinary names: `--p` must still mean
+    /// `--preserve-root` alone, because `-presume-input-tty` does not start
+    /// with `p`. This is the test that fails if someone "fixes" the table by
+    /// dropping the leading hyphen.
+    #[test]
+    fn the_hyphen_named_option_does_not_disturb_double_dash_prefixes() {
+        let e = fail(&["--p", "a"]);
+        assert!(
+            e.sentence.contains("'--preserve-root' is not implemented"),
+            "{:?}",
+            e.sentence
+        );
     }
 
     #[test]

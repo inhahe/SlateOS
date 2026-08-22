@@ -13,7 +13,11 @@
 //! ├── random     Reads return CSPRNG bytes (ChaCha20, kernel `rng`)
 //! ├── urandom    Same as random (no entropy blocking distinction)
 //! ├── console    Reads/writes to the kernel console
-//! └── tty        Controlling terminal (aliases console, single-console)
+//! ├── tty        Controlling terminal (aliases console, single-console)
+//! ├── stdin/stdout/stderr, kmsg, uptime
+//! ├── input/     event0 (keyboard), event1 (mouse)
+//! ├── dri/       card0, renderD128
+//! └── snd/       controlC0, pcmC0D0p, pcmC0D0c
 //! ```
 //!
 //! ## Design
@@ -22,6 +26,20 @@
 //! architecture, hardware devices are managed by userspace drivers via
 //! IPC — the devfs does NOT expose block devices or hardware directly.
 //! It provides the standard "utility" device files that programs expect.
+//!
+//! ## The subdirectories are a namespace, not an implementation
+//!
+//! The nodes under `input/`, `dri/` and `snd/` are **not served by this
+//! filesystem**.  `open` of one is intercepted in the syscall layer
+//! (`syscall/linux.rs`), which mints a device handle rather than a VFS file;
+//! reading one through the VFS gets `NotSupported`.  They are listed here
+//! because existing-but-invisible is not a state a real client can cope with:
+//! libinput *scans* `/dev/input/` to discover devices and checks `S_ISCHR` on
+//! what it finds, libdrm and ALSA do the same for their directories, and until
+//! this table existed all three would have concluded the machine had no
+//! hardware while the nodes sat there working for anyone who knew the exact
+//! path.  Keeping the namespace here — rather than teaching each client our
+//! paths — is what makes those libraries usable unmodified.
 //!
 //! `/dev/random` and `/dev/urandom` both delegate to the kernel
 //! CSPRNG (`crate::rng::fill`, ChaCha20-based, seeded at boot from
@@ -67,11 +85,133 @@ impl DevFs {
     }
 }
 
-/// Device file names.
-const DEV_FILES: &[&str] = &[
-    "null", "zero", "full", "random", "urandom", "console", "tty", "stdin", "stdout", "stderr",
-    "kmsg", "uptime",
+/// One node in the devfs namespace.
+///
+/// `path` is relative to the devfs mount point and may contain a `/`, because
+/// devfs has subdirectories now. They are spelled out flat here rather than
+/// built as a tree: the namespace is a fixed handful of entries the kernel
+/// knows at compile time, so a tree would be a data structure with no
+/// variation to justify it. A devfs that grew nodes at run time would want the
+/// tree; ours does not.
+struct DevNode {
+    /// Path relative to the devfs root — `"null"`, `"input/event0"`.
+    path: &'static str,
+    /// What `stat` reports. [`EntryType::CharDevice`] for real device nodes.
+    entry_type: EntryType,
+    /// Unix permission bits.
+    mode: u16,
+}
+
+impl DevNode {
+    /// A utility file this filesystem serves itself.
+    const fn file(path: &'static str, mode: u16) -> Self {
+        Self {
+            path,
+            entry_type: EntryType::File,
+            mode,
+        }
+    }
+
+    /// A directory. Mode 0o755, as on Linux.
+    const fn dir(path: &'static str) -> Self {
+        Self {
+            path,
+            entry_type: EntryType::Directory,
+            mode: 0o755,
+        }
+    }
+
+    /// A character device node, served by the syscall layer, not by devfs.
+    ///
+    /// Mode 0o660 for all of them: on Linux each is `crw-rw----` owned by a
+    /// per-class group (`input`, `video`, `audio`). We have no groups yet, so
+    /// the bits are the honest part and the ownership is not.
+    const fn chr(path: &'static str) -> Self {
+        Self {
+            path,
+            entry_type: EntryType::CharDevice,
+            mode: 0o660,
+        }
+    }
+
+    /// The final component of [`path`](Self::path) — what `readdir` reports.
+    fn name(&self) -> &'static str {
+        match self.path.rsplit_once('/') {
+            Some((_, base)) => base,
+            None => self.path,
+        }
+    }
+
+    /// The directory this node lives in, `""` for the root.
+    fn parent(&self) -> &'static str {
+        match self.path.rsplit_once('/') {
+            Some((dir, _)) => dir,
+            None => "",
+        }
+    }
+}
+
+/// The whole devfs namespace.
+///
+/// The character devices in the subdirectories are **not readable through this
+/// filesystem** — `open` of one is intercepted in the syscall layer
+/// (`syscall/linux.rs`) and mints a device handle instead of a VFS file. They
+/// are listed here anyway, and that is the point of this table: a client that
+/// *scans* `/dev/input/` to find input devices — which is exactly what libinput
+/// does — has to be able to see them, and `stat` has to report `S_IFCHR` or
+/// libinput will reject a device that works. Before this table those nodes were
+/// openable by exact path and invisible to everything else, which is the kind
+/// of half-existence that makes a port fail for no discoverable reason.
+const DEV_NODES: &[DevNode] = &[
+    // Utility files, served by this filesystem's own read/write.
+    DevNode::file("null", 0o666),
+    DevNode::file("zero", 0o666),
+    DevNode::file("full", 0o666),
+    DevNode::file("random", 0o666),
+    DevNode::file("urandom", 0o666),
+    DevNode::file("console", 0o600),
+    DevNode::file("tty", 0o666),
+    DevNode::file("stdin", 0o666),
+    DevNode::file("stdout", 0o666),
+    DevNode::file("stderr", 0o666),
+    DevNode::file("kmsg", 0o666),
+    // Read-only: `write_file` refuses it with NotSupported, so 0o444 is what
+    // the mode bits should have said all along.
+    DevNode::file("uptime", 0o444),
+    // Device-node directories.
+    DevNode::dir("input"),
+    DevNode::dir("dri"),
+    DevNode::dir("snd"),
+    // Input devices — `evdev_ioctl` / `evdev_read` in the syscall layer.
+    DevNode::chr("input/event0"),
+    DevNode::chr("input/event1"),
+    // DRM card and render node.
+    DevNode::chr("dri/card0"),
+    DevNode::chr("dri/renderD128"),
+    // ALSA control and PCM substreams.
+    DevNode::chr("snd/controlC0"),
+    DevNode::chr("snd/pcmC0D0p"),
+    DevNode::chr("snd/pcmC0D0c"),
 ];
+
+/// Look up a node by its devfs-relative path.
+fn find_node(rel: &str) -> Option<&'static DevNode> {
+    DEV_NODES.iter().find(|n| n.path == rel)
+}
+
+/// The entries directly inside `dir` (`""` for the devfs root).
+fn children_of(dir: &str) -> Vec<DirEntry> {
+    DEV_NODES
+        .iter()
+        .filter(|n| n.parent() == dir)
+        .map(|n| DirEntry {
+            name: PathBuf::from(n.name()),
+            entry_type: n.entry_type,
+            // Special files have no meaningful static size.
+            size: 0,
+        })
+        .collect()
+}
 
 // ---------------------------------------------------------------------------
 // FileSystem trait implementation
@@ -91,6 +231,22 @@ fn strip_root(path: &Path) -> KernelResult<&str> {
     Ok(s.strip_prefix('/').unwrap_or(s))
 }
 
+/// The answer for a path that this filesystem does not itself serve.
+///
+/// A character device node exists — `stat` says so, and `readdir` lists it —
+/// but its contents do not come from here: `open` of one is intercepted in the
+/// syscall layer, which mints a device handle. Reaching it through the VFS's
+/// own read/write is therefore not "no such file" but "not that way", and
+/// saying `NotFound` about a path `stat` just confirmed would send whoever hits
+/// it looking for a missing entry that is right there.
+fn unserved(rel: &str) -> KernelError {
+    match find_node(rel) {
+        Some(n) if n.entry_type == EntryType::Directory => KernelError::IsADirectory,
+        Some(_) => KernelError::NotSupported,
+        None => KernelError::NotFound,
+    }
+}
+
 impl FileSystem for DevFs {
     fn fs_type(&self) -> &'static str {
         "devfs"
@@ -100,17 +256,12 @@ impl FileSystem for DevFs {
         let rel = strip_root(path)?;
 
         if rel.is_empty() {
-            let entries = DEV_FILES
-                .iter()
-                .map(|name| DirEntry {
-                    name: PathBuf::from(*name),
-                    entry_type: EntryType::File,
-                    size: 0, // Special files have no meaningful static size.
-                })
-                .collect();
-            Ok(entries)
-        } else {
-            Err(KernelError::NotADirectory)
+            return Ok(children_of(""));
+        }
+        match find_node(rel) {
+            Some(node) if node.entry_type == EntryType::Directory => Ok(children_of(rel)),
+            Some(_) => Err(KernelError::NotADirectory),
+            None => Err(KernelError::NotFound),
         }
     }
 
@@ -142,7 +293,7 @@ impl FileSystem for DevFs {
                 // since we're single-console, it aliases /dev/console.
                 Ok(Vec::new())
             }
-            _ => Err(KernelError::NotFound),
+            _ => Err(unserved(rel)),
         }
     }
 
@@ -189,7 +340,7 @@ impl FileSystem for DevFs {
                 let text = alloc::format!("{secs}.{frac:09}\n");
                 Ok(text.into_bytes())
             }
-            _ => Err(KernelError::NotFound),
+            _ => Err(unserved(rel)),
         }
     }
 
@@ -259,7 +410,7 @@ impl FileSystem for DevFs {
                 // /dev/uptime is read-only.
                 Err(KernelError::NotSupported)
             }
-            _ => Err(KernelError::NotFound),
+            _ => Err(unserved(rel)),
         }
     }
 
@@ -280,15 +431,12 @@ impl FileSystem for DevFs {
             });
         }
 
-        if DEV_FILES.contains(&rel) {
-            Ok(DirEntry {
-                name: PathBuf::from(rel),
-                entry_type: EntryType::File,
-                size: 0,
-            })
-        } else {
-            Err(KernelError::NotFound)
-        }
+        let node = find_node(rel).ok_or(KernelError::NotFound)?;
+        Ok(DirEntry {
+            name: PathBuf::from(node.name()),
+            entry_type: node.entry_type,
+            size: 0,
+        })
     }
 
     fn metadata(&mut self, path: &Path) -> KernelResult<FileMeta> {
@@ -305,27 +453,18 @@ impl FileSystem for DevFs {
             });
         }
 
-        if DEV_FILES.contains(&rel) {
-            // Device files have special permissions:
-            // - null/zero/full/urandom: world read+write (0o666)
-            // - random: world read+write (0o666)
-            // - console: owner read+write (0o600)
-            let perms = match rel {
-                "console" => 0o600,
-                _ => 0o666,
-            };
-            Ok(FileMeta {
-                size: 0,
-                entry_type: EntryType::File,
-                permissions: perms,
-                attributes: FileAttr::NONE,
-                nlinks: 1,
-                blocks: 0,
-                ..FileMeta::minimal(EntryType::File, 0)
-            })
-        } else {
-            Err(KernelError::NotFound)
-        }
+        let node = find_node(rel).ok_or(KernelError::NotFound)?;
+        Ok(FileMeta {
+            size: 0,
+            entry_type: node.entry_type,
+            permissions: node.mode,
+            attributes: FileAttr::NONE,
+            // A directory here has no `.`/`..` on disk to count, and every
+            // other node is a single unlinked-from-nowhere device: one link.
+            nlinks: 1,
+            blocks: 0,
+            ..FileMeta::minimal(node.entry_type, 0)
+        })
     }
 
     fn statvfs(&mut self) -> KernelResult<FsInfo> {
@@ -335,7 +474,7 @@ impl FileSystem for DevFs {
             block_size: 0,
             total_blocks: 0,
             free_blocks: 0,
-            total_inodes: DEV_FILES.len() as u64,
+            total_inodes: DEV_NODES.len() as u64,
             free_inodes: 0,
             max_name_len: 255,
             read_only: false,
@@ -343,7 +482,7 @@ impl FileSystem for DevFs {
     }
 
     fn debug_stats(&self) -> String {
-        format!("devfs: {} device files", DEV_FILES.len())
+        format!("devfs: {} nodes", DEV_NODES.len())
     }
 }
 
@@ -370,13 +509,14 @@ pub fn self_test() -> KernelResult<()> {
 
     let mut fs = DevFs::new();
 
-    // Test root readdir.
+    // Test root readdir.  The root holds every node whose path has no slash.
+    let expect_root = DEV_NODES.iter().filter(|n| n.parent().is_empty()).count();
     let entries = fs.readdir(Path::new("/"))?;
-    if entries.len() != DEV_FILES.len() {
+    if entries.len() != expect_root {
         serial_println!(
             "[devfs]   FAIL: readdir returned {} entries, expected {}",
             entries.len(),
-            DEV_FILES.len()
+            expect_root
         );
         return Err(KernelError::InternalError);
     }
@@ -478,6 +618,105 @@ pub fn self_test() -> KernelResult<()> {
         return Err(KernelError::InternalError);
     }
     serial_println!("[devfs]   stat /nonexistent: NotFound OK");
+
+    // ------------------------------------------------------------------
+    // Device-node subdirectories.
+    //
+    // This is the whole reason the node table exists, so it is tested as a
+    // client would use it: scan the directory, then stat what you found and
+    // check it is a character device.  A regression here does not break a
+    // kernel test -- it makes libinput report no input devices on a machine
+    // whose keyboard works, which is a very long way from the cause.
+    // ------------------------------------------------------------------
+    for (dir, want) in [("/input", 2usize), ("/dri", 2), ("/snd", 3)] {
+        let listing = fs.readdir(Path::new(dir))?;
+        if listing.len() != want {
+            serial_println!(
+                "[devfs]   FAIL: readdir {} returned {} entries, expected {}",
+                dir,
+                listing.len(),
+                want
+            );
+            return Err(KernelError::InternalError);
+        }
+        for ent in &listing {
+            if ent.entry_type != EntryType::CharDevice {
+                serial_println!(
+                    "[devfs]   FAIL: {}/{} is not a character device",
+                    dir,
+                    ent.name.display()
+                );
+                return Err(KernelError::InternalError);
+            }
+            // The name readdir reports must be a bare component, and the
+            // path built from it must stat back to the same thing -- that
+            // round trip is exactly what a scanning client performs.
+            let mut full = String::from(dir);
+            full.push('/');
+            full.push_str(&alloc::format!("{}", ent.name.display()));
+            let st = fs.stat(Path::new(&full))?;
+            if st.entry_type != EntryType::CharDevice {
+                serial_println!("[devfs]   FAIL: stat {} is not a char device", full);
+                return Err(KernelError::InternalError);
+            }
+            let meta = fs.metadata(Path::new(&full))?;
+            if meta.entry_type != EntryType::CharDevice || meta.permissions != 0o660 {
+                serial_println!(
+                    "[devfs]   FAIL: metadata {} is {:?}/{:o}, expected CharDevice/660",
+                    full,
+                    meta.entry_type,
+                    meta.permissions
+                );
+                return Err(KernelError::InternalError);
+            }
+            // Reading one through the VFS must say "not that way", never
+            // "no such file" -- `stat` just said it is there.
+            match fs.read_file(Path::new(&full)) {
+                Err(KernelError::NotSupported) => {}
+                other => {
+                    serial_println!(
+                        "[devfs]   FAIL: read {} should be NotSupported, got {:?}",
+                        full,
+                        other.map(|v| v.len())
+                    );
+                    return Err(KernelError::InternalError);
+                }
+            }
+        }
+        // The directory itself stats as a directory, and reading it as a file
+        // is IsADirectory rather than NotFound.
+        if fs.stat(Path::new(dir))?.entry_type != EntryType::Directory {
+            serial_println!("[devfs]   FAIL: stat {} is not a directory", dir);
+            return Err(KernelError::InternalError);
+        }
+        match fs.read_file(Path::new(dir)) {
+            Err(KernelError::IsADirectory) => {}
+            _ => {
+                serial_println!("[devfs]   FAIL: read {} should be IsADirectory", dir);
+                return Err(KernelError::InternalError);
+            }
+        }
+        serial_println!("[devfs]   {}: {} char devices OK", dir, want);
+    }
+
+    // A plain file is not a directory, and a missing directory is not found:
+    // the two failure modes must stay distinguishable, because "readdir said
+    // NotADirectory" is how a client learns to stop descending.
+    match fs.readdir(Path::new("/null")) {
+        Err(KernelError::NotADirectory) => {}
+        _ => {
+            serial_println!("[devfs]   FAIL: readdir /null should be NotADirectory");
+            return Err(KernelError::InternalError);
+        }
+    }
+    match fs.readdir(Path::new("/nosuchdir")) {
+        Err(KernelError::NotFound) => {}
+        _ => {
+            serial_println!("[devfs]   FAIL: readdir /nosuchdir should be NotFound");
+            return Err(KernelError::InternalError);
+        }
+    }
+    serial_println!("[devfs]   readdir /null=NotADirectory, /nosuchdir=NotFound OK");
 
     serial_println!("[devfs] Self-test PASSED");
     Ok(())

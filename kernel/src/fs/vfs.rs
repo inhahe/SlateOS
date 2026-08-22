@@ -50,6 +50,21 @@ pub enum EntryType {
     Symlink,
     /// Volume label (FAT-specific, usually hidden).
     VolumeLabel,
+    /// Character device node (`/dev/input/event0`, `/dev/dri/card0`, …).
+    ///
+    /// Only [`devfs`](crate::fs::devfs) produces these, and they exist because
+    /// `S_IFCHR` is load-bearing for real clients rather than cosmetic:
+    /// libinput refuses a node that is not `S_ISCHR`, and libdrm and ALSA make
+    /// the same check. Before this variant, `stat("/dev/input/event0")`
+    /// reported a regular file, and those libraries would have rejected a
+    /// device that works perfectly.
+    ///
+    /// Deliberately no `BlockDevice` sibling: this kernel has no block device
+    /// nodes to name — storage is reached through the VFS, not through
+    /// `/dev/sdaN` — and a variant with no producer is one that every `match`
+    /// must answer for while teaching the reader something untrue about the
+    /// system.
+    CharDevice,
 }
 
 /// A single directory entry returned by readdir.

@@ -19846,6 +19846,9 @@ fn meta_mode_bits(meta: &crate::fs::FileMeta) -> u32 {
         // VolumeLabel is a FAT artefact with no Unix analogue; treat as a
         // regular file so stat() at least returns a coherent shape.
         crate::fs::EntryType::File | crate::fs::EntryType::VolumeLabel => (S_IFREG, 0o644),
+        // The point of the variant: libinput refuses a node that is not
+        // S_ISCHR, and libdrm and ALSA make the same check.
+        crate::fs::EntryType::CharDevice => (S_IFCHR, 0o660),
     };
     let perm = if meta.permissions == 0 {
         default_perm
@@ -43034,6 +43037,7 @@ fn sys_getdents64(args: &SyscallArgs) -> SyscallResult {
             crate::fs::EntryType::Directory => 4,   // DT_DIR
             crate::fs::EntryType::Symlink => 10,    // DT_LNK
             crate::fs::EntryType::VolumeLabel => 0, // DT_UNKNOWN
+            crate::fs::EntryType::CharDevice => 2,  // DT_CHR
         };
 
         out.extend_from_slice(&d_ino.to_le_bytes());

@@ -50335,7 +50335,7 @@ commands that carry the colour in question, and assert the two renders agree.
 Candidates: anything drawn on the wallpaper, on a video surface, on a
 thumbnail, or on any other content the palette does not own.
 
-**Part 2 progress. 8 of 49 modules converted.**
+**Part 2 progress. 9 of 49 modules converted.**
 
 - [x] `security_dialog.rs` — 29 constants, done 2026-08-22. The method above
   survived contact: the sweep lives in `gui/desktop/src/palette_check.rs` as
@@ -50606,6 +50606,38 @@ thumbnail, or on any other content the palette does not own.
   - One `MOCHA_BASE` became `readable_on(p.lavender)` — the device-type glyph
     on the lavender icon circle. Same shape as `user_accounts.rs`'s two: text
     on a coloured fill, not a role.
+- [x] `update_settings.rs` — 13 constants, done 2026-08-22. Harness defects
+  HHH/III/JJJ/KKK/LLL/MMM/NNN/OOO.
+  - **Defect NNN is the FFF lesson paying for itself one module later.** This
+    panel has *two* accent sites — the active tab's label and the chosen
+    schedule's label — and NNN freezes only the second. The tab label keeps
+    following the accent, so an `assert_ne!` over the union of both sites would
+    have passed and NNN would have gone unnoticed exactly as FFF did. Written
+    per-site from the start, it fails. The rule is now confirmed rather than
+    merely inferred: **n accent sites, n negative assertions.**
+  - **The widest categorical row so far — five hues in one `match`.**
+    `UpdateStatus::color` is green / blue / yellow / peach / red for up-to-date,
+    checking-or-downloading, available, pending-restart and error. Five *kinds
+    of fact about the machine*, and four of the five hues are among the fourteen
+    selectable accents, so the distinctness argument applies to the whole row at
+    once rather than to one member: `the_update_statuses_stay_distinct_in_both_modes`
+    walks four accents × both modes and asserts no two statuses collide. Defect
+    OOO gives "updates available" the same green as "up to date" and is caught
+    only by that test — a collision the membership sweep cannot see, because
+    green is a perfectly good palette role.
+  - **The empty branch of each tab is its own colour and needs its own fixture
+    flag.** All three tabs bail early with an `overlay0` "No updates available."
+    / "No update history." caption instead of drawing a list, so the sweep runs
+    `populated` both ways; a fixture that always had data would never render
+    those three captions at all. Same shape as `bluetooth.rs`'s unpowered
+    early `return`, and worth expecting in every settings panel: the
+    interesting colours are often on the path where there is nothing to show.
+  - `UpdateSchedule` is a radio group, not a categorical row: exactly one member
+    is chosen, and the chosen one is "you are here", so its label is `p.accent`
+    while the rest stay `p.text`. The tab bar is the same shape. That is the
+    distinction to carry forward — *which of these am I on* is the accent's,
+    *which kind of thing is this* is not, and both can be a blue `if active`
+    one-liner in the source.
 
 **Trigger:** this is not blocked on anything. It is sequenced after the shell
 event loop (`TD-C-THE-SHELL-CAN-DRAW-ITSELF-AND-NOBODY-CAN-ASK-IT-TO`) only

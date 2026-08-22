@@ -57,6 +57,7 @@ DEV = "gui/desktop/src/device_settings.rs"
 RULES = "gui/desktop/src/window_rules.rs"
 ACCT = "gui/desktop/src/user_accounts.rs"
 BT = "gui/desktop/src/bluetooth.rs"
+UPD = "gui/desktop/src/update_settings.rs"
 
 # (name, file, [(old, new), ...], [packages], [tests expected to fail])
 DEFECTS = [
@@ -673,6 +674,70 @@ DEFECTS = [
         ["desktop"],
         ["the_scan_button_says_something_different_while_it_is_scanning",
          "a_devices_status_colours_do_not_follow_the_accent"],
+    ),
+    # --- update_settings.rs (module 9) --------------------------------------
+    (
+        "HHH: the status banner's background goes back to Mocha mantle",
+        UPD,
+        [("            color: p.mantle,", "            color: Color::from_hex(0x181825),")],
+        ["desktop"],
+        ["every_colour_the_panel_draws_comes_from_its_palette"],
+    ),
+    (
+        "III: the restart warning goes back to Mocha peach",
+        UPD,
+        [("                color: p.peach,", "                color: Color::from_hex(0xFAB387),")],
+        ["desktop"],
+        ["every_colour_the_panel_draws_comes_from_its_palette"],
+    ),
+    (
+        "JJJ: the schedule heading goes back to Mocha lavender",
+        UPD,
+        [("            color: p.lavender,", "            color: Color::from_hex(0xB4BEFE),")],
+        ["desktop"],
+        ["every_colour_the_panel_draws_comes_from_its_palette"],
+    ),
+    (
+        "KKK: a failed install's row goes back to Mocha red",
+        UPD,
+        [("            let color = if entry.success { p.green } else { p.red };",
+          "            let color = if entry.success { p.green } else { Color::from_hex(0xF38BA8) };")],
+        ["desktop"],
+        ["every_colour_the_panel_draws_comes_from_its_palette"],
+    ),
+    (
+        "LLL: the error status is made to follow the accent",
+        UPD,
+        [("            Self::Error => p.red,", "            Self::Error => p.accent,")],
+        ["desktop"],
+        ["an_updates_status_colours_do_not_follow_the_accent"],
+    ),
+    (
+        "MMM: the active tab's label stops following the accent",
+        UPD,
+        [("                color: if active { p.accent } else { p.subtext0 },",
+          "                color: if active { p.blue } else { p.subtext0 },")],
+        ["desktop"],
+        ["an_updates_status_colours_do_not_follow_the_accent"],
+    ),
+    # The one that only a *per-site* negative half can see. The active tab
+    # label keeps following the accent here, so an assert_ne! over the union of
+    # both accent sites would still pass -- which is exactly how bluetooth.rs's
+    # first draft missed defect FFF.
+    (
+        "NNN: the chosen schedule's label stops following the accent",
+        UPD,
+        [("                color: if active { p.accent } else { p.text },",
+          "                color: if active { p.blue } else { p.text },")],
+        ["desktop"],
+        ["an_updates_status_colours_do_not_follow_the_accent"],
+    ),
+    (
+        "OOO: 'updates available' is given the same colour as 'up to date'",
+        UPD,
+        [("            Self::Available => p.yellow,", "            Self::Available => p.green,")],
+        ["desktop"],
+        ["the_update_statuses_stay_distinct_in_both_modes"],
     ),
 ]
 

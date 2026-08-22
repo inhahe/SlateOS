@@ -61142,7 +61142,15 @@ whether `VERASE` is 127.
 
 ## Seven of the eight boot self-tests behind `if fat_ok` do not need a FAT root (lane A)
 
-**Status:** FIXED 2026-08-22 for `ext4::self_test`; **OPEN** for the other six.
+**Status:** FIXED 2026-08-22 for `ext4::self_test`, `io_ring::self_test_fh`,
+`cache::self_test` and `vfs::self_test` (one commit + one boot test each, as
+planned below); **OPEN** for the remaining three — `trash::self_test`,
+`notify::self_test`, `journal::self_test`.
+
+Un-gating `vfs::self_test` paid for the whole exercise on its own: it failed on
+its very first CI run with `AlreadyExists`, surfacing a real data-loss-class bug
+in memfs's `rename` that had been invisible for as long as the gate had been
+there. See *"memfs `rename` refused to replace an existing destination"* below.
 
 **In short:** The kernel runs a batch of filesystem self-tests at boot, but only
 if it managed to mount a real FAT disk as the main drive. The automated boot
@@ -61214,3 +61222,152 @@ tests that run are the ones somebody needed while debugging, and an entire tier
 next to them sits behind a condition that was never re-examined. A gate that
 names one thing (`fat_ok`) while guarding eight is not a gate, it is a place
 things got appended to.
+
+---
+
+## memfs `rename` refused to replace an existing destination (lane A)
+
+**Status:** FIXED 2026-08-22 (`kernel/src/fs/memfs.rs`). Two further bugs found
+in the same function are fixed with it; the ext4 equivalents of both are still
+**OPEN** — see the next entry.
+
+**In short:** Renaming a file onto a name that already exists is supposed to
+replace it — that is how every editor, config writer and database saves a file
+safely: write a temporary file, then rename it over the real one, so a crash
+leaves either the whole old file or the whole new one and never half of each.
+The in-memory filesystem refused to do it, failing instead with "already
+exists". `/tmp` is always that filesystem, and in the automated boot test so is
+`/`, which means the safe-save pattern simply did not work there.
+
+### Evidence
+
+Surfaced the first time `fs::vfs::self_test()` ran in CI (it had been behind the
+`fat_ok` gate — see the entry above):
+
+```
+[vfs]   --- atomic write ---
+WARNING: VFS self-test failed: AlreadyExists
+```
+
+`Vfs::atomic_write` (`kernel/src/fs/vfs.rs`) writes `.tmp_atomic_<n>` beside the
+target, syncs, then `rename`s it over the target. Step 3 could never succeed
+against an existing file on memfs.
+
+### Root cause
+
+`MemFs::rename` checked `to_children.contains_key(to_name)` and returned
+`AlreadyExists` — that is `RENAME_NOREPLACE` semantics baked into the plain
+operation. Both other filesystems already got this right: ext4
+(`fs/ext4/vfs_impl.rs:529`, *"POSIX rename semantics: if the destination already
+exists and is a regular file, replace it"*) and FAT (`fs/fat.rs:3802`, the same
+comment) unlink the destination first. memfs was the sole outlier.
+
+Note that no caller lost the no-replace behaviour: the VFS implements that flag
+itself. `Vfs::rename_inner` stats the destination under the *same* per-mount lock
+it then renames under, which is both where `Vfs::rename_noreplace` gets its
+`AlreadyExists` and why that check is TOCTOU-free. A filesystem hardcoding the
+refusal only removed the caller's ability to ask for the other behaviour.
+
+### Two more bugs in the same function, fixed alongside
+
+Both were latent because the `AlreadyExists` check happened to reject the first
+one before it could do damage, and nothing exercised the second:
+
+1. **Renaming an entry onto itself destroyed it.** `rename(x, x)` should be a
+   no-op success (POSIX). The function detaches the source and re-inserts it at
+   the destination — which, once replacement is allowed, means removing `x` and
+   then inserting it back under the same key. Correct only by luck of ordering;
+   now short-circuited explicitly before anything is detached.
+2. **Moving a directory into its own subtree destroyed the subtree.** `/a` ->
+   `/a/b/c` detached `/a` from its parent first, then walked to `/a/b` to insert
+   it — a path that had just gone with it — so the walk failed `NotFound` and the
+   owned node was dropped on the floor, taking the entire subtree with it. Now
+   rejected with `InvalidArgument` (POSIX EINVAL) before the detach.
+
+### Regression test
+
+`fs::vfs::self_test()` gained a *"rename (replace semantics)"* section directly
+ahead of the atomic-write one, covering all four behaviours: replace an existing
+destination, self-rename is a no-op that keeps the content, a directory
+destination is refused with `IsADirectory`, and a rejected into-own-subtree move
+leaves the subtree intact.
+
+---
+
+## ext4 `rename` has the same self-rename and subtree bugs memfs just had (lane A)
+
+**Status:** FIXED 2026-08-22 (`kernel/src/fs/ext4/vfs_impl.rs`), both bugs, along
+the lines sketched under "The proper fix" below. Verified in CI against the live
+`/mnt` ext4 mount — see "Regression test" at the end of this entry.
+
+**In short:** Renaming an ext4 file onto its own name — `rename("a", "a")`, which
+POSIX says must quietly do nothing — instead deletes the file's contents. And
+moving a directory inside itself is not checked for at all. Neither is reachable
+from the boot test today, but both are reachable from userspace.
+
+### Bug 1: `rename(x, x)` frees the file
+
+The replace path resolves the destination and, finding it exists, unlinks it:
+
+```rust
+let dest_inode = self.driver.read_inode(dest_ino)?;
+dest_inode.i_links_count = dest_inode.i_links_count.saturating_sub(1);
+if dest_inode.i_links_count == 0 {
+    self.driver.free_inode_data(dest_ino, &dest_inode)?;   // <- the file's blocks
+    self.driver.free_inode_number(dest_ino, false)?;       // <- the inode itself
+}
+```
+
+When `from` and `to` are the same path, `dest_ino == src_ino`, so this frees the
+*source's* data and inode. Execution then continues to `add_dir_entry(...,
+src_ino, dst_name, ...)` at line 579, re-adding a directory entry that now points
+at a freed inode, and `remove_dir_entry` at 589 removes the entry it just added
+(same name, same parent). Net effect: contents gone, inode freed, directory entry
+dangling or absent.
+
+### Bug 2: no into-own-subtree check
+
+`rename("/a", "/a/b/c")` is not rejected. ext4 adds the destination entry before
+removing the source one, so it does not lose the subtree the way memfs did, but
+it produces an unreachable directory cycle — `/a` becomes its own ancestor, which
+`fsck` will report and which can hang any naive tree walk.
+
+### The proper fix
+
+Mirror what `MemFs::rename` now does, before either the unlink or the
+`add_dir_entry`:
+
+1. If `src_ino == dest_ino`, return `Ok(())` — that catches `rename(x, x)`
+   through any spelling of the two paths, including hard links to the same
+   inode, which is exactly what POSIX specifies (*"if the two names refer to the
+   same existing file, rename() shall return successfully and perform no other
+   action"*) and is stronger than memfs's string comparison.
+2. Walk `dst_parent_ino` up through `..` and refuse with `InvalidArgument` if
+   `src_ino` is encountered — only needed when the source is a directory.
+
+Extend the ext4 `vfs_impl` self-test with the same four cases the VFS self-test
+now covers for memfs.
+
+### Regression test
+
+`fs::ext4::self_test()` Phase 1 gained a *"rename semantics"* section, which runs
+against the live `/mnt` ext4 mount in every boot test. Six cases:
+
+| # | Case | Expected |
+|---|---|---|
+| 1 | rename over an existing file | replaces it, source gone |
+| 2 | `rename(x, x)` | no-op, content intact |
+| 3 | rename between two hard links to one inode | no-op, **both** names survive |
+| 4 | rename onto a directory | `IsADirectory` |
+| 5 | move a directory into its own subtree | `InvalidArgument`, tree intact |
+| 6 | move a directory to a *different* parent | succeeds |
+
+Case 3 is the one that justifies comparing inode numbers rather than path
+strings: two different paths, one file. memfs's equivalent check is a string
+comparison and would miss it — memfs has no hard links, so there it cannot
+arise, but the ext4 form is the one POSIX actually specifies.
+
+Case 6 exists to keep the fix from being over-broad: the loop check added for
+case 5 walks `..` upwards, and an ordinary cross-parent directory move is
+exactly the traffic it has to let through. A check that rejected case 5 by
+rejecting all directory moves would pass every other test here.

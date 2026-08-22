@@ -1464,14 +1464,10 @@ extern "C" fn kernel_main() -> ! {
                 if let Err(e) = fs::fat::self_test() {
                     serial_println!("WARNING: FAT self-test failed: {:?}", e);
                 }
-                // io_ring file handle test (requires mounted /tmp).
-                if let Err(e) = ipc::io_ring::self_test_fh() {
-                    serial_println!("WARNING: io_ring file handle self-test failed: {:?}", e);
-                }
-                // Buffer cache self-test (validates caching, write-back, LRU).
-                if let Err(e) = fs::cache::self_test() {
-                    serial_println!("WARNING: Buffer cache self-test failed: {:?}", e);
-                }
+                // (io_ring's file-handle self-test is NOT here either — it needs
+                // /tmp, not a FAT root.  See the unconditional block below.)
+                // (the buffer-cache self-test is NOT here either — it now brings
+                // its own scratch device.  See the unconditional block below.)
                 // Recycle bin self-test (trash, list, restore, empty).
                 if let Err(e) = fs::trash::self_test() {
                     serial_println!("WARNING: Recycle bin self-test failed: {:?}", e);
@@ -1486,11 +1482,8 @@ extern "C" fn kernel_main() -> ! {
                 }
                 // (ext4's own self-test is NOT here — it has nothing to do with the
                 // FAT root.  See the unconditional block below.)
-                // VFS-level self-test (symlinks, cross-mount resolution) — relies on
-                // the FAT root for cross-mount cases.
-                if let Err(e) = fs::vfs::self_test() {
-                    serial_println!("WARNING: VFS self-test failed: {:?}", e);
-                }
+                // (the VFS self-test is NOT here either — its cross-mount cases
+                // work off whatever "/" is.  See the unconditional block below.)
                 // Flush buffer cache to disk so data survives power loss / QEMU kill.
                 if let Err(e) = fs::cache::flush_all() {
                     serial_println!("WARNING: Buffer cache flush failed: {:?}", e);
@@ -1542,6 +1535,47 @@ extern "C" fn kernel_main() -> ! {
                     "WARNING: Buffer cache flush after ext4 self-test failed: {:?}",
                     e
                 );
+            }
+            // io_ring's file-handle path: registering a file handle with a ring
+            // and driving read/write SQEs through it.
+            //
+            // This was inside `if fat_ok` too, and had never run in CI for the
+            // same reason.  What it actually needs is `/tmp`, which is memfs and
+            // is mounted unconditionally on every boot path — nothing about it
+            // touches the FAT root.  It also already decides for itself: with no
+            // filesystem to work with it prints "SKIPPED (no FS)" and returns
+            // Ok, which is the tell that the outer gate was never load-bearing
+            // for it.
+            if let Err(e) = ipc::io_ring::self_test_fh() {
+                serial_println!("WARNING: io_ring file handle self-test failed: {:?}", e);
+            }
+            // Buffer cache: hit/miss accounting, write-back, flush, read-ahead.
+            //
+            // Third of the calls `if fat_ok` was skipping.  Moving it needed
+            // more than a change of scope: it ran against `"vda"`, writing
+            // sector 100 and sectors 200..205, on the stated reasoning that
+            // those were "unlikely to contain important data".  On this boot
+            // path `vda` is the disk swap backend (`base_sector = 0`, 512 slots
+            // × 32 sectors), so every one of those LBAs is live swap and the
+            // test would have corrupted a swapped-out page.  It now registers
+            // its own RAM disk, which makes it both harmless and independent of
+            // how the machine booted — nothing it checks was ever
+            // device-specific.
+            if let Err(e) = fs::cache::self_test() {
+                serial_println!("WARNING: Buffer cache self-test failed: {:?}", e);
+            }
+            // VFS: path validation, normalisation, and symlink resolution both
+            // within a mount and across one.
+            //
+            // Fourth of the calls `if fat_ok` was skipping.  The comment on it
+            // said the cross-mount cases "rely on the FAT root", but what they
+            // actually do is create a symlink at "/" pointing into /tmp — which
+            // works off whatever "/" happens to be, and needs only that it be
+            // writable.  It already self-skips when nothing is mounted and
+            // branches on `has_tmp` for the symlink cases, so like the others it
+            // had been written to decide for itself all along.
+            if let Err(e) = fs::vfs::self_test() {
+                serial_println!("WARNING: VFS self-test failed: {:?}", e);
             }
             // Path predicates: subtree matching and the `confine_under` jail
             // guard.  Pure (constants only, no disk), so it runs on every boot

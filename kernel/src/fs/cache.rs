@@ -1010,79 +1010,146 @@ pub fn stats() -> CacheStats {
 /// Run a self-test of the buffer cache.
 ///
 /// Tests: cache hit, write-back, flush, LRU eviction, statistics.
-/// Requires a mounted block device (typically "vda").
+///
+/// Runs against a scratch RAM disk that this function registers and
+/// unregisters itself, so it needs no particular boot path and cannot damage
+/// anything.  It used to run against `"vda"` — whatever that happened to be —
+/// writing sector 100 and sectors 200..205 after a read-modify-restore, on the
+/// reasoning that those were "unlikely to contain important data".  That was a
+/// guess, and on the current boot path it is wrong: `vda` is the disk swap
+/// backend, added with `base_sector = 0` and 512 slots of 32 sectors each, so
+/// sectors 0..16384 are live swap and every LBA the test touched sat inside
+/// them.  Writing there corrupts a swapped-out page, and the restore does not
+/// save it — the window between the write and the restore is enough, and a
+/// crash inside that window leaves the damage permanently.
+///
+/// Nothing the test verifies — hit/miss accounting, write-back, flush,
+/// read-ahead — is specific to any device, so there was never anything to be
+/// gained by aiming it at a real one.
 #[allow(clippy::arithmetic_side_effects)]
 pub fn self_test() -> KernelResult<()> {
     crate::serial_println!("[bcache] Running self-test...");
 
-    let device = "vda";
+    let device = "bcachetest0";
 
-    // Verify the device exists.
-    let exists = blkdev::with_device(device, |dev| {
-        let info = dev.info();
-        crate::serial_println!(
-            "[bcache]   Device '{}': {} sectors",
-            info.name,
-            info.sector_count,
-        );
-    });
-    if exists.is_none() {
-        crate::serial_println!("[bcache]   No device '{}' — skipping self-test", device);
-        return Ok(());
-    }
+    // Clear out any leftovers from a previous run before registering.  Both
+    // results are discarded on purpose: on the normal path there is nothing
+    // registered under this name and nothing cached for it, so "not found" is
+    // the expected answer rather than an error worth reporting.
+    let _ = invalidate(device);
+    let _ = blkdev::unregister(device);
 
-    // Flush any existing dirty data first.
-    flush_all()?;
-
-    // Read sector 0 (boot sector) — should be a miss.
-    let stats_before = stats();
-    let mut buf = [0u8; SECTOR_SIZE];
-    read_sector(device, 0, &mut buf)?;
-    let stats_after = stats();
-
-    crate::serial_println!(
-        "[bcache]   Read sector 0: {} bytes, boot sig {:02X}{:02X}",
-        SECTOR_SIZE,
-        buf[510],
-        buf[511],
+    // 1024 sectors * 512 B = 512 KiB — comfortably past the highest LBA the
+    // test touches (the read-ahead window above sector 200).
+    blkdev::register(
+        device,
+        alloc::boxed::Box::new(crate::blkdev::RamBlockDevice::new(1024)),
     );
 
-    // Verify it was counted.
-    if stats_after.reads != stats_before.reads.wrapping_add(1) {
+    let result = self_test_on(device);
+
+    // Tear down on every path, including the failing ones.  A teardown error
+    // is discarded rather than propagated so that it cannot mask the real
+    // failure in `result`, which is what the caller needs to see; the device is
+    // scratch and about to be unregistered either way.
+    let _ = invalidate(device);
+    let _ = blkdev::unregister(device);
+
+    result?;
+    crate::serial_println!("[bcache] Self-test passed.");
+    Ok(())
+}
+
+/// The body of [`self_test`], factored out so that the scratch device is torn
+/// down on the error paths as well as the success one.
+#[allow(clippy::arithmetic_side_effects)]
+fn self_test_on(device: &str) -> KernelResult<()> {
+    // Read the metadata through the registry, not through
+    // `with_device(|d| d.info())`: the latter asks the driver, which does not
+    // know the name it was registered under, so a RAM disk reports itself as
+    // `Device ''`.
+    let Some(info) = blkdev::info(device) else {
+        crate::serial_println!(
+            "[bcache]   FAIL: scratch device '{}' did not register",
+            device
+        );
+        return Err(KernelError::NoSuchDevice);
+    };
+    crate::serial_println!(
+        "[bcache]   Device '{}': {} sectors",
+        info.name,
+        info.sector_count,
+    );
+
+    // Seed sector 0 with a recognisable pattern, written straight to the device
+    // so it is independent of the cache under test.  Without it, "the second
+    // read returned the same bytes" would be satisfied trivially by two reads
+    // of a zero-filled sector agreeing.
+    let mut seed = [0u8; SECTOR_SIZE];
+    for (i, b) in seed.iter_mut().enumerate() {
+        // 251 is prime, so the pattern does not repeat on any power-of-two
+        // boundary a buffer-length bug would land on.
+        *b = (i % 251) as u8;
+    }
+    blkdev::with_device(device, |dev| dev.write_sector(0, &seed))
+        .ok_or(KernelError::NoSuchDevice)??;
+
+    // Read sector 0 — a miss, and it must be counted.
+    //
+    // The counters are global and other CPUs may be doing I/O, so the
+    // assertions here are "advanced by at least" rather than "advanced by
+    // exactly": an exact comparison turns unrelated concurrent I/O into a
+    // spurious boot-test failure, while still catching the bug that matters,
+    // which is a counter that does not move at all.
+    let reads_before = stats().reads;
+    let mut buf = [0u8; SECTOR_SIZE];
+    read_sector(device, 0, &mut buf)?;
+    let reads_after = stats().reads;
+
+    if buf != seed {
+        crate::serial_println!("[bcache]   FAIL: sector 0 read back different bytes than written");
+        return Err(KernelError::InternalError);
+    }
+    if reads_after <= reads_before {
         crate::serial_println!("[bcache]   FAIL: read count not incremented");
         return Err(KernelError::InternalError);
     }
+    crate::serial_println!("[bcache]   Read sector 0: {} bytes, pattern OK", SECTOR_SIZE);
 
-    // Read the same sector again — should be a hit.
-    let miss_before = stats().misses;
+    // Read the same sector again — it must be served from the cache.  Asserting
+    // that `hits` rose is more robust than asserting that `misses` did not: a
+    // concurrent miss on some other device would break the latter while saying
+    // nothing about whether *this* read hit.
+    let hits_before = stats().hits;
     let mut buf2 = [0u8; SECTOR_SIZE];
     read_sector(device, 0, &mut buf2)?;
-    let miss_after = stats().misses;
+    let hits_after = stats().hits;
 
     if buf != buf2 {
         crate::serial_println!("[bcache]   FAIL: second read returned different data");
         return Err(KernelError::InternalError);
     }
 
-    if miss_after != miss_before {
-        crate::serial_println!("[bcache]   FAIL: second read was a miss (expected hit)");
+    if hits_after <= hits_before {
+        crate::serial_println!("[bcache]   FAIL: second read was not a cache hit");
         return Err(KernelError::InternalError);
     }
 
     crate::serial_println!("[bcache]   Cache hit verified for sector 0");
 
-    // Test write-back: write to a sector, verify it's cached dirty,
-    // then flush and verify it's clean.
+    // Test write-back: write to a sector, verify the dirty copy is what a
+    // subsequent read sees, then flush and verify the bytes actually reached
+    // the device.
     //
-    // Use a high sector number that's unlikely to contain important data.
-    // Read it first to preserve original content.
+    // On a scratch device the sector can just be written outright — the old
+    // read-modify-restore dance existed only because the test was aimed at a
+    // live volume, and it was never a real safeguard anyway (see the note on
+    // `self_test`).
     let test_lba: u64 = 100;
-    let mut original = [0u8; SECTOR_SIZE];
-    read_sector(device, test_lba, &mut original)?;
-
-    // Write modified data.
-    let mut modified = original;
-    modified[0] = modified[0].wrapping_add(1); // Flip one byte.
+    let mut modified = [0u8; SECTOR_SIZE];
+    for (i, b) in modified.iter_mut().enumerate() {
+        *b = (i % 241) as u8; // distinct from the sector-0 pattern
+    }
     write_sector(device, test_lba, &modified)?;
 
     // Read it back — should come from cache (dirty).
@@ -1092,9 +1159,24 @@ pub fn self_test() -> KernelResult<()> {
         crate::serial_println!("[bcache]   FAIL: dirty read returned wrong data");
         return Err(KernelError::InternalError);
     }
+
+    // ...and until the flush, the device must still hold the *old* bytes.
+    // Without this the dirty read above would also pass on a cache that wrote
+    // straight through, which is precisely the behaviour this section exists to
+    // distinguish from write-back.
+    let mut on_device = [0u8; SECTOR_SIZE];
+    blkdev::with_device(device, |dev| dev.read_sector(test_lba, &mut on_device))
+        .ok_or(KernelError::NoSuchDevice)??;
+    if on_device == modified {
+        crate::serial_println!(
+            "[bcache]   FAIL: sector {} hit the device before the flush (not write-back)",
+            test_lba
+        );
+        return Err(KernelError::InternalError);
+    }
     crate::serial_println!("[bcache]   Write-back + dirty read verified");
 
-    // Flush and verify writebacks counter increased.
+    // Flush and verify the writebacks counter increased.
     let wb_before = stats().writebacks;
     flush(device)?;
     let wb_after = stats().writebacks;
@@ -1103,62 +1185,77 @@ pub fn self_test() -> KernelResult<()> {
         crate::serial_println!("[bcache]   FAIL: flush did not trigger writeback");
         return Err(KernelError::InternalError);
     }
+
+    // The counter moving is not the same as the data landing.  Read the device
+    // directly, behind the cache's back, and check the bytes are there.
+    blkdev::with_device(device, |dev| dev.read_sector(test_lba, &mut on_device))
+        .ok_or(KernelError::NoSuchDevice)??;
+    if on_device != modified {
+        crate::serial_println!(
+            "[bcache]   FAIL: flush counted a writeback but sector {} on the device is stale",
+            test_lba
+        );
+        return Err(KernelError::InternalError);
+    }
     crate::serial_println!(
-        "[bcache]   Flush verified (writebacks: {} → {})",
+        "[bcache]   Flush verified (writebacks: {} → {}, bytes on device)",
         wb_before,
         wb_after
     );
 
-    // Restore the original sector content.
-    write_sector(device, test_lba, &original)?;
-    flush(device)?;
-
-    // Test sequential read-ahead:
-    // Read consecutive sectors and verify the readahead counter increases.
-    // After READAHEAD_THRESHOLD consecutive reads, the cache should
-    // prefetch ahead sectors automatically.
-    let ra_start_lba: u64 = 200; // Use sectors unlikely to be in cache.
+    // Test sequential read-ahead: read consecutive sectors and verify the
+    // readahead counter increases.  After READAHEAD_THRESHOLD consecutive
+    // reads, the cache should prefetch ahead sectors automatically.
+    //
+    // This is now a hard assertion.  It used to end in an "or else: no
+    // triggers (sectors may already be cached)" branch that passed without
+    // testing anything — a real possibility when the test was aimed at the
+    // live root device, whose sectors something else may well have touched
+    // first.  On a scratch device registered moments ago that excuse is gone:
+    // the read-ahead tracker is per-device (`cache.readahead[dev_id]`), this
+    // device's tracker has never been touched, and five sequential reads
+    // clears a threshold of two. If no prefetch happens, read-ahead is broken.
+    let ra_start_lba: u64 = 200;
     let ra_before = stats().readaheads;
 
-    // Invalidate this range first to ensure clean state.
-    // Read sectors sequentially to trigger read-ahead detection.
     for i in 0..5u64 {
         let mut sector_buf = [0u8; SECTOR_SIZE];
         read_sector(device, ra_start_lba.wrapping_add(i), &mut sector_buf)?;
     }
 
     let ra_after = stats().readaheads;
-    if ra_after > ra_before {
+    if ra_after <= ra_before {
         crate::serial_println!(
-            "[bcache]   Read-ahead triggered: {} → {} ({} new prefetches)",
-            ra_before,
-            ra_after,
-            ra_after.wrapping_sub(ra_before),
+            "[bcache]   FAIL: 5 sequential reads on a fresh device triggered no read-ahead"
         );
+        return Err(KernelError::InternalError);
+    }
+    crate::serial_println!(
+        "[bcache]   Read-ahead triggered: {} → {} ({} new prefetches)",
+        ra_before,
+        ra_after,
+        ra_after.wrapping_sub(ra_before),
+    );
 
-        // Verify that sectors ahead are now cached (should be cache hits).
-        let hit_before = stats().hits;
-        let ahead_lba = ra_start_lba.wrapping_add(5);
-        let mut ahead_buf = [0u8; SECTOR_SIZE];
-        read_sector(device, ahead_lba, &mut ahead_buf)?;
-        let hit_after = stats().hits;
+    // Verify that sectors ahead are now cached (should be cache hits).
+    let hit_before = stats().hits;
+    let ahead_lba = ra_start_lba.wrapping_add(5);
+    let mut ahead_buf = [0u8; SECTOR_SIZE];
+    read_sector(device, ahead_lba, &mut ahead_buf)?;
+    let hit_after = stats().hits;
 
-        if hit_after > hit_before {
-            crate::serial_println!(
-                "[bcache]   Read-ahead verification: sector {} was a cache hit",
-                ahead_lba
-            );
-        } else {
-            // Not a failure — the read-ahead might not have reached
-            // this exact sector.  Just note it.
-            crate::serial_println!(
-                "[bcache]   Read-ahead note: sector {} was a miss (prefetch window may vary)",
-                ahead_lba
-            );
-        }
-    } else {
+    if hit_after > hit_before {
         crate::serial_println!(
-            "[bcache]   Read-ahead: no triggers (sectors may already be cached)"
+            "[bcache]   Read-ahead verification: sector {} was a cache hit",
+            ahead_lba
+        );
+    } else {
+        // Still not a failure: the window is adaptive, so exactly which
+        // sectors the prefetch reached is deliberately not pinned down.  That
+        // read-ahead happened at all is asserted above.
+        crate::serial_println!(
+            "[bcache]   Read-ahead note: sector {} was a miss (prefetch window may vary)",
+            ahead_lba
         );
     }
 
@@ -1185,6 +1282,5 @@ pub fn self_test() -> KernelResult<()> {
         final_stats.entries_dirty,
     );
 
-    crate::serial_println!("[bcache] Self-test passed.");
     Ok(())
 }

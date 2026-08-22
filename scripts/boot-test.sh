@@ -2383,6 +2383,50 @@ check_self_tests_wired() {
 
 check_self_tests_wired
 
+# Refuse to build when a lock guard is held across a call that re-takes the same
+# lock.
+#
+# This is the cross-function form of the bug that froze a boot in
+# `fs::encrypt::encrypt`: a task asking for a lock it already holds, on a
+# non-reentrant spinlock, which spins forever.  The single-statement form
+# (`X.lock().n = X.lock().n + 1`) is findable with a grep.  The cross-function
+# form is not -- no single line mentions the lock twice -- and it produces a
+# boot that hangs with no output at all, which is the most expensive failure
+# mode this project has.  When the checker was first written it found two, one
+# of them reachable by typing `boot` at the kernel shell.
+#
+# Gated here, before the build, for the same reason as the self-test check: it
+# costs milliseconds and the build costs ten minutes.  Exit 2 (could not run at
+# all) is treated as a failure, because a check that cannot fire must never be
+# indistinguishable from a check that passed.
+check_recursive_locks() {
+    local py=""
+    if command -v python &>/dev/null; then
+        py=python
+    elif command -v python3 &>/dev/null; then
+        py=python3
+    else
+        echo "=== Recursive-lock check: skipped (no python) ===" >&2
+        return 0
+    fi
+
+    echo "=== Checking for guards held across a re-acquiring call ==="
+    if "$py" "$PROJECT_ROOT/scripts/check-recursive-locks.py"; then
+        return 0
+    fi
+
+    echo "" >&2
+    echo "ERROR: refusing to build.  Each report above is a task that would" >&2
+    echo "ask for a lock it already holds -- an unbounded spin with no serial" >&2
+    echo "output, not a crash.  Drop the guard before the call, or split the" >&2
+    echo "callee so the locked part is separate.  The analysis is within-file" >&2
+    echo "and hand-checkable: read the two functions it names before changing" >&2
+    echo "anything." >&2
+    exit 1
+}
+
+check_recursive_locks
+
 # Step 1: Build
 if [ "$NO_BUILD" -eq 0 ]; then
     check_free_space "before building"

@@ -945,13 +945,43 @@ fn spin_with_stall<G>(
     name: &'static [u8],
     addr: usize,
     owner: &AtomicU64,
+    try_acquire: impl FnMut() -> Option<G>,
+) -> G {
+    spin_with_stall_threshold(
+        name,
+        addr,
+        owner,
+        crate::bench::tsc_freq().saturating_mul(STALL_SECONDS),
+        try_acquire,
+    )
+}
+
+/// The body of [`spin_with_stall`], with the stall threshold passed in rather
+/// than derived from [`STALL_SECONDS`].
+///
+/// The split exists so the detector can be *tested*. With the threshold baked
+/// in at 30 s, the only way to observe whether a stall report ever fires is to
+/// deadlock a real boot for half a minute — which is precisely the experiment
+/// that went wrong: a boot did hang here for ten minutes on a genuine
+/// self-deadlock and no report appeared, and there was no way to tell whether
+/// the detector was broken or the hang was somewhere else. `self_test_stall`
+/// runs this same loop with a ~10 ms threshold and asserts the report fires,
+/// so the question is answered on every boot in milliseconds instead of being
+/// re-opened by every hang.
+///
+/// A `threshold_cycles` of 0 means the TSC is not calibrated yet and the
+/// fallback iteration count applies.
+fn spin_with_stall_threshold<G>(
+    name: &'static [u8],
+    addr: usize,
+    owner: &AtomicU64,
+    threshold_cycles: u64,
     mut try_acquire: impl FnMut() -> Option<G>,
 ) -> G {
     // Before spending 30 s finding out the slow way: if this task already holds
     // the lock, no number of retries can help. See `fail_if_recursive`.
     fail_if_recursive(name, addr, owner);
 
-    let threshold_cycles = crate::bench::tsc_freq().saturating_mul(STALL_SECONDS);
     let start_tsc = crate::bench::rdtsc();
     let mut iters: u64 = 0;
     let mut warned = false;
@@ -1297,5 +1327,87 @@ pub fn self_test() {
     }
     serial_println!("[sync]   PreemptSpinMutex try_lock: OK");
 
+    // Test 7: the spin-stall detector actually fires.
+    self_test_stall();
+
     serial_println!("[sync] Self-test PASSED");
+}
+
+/// Prove that a spin lasting past the stall threshold emits a stall report.
+///
+/// **Why this test exists.** The stall detector is the kernel's only net for a
+/// lock convoy, a leaked guard, or a task wedged on a lock another (possibly
+/// dead) task holds — the failure modes `fail_if_recursive` does *not* cover,
+/// because it only catches a task re-entering a lock it holds itself. A net
+/// that has never been shown to work is not a net. And there is direct reason
+/// to doubt this one: a boot hung for ten minutes on a genuine self-deadlock in
+/// `fs::encrypt`, which spun in exactly this loop, and no stall report ever
+/// reached the serial log. Every explanation offered for that has since been
+/// disproved (the TSC is calibrated to 3.66 GHz at boot line 133, long before
+/// the filesystem self-tests run, so the uncalibrated-fallback path was not in
+/// play; neither report budget had been touched). Until this test runs, "does
+/// the detector work?" is answered only by an absence of evidence.
+///
+/// **Why it takes milliseconds, not thirty seconds.** It calls
+/// `spin_with_stall_threshold` — the same loop the real contended paths use —
+/// with a threshold of ~10 ms instead of [`STALL_SECONDS`]. Everything under
+/// test is shared with production: the iteration throttle, the `rdtsc`
+/// comparison, the one-shot `warned` latch, and `report_spin_stall` itself.
+///
+/// **Why it cannot hang.** A broken detector would leave the closure returning
+/// `None` forever, which is the very hang this test is meant to diagnose. So
+/// the closure also gives up after 100× the threshold and reports failure
+/// through the return value, turning "silent hang" into "named assertion
+/// failure" — the same reason `fail_if_recursive` panics rather than warns.
+#[allow(dead_code)]
+fn self_test_stall() {
+    use crate::serial_println;
+
+    let freq = crate::bench::tsc_freq();
+    assert!(
+        freq != 0,
+        "TSC is not calibrated, so every stall check in the kernel is running on \
+         the raw-iteration fallback instead of wall-clock time"
+    );
+
+    // ~10 ms. Long enough that the 4096-iteration throttle checks many times,
+    // short enough to be free on every boot. Floored at 1 because a threshold of
+    // 0 means "TSC uncalibrated" to the loop and would silently switch it to the
+    // five-billion-iteration fallback, i.e. test something else entirely.
+    let threshold = freq.checked_div(100).unwrap_or(0).max(1);
+    // 100x the threshold (~1 s) is the give-up bound: far past any plausible
+    // scheduling hiccup, so reaching it means the detector genuinely failed.
+    let deadline = crate::bench::rdtsc().saturating_add(threshold.saturating_mul(100));
+
+    // `OWNER_NONE`: no task holds this synthetic lock, so `fail_if_recursive`
+    // returns immediately and we exercise the spin path rather than panicking.
+    let owner = AtomicU64::new(OWNER_NONE);
+    let reports_before = STALL_REPORTS.load(Ordering::Relaxed);
+
+    serial_println!(
+        "[sync]   (self-test) forcing a ~10ms spin stall; the 'SPINLOCK STALL' line \
+         below is expected and not a real event:"
+    );
+
+    let fired = spin_with_stall_threshold(b"selftest-stall", 0, &owner, threshold, || {
+        if STALL_REPORTS.load(Ordering::Relaxed) != reports_before {
+            return Some(true); // the report fired — stop spinning
+        }
+        if crate::bench::rdtsc() >= deadline {
+            return Some(false); // gave up; the detector did not fire
+        }
+        None
+    });
+
+    // Hand back the report budget. This test is not a real stall, and consuming
+    // one of the eight slots would make a genuine convoy later in the boot that
+    // much more likely to be silently truncated.
+    STALL_REPORTS.store(reports_before, Ordering::Relaxed);
+
+    assert!(
+        fired,
+        "spin-stall detector did not report after spinning ~100x its threshold — \
+         a real lock convoy or leaked guard would wedge the machine silently"
+    );
+    serial_println!("[sync]   Spin-stall detector fires: OK");
 }

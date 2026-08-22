@@ -50335,7 +50335,7 @@ commands that carry the colour in question, and assert the two renders agree.
 Candidates: anything drawn on the wallpaper, on a video surface, on a
 thumbnail, or on any other content the palette does not own.
 
-**Part 2 progress. 5 of 49 modules converted.**
+**Part 2 progress. 6 of 49 modules converted.**
 
 - [x] `security_dialog.rs` — 29 constants, done 2026-08-22. The method above
   survived contact: the sweep lives in `gui/desktop/src/palette_check.rs` as
@@ -50482,6 +50482,43 @@ thumbnail, or on any other content the palette does not own.
   - The content well behind the tabs was `CRUST`, the `readable_on` hole
     again; `p.crust` by reading. Text on the driver badges and on the eject
     button became `readable_on(...)` of what they sit on.
+- [x] `window_rules.rs` — 14 constants, done 2026-08-22. Harness defects
+  OO/PP/QQ/RR/SS/TT.
+  - **A third naming shape: `const MOCHA_BASE`, `MOCHA_SURFACE0`, … at file
+    scope.** After `mod theme { … }` (`notif_pane.rs`) and bare `const NAME`
+    (`device_settings.rs`), the survey now has to expect at least three. The
+    conclusion is the same one the inline literals already forced: the only
+    reliable survey is a whole-file grep for `Color::from_hex`/`Color::rgba`,
+    not a search for a block to empty.
+  - **The row-of-cells shape makes the categorical/accent question decidable
+    rather than a matter of taste.** Each cell of a rule row is coloured by
+    what it means — priority red/yellow/`subtext1`, action-count
+    green/`overlay0`, status green/red, match-expression blue — and they are
+    *siblings in one row*. The blue is the `device_settings.rs` trap again
+    (blue is the default accent, so it reads like an accent site), and the
+    siblings are what settle it: moving one member of a categorical row while
+    the rest stay put is the bug, not the feature. Defect SS reintroduces
+    exactly that and is caught only by the accent test.
+  - **The module's two genuine accent sites are in different views from its
+    green confirm button**, which surfaced a pre-existing inconsistency worth
+    recording rather than fixing: the list view's primary action ("+ Add Rule")
+    was blue and became `p.accent`; the editor's primary action ("Save") is
+    green and stayed `p.green`. Green is the one hue no accent resolves to, so
+    reading Save as an accent site would have changed its colour under the
+    *default* accent — which no faithful conversion does. The two never appear
+    on screen together, which is presumably how the inconsistency survived.
+    Same disposition as `notif_pane.rs`'s blue/green toggles: converted
+    faithfully, noted for the pass that comes after all 49.
+  - **Both "does not follow the accent" tests here carry their negative half,
+    and defect TT is the proof it is needed.** TT freezes the selected
+    match-type chip on blue — nothing moves with the accent any more, so the
+    equality half of the test passes; only the `assert_ne!` on the chip catches
+    it. A "does not follow X" test without a negative half certifies a module
+    that ignores X entirely.
+  - The status badge's wash (`Color::rgba(status_color.r, …, 51)`) needed no
+    `derived` declaration, for the reason recorded under `device_settings.rs`:
+    the sweep compares roles on RGB alone. Defect RR replaces it with Mocha
+    green's channels at the same alpha and the light sweep still names it.
 
 **Trigger:** this is not blocked on anything. It is sequenced after the shell
 event loop (`TD-C-THE-SHELL-CAN-DRAW-ITSELF-AND-NOBODY-CAN-ASK-IT-TO`) only

@@ -54,6 +54,7 @@ RUN = "gui/desktop/src/run_dialog.rs"
 ICON = "gui/desktop/src/icons.rs"
 NOTIF = "gui/desktop/src/notif_pane.rs"
 DEV = "gui/desktop/src/device_settings.rs"
+RULES = "gui/desktop/src/window_rules.rs"
 
 # (name, file, [(old, new), ...], [packages], [tests expected to fail])
 DEFECTS = [
@@ -498,6 +499,64 @@ DEFECTS = [
         [("            Self::Updating => p.blue,", "            Self::Updating => p.accent,")],
         ["desktop"],
         ["a_device_status_does_not_follow_the_accent"],
+    ),
+    (
+        "OO: the rules panel's background goes back to Mocha base",
+        RULES,
+        [("            color: p.base,", "            color: Color::from_hex(0x1E1E2E),")],
+        ["desktop"],
+        ["every_colour_the_panel_draws_comes_from_its_palette"],
+    ),
+    (
+        # Only drawn for a one-shot rule, so this measures the fixture as much
+        # as the sweep: a rule set that never sets `one_shot` would leave the
+        # badge unrendered and the reintroduced constant unseen.
+        "PP: the one-shot badge goes back to Mocha peach",
+        RULES,
+        [("                    color: p.peach,", "                    color: Color::from_hex(0xFAB387),")],
+        ["desktop"],
+        ["every_colour_the_panel_draws_comes_from_its_palette"],
+    ),
+    (
+        # Behind a tab: nothing in the rule-list view draws it.
+        "QQ: the editor's Save button goes back to Mocha green",
+        RULES,
+        [("            color: p.green,", "            color: Color::from_hex(0xA6E3A1),")],
+        ["desktop"],
+        ["every_colour_the_panel_draws_comes_from_its_palette"],
+    ),
+    (
+        # The wash, not a named constant -- Mocha green's channels written out
+        # at the call site at a fifth alpha. The sweep compares roles on RGB
+        # alone, which is exactly what lets it see through the alpha to the
+        # wrong hue underneath.
+        "RR: the ON badge's wash goes back to a hardcoded Mocha green",
+        RULES,
+        [("                color: Color::rgba(status_color.r, status_color.g, status_color.b, 51),",
+          "                color: Color::rgba(166, 227, 161, 51),")],
+        ["desktop"],
+        ["every_colour_the_panel_draws_comes_from_its_palette"],
+    ),
+    (
+        # A wrong *role*, not a leftover constant: `p.accent` is a member of
+        # both palettes, so the membership sweep passes this in light mode
+        # exactly as in dark. Only the categorical test can see it.
+        "SS: the ON status badge is made to follow the accent",
+        RULES,
+        [('                ("ON", p.green)', '                ("ON", p.accent)')],
+        ["desktop"],
+        ["a_rule_rows_colours_do_not_follow_the_accent"],
+    ),
+    (
+        # The other direction, and the reason each "does not follow" test
+        # carries a negative half: a selection frozen on blue still passes the
+        # sweep and still passes the equality assertion, because nothing moved.
+        "TT: the selected match-type chip stops following the accent",
+        RULES,
+        [("                color: if selected { p.accent } else { p.surface0 },",
+          "                color: if selected { p.blue } else { p.surface0 },")],
+        ["desktop"],
+        ["the_editors_save_button_does_not_follow_the_accent"],
     ),
 ]
 

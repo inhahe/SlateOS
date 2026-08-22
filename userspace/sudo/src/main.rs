@@ -3275,6 +3275,16 @@ fn main() {
 // ============================================================================
 
 #[cfg(test)]
+// Panicking on bad data is what a test is *for*, which is why CLAUDE.md allows
+// these here and nowhere else. Without the attribute this module alone emits a
+// dozen warnings, and a clippy run with a standing dozen warnings is one whose
+// thirteenth — a real one, in production code — goes unread.
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::indexing_slicing
+)]
 mod tests {
     use super::*;
 

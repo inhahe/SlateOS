@@ -30,7 +30,6 @@ userspace/coreutils/src/bin/more.rs:host-error-text
 userspace/coreutils/src/bin/nice.rs:host-error-text
 userspace/coreutils/src/bin/nohup.rs:host-error-text
 userspace/coreutils/src/bin/patch.rs:host-error-text
-userspace/coreutils/src/bin/readlink.rs:host-error-text
 userspace/coreutils/src/bin/realpath.rs:host-error-text
 userspace/coreutils/src/bin/renice.rs:host-error-text
 userspace/coreutils/src/bin/sh.rs:host-error-text

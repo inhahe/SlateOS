@@ -61679,3 +61679,155 @@ them separately means reading and re-reading each bin twice. The five converted
 so far had both done in one pass (argv first, error text immediately after), and
 that is the order to keep: the argv conversion is what introduces the
 `writeln!(err, ..)` sink in the first place.
+
+## TD-B-TOUCH-CANNOT-STAMP-A-PATH-IT-CANNOT-OPEN (lane B, 2026-08-22) — OPEN, host-only
+
+**In short:** `touch` sets a file's "last changed" date. On SlateOS it does that
+by naming the file — which works even for things you are not allowed to *open*,
+like a directory, a file whose permissions are set to deny everyone, or a
+socket. On the Windows machine we develop on there is no way to set a date by
+name; you must open the file first. So on that machine, and only on that
+machine, `touch` fails on those few kinds of file. Nothing shipped is affected —
+the real OS takes the good path — but it means a test for those cases cannot be
+written on the dev machine, so none exists.
+
+### Where
+
+`userspace/coreutils/src/bin/touch.rs` → `stamp_path`. Two arms:
+
+| Arm | How it stamps | Reaches |
+|---|---|---|
+| `#[cfg(unix)]` — **what ships** | `utimensat(AT_FDCWD, path, times, 0)` | everything a path can name |
+| `#[cfg(not(unix))]` — the dev host | open a handle, `SetFileTime` | everything a handle can name |
+
+### What the gap actually is
+
+Measured on Linux 6.6 (glibc), running the create-open and the stamp in the
+order `touch_one` does:
+
+| Path | create-open | `utimensat` |
+|---|---|---|
+| ordinary file | ok | ok |
+| a directory | `Is a directory` | ok |
+| a file of mode 000 you own | `Permission denied` | ok |
+| a FIFO with no reader | `No such device or address` | ok |
+| a unix-domain socket | `No such device or address` | ok |
+
+Four of those five cannot be opened in *any* mode — a mode-000 file refuses
+`O_RDONLY` exactly as it refuses `O_WRONLY`, and `open` on a socket fails
+outright. The unix arm handles all five. The Windows arm handles the first two
+(a directory works there because the handle asks for `FILE_WRITE_ATTRIBUTES`
+with `FILE_FLAG_BACKUP_SEMANTICS`); the other three have no Windows analogue
+worth chasing, since Windows has neither a mode-000 file nor a unix socket.
+
+### Why this is filed as debt rather than fixed
+
+There is nothing to fix in the shipping code — it already does the right thing.
+What is missing is **coverage**: the four interesting rows above are exactly the
+rows the host cannot execute, so the host suite proves the *logic* around the
+stamp (order of operations, which error is reported, `-c`/`-a`/`-m`/`-r`) and
+not the stamp itself on those file types.
+
+The C probe that produced the table above is the evidence that exists today. It
+was run once, by hand, under WSL. That is better than reasoning and worse than
+a test.
+
+### What the correct fix looks like
+
+A ring-3 self-test on the target, next to the existing `fastpy-settimes` one in
+`kernel/src/proc/spawn.rs` (which already exercises `SYS_FS_SET_TIMES` end to
+end). It should create the five paths above in a scratch directory, run the
+shipped `touch` on each, and assert exit 0 and a moved timestamp for all five.
+That is the only place all five can exist at once.
+
+Trigger: whenever the next ring-3 coreutils self-test is written — do not build
+a boot-test harness solely for this.
+
+### What must NOT be done about it
+
+Do not "fix" the divergence by making the unix arm open a handle too, so that
+both hosts behave alike. That trades a correct program for a testable one: it
+would break `touch` on four real file types on the only OS this is for, to make
+the dev host's limitation universal. The asymmetry is the right outcome.
+
+## TD-B-GETOPT-HAS-NO-DRIVER-FOR-OPTIONS-THAT-TAKE-VALUES (lane B, 2026-08-22) — OPEN
+
+**In short:** Our command-line tools share a helper that produces the *error
+messages* for bad options ("invalid option -- 'q'"). It does not do the actual
+*reading* of the command line. That was fine while every converted tool had only
+on/off switches like `-r`, but `touch` is the first with an option that takes a
+value (`-r FILE`, `--reference=FILE`), and those can be written four different
+ways. `touch` therefore carries about forty lines of its own command-line reader.
+The moment a second tool needs one, that code will be copied — and two copies
+will drift apart on the fiddly cases.
+
+### Where
+
+- The shared helper: `userspace/coreutils/src/getopt.rs`. It has
+  `Program::invalid_option`, `unrecognized_option`, `short_missing_argument`,
+  `long_missing_argument`, `argmatch`, `resolve_long`, and the `Takes` enum
+  (`Nothing` / `Required` / `Optional`) — everything needed to *describe* an
+  option table and to *complain* about it. There is no loop that walks argv.
+- The private copy: `userspace/coreutils/src/bin/touch.rs` → `Cursor`,
+  `parse_args`, `parse_long`, `parse_cluster`, `short_takes_argument`.
+
+### The four spellings that have to be got right
+
+For an option taking a value, all of these are the same thing, and GNU accepts
+all four:
+
+```
+-r FILE        --reference FILE
+-rFILE         --reference=FILE
+```
+
+Plus the cases that are easy to get subtly wrong, each of which `touch` has a
+test for:
+
+| Input | Correct behaviour |
+|---|---|
+| `-cr ref f` | bundling continues up to the value-taking option, which then eats the *next* argv word |
+| `-r` at the end | `option requires an argument -- 'r'` |
+| `--reference` at the end | `option '--reference' requires an argument` |
+| `--no-create=x` | refused: the option takes no value |
+| `--time=` | an *empty* value, which then fails `argmatch` and lists the valid words |
+| `-d 2001-01-01` | the option is refused, but its value must still be *consumed*, or `2001-01-01` becomes a file name |
+
+That last row is the one worth calling out: an option this crate does not
+implement still has to be parsed exactly like one it does, or the refusal turns
+into a silent file operation on the argument.
+
+### Why it was not lifted into `getopt` immediately
+
+Deliberate, not an oversight. An API designed from a single caller is one the
+second caller has to fight, and the case that will actually shape the design —
+`Takes::Optional`, where `--color` and `--color=never` differ but `--color never`
+is *not* the option's value — has no caller at all yet. `touch` needs only
+`Nothing` and `Required`, so a `getopt` driver written now would be guessing at
+the third.
+
+### What the correct fix looks like
+
+When a **second** bin needs an option argument, lift it then, with two callers
+in hand to check the shape against. The natural signature, given what is already
+in `getopt.rs`:
+
+```rust
+impl Program {
+    pub fn parse<'a>(
+        &self,
+        argv: &'a [OsString],
+        shorts: &str,              // GNU's getopt string, e.g. "acd:fhmr:t:"
+        longs: &[(&str, Takes)],
+    ) -> Result<Vec<Opt<'a>>, Error>;
+}
+```
+
+...yielding a flat sequence of `Opt::Short(u8, Option<OsString>)`,
+`Opt::Long(&str, Option<OsString>)` and `Opt::Operand(&OsString)`, so each bin
+keeps its own `match` over that sequence and only the walking is shared. Move
+`touch`'s tests for the table above with it — they are the specification.
+
+Trigger: **the second bin that needs an option taking a value.** The remaining
+argv-conversion backlog makes that near-certain (`ls`, `find`, `du`, `dd`,
+`sed`, `tar` all have them), so this should not sit long.

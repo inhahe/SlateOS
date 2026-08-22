@@ -40,5 +40,4 @@ userspace/coreutils/src/bin/strings.rs:host-error-text
 userspace/coreutils/src/bin/tar.rs:host-error-text
 userspace/coreutils/src/bin/tee.rs:host-error-text
 userspace/coreutils/src/bin/time_cmd.rs:host-error-text
-userspace/coreutils/src/bin/touch.rs:host-error-text
 userspace/coreutils/src/bin/xargs.rs:host-error-text

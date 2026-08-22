@@ -53,7 +53,6 @@ userspace/coreutils/src/bin/strings.rs:argv-as-string
 userspace/coreutils/src/bin/tar.rs:argv-as-string
 userspace/coreutils/src/bin/tee.rs:argv-as-string
 userspace/coreutils/src/bin/time_cmd.rs:argv-as-string
-userspace/coreutils/src/bin/touch.rs:argv-as-string
 userspace/coreutils/src/bin/tty.rs:argv-as-string
 userspace/coreutils/src/bin/which.rs:argv-as-string
 userspace/coreutils/src/bin/xargs.rs:argv-as-string

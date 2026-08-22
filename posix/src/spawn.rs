@@ -110,6 +110,167 @@ pub struct SpawnExArgs {
     pub envc: u64,
 }
 
+/// Extended spawn arguments, **version 2**, passed to
+/// [`SYS_PROCESS_SPAWN_EX2`].
+///
+/// [`SpawnExArgs`] plus a leading `struct_size` and a capability policy.
+/// Layout must match the kernel's `SpawnEx2Args` (`kernel/src/proc/spawn.rs`)
+/// exactly: C ABI, sixteen `u64`s, 128 bytes.
+///
+/// # Why the size field
+///
+/// So a *third* syscall number is never needed. `struct_size` is field 0, so
+/// the kernel can accept a struct shorter than it expects (an older caller —
+/// the missing tail is zero-filled, and **every field's zero value is its
+/// version-1 behaviour**) and reject a longer one whose extra bytes are
+/// non-zero (a newer caller asking for something this kernel cannot do).
+///
+/// That refusal is the point, not pedantry: the fields most likely to be added
+/// to a spawn struct are *restrictions* — `no_new_privs`, a seccomp filter, a
+/// namespace. A kernel that silently ignored one would turn a sandbox request
+/// into a no-op with no way for the caller to find out.
+///
+/// Always set `struct_size` to `size_of::<SpawnEx2Args>()` and the right thing
+/// happens whichever side is newer. [`spawn_ex2_args`] does that for you.
+#[derive(Debug, Clone, Copy)]
+#[repr(C)]
+pub struct SpawnEx2Args {
+    /// `size_of::<SpawnEx2Args>()` as *this* build knows it, in bytes.
+    pub struct_size: u64,
+    /// Pointer to ELF data in memory.
+    pub elf_ptr: u64,
+    /// Length of ELF data in bytes.
+    pub elf_len: u64,
+    /// Pointer to process name string (UTF-8).
+    pub name_ptr: u64,
+    /// Length of name string in bytes.
+    pub name_len: u64,
+    /// Pointer to `FdMapEntry` array (0 = no fd inheritance).
+    pub fd_map_ptr: u64,
+    /// Number of `FdMapEntry` entries.
+    pub fd_map_count: u64,
+    /// Pointer to packed null-terminated argv string data.
+    pub argv_ptr: u64,
+    /// Total byte length of the packed argv data.
+    pub argv_len: u64,
+    /// Number of arguments.
+    pub argc: u64,
+    /// Pointer to packed null-terminated envp string data.
+    pub envp_ptr: u64,
+    /// Total byte length of the packed envp data.
+    pub envp_len: u64,
+    /// Number of environment variables.
+    pub envc: u64,
+    /// How much of the caller's capability table the child receives:
+    /// [`SPAWN_CAP_MODE_INHERIT_ALL`] or [`SPAWN_CAP_MODE_SUBSET`].
+    ///
+    /// Any other value is `InvalidArgument` — not clamped and not defaulted.
+    /// A caller who asked for a policy this kernel does not implement must not
+    /// be handed a *wider* one.
+    pub cap_mode: u64,
+    /// Pointer to a [`CapEntryInfo`] array. Read only when `cap_mode` is
+    /// [`SPAWN_CAP_MODE_SUBSET`].
+    pub cap_ptr: u64,
+    /// Number of entries at `cap_ptr`.
+    pub cap_count: u64,
+}
+
+/// A mismatch here is an ABI break that would show up as the kernel reading a
+/// pointer out of the wrong field, so fail the build instead of the spawn.
+/// This struct's entire compatibility story rests on both sides agreeing on
+/// the size, which is exactly the thing a `const` assertion can guarantee and
+/// a test can only observe on a run somebody makes.
+const _: () = {
+    assert!(size_of::<SpawnEx2Args>() == 128);
+    assert!(align_of::<SpawnEx2Args>() == 8);
+    // The prefix through `envc` must be layout-identical to `SpawnExArgs`, or
+    // "version 1 plus a size field" is not what we are sending.
+    assert!(size_of::<SpawnExArgs>() == 96);
+    assert!(SPAWN_EX2_MIN_SIZE as usize == size_of::<SpawnExArgs>() + 8);
+};
+
+/// `cap_mode`: the child inherits the parent's entire capability table.
+///
+/// Zero so that a zero-filled tail reproduces `SYS_PROCESS_SPAWN_EX`'s
+/// behaviour exactly.
+pub const SPAWN_CAP_MODE_INHERIT_ALL: u64 = 0;
+
+/// `cap_mode`: the child inherits exactly the listed capabilities, and nothing
+/// else. A count of zero is legal and means the child gets **nothing**.
+pub const SPAWN_CAP_MODE_SUBSET: u64 = 1;
+
+/// The shortest `struct_size` the kernel accepts: through `envc`.
+///
+/// `13 * 8` — `struct_size` plus the twelve fields [`SpawnExArgs`] carries.
+/// A caller may stop here and get version-1 behaviour with a size field.
+pub const SPAWN_EX2_MIN_SIZE: u64 = 13 * 8;
+
+/// The largest `cap_count` the kernel will read: `kernel/src/cap/table.rs`'s
+/// `MAX_ENTRIES`, via `kernel/src/proc/spawn.rs`'s `SPAWN_CAP_MAX`.
+///
+/// This is the capacity of a capability *table*, so a larger request could not
+/// be satisfied even if every entry in it were legitimate — the child has
+/// nowhere to put them. The kernel answers `InvalidArgument` (from
+/// `read_user_items`, before it reads a single entry); we answer `EINVAL`
+/// locally for the same reason, so a caller that built an oversized list finds
+/// out without a syscall and without a partially-validated request.
+pub const SPAWN_CAP_MAX: usize = 4096;
+
+/// One capability as the kernel enumerates and accepts it.
+///
+/// Re-exported rather than redeclared so that building a subset is
+/// enumerate → filter → pass back with **no transcription step**: the same
+/// 24-byte struct `SYS_CAP_QUERY` writes out is the one
+/// [`SYS_PROCESS_SPAWN_EX2`] reads. A transcription step between "what I hold"
+/// and "what I delegate" is a place to get a field wrong.
+///
+/// `reserved` is validated by the kernel, not skipped — zero it.
+pub use crate::sys_capability::kernel_view::CapEntryInfo;
+
+/// Build a [`SpawnEx2Args`] with the size field and capability policy already
+/// correct, leaving every other field zero for the caller to fill in.
+///
+/// Exists so no call site ever writes `struct_size` by hand. A literal there
+/// would be a number that is right until someone adds a field, and wrong in
+/// the direction that makes the kernel read past what was written.
+///
+/// `caps` of `None` means [`SPAWN_CAP_MODE_INHERIT_ALL`]; `Some(slice)` means
+/// exactly that slice, including `Some(&[])` for "no capabilities at all".
+#[must_use]
+pub fn spawn_ex2_args(caps: Option<&[CapEntryInfo]>) -> SpawnEx2Args {
+    let (cap_mode, cap_ptr, cap_count) = match caps {
+        None => (SPAWN_CAP_MODE_INHERIT_ALL, 0, 0),
+        // A null pointer is *not* "the empty list" here, unlike the fd map and
+        // argv in version 1: the kernel rejects `cap_ptr == 0` with a non-zero
+        // count, and an empty subset must still be an explicit request for
+        // nothing. `[].as_ptr()` is a dangling-but-aligned non-null pointer,
+        // which is what the kernel expects to never read.
+        Some(list) => (
+            SPAWN_CAP_MODE_SUBSET,
+            list.as_ptr() as u64,
+            list.len() as u64,
+        ),
+    };
+    SpawnEx2Args {
+        struct_size: size_of::<SpawnEx2Args>() as u64,
+        elf_ptr: 0,
+        elf_len: 0,
+        name_ptr: 0,
+        name_len: 0,
+        fd_map_ptr: 0,
+        fd_map_count: 0,
+        argv_ptr: 0,
+        argv_len: 0,
+        argc: 0,
+        envp_ptr: 0,
+        envp_len: 0,
+        envc: 0,
+        cap_mode,
+        cap_ptr,
+        cap_count,
+    }
+}
+
 /// Header returned by `SYS_PROCESS_GET_ARGS`.
 ///
 /// Prefixed to the output buffer, followed by packed argv strings
@@ -1359,9 +1520,6 @@ fn build_fd_map(
 /// Returns 0 on success, or an error number (NOT -1) on failure.
 /// This matches the POSIX spec: `posix_spawn` returns the error
 /// directly, not via errno.
-// argc/envc and argv/envp pair on the canonical exec-family naming;
-// the visual similarity is intentional and worth keeping.
-#[allow(clippy::similar_names)]
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn posix_spawn(
     pid: *mut PidT,
@@ -1370,6 +1528,122 @@ pub extern "C" fn posix_spawn(
     _attrp: *const PosixSpawnattrT,
     argv: *const *const u8,
     envp: *const *const u8,
+) -> i32 {
+    // `None` — inherit everything. POSIX specifies `posix_spawn` as
+    // fork+exec-equivalent, and `fork` hands the child the parent's whole
+    // authority, so anything narrower here would be this libc inventing a
+    // sandbox its callers never asked for. Narrowing is opt-in only, via
+    // `slateos_spawn_caps`.
+    unsafe { spawn_impl(pid, path, file_actions, argv, envp, None) }
+}
+
+/// Spawn a process holding **exactly** the capabilities in `caps`.
+///
+/// The SlateOS-native counterpart to [`posix_spawn`]. Identical in every other
+/// respect — same fd inheritance, same file actions, same argv/envp packing —
+/// but the child receives the listed capabilities instead of the parent's
+/// whole table.
+///
+/// A `caps` of null with `cap_count` of 0 means the child gets **nothing**,
+/// which is a legitimate request and not an error. Null with a non-zero count
+/// is `EINVAL`: unlike the fd map and argv, this array is not optional, and
+/// silently substituting the empty list would start a child holding nothing
+/// when the caller asked for something.
+///
+/// # The refusal rule
+///
+/// If the caller names a capability it does not hold — **or rights wider than
+/// it holds**, e.g. asking to delegate `WRITE` on something it holds only
+/// `READ` on — the kernel fails the entire spawn and creates no process. It
+/// does not trim the request to the intersection, and neither does this
+/// function: **do not wrap this in a retry-with-fewer-caps loop.**
+///
+/// A refusal is reported as `EPERM`, distinct from the `EACCES` an unreadable
+/// binary gives, so the two are never confused at the call site. (`EPERM` is
+/// specific to this entry point; the shared kernel-error table maps
+/// `PermissionDenied` to `EACCES` and is unchanged.)
+///
+/// That is deliberate, and the bug it exists to prevent is on record. A
+/// quietly under-privileged child is how `make` came to parse its makefile
+/// fine and then die inside `ld.so` with `libc.so.6: cannot open shared object
+/// file: Permission denied` — a message naming nothing to do with the spawn,
+/// read as a userspace bug for a day. The list is caller-written, so an
+/// unsatisfiable entry is a caller bug and belongs at the call site.
+///
+/// Rights may be narrowed, never widened; the child gets the *requested*
+/// rights, not the parent's.
+///
+/// # Building the list
+///
+/// Enumerate with `SYS_CAP_QUERY`, drop what the child should not have, pass
+/// the remainder straight back — [`CapEntryInfo`] is the same struct on both
+/// sides precisely so that there is no transcription step. Note the kernel
+/// matches `resource_id` **exactly**, so a filtered enumeration round-trips
+/// but a hand-built entry naming a different id will not.
+///
+/// Returns 0 on success or an error number (not -1), as [`posix_spawn`] does.
+///
+/// # Safety
+///
+/// Same contract as [`posix_spawn`], plus: `caps` must point to `cap_count`
+/// initialised [`CapEntryInfo`] values, each with `reserved` zeroed — the
+/// kernel validates that field rather than skipping it.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub unsafe extern "C" fn slateos_spawn_caps(
+    pid: *mut PidT,
+    path: *const u8,
+    file_actions: *const PosixSpawnFileActionsT,
+    _attrp: *const PosixSpawnattrT,
+    argv: *const *const u8,
+    envp: *const *const u8,
+    caps: *const CapEntryInfo,
+    cap_count: usize,
+) -> i32 {
+    if caps.is_null() && cap_count != 0 {
+        return errno::EINVAL;
+    }
+    if cap_count > SPAWN_CAP_MAX {
+        return errno::EINVAL;
+    }
+    // SAFETY: `caps` is non-null for any non-zero `cap_count` (checked above),
+    // and the caller's contract is that it addresses `cap_count` initialised
+    // entries. For a zero count we synthesise an empty slice from a dangling
+    // aligned pointer rather than dereferencing `caps`, so a null with count 0
+    // — the "child gets nothing" request — is well-defined here.
+    let list: &[CapEntryInfo] = if cap_count == 0 {
+        &[]
+    } else {
+        unsafe { core::slice::from_raw_parts(caps, cap_count) }
+    };
+    unsafe { spawn_impl(pid, path, file_actions, argv, envp, Some(list)) }
+}
+
+/// The whole of `posix_spawn`, with the capability policy left open.
+///
+/// One body rather than two so the POSIX entry point and the native one cannot
+/// drift: everything except `cap_mode` is identical between them, and a second
+/// copy of ELF loading, fd-map construction and argv packing would be a second
+/// place for the `munmap`/`close_all` cleanup to be got wrong.
+///
+/// `caps` of `None` selects [`SYS_PROCESS_SPAWN_EX`] (517) — not 559 with
+/// `cap_mode == 0`. Both mean "inherit everything", but routing the untouched
+/// path through the untouched syscall means adding this feature cannot regress
+/// `posix_spawn`, which every existing caller uses.
+///
+/// # Safety
+///
+/// `path`, `file_actions`, `argv`, `envp` and `pid` carry `posix_spawn`'s
+/// contract; `caps`, if `Some`, must remain valid for the syscall's duration.
+// argc/envc and argv/envp pair on the canonical exec-family naming;
+// the visual similarity is intentional and worth keeping.
+#[allow(clippy::similar_names)]
+unsafe fn spawn_impl(
+    pid: *mut PidT,
+    path: *const u8,
+    file_actions: *const PosixSpawnFileActionsT,
+    argv: *const *const u8,
+    envp: *const *const u8,
+    caps: Option<&[CapEntryInfo]>,
 ) -> i32 {
     if path.is_null() {
         return errno::EFAULT;
@@ -1421,36 +1695,69 @@ pub extern "C" fn posix_spawn(
     let envp_packed_len = pack_cstring_array(envp, &mut envp_buf);
     let envc = count_cstring_array(envp);
 
-    // Build the SpawnExArgs struct for SYS_PROCESS_SPAWN_EX.
-    let spawn_args = SpawnExArgs {
-        elf_ptr: buf_ptr as u64,
-        elf_len: data_size as u64,
-        name_ptr: resolved.as_ptr() as u64,
-        name_len: resolved_len as u64,
-        fd_map_ptr: if fd_map_count > 0 {
-            fd_map.as_ptr() as u64
-        } else {
-            0
-        },
-        fd_map_count: fd_map_count as u64,
-        argv_ptr: if argv_packed_len > 0 {
-            argv_buf.as_ptr() as u64
-        } else {
-            0
-        },
-        argv_len: argv_packed_len as u64,
-        argc: argc as u64,
-        envp_ptr: if envp_packed_len > 0 {
-            envp_buf.as_ptr() as u64
-        } else {
-            0
-        },
-        envp_len: envp_packed_len as u64,
-        envc: envc as u64,
+    // The fields both syscalls share. Computed once and copied into whichever
+    // struct we send, so the two paths cannot disagree about what is being
+    // spawned -- only about who the child is allowed to be.
+    let elf_ptr = buf_ptr as u64;
+    let elf_len = data_size as u64;
+    let name_ptr = resolved.as_ptr() as u64;
+    let name_len = resolved_len as u64;
+    let fd_map_ptr = if fd_map_count > 0 {
+        fd_map.as_ptr() as u64
+    } else {
+        0
+    };
+    let argv_ptr = if argv_packed_len > 0 {
+        argv_buf.as_ptr() as u64
+    } else {
+        0
+    };
+    let envp_ptr = if envp_packed_len > 0 {
+        envp_buf.as_ptr() as u64
+    } else {
+        0
     };
 
-    // Spawn the process with the extended args struct.
-    let ret = syscall1(SYS_PROCESS_SPAWN_EX, (&raw const spawn_args) as u64);
+    // `None` goes to 517, not to 559 with `cap_mode == 0`. Both mean "inherit
+    // everything", but sending the untouched case down the untouched syscall
+    // means this feature cannot regress the path every existing caller uses.
+    let ret = match caps {
+        None => {
+            let spawn_args = SpawnExArgs {
+                elf_ptr,
+                elf_len,
+                name_ptr,
+                name_len,
+                fd_map_ptr,
+                fd_map_count: fd_map_count as u64,
+                argv_ptr,
+                argv_len: argv_packed_len as u64,
+                argc: argc as u64,
+                envp_ptr,
+                envp_len: envp_packed_len as u64,
+                envc: envc as u64,
+            };
+            syscall1(SYS_PROCESS_SPAWN_EX, (&raw const spawn_args) as u64)
+        }
+        Some(list) => {
+            // `spawn_ex2_args` fills `struct_size` and the capability policy;
+            // writing either by hand at a call site is how they go stale.
+            let mut spawn_args = spawn_ex2_args(Some(list));
+            spawn_args.elf_ptr = elf_ptr;
+            spawn_args.elf_len = elf_len;
+            spawn_args.name_ptr = name_ptr;
+            spawn_args.name_len = name_len;
+            spawn_args.fd_map_ptr = fd_map_ptr;
+            spawn_args.fd_map_count = fd_map_count as u64;
+            spawn_args.argv_ptr = argv_ptr;
+            spawn_args.argv_len = argv_packed_len as u64;
+            spawn_args.argc = argc as u64;
+            spawn_args.envp_ptr = envp_ptr;
+            spawn_args.envp_len = envp_packed_len as u64;
+            spawn_args.envc = envc as u64;
+            syscall1(SYS_PROCESS_SPAWN_EX2, (&raw const spawn_args) as u64)
+        }
+    };
 
     // Free the ELF buffer (must use alloc_size, not data_size, to
     // unmap the entire mmap'd region and avoid memory leaks).
@@ -1462,6 +1769,23 @@ pub extern "C" fn posix_spawn(
     opened.close_all();
 
     if ret < 0 {
+        // The delegation refusal must not arrive wearing the same errno as a
+        // binary this process could not read. The shared table maps the
+        // kernel's `PermissionDenied` to `EACCES`, and `load_elf` above can
+        // return `EACCES` too — so on the subset path the caller would be left
+        // unable to tell "you asked to delegate authority you do not hold"
+        // from "I could not open the file", and would go and look at the file.
+        //
+        // That confusion is a smaller copy of the bug this syscall exists to
+        // prevent (see `slateos_spawn_caps`), so the subset path reports
+        // `EPERM` instead: from this entry point, `EPERM` means the kernel
+        // refused on capability grounds and `EACCES` means the binary was
+        // unreadable. POSIX `posix_spawn` keeps the shared mapping untouched —
+        // it never takes this branch, because it never passes `Some`.
+        if caps.is_some() && ret == errno::native::PERMISSION_DENIED {
+            errno::set_errno(errno::EPERM);
+            return errno::EPERM;
+        }
         return native_to_posix_err(ret);
     }
 
@@ -2192,6 +2516,11 @@ pub extern "C" fn execvpe(file: *const u8, argv: *const *const u8, envp: *const 
 #[cfg(test)]
 mod tests {
     use super::*;
+    // `super::*` re-exports `CapEntryInfo` but not the modules of discriminants
+    // beside it, and the ex2 tests build entries out of real `ResourceType` and
+    // `Rights` values rather than invented ones — an entry whose type is 0 would
+    // pass a shape test while being a request the kernel rejects.
+    use crate::sys_capability::kernel_view;
 
     // -- posix_spawnattr_t ABI and round-tripping --
 
@@ -3718,5 +4047,281 @@ mod tests {
         let mut got: i16 = 0;
         assert_eq!(posix_spawnattr_getflags(&raw const attr, &raw mut got), 0);
         assert_eq!(got, 0);
+    }
+
+    // -- SYS_PROCESS_SPAWN_EX2 mirror --
+    //
+    // These pin the half of the ABI this side owns: the layout we send and
+    // the shape of the request we build.  What the *kernel* does with each
+    // malformed shape is asserted from ring 3 by `spawn::self_test_spawn_ex2_abi`
+    // (see `requests/a-b-spawn-ex2-capability-subset.md`); duplicating that here
+    // would be asserting our own guess at another lane's behaviour.  What is
+    // testable here — and is the part that actually breaks — is that we never
+    // *send* one of those malformed shapes.
+
+    /// Byte offset of `$f` within a zeroed `$t`, without constructing a
+    /// reference to the field.
+    macro_rules! offset_of_field {
+        ($t:ty, $v:expr, $f:ident) => {{
+            let v: &$t = &$v;
+            ((&raw const v.$f).cast::<u8>() as usize) - ((&raw const *v).cast::<u8>() as usize)
+        }};
+    }
+
+    fn zero_ex2() -> SpawnEx2Args {
+        spawn_ex2_args(None)
+    }
+
+    fn zero_ex() -> SpawnExArgs {
+        SpawnExArgs {
+            elf_ptr: 0,
+            elf_len: 0,
+            name_ptr: 0,
+            name_len: 0,
+            fd_map_ptr: 0,
+            fd_map_count: 0,
+            argv_ptr: 0,
+            argv_len: 0,
+            argc: 0,
+            envp_ptr: 0,
+            envp_len: 0,
+            envc: 0,
+        }
+    }
+
+    /// 128 bytes of sixteen `u64`s, no padding.
+    ///
+    /// The `const` block beside the declaration already fails the build on a
+    /// size change; this states the *field* offsets, which a reordering could
+    /// break while leaving the size right.  A swapped `cap_ptr`/`cap_count`
+    /// would hand the kernel a count where it expects a pointer — an
+    /// `InvalidAddress` at best and a read of unrelated memory at worst.
+    #[test]
+    fn ex2_layout_is_sixteen_u64s() {
+        use core::mem::{align_of, size_of};
+        assert_eq!(size_of::<SpawnEx2Args>(), 128);
+        assert_eq!(align_of::<SpawnEx2Args>(), 8);
+        let a = zero_ex2();
+        for (i, off) in [
+            offset_of_field!(SpawnEx2Args, a, struct_size),
+            offset_of_field!(SpawnEx2Args, a, elf_ptr),
+            offset_of_field!(SpawnEx2Args, a, elf_len),
+            offset_of_field!(SpawnEx2Args, a, name_ptr),
+            offset_of_field!(SpawnEx2Args, a, name_len),
+            offset_of_field!(SpawnEx2Args, a, fd_map_ptr),
+            offset_of_field!(SpawnEx2Args, a, fd_map_count),
+            offset_of_field!(SpawnEx2Args, a, argv_ptr),
+            offset_of_field!(SpawnEx2Args, a, argv_len),
+            offset_of_field!(SpawnEx2Args, a, argc),
+            offset_of_field!(SpawnEx2Args, a, envp_ptr),
+            offset_of_field!(SpawnEx2Args, a, envp_len),
+            offset_of_field!(SpawnEx2Args, a, envc),
+            offset_of_field!(SpawnEx2Args, a, cap_mode),
+            offset_of_field!(SpawnEx2Args, a, cap_ptr),
+            offset_of_field!(SpawnEx2Args, a, cap_count),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            assert_eq!(off, i * 8, "field {i} of SpawnEx2Args");
+        }
+    }
+
+    /// Everything through `envc` sits exactly 8 bytes later than in version 1.
+    ///
+    /// This is the claim that makes `struct_size` work at all: a short struct
+    /// is "version 1 plus a size field", so the kernel can zero-fill the tail
+    /// and get version-1 behaviour.  If the prefix ever stopped matching, the
+    /// size field would still be accepted and the *contents* would be wrong —
+    /// which is the failure that produces a spawn of the wrong binary rather
+    /// than an error.
+    #[test]
+    fn ex2_prefix_matches_ex_shifted_by_the_size_field() {
+        let a = zero_ex2();
+        let b = zero_ex();
+        macro_rules! same {
+            ($($f:ident),+ $(,)?) => {$(
+                assert_eq!(
+                    offset_of_field!(SpawnEx2Args, a, $f),
+                    offset_of_field!(SpawnExArgs, b, $f) + 8,
+                    concat!("field ", stringify!($f), " must be SpawnExArgs' + 8"),
+                );
+            )+};
+        }
+        same!(
+            elf_ptr,
+            elf_len,
+            name_ptr,
+            name_len,
+            fd_map_ptr,
+            fd_map_count,
+            argv_ptr,
+            argv_len,
+            argc,
+            envp_ptr,
+            envp_len,
+            envc,
+        );
+    }
+
+    /// The `struct_size` we send must land in the kernel's accepted range.
+    ///
+    /// Lane A's table rejects a size below 104, not a multiple of 8, or above
+    /// 4096.  Growing this struct is legal; growing it to a size the kernel
+    /// rejects outright is not, and the difference is invisible until a spawn
+    /// fails with `InvalidArgument` naming nothing.
+    #[test]
+    fn ex2_struct_size_is_one_the_kernel_accepts() {
+        let n = size_of::<SpawnEx2Args>();
+        assert_eq!(zero_ex2().struct_size as usize, n, "we send our own size");
+        assert!(n >= SPAWN_EX2_MIN_SIZE as usize, "{n} < min");
+        assert_eq!(n % 8, 0, "{n} is not a multiple of 8");
+        assert!(n <= 4096, "{n} > the kernel's 4096-byte ceiling");
+        assert_eq!(SPAWN_EX2_MIN_SIZE, 104);
+    }
+
+    /// `None` is the untouched case and must be *entirely* zero apart from the
+    /// size, so that a caller who fills in only the version-1 fields gets
+    /// version-1 behaviour with no capability policy attached by accident.
+    #[test]
+    fn ex2_args_none_is_inherit_all_and_otherwise_zero() {
+        let a = spawn_ex2_args(None);
+        assert_eq!(a.cap_mode, SPAWN_CAP_MODE_INHERIT_ALL);
+        assert_eq!(a.cap_mode, 0);
+        assert_eq!(a.cap_ptr, 0);
+        assert_eq!(a.cap_count, 0);
+        // Every version-1 field left for the caller.
+        assert_eq!(
+            (
+                a.elf_ptr,
+                a.elf_len,
+                a.name_ptr,
+                a.name_len,
+                a.fd_map_ptr,
+                a.fd_map_count
+            ),
+            (0, 0, 0, 0, 0, 0)
+        );
+        assert_eq!(
+            (a.argv_ptr, a.argv_len, a.argc, a.envp_ptr, a.envp_len, a.envc),
+            (0, 0, 0, 0, 0, 0)
+        );
+    }
+
+    /// "Give the child nothing" is a **non-null** pointer with a zero count.
+    ///
+    /// The kernel accepts `cap_ptr == 0` with `cap_count == 0` as well, so this
+    /// is not required — but it is the shape that stays correct if that ever
+    /// tightens, and more importantly it is the shape that proves we are not
+    /// treating a null pointer as "the array is absent".  Version 1 does treat
+    /// null that way for its fd map and argv; carrying that habit over here is
+    /// exactly how a request for *specific* capabilities would silently become
+    /// a request for none.
+    #[test]
+    fn ex2_args_empty_subset_is_a_request_not_an_absence() {
+        let a = spawn_ex2_args(Some(&[]));
+        assert_eq!(a.cap_mode, SPAWN_CAP_MODE_SUBSET);
+        assert_eq!(a.cap_mode, 1);
+        assert_eq!(a.cap_count, 0);
+        assert_ne!(a.cap_ptr, 0, "an empty slice still has a non-null pointer");
+        assert_eq!(a.cap_ptr % 8, 0, "and it is aligned for CapEntryInfo");
+    }
+
+    /// A non-empty subset is passed through by address, with no copy.
+    #[test]
+    fn ex2_args_subset_points_at_the_callers_slice() {
+        let list = [
+            CapEntryInfo {
+                resource_type: kernel_view::res::FILE,
+                reserved: [0; 3],
+                rights: kernel_view::rights::READ,
+                resource_id: 7,
+            },
+            CapEntryInfo {
+                resource_type: kernel_view::res::PROCESS,
+                reserved: [0; 3],
+                rights: kernel_view::rights::SIGNAL,
+                resource_id: 9,
+            },
+        ];
+        let a = spawn_ex2_args(Some(&list));
+        assert_eq!(a.cap_mode, SPAWN_CAP_MODE_SUBSET);
+        assert_eq!(a.cap_count, 2);
+        assert_eq!(a.cap_ptr, list.as_ptr() as u64);
+    }
+
+    /// The re-export is the same 24-byte struct `SYS_CAP_QUERY` writes.
+    ///
+    /// If this ever became a separate declaration that merely looked alike,
+    /// enumerate → filter → spawn would compile and the entries would be
+    /// reinterpreted field-by-field.  Asserting the size and the offsets here
+    /// costs nothing and states the property the re-export exists to give.
+    #[test]
+    fn cap_entry_info_is_the_query_struct() {
+        use core::mem::{align_of, size_of};
+        assert_eq!(size_of::<CapEntryInfo>(), 24);
+        assert_eq!(align_of::<CapEntryInfo>(), 8);
+        let e = CapEntryInfo {
+            resource_type: 0,
+            reserved: [0; 3],
+            rights: 0,
+            resource_id: 0,
+        };
+        assert_eq!(offset_of_field!(CapEntryInfo, e, resource_type), 0);
+        assert_eq!(offset_of_field!(CapEntryInfo, e, reserved), 2);
+        assert_eq!(offset_of_field!(CapEntryInfo, e, rights), 8);
+        assert_eq!(offset_of_field!(CapEntryInfo, e, resource_id), 16);
+        // Same type, not merely the same shape.
+        let _: kernel_view::CapEntryInfo = e;
+    }
+
+    /// A null array with a non-zero count is rejected here, before the syscall.
+    ///
+    /// The kernel rejects it too, so this is not the only guard — but it is the
+    /// one that fires without having loaded the ELF, opened the file actions,
+    /// and mapped a buffer, all of which this call would otherwise do before
+    /// finding out.  Checked ahead of the null-`path` test on purpose: a caller
+    /// with both wrong should hear about the one it asked a question about.
+    #[test]
+    fn slateos_spawn_caps_rejects_a_null_list_with_a_count() {
+        let r = unsafe {
+            slateos_spawn_caps(
+                core::ptr::null_mut(),
+                core::ptr::null(),
+                core::ptr::null(),
+                core::ptr::null(),
+                core::ptr::null(),
+                core::ptr::null(),
+                core::ptr::null(),
+                1,
+            )
+        };
+        assert_eq!(r, errno::EINVAL);
+    }
+
+    /// More entries than a capability table can hold cannot succeed, so it is
+    /// answered locally rather than after a 4096-entry copy into the kernel.
+    #[test]
+    fn slateos_spawn_caps_rejects_an_oversized_list() {
+        let one = CapEntryInfo {
+            resource_type: kernel_view::res::FILE,
+            reserved: [0; 3],
+            rights: kernel_view::rights::READ,
+            resource_id: 1,
+        };
+        let r = unsafe {
+            slateos_spawn_caps(
+                core::ptr::null_mut(),
+                core::ptr::null(),
+                core::ptr::null(),
+                core::ptr::null(),
+                core::ptr::null(),
+                core::ptr::null(),
+                &raw const one,
+                SPAWN_CAP_MAX + 1,
+            )
+        };
+        assert_eq!(r, errno::EINVAL);
+        assert_eq!(SPAWN_CAP_MAX, 4096, "kernel CapTable::MAX_ENTRIES");
     }
 }

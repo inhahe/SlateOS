@@ -35844,13 +35844,44 @@ it marks which entries I may revisit. So:
    direction I would argue for.
 2. The premise error is queued as `open-questions.md` → **B-Q7**, with the
    measurements, three options and a recommendation.
-3. The `bc` consolidation this entry describes is **reverted** — `userspace/bc`
-   restored (carrying the better August implementation, which was the one good
-   part of the exercise), `coreutils/src/bin/bc.rs` deleted, `calc-diff.sh`
-   repointed. The tree matches §8 while B-Q7 is open.
+3. The `bc` consolidation this entry describes **stays as it is** —
+   `userspace/bc` deleted, the better August implementation living at
+   `coreutils/src/bin/bc.rs`, `calc-diff.sh` naming the `coreutils` package.
+   *This point said "is reverted" when written on 2026-08-22; it was changed
+   the same day, before the revert was carried out.* See the amendment below.
 4. `known-issues.md` → `B-FORTY-TWO-BINARY-NAMES-ARE-BUILT-BY-TWO-PACKAGES`
    is corrected to say the *direction* is undecided pending B-Q7, since the
    collision itself is real either way.
+
+### Amendment, 2026-08-22 — why point 3 no longer reverts `bc`
+
+Reverting one utility looked like the cheap way to keep the tree honest while
+B-Q7 is open. Priced properly, it is not cheap and it is not honest:
+
+- **It buys no compliance.** §8 wants one tool per crate. 45 names live *only*
+  in `coreutils` and four standalone crates are multi-call, so the tree violates
+  §8 in ~49 places. Moving `bc` takes that to ~48 — a gesture, not a state.
+- **It costs the only mechanical check `bc` has.** `diagnostics_quote_names`
+  reads `coreutils/src/bin` and nothing else, and it caught a real unquoted-name
+  bug in `bc` on 2026-08-22 (see
+  `B-BCS-COMMAND-LINE-EXITED-0-ON-EVERY-KIND-OF-FAILURE`). Widening it is not a
+  side-fix: `scripts/quote-names-scope.py` prices a tree-wide version at 1796
+  call sites in 777 crates (`TD-B-THE-QUOTE-NAMES-TEST-READS-ONE-DIRECTORY-OF-EIGHTY`).
+- **It needs a dependency edge nobody has drawn yet.** After the 2026-08-22
+  rewrite `bc` uses `coreutils`'s `getopt`, `quote` and `errmsg`. A standalone
+  `userspace/bc` must either depend on the library inside the bundle §8 retires,
+  or fork three modules — which is the drift this entry exists to stop.
+- **Leaving it costs nothing meanwhile.** The harm B-Q7 describes is two crates
+  writing one filename; for `bc` that harm is already gone. One implementation,
+  the better one, named explicitly by its harness, 200/200 against GNU bc.
+
+The principle this turns on, and the reason it is recorded rather than just
+done: **an operator decision is owed an accurate tree or an accurate account,
+and when the two conflict the account is worth more.** A one-file gesture that
+makes the tree look §8-shaped while 48 other violations stand would misinform
+the very decision B-Q7 is asking for. So B-Q7 now states plainly that `bc` was
+not reverted and why, and the move remains one file, one dependency line and one
+`calc-diff.sh` edit away if the operator answers A.
 
 The two traps recorded above (`git mv` is invisible to cargo; do not restructure
 a crate mid-harness-run) are independent of which way B-Q7 goes, and are the

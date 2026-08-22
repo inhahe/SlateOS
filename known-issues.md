@@ -58959,3 +58959,97 @@ door.
 The 20 new tests enter through `parse_args`, which is why it was extracted as
 a pure function returning a `Request` rather than left as statements inside
 `main`.
+
+---
+
+## TD-B-THE-QUOTE-NAMES-TEST-READS-ONE-DIRECTORY-OF-EIGHTY (lane B, 2026-08-22) — OPEN
+
+**In short:** We have a test that reads our own source code looking for error
+messages that print a file's name without quoting it. Unquoted names are a real
+hazard — a file can be *named* something that looks like a second error message,
+and it will be printed as one. The test works, and it caught a live bug this
+week. The problem is where it looks: it reads exactly one folder, the one
+holding the 85 tools inside `coreutils`, and nothing else in the tree. Every
+other utility crate — 777 of them — is unchecked, and a scan says they contain
+**1796** of exactly the mistake the test exists to catch.
+
+### Where
+
+The test is `userspace/coreutils/tests/diagnostics_quote_names.rs`. Its whole
+scope is set by one function:
+
+```rust
+fn bin_dir() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("src/bin")
+}
+```
+
+`CARGO_MANIFEST_DIR` is `userspace/coreutils`, so the sweep is
+`userspace/coreutils/src/bin/**.rs` and stops there. An integration test can
+only be attached to the crate it lives in, so this is not an oversight in the
+test so much as a consequence of the shape it was given.
+
+### The measurement
+
+`scripts/quote-names-scope.py` (added with this entry) re-implements the test's
+two detectors — `bare_interpolated_name` and the hand-written-`'{name}'` check —
+in Python, so the whole tree can be priced without moving the test first. It
+skips comment lines, which the Rust version never needed to because no comment
+in `coreutils/src/bin` happens to match; tree-wide, several do (including the
+Rust test's own doc comments, which is how the port was validated against it).
+
+```
+$ python scripts/quote-names-scope.py
+scanned 2902 .rs files under userspace
+1796 would-be violations in 777 crates
+
+   46  btrfs
+   38  pulseaudio
+   36  cups
+   34  flatpak
+   19  timeout
+   ...
+```
+
+Run it with `--list` for the offending lines, or pass a path to scope it to one
+crate. `userspace/coreutils` reports 4, all of them the deliberately-bad fixture
+strings inside the test itself — i.e. `src/bin` really is clean, and the port
+agrees with the test it is modelling.
+
+### Why this matters more than the raw number suggests
+
+The 1796 are not evenly distributed over harmless code. The heads of the list
+are `btrfs`, `cups`, `flatpak`, `parted`, `losetup`, `mkfs`, `snapper` — tools
+whose entire job is to take a path or a device name from the user and report
+what went wrong with it. That is precisely the population where an
+attacker-chosen name reaches an error stream.
+
+### What the correct fix looks like
+
+Not "widen `bin_dir()`" — an integration test cannot reach outside its own
+crate's manifest directory in any clean way, and 777 crates is far past the
+point where one test's failure output is actionable. Two better shapes:
+
+1. **A workspace-level check rather than a crate test.** Promote the detectors
+   into `scripts/` (the Python port is already there) and run it from the
+   pre-push gate with a *baseline* file, exactly as
+   `scripts/multicall-aliases.py` does for unreachable command names: the
+   current 1796 are recorded as known, and the gate fails only on a *new* one.
+   That stops the bleeding immediately at near-zero cost and turns the backlog
+   into something that can be burned down crate by crate.
+2. **Then burn it down**, highest-risk crates first (the path-handling list
+   above), converting each site to `quotef_os` / `quoteaf_os`. This is the same
+   sweep that was done once inside `coreutils/src/bin`, so the shape of the work
+   is known.
+
+Doing (1) without (2) is still a clear win — it is the difference between a
+backlog and a growing backlog.
+
+### Interaction with B-Q7
+
+This is one of the two things that would be *lost* by moving a utility out of
+`coreutils/src/bin` into a standalone crate, and it is why the `bc` move was not
+reverted while B-Q7 is open (see `design-decisions.md` §359, amendment
+2026-08-22). If B-Q7 is answered **A** — standalone crates canonical — then fix
+(1) stops being an improvement and becomes a prerequisite, because at that point
+*no* utility in the tree is covered by the test at all.

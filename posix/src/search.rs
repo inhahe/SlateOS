@@ -429,7 +429,15 @@ fn c_str_eq(a: *const u8, b: *const u8) -> bool {
 /// we silently destroy the old one.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn hcreate(nel: usize) -> i32 {
-    // SAFETY: single-threaded access to global state.
+    // SAFETY: `HTAB` is the single process-global table the POSIX
+    // `hsearch` family is defined around, and that family is explicitly
+    // not thread-safe -- serialising calls is the caller's obligation
+    // (`hsearch_r` is the reentrant form for callers who need one).  So
+    // the sole accessor here is the calling thread.  This crate's own
+    // tests are such a caller: see `HTAB_TEST_LOCK` in the test module,
+    // added after unsynchronised tests segfaulted the test binary.
+    // NOTE: this used to read "single-threaded access", which asserted a
+    // fact rather than naming an obligation, and was false in the tests.
     unsafe {
         // Destroy any existing table.
         if !HTAB.buckets.is_null() {
@@ -474,7 +482,15 @@ pub extern "C" fn hcreate(nel: usize) -> i32 {
 /// the key or data pointers in each entry (POSIX does not require it).
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn hdestroy() {
-    // SAFETY: single-threaded access.
+    // SAFETY: `HTAB` is the single process-global table the POSIX
+    // `hsearch` family is defined around, and that family is explicitly
+    // not thread-safe -- serialising calls is the caller's obligation
+    // (`hsearch_r` is the reentrant form for callers who need one).  So
+    // the sole accessor here is the calling thread.  This crate's own
+    // tests are such a caller: see `HTAB_TEST_LOCK` in the test module,
+    // added after unsynchronised tests segfaulted the test binary.
+    // NOTE: this used to read "single-threaded access", which asserted a
+    // fact rather than naming an obligation, and was false in the tests.
     unsafe {
         if HTAB.buckets.is_null() {
             return;
@@ -508,7 +524,15 @@ pub extern "C" fn hdestroy() {
 /// not-found, ENOMEM on allocation failure.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn hsearch(item: Entry, action: i32) -> *mut Entry {
-    // SAFETY: single-threaded access to global table.
+    // SAFETY: `HTAB` is the single process-global table the POSIX
+    // `hsearch` family is defined around, and that family is explicitly
+    // not thread-safe -- serialising calls is the caller's obligation
+    // (`hsearch_r` is the reentrant form for callers who need one).  So
+    // the sole accessor here is the calling thread.  This crate's own
+    // tests are such a caller: see `HTAB_TEST_LOCK` in the test module,
+    // added after unsynchronised tests segfaulted the test binary.
+    // NOTE: this used to read "single-threaded access", which asserted a
+    // fact rather than naming an obligation, and was false in the tests.
     unsafe {
         if HTAB.buckets.is_null() || HTAB.size == 0 {
             errno::set_errno(errno::ESRCH);
@@ -707,7 +731,37 @@ pub extern "C" fn remque(elem: *mut u8) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use core::sync::atomic::{AtomicI32, Ordering};
+    use core::cell::Cell;
+
+    /// Serialises every test that touches the process-global `HTAB`.
+    ///
+    /// `hcreate`/`hsearch`/`hdestroy` implement the POSIX single-table API, so
+    /// there is exactly one table per process and no way to give each test its
+    /// own — unlike the walker counters below, which simply stop being shared.
+    /// The only thing left to fix is therefore the concurrency, and it has to
+    /// be fixed: `hdestroy` frees `HTAB.buckets` and nulls it, while `hsearch`
+    /// null-checks it and *then* dereferences it, and those are not one atomic
+    /// step. A test that reaches the dereference just as another test's
+    /// `hdestroy` frees the array reads freed memory, which is why this showed
+    /// up as `STATUS_ACCESS_VIOLATION` killing the whole binary rather than as
+    /// a failing assertion — a crash costs all 20 500 results in the process,
+    /// not one.
+    ///
+    /// Hold it for the *whole* test body, from before `hcreate` to past
+    /// `hdestroy`, so no test can observe a half-built or half-freed table.
+    static HTAB_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// Acquire the `HTAB` lock, recovering from poison.
+    ///
+    /// Poison recovery matters here: without it, the first test to fail an
+    /// assertion while holding the lock would turn six sibling failures into
+    /// the report, burying the one real cause.
+    #[must_use = "the guard serialises HTAB-touching tests; bind it to `_g`"]
+    fn lock_htab_for_test() -> std::sync::MutexGuard<'static, ()> {
+        HTAB_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
 
     /// Integer comparison function for tests.
     extern "C" fn int_compar(a: *const u8, b: *const u8) -> i32 {
@@ -864,19 +918,46 @@ mod tests {
 
     // -- twalk --
 
-    static WALK_COUNT: AtomicI32 = AtomicI32::new(0);
+    std::thread_local! {
+        /// Nodes `count_walker` has seen **on this thread**.
+        ///
+        /// Thread-local, not a global atomic, and the distinction is the whole
+        /// bug: `libtest` gives every test its own thread but runs many at
+        /// once, so a global counter is reset to zero by *sibling* tests in
+        /// the middle of this one's walk. The assertion then compares this
+        /// test's expected node count against a number some other test zeroed
+        /// — a failure with nothing wrong in the code under test.
+        ///
+        /// Per-thread, the counter is perturbed only by this test, so it needs
+        /// no lock and the tests keep running concurrently. (Same reasoning,
+        /// and the same shape, as `malloc::live_regions`.)
+        static WALK_COUNT: Cell<i32> = const { Cell::new(0) };
+    }
 
+    /// A walker callback has to be a bare `extern "C"` function pointer, which
+    /// cannot capture — hence a thread-local rather than a closure over a
+    /// local counter.
     extern "C" fn count_walker(_node: *const u8, action: i32, _depth: i32) {
         if action == LEAF || action == POSTORDER {
-            WALK_COUNT.fetch_add(1, Ordering::Relaxed);
+            WALK_COUNT.with(|c| c.set(c.get().wrapping_add(1)));
         }
+    }
+
+    /// Zero this thread's walk counter.
+    fn reset_walk_count() {
+        WALK_COUNT.with(|c| c.set(0));
+    }
+
+    /// This thread's walk counter.
+    fn walk_count() -> i32 {
+        WALK_COUNT.with(Cell::get)
     }
 
     #[test]
     fn test_twalk_empty() {
-        WALK_COUNT.store(0, Ordering::Relaxed);
+        reset_walk_count();
         twalk(core::ptr::null(), count_walker);
-        assert_eq!(WALK_COUNT.load(Ordering::Relaxed), 0);
+        assert_eq!(walk_count(), 0);
     }
 
     #[test]
@@ -886,13 +967,9 @@ mod tests {
             return;
         }
 
-        WALK_COUNT.store(0, Ordering::Relaxed);
+        reset_walk_count();
         twalk(root, count_walker);
-        assert_eq!(
-            WALK_COUNT.load(Ordering::Relaxed),
-            1,
-            "single node = 1 leaf"
-        );
+        assert_eq!(walk_count(), 1, "single node = 1 leaf");
 
         tdestroy(root, dummy_free);
     }
@@ -907,28 +984,42 @@ mod tests {
             }
         }
 
-        WALK_COUNT.store(0, Ordering::Relaxed);
+        reset_walk_count();
         twalk(root, count_walker);
-        assert_eq!(WALK_COUNT.load(Ordering::Relaxed), 3);
+        assert_eq!(walk_count(), 3);
 
         tdestroy(root, dummy_free);
     }
 
     // -- tdestroy --
 
-    static DESTROY_COUNT: AtomicI32 = AtomicI32::new(0);
+    std::thread_local! {
+        /// Keys `count_destroyer` has freed **on this thread**.  Thread-local
+        /// for the same reason as `WALK_COUNT` above.
+        static DESTROY_COUNT: Cell<i32> = const { Cell::new(0) };
+    }
 
     extern "C" fn count_destroyer(_key: *mut u8) {
-        DESTROY_COUNT.fetch_add(1, Ordering::Relaxed);
+        DESTROY_COUNT.with(|c| c.set(c.get().wrapping_add(1)));
+    }
+
+    /// Zero this thread's destroy counter.
+    fn reset_destroy_count() {
+        DESTROY_COUNT.with(|c| c.set(0));
+    }
+
+    /// This thread's destroy counter.
+    fn destroy_count() -> i32 {
+        DESTROY_COUNT.with(Cell::get)
     }
 
     extern "C" fn dummy_free(_key: *mut u8) {}
 
     #[test]
     fn test_tdestroy_empty() {
-        DESTROY_COUNT.store(0, Ordering::Relaxed);
+        reset_destroy_count();
         tdestroy(core::ptr::null_mut(), count_destroyer);
-        assert_eq!(DESTROY_COUNT.load(Ordering::Relaxed), 0);
+        assert_eq!(destroy_count(), 0);
     }
 
     #[test]
@@ -941,10 +1032,10 @@ mod tests {
             }
         }
 
-        DESTROY_COUNT.store(0, Ordering::Relaxed);
+        reset_destroy_count();
         tdestroy(root, count_destroyer);
         assert_eq!(
-            DESTROY_COUNT.load(Ordering::Relaxed),
+            destroy_count(),
             5,
             "tdestroy should call free_fn for each node"
         );
@@ -1040,6 +1131,7 @@ mod tests {
 
     #[test]
     fn test_hcreate_basic() {
+        let _g = lock_htab_for_test();
         let ret = hcreate(10);
         // malloc may fail — skip if so.
         if ret == 0 {
@@ -1051,12 +1143,14 @@ mod tests {
 
     #[test]
     fn test_hdestroy_no_table() {
+        let _g = lock_htab_for_test();
         // Calling hdestroy with no table should be safe.
         hdestroy();
     }
 
     #[test]
     fn test_hsearch_no_table() {
+        let _g = lock_htab_for_test();
         // Make sure no table exists.
         hdestroy();
         let item = Entry {
@@ -1069,6 +1163,7 @@ mod tests {
 
     #[test]
     fn test_hsearch_enter_and_find() {
+        let _g = lock_htab_for_test();
         hdestroy(); // ensure clean state
         if hcreate(32) == 0 {
             return;
@@ -1102,6 +1197,7 @@ mod tests {
 
     #[test]
     fn test_hsearch_find_nonexistent() {
+        let _g = lock_htab_for_test();
         hdestroy();
         if hcreate(32) == 0 {
             return;
@@ -1119,6 +1215,7 @@ mod tests {
 
     #[test]
     fn test_hsearch_enter_multiple() {
+        let _g = lock_htab_for_test();
         hdestroy();
         if hcreate(64) == 0 {
             return;
@@ -1157,6 +1254,7 @@ mod tests {
 
     #[test]
     fn test_hsearch_enter_duplicate_returns_existing() {
+        let _g = lock_htab_for_test();
         hdestroy();
         if hcreate(32) == 0 {
             return;

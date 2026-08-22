@@ -50335,7 +50335,7 @@ commands that carry the colour in question, and assert the two renders agree.
 Candidates: anything drawn on the wallpaper, on a video surface, on a
 thumbnail, or on any other content the palette does not own.
 
-**Part 2 progress. 6 of 49 modules converted.**
+**Part 2 progress. 7 of 49 modules converted.**
 
 - [x] `security_dialog.rs` — 29 constants, done 2026-08-22. The method above
   survived contact: the sweep lives in `gui/desktop/src/palette_check.rs` as
@@ -50519,6 +50519,41 @@ thumbnail, or on any other content the palette does not own.
     `derived` declaration, for the reason recorded under `device_settings.rs`:
     the sweep compares roles on RGB alone. Defect RR replaces it with Mocha
     green's channels at the same alpha and the light sweep still names it.
+- [x] `user_accounts.rs` — 14 constants, done 2026-08-22. Harness defects
+  UU/VV/WW/XX/YY/ZZ.
+  - **A fourth shape, and the first that cannot be converted by substitution: a
+    `const [Color; N]` table.** `AVATAR_COLORS` was seven Mocha constants in an
+    array, indexed by a `u8` read straight off disk. A palette resolved at
+    runtime cannot live in a `const`, so the table became
+    `fn avatar_colors(p: &Palette) -> [Color; 7]`. Add tables to the survey
+    checklist: a whole-file grep for `Color::from_hex`/`Color::rgba` finds the
+    *definition* of such a table, but the thing that has to change is every
+    signature that reads it — here three public methods
+    (`AccountType::badge_color`, `Avatar::palette_color`,
+    `Avatar::background_color`) all gained a `&Palette`.
+  - **The avatar table settles the categorical question on a new ground:
+    distinctness.** The seven colours are identity — how you tell accounts
+    apart at a glance — so they are categorical for the same reason a risk
+    level is. But they carry an extra constraint no other categorical row has:
+    they must stay mutually *distinct*, which an accent-following member could
+    not guarantee, since it would collide with whichever of the seven the
+    accent happened to equal. `the_avatar_colours_stay_distinct_in_both_modes`
+    asserts it directly; defect XX proves the sweep sees the seventh slot at
+    all, which it only does because the fixture makes one account per slot.
+  - The blue-state trap for the third time: `AccountType::Standard` is blue,
+    blue is the default accent, and its two siblings (`Administrator` red,
+    `Guest` grey) are what settle it. Defect YY is that substitution and is
+    caught only by `a_users_identity_colours_do_not_follow_the_accent`; defect
+    ZZ freezes the active tab label on blue and is caught only by that test's
+    `assert_ne!` half — the second independent confirmation of the TT lesson.
+  - The "on" toggle stayed `p.green` rather than becoming `p.accent`, same
+    disposition and same reason as `notif_pane.rs` and `window_rules.rs`: the
+    shell disagrees with itself about which an on-switch uses, and a conversion
+    is not the place to settle it. Three modules now carry that note; when the
+    49 are done it is one small pass, not 49 judgement calls.
+  - Two `MOCHA_MANTLE` sites became `readable_on(...)` — the initials on the
+    avatar circle and the label on the account-type pill. Both sit *on* a
+    coloured fill whose hue is chosen by data, so neither is a palette role.
 
 **Trigger:** this is not blocked on anything. It is sequenced after the shell
 event loop (`TD-C-THE-SHELL-CAN-DRAW-ITSELF-AND-NOBODY-CAN-ASK-IT-TO`) only
@@ -54057,6 +54092,29 @@ crate can reach:
 Each stage is its own commit with its own green test run, the way the three auth
 crates were.
 
+**Addendum 2026-08-22: `userspace/coreutils` is in the non-inheriting set, and
+it should be promoted out of stage 4.** It is one crate by the count above, but
+it is **86 binaries** — `wc`, `sed`, `sort`, `awk`, `tr`, `head`, `cut` and the
+rest — which is nearly every command a shell script runs, and every one of them
+parses attacker-shaped input in the ordinary course of its job (a file's bytes,
+a regular expression, a `--width` operand). Its `Cargo.toml` has no `[lints]`
+section and none of its bins carries a crate-level `#![deny]`, so the whole of
+it is unchecked. Weighed by "what a bug in the crate can reach", it belongs
+between stages 2 and 3, not at the end.
+
+It is also the one place where the cost is bounded by something better than an
+extrapolation: 27 of its utilities are already under differential harnesses
+(`scripts/*-diff.sh`), so a lint fix that changes behaviour is caught the same
+run rather than at the next boot test. Sequence it **after**
+`B-FORTY-TWO-BINARY-NAMES-ARE-BUILT-BY-TWO-PACKAGES` is resolved, not before:
+whichever way that goes, utilities move between crates, they arrive carrying
+their own warnings, and linting the same code twice is the avoidable half of
+the work. Note that if `open-questions.md` → B-Q7 is answered in favour of the
+standing §8 — standalone crates canonical, `coreutils/src/bin/*` retired — then
+this crate's 86 binaries do not need linting at all; they need porting into 45
+new crates that inherit the workspace lints by construction. That is a further
+reason not to start here until B-Q7 lands.
+
 **If never fixed:** no regression — the exposure is exactly what it has been
 since the crates were written. But the lints exist because this codebase has no
 human reviewer, and a check that runs over 32 of 2762 crates is not the safety
@@ -55024,8 +55082,62 @@ native SlateOS binary; the boot test hands it the command line
 `cat`. Instead it exits immediately, reporting success, having started nothing.
 The boot log proves it never even forked.
 
-**Found 2026-08-22** by lane B on `92501b295`. **Not fixed yet.** This one *is*
-lane B's own — `services/fastpy-minishell/`.
+**Found 2026-08-22** by lane B on `92501b295`. **Root-caused and rebuilt
+2026-08-22; awaiting a boot test to confirm.** This one *is* lane B's own —
+`services/fastpy-minishell/`.
+
+**Root cause: a fastpy codegen defect, already fixed upstream, in a fixture
+nothing could tell was stale.** fastpy's `x = []` wrote a *fabricated*
+`list:int` element kind into the variable's type tag, and that fabrication then
+satisfied `_is_confident_elem_type` — whose own docstring said it must fire only
+on "explicit evidence the elements are the claimed type (not just the 'int'
+default)". A loop over a list of *appended strings* therefore hardcoded the
+int tag and compared pointers as integers. That is exactly the shape of
+minishell's stage counter:
+
+```python
+toks2 = []          # <- fabricated list:int
+for t in toks:
+    toks2.append(t) # <- strings
+toks2.append('|')
+nstages = 0
+for t in toks2:
+    if t == '|':    # <- never true: str pointer read as i64
+        nstages = nstages + 1
+```
+
+`nstages` counted zero, the `'|'` branch never ran, `pids` stayed empty, and
+the program fell off the end returning 0 — which is why the exit code was none
+of the program's own diagnostic values. fastpy fixed it in `8e8b529`
+("*I could not tell* is not *int*: a sentinel for an unevidenced element kind",
+2026-08-21 18:03), whose commit message names this self-test by name.
+
+**Why it survived: the fixture staleness gates could not see the compiler.**
+`services/fastpy-minishell/fastpy-minishell.elf` was built 2026-08-21 **16:05**
+— an hour and 58 minutes before the fix. Both gates that police fixture
+freshness (`scripts/ctest-fixtures.py::_inputs` and the completeness loop in
+`scripts/create-ext4-rootfs.sh`) listed `build.py`, `main.c`, any `*.h`, and
+`libc.a` — and a fastpy fixture's ELF is generated by `compiler.codegen` from a
+source that *never changes*, so a codegen fix rewrites the binary while every
+listed input stands still. Both gates went on reporting the fixture as current.
+Logged separately as `B-FIXTURE-GATES-CANNOT-SEE-THE-FASTPY-COMPILER` below,
+because the blindness is the more general defect: it covered all 61 fastpy
+fixtures, not just this one.
+
+**The fix, in two parts.** (1) The fastpy compiler is now an input to both
+gates — the newest `.py` under its `compiler/` package, ordered by mtime like
+every other input. Adding it immediately reported **61 of 70 fixtures stale**,
+which is the measurement of how wide the hole was. (2) All of them rebuilt
+against current fastpy.
+
+The original analysis below is kept because its *method* was right even though
+its conclusion pointed one layer too far down — it correctly eliminated the
+kernel, the shell logic and the five primitives, and correctly identified the
+loop as the thing that had not run. Where it went wrong is instructive: it
+reasoned "an empty `pids` means `toks2` was empty" and therefore suspected
+argv delivery, when in fact `toks2` was *full* and the comparison against its
+contents was what failed. "The loop produced nothing" has two causes — no
+elements, or no element matching — and only the first was considered.
 
 **The symptom.**
 
@@ -55071,9 +55183,66 @@ this. Bisect by compiling a two-line probe (`print(len(sys.argv))`,
 `print(len(sys.argv[1]))`) through the same toolchain before touching the shell
 source.
 
+*(That next step was the right one and is what found it — the rebuild alone
+fixes it. The probe was not needed.)*
+
 **Cost while unfixed:** one red boot self-test. The primitives it composes are
 each covered by a passing fixture, so nothing is *untested* — only the
 composition is.
+
+
+## B-FIXTURE-GATES-CANNOT-SEE-THE-FASTPY-COMPILER (lane B) — fixed 2026-08-22
+
+**In short:** 61 of the 70 ring-3 test binaries are Python compiled to native
+code by fastpy. Two separate checks are supposed to notice when one of those
+binaries is out of date and needs rebuilding. Neither of them looked at *the
+compiler* — so when fastpy fixed a bug, all 61 binaries silently kept the bug
+and both checks kept saying they were fine. One of them was a self-test that
+had been failing for a day (`BUG-FASTPY-MINISHELL-EXITS-0-WITHOUT-FORKING`).
+
+**Where it lived.** Two gates, one defect:
+
+| Gate | What it listed as an input |
+|---|---|
+| `scripts/ctest-fixtures.py::_inputs` | `build.py`, `main.c`, `*.h`, `toolchain/sysroot/lib/libc.a` |
+| `scripts/create-ext4-rootfs.sh`, the completeness/staleness loop | the same four |
+
+For a **C** fixture that list is complete: `main.c` is the source and `zig cc`
+is a fixed toolchain. For a **fastpy** fixture it is missing the largest input
+there is. The fixture's whole source is a string literal inside its `build.py`,
+so the source genuinely never moves; what moves is `compiler.codegen`, which
+turns that unchanged source into a different binary. An input that is not
+listed is an input that cannot make anything stale.
+
+**How it was found.** By asking why a fixture whose bug was fixed upstream at
+18:03 was still built at 16:05 and still called current. The answer was not
+that the gate was wrong about the files it checked — it was right about all
+four — but that the set was short.
+
+**The fix.** Both gates now include the newest `.py` under fastpy's `compiler/`
+package as an input to every `fastpy-*` fixture, using the same mtime ordering
+as every other input, and reporting it by *file name* so the diagnosis says
+which file moved rather than "fastpy changed". The compiler checkout is located
+exactly as the builder locates it (`$FASTPY_DIR`, then `$PYTHONPATH`, then a
+sibling of the repo root named exactly `fastpy`), because a gate that resolves
+its inputs differently from the builder is a gate that judges a different
+artifact than the one that gets built. Not finding a checkout omits the input
+rather than failing closed: the shell gate runs under WSL, which cannot rebuild
+a fastpy fixture in any case, and a machine with no fastpy at all should not be
+blocked from packing an image.
+
+**The measurement that shows the size of the hole:** adding the input reported
+**61 of 70 fixtures stale** on the first run — i.e. every fastpy fixture in the
+tree, and none of the nine C ones. All 61 were rebuilt.
+
+**Related, and the same lesson twice.** §355 removed these ELFs from git and
+made them build on demand, on the argument that *a gate cannot tell which side
+moved, but a build step never has to ask*. This is the other half of the same
+observation: a build step can only rebuild what a staleness answer names, so
+the answer has to be complete. The rootfs script's own comments already warn
+against "a per-family gate in a per-family loop" producing a per-family blind
+spot; this was a per-*input-kind* blind spot, produced the same way — the input
+list was written for the C family and reused unchanged for the fastpy one.
 
 
 ## Timeline note — the three boot self-test failures are older than any lane-B coreutils change
@@ -55176,15 +55345,53 @@ with the reason written above them.
 unit test.
 
 
-## BUG-BC-PRINTS-A-BANNER-A-LEADING-ZERO-AND-NEVER-WRAPS (lane B)
+## BUG-BC-PRINTS-A-BANNER-A-LEADING-ZERO-AND-NEVER-WRAPS (lane B) — WITHDRAWN 2026-08-22, THE BUGS WERE NEVER THERE
 
-**Found 2026-08-21** by `scripts/calc-diff.sh`, which reports 95 passed and
-105 differed. All 105 are one or more of the three defects below, none of them
-related to the quoting migration that turned them up — the harness has been red
-at roughly this number since it was written, and nobody had read the rows.
+**In short:** This entry reported three bugs in `bc` that `bc` does not have.
+The harness that found them was running a *different program of the same name*:
+two packages in this workspace both build a file called `bc.exe` into the same
+place, and the one the harness happened to pick up was an older, abandoned
+implementation. The `bc` we ship agrees with GNU on all 200 cases, and did on
+the day this was filed. Nothing below needs fixing; the real defect is
+`B-FORTY-TWO-BINARY-NAMES-ARE-BUILT-BY-TWO-PACKAGES`, filed the same day.
 
-Reproduce: `bash scripts/calc-diff.sh`. Every case is `printf '<expr>\n' | bc`
-against GNU bc 1.07 in WSL.
+**What actually happened.** `scripts/calc-diff.sh` named its subject as the
+*path* `target/x86_64-pc-windows-gnu/debug/bc.exe` and ran it without building
+it. Two packages write that path — `userspace/bc` (the bignum rewrite, which
+this harness was written to certify) and `coreutils/src/bin/bc.rs` (a separate
+June implementation nobody has touched since) — so which program the harness
+measured was decided by whichever had been built last, at some unrelated earlier
+moment. It was `coreutils`'s. Rebuilding `userspace/bc` and re-running the
+identical harness, unchanged, gives **200 passed, 0 differed**.
+
+So all three sections below are accurate descriptions of
+`coreutils/src/bin/bc.rs`, and none of them describes `userspace/bc`:
+
+| # | Claimed of `bc` | True of `coreutils`'s bc | True of `userspace/bc` |
+|---|---|---|---|
+| 1 | banner on a pipe | yes | no — gated on `stdin.is_terminal()`, and `-q` accepted (`main.rs:2139`) |
+| 2 | `0.333…` not `.333…` | yes | no — fixed in `a1625db82` |
+| 3 | never wraps | yes | no — `BC_LINE_LENGTH` honoured, `wrap_chunk` (`main.rs:1121`) |
+
+**What this cost, and the lesson.** A day of a red harness that everyone
+believed, an `all-diff.sh` invocation documented as needing `calc` skipped, and
+three fixes queued against code that already had them. The reading that should
+have raised the alarm was in the entry itself: it said the harness "has been red
+at roughly this number since it was written", which is not how a harness written
+*to certify a rewrite* behaves — it is how one behaves when it is pointed at
+something other than the rewrite. The measurement was doubted only after the
+banner text in the failure rows (`bc 1.0 (slateos coreutils)`) turned out not to
+occur anywhere in `userspace/bc/src/main.rs`, which says the source of the
+program under test in one grep. **When a differential harness disagrees with a
+unit test, check that they are testing the same binary before believing either.**
+
+The three sections are kept below as the record of what was claimed, and because
+they remain a correct bug report against `coreutils/src/bin/bc.rs` — which is
+one of the 42 duplicates that has to be resolved one way or the other.
+
+Reproduce (as originally written): `bash scripts/calc-diff.sh`. Every case is
+`printf '<expr>\n' | bc` against GNU bc 1.07 in WSL. The harness now builds
+`-p bc --bin bc` itself, so it can no longer be reproduced.
 
 ### 1. The welcome banner is printed even when stdin is not a terminal
 
@@ -55232,6 +55439,1677 @@ diagnostics, which GNU does not wrap.
 **The proper fix is all three, measured against the harness** — `calc-diff.sh`
 already covers them, so the work is done when it reports 0 differed rather than
 when the three changes are written.
+
+*(2026-08-22: the paragraph above is what made this entry survive a day. It is
+right that the harness is the measure, and the harness did report 0 differed —
+the moment it was pointed at the right binary. "Measured against the harness" is
+only worth anything if the harness builds what it measures, which is what
+`scripts/diff-subject.sh` now guarantees for all twenty-seven of them.)*
+
+---
+
+
+## B-FORTY-TWO-BINARY-NAMES-ARE-BUILT-BY-TWO-PACKAGES (lane B, 2026-08-22) — harnesses fixed, the duplication itself is open
+
+**In short:** Forty-two of our command-line utilities exist *twice* in this
+tree, as two separate programs with the same name — one inside the big
+`userspace/coreutils` package, one as its own little `userspace/<name>` crate.
+Both get compiled to the same file on disk, so the one you actually run is
+whichever was compiled most recently. That is how a test harness spent a day
+reporting three bugs in `bc` that the shipped `bc` does not have. Nothing we
+*install* is affected yet, because the disk image does not stage these binaries;
+what is affected is every measurement taken by running one of them.
+
+**How to see it:**
+
+```
+$ cargo build -p tr -p coreutils --bin tr --target x86_64-pc-windows-gnu
+warning: output filename collision at …\target\x86_64-pc-windows-gnu\debug\tr.exe
+  = note: the bin target `tr` in package `tr` has the same output filename as
+          the bin target `tr` in package `coreutils`
+  = note: this may become a hard error in the future; see rust-lang/cargo#6313
+```
+
+Cargo warns and then picks one. The warning is emitted only when both are asked
+for in a single invocation, so `cargo build -p coreutils` alone is silent — and
+then a later `cargo build --workspace` quietly replaces the file.
+
+**The full list** as first filed (42 names; every one is `coreutils` vs a
+standalone `userspace/<name>`). `bc` is since resolved — one producer,
+`userspace/bc` — leaving **41**:
+
+```
+awk bc cal chown cmp comm cut date dd df diff du env expand fold free head
+hostname join kill logger nl paste patch ps sed seq sha256sum sort split stat
+strings tar tee tr tsort uname uniq uptime wc who xargs
+```
+
+**It is not simply "the standalone ones are dead."** The fork went both ways:
+
+| | live copy | the other one |
+|---|---|---|
+| `tr`, `wc`, `uniq`, `nl`, `cut`, `head`, `join`, `sed`, `seq`, `split`, `tsort`, `expand`, `fold`, `comm`, `paste`, `awk`, `sort` | **`coreutils`** — rewritten Aug 2026 for GNU parity, each certified by its own `*-diff.sh` | standalone, frozen 2026-06-13, roughly half the size |
+| `bc` | **`userspace/bc`** — Aug 2026 rewrite on `bignum::Decimal`, 200/200 against GNU | `coreutils/src/bin/bc.rs`, June, the one that fails 105 cases — **deleted 2026-08-22, this pair is done** |
+| `cal`, `date`, `dd`, `df`, `diff`, `du`, `env`, `free`, `hostname`, `kill`, `logger`, `patch`, `ps`, `stat`, `strings`, `tar`, `tee`, `uname`, `uptime`, `who`, `xargs`, `chown`, `cmp`, `sha256sum` | **standalone** — 1000–2800 lines each | `coreutils/src/bin/<n>.rs`, a 125–450 line stub |
+
+So resolving it means a per-utility decision, and in the third row it means
+moving the real implementation *into* `coreutils` (or deciding `coreutils` is
+not the home). It is not a delete-41-directories change.
+
+**Fixed so far (2026-08-22).**
+
+1. The differential harnesses no longer depend on which copy won:
+   `scripts/diff-subject.sh` builds the subject from a named package
+   immediately before the comparison, and all 27 `*-diff.sh` harnesses use it.
+   That removes the way this defect was actually hurting us.
+2. **`bc`'s two implementations are merged**, which was the substance of the
+   `bc` problem regardless of where the survivor lives: the August rewrite on
+   `bignum::Decimal` (200/200 against GNU) is the one that survives, and the
+   June implementation that fails 105 cases is gone. `calc-diff.sh` names the
+   package explicitly and still reports 200 passed, 0 differed.
+
+**Not settled — which package is the one home.** I wrote
+**design-decisions.md §359** saying `coreutils` is, and began implementing it,
+before finding that **§8 (2026-06-12) decides the opposite and is an *operator*
+decision**: standalone per-tool crates are canonical, `coreutils/src/bin/*`
+retires. §359 is therefore **suspended and unimplemented**, and the `bc` move
+into `coreutils` has been reverted so the tree matches §8 — `userspace/bc` is
+back, carrying the good August code.
+
+The reason this is a question rather than simply "obey §8" is that §8's
+deciding argument is false. It retires `coreutils` for being "a busybox-style
+multi-call binary that dispatches on `argv[0]`" — one file serving many tools,
+which forces one on-disk identity to hold the union of all their capabilities.
+`coreutils` is not that: 86 separate bin targets, no `argv[0]` dispatch, no
+`src/main.rs` anywhere in its history, and it already contains the shared
+library §8 proposed extracting as `coreutils-common` (which was never created —
+no part of §8 was ever carried out). The crates that *do* dispatch on `argv[0]`
+are standalone ones: `stat` (six tools), `sha256sum` (four), `chown` (two),
+`who` (two). Queued for the operator as **`open-questions.md` → B-Q7**, with
+the measurements and three options. Until it is answered, §8 governs and no
+further consolidation happens in either direction.
+
+**A tool for the remaining 41: `scripts/dup-bins-survey.py`.** It lists every
+colliding name with both sides' line counts and the set of command-line options
+each side's source mentions, and ranks which side is ahead. It is triage, not a
+verdict — every pair is still read before either copy is deleted — but it turns
+"42 unknown pairs" into 12 where `coreutils` leads, 24 where the standalone
+does, and 6 that need reading.
+
+Its own history is a warning worth keeping. The first version scanned for
+`"--name"` string literals, which `coreutils`'s newer parsers do not contain —
+they hold long options in a table with the dashes already stripped
+(`("equal-width", Long::EqualWidth)`), because that is the form GNU's
+abbreviation rule compares against. So it credited every long option to the
+standalone side and called `nl`, `split`, `seq`, `comm` and `tr` "standalone
+ahead" — five utilities where `coreutils` implements a superset *and* is the
+side under a differential harness. Acting on that would have deleted the tested
+implementation: the same mistake as the `bc` bug report, one level up. A second
+pass over `b'X'` byte literals was needed for the same reason in reverse — a
+bare scan credited `tr` with `-A -F -X -Z`, which are `for b in b'A'..=b'Z'`
+expanding `[:upper:]`, not flags.
+
+**Still open — the proper fix.** One name, one program. For each of the
+remaining 41: pick the implementation that is under test and maintained, make
+sure nothing in the other is worth keeping (the standalone ones are older but
+not uniformly worse — `stat` is 2845 lines against a 343-line stub), fold in
+anything that is, and delete the loser so the name has exactly one producer.
+Three names — `sha1sum`, `sha512sum` and `w` — have *no* `coreutils` bin at all
+and exist only as extra personalities of the standalone `sha256sum` and `who`,
+so they are gained by the move rather than merely relocated; deleting those two
+crates without porting them first would remove three working commands. Verify
+with a build that asks for everything at once and emits no `output filename
+collision` warning:
+
+```
+cargo build --workspace --target x86_64-pc-windows-gnu 2>&1 | grep -c collision   # must be 0
+```
+
+**Why it has not shipped a wrong binary yet.** `scripts/create-ext4-rootfs.sh`
+stages the fastpy-compiled ELFs, not these; nothing in the image build reads
+`target/<triple>/debug/<name>.exe`. That is luck, not design — the moment
+anything does, it inherits the coin flip.
+---
+
+## B-DOZENS-OF-COMMANDS-EXIST-IN-SOURCE-AND-CAN-NEVER-BE-RUN (lane B, 2026-08-22)
+
+**In short:** We have written somewhere around **50 to 70 command-line tools**
+— `e2fsck`, `mke2fs`, `strip`, `ranlib`, `xxd`, `killall`, `shred`, `visudo`,
+`iostat`, `lpr` and many more — that **no build produces an executable for**.
+They are real, complete implementations, several thousand lines in places. They
+are unreachable because of how they were written: each one lives inside
+*another* program, which is supposed to change behaviour when it is run under
+that name, and **nothing ever runs it under that name**. Type `e2fsck` on the
+finished system and you get "command not found", even though we have an
+`e2fsck`. This is a lot of finished work that currently ships as dead code.
+
+**The mechanism.** A "multi-call" program looks at the name it was started as
+and behaves accordingly — one file on disk, many command names pointing at it
+by symbolic link. BusyBox on Linux is the famous example. That works only if
+somebody *creates the links*. We wrote the dispatch and never wrote the links:
+
+- there is no `userspace/<alias>` crate for these names, so cargo never builds
+  an executable called `e2fsck`;
+- `userspace/coreutils` has no bin of that name either;
+- `scripts/create-ext4-rootfs.sh` creates no such alias. It *can* — it copies
+  `dash` to `/bin/sh` at line 669 and does the same again at line 1168, so the
+  machinery exists and is simply never pointed at any of these.
+
+So the personality is selected by a branch that no invocation can reach.
+
+**Verified by reading the source, not just by pattern:**
+
+| Program | Names it answers to that nothing produces |
+|---|---|
+| `userspace/e2fsprogs` | `mke2fs`, `mkfs.ext2/3/4`, `e2fsck`, `fsck.ext2/3/4`, `dumpe2fs`, `debugfs`, `e2image`, `e2label`, `filefrag`, `resize2fs`, `tune2fs` |
+| `userspace/systemctl` | `systemd-analyze`, `systemd-cat`, `systemd-cgls`, `systemd-cgtop`, `systemd-escape`, `systemd-notify`, `systemd-path`, `systemd-tmpfiles` |
+| `userspace/sudo` | `visudo`, `sudoedit`, `sudoreplay` |
+| `userspace/perf` | `perf-record`, `perf-report`, `perf-stat`, `perf-top` |
+| `userspace/lp` | `lpr`, `lpq`, `lprm`, `lpstat`, `cancel` |
+| `userspace/sysstat` | `mpstat`, `pidstat`, `cifsiostat`, `tapestat` |
+| `userspace/ar` | `ranlib`, `strip` |
+| `userspace/pv` | `shred`, `truncate` |
+| `userspace/last` | `lastb`, `lastlog` |
+| `userspace/locale` | `getconf`, `localedef` |
+| `userspace/mesg` | `talk`, `write` |
+| `userspace/w` | `finger`, `pinky` |
+| `userspace/hexdump` | `xxd` |
+| `userspace/kill` | `killall` |
+| `userspace/cal` | `ncal` |
+| `userspace/blkid` | `findfs` |
+| `userspace/getty` | `mingetty` |
+| `userspace/crond2` | `anacron` |
+| `userspace/xdg` | `mimeopen`, `xdg-mime` |
+| `userspace/ninja` | `samu` |
+
+`e2fsprogs` is the one to look at first: `userspace/e2fsprogs/src/main.rs:98-103`
+dispatches `mke2fs` and `e2fsck` (with their `mkfs.ext4`/`fsck.ext4` spellings),
+the file is ~3400 lines, and **`design.txt` makes ext4 the filesystem**. The
+tools that create and check our only filesystem are among the unreachable ones.
+
+**Why the count is a range.** Detecting "dispatches on its own name" is a
+heuristic — a program comparing a string to `"root"` may be checking a username,
+not its own name. Requiring a strict `=> Personality::` shape finds 52 names
+across 19 crates; a looser one finds 78 across 39. The following hits are
+**false positives** and should be discounted from any count: `root` (`sudo`,
+`sshd`, `useradm` — checking a *user*), `lo` (`ifconfig`, `dhcpcd`, `hwinfo` —
+a network interface), `all`/`list`/`internal`/`error`/`cpu`/`memory`/`min`/
+`time`/`localhost`/`anonymous` (argument values). The reproduction below prints
+the list so it can be re-checked rather than trusted.
+
+**A second, sharper form of the same defect: the alias that *is* produced.**
+Six aliases do have a producer, which means two implementations of one command
+exist and the multi-call branch is dead code that can silently disagree with the
+live one:
+
+| Program | Alias | Who really provides it |
+|---|---|---|
+| `userspace/head` | `tail` | `coreutils`'s `tail` — and `tail-diff.sh` tests *that* one |
+| `userspace/chown` | `chmod` | `coreutils`'s `chmod` |
+| `userspace/who` | `w` | `userspace/w` — see the entry below |
+| `userspace/pv` | `fuser` | `userspace/fuser` |
+| `userspace/sysstat` | `iostat` | `userspace/iostat` |
+| `userspace/chpasswd` | `passwd` | `userspace/passwd` |
+
+`head`/`tail` is the clearest: `userspace/head/src/main.rs:219` implements
+`tail`, there is no `userspace/tail` crate, and `coreutils/src/bin/tail.rs` is
+the one under differential test. So the standalone `tail` can never run, and
+this is invisible to the filename-collision check in
+`B-FORTY-TWO-BINARY-NAMES-ARE-BUILT-BY-TWO-PACKAGES` — the two executables have
+*different* names; only the behaviour is duplicated.
+
+**How to reproduce:**
+
+```sh
+python - <<'PY'
+import re, pathlib
+US = pathlib.Path("userspace"); CU = US/"coreutils"/"src"/"bin"
+cu = {p.stem for p in CU.glob("*.rs")} | {p.name for p in CU.iterdir() if p.is_dir()}
+CHAIN = re.compile(r'((?:"[a-z][a-z0-9_.+-]{1,20}"\s*\|\s*)*"[a-z][a-z0-9_.+-]{1,20}")\s*=>\s*Personality::')
+LIT = re.compile(r'"([a-z][a-z0-9_.+-]{1,20})"')
+for main in sorted(US.glob("*/src/main.rs")):
+    crate = main.parent.parent.name
+    t = main.read_text(encoding="utf-8", errors="replace")
+    if (m := re.search(r"^#\[cfg\(test\)\]", t, re.M)): t = t[:m.start()]
+    names = {n for ch in CHAIN.findall(t) for n in LIT.findall(ch)} - {crate}
+    dead = [a for a in sorted(names) if not (US/a/"Cargo.toml").is_file() and a not in cu]
+    if dead: print(f"{crate:<14} {' '.join(dead)}")
+PY
+```
+
+**The proper fix**, in order:
+
+1. **Decide the shape first** — this is the same question as
+   `open-questions.md` → **B-Q7**, and doing anything here before it is answered
+   means doing it twice. Note that this entry is *evidence* for B-Q7: §8's rule
+   is "one tool = one crate = one binary = one identity", and the standalone
+   side violates it in at least 19 crates, which is where all of this dead code
+   came from.
+2. **Prefer splitting the personalities into real binaries over adding links.**
+   Per `coreutils-canonical-answer.md`, one executable answering to many tool
+   names is the shape this OS's capability model exists to exclude: the kernel
+   grants permissions per file, so one file serving `sudo`, `visudo` and
+   `sudoedit` must hold the union of what all three need. Adding symlinks would
+   make the commands work *and* create exactly the least-privilege problem §8
+   was written to avoid.
+3. **Add a test that fails when a personality has no producer.** The whole
+   defect is that nothing checks; the reproduction above is most of such a test
+   already. Without it this recurs the next time someone writes an `argv[0]`
+   branch.
+4. For the six shadowed aliases, delete the dead branch and keep one
+   implementation — after comparing them, since they disagree (`head`'s `tail`
+   vs `coreutils`'s `tail` are separate codebases).
+
+**If never fixed:** no regression and nothing breaks today, because nothing
+stages these binaries into an image yet (`create-ext4-rootfs.sh` stages
+fastpy-compiled ELFs). But it is a large amount of completed work that a user
+can never invoke, and every week that passes adds another personality written
+the same way. The first image that stages Rust userspace binaries will ship a
+system where `e2fsck` — the checker for our only filesystem — is not a command.
+
+---
+
+## B-TWO-IMPLEMENTATIONS-OF-`w`-AND-THE-BETTER-ONE-CAN-NEVER-RUN (lane B, 2026-08-22)
+
+**In short:** `w` is the command that lists who is logged in and what each of
+them is running. We have written it **twice**, in two different places, and the
+two disagree about what columns it prints. Only one of them can ever actually
+run — and it is the **less complete** of the two. The better one is unreachable
+by construction: it is a second personality of the `who` program, activated by
+running `who` under the name `w`, and nothing ever does that, because a
+*different* program already owns the name `w`. Two more commands, `finger` and
+`pinky`, are written and have no way to be run at all.
+
+**How it happens.** Two crates, each with its own executable, and one of them
+changes behaviour based on the name it is invoked under:
+
+| Crate | Executable it builds | Extra personalities it answers to |
+|---|---|---|
+| `userspace/who` | `who` | **`w`** — `userspace/who/src/main.rs:1091`, `if basename == "w"` |
+| `userspace/w` | `w` | `finger`, `pinky` — `userspace/w/src/main.rs:42-43` |
+
+An extra personality only runs if something invokes the executable under that
+name — a symlink, a hard link, or a copy. So:
+
+- `who`'s `w` personality needs a `w` that is a link to `who.exe`. There is
+  none, and there cannot be a natural one, because `userspace/w` builds a real
+  `w.exe`. **Dead code.**
+- `finger` and `pinky` need links to `w.exe`. Nothing creates them: there is no
+  `userspace/finger` or `userspace/pinky` crate, no `coreutils` bin of either
+  name, and `scripts/create-ext4-rootfs.sh` creates no such alias (it does copy
+  binaries to second names — `dash` → `/bin/sh`, line 669 — so the machinery
+  exists; it is simply never pointed at these). **Unreachable features.**
+
+**The one that loses is the better one.** GNU `w` prints a summary line
+(time, uptime, user count, load averages) and then eight columns:
+`USER TTY FROM LOGIN@ IDLE JCPU PCPU WHAT`.
+
+| | Summary line | Columns printed |
+|---|---|---|
+| `who` in `w` mode (**unreachable**) | yes | all eight — `who/src/main.rs:940` |
+| `userspace/w` (**this is what runs**) | yes | six: `USER TTY FROM LOGIN@ IDLE WHAT` — no `JCPU`, no `PCPU` (`w/src/main.rs:415`) |
+
+`JCPU` and `PCPU` are the CPU time used by all processes on the terminal and by
+the current process respectively — the two columns that make `w` more than a
+prettier `who`. The implementation that computes them (`who/src/main.rs:600`,
+`get_user_process_info`, which scans `/proc`) is the one that never runs.
+
+**The proper fix.** One name, one program — the same rule as the entry above,
+and this is the same disease in a form that filename collisions do not catch,
+because the two executables have *different* filenames and only the behaviour
+is duplicated. Concretely:
+
+1. Decide which `w` survives. On the evidence it should be `who`'s
+   implementation, which is the complete one — but that means either deleting
+   `userspace/w` or gutting it to a link.
+2. Port `finger` and `pinky` to whatever survives, and **stage the alias names
+   in the image build**, so a personality that exists is a command that runs.
+   A personality with no link is not a feature; it is unreachable code that
+   reads like one, which is worse than not having it.
+3. Prefer removing the `argv[0]` dispatch entirely over adding links to it.
+   Per `coreutils-canonical-answer.md`, one executable serving several tool
+   names is the shape this OS's capability model is meant to exclude: the
+   kernel grants permissions per file, so one file answering to `w`, `finger`
+   and `pinky` must hold the union of what all three need.
+
+**Blocked on nothing, but sequence it after `open-questions.md` → B-Q7**, which
+decides whether `userspace/<tool>` crates or `coreutils` is the home for this
+family. Doing it first would mean doing it twice.
+
+**How to see it** (once built):
+
+```
+$ ./w --help          # six columns, no JCPU/PCPU -- userspace/w
+$ cp who.exe w.exe && ./w    # eight columns -- userspace/who's dead branch
+$ ./finger            # no such file: the personality has no executable
+```
+
+---
+
+## B-`chmod -r` REMOVES NOTHING AND RECURSES INSTEAD (lane B, 2026-08-22) — FIXED 2026-08-22 (steps 1-2); 3-4 open
+
+> **Fixed the same day, in the copy that ships.** `-r` is now a mode, `-R` and
+> `--recursive` are the flag, `--` ends options, and an unknown dash-argument is
+> rejected as an option instead of being mis-parsed as a mode. The test that
+> asserted the wrong behaviour is replaced by seven that assert the right one;
+> `cargo test -p coreutils --bin chmod` is 31/31 and clippy pedantic is clean on
+> the file. **Steps 3 and 4 below are still open** — the shipped `chmod` still
+> lacks `--reference`, `-v`, `-c` and `-f`, which are written and unreachable in
+> `userspace/chown`.
+
+**In short:** `chmod -r somefile` is the standard way to take away read
+permission on a file. Ours does not do that. It reads the `-r` as "recurse into
+directories", is then left with no permission change to make, and exits with
+`chmod: missing operand` — so the user who meant to make a file unreadable is
+told they made a typo, and **the file is still readable**. There is a unit test
+asserting this wrong behaviour, which is why it has survived. A second,
+unreachable copy of `chmod` in the tree gets it right.
+
+**Where.** `userspace/coreutils/src/bin/chmod.rs:52`:
+
+```rust
+for arg in args {
+    if arg == "-R" || arg == "-r" {     // <-- "-r" does not belong here
+        out.recursive = true;
+    } else {
+        positional.push(arg);
+    }
+}
+```
+
+`-R` is the recursive flag. `-r` is **not an option at all** — in POSIX and in
+GNU coreutils it is a *mode operand*, the `-` operator applied to the `r`
+permission bit, exactly like the `-w` in `chmod -w file` (which our
+implementation does handle, because `-w` falls through to `positional` and is
+parsed as a symbolic mode). Consuming `-r` as a flag is what breaks the
+symmetry: `chmod -w f` works and `chmod -r f` errors.
+
+**What a user sees.**
+
+| Command | GNU / POSIX | Ours |
+|---|---|---|
+| `chmod -w f` | clears the write bits | clears the write bits ✓ |
+| `chmod -r f` | clears the read bits | `chmod: missing operand`, exit 1, **file unchanged** |
+| `chmod -r 644 d` | treats `-r` as the mode, then fails on `644` not existing | silently recurses `d` with mode 644 |
+
+The third row is the dangerous one: it is not an error, it is a different
+action. A script that means "clear read on these paths" gets a recursive
+permission change on a directory tree instead.
+
+**The test that keeps it.** `userspace/coreutils/src/bin/chmod.rs`,
+`parse_recursive_lowercase_r_accepted`, asserts `parse_args(["-r","644","f"])`
+sets `recursive`. The test is not wrong about what the code does; it is wrong
+about what the code should do, which is the failure mode that makes a bug
+permanent — anyone who fixes the parser gets a red test and assumes they broke
+something.
+
+**The right implementation is already written, and cannot run.** `userspace/chown`
+carries a full second `chmod` as an `argv[0]` personality (see
+`B-DOZENS-OF-COMMANDS-EXIST-IN-SOURCE-AND-CAN-NEVER-BE-RUN`), and it is correct
+here — `userspace/chown/src/main.rs:937` takes `-R` and `--recursive` only, and
+`:928` honours `--` as end-of-options. It also has `--reference=REF`, `-v`,
+`-c`/`--changes` and `-f`/`--silent`, none of which the shipped `chmod` has.
+Nothing produces an executable named `chmod` from that crate, so none of it
+runs. This is the second measured case (after `w`) where the reachable copy is
+the worse copy, which is the argument for why that entry is not cosmetic.
+
+**The proper fix**, in this order:
+
+1. ~~Delete `|| arg == "-r"` and **fix the test** to assert the POSIX meaning:
+   `parse_args(["-r","f"])` yields mode `-r`, one path, `recursive == false`.~~
+   **Done.** The general rule now lives in `is_mode_operand`, which asks whether
+   what follows the `-` is drawn from `rwxXstugoa,+-=` — the set POSIX allows in
+   a mode operand, which deliberately excludes `R`.
+2. ~~Add `--recursive` as the long spelling, and `--` as end-of-options, so
+   `chmod -- -r file` can address a file literally named `-r`.~~ **Done**, plus
+   a third thing the fix made necessary: an unrecognised dash-argument is now an
+   error. It used to fall through to the mode parser, so `chmod -v 644 f`
+   answered `invalid operator in mode: -v` — an error about the user's mode
+   rather than about the flag we do not implement.
+3. Port `--reference`, `-v`, `-c`, `-f` across from `userspace/chown`'s copy
+   rather than rewriting them. **Still open.**
+4. Then resolve the duplication itself per `open-questions.md` → **B-Q7**, so
+   there is one `chmod` and not two. **Still open.**
+
+Steps 1 and 2 were worth doing **before** B-Q7 is answered: they are a
+correctness fix to the copy that actually ships, and they are the same edit
+whichever way B-Q7 goes. Step 3 is deliberately *not* done ahead of B-Q7,
+because porting four options into a file that may itself be deleted is the
+work-twice trap.
+
+**A deviation the fix chose not to close.** GNU appends mode-operand characters
+to the mode wherever they appear, so `chmod 644 -r f` builds the mode `644,-r`.
+Ours takes the first positional as the mode and everything after as paths, so
+that invocation tries to chmod a file named `-r` and reports that it does not
+exist. That is a visible failure rather than a silent wrong action, and `--`
+gives a way to address such a file deliberately, so it is left as-is rather than
+guessed at.
+
+**No harness covers this.** The 27 differential harnesses in `scripts/` cover
+`awk cat comm csplit cut expand expr fold head join nl od paste printf sed seq
+sort split tail test tr tsort unexpand uniq wc` plus `calc`/`extfloat` — there is
+no `chmod-diff.sh`, which is why a divergence this plain went unmeasured. A
+harness for the permission tools needs a real filesystem to act on, so it is
+more than a `diff` of stdout; that is the reason it does not exist, not an
+oversight, but the gap is real.
+
+**If never fixed:** every `chmod -r` in a script silently does the wrong thing —
+either failing where it should succeed, or recursing where it should clear one
+bit. Permission changes are exactly the class of bug that is discovered late and
+by an attacker.
+
+---
+
+## B-dd-DESTROYS-THE-OUTPUT-FILE-WHEN-`seek=`-IS-GIVEN (lane B, 2026-08-22) — FIXED 2026-08-22
+
+> **Fixed the same day.** All five defects below are corrected in
+> `userspace/coreutils/src/bin/dd.rs`, with 30/30 unit tests and an end-to-end
+> check that a `seek=` write into a 4096-byte file leaves all 4096 bytes with
+> only the addressed block changed. Kept here because it is the sharpest example
+> in the tree of the pattern the entries above are about — a comment that
+> correctly describes the right behaviour, sitting above code that does the
+> opposite, with tests that pin the wrong answer.
+
+**In short:** `dd` copies raw blocks, and `seek=N` means "leave the first N
+blocks of the destination alone and write after them" — it is how you patch a
+bootloader into a disk image, or a partition into a slot, without disturbing the
+rest. Ours **erased the entire destination file first** and then wrote at the
+offset. Anyone using `dd seek=` the way it is meant to be used lost everything
+already in the file, silently, with `dd` reporting success. A second bug made a
+plausible typo — `bs=1MB` instead of `bs=1M` — mean "block size zero", which
+truncated the destination and copied nothing, also reporting success.
+
+**Where.** `userspace/coreutils/src/bin/dd.rs`, and the tell is that the code
+carried a comment stating the correct rule while doing the opposite:
+
+```rust
+let mut writer: Box<dyn Write> = match &ops.output_file {
+    Some(path) => match OpenOptions::new()
+        .write(true).create(true).truncate(true)      // <-- file emptied HERE
+        .open(path) { ... },
+    ...
+};
+
+if ops.seek > 0 {
+    // dd with `seek=` preserves the existing tail of the output file —
+    // it positions the cursor and overwrites in place, so truncate(false)
+    // is the correct semantic (not truncate(true)).
+    if let Some(f) = ops.output_file.as_ref()
+        && let Ok(mut fh) = OpenOptions::new()
+            .write(true).create(true).truncate(false)  // <-- too late
+            .open(f)
+        && fh.seek(SeekFrom::Start(seek_bytes as u64)).is_ok()
+    { writer = Box::new(fh); }
+}
+```
+
+Re-opening a file with `truncate(false)` does not restore what the first open
+destroyed. Truncation is decided at open time, which is why GNU decides it
+there: its `open` passes `O_TRUNC` only when `seek_records == 0` and
+`conv=notrunc` is absent. The fix is one condition — `.truncate(ops.seek == 0)`
+— in the single place the file is opened.
+
+**Five defects, all of the same kind: a data loss reported as success.**
+
+| # | What it did | What a user saw |
+|---|---|---|
+| 1 | `of=` always truncated, even with `seek=` | `dd if=part of=disk.img seek=2048` left `disk.img` containing only the new part. Everything else gone. |
+| 2 | An unparseable size became `0` | `bs=1MB` (a real GNU suffix, meaning 1000000) hit a parser that looked only at the last byte, saw `B`, matched nothing, and `"1MB".parse()` failed to `0`. `bs=0` makes every read return `Ok(0)`, which the copy loop cannot tell from end-of-input — so dd truncated the destination, copied nothing, printed `0+0 records in`, and exited **0**. |
+| 3 | A failed `seek=` was ignored | The payload was written at offset 0 instead — over the exact bytes `seek=` existed to protect. |
+| 4 | A failed `skip=` was ignored | The copy silently started at offset 0, producing a file with the wrong contents rather than an error. Skipping on a pipe also counted *read calls* rather than bytes, so a short read skipped less than asked. |
+| 5 | `writer.flush()` result discarded (`let _ =`) | A write failure at the very end lost the tail of the copy and still exited 0. |
+
+Defect 2 is the one most likely to be met by accident, because `1MB` is a
+*correct* GNU spelling; defect 1 is the one that destroys the most.
+
+**What it does now.**
+
+- Truncation is decided once, at open: `.truncate(ops.seek == 0)`.
+- `parse_size` returns `Result`. Unknown suffixes, empty strings, negative
+  numbers and overflow are errors. It understands the full GNU suffix set
+  (`c`=1, `w`=2, `b`=512, `k`/`K`=1024, `kB`=1000, `M`/`MB`, `G`/`GB`, `T`/`TB`)
+  and products written `2x512`, with the two-letter forms as powers of 1000 and
+  the one-letter forms as powers of 1024.
+- `bs=0` is rejected outright.
+- Every seek, skip, write and flush failure is fatal.
+- Skipping on a non-seekable input counts bytes, not read calls.
+- `conv=`, `status=`, `ibs=`/`obs=`, `iflag=`/`oflag=` remain **unimplemented and
+  rejected**. That is deliberate and is now pinned by a test: a `dd` that accepts
+  `conv=notrunc` and truncates anyway is worse than one that refuses, because
+  the caller has no way to find out.
+
+**How the tests kept it.** `parse_size_garbage_zero` asserted
+`parse_size("notanumber") == 0`, and `parse_size_empty_zero` the same for `""`.
+As with `chmod -r`, the tests were right about what the code did and wrong about
+what it should do, so the bug was load-bearing: fixing it turned an existing
+test red. Both are replaced by tests asserting an error, and the suite grew from
+19 to 30 cases, most of them about refusing bad input rather than accepting good
+input.
+
+**Reproduction, before the fix:**
+
+```
+$ python -c "open('disk.img','wb').write(b'A'*4096)"
+$ python -c "open('payload.bin','wb').write(b'B'*512)"
+$ dd if=payload.bin of=disk.img seek=1 bs=512
+$ wc -c disk.img
+1024 disk.img          # was 4096; the last 3 KiB are gone
+```
+
+After the fix, `disk.img` is 4096 bytes, block 1 is `B`s, and everything else is
+untouched — verified 2026-08-22.
+
+**How this was found.** Not by a harness — there is no `dd-diff.sh`, and a
+differential harness for `dd` needs a filesystem rather than a stdout `diff`.
+It came out of `scripts/dup-bins-survey.py`, which ranks the 41 duplicated
+binary names (see `B-FORTY-TWO-BINARY-NAMES-ARE-BUILT-BY-TWO-PACKAGES`) and
+flagged `dd` as 365 lines in `coreutils` against 1166 in `userspace/dd`. The
+size gap is not itself a defect — it is a prompt to read the smaller one, which
+is what turned this up, exactly as it turned up `chmod -r`. **Both of the two
+tools read this way so far had a silent-wrong-behaviour bug**, which is the
+argument for reading the rest rather than treating the survey as a ranking to
+act on directly.
+
+**Still open, and deliberately deferred:** `conv=`, `status=progress`, separate
+`ibs=`/`obs=`. Implementing them belongs with `open-questions.md` → **B-Q7**,
+which decides whether this file or `userspace/dd` survives; writing them twice
+is the trap that decision exists to avoid.
+
+---
+
+## B-tee-REPORTS-SUCCESS-AFTER-LOSING-THE-DATA (lane B, 2026-08-22) — FIXED 2026-08-22
+
+**In short:** `tee` copies a stream to a file so you have a durable copy of it —
+`build 2>&1 | tee build.log`. The shipped `tee` threw away every error it hit
+while doing that and then exited 0, so a log that could not be created, could
+not be written, or was left half-written in a buffer that failed to empty all
+looked to the calling script exactly like a log that was written perfectly. A
+script that checks `tee`'s exit status — which is the only thing it *can* check
+— was told the copy was safe when the copy did not exist.
+
+**The offending code**, `userspace/coreutils/src/bin/tee.rs` as of `f631b7f23`:
+
+```rust
+        match file {
+            Ok(f) => files.push(f),
+            Err(e) => {
+                eprintln!("tee: {}: {e}", quotef_os(path));   // warns, then carries on
+            }
+        }
+...
+            Ok(n) => {
+                let _ = out.write_all(&buf[..n]);             // discarded
+                for f in &mut files {
+                    let _ = f.write_all(&buf[..n]);           // discarded
+                }
+            }
+...
+    }
+}                                                             // no flush, no exit status
+```
+
+Three separate ways to lose the data, one shared consequence — exit 0:
+
+| What happens | What the user saw | What GNU does |
+|---|---|---|
+| a file cannot be opened (bad path, no permission, read-only fs) | message on stderr, **exit 0**, other copies written | message, **exit 1** |
+| a write fails (disk full, I/O error, quota) | **silence**, exit 0 | message, **exit 1** |
+| buffered output fails when the file is closed | **silence**, exit 0 | message, **exit 1** |
+
+The third is the worst of the three because it is the *normal* failure mode for
+a full disk: the writes all succeed into an 8 KiB buffer and the error surfaces
+only on the final flush. Dropping the `File` at end of `main` flushes it and
+discards the result, so `tee` could hold the last block of a log in memory,
+fail to write it, and report success. Nothing on stderr either — the previous
+code did not merely mis-report the status, it never mentioned the failure at
+all.
+
+**What it does now.** A `status` variable starts at 0 and is set to 1 by any of
+the three, and `main` ends in `process::exit(status)`; the handles are held as
+`Vec<(String, File)>` so a write error can name the file that failed (a `File`
+cannot report its own path); a destination that fails a write is *dropped* via
+`retain_mut` rather than retried, so one full disk produces one message rather
+than one per 8 KiB of input; and every flush — stdout's and each file's — is
+checked. `parse_args` also gained `--` and the `--append` spelling, so a file
+genuinely named `-a` can now be written to.
+
+**The one thing deliberately left as success:** `BrokenPipe` on stdout.
+`cmd | tee log | head -1` shuts the pipeline down by closing the reader, and
+that is how a pipeline is *supposed* to end, not a failure of this program. It
+exits with whatever status the file copies earned.
+
+`-i`/`--ignore-interrupts` is absent on purpose rather than missing. The
+standalone `userspace/tee` implements it (`main.rs:121`), but `design.txt`
+rules out Unix signals for process control, so there is no SIGINT here to
+ignore; a flag that accepts an argument and does nothing is worse than no flag.
+
+**How this was found.** The same way as `chmod -r` and `dd seek=`: the survey in
+`scripts/dup-bins-survey.py` ranks the duplicated binary names by size, and a
+much *smaller* shipped `coreutils` bin against a much bigger standalone twin
+(139 lines against 397) is a prompt to read the small one. The standalone
+`userspace/tee` gets all three cases right — it checks both flushes
+(`main.rs:323,334`) and has an explicit `BrokenPipe` predicate (`main.rs:204`) —
+and cannot run, because nothing produces an executable for it. **Three for
+three: every tool read this way so far had a silent-wrong-behaviour bug.**
+
+**No harness covers this.** There is no `tee-diff.sh`, and there could not
+usefully be one built on `diff`ing stdout: every defect here is about a *file*
+and an *exit status*, neither of which a stdout comparison sees. The 11 unit
+tests in the file cover argument parsing only; the write/flush paths are
+verified by reading, not by test, which is the gap to close if a filesystem
+harness is ever built (the same gap `dd` has).
+
+---
+
+## B-tar-EXTRACTS-OUTSIDE-THE-DESTINATION-DIRECTORY (lane B, 2026-08-22) — FIXED 2026-08-22
+
+**In short:** `tar -xf downloaded.tar` unpacked an archive by writing each file
+to whatever path the archive said, and the archive is written by whoever made
+it. A file inside it called `../../etc/passwd` was written to `../../etc/passwd`
+— outside the directory you unpacked into, and outside the one you named with
+`-C`. So unpacking any archive you did not build yourself let its author
+overwrite an arbitrary file with the permissions of whoever ran `tar`. This is
+the long-known "tar slip"/"zip slip" vulnerability class, and it was present in
+**both** implementations in this tree.
+
+**The offending code**, `userspace/coreutils/src/bin/tar.rs` as of `88b52a28a`:
+
+```rust
+        let name = extract_string(header_buf.get(..100).unwrap_or(&[]));
+        ...
+            b'0' | b'\0' => {
+                if let Some(parent) = Path::new(&name).parent() {
+                    let _ = fs::create_dir_all(parent);      // creates ../../etc too
+                }
+                ...
+                if let Err(e) = fs::write(&name, &file_data) { ... }
+```
+
+`name` goes from the 100 header bytes to the filesystem with nothing in
+between. Two distinct escapes:
+
+| Member name in the archive | Where it was written | Does `-C safe/` help? |
+|---|---|---|
+| `../../etc/passwd` | two directories above the destination | no — `..` is applied after the chdir |
+| `/etc/shadow` | `/etc/shadow`, absolutely | **no** — an absolute path ignores the base entirely |
+
+The absolute case is the nastier of the two, because `-C` is the thing a
+careful user reaches for and it provides no protection whatsoever:
+`Path::join` with an absolute right-hand side *discards* the left-hand side.
+
+**Not just this copy.** `userspace/tar/src/main.rs:1064` does
+`base_dir.join(&output_path_str)` with the same unchecked name, so the
+standalone twin has the identical hole. This is the first tool in this audit
+where the bigger standalone implementation was **not** the more correct one —
+it has `--strip-components` and `--exclude`, neither of which is a security
+boundary. That copy cannot currently run (nothing produces an executable for
+it; see `B-DOZENS-OF-COMMANDS-EXIST-IN-SOURCE-AND-CAN-NEVER-BE-RUN`), so the
+fix went into the shipped file; whichever survives **B-Q7** must carry
+`sanitize_member_name` with it.
+
+**What it does now.** `sanitize_member_name` sits between the header and every
+filesystem call, and treats the two escapes differently on purpose:
+
+- **A leading `/` is stripped**, with GNU's one-time `Removing leading '/' from
+  member names` notice. Archives of system trees are routinely made with
+  absolute paths and are safe to unpack elsewhere, so refusing them would break
+  a common case for nothing.
+- **A `..` component is refused and the member skipped.** It cannot be stripped
+  safely: `a/../b` is equivalent to `b` only if `a` is a real directory rather
+  than a symlink, and the archive is exactly the thing we will not trust about
+  that. A rare loud refusal is the right trade against an arbitrary file write.
+- `.` components and doubled slashes are dropped, since they name the same path
+  and exist chiefly to disguise the first two.
+- The `..` test also splits on `\`, which is not a separator in this OS but is
+  on the hosts this file's unit tests run on. Names are rebuilt with `/` alone,
+  so a slateos filename that legitimately contains a backslash survives; only a
+  literal `..\` component is refused.
+
+Verified end-to-end against the built binary, 2026-08-22: a crafted archive
+holding `../../ESCAPED.txt`, `/tmp/…/ABSOLUTE.txt` and one legitimate member
+extracted **only** the legitimate one plus the de-absolutised one under the
+destination, wrote nothing outside it, and exited 2. `tar -tf` still lists the
+raw names — the point of listing an archive is to show you what is actually in
+it.
+
+**Four more defects fixed in the same pass**, all of the "reports success after
+failing" family that `chmod`, `dd` and `tee` also had:
+
+1. **Every `write_all` in create mode was `let _ =`**, and there was no flush.
+   `tar -cf backup.tar big-tree/` on a full disk wrote a truncated archive and
+   exited 0. Now any write error is reported once, aborts the archive (every
+   later member would land at the wrong offset anyway) and exits 2.
+2. **`Vec::with_capacity(size)` from the header's own size field.** A 512-byte
+   archive whose header claims 2^40 bytes made `tar` try to reserve a terabyte
+   before reading a single block — a denial of service costing the attacker one
+   header. Extraction now streams block by block; the crafted 1 TiB header
+   returns in milliseconds with `unexpected end of archive` and exit 2.
+3. **`f.read(&mut buf).unwrap_or(0)`** in create mode treated a *short* read as
+   end-of-file and NUL-padded the rest of the block, punching holes through any
+   file the OS chose to deliver in pieces. It also wrote however many blocks it
+   happened to read while the header declared `meta.len()`, so a file that
+   shrank mid-archive desynchronised every subsequent member — the archive
+   would list fine and extract garbage. Now the body is always exactly the
+   declared length, short reads are looped over, and a genuinely short file is
+   padded *and reported*.
+4. **Silent skips.** An unreadable directory (`if let Ok(entries)`) dropped its
+   whole subtree from the archive without a word; symlink, hardlink and device
+   members were skipped on extraction without a word. Both now report and set
+   the exit status. Directory entries are also sorted, so archiving the same
+   tree twice produces the same bytes.
+
+Exit status is GNU's: 2 for a fatal error, 0 only when every member was
+actually handled. `main` no longer exits inline from the middle of a mode.
+
+**How this was found.** The same reading pass as `chmod -r`, `dd seek=` and
+`tee`: `scripts/dup-bins-survey.py` flagged `tar` at 752 lines against
+`userspace/tar`'s 1676, and the gap is a prompt to read the smaller one.
+**Four for four** — every shipped `coreutils` bin read against its bigger
+standalone twin so far has had a silent-wrong-behaviour bug, and this one was
+exploitable.
+
+**Not covered by any harness.** There is no `tar-diff.sh` and a stdout `diff`
+could not have caught any of this — every defect above is about a *file*, an
+*exit status*, or an *allocation*. The 40 unit tests now cover the sanitizer
+and the block arithmetic; the create/extract I/O paths are verified by the
+end-to-end runs recorded above rather than by test, which is the same gap `dd`
+and `tee` have and the argument for a filesystem-level harness.
+
+**Still not implemented, deliberately:** compression (`-z`/`-j`), pax/GNU long
+names (paths over 100 chars, the `L` typeflag), sparse files, and restoring
+mode/mtime on extraction. Adding them belongs with **B-Q7**, which decides
+whether this file or `userspace/tar` survives.
+
+---
+
+## B-chown-FOLLOWS-SYMLINKS-WHILE-RECURSING (lane B, 2026-08-22) — FIXED 2026-08-22
+
+**In short:** A *symbolic link* is a file whose entire content is the name of
+another file; opening it gets you the other file. `chown -R alice srv/` is
+supposed to give alice everything under the `srv` directory and nothing else.
+Both of our `chown` implementations, on meeting a symbolic link inside `srv`,
+followed it — so a link named `srv/x` pointing at `/etc` made the command walk
+into `/etc` and hand alice the system's configuration, and a link pointing at
+`/etc/shadow` (the password file) handed her that. Whoever put the files in
+`srv` chooses those links, and under `/tmp`, a downloads directory, or a shared
+home that is not the person running the command. Fixed: the walk no longer
+follows links, and the links it meets are changed rather than their targets.
+
+### Two separate escapes, either of which is enough
+
+`userspace/coreutils/src/bin/chown.rs`, both fixed:
+
+| # | Old code | What it did |
+|---|---|---|
+| 1 | `if path.is_dir() { … recurse … }` | `is_dir()` **resolves the link first**, so a link to a directory answered "yes, a directory" and the walk descended through it into a tree the caller never named. |
+| 2 | `chown(path, uid, gid)` | `chown(2)` is defined to follow the final symlink. So even without descending, `srv/x -> /etc/shadow` transferred `/etc/shadow`. |
+
+POSIX has a name for the correct behaviour and makes it the default: of
+`-H`/`-L`/`-P`, **`-P` (follow nothing) is what `chown -R` does when none is
+given**, and it exists for exactly this reason. Neither implementation had any
+of the three options, so there was not even a way to ask for the safe
+behaviour, let alone get it by default.
+
+The fix, in both copies:
+
+* Traversal is driven by `symlink_metadata`/`DirEntry::file_type()`, which are
+  `lstat`-based — a link to a directory reports as a link, so the recursion
+  cannot descend through one.
+* The syscall issued during traversal is `lchown(2)` (`SYS_FS_SET_OWNER` with
+  arg4 bit 0 = NO_FOLLOW), which changes the link inode itself.
+* A link named *on the command line* is still followed when `-R` is absent, per
+  POSIX — the caller typed that name and can see what it is. Under `-R` it is
+  not, because the root of the walk is as good an exit as any leaf.
+
+### The standalone copy said the safe call did not exist
+
+`userspace/chown/src/main.rs` was worse than wrong; it was documented as wrong.
+Its `-h`/`--no-dereference` handler printed:
+
+> `chown: warning: -h/--no-dereference is not supported on Slate OS; symlink targets will be affected`
+
+and a comment explained that "the Slate OS VFS set_owner path resolves symlinks
+(resolve_follow) and there is no lchown-equivalent syscall yet". That was true
+when it was written and stopped being true afterwards: `sys_fs_set_owner` reads
+a NO_FOLLOW bit from arg4 (`kernel/src/syscall/handlers.rs`), and
+`posix/src/file.rs` → `lchown` has been passing it. The binary was only issuing
+`syscall4`, so the fifth argument never reached the kernel — it had no
+`syscall5` at all. Adding one is the whole of the plumbing fix.
+
+The stale claim also lived in `todo.txt`'s 2026-05-30 entry as a "JUDGMENT
+CALL / DOCUMENTED LIMITATION" marked *"Deferred: low value"*. That is annotated
+in place now. It was neither low value nor, by the time anyone read it, still
+undone — which is the more useful lesson: a deferral note with no expiry
+outlives the condition that justified it, and the next reader takes it as
+current.
+
+### Everything else this rewrite fixed
+
+`userspace/coreutils/src/bin/chown.rs` was rewritten rather than patched. The
+other defects found in it:
+
+1. **`-r` was accepted as `-R`.** POSIX `chown` has no `-r`, and reading it as
+   recursion turns a one-file change into a whole-tree one. There was a test,
+   `parse_recursive_lowercase_r_accepted`, asserting the wrong behaviour — the
+   **third** instance of that anti-pattern in this audit after `chmod` and
+   `dd`. The test was right about what the code did and wrong about what it
+   should do, so fixing the bug turned a green test red, which reads like a
+   regression to anyone who did not know the history.
+2. **Unknown options became file names.** `chown -x alice f` treated `-x` as a
+   path. Now rejected.
+3. **Paths had to be UTF-8.** `to_str()` on the operand meant a perfectly legal
+   filename with a non-UTF-8 byte in it could not be chowned at all. Paths are
+   bytes here (`CLAUDE.md` §7); the rewrite uses `OsStr`/`as_bytes` throughout.
+4. **The error message was `chown failed (errno)` with no errno in it.** It now
+   reports `io::Error::last_os_error()` and the path.
+5. **Recursion aborted on the first error** via `?`, so one unreadable
+   subdirectory silently left every later sibling unchanged. It now reports and
+   continues, tracking the worst status.
+6. **`4294967295` as a literal uid collided with the "unchanged" sentinel.**
+   POSIX's `(uid_t)-1` — `u32::MAX` — means "leave this field alone", and it is
+   passed straight through, which is better than a stat-then-write (no TOCTOU
+   window, and an omitted field never becomes a real write).
+7. **Directory loops.** The walk now keys on `(st_dev, st_ino)`, so a
+   filesystem containing a cycle terminates. Not reachable through symlinks any
+   more, but bind mounts and hard-linked directories are not this program's to
+   rule out.
+
+`-c/--changes`, `--from` and `--reference` are still unimplemented in the
+coreutils copy, and neither copy resolves user *names* without `/etc/users.yaml`
+(§353). Both are noted rather than fixed because **B-Q7** has not yet decided
+which of the two files survives.
+
+### Testing
+
+The `Runner` is `cfg(unix)`-only, so on the Windows build host — where
+`cargo test --workspace` runs — none of it compiles and none of it would be
+exercised. The two decisions that matter were therefore extracted as pure,
+all-platform functions, `follow_operand(recursive, no_deref)` and
+`follow_child()`, and tested directly. A rule nobody can test is a rule that
+quietly stops holding. 35 tests in the coreutils copy, 45 in the standalone;
+clippy clean for both `x86_64-pc-windows-gnu` and `x86_64-slateos`.
+
+**Five for five.** Every shipped `coreutils` bin read against its bigger
+standalone twin so far — `chmod`, `dd`, `tee`, `tar`, `chown` — has had a
+silent-wrong-behaviour bug, and this is the second that was exploitable.
+
+---
+
+## B-chmod-FOLLOWS-SYMLINKS-WHILE-RECURSING (lane B, 2026-08-22) — FIXED 2026-08-22
+
+**In short:** The same escape as `B-chown-FOLLOWS-SYMLINKS-WHILE-RECURSING`
+immediately above, in `chmod`, found by going looking for it once `chown` had
+it. `chmod -R 777 srv/` on a directory containing a *symbolic link* (a file
+whose content is the name of another file) named `x` and pointing at
+`/etc/shadow` made `/etc/shadow` — the system password file — writable by
+everyone. Found in **both** implementations. Fixed: a recursive `chmod` now
+skips every symbolic link it meets and never walks through one.
+
+### Why the answer is "skip", not "chown's answer"
+
+`chown` changes the link itself under `-R`; `chmod` does not touch it at all.
+That is not an inconsistency, it is what the two operations mean:
+
+* A symlink's owner is a real, meaningful thing — it decides who may delete or
+  rename the link. Changing it is a sensible request.
+* A symlink's **permission bits are never consulted by anything**. Every access
+  is checked against the target. So the only effect a `chmod` on a link can
+  have is on its target's bits, which is precisely the escape.
+
+GNU chmod resolves this the same way, and documents it: *"chmod never changes
+the permissions of symbolic links … this is not a problem since the permissions
+of symbolic links are never used."*
+
+A link named directly on the command line **is** still dereferenced, in both
+implementations, also matching GNU (`fts` with `FTS_COMFOLLOW`). The caller
+typed that name and can see what it is; the distinction throughout this pair of
+entries is between a name the caller chose and a name the filesystem handed us.
+
+### Four defects in the coreutils copy
+
+`userspace/coreutils/src/bin/chmod.rs`:
+
+1. **`if path.is_dir()` in `chmod_recursive`** — follows, so the walk descended
+   through a link to a directory and out of the tree. Now `walk_action()` on
+   the `lstat`-based `DirEntry::file_type()`.
+2. **`fs::set_permissions` on a link** — follows, so the target's mode changed.
+   Now links are skipped outright.
+3. **`fs::metadata(path).map(…).unwrap_or(0)`** in `apply_chmod` — a stat
+   failure silently became "no bits set", which is the base a symbolic mode is
+   applied to. So `chmod u+x f` on a file whose mode could not be read did not
+   fail; it **set the mode to `0o100`, clearing every other permission on the
+   file**. A discarded error that destroys data rather than merely hiding one,
+   and exactly the `.unwrap_or_default()` pattern `CLAUDE.md` §9 warns about.
+4. **`chmod_recursive` returned `Result` and used `?`**, so the first
+   unreadable subdirectory abandoned every sibling after it. `chmod -R 700 ~`
+   could report an error and leave most of the home directory world-readable.
+   It now reports each failure and keeps walking, matching GNU.
+
+### And in the standalone copy
+
+`userspace/chown/src/main.rs` is a dual-mode binary — invoked as `chmod` it
+runs `run_chmod`. Its `collect_recursive` had the identical `ft.is_dir()`
+recursion (safe, as it happens: that one *was* already `lstat`-based) but
+returned a bare `Vec<PathBuf>`, discarding the fact that an entry was a link,
+so `run_chmod` then chmod'ed links and their targets. The walk now returns
+`WalkEntry { path, is_symlink }`, carrying the type it already knew at no cost
+and with no second `stat` to race against.
+
+### Testing
+
+Same problem as `chown`: the walk is `cfg(unix)` and invisible to the host test
+run. The rule is extracted as `walk_action(is_symlink, is_dir) -> Skip | Descend
+| Apply` and tested on all platforms, including the one assertion that *is* the
+bug — `walk_action(true, true) == Skip`, a symlink to a directory, which the old
+`is_dir()` answered "descend" to. 35 tests in the coreutils copy; clippy clean
+on both targets.
+
+**Not verified end-to-end**, unlike `tar`: `chmod` is `cfg(unix)`-gated, so it
+cannot be run on the Windows build host at all, and a real check needs QEMU.
+This is the same gap `dd`, `tee` and `chown` have, and the third argument in
+three days for a filesystem-level harness that runs the shipped binaries inside
+the OS.
+
+---
+
+## B-stat-HAS-NO-OPTIONS-AND-CANNOT-READ-A-CLOCK (lane B, 2026-08-22) — FIXED 2026-08-22
+
+**In short:** `stat` reports a file's size, owner, dates and so on. Almost
+nobody runs it to read the output; they run it inside a script to pull out one
+number, which is spelled `size=$(stat -c %s file)` — `-c` meaning "print just
+this". The shipped `stat` parsed **no options at all**. It treated `-c` and
+`%s` as two more file names, failed on both, and printed the whole
+human-readable paragraph for `file` — so `$size` came out as a paragraph. It
+also printed the string `0` instead of a date for any file dated 1970 or
+earlier, and could be made to spin for minutes on a single file with a
+far-future date.
+
+### There was no argument parser
+
+`userspace/coreutils/src/bin/stat.rs` was 343 lines with a `main` that read, in
+full:
+
+```rust
+for (i, path_str) in args.iter().enumerate() { … show_stat(path_str) … }
+```
+
+Every argument was a path. So of GNU's options, **all** of them were broken in
+the same way:
+
+| Invocation | What it did |
+|---|---|
+| `stat -c %s f` | Two errors on stderr, the full block for `f` on stdout, exit 1. A script capturing stdout gets the block. |
+| `stat -L link` | Reported a file named `-L` (error) and the *link*, never the target. |
+| `stat -t f` | Same; no terse output exists. |
+| `stat -f /` | Same; no filesystem mode exists. |
+| `stat -- -weird` | No `--`, so a file whose name starts with `-` was unreachable… by luck, reachable, since nothing was an option. |
+
+The standalone twin, `userspace/stat/src/main.rs` (2845 lines, also providing
+`touch`/`ln`/`readlink`), has had `-c`, `-L`, `-t` and `-f` all along. This is
+the same shape as the four finds before it: the shipped binary is a stripped
+reimplementation, and what got stripped was the part scripts use.
+
+### Time formatting was wrong at both ends and slow in the middle
+
+`format_timestamp` began:
+
+```rust
+if epoch_secs <= 0 { return "0".to_string(); }
+```
+
+so **the epoch itself printed as `0`**, not as `1970-01-01 00:00:00` — and a
+file restored from an archive with no recorded mtime gets exactly that stamp.
+Every legitimate pre-1970 date printed `0` too.
+
+It then counted forward one year at a time from 1970 to find the year. For a
+timestamp far in the future — `touch -d` will set one, and so will a corrupt
+inode — that is hundreds of billions of iterations, i.e. **`stat` hangs for
+minutes on one file**, at a cost to the attacker of one `touch`. Replaced with
+Howard Hinnant's `civil_from_days`, which is exact over the whole proleptic
+Gregorian range and runs in constant time. There is a test that the far-future
+case returns immediately; if it ever takes measurable time, the loop is back.
+
+Nanoseconds were not printed at all, so two files written a millisecond apart
+looked simultaneous — which defeats the most common reason to compare
+timestamps in the first place.
+
+### Six smaller defects, all in the same direction
+
+1. **Symbolic links did not show their target.** `stat link` printed
+   `File: link` and stopped. Where the link points is the single most useful
+   thing about it; GNU prints `File: 'link' -> '/etc'`. Fixed.
+2. **The name was never quoted**, although the file imported `quoteaf_os` and
+   used it *only in the error path*. A filename containing a newline produced
+   output that could not be parsed, which is the whole reason GNU quotes.
+3. **Device major/minor used the pre-2.6 encoding** (`rdev >> 8`, `rdev & 0xff`)
+   in the standalone's `%t`/`%T` — silently wrong for any minor above 255, which
+   on a modern system is most of them. The rewrite uses the current encoding
+   and tests minor 300 specifically.
+4. **`%N` hand-rolled its quoting** as `'{name}'` in the standalone, so a
+   filename containing an apostrophe emitted an unbalanced quote. Now routed
+   through the shared quoter.
+5. **`%F` had no `regular empty file`**, GNU's one special case and the one
+   scripts actually match on.
+6. **Nothing checked the write.** Output went through `println!`, which panics
+   on a broken pipe rather than exiting — `stat * | head -1` on a large
+   directory. Writes are now checked, `BrokenPipe` exits with the accumulated
+   status, and the final flush is checked too, which is the same rule
+   `B-tee-REPORTS-SUCCESS-AFTER-LOSING-THE-DATA` established.
+
+### What the rewrite adds
+
+`-c FORMAT`, `--format=`, `--printf=` (escapes interpreted, no trailing
+newline), `-L`, `-f` (via the posix crate's `statvfs`, the same call the
+standalone uses), `-t` with GNU's exact terse field orders, `--`, option
+permutation, and rejection of unknown options. Roughly 30 `%` specifiers plus
+printf-style widths.
+
+Two structural choices worth recording:
+
+* **The default human-readable block is itself a format string**, expanded by
+  the same code as `-c`. Six `println!`s were how the old version came to quote
+  names in its errors but not in its output; one code path cannot drift from
+  itself. The block is asserted character-for-character in a test.
+* **Everything below the syscalls is written over a plain `StatInfo`/`FsInfo`
+  struct, not `std::fs::Metadata`.** `Metadata`'s unix accessors are
+  `cfg(unix)`, the build host is Windows, and so anything written against them
+  is invisible to `cargo test --workspace`. That is precisely how a `stat` with
+  no argument parser survived this long. 35 tests now run on the host, covering
+  the parser, the calendar, the formatter and the default block; clippy clean on
+  `x86_64-pc-windows-gnu` and `x86_64-slateos`.
+
+**Not verified end-to-end** — `stat` is `cfg(unix)`-gated and needs QEMU. Same
+gap as `dd`, `tee`, `chown` and `chmod`; the fourth argument in three days for
+a filesystem-level harness that runs the shipped binaries inside the OS.
+
+**Still not implemented:** `%U`/`%G` print the numeric uid/gid rather than
+looking up names, because name lookup needs `/etc/users.yaml` (§353). Printing
+the number is right, just unfriendly; printing a guessed name would not be.
+
+**Six for six.** Every shipped `coreutils` bin read against its bigger
+standalone twin so far — `chmod`, `dd`, `tee`, `tar`, `chown`, `stat` — has had
+a silent-wrong-behaviour bug.
+
+---
+
+## B-kill-CANNOT-SIGNAL-A-PROCESS-GROUP (lane B, 2026-08-22) — FIXED 2026-08-22
+
+**In short:** `kill` could not send a signal to a *process group* — the normal
+way a shell shuts down a whole job — and, worse, it did not say so. A process
+group is a set of related processes (a pipeline, a background job) that the
+system lets you signal as a unit; you name one by writing its number with a
+minus sign, so `kill -TERM -1234` means "terminate group 1234". Our `kill` read
+that leading minus as introducing a *signal name*, so it quietly decided the
+signal was number 1234 and then complained it had been given no process to
+signal. In the form that appears in real scripts — `kill -9 -1234 567` — it did
+something worse than fail: it sent signal *1234* to process *567*. The wrong
+signal, to the wrong target, with no hint that anything had been misread.
+
+Fixed: `userspace/coreutils/src/bin/kill.rs`, rewritten. 22 → 39 tests.
+
+### The parse
+
+The old parser had one loop over *every* argument:
+
+```rust
+for arg in args {
+    if arg.starts_with('-') && arg.len() > 1 {
+        match resolve_signal(&arg[1..]) { Some(n) => signal = n, ... }
+    } else { pids.push(arg.clone()); }
+}
+```
+
+Anything shaped like `-X` was a signal, wherever it appeared. So a PID could
+never be negative, and a negative one was not rejected — it was *absorbed*:
+
+| Typed | Old result | Correct |
+|---|---|---|
+| `kill -TERM -1234` | signal := 1234; then `kill: missing PID` | SIGTERM to group 1234 |
+| `kill -9 -1234 567` | `kill(567, 1234)` | SIGKILL to group 1234 **and** to 567 |
+| `kill -- -1` | `kill: unknown signal: -` | SIGTERM to group 1 |
+| `kill 100 -9 200` | signal 9 to 100 and 200 | signal is argv[0] only; `-9` is a bad PID |
+
+The last row had a test asserting the old behaviour —
+`parse_signal_after_pids_still_applies`, with the comment "order doesn't matter
+for collecting". **The third time this audit has found a test that pins the
+wrong answer** (after `chmod`'s `parse_recursive_lowercase_r_accepted` and
+`dd`'s `parse_size_garbage_zero`). The signal goes first in POSIX for exactly
+the reason this bug exists: if it could go anywhere, a negative PID would be
+ambiguous with it.
+
+The POSIX layer was never the limitation. `posix/src/signal.rs:1053 kill()`
+routes `pid <= 0` to the kernel's group fanout over the membership `setpgid()`
+writes, handles `pid == 0` as the caller's own group, and reports EPERM/ESRCH
+honestly (§314). All of that was reachable from C and unreachable from the
+command line.
+
+### Five more defects
+
+1. **Twenty of the thirty-one signals did not exist.** The table had twelve
+   entries. Missing: `ILL`, `TRAP`, `BUS`, `FPE`, `SEGV`, `TTIN`, `TTOU`,
+   `URG`, `XCPU`, `XFSZ`, `VTALRM`, `PROF`, `WINCH`, `IO`, `PWR`, `SYS`,
+   `STKFLT` — and `USR1`/`USR2`, which after TERM/HUP/KILL are the signals
+   scripts send most (`kill -USR1` is how you ask a daemon to reopen its logs).
+   `kill -USR1 $pid` was `unknown signal: USR1`. The table is now 1..=31, and a
+   test asserts it is dense and matches `posix/src/signal.rs`'s constants
+   one for one — a `kill` whose `TERM` was not the platform's `SIGTERM` would
+   be a much quieter disaster than a missing name.
+
+2. **`-s SIGNAL` did not work.** This is POSIX's own spelling, the one the
+   standard's synopsis leads with. `-s` fell into the signal branch, so
+   `kill -s TERM 123` died with `unknown signal: s`. `-n`, `--signal` and
+   `--signal=` were likewise absent.
+
+3. **Every failure printed the same sentence.** `No such process or permission
+   denied` — for ESRCH, for EPERM, for EINVAL alike. The one thing a script
+   most needs to distinguish (the process is gone → fine; I am not allowed →
+   not fine) was deliberately blurred. Now `No such process` /
+   `Operation not permitted` / `Invalid argument`, chosen by errno, in GNU's
+   wording and with GNU's quoting.
+
+4. **`kill -l 9` ignored the `9`.** `-l` was taken as the whole command and its
+   operands discarded, so it listed everything instead of printing `KILL`.
+   `kill -l $?` — the reason the synopsis says `EXIT_STATUS` — now works,
+   including the 128 subtraction that turns a wait status back into a signal.
+   `-l`'s format was also one-signal-per-line rather than GNU's single
+   space-separated line that `$(kill -l)` expects to read as a word list;
+   `-L` gives the numbered table.
+
+5. **`kill -l | head -1` panicked.** `print!` panics when the write fails, so
+   a reader closing the pipe produced a Rust panic message. Same family as
+   `tee`, `tar`, `dd` and `stat`: writes are checked now, with `BrokenPipe`
+   the one deliberate success.
+
+Also: an out-of-range numeric signal (`kill -1234 $$`) used to reach `kill()`
+and fail with EINVAL, reported against the *PID*. It is rejected up front now,
+naming the signal.
+
+### Two judgment calls
+
+- **The signal universe is 0 and 1..=31 — no real-time signals.** Linux has 34
+  through 64, but `posix/src/signal.rs`'s `SIGNAL_NAMES` stops at 31, so
+  `strsignal` cannot describe them. Listing names for signals the platform
+  cannot name would make `kill -l` a catalogue of things that do not work.
+  `SIGNALS` is the single place to extend when the POSIX layer grows them.
+
+- **`-segv` is SIGSEGV, not `-s egv`.** getopt's rule is that an option taking
+  an argument swallows the rest of the token, which would make `kill -segv $$`
+  send whatever `egv` means — nothing — and it is reachable by accident because
+  this program accepts lower-case signal names everywhere else. The whole body
+  after `-` is tried as a signal spec first, and only then re-read as an
+  attached option argument. `-s9` and `-n15` still work; no valid GNU spelling
+  changes meaning.
+
+**Not verified end-to-end.** `send_one` is `cfg(target_os = "linux")` and needs
+QEMU to exercise. The `cfg` region is now three lines — the diagnostics, the
+parser, the tables and the listing are all outside it and all tested on the
+host, which is the point: the old code built its error messages *inside* the
+`cfg`, so nothing about them was compiled on the development machine. Fifth
+consecutive argument for a filesystem-level harness that runs the shipped
+binaries inside the OS.
+
+**Seven for seven.** Every shipped `coreutils` bin read against its bigger
+standalone twin — `chmod`, `dd`, `tee`, `tar`, `chown`, `stat`, `kill` — has
+had a silent-wrong-behaviour bug. The hit rate is not a coincidence: the
+standalone twin is bigger *because* it was written against the real problem,
+and the shipped one is smaller because it was written against a summary of it.
+
+---
+
+## B-env-PANICS-ON-THE-ENVIRONMENT-AND-HAS-NO-OPTIONS (lane B, 2026-08-22) — FIXED 2026-08-22
+
+**In short:** Two things. First, `env` — the program whose whole job is to
+carry environment variables around — *crashed* if any variable in the
+environment was not valid text. Our OS lets a variable, like a filename, hold
+any byte at all, so this is reachable, and what the user saw was a Rust crash
+message instead of their environment. Second, `env` had no options whatsoever.
+`env -i somecommand`, the standard way to run a program with a clean
+environment (what a build script or a security boundary reaches for), was read
+as "run the program called `-i`" and failed.
+
+Fixed: `userspace/coreutils/src/bin/env.rs`, rewritten. 11 → 29 tests.
+
+### The panic is one `unwrap` in std, and 54 utilities inherit it
+
+`std::env::args()` is not a safe reading of the command line. Its iterator, in
+`library/std/src/env.rs`:
+
+```rust
+fn next(&mut self) -> Option<String> {
+    self.inner.next().map(|s| s.into_string().unwrap())
+}
+```
+
+A literal `unwrap`, documented as such: *"The returned iterator will panic
+during iteration if any argument to the process is not valid Unicode."*
+`env::vars()` is the same. So the first line of the old `env`,
+
+```rust
+let args: Vec<String> = env::args().skip(1).collect();
+```
+
+panics *during `collect`* — before a single line of the program's own logic
+runs — if any argument holds a byte sequence that is not UTF-8. And its print
+loop, `for (key, value) in env::vars()`, panics if any *variable* does.
+
+This is CLAUDE.md's rule 7 ("never force UTF-8 on filesystem paths,
+environment variables, or pipe data") violated at the point where it costs the
+most. `env` now uses `args_os` and `vars_os`, and is `OsString`/`&[u8]` end to end,
+with the `NAME=VALUE` split done on bytes so a name or a value may be anything
+the OS allows.
+
+**This is not just `env`.** 52 of the 84 shipped `coreutils` bins opened with
+`env::args()`, including every one that takes a filename: `cp`, `mv`, `rm`,
+`ls`, `ln`, `mkdir`, `rmdir`, `touch`, `find`, `grep`, `du`, `df`, `readlink`,
+`realpath`, `basename`, `dirname`, `stat`, `chmod`, `chown`, `tar`, `xargs`.
+On an OS whose paths are byte strings, `rm <name-with-a-non-UTF-8-byte>`
+panics before it does anything. Tracked separately as
+**`B-COREUTILS-PANIC-ON-A-NON-UTF-8-ARGUMENT`** below, because it is a sweep
+rather than one fix.
+
+### The options
+
+POSIX defines exactly two for `env`, and this had neither:
+
+| Typed | Old behaviour | Correct |
+|---|---|---|
+| `env -i prog` | runs a program named `-i`; `No such file or directory`, exit 127 | `prog` with an empty environment |
+| `env -u FOO prog` | runs a program named `-u` | `prog` without `FOO` |
+| `env -- -i` | runs a program named `--` | runs the program named `-i` |
+
+These failed loudly rather than quietly, which is the one mercy — but `env -i`
+not existing is a larger hole than any single wrong answer, since the whole
+reason to reach for it is to establish a known-clean environment, and a script
+that believes it did but did not is a security problem rather than a bug.
+
+Added: `-i`/`--ignore-environment` (and bare `-`, GNU's historical synonym),
+`-u`/`--unset`, `-0`/`--null`, `-C`/`--chdir`, `--`, short-option bundling
+(`-i0`, `-iuFOO`), and GNU's rule that option parsing stops at the first
+operand so `env FOO=1 prog -i` passes `-i` to `prog`.
+
+### Three more
+
+1. **Exit status 127 for everything.** GNU distinguishes 127 (no such command)
+   from 126 (found it, cannot run it — permissions, or not an executable
+   format), and scripts test for them. The old code returned 127 for both, so
+   a non-executable file was reported as a missing one. `env`'s *own* failures
+   are 125, a third number, which is why the distinction needs one.
+
+2. **A signalled child reported `1`.** `status.code().unwrap_or(1)` — so a
+   command killed by SIGKILL looked like one that returned failure. The shell
+   convention is `128 + signal`; `env` must not change the answer merely by
+   standing in front of the command. Now 137 for SIGKILL, 143 for SIGTERM.
+
+3. **The two paths built the environment differently.** The print path applied
+   assignments with `unsafe { env::set_var }` and mutated the process's own
+   environment to do it; the exec path used `Command::env`. Two implementations
+   of one question — what does `env -u FOO FOO=bar` leave `FOO` as? — is two
+   chances to answer it differently. There is now one `effective_env` that both
+   call, and the `unsafe` block is gone.
+
+Also: `println!` panics on a write error, so `env | head -1` produced a panic
+message. Checked writes, `BrokenPipe` the one deliberate success — the same
+family as `tee`, `tar`, `dd`, `stat` and `kill`.
+
+**Not implemented:** `-S`/`--split-string`, GNU's `#!`-line helper. It is a
+quoting grammar rather than a flag, nothing in the tree uses it (verified: no
+`env -S` anywhere in `userspace/`, `services/`, `init/`, `scripts/`), and the
+proper shape for it is recorded in `todo.txt`.
+
+**Eight for eight.**
+
+---
+
+## B-hostname-DOES-NOTHING-IN-EITHER-DIRECTION (lane B, 2026-08-22) — FIXED 2026-08-22
+
+**In short:** The `hostname` command did not work at all, in either direction,
+and said nothing about it. Asked for the machine's name it always answered
+`localhost`, whatever the machine was really called. Asked to *change* the
+name — `hostname newbox` — it changed nothing and exited reporting success.
+And because it had no notion of options, `hostname --help` did not print help:
+it tried to rename your machine to the literal string `--help`. Now rewritten:
+it reads and writes the same two files as the rest of the system, understands
+all nine standard options, and refuses names that are not legal host names.
+
+### Why it did nothing
+
+The old version (`userspace/coreutils/src/bin/hostname.rs`, 125 lines) called
+the C functions `gethostname()` and `sethostname()` from our POSIX layer. Those
+look like system calls, and on Linux they are. Ours are not. In
+`posix/src/unistd.rs` they are backed by:
+
+```rust
+process_global! {
+    /// Initialized to "localhost" — can be changed via `sethostname()`.
+    fn hostname_buf_ptr() -> [u8; HOST_NAME_MAX + 1] = { /* "localhost" */ };
+```
+
+and `process_global!` (`posix/src/perprocess.rs:82`) expands to `static mut
+STORAGE` — a plain variable **inside the calling program's own memory**.
+Nothing about it crosses a process boundary. So:
+
+| Command | What it did | What the machine saw |
+|---|---|---|
+| `hostname` | read that variable | printed `localhost`, always |
+| `hostname newbox` | wrote that variable, then exited | nothing changed, exit status 0 |
+
+The second row is the dangerous one. A first-boot or provisioning script that
+runs `hostname "$NAME"` and checks the exit status was told it succeeded. The
+machine kept whatever name it had, and the script had no way to find out.
+
+### It also disagreed with every other program
+
+The rest of the tree keeps the host name in two files —
+`/proc/sys/kernel/hostname` (the live value) and `/etc/hostname` (the value
+that survives a reboot). `dhcpcd` writes both when a DHCP lease supplies a
+name; `getty` shows the name in its login banner; `osh` fills `$HOSTNAME` from
+exactly this pair, in exactly this order; `sysctl` maps `kernel.hostname` onto
+the first; `hostnamectl`, `logger`, `snapper2` and `sudo` all read them. The
+`hostname` command was the only program in the system not using them — so it
+was also the only one that could not see a name `dhcpcd` had just set.
+
+### Everything else that was wrong
+
+| Defect | Consequence |
+|---|---|
+| **No option parsing whatsoever** | every option was read as a new host name. `-s`, `-f`, `-d`, `-i`, `-I`, `-F`, `-b`, `-V`, `--help` — all of them. `hostname -s` (the single most common use, "just the short name") tried to rename the machine to `-s`. |
+| **No validation** | `hostname ""`, `hostname "my box"`, `hostname $'a\nb'`, a 5000-byte name — all passed straight through. A newline is the worst: it makes the *second* line of `/etc/hostname` look like a separate valid name to anything that reads the file line-wise. |
+| **`String::from_utf8_lossy` on the result** | forbidden outright by CLAUDE.md rule 7 ("silent data corruption"). A name containing a stray byte printed as `a<?>b`, indistinguishable from a name that genuinely contained U+FFFD. |
+| **errno discarded** | one string, `failed to set hostname`, for every cause. "You are not root", "that name is too long" and "the file is read-only" were the same message. |
+| **Extra operands ignored** | `hostname foo bar` used `foo` and said nothing about `bar`. |
+| **`env::args()`** | panicked before any of the above on a non-UTF-8 argument (see the sweep entry below). |
+| **`println!`** | panics when stdout cannot be written, so `hostname \| head -1` could end in a Rust panic message rather than a broken pipe. |
+
+### The fix
+
+Rewritten to 700 lines, 7 tests → 35. Reads `/proc/sys/kernel/hostname` then
+`/etc/hostname`; writes both, replacing the persistent one by rename so a crash
+part-way leaves the old name rather than half of the new one (a truncated
+`/etc/hostname` is read at boot as a *different valid name*, which is worse
+than an unchanged one). Full option set including `-F`/`--file`, `-b`/`--boot`,
+and `--`, which the standalone twin lacks — without `--` there is no way to be
+sure an argument taken from a variable is treated as a name rather than an
+option.
+
+**Validation is done on bytes, and that is what also makes it panic-proof.**
+A non-UTF-8 argument contains a byte ≥ 0x80; that byte is not ASCII
+alphanumeric; so the *same* RFC 1123 rule that rejects a space in a host name
+rejects it — with a diagnostic naming the byte, not a crash. The byte-safety
+and the standards-compliance turned out to be one check, not two.
+
+**There is no `#[cfg]` in the new file at all**, and that is the headline
+lesson repeated from `kill` and `env`. The old version put its entire working
+body inside `#[cfg(target_os = "linux")]`, so `cargo test` on the Windows
+development host compiled *none* of it; its seven tests all exercised one
+4-line buffer-decoding helper, and passed. That is precisely why nobody
+noticed the program did nothing. The new implementation is file I/O and byte
+manipulation, which compiles and runs identically on the host — the paths
+merely do not exist there, which the code must handle anyway because they may
+not exist on the real system either.
+
+**Nine for nine.** Every shipped `coreutils` binary examined so far against a
+larger standalone twin has had a silent-wrong-behaviour bug. This is the most
+complete one: previous entries were tools that got some cases wrong, whereas
+this one had no working path in either direction while reporting success.
+
+---
+
+## B-FOUR-COMPONENTS-DISAGREED-ON-THE-NAME-OF-THE-SYSTEM (lane B, 2026-08-22) — FIXED 2026-08-22
+
+**In short:** Four different parts of this OS each kept their own private
+answer to "what is this system called", and all four answers were different:
+`Linux`, `CustomOS`, `MintOS` and `Slate OS`. Which one a program saw depended
+on which one it happened to ask. On top of that, the `uname` command — the
+standard way to ask — was missing two options that POSIX requires, so
+`uname -n` (the portable way to ask for the machine's name) answered
+`unknown option: -n` instead of answering; and the C library's `uname()`
+reported a system version so low that a program built against glibc (the
+standard C library that almost all ported Linux software uses) would have
+refused to start at all.
+
+**The four answers.** Each was a string literal compiled into a different
+component, with nothing connecting them:
+
+| Component | Said | Where |
+|---|---|---|
+| the kernel's `uname(2)` syscall, and `/proc/sys/kernel/ostype` | `Linux` | `kernel/src/syscall/linux.rs:45483`, `kernel/src/fs/procfs.rs:14356` |
+| the C library's `uname()` | `CustomOS` | `posix/src/utsname.rs:73` |
+| `/sys/kernel/ostype` | `MintOS` | `kernel/src/fs/sysfs.rs:396` |
+| the `uname` command | `Slate OS` | `userspace/coreutils/src/bin/uname.rs` |
+
+**`Linux` is the right answer, and it was already decided.** Not by me, and
+not this week: `roadmap-detailed.md` §72 "Version-surface policy" records it as
+user-directed on 2026-06-10, and `sys_uname` states the reasoning in the code:
+
+> sysname / release are Linux-ABI-only surfaces: in our architecture native
+> code uses native APIs, so the ONLY callers of uname(2) are Linux binaries
+> that expect Linux values. Reporting "Linux" / "6.6.x" is therefore the
+> faithful answer for this ABI, not a lie about what we are — it tells a Linux
+> program exactly which Linux personality it is talking to.
+
+So this was never an open question. The kernel had the settled answer and the
+other three components had each independently invented one. (For the record: I
+did initially take this for an operator question and was about to file it as
+one. Reading `roadmap-detailed.md` and the kernel's own source first is what
+stopped that — the answer was written down, which is exactly the case CLAUDE.md
+means by "don't guess at requirements when the answer is written down.")
+
+### What was wrong with the `uname` command
+
+`userspace/coreutils/src/bin/uname.rs` was 205 lines against a 445-line
+standalone twin in `userspace/uname/` — the size-gap signal that has now
+found ten bugs for ten looks.
+
+| Defect | Effect |
+|---|---|
+| `-n` absent | `uname -n`, POSIX-required, printed `unknown option: -n` and exited non-zero. This is *the* portable way to get the machine's name; scripts use it constantly. |
+| `-v` absent | POSIX-required. Same failure. |
+| `-p`, `-i`, `-o` absent | GNU options that portable scripts probe for. Same failure. |
+| `--help`, `--version` absent | Every other utility has them. |
+| long options absent entirely | `--kernel-name` etc. unrecognised. |
+| `SYSNAME = "Slate OS"` | Contains a **space**. `uname -a` output is routinely split on whitespace; one field that is two words silently shifts every field after it, so a script reading field 5 as the machine type got the wrong one. |
+| the values were compiled in | Four-way disagreement above; and no way for the kernel's answer ever to reach the command. |
+
+### What was wrong with the C library's `uname()`
+
+Worse, and independent of the command:
+
+| Defect | Effect |
+|---|---|
+| `release` was `0.1.0` | glibc's start-up code (`__libc_start_main`) parses this and aborts the process with **"FATAL: kernel too old"** if the leading version is below its build-time minimum — typically 3.2. `0.1.0` is below every minimum ever shipped. Any glibc-linked program reaching this code died before `main`. Note the kernel deliberately reports `6.6.0-slateos` *for this exact reason*, with the reason written in a comment; the C library then reported something else. |
+| `sysname` was `CustomOS` | See above. |
+| `struct utsname` had **five** fields, 325 bytes | The real struct has six — `domainname` — and is 390 bytes, both in glibc and in our own kernel, whose `sys_uname` builds `[u8; 6 * 65]` and copies **all 390 bytes** to the caller. A caller that declared this struct and invoked `uname(2)` was handed 65 bytes past the end of its buffer. That is a memory-safety bug, not a cosmetic one. |
+| the values were compiled in | The `nodename` field did track `sethostname()`, but only the process-local copy — see `B-POSIX-HOSTNAME-IS-PROCESS-LOCAL`. |
+
+**The tree already contained the correct layout.**
+`posix/src/linux_utsname_types.rs` has declared `UTSNAME_SIZE = 390`,
+`UTSNAME_FIELD_COUNT = 6` and `UTSNAME_OFF_DOMAINNAME = 325` since it was
+written, and `posix/src/linux_uts_user_types.rs` says the same and even names
+`PROC_SYS_KERNEL_DOMAINNAME`. The constants were right and the actual `struct`
+was wrong, and **nothing tied the two together**, so neither side could notice
+the other. Meanwhile `linux_utsname.rs`'s own test asserted `325` — a test
+that locked the bug in place rather than catching it.
+
+### The fix
+
+Neither the command nor the library keeps a name of its own any more. Both read
+the kernel's `/proc/sys/kernel/{ostype,osrelease,version,hostname,domainname}`,
+which `procfs.rs` generates with the comment "the uname(2) surface — must stay
+byte-consistent with sys_uname". The compiled-in constants that remain are
+**fallbacks for a `/proc`-less boot, set byte-identical to the kernel's own
+values**, so even the degraded path cannot introduce a fifth answer.
+
+- `userspace/coreutils/src/bin/uname.rs`: 205 → ~530 lines, 15 → 22 tests. All
+  eight POSIX/GNU fields, short bundling (`-mrs`), long options, `--help`,
+  `--version`, fixed print order independent of option order, `-a`'s
+  omit-unknown-`-p`/`-i` rule (tested to match GNU's "was `-a` given" test
+  rather than "was `-p` given"), byte-native argv via `args_os` — which also
+  removes it from the `env::args()` panic sweep.
+- `posix/src/utsname.rs`: the sixth field added, all values read from the
+  kernel, `sysname` `Linux`, `release` `6.6.0-slateos`. 13 → 51 tests.
+- `posix/src/linux_utsname.rs`: the stale `325` assertion corrected to 390 and
+  expressed as `6 * (__NEW_UTS_LEN + 1)` so it cannot drift again.
+- A new test binds the struct to the layout constants — size, field count and
+  every field's offset — so the two can never again disagree silently.
+- A `const _: () = assert!(size_of::<Utsname>() == UTSNAME_FIELDS * UTSNAME_LEN)`
+  makes the ABI size a **compile** error to break. That matters specifically
+  here: `cargo test` runs on the Windows build host, and the size of this
+  struct is a contract with a kernel that host never runs, so a unit test alone
+  would not protect it on the target we ship.
+
+**Still outstanding, and not lane B's to fix:** `/sys/kernel/ostype` still says
+`MintOS` (`kernel/src/fs/sysfs.rs:396`), contradicting procfs's `Linux` two
+directories away — and `/sys/kernel/osrelease` says `0.1.0-dev`, which is the
+value with teeth, since it is the one that fails glibc's start-up gate. Filed
+as `requests/b-a-sysfs-says-mintos-while-procfs-says-linux.md`.
+
+**Ten for ten.** Every shipped `coreutils` binary examined against a larger
+standalone twin has had a silent-wrong-behaviour bug: `chmod`, `dd`, `tee`,
+`tar`, `chown`, `stat`, `kill`, `env`, `hostname`, `uname`. The pattern holds
+without exception — the standalone twin is bigger because it was written
+against the real problem, and the shipped one is smaller because it was written
+against a summary of it.
+
+**Why it survived:** partly the usual reason (the host build compiles no
+`cfg(target_os)` body and `cargo test` never runs the binaries), but this one
+adds a distinct cause worth naming: **four components each had passing tests,
+and each test asserted its own component's private answer.** `utsname.rs`
+asserted `CustomOS`; `linux_utsname.rs` asserted `325`; the command's tests
+asserted `Slate OS`. Every one of them was green. A test that checks a value
+against itself confirms only that the value has not changed — it cannot notice
+that three other components hold a different value. The cross-checking test
+added above is the direct answer to that: it asserts one component's type
+against *another* component's constants, which is the only kind of assertion
+that could have caught this.
+
+---
+
+## B-POSIX-HOSTNAME-IS-PROCESS-LOCAL (lane B, 2026-08-22) — OPEN
+
+**In short:** `gethostname()` and `sethostname()` — the two C functions any
+program uses to ask or set what this machine is called — do not actually talk
+to the system. Each program that calls them gets its own private copy of the
+answer, starting at `localhost`, and setting it changes only that program's
+copy. Two programs running side by side can hold different opinions about the
+machine's name, and neither is the real one. This was found while fixing the
+`hostname` command (entry above), which is now file-based and no longer
+affected; but every *other* caller still is.
+
+**Where it lives:** `posix/src/unistd.rs` — `gethostname()` (line 1091),
+`sethostname()` (line 1735), and the `process_global!` block above them (line
+989). `process_global!` is defined at `posix/src/perprocess.rs:82` and expands
+to `static mut STORAGE` on the target, `thread_local!` on the host. It is a
+per-process variable by construction; there is no syscall behind it.
+
+**How to reproduce:** any program that calls `sethostname("x", 1)` and then
+`execve`s or exits, followed by any program calling `gethostname()` — the
+second sees `localhost`. Also: `uname()`'s `nodename` field is filled from the
+same storage (`copy_hostname`, line 1020), so `uname -n` has the same defect
+wherever it is served from the C function rather than from the files.
+
+**Why this is not simply "the utility's fault":** the functions are honest
+about their *arguments* — they match glibc's truncation rules, return
+`ENAMETOOLONG`, check `CAP_SYS_ADMIN` before anything else exactly as Linux's
+`sys_sethostname` does, and are well tested. Every observable detail is right
+except the one that matters: where the value lives. That is what made the
+defect survive — the code around it looks carefully done, because it is.
+
+**What the proper fix looks like.** Two options, and the choice needs care:
+
+1. **Back them with the files** — `gethostname()` reads
+   `/proc/sys/kernel/hostname` then `/etc/hostname`; `sethostname()` writes
+   both. Correct immediately and consistent with every other consumer, but it
+   puts filesystem I/O behind a function that callers reasonably assume is
+   cheap and non-blocking, and `posix` is `no_std` on the target so the read
+   has to go through its own VFS path rather than `std::fs`.
+2. **Back them with a kernel call** — the kernel already owns a host name at
+   `/sys/kernel/hostname` (`kernel/src/fs/sysfs.rs:76`, written by `kshell`).
+   A `uname`-style syscall would be the Linux-faithful shape and would keep the
+   functions cheap. This needs a kernel-side addition, which is **lane A**, so
+   it would go through `requests/`.
+
+Option 2 is the right end state and option 1 is a correct interim. Not decided
+yet — deliberately, because it is worth doing once. Until then, **anything in
+the tree that needs the real host name should read the two files**, which is
+what `dhcpcd`, `getty`, `osh`, `sysctl`, `logger`, `hostnamectl`, `snapper2`,
+`sudo` and now `hostname` all do.
+
+**If never fixed:** the C functions stay quietly wrong. Nothing in the tree
+depends on them today (the file-based route is universal), so nothing is
+currently broken by it — but they are the obvious thing for a ported C program
+to call, and it would get `localhost` with no indication anything was amiss.
+
+---
+
+## B-COREUTILS-PANIC-ON-A-NON-UTF-8-ARGUMENT (lane B, 2026-08-22) — OPEN
+
+**In short:** On this OS a filename may contain any byte except `/` and NUL —
+that is a deliberate design decision, written down in `design.txt`. But 50 of
+our 84 core utilities read their command line with a Rust function that
+*crashes* when an argument is not valid text. So `rm` on a file whose name
+contains such a byte does not delete it, does not report an error, and does
+not even reach its own code: it dies with a Rust crash message. The same is
+true of `cp`, `mv`, `ls`, `find`, `grep` and most of the rest.
+
+**Where it lives:** the first line of `main` in each of these files:
+
+```rust
+let args: Vec<String> = env::args().collect();
+```
+
+`std::env::args()`'s iterator is `self.inner.next().map(|s| s.into_string().unwrap())`
+— a literal `unwrap` in std, documented to panic. The fix in each case is
+`env::args_os()` plus carrying `OsString`/`&[u8]` through to wherever the
+argument is used, which for a filename means all the way to the syscall. The
+tree already has the pieces: `coreutils::quote::os_bytes`, `quotef_os`,
+`quote_os`, and `getopt`'s byte-based error constructors.
+
+**How to reproduce (needs QEMU — see below):** create a file whose name
+contains byte `0x80`, then `rm` it.
+
+**Scale, measured 2026-08-22 (`grep -l '^[^/]*env::args()' src/bin/*.rs`):**
+50 of 84 bins.
+
+```
+basename bc cal chmod chown cmp cp dd df diff dirname du echo ed fetch
+find free grep id ln logger ls md5sum mkdir mkfifo more mv
+nice nohup patch ps readlink realpath renice rm rmdir sed sh sha256sum sleep
+stat strings tar tee time_cmd touch tty which xargs yes
+```
+
+`env`, `kill`, `hostname` and `uname` were on this list and were fixed the same
+day, which is why they are absent above. `stat`, `chmod`, `chown` and `tar`
+were rewritten this week for other reasons and use `os_bytes` internally but
+still *read* argv as `String`, so they remain on it.
+
+**The correlation is the whole argument for how to fix this.** Of the 34 bins
+that are already clean, **23 use `coreutils::getopt`**; of the 50 dirty ones,
+**none do** — not one. `getopt` is byte-based, so a bin that goes through it
+never had a reason to reach for `String` in the first place. That is a
+structural cause, not a coincidence, and it means finishing the `getopt`
+migration fixes the class, whereas patching 50 `main`s independently fixes 50
+instances and leaves the next new bin free to reintroduce it.
+
+**`hostname` is worth copying as the pattern**, because its fix cost nothing
+extra: host names are ASCII by RFC 1123, so validating the argument *as bytes*
+rejects a non-UTF-8 byte under the same rule that rejects a space. Wherever a
+utility already validates its argument, doing that validation on bytes removes
+the panic for free — no separate UTF-8 handling is needed at all.
+
+**Why it survived:** the same reason as everything else in this audit. The
+development host is Windows, where argv arrives as UTF-16 and a test cannot
+easily produce an invalid argument; and `cargo test` never runs the binaries
+at all, only their internal functions. A `main` is the least-tested line in
+every one of these files. This is now the **sixth** consecutive entry arguing
+for a filesystem-level harness that runs the shipped binaries inside QEMU.
+
+**Priority:** the file-touching ones first — `rm`, `mv`, `cp`, `ln`, `ls`,
+`find`, `touch`, `mkdir`, `rmdir`, `du`, `readlink`, `realpath` — because for
+those the panic happens on data the *user does not control and cannot see*: a
+single oddly-named file in a directory is enough to make `rm -r` abort
+part-way, and a backup or a cleanup script that dies half-done is worse than
+one that refuses to start.
+
 ---
 
 ## TD-C-COMPOSITOR-TILES-UNDER-THE-TASKBAR (lane C, 2026-08-21) — MOSTLY RESOLVED 2026-08-21, step 4 blocked
@@ -56505,7 +58383,7 @@ concurrent `polkit` runs would delete each other's fixture mid-test.
 **Workaround until fixed:** run the gate as
 `cargo test --workspace --no-fail-fast --target x86_64-pc-windows-gnu`.
 
-## B-TWO-POSIX-TDESTROY-TESTS-SHARE-ONE-COUNTER (found by lane C, 2026-08-22 — lane B's crate)
+## B-TWO-POSIX-TDESTROY-TESTS-SHARE-ONE-COUNTER (found by lane C, 2026-08-22 — lane B's crate) — FIXED 2026-08-22
 
 **In short:** Two tests in `posix/src/search.rs` reset and read the same
 process-wide counter, and `cargo test` runs them on different threads at the
@@ -56545,7 +58423,34 @@ turned up the `ftpd` half of
 runs failed on *different* subsets of the three, which is what identified all of
 them as load-sensitive races rather than regressions.
 
-## B-POSIX-HSEARCH-TESTS-RACE-ONE-GLOBAL-TABLE-AND-SEGFAULT (found by lane C, 2026-08-22 — lane B's crate)
+### Fixed 2026-08-22 (lane B) — thread-local counters, not per-test statics
+
+`DESTROY_COUNT` and `WALK_COUNT` are now `std::thread_local!` `Cell<i32>`s with
+`reset_*`/`*_count()` accessors, so each test observes only its own thread's
+count. `libtest` gives every test its own thread, so that is exactly per-test
+isolation — no lock, no serialisation, and the tests still run concurrently.
+It is the same shape, and the same argument, as `malloc::live_regions`, which
+had already solved this problem one file away.
+
+**Two deviations from lane C's prescription, both deliberate:**
+
+1. *"One static and one callback per test"* fixes the two `tdestroy` tests and
+   leaves `WALK_COUNT` alone — but `WALK_COUNT` has the identical defect and
+   **three** tests on it (`test_twalk_empty`, `test_twalk_single`,
+   `test_twalk_multiple`), each doing the same store-walk-load. Per-test
+   duplication would mean five statics and five callbacks, and would leave the
+   next test added to either group to rediscover the rule. Thread-locals fix
+   both counters at once and make the correct thing the default.
+2. *"`test_tdestroy_empty` needs no counter — a callback that panics on entry is
+   a stronger assertion"* is a good idea that is unsafe **here**: the callback
+   is an `extern "C"` function, and a panic unwinding out of an `extern "C"`
+   frame aborts the process rather than failing the test. That would convert a
+   test failure into a dead test binary — precisely the failure mode being
+   fixed in the sibling entry below. With a thread-local counter, reading `0`
+   is already a real assertion about this test alone, so the counter is doing
+   the job the panic was meant to do.
+
+## B-POSIX-HSEARCH-TESTS-RACE-ONE-GLOBAL-TABLE-AND-SEGFAULT (found by lane C, 2026-08-22 — lane B's crate) — FIXED 2026-08-22
 
 **In short:** Seven tests in `posix/src/search.rs` all drive one process-wide
 hash table at the same time, on different threads. One test frees the table
@@ -56601,6 +58506,29 @@ cannot give each test its own, so the only thing left to fix is the concurrency.
 and exposure as `DESTROY_COUNT` — `test_twalk_multiple` (`:900`) resets and
 reads it, and any sibling `twalk` test that does the same will race it. It has
 not been seen to fail yet.
+
+### Fixed 2026-08-22 (lane B) — as prescribed, plus the SAFETY comments
+
+`HTAB_TEST_LOCK` is a `std::sync::Mutex<()>` in `search.rs`'s test module, taken
+as the **first statement** of all seven tests so it is held from before
+`hcreate`/`hdestroy` to past the end of the body. Poison is recovered with
+`unwrap_or_else(PoisonError::into_inner)`, so one failing test reports one
+failure instead of six poisoned-lock failures burying the cause. `WALK_COUNT`
+was done in the same pass, by the different route the entry above explains.
+
+**The production `// SAFETY: single-threaded access` comments were the real
+root, and all three are rewritten.** They asserted a *fact* that nothing
+established. What is actually true is an *obligation*: POSIX defines the
+`hsearch` family around one process-global table and does not make it
+thread-safe (`hsearch_r` is the reentrant form), so serialising calls is the
+caller's job. The tests were simply a caller that did not do it. The new
+comments name the obligation, say who discharges it, and record that the old
+wording was false — because a SAFETY comment stating an unchecked fact is worse
+than none: it tells the next reader the question has been considered.
+
+**Verified** by 10 consecutive `cargo test -p posix --lib` runs, against a
+baseline of 3 pre-fix runs that gave one segfault, one assertion failure and one
+pass. A single green run would not have been evidence for a load-sensitive race.
 
 **Filed to the owning lane** as item 4 of
 `requests/c-b-three-flaky-tests-fail-the-workspace-gate.md`. Lane C has not
@@ -57332,3 +59260,357 @@ looked and it was fine."
 `Mutex::named` is a large diff that would still leave the report unable to
 identify a lock whose name was mistyped or duplicated. The address is unique
 by construction and costs one format argument.
+
+---
+
+## B-BCS-COMMAND-LINE-EXITED-0-ON-EVERY-KIND-OF-FAILURE (lane B, 2026-08-22) — FIXED 2026-08-22
+
+**In short:** `bc` is the calculator. Every way of getting its command line
+wrong — naming a file that does not exist, typing an option it does not have,
+typing `-e` with no expression after it — was reported with a message and then
+**ignored**: `bc` carried on and exited **0**, the code that means "success".
+A shell script doing `bc calculations.bc || echo failed` never printed
+`failed`, and `$(bc missing.bc)` produced an empty answer that looked like a
+computed zero. On top of that the parser called `env::args()`, which *panics*
+on an argument that is not valid text, so `bc café.bc` on a system whose file
+names are not UTF-8 aborted before it could name the file at all.
+
+Found by the size-gap audit (see
+`B-FORTY-TWO-BINARY-NAMES-ARE-BUILT-BY-TWO-PACKAGES`), and surfaced by the
+`diagnostics_quote_names` lint: moving `bc.rs` into
+`userspace/coreutils/src/bin/` brought it under a test it had never faced,
+which flagged the hand-written quotes in one diagnostic. Reading the function
+to fix that one line found six more defects in the same twenty lines.
+
+**Every sentence and status below was measured against GNU bc 1.07.1 through
+WSL, and recall was wrong three times.** The instrument for the option table
+is `bc --=x`: an empty prefix matches every long option, so `getopt_long`
+prints the whole table in declaration order.
+
+### The seven defects
+
+| # | What `main` did | What GNU does | Cost |
+|---|---|---|---|
+| 1 | a file that will not open printed a message and the loop **continued**, exiting `0` | `File NAME is unavailable.`, **stop**, exit `1` | `bc a.bc missing.bc c.bc` ran `c.bc` with the definitions `missing.bc` was to have provided — a wrong answer instead of an error, and a `0` status saying it was right |
+| 2 | `env::args()` | — | panics on a non-UTF-8 argument, so the file could not even be named |
+| 3 | `fs::read_to_string` | — | an invalid byte *in the file's contents* was reported as `cannot open 'x'`, naming the wrong failure: the file had been opened and read in full |
+| 4 | `stdin.lock().lines()` with `Err(_) => break` | — | one stray byte in a piped script **silently truncated the program** and still exited `0` |
+| 5 | an unknown option printed `bc: unknown option: -Z` and **carried on**, exiting `0` | `bc: invalid option -- 'Z'` on stderr, usage on stdout, exit `1` | a mistyped flag ran the calculation anyway, with the flag not applied |
+| 6 | `-e` with nothing after it wrote `None` into an unchecked `Option` | `bc -e` is not even an option upstream; ours needs an argument | `bc -e` became an **interactive session**, so a script that built its expression from an empty variable hung waiting on stdin |
+| 7 | the option loop iterated `flag.chars()` | bytes | `-é` reported `invalid option -- 'é'`, an option nobody typed |
+
+Defect 1 is the one that matters most, and defects 1, 4 and 6 share a shape:
+**a failure was detected, described, and then not acted on.** That is worse
+than not detecting it, because the `0` status actively certifies the wrong
+answer to everything downstream.
+
+### Three measurements that contradicted recall
+
+1. **`-e` and `-f` do not exist in GNU bc 1.07.1.** `bc -e 2+2` answers
+   `bc: invalid option -- 'e'` and exits 1; `bc --expression=2+2` answers
+   `unrecognized option '--expression=2+2'`. Our `-e` is a SlateOS extension
+   (it is Gavin Howard's bc that has one), and the usage text now says so, so
+   nobody ports a script to a GNU host expecting it.
+2. **The long-option table is alphabetical and has eight entries**, one of
+   which — `--compile`, which emits dc code — the usage text does not mention:
+   `'--compile' '--help' '--interactive' '--mathlib' '--quiet' '--standard'
+   '--version' '--warn'`. The order is observable output, because
+   `getopt_long` lists an ambiguous prefix's candidates in it.
+3. **A file operand does not end the run.** `printf '9+9\n' | bc a.bc` prints
+   a.bc's output *and then* evaluates standard input, in one interpreter — so
+   a file may define functions a later interactive session uses. Ours returned
+   after the files. Also measured: a bare `-` is **not** standard input, it is
+   a file name that fails to open (`File - is unavailable.`, exit 1) — the
+   comment in our operand arm claimed the opposite.
+
+### The fix
+
+`main` is now three functions plus a pure `parse_args` that can be tested:
+
+- `env::args_os()` and byte-wise option matching throughout, so no argument
+  can panic and `-é` reports the byte it is.
+- `-e`/`--expression` and file operands go into **one ordered list**, so
+  `bc -e 'define f(x){…}' use.bc` and `bc use.bc -e '…'` are different
+  programs, as the order typed says they are.
+- Standard input is read after the operands, as GNU does — unless `-e` was
+  given, since `bc -e '2+2'` dropping into an interactive session is nobody's
+  behaviour.
+- Every failure returns `ExitCode::FAILURE`, and a file that will not open
+  stops the run at that file.
+- Diagnostics come from `coreutils::getopt`, so they are glibc's sentences
+  rather than sentences invented here, and file names go through
+  `coreutils::quote` so a name cannot forge a line of output.
+- 20 new tests, each citing the GNU command that was run to establish what it
+  asserts. `cargo test -p coreutils --bin bc`: 77 passing, up from 57.
+
+### Two limitations this leaves, on purpose
+
+**`-s`/`--standard` and `-c`/`--compile` are now refused rather than
+ignored.** We implement neither. Ignoring `-s` is *silently wrong*: it makes
+non-standard constructs errors, so a bc that accepted and ignored it would run
+a program POSIX bc rejects and print an answer. Measured: `echo 'print 1,2' |
+bc -s` prints `(standard_in) 1: Error: print statement` and computes nothing,
+where plain `bc` prints `12`. `-c` is worse still — it emits dc code instead
+of results. Refusing is loud and cannot mislead; the proper fix is to tag
+every extension in the parser with whether POSIX has it, which is a real piece
+of work in `Parser` and not a flag.
+
+`-w`/`--warn` is the counter-example, and is accepted as a **no-op**:
+ignoring it omits an advisory on stderr and leaves every computed value
+identical, so refusing it would break working scripts to no purpose. The line
+between the two is *whether the flag's absence changes an answer*.
+
+**A source file that is not UTF-8 is refused, where GNU lexes it byte by
+byte.** Our `Lexer` takes `&str`. The old code silently truncated at the first
+bad byte and exited 0; the new code says `bc: 'x.bc': not valid UTF-8` and
+exits 1, which is honest but still stricter than GNU. The proper fix is to
+make the lexer byte-oriented, at which point a stray byte becomes a lex error
+on one line rather than a whole-file refusal.
+
+### Why the tests did not catch any of this
+
+`bc` had 57 unit tests and a 200-case differential harness against GNU bc, and
+**neither touches the command line.** The unit tests call `Parser`/
+`Interpreter` directly; `scripts/calc-diff.sh` feeds every program on *stdin*
+with no arguments at all. So the whole of `main` — argument parsing, file
+reading, exit status — was covered by nothing, in a binary otherwise tested
+better than most in the tree. This is the same shape as
+`B-FOUR-COMPONENTS-DISAGREED-ON-THE-NAME-OF-THE-SYSTEM`'s cause: a test suite
+can be thorough and still leave a hole, if every test enters through the same
+door.
+
+The 20 new tests enter through `parse_args`, which is why it was extracted as
+a pure function returning a `Request` rather than left as statements inside
+`main`.
+
+---
+
+## TD-B-THE-QUOTE-NAMES-TEST-READS-ONE-DIRECTORY-OF-EIGHTY (lane B, 2026-08-22) — OPEN
+
+**In short:** We have a test that reads our own source code looking for error
+messages that print a file's name without quoting it. Unquoted names are a real
+hazard — a file can be *named* something that looks like a second error message,
+and it will be printed as one. The test works, and it caught a live bug this
+week. The problem is where it looks: it reads exactly one folder, the one
+holding the 85 tools inside `coreutils`, and nothing else in the tree. Every
+other utility crate — 777 of them — is unchecked, and a scan says they contain
+**1796** of exactly the mistake the test exists to catch.
+
+### Where
+
+The test is `userspace/coreutils/tests/diagnostics_quote_names.rs`. Its whole
+scope is set by one function:
+
+```rust
+fn bin_dir() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("src/bin")
+}
+```
+
+`CARGO_MANIFEST_DIR` is `userspace/coreutils`, so the sweep is
+`userspace/coreutils/src/bin/**.rs` and stops there. An integration test can
+only be attached to the crate it lives in, so this is not an oversight in the
+test so much as a consequence of the shape it was given.
+
+### The measurement
+
+`scripts/quote-names-scope.py` (added with this entry) re-implements the test's
+two detectors — `bare_interpolated_name` and the hand-written-`'{name}'` check —
+in Python, so the whole tree can be priced without moving the test first. It
+skips comment lines, which the Rust version never needed to because no comment
+in `coreutils/src/bin` happens to match; tree-wide, several do (including the
+Rust test's own doc comments, which is how the port was validated against it).
+
+```
+$ python scripts/quote-names-scope.py
+scanned 2902 .rs files under userspace
+1796 would-be violations in 777 crates
+
+   46  btrfs
+   38  pulseaudio
+   36  cups
+   34  flatpak
+   19  timeout
+   ...
+```
+
+Run it with `--list` for the offending lines, or pass a path to scope it to one
+crate. `userspace/coreutils` reports 4, all of them the deliberately-bad fixture
+strings inside the test itself — i.e. `src/bin` really is clean, and the port
+agrees with the test it is modelling.
+
+### Why this matters more than the raw number suggests
+
+The 1796 are not evenly distributed over harmless code. The heads of the list
+are `btrfs`, `cups`, `flatpak`, `parted`, `losetup`, `mkfs`, `snapper` — tools
+whose entire job is to take a path or a device name from the user and report
+what went wrong with it. That is precisely the population where an
+attacker-chosen name reaches an error stream.
+
+### What the correct fix looks like
+
+Not "widen `bin_dir()`" — an integration test cannot reach outside its own
+crate's manifest directory in any clean way, and 777 crates is far past the
+point where one test's failure output is actionable. Two better shapes:
+
+1. **A workspace-level check rather than a crate test.** Promote the detectors
+   into `scripts/` (the Python port is already there) and run it from the
+   pre-push gate with a *baseline* file, exactly as
+   `scripts/multicall-aliases.py` does for unreachable command names: the
+   current 1796 are recorded as known, and the gate fails only on a *new* one.
+   That stops the bleeding immediately at near-zero cost and turns the backlog
+   into something that can be burned down crate by crate.
+2. **Then burn it down**, highest-risk crates first (the path-handling list
+   above), converting each site to `quotef_os` / `quoteaf_os`. This is the same
+   sweep that was done once inside `coreutils/src/bin`, so the shape of the work
+   is known.
+
+Doing (1) without (2) is still a clear win — it is the difference between a
+backlog and a growing backlog.
+
+### Interaction with B-Q7
+
+This is one of the two things that would be *lost* by moving a utility out of
+`coreutils/src/bin` into a standalone crate, and it is why the `bc` move was not
+reverted while B-Q7 is open (see `design-decisions.md` §359, amendment
+2026-08-22). If B-Q7 is answered **A** — standalone crates canonical — then fix
+(1) stops being an improvement and becomes a prerequisite, because at that point
+*no* utility in the tree is covered by the test at all.
+
+## B-POSIX-FOUR-MORE-PROCESS-GLOBALS-ARE-RACED-BY-THEIR-OWN-TESTS (lane B, 2026-08-22) — FIXED 2026-08-22
+
+**In short:** A C library has a handful of functions that remember something
+between calls — `strtok` remembers where it stopped, `dlerror` remembers the
+last error, `umask` remembers the mask. That memory is *one slot for the whole
+program*, on purpose: that is how POSIX defines these functions. But `cargo
+test` runs tests on many threads at once, so several tests were writing to the
+same slot simultaneously and reading back each other's values. One of them
+started failing; the rest had not yet, but had the same defect.
+
+**Why this entry exists separately from the two above it:** those two were found
+because they *failed*. These were found by then going and reading every
+process-global in the crate, which is what should have happened the first time.
+
+### How it surfaced
+
+`cargo test -p coreutils -p posix` — the two crates together, so the machine is
+busier than `posix` alone — failed once on:
+
+```
+---- string::tests::test_strtok_basic stdout ----
+thread 'string::tests::test_strtok_basic' panicked at posix\src\string.rs:4114:9:
+assertion failed: !tok2.is_null()
+```
+
+Ten consecutive runs of `-p posix --lib` on its own had passed immediately
+before. That is the load-sensitivity signature: the same code, a busier
+machine, a different answer.
+
+### What was actually wrong, and why `strtok` was the serious one
+
+| Global | Where | Tests racing it | Worst case |
+|---|---|---|---|
+| `SAVED` (strtok) | `posix/src/string.rs:573` | 3 | **cross-thread memory corruption** |
+| `DL_ERROR` | `posix/src/dlfcn.rs:35` | 15 | wrong/absent error message |
+| `UMASK_VALUE` | `posix/src/file.rs:3030` | 3 | wrong previous-mask assertion |
+
+The failed assertion is the least of what `strtok` can do. Each test's buffer is
+a local on *its own thread's stack*. `SAVED` points into whichever buffer was
+tokenised last, so under interleaving it points into **another live thread's
+stack frame** — and `strtok` writes a NUL through that pointer to terminate the
+token it returns. The observed symptom was a null return; the available symptom
+was one thread silently overwriting a byte in another thread's frame.
+
+`DL_ERROR` and `UMASK_VALUE` cannot corrupt anything — `DL_ERROR` only ever
+holds pointers to `'static` strings, and `UMASK_VALUE` is a plain integer. They
+are ordinary flaky-assertion races, and both would have failed the workspace
+gate eventually.
+
+`dlerror`'s test count is high (15, not 6) because `dlerror` is a *destructive*
+read: it returns the message and clears the slot. So a test that merely calls
+`dlopen` is a writer that can refill a slot another test just asserted was
+empty. Being a writer is enough to break a reader, so every test that calls any
+of `dlopen`/`dlsym`/`dlclose`/`dlerror` had to take the lock, not just the ones
+with `dlerror` in the assertion.
+
+### Fixed 2026-08-22 (lane B)
+
+A `Mutex` per global in the test module — `STRTOK_TEST_LOCK`,
+`DL_ERROR_TEST_LOCK`, `UMASK_TEST_LOCK` — taken as the **first statement** of
+each affected test, because in all three cases the indivisible unit is the whole
+"set a known state, provoke, read it back" body and not any single call. Poison
+is recovered with `unwrap_or_else(PoisonError::into_inner)` so one genuine
+failure reports once instead of poisoning up to fourteen siblings and burying
+the cause. This is the idiom `getopt.rs`, `crypt.rs`, `libintl.rs` and
+`error.rs` already use in this crate; these three modules were simply the ones
+that had not adopted it.
+
+Thread-locals — the fix used for `search.rs`'s counters — are **not** applicable
+here. That fix works when state is only *incidentally* shared; these three are
+shared *by specification*. `strtok` with a per-thread save pointer would be
+`strtok_r`, which already exists next to it.
+
+**The production `// SAFETY: Single-threaded access` comments were the root, and
+all four are rewritten.** Each asserted a fact — "this is single-threaded" —
+that nothing in the crate established and that the crate's own test suite
+falsified. What is true is an *obligation*: POSIX specifies these interfaces
+around process-global state and does not make them thread-safe, so serialising
+is the caller's job. The new comments say that, name who discharges it, and
+record that the previous wording was false. A SAFETY comment stating an
+unchecked fact is worse than no comment, because it tells the next reader the
+question has already been considered.
+
+### What was checked and left alone
+
+`ctype.rs`'s `CACHED` locale-table pointers (`:336`, `:394`, `:408`) are a
+memoisation: every writer stores the *same* address of the *same* static table,
+so a race stores the value that was already there. Left as is.
+
+`crt.rs`, `fdtable.rs`, `aio.rs`, `dirent.rs`, `pthread.rs` and `perthread.rs`
+reach their globals through the `perprocess!`/`perthread` macros, which is a
+separate mechanism with its own story and was not part of this pass.
+
+### The check that now covers this
+
+All five instances were found by a flake or by someone reading, so the sixth
+would have been too. `scripts/raced-globals.py` closes that: it flags a
+*resettable* `static mut` / `static Atomic*` reachable from two or more
+`#[test]` functions with no lock and no thread-local between them, and
+`scripts/hooks/pre-push` gate 3 refuses a push that introduces one.
+
+Three things make it a check that survives contact rather than one that gets
+deleted:
+
+- **It is a ratchet.** `scripts/raced-globals-baseline.txt` records the 48
+  pre-existing instances, and `--check` fails only on a global that is *not* in
+  it, so the backlog can be worked down without the gate being red on the day it
+  lands. The file only ever shrinks. A false positive belongs in the script's
+  `IGNORE` table, which records *why*; the baseline records only *that*.
+- **A resetting write is required.** A `static COUNTER: AtomicU64` that is only
+  ever `fetch_add`ed is the pattern that *prevents* this bug — every caller gets
+  a distinct value and a race cannot lie. Demanding a `store`/`swap`/
+  `compare_exchange`/`addr_of_mut!`/assignment cut the report from 84 globals
+  to 48; the three largest entries it removed (106, 88 and 35 tests) were all
+  unique-id counters.
+- **The lock hint propagates one hop.** `getopt` and `environ` serialise via
+  `reset_getopt_state()` and `lock_env_for_test()`, whose *call sites* contain
+  no word resembling "lock". Following the same call graph used for
+  reachability is what stops the tool flagging the code that already did it
+  right — the failure mode that gets a linter switched off.
+
+It is scoped to `posix/` and `userspace/` for the same reason gate 2 is scoped
+to `userspace/`: a lane A or C push must never pay for, or be blocked by, a lane
+B check. Bypass is `ALLOW_RACED_GLOBAL=1`, separate from the other two gates'.
+
+Validated against the five known instances: the detector's per-global test
+counts match the hand analysis exactly (`DL_ERROR` 15, `HTAB` 7, `SAVED` 3,
+`UMASK_VALUE` 3), and all four fixed globals now classify as *serialised* —
+which is what demonstrates that both halves work, reachability and guard
+detection. The macro-based globals above remain unaudited, but they are now
+*visible*: they sit in the baseline rather than being invisible until they flake.
+
+### Verification
+
+`cargo test -p posix --lib` — 20515 passed, 0 failed. Then the pairing that
+exposed it: `cargo test -p coreutils -p posix`, which is the load condition
+under which the original failure appeared.

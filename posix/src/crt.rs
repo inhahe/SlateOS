@@ -1098,7 +1098,7 @@ fn ensure_at_random_initialized() {
 /// Our kernel doesn't populate an auxv struct; we synthesize the
 /// commonly-queried entries here:
 ///
-/// - `AT_PAGESZ` (6) → 16384 (our page size).
+/// - `AT_PAGESZ` (6) → [`crate::unistd::PAGE_SIZE`] (our page size, 16 KiB).
 /// - `AT_CLKTCK` (17) → 100 (HZ).
 /// - `AT_RANDOM` (25) → pointer to 16 bytes of process-local randomness,
 ///   lazily populated on first call from the kernel CSPRNG (see
@@ -1125,8 +1125,10 @@ pub extern "C" fn getauxval(typ: u64) -> u64 {
     const AT_PLATFORM: u64 = 15;
 
     match typ {
-        AT_PAGESZ => 16384, // Our 16 KiB page size.
-        AT_CLKTCK => 100,   // Jiffy rate (HZ).
+        // Not a second copy of the number: `PAGE_SIZE` is the one definition,
+        // and `every_spelling_of_the_page_size_agrees` pins this to it.
+        AT_PAGESZ => crate::unistd::PAGE_SIZE as u64,
+        AT_CLKTCK => 100, // Jiffy rate (HZ).
         AT_RANDOM => {
             ensure_at_random_initialized();
             core::ptr::addr_of!(AT_RANDOM_BYTES) as u64
@@ -1500,6 +1502,11 @@ mod tests {
 
     #[test]
     fn test_getauxval_page_size() {
+        // The literal is deliberate here.  Everywhere else in the crate the
+        // page size is derived from `unistd::PAGE_SIZE`; this test is one of
+        // the few places that writes the number out, so that changing
+        // `PAGE_SIZE` fails a test rather than silently re-defining an
+        // architectural invariant (`CLAUDE.md` → "16 KiB pages, not 4 KiB").
         assert_eq!(getauxval(6), 16384); // AT_PAGESZ = 6; our 16 KiB pages.
     }
 

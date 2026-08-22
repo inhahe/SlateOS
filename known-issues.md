@@ -57133,7 +57133,7 @@ nice nohup patch ps readlink realpath renice rm rmdir sed sh sha256sum sleep
 stat strings tar tee time_cmd touch tty which xargs yes
 ```
 
-**Burn-down progress.** Converted so far: `rm`, `mv`, `cp`, `ln` (all
+**Burn-down progress.** Converted so far: `rm`, `mv`, `cp`, `ln`, `mkdir` (all
 2026-08-22, see the sections at the end of this entry). The live count is
 whatever `python scripts/argv-utf8.py --check` prints; the baseline shrinks by
 one line per conversion and never grows, so this paragraph cannot silently go
@@ -57141,7 +57141,8 @@ stale in the dangerous direction — if it disagrees with the tool, the tool is
 right.
 
 **Every conversion so far has uncovered unrelated bugs in the `main` it
-replaced** — three in `rm`, four in `mv`, six in `cp`, four in `ln`, none of
+replaced** — three in `rm`, four in `mv`, six in `cp`, four in `ln`, four in
+`mkdir`, none of
 them about UTF-8 and all of them in code that no test touched. That is the argument for converting these
 files properly rather than mechanically swapping `env::args()` for
 `env::args_os()`: the defect is a marker for *untested `main`*, and the panic
@@ -57571,6 +57572,90 @@ remaining 47 should copy:**
   type-checked by the step introduced for `mv`. `clippy --all-targets` compiles
   the test harness for `x86_64-slateos` and so covers them. Use it in place of
   the plain build from here on.
+
+### `mkdir` converted, and the four further defects the rewrite uncovered (2026-08-22)
+
+Gate count 47 → 46. 27 tests, up from 7, and — as with `mv`, `cp` and `ln` — the
+*action* path had none at all before, so all of its coverage is new.
+
+Like `ln`, and unlike `rm`, `mv` and `cp`, **none of these defects made `mkdir`
+create a directory in a place the user did not ask for**. All four were refusals
+of valid command lines, or messages in the wrong shape. That is now two
+conversions in a row where the argv defect was not a marker for something that
+loses data.
+
+**The four defects**, in the lines the rewrite replaced:
+
+1. **No long option worked, including `--help` and `--parents`, and `--` was not
+   an end-of-options marker.** `parse_args` compared each whole argument against
+   the literal string `"-p"` and treated everything else beginning with `-` as
+   unknown. So the long spelling of the one option the program *has* was refused;
+   `--help` was refused; a directory whose name begins with a dash could not be
+   created at all, there being no way to stop option parsing; and short options
+   could not be bundled, so `mkdir -pv` failed as one unknown option.
+2. **The failure message used the wrong quoting style** — `quoteaf_os`, straight
+   `'a'`, where GNU `mkdir` uses locale quoting, curly `‘a’`. See the section
+   below; this is the finding worth carrying forward, not the bug.
+3. **`missing operand` carried no `Try 'mkdir --help' for more information.`**,
+   which was the only pointer a user had to a `--help` that — see defect 1 — did
+   not work anyway.
+4. **Unknown options were reported in a shape no other utility uses**:
+   `mkdir: unknown option: -q`, against GNU's `mkdir: invalid option -- 'q'`
+   plus the referral. Going through `getopt` fixes this for the same reason it
+   fixes ambiguity handling — the wording is the library's, measured once,
+   rather than each bin's own guess.
+
+**The quoting style is a property of the individual message, not of the utility,
+and `mkdir` is the odd one out.** This is the reusable finding. Measured under
+`LANG=C.UTF-8`, GNU coreutils 9.4:
+
+| Message | Marks | Our function |
+|---|---|---|
+| ``mkdir: cannot create directory ‘a’: File exists`` | curly | `quote` / `quote_os` |
+| ``mkdir: created directory 'v1'`` (`-v`) | straight | `quoteaf` / `quoteaf_os` |
+| ``rmdir: failed to remove 'nosuch'`` | straight | `quoteaf_os` |
+| ``cp: cannot stat 'nosuch'`` | straight | `quoteaf_os` |
+| ``rm: cannot remove 'nosuch'`` | straight | `quoteaf_os` |
+| ``touch: cannot touch '/nope/x'`` | straight | `quoteaf_os` |
+| ``ln: failed to create hard link 'g'`` | straight | `quoteaf_os` |
+
+The two `mkdir` rows are the point: one program, two styles, in the same run.
+`quoteaf_os` was not a careless choice in the old file — it is what all five of
+`mkdir`'s nearest neighbours use, which is exactly why it is easy to get wrong
+in both directions. **The rule for the remaining 46 is to measure the specific
+message, not to copy the utility next door**, and `mkdir.rs` now carries a test
+(`the_failure_message_uses_curly_marks`) that fails if someone harmonises it.
+
+**What `mkdir` still does not do:**
+
+- **Every option but `-p`/`--parents`**, all rejected by name: `-m`/`--mode`,
+  `-v`/`--verbose`, `-Z`/`--context`. `-m` is the one that would be harmful
+  ignored — `mkdir -m 700 ~/.ssh` would silently produce a 0755 directory, i.e.
+  a directory the user asked to be private, made world-readable with no message.
+  Implementing it properly needs a symbolic-mode parser (`u=rwx,go=`); the only
+  one in the tree is private to `chmod.rs`. **Lifting that into a shared
+  `coreutils::mode` module is the prerequisite**, and it unblocks `-m` in
+  `mkdir`, `mkfifo` and `install` at once, so it is worth doing once rather than
+  copying the parser a third time.
+- `--verbose` is unimplemented only for scope discipline; it is safe to ignore
+  and trivial to add, and it is refused rather than ignored purely so that no
+  option in this program is silently dropped.
+
+**Measured, not recalled**, per the rule the `ln` section sets out. The whole
+long-option table came from `mkdir --=x` and is pinned by a test asserting the
+exact string, so the *order* — which is observable, and which the ambiguity
+messages depend on — cannot drift:
+
+```text
+mkdir: option '--=x' is ambiguous; possibilities: '--context' '--mode'
+'--parents' '--verbose' '--help' '--version'
+```
+
+The ambiguity that matters is `--v` between `--verbose` and `--version`: a table
+pruned to the single implemented option would turn `mkdir --v` from an error
+into a version banner. `--p` is measured as *unambiguous* (`mkdir --p q` works),
+and there is a test for that too, since it is the abbreviation a user is most
+likely to type.
 
 ---
 

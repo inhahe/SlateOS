@@ -34,7 +34,6 @@ userspace/coreutils/src/bin/id.rs:argv-as-string
 userspace/coreutils/src/bin/logger.rs:argv-as-string
 userspace/coreutils/src/bin/ls.rs:argv-as-string
 userspace/coreutils/src/bin/md5sum.rs:argv-as-string
-userspace/coreutils/src/bin/mkdir.rs:argv-as-string
 userspace/coreutils/src/bin/mkfifo.rs:argv-as-string
 userspace/coreutils/src/bin/more.rs:argv-as-string
 userspace/coreutils/src/bin/nice.rs:argv-as-string

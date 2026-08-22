@@ -54883,7 +54883,7 @@ on the reaper being called from the right places.
 That converts a correctness bug into a probabilistic one and makes the failure
 rarer and harder to attribute, which is strictly worse.
 
-### TD-A-LOCKDEP-VIOLATION-REPORT-NAMES-NO-ADDRESS. Four live AB/BA lock-order inversions are reported at boot and none can be acted on, because the report identifies the locks only by a name that is `"?"` — found 2026-08-22
+### TD-A-LOCKDEP-VIOLATION-REPORT-NAMES-NO-ADDRESS. `Vfs::unmount` and four other sites take a per-mount filesystem lock while holding the global VFS lock, inverting the order the overlay depends on — found 2026-08-22 (reported for weeks as unreadable `lock "?"` warnings; diagnostic fixed, root cause now identified)
 
 **Owner: lane A** (`kernel/src/lockdep.rs`, plus whichever subsystems the
 inversions turn out to be in).
@@ -54949,10 +54949,54 @@ every symbol that is not `STT_FUNC`, so a runtime `ksyms::resolve` of a lock
 address returns `None`. That is a deliberate size tradeoff, not a bug, but it
 is why the resolution step is offline.
 
-**Still OPEN: the inversions themselves,** which are the actual point; this
-entry exists because that work could not start until the locks could be named.
-**Next step:** the next boot's log will carry addresses for classes 130, 18,
-110, 55 — resolve each with `symbolize.py`, then fix the order graph. Note that
+**RESOLVED — the locks are now named, and the culprit is identified.** From the
+cycle-9 boot (the first with addresses), via `python scripts/symbolize.py`:
+
+| Class | Address | Identity |
+|---|---|---|
+| 18 | `0xffffffff82782620` | `kernel::fs::vfs::VFS` +0x10 — the global VFS lock |
+| 55 | `0xffffffff827fe8b0` | `kernel::fs::overlay::OVERLAYS` +0x10 |
+| 110 | `0xffff80007d6e80a0` | heap — a per-mount `MountPoint::fs` lock |
+| 130 | `0xffff80007d6ea120` | heap — a per-mount `MountPoint::fs` lock (overlay) |
+
+(110 and 130 are heap addresses, so they do not appear in the ELF; they were
+identified from the call sites instead. `MountedFs = Arc<Mutex<Box<dyn
+FileSystem>>>`, `vfs.rs:967`.)
+
+**One of the two directions is the design, and the other is a bug.**
+`MountPoint::fs`'s own doc comment (`vfs.rs:972`, citing design-decisions §43)
+states the invariant: *"the global VFS lock is released the moment the mount
+table lookup is done"*, explicitly so that *"stacked filesystems (e.g. the
+overlay) can re-enter the VFS to read their backing layers without
+deadlocking"*. So:
+
+- **per-mount `fs` lock → VFS / OVERLAYS is the intended order** — it is the
+  overlay re-entering the VFS to reach its lower layer, which §43 designs for.
+  That is rows 3 and 4 of the report table (class 130 → 55, 130 → 18), fired
+  from the container-delete path in the OCI self-test.
+- **VFS → per-mount `fs` lock is the violation** — row 2 (class 18 → 110),
+  fired from `Vfs::unmount`, which takes `VFS.lock()` at `vfs.rs:1490` and is
+  still holding it at `vfs.rs:1519` when it calls
+  `vfs.mounts[idx].fs.lock().sync()`. That is the documented invariant broken
+  literally, in the function whose own struct documents it.
+
+**Five sites take a per-mount `fs` lock under the VFS lock**, not one —
+`vfs.rs` lines 1519 (`sync()` in `unmount`), 1532 (`fs_type()`), 2809 and 2821
+(`fs_type()` in mount listings), 3410 (`device_name()` in a device lookup).
+Only 1519 has been caught so far because only it runs while another lock order
+is live, but every one of them is the inverted order and the same deadlock
+against a stacked filesystem re-entering the VFS. The last four call trivial
+accessors that cannot themselves re-enter, which is why they have not hung
+anything — but they still create the edge, and the risk is real the moment a
+second CPU holds that `fs` lock and waits on `VFS`.
+
+**The fix** is to honour §43 at all five: clone the `Arc<Mutex<..>>` (cheap —
+it is an `Arc`, and cloning keeps the filesystem alive) under the VFS lock,
+drop the VFS guard, then take the `fs` lock. `unmount` additionally has to
+re-acquire and re-find its index afterwards, since the mount table can move
+while it is unlocked.
+
+Note that
 an inversion reported once may be benign in practice (the two orders may be
 unreachable concurrently on a uniprocessor boot) — but that judgement needs
 the call sites, and "we could not identify it" is not the same finding as "we

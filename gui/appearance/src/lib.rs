@@ -58,7 +58,15 @@ pub const MAUVE: Color = Color::from_hex(0xCBA6F7);
 pub const ROSEWATER: Color = Color::from_hex(0xF5E0DC);
 pub const FLAMINGO: Color = Color::from_hex(0xF2CDCD);
 pub const MAROON: Color = Color::from_hex(0xEBA0AC);
-pub const SKY: Color = Color::from_hex(0x89DCFE);
+// `0x89DCEB`, not `0x89DCFE`. This carried a transposed byte pair from the day
+// it was written, so `AccentColor::Sky.color()` returned a colour Catppuccin
+// does not contain — and, being the crate that owns the answer, it had already
+// propagated into `apps/alarmclock` and `apps/emojipicker`. Found by comparing
+// every dark constant here against the published Mocha palette; it was the
+// only mismatch, which is why a copy that agrees with 2,000 others is not
+// evidence of anything. See known-issues.md
+// TD-C-EVERY-APPLICATION-CARRIES-ITS-OWN-COPY-OF-THE-PALETTE-TOO.
+pub const SKY: Color = Color::from_hex(0x89DCEB);
 pub const SAPPHIRE: Color = Color::from_hex(0x74C7EC);
 
 // ============================================================================
@@ -853,6 +861,19 @@ pub struct Palette {
     pub mauve: Color,
     /// Sapphire.
     pub sapphire: Color,
+    /// Teal.
+    ///
+    /// Here because the applications need it, not because the shell does — 86
+    /// `const TEAL` declarations across `apps/`, against 0 in `gui/desktop`.
+    /// Added while the light ladder was being written rather than when
+    /// `apps/` is converted, because a hue added later has to be re-checked
+    /// against every mode-flip and legibility sweep in this module, and a
+    /// sweep that silently skips a field is the failure those sweeps exist to
+    /// catch. See known-issues.md
+    /// `TD-C-EVERY-APPLICATION-CARRIES-ITS-OWN-COPY-OF-THE-PALETTE-TOO`.
+    pub teal: Color,
+    /// Sky. Present for the same reason as [`teal`](Self::teal).
+    pub sky: Color,
     /// The colour this desktop is themed around, as the user chose it.
     ///
     /// Already resolved for the mode and for a custom colour — this is
@@ -924,6 +945,8 @@ impl Palette {
                 lavender: LIGHT_LAVENDER,
                 mauve: LIGHT_MAUVE,
                 sapphire: LIGHT_SAPPHIRE,
+                teal: LIGHT_TEAL,
+                sky: LIGHT_SKY,
                 accent: LIGHT_BLUE,
                 panel_alpha: 255,
                 light: true,
@@ -948,6 +971,8 @@ impl Palette {
                 lavender: LAVENDER,
                 mauve: MAUVE,
                 sapphire: SAPPHIRE,
+                teal: TEAL,
+                sky: SKY,
                 accent: BLUE,
                 panel_alpha: 255,
                 light: false,
@@ -2251,6 +2276,65 @@ mod tests {
         0.299 * f32::from(c.r) + 0.587 * f32::from(c.g) + 0.114 * f32::from(c.b)
     }
 
+    #[test]
+    fn every_dark_constant_is_the_published_catppuccin_mocha_value() {
+        // Transcribed from the Catppuccin Mocha palette, independently of the
+        // constants under test — that independence *is* the test. Everything
+        // else in this module compares one part of the tree against another,
+        // which cannot see an error the whole tree shares.
+        //
+        // It found one. `SKY` was `0x89DCFE` for the life of the crate, a
+        // transposed byte pair, and had already been copied into two
+        // applications. Nothing could have caught it: 2,258 duplicate
+        // declarations across `apps/` all agree with each other, and the two
+        // that agreed with *this* file were the two that were wrong.
+        //
+        // Only the dark values are pinned. The `LIGHT_*` accents deliberately
+        // depart from published Latte — they are darkened to carry text, which
+        // is what `every_role_a_user_reads_is_legible_on_the_base_of_its_own_palette`
+        // asserts and what §525 records — so pinning them here would assert
+        // the opposite of the decision that produced them.
+        // `overlay1` and `overlay2` are published but not declared here, and
+        // are deliberately absent rather than listed: an entry pairing
+        // `Color::from_hex(0x7F849C)` with `0x7F849C` asserts a value against
+        // itself, which is the vacuous shape this whole file's tests are
+        // written to avoid. A constant this crate does not have is not a
+        // constant this test can check.
+        let published: [(&str, Color, u32); 24] = [
+            ("rosewater", ROSEWATER, 0xF5E0DC),
+            ("flamingo", FLAMINGO, 0xF2CDCD),
+            ("pink", PINK, 0xF5C2E7),
+            ("mauve", MAUVE, 0xCBA6F7),
+            ("red", RED, 0xF38BA8),
+            ("maroon", MAROON, 0xEBA0AC),
+            ("peach", PEACH, 0xFAB387),
+            ("yellow", YELLOW, 0xF9E2AF),
+            ("green", GREEN, 0xA6E3A1),
+            ("teal", TEAL, 0x94E2D5),
+            ("sky", SKY, 0x89DCEB),
+            ("sapphire", SAPPHIRE, 0x74C7EC),
+            ("blue", BLUE, 0x89B4FA),
+            ("lavender", LAVENDER, 0xB4BEFE),
+            ("text", TEXT, 0xCDD6F4),
+            ("subtext1", SUBTEXT1, 0xBAC2DE),
+            ("subtext0", SUBTEXT0, 0xA6ADC8),
+            ("overlay0", OVERLAY0, 0x6C7086),
+            ("surface2", SURFACE2, 0x585B70),
+            ("surface1", SURFACE1, 0x45475A),
+            ("surface0", SURFACE0, 0x313244),
+            ("base", BASE, 0x1E1E2E),
+            ("mantle", MANTLE, 0x181825),
+            ("crust", CRUST, 0x11111B),
+        ];
+        for (name, got, want) in published {
+            assert_eq!(
+                got,
+                Color::from_hex(want),
+                "{name} is not the published Mocha value 0x{want:06X}"
+            );
+        }
+    }
+
     /// Every field of the palette, paired with its name, for the sweeps that
     /// have to cover all of them rather than a sample.
     ///
@@ -2258,7 +2342,7 @@ mod tests {
     /// tests is that a field added later is *not* silently skipped, and a
     /// macro or a reflection trick would skip it for exactly the same reason
     /// the renderer would.
-    fn roles(p: &Palette) -> [(&'static str, Color); 19] {
+    fn roles(p: &Palette) -> [(&'static str, Color); 21] {
         [
             ("crust", p.crust),
             ("mantle", p.mantle),
@@ -2278,6 +2362,8 @@ mod tests {
             ("lavender", p.lavender),
             ("mauve", p.mauve),
             ("sapphire", p.sapphire),
+            ("teal", p.teal),
+            ("sky", p.sky),
             ("accent", p.accent),
         ]
     }
@@ -2384,8 +2470,9 @@ mod tests {
     fn every_named_hue_agrees_with_the_accent_of_the_same_name() {
         // The two ways to reach a hue must not become two answers. `hue()`
         // exists for the settings page, which draws all fourteen swatches; the
-        // named fields exist for the shell, which uses eight of them as
-        // categorical colours. A swatch that is not the colour it selects is
+        // named fields exist for the shell and the applications, which use ten
+        // of them as categorical colours. A swatch that is not the colour it
+        // selects is
         // the exact bug this crate was created to stop.
         for light in [false, true] {
             let p = Palette::for_mode(light);
@@ -2398,6 +2485,8 @@ mod tests {
                 (AccentColor::Lavender, p.lavender),
                 (AccentColor::Mauve, p.mauve),
                 (AccentColor::Sapphire, p.sapphire),
+                (AccentColor::Teal, p.teal),
+                (AccentColor::Sky, p.sky),
             ];
             for (accent, field) in named {
                 assert_eq!(
@@ -2416,24 +2505,57 @@ mod tests {
         // be decorative again; if the named hues *did* follow it, a user who
         // picked Red would get a resource graph whose CPU and temperature
         // lines were the same colour.
-        let default = Palette::for_mode(false);
-        for accent in [AccentColor::Red, AccentColor::Green, AccentColor::Teal] {
-            let settings = AppearanceSettings {
-                accent_color: accent,
-                ..AppearanceSettings::default()
+        //
+        // Swept over *both* modes, and that is not padding. This test read
+        // only the dark palette until the reintroduction harness put a
+        // hue-collapse behind `if settings.theme_mode.is_light()` and watched
+        // it go by (defect U). A light-mode-only defect is the more likely
+        // one, too: the light arm of `for_mode` is the newer code and the one
+        // a reader checks less.
+        //
+        // Note what is *not* provable here: writing the chosen accent into the
+        // field of the same name is invisible, because the two are equal by
+        // construction — that is what
+        // `every_named_hue_agrees_with_the_accent_of_the_same_name` asserts.
+        // The reachable defect is the accent landing on some *other* hue, so
+        // that is what the sweep below covers.
+        for light in [false, true] {
+            let mode = if light {
+                ThemeMode::Light
+            } else {
+                ThemeMode::Dark
             };
-            let p = Palette::from_settings(&settings);
-            assert_eq!(
-                p.accent,
-                settings.effective_accent(),
-                "{accent:?} did not reach the palette"
-            );
-            assert_eq!(p.blue, default.blue, "{accent:?} moved the blue category");
-            assert_eq!(
-                p.green, default.green,
-                "{accent:?} moved the green category"
-            );
-            assert_eq!(p.red, default.red, "{accent:?} moved the red category");
+            let default = Palette::for_mode(light);
+            for accent in [AccentColor::Red, AccentColor::Green, AccentColor::Teal] {
+                let settings = AppearanceSettings {
+                    accent_color: accent,
+                    theme_mode: mode,
+                    ..AppearanceSettings::default()
+                };
+                let p = Palette::from_settings(&settings);
+                assert_eq!(
+                    p.accent,
+                    settings.effective_accent(),
+                    "{accent:?} did not reach the palette in {mode:?} mode"
+                );
+                for (name, got, want) in [
+                    ("blue", p.blue, default.blue),
+                    ("green", p.green, default.green),
+                    ("red", p.red, default.red),
+                    ("yellow", p.yellow, default.yellow),
+                    ("peach", p.peach, default.peach),
+                    ("lavender", p.lavender, default.lavender),
+                    ("mauve", p.mauve, default.mauve),
+                    ("sapphire", p.sapphire, default.sapphire),
+                    ("teal", p.teal, default.teal),
+                    ("sky", p.sky, default.sky),
+                ] {
+                    assert_eq!(
+                        got, want,
+                        "{accent:?} moved the {name} category in {mode:?} mode"
+                    );
+                }
+            }
         }
     }
 

@@ -35845,3 +35845,61 @@ passed, and it is three lines long.
 Worth stating because it recurs: the harness's value here was not confirming
 that the tests work. It was that a test which *should* have failed and did not
 pointed at a defect in the code beneath it, rather than at itself.
+
+### Addendum, same day: two fields more, one constant wrong, and a sweep that was half a sweep
+
+Surveying `apps/` to size the next stage turned up three things that belong in
+this decision rather than in the one that will consume them.
+
+**`teal` and `sky` were added to `Palette` immediately, not when `apps/` is
+converted.** The shell declares neither; the applications declare `TEAL` 86
+times and `SKY` 18. The argument for waiting is that a field with no caller is
+dead weight and this crate's own tests exist to catch exactly that. The
+argument for adding them now, which won, is that every mode-flip and legibility
+sweep in the test module iterates a hand-written list of the palette's fields —
+so a hue added later has to be threaded back through all of them, and a sweep
+that silently skips a field is the precise failure those sweeps were written to
+detect. Paying that cost once, while the light ladder is being written and
+every value is being checked anyway, is cheaper and safer than paying it under
+a large mechanical conversion where a missed row would look like noise.
+
+**`SKY` was wrong, in the crate that owns the answer.** Catppuccin Mocha's Sky
+is `#89DCEB`; `gui/appearance/src/lib.rs` said `0x89DCFE` — a transposed byte
+pair, present since the constant was written — so `AccentColor::Sky.color()`
+returned a colour the scheme does not contain, and the wrong value had already
+been copied into `apps/alarmclock` and `apps/emojipicker`. Six other
+applications and `gui/toolkit` had the right one.
+
+The fix is one character. The interesting part is that **nothing in the tree
+could have found it**, and the reason generalises past this bug: every test in
+this crate compares one part of the tree against another, which by construction
+cannot see an error the whole tree shares — and 2,258 duplicated declarations
+agreeing with each other is not evidence, since agreement is what copying
+produces whether or not the original was right. So
+`every_dark_constant_is_the_published_catppuccin_mocha_value` transcribes the
+published palette *independently* and pins all 24 declared values against it.
+That is the only test in the file whose expected values do not come from the
+tree, and it is the only one that could have caught this.
+
+Two things it deliberately does not do. It does not pin the `LIGHT_*` accents,
+because those depart from published Latte on purpose — they are darkened to
+carry text, per Decision 4 above — so pinning them would assert the negation of
+a decision recorded twenty lines earlier. And it does not list `overlay1` and
+`overlay2`: they are published but not declared here, and an entry pairing
+`Color::from_hex(0x7F849C)` with `0x7F849C` asserts a value against itself,
+which is the vacuous shape the reintroduction harness for this work exists to
+rule out. A constant the crate does not have is not a constant a test can check.
+
+**The categorical-hue sweep was only testing half of what it claimed**, and the
+harness is what said so. `the_accent_setting_moves_the_accent_and_leaves_the_categorical_hues_alone`
+compared against `Palette::for_mode(false)` using the default settings — which
+are dark — so the entire light arm was unexercised. A reintroduced defect that
+collapsed a hue onto the accent *only in light mode* was reported as
+`NO TEST FAILED`. It now sweeps both modes and all ten named hues.
+
+Worth recording as a rule rather than an anecdote: a mode-dependent type wants
+its tests written as a loop over the modes from the start, because the arm a
+reader checks less is also the arm a test forgets, and both defaults point the
+same way — the dark arm is older, is what the tree already agreed with, and is
+what `Default` returns. Every unswept test in a two-mode type will be unswept
+on the same side.

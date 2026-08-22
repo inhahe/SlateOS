@@ -196,6 +196,31 @@ DEFECTS = [
         ["a_window_button_keeps_its_meaning_when_the_accent_changes"],
     ),
     (
+        "T: SKY carries the transposed byte pair it shipped with",
+        APP,
+        [("pub const SKY: Color = Color::from_hex(0x89DCEB);",
+          "pub const SKY: Color = Color::from_hex(0x89DCFE);")],
+        ["appearance"],
+        ["every_dark_constant_is_the_published_catppuccin_mocha_value"],
+    ),
+    (
+        # Defect F is this collapse unconditionally. This one happens only in
+        # light mode, which the categorical-hue test could not see until it was
+        # swept over both — it read `Palette::for_mode(false)` and the default
+        # (dark) settings, so the entire light arm was unexercised. The first
+        # run of this defect reported NO TEST FAILED; that is what put the
+        # sweep in.
+        "U: in light mode only, the accent overwrites the categorical sapphire",
+        APP,
+        [("        palette.panel_alpha = settings.transparency.panel_alpha();",
+          "        palette.panel_alpha = settings.transparency.panel_alpha();\n"
+          "        if palette.light {\n"
+          "            palette.sapphire = palette.accent;\n"
+          "        }")],
+        ["appearance"],
+        ["the_accent_setting_moves_the_accent_and_leaves_the_categorical_hues_alone"],
+    ),
+    (
         "R: a pressed taskbar button is raised one step too far",
         DESK,
         [("            taskbar_active_bg: p.surface1,", "            taskbar_active_bg: p.surface2,")],

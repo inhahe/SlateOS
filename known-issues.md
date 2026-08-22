@@ -53773,16 +53773,59 @@ than a frame — `osd.rs:249`, `power.rs:601`, `a11y.rs:664` — are fine and ar
 not part of this entry. The distinction is whether the caller has a reason to
 call at all when nothing happened.
 
-**Proper fix:** give `EventLoop` a deadline-aware wait. `Connection::wait`
-grows a `wait_until(deadline)` (a `poll`/`select` timeout at the socket layer,
-which is where the blocking already is), `EventLoop` grows a
-`request_frame_callback`-style registration, and `run` computes the nearest
-pending deadline each pass and waits at most that long. Then a `tick(dt)` has a
-caller: the loop steps registered animations when a deadline fires and
-re-renders, and an idle desktop with no registrations still blocks forever and
-burns nothing. This is deliberately *not* a fixed-rate frame timer — a shell
-that wakes 60 times a second to discover it has nothing to draw is the polling
-bug in a different place.
+**Corrected 2026-08-22 — the gap is higher up than first written.** This entry
+originally proposed adding a `wait_until(deadline)` at the socket layer. That
+was wrong: **`SocketTransport` already has one.** `set_wait_timeout(Option<Duration>)`
+(`gui/remote/src/socket.rs:204`) caps how long `park()` blocks, by way of
+`set_read_timeout`, and it already refuses a zero duration with an explanation.
+Its own doc comment even names the use case — *"Only useful to a client that has
+something to do on a timer — an animation, a blinking caret"*. Nothing above it
+has ever called it.
+
+**And the event type already exists too.** `guitk::event::Event::Tick { elapsed_ms }`
+is in the shared vocabulary, `gui/remote/src/input.rs` encodes and decodes it on
+the wire in both directions, and **50 references to it exist across the toolkit
+and the applications** — `modal.rs` (three), `grid.rs`, `asteroids`, `breakout`,
+`dots`, `benchmark`, `diskimager`, `credmanager` and more all have a
+`Event::Tick { elapsed_ms } =>` arm ready to receive one. A tree-wide search for
+anything that *constructs* one outside a test finds nothing. The compositor
+never sends a `Tick`; `EventLoop` never synthesises one.
+
+So this is not a missing mechanism at either end. It is a **missing producer in
+the middle**, with a working consumer vocabulary on one side and a working
+bounded wait on the other, and no line of code joining them. That makes it
+markedly cheaper to fix than first assessed, and markedly worse to leave: every
+one of those 50 arms is dead code that its author had no way to notice was dead,
+because a `handle_event(Event::Tick { elapsed_ms: 16 })` written by hand in a
+unit test passes perfectly.
+
+**Proper fix:** `EventLoop` synthesises the tick locally.
+
+1. `Transport` grows `set_wait_timeout(Option<Duration>)`, defaulting to
+   `Ok(())`. The default is sound rather than lax: the default `wait()` returns
+   immediately, and a wait that never blocks trivially honours any bound. The
+   rule is the same one `wait` already states — every transport that really
+   blocks must implement it. `SocketTransport`'s inherent method becomes the
+   trait impl.
+2. `EventLoop` grows `wake_at(window, Instant)` / `wake_after(window, Duration)`
+   and `cancel_wake(window)`. Wake-ups are **one-shot**, so an animation re-arms
+   from its own handler: that makes stopping the default and continuing the
+   deliberate act, which is what keeps an idle desktop idle.
+3. `run` computes the nearest pending deadline each pass, bounds the wait to it,
+   and delivers `Event::Tick { elapsed_ms }` — measured, not assumed — to each
+   window whose deadline has passed. With no registrations it blocks for ever
+   and burns nothing, exactly as now.
+
+This is deliberately **not** a fixed-rate frame timer. A shell that wakes 60
+times a second to discover it has nothing to draw is
+`TD-COMPOSITOR-POLLS-INSTEAD-OF-WAITING` in a different place.
+
+It is also deliberately **local**, not a compositor frame callback. The wire can
+already carry a `Tick`, so a compositor-driven, vsync-locked version remains
+open later for anything that needs to be in step with the display; but routing
+every animation frame through a socket round trip to get a timer the client can
+read from its own clock would put the compositor in the middle of every blinking
+caret on the desktop.
 
 Rendering also has to become re-entrant from the loop rather than from an input
 event, which is the part that touches `session.rs`: `paint_chrome` is called

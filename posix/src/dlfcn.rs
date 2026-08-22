@@ -32,6 +32,15 @@ pub const RTLD_DEFAULT: *mut u8 = core::ptr::null_mut();
 // ---------------------------------------------------------------------------
 
 /// Static error message for dlerror.
+///
+/// One slot for the whole process. glibc gives `dlerror` per-thread error
+/// state; POSIX only requires that the message describe "the most recent
+/// error that occurred", and leaves concurrent use unspecified. This is the
+/// simpler process-wide form, so a caller that needs a `dl*`-then-`dlerror`
+/// pair to describe *its own* call has to keep other threads out of that pair.
+/// This crate's tests are such a caller and serialise on `DL_ERROR_TEST_LOCK`;
+/// if a real multi-threaded consumer ever appears, the fix is per-thread state
+/// (see `perthread.rs`), not a lock inside `dlerror`.
 static mut DL_ERROR: *const u8 = core::ptr::null();
 
 // ---------------------------------------------------------------------------
@@ -43,7 +52,10 @@ static mut DL_ERROR: *const u8 = core::ptr::null();
 /// Stub: always returns NULL (dynamic linking not supported).
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn dlopen(_filename: *const u8, _flags: i32) -> *mut u8 {
-    // SAFETY: Single-threaded access.
+    // SAFETY: `DL_ERROR` is written only through a raw pointer, never through
+    // a reference, and the value stored is a pointer to a `'static` string, so
+    // a racing `dlerror` can read a stale message but never a dangling one.
+    // Excluding that staleness is the caller's job — see `DL_ERROR`.
     unsafe {
         core::ptr::addr_of_mut!(DL_ERROR)
             .write(c"dynamic linking not supported".as_ptr().cast::<u8>());
@@ -167,16 +179,43 @@ mod tests {
         assert!(RTLD_DEFAULT.is_null());
     }
 
+    /// Serialises every test that touches `DL_ERROR` — which is every test
+    /// that calls `dlopen`, `dlsym`, `dlclose` or `dlerror`, since all four do.
+    ///
+    /// `dlerror` is a *destructive* read: it returns the message and clears the
+    /// slot. So the pattern every one of these tests uses — clear, provoke an
+    /// error, read it back — is a three-step sequence over one process-wide
+    /// slot, and `libtest` runs fifteen such sequences on fifteen threads at
+    /// once. A sibling's `dlerror` between this test's provoke and read steals
+    /// the message (`err.is_null()` fires); a sibling's `dlopen` after this
+    /// test's final read refills the slot it just asserted was empty
+    /// (`test_dlerror_clears_after_read`). Non-reading tests are covered too,
+    /// because being a *writer* is enough to break a reader.
+    ///
+    /// Not observed failing — found by reading, after `strtok` in this crate
+    /// was found the other way. Poison is recovered so one real failure
+    /// reports once rather than poisoning fourteen siblings.
+    static DL_ERROR_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[must_use = "the guard serialises the process-wide dlerror slot; bind it to `_g`"]
+    fn lock_dl_error_for_test() -> std::sync::MutexGuard<'static, ()> {
+        DL_ERROR_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
     // -- dlopen always returns NULL --
 
     #[test]
     fn test_dlopen_returns_null() {
+        let _g = lock_dl_error_for_test();
         let handle = dlopen(b"libfoo.so\0".as_ptr(), RTLD_LAZY);
         assert!(handle.is_null());
     }
 
     #[test]
     fn test_dlopen_null_filename() {
+        let _g = lock_dl_error_for_test();
         // dlopen(NULL, ...) would normally return main program handle
         let handle = dlopen(core::ptr::null(), RTLD_NOW);
         assert!(handle.is_null());
@@ -186,6 +225,7 @@ mod tests {
 
     #[test]
     fn test_dlsym_returns_null() {
+        let _g = lock_dl_error_for_test();
         let sym = dlsym(core::ptr::null_mut(), b"some_function\0".as_ptr());
         assert!(sym.is_null());
     }
@@ -194,6 +234,7 @@ mod tests {
 
     #[test]
     fn test_dlclose_returns_error() {
+        let _g = lock_dl_error_for_test();
         assert_eq!(dlclose(core::ptr::null_mut()), -1);
     }
 
@@ -201,6 +242,7 @@ mod tests {
 
     #[test]
     fn test_dlerror_after_dlopen() {
+        let _g = lock_dl_error_for_test();
         // Clear any prior error.
         let _ = dlerror();
 
@@ -216,6 +258,7 @@ mod tests {
 
     #[test]
     fn test_dlerror_clears_after_read() {
+        let _g = lock_dl_error_for_test();
         // Trigger an error.
         let _ = dlopen(b"libfoo.so\0".as_ptr(), RTLD_LAZY);
 
@@ -230,6 +273,7 @@ mod tests {
 
     #[test]
     fn test_dlerror_after_dlsym() {
+        let _g = lock_dl_error_for_test();
         let _ = dlerror(); // Clear
         let _ = dlsym(core::ptr::null_mut(), b"func\0".as_ptr());
         let err = dlerror();
@@ -238,6 +282,7 @@ mod tests {
 
     #[test]
     fn test_dlerror_after_dlclose() {
+        let _g = lock_dl_error_for_test();
         let _ = dlerror(); // Clear
         let _ = dlclose(core::ptr::null_mut());
         let err = dlerror();
@@ -289,11 +334,13 @@ mod tests {
 
     #[test]
     fn test_dlopen_rtld_now() {
+        let _g = lock_dl_error_for_test();
         assert!(dlopen(b"libfoo.so\0".as_ptr(), RTLD_NOW).is_null());
     }
 
     #[test]
     fn test_dlopen_rtld_global() {
+        let _g = lock_dl_error_for_test();
         assert!(dlopen(b"libfoo.so\0".as_ptr(), RTLD_LAZY | RTLD_GLOBAL).is_null());
     }
 
@@ -301,11 +348,13 @@ mod tests {
 
     #[test]
     fn test_dlsym_null_symbol() {
+        let _g = lock_dl_error_for_test();
         assert!(dlsym(core::ptr::null_mut(), core::ptr::null()).is_null());
     }
 
     #[test]
     fn test_dlsym_rtld_default() {
+        let _g = lock_dl_error_for_test();
         assert!(dlsym(RTLD_DEFAULT, b"printf\0".as_ptr()).is_null());
     }
 
@@ -313,6 +362,7 @@ mod tests {
 
     #[test]
     fn test_dlclose_nonzero_handle() {
+        let _g = lock_dl_error_for_test();
         assert_eq!(dlclose(1usize as *mut u8), -1);
     }
 
@@ -320,6 +370,7 @@ mod tests {
 
     #[test]
     fn test_dlerror_after_dlsym_then_clear() {
+        let _g = lock_dl_error_for_test();
         let _ = dlerror(); // clear
         let _ = dlsym(core::ptr::null_mut(), b"foo\0".as_ptr());
         let err = dlerror();
@@ -330,6 +381,7 @@ mod tests {
 
     #[test]
     fn test_dlerror_message_starts_with_d() {
+        let _g = lock_dl_error_for_test();
         let _ = dlerror(); // clear
         let _ = dlclose(core::ptr::null_mut());
         let err = dlerror();

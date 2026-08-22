@@ -64,7 +64,12 @@ set -u
 # looks like a path — and `/`, `-ef`'s operands and every `-f FILE` case do.
 export MSYS2_ARG_CONV_EXCL='*'
 
-OURS=${OURS:-"target/x86_64-pc-windows-gnu/debug/test.exe"}
+# Built here, from the package named, rather than picked up out of `target/`.
+# A harness that only *runs* that path measures whatever was written there
+# last, which need not be current and need not even be this crate — see
+# `scripts/diff-subject.sh`.
+. "$(dirname "$0")/diff-subject.sh"
+OURS=$(subject_binary coreutils test "${OURS:-}") || exit 1
 export LC_ALL=${LC_ALL:-C.UTF-8}
 
 US=$'\x1f'   # joins the arguments of one case

@@ -92,7 +92,10 @@ pub const SHM_LOCK: i32 = 11;
 pub const SHM_UNLOCK: i32 = 12;
 
 /// Segment low boundary address multiple (page size).
-pub const SHMLBA: usize = 16384; // 16 KiB pages
+///
+/// An alias of [`crate::unistd::PAGE_SIZE`]; `shmat` addresses must be a
+/// multiple of this, and the number is written down once, in `unistd`.
+pub const SHMLBA: usize = crate::unistd::PAGE_SIZE;
 
 // ---------------------------------------------------------------------------
 // Pool sizing

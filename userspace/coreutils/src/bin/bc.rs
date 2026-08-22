@@ -1,898 +1,59 @@
-//! bc — arbitrary-precision calculator language.
+//! Slate OS `bc` -- arbitrary-precision calculator
 //!
-//! Usage: bc [-q] [-l] [FILE...]
-//!   -q          quiet: suppress the welcome banner
-//!   -l          load the math library (defines extra scale and functions)
-//!   FILE...     read and execute commands from files before interactive mode
+//! A POSIX-compatible `bc` implementation with extensions.  Supports
+//! arbitrary-precision integers and fixed-point decimals, variables,
+//! user-defined functions, control flow, and the `-l` math library.
 //!
-//! Supports:
-//!   - Arbitrary-precision integer and fixed-point decimal arithmetic
-//!   - Operators: + - * / % ^ (power)
-//!   - Comparison: == != < > <= >=
-//!   - Assignment: = += -= *= /= %= ^=
-//!   - Increment/decrement: ++ --
-//!   - Variables: single lowercase letters and multi-character names
-//!   - Special variables: scale, ibase, obase, last (or .)
-//!   - Control flow: if (cond) { ... } else { ... }
-//!   - Loops: while (cond) { ... }
-//!   - Built-in functions: sqrt(x), length(x), scale(x), print expr
-//!   - Line continuation with backslash
-//!   - Comments: /* ... */ and # to end of line
-//!   - quit command
-//!
-//! Interactive mode: reads expressions from stdin when no files are given
-//! or after all files have been processed.
-//!
-//! Exit codes:
-//!   0  normal exit
-//!   1  error
+//! Architecture: hand-written lexer -> recursive-descent parser -> AST ->
+//! tree-walk interpreter.  The numbers are `bignum::Decimal`, shared with `dc`.
 
-use coreutils::quote::quotef_os;
+use coreutils::errmsg::strerror;
+use coreutils::getopt::{self, Program};
+use coreutils::quote::{quoteaf_os, quotef_os};
 use std::collections::HashMap;
 use std::env;
-use std::fs;
-use std::io::{self, BufRead, BufReader, Write};
+use std::ffi::OsString;
+#[cfg(not(test))]
+use std::io::Write;
+use std::io::{self, BufRead};
 use std::process;
-
-// ---------------------------------------------------------------------------
-// Arbitrary-precision decimal number
-// ---------------------------------------------------------------------------
-
-/// A decimal number represented as an arbitrary-precision integer with a
-/// fixed-point scale (number of digits after the decimal point).
-#[derive(Clone, Debug)]
-struct BigDecimal {
-    /// The unscaled integer value. The actual value is `digits * 10^(-scale)`.
-    /// Stored as a big-endian vector of digits (base 10^9 limbs) plus a sign.
-    negative: bool,
-    /// Limbs in little-endian order (least significant first), base 10^9.
-    limbs: Vec<u64>,
-    /// Number of decimal digits after the point.
-    scale: usize,
-}
-
-const LIMB_BASE: u64 = 1_000_000_000;
-const LIMB_DIGITS: usize = 9;
-
-impl BigDecimal {
-    fn zero() -> Self {
-        BigDecimal {
-            negative: false,
-            limbs: vec![0],
-            scale: 0,
-        }
-    }
-
-    fn one() -> Self {
-        BigDecimal {
-            negative: false,
-            limbs: vec![1],
-            scale: 0,
-        }
-    }
-
-    fn is_zero(&self) -> bool {
-        self.limbs.iter().all(|&l| l == 0)
-    }
-
-    /// Parse a decimal string like "123.456" or "-78".
-    fn parse(s: &str) -> Option<Self> {
-        let s = s.trim();
-        if s.is_empty() {
-            return None;
-        }
-
-        let (negative, s) = if let Some(rest) = s.strip_prefix('-') {
-            (true, rest)
-        } else if let Some(rest) = s.strip_prefix('+') {
-            (false, rest)
-        } else {
-            (false, s)
-        };
-
-        // Split into integer and fractional parts.
-        let (int_part, frac_part) = if let Some((i, f)) = s.split_once('.') {
-            (i, f)
-        } else {
-            (s, "")
-        };
-
-        // Validate: all characters must be digits (or empty).
-        if !int_part.chars().all(|c| c.is_ascii_digit()) && !int_part.is_empty() {
-            return None;
-        }
-        if !frac_part.chars().all(|c| c.is_ascii_digit()) {
-            return None;
-        }
-
-        let scale = frac_part.len();
-
-        // Concatenate integer and fractional parts into one digit string.
-        let full_digits = format!("{int_part}{frac_part}");
-        let full_digits = full_digits.trim_start_matches('0');
-
-        if full_digits.is_empty() {
-            return Some(BigDecimal {
-                negative: false,
-                limbs: vec![0],
-                scale,
-            });
-        }
-
-        // Convert digit string to limbs (base 10^9, little-endian).
-        let limbs = digits_to_limbs(full_digits);
-
-        Some(BigDecimal {
-            negative,
-            limbs,
-            scale,
-        })
-    }
-
-    /// Format as a decimal string.
-    fn to_string_with_scale(&self, display_scale: usize) -> String {
-        // First, get the full digit string from limbs.
-        let digit_str = limbs_to_digits(&self.limbs);
-
-        // The digit string represents the unscaled value.
-        // We need to insert a decimal point `self.scale` digits from the right.
-        let total_digits = digit_str.len();
-
-        let (int_part, frac_part) = if self.scale == 0 {
-            (digit_str.as_str(), "")
-        } else if total_digits > self.scale {
-            let split = total_digits - self.scale;
-            (&digit_str[..split], &digit_str[split..])
-        } else {
-            // Need leading zeros in fractional part.
-            let zeros = self.scale - total_digits;
-            let padded = format!("{}{}", "0".repeat(zeros), digit_str);
-            // We need to return owned strings, so handle differently.
-            return format!(
-                "{}0.{}",
-                if self.negative { "-" } else { "" },
-                truncate_or_pad(&padded, display_scale)
-            );
-        };
-
-        let int_display = if int_part.is_empty() { "0" } else { int_part };
-
-        if display_scale == 0 {
-            format!(
-                "{}{}",
-                if self.negative && !self.is_zero() {
-                    "-"
-                } else {
-                    ""
-                },
-                int_display
-            )
-        } else {
-            format!(
-                "{}{}.{}",
-                if self.negative && !self.is_zero() {
-                    "-"
-                } else {
-                    ""
-                },
-                int_display,
-                truncate_or_pad(frac_part, display_scale)
-            )
-        }
-    }
-
-    /// Normalize: remove leading zero limbs (but keep at least one).
-    fn normalize(&mut self) {
-        while self.limbs.len() > 1 && self.limbs.last() == Some(&0) {
-            self.limbs.pop();
-        }
-        if self.is_zero() {
-            self.negative = false;
-        }
-    }
-
-    /// Compare absolute values. Returns Ordering.
-    fn cmp_abs(&self, other: &Self) -> std::cmp::Ordering {
-        // Equalize scales first.
-        let (a, b) = equalize_scales(self, other);
-        cmp_limbs(&a.limbs, &b.limbs)
-    }
-
-    fn negate(&self) -> Self {
-        let mut r = self.clone();
-        if !r.is_zero() {
-            r.negative = !r.negative;
-        }
-        r
-    }
-}
-
-fn truncate_or_pad(frac: &str, target_len: usize) -> String {
-    if frac.len() >= target_len {
-        frac[..target_len].to_string()
-    } else {
-        format!("{}{}", frac, "0".repeat(target_len - frac.len()))
-    }
-}
-
-fn digits_to_limbs(digits: &str) -> Vec<u64> {
-    let mut limbs = Vec::new();
-    let bytes = digits.as_bytes();
-    let len = bytes.len();
-
-    // Process from right to left in chunks of LIMB_DIGITS.
-    let mut end = len;
-    while end > 0 {
-        let start = end.saturating_sub(LIMB_DIGITS);
-        let chunk = &digits[start..end];
-        let val: u64 = chunk.parse().unwrap_or(0);
-        limbs.push(val);
-        end = start;
-    }
-
-    if limbs.is_empty() {
-        limbs.push(0);
-    }
-    limbs
-}
-
-fn limbs_to_digits(limbs: &[u64]) -> String {
-    if limbs.is_empty() || (limbs.len() == 1 && limbs[0] == 0) {
-        return "0".to_string();
-    }
-
-    // Build from most significant limb.
-    let mut result = String::new();
-    let mut first = true;
-    for &limb in limbs.iter().rev() {
-        if first {
-            if limb > 0 {
-                result.push_str(&limb.to_string());
-                first = false;
-            }
-        } else {
-            result.push_str(&format!("{limb:09}"));
-        }
-    }
-
-    if result.is_empty() {
-        "0".to_string()
-    } else {
-        result
-    }
-}
-
-fn cmp_limbs(a: &[u64], b: &[u64]) -> std::cmp::Ordering {
-    let alen = effective_len(a);
-    let blen = effective_len(b);
-
-    if alen != blen {
-        return alen.cmp(&blen);
-    }
-
-    // Compare from most significant.
-    for i in (0..alen).rev() {
-        if a[i] != b[i] {
-            return a[i].cmp(&b[i]);
-        }
-    }
-    std::cmp::Ordering::Equal
-}
-
-fn effective_len(limbs: &[u64]) -> usize {
-    let mut len = limbs.len();
-    while len > 1 && limbs[len - 1] == 0 {
-        len -= 1;
-    }
-    len
-}
-
-/// Make two BigDecimals have the same scale by multiplying the one with
-/// smaller scale by the appropriate power of 10.
-fn equalize_scales(a: &BigDecimal, b: &BigDecimal) -> (BigDecimal, BigDecimal) {
-    if a.scale == b.scale {
-        return (a.clone(), b.clone());
-    }
-    if a.scale < b.scale {
-        let diff = b.scale - a.scale;
-        let mut a2 = a.clone();
-        multiply_by_pow10(&mut a2.limbs, diff);
-        a2.scale = b.scale;
-        (a2, b.clone())
-    } else {
-        let diff = a.scale - b.scale;
-        let mut b2 = b.clone();
-        multiply_by_pow10(&mut b2.limbs, diff);
-        b2.scale = a.scale;
-        (a.clone(), b2)
-    }
-}
-
-/// Multiply limbs by 10^n.
-fn multiply_by_pow10(limbs: &mut Vec<u64>, n: usize) {
-    if n == 0 {
-        return;
-    }
-
-    // Full groups of LIMB_DIGITS shift as whole limb inserts.
-    let full_limbs = n / LIMB_DIGITS;
-    let remainder = n % LIMB_DIGITS;
-
-    // Insert zero limbs at the low end.
-    for _ in 0..full_limbs {
-        limbs.insert(0, 0);
-    }
-
-    // Multiply all limbs by 10^remainder.
-    if remainder > 0 {
-        let factor = 10u64.pow(remainder as u32);
-        let mut carry = 0u64;
-        for limb in limbs.iter_mut() {
-            let val = *limb as u128 * factor as u128 + carry as u128;
-            *limb = (val % LIMB_BASE as u128) as u64;
-            carry = (val / LIMB_BASE as u128) as u64;
-        }
-        if carry > 0 {
-            limbs.push(carry);
-        }
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Arithmetic operations
-// ---------------------------------------------------------------------------
-
-fn add_abs(a: &[u64], b: &[u64]) -> Vec<u64> {
-    let len = a.len().max(b.len());
-    let mut result = Vec::with_capacity(len + 1);
-    let mut carry = 0u64;
-
-    for i in 0..len {
-        let av = if i < a.len() { a[i] } else { 0 };
-        let bv = if i < b.len() { b[i] } else { 0 };
-        let sum = av + bv + carry;
-        result.push(sum % LIMB_BASE);
-        carry = sum / LIMB_BASE;
-    }
-    if carry > 0 {
-        result.push(carry);
-    }
-    result
-}
-
-/// Subtract b from a (assumes a >= b in absolute value).
-fn sub_abs(a: &[u64], b: &[u64]) -> Vec<u64> {
-    let mut result = Vec::with_capacity(a.len());
-    let mut borrow: i64 = 0;
-
-    for i in 0..a.len() {
-        let av = a[i] as i64;
-        let bv = if i < b.len() { b[i] as i64 } else { 0 };
-        let mut diff = av - bv - borrow;
-        if diff < 0 {
-            diff += LIMB_BASE as i64;
-            borrow = 1;
-        } else {
-            borrow = 0;
-        }
-        result.push(diff as u64);
-    }
-
-    // Remove leading zeros.
-    while result.len() > 1 && result.last() == Some(&0) {
-        result.pop();
-    }
-    result
-}
-
-fn mul_abs(a: &[u64], b: &[u64]) -> Vec<u64> {
-    if a.len() == 1 && a[0] == 0 || b.len() == 1 && b[0] == 0 {
-        return vec![0];
-    }
-
-    let mut result = vec![0u64; a.len() + b.len()];
-
-    for i in 0..a.len() {
-        let mut carry = 0u128;
-        for j in 0..b.len() {
-            let prod = a[i] as u128 * b[j] as u128 + result[i + j] as u128 + carry;
-            result[i + j] = (prod % LIMB_BASE as u128) as u64;
-            carry = prod / LIMB_BASE as u128;
-        }
-        if carry > 0 {
-            result[i + b.len()] += carry as u64;
-        }
-    }
-
-    while result.len() > 1 && result.last() == Some(&0) {
-        result.pop();
-    }
-    result
-}
-
-/// Divide a by b, returning (quotient_limbs, remainder_limbs).
-/// Both a and b are treated as non-negative integers (limb arrays).
-fn div_abs(a: &[u64], b: &[u64]) -> Option<(Vec<u64>, Vec<u64>)> {
-    if b.iter().all(|&l| l == 0) {
-        return None; // division by zero
-    }
-
-    if cmp_limbs(a, b) == std::cmp::Ordering::Less {
-        return Some((vec![0], a.to_vec()));
-    }
-
-    // For simplicity, convert to a big decimal string representation,
-    // do long division in base 10, then convert back.
-    let a_digits = limbs_to_digits(a);
-    let b_digits = limbs_to_digits(b);
-
-    let (q, r) = long_division_decimal(&a_digits, &b_digits);
-
-    let q_limbs = if q.is_empty() || q == "0" {
-        vec![0]
-    } else {
-        digits_to_limbs(&q)
-    };
-
-    let r_limbs = if r.is_empty() || r == "0" {
-        vec![0]
-    } else {
-        digits_to_limbs(&r)
-    };
-
-    Some((q_limbs, r_limbs))
-}
-
-/// Long division of two decimal digit strings, returning (quotient, remainder).
-fn long_division_decimal(a: &str, b: &str) -> (String, String) {
-    let b_val = decimal_str_to_u128(b);
-    if b_val == 0 {
-        return ("0".to_string(), a.to_string());
-    }
-
-    // If both fit in u128, use direct division.
-    if a.len() <= 38 && b.len() <= 38 {
-        let a_val = decimal_str_to_u128(a);
-        return ((a_val / b_val).to_string(), (a_val % b_val).to_string());
-    }
-
-    // Schoolbook long division digit by digit.
-    let a_bytes = a.as_bytes();
-    let mut quotient = String::new();
-    let mut remainder = String::new();
-
-    for &digit in a_bytes {
-        remainder.push(digit as char);
-        // Remove leading zeros from remainder.
-        let rem_trimmed = remainder.trim_start_matches('0');
-        let rem_str = if rem_trimmed.is_empty() {
-            "0"
-        } else {
-            rem_trimmed
-        };
-
-        // How many times does b go into remainder?
-        let q_digit = if rem_str.len() < b.len() || (rem_str.len() == b.len() && rem_str < b) {
-            0u8
-        } else {
-            // Use the leading digits of remainder to estimate.
-            estimate_quotient_digit(rem_str, b)
-        };
-
-        quotient.push((b'0' + q_digit) as char);
-
-        if q_digit > 0 {
-            // remainder = remainder - q_digit * b
-            let product = multiply_decimal_by_digit(b, q_digit);
-            remainder = subtract_decimal(&remainder, &product);
-        }
-    }
-
-    // Trim leading zeros.
-    let q = quotient.trim_start_matches('0');
-    let r = remainder.trim_start_matches('0');
-
-    (
-        if q.is_empty() {
-            "0".to_string()
-        } else {
-            q.to_string()
-        },
-        if r.is_empty() {
-            "0".to_string()
-        } else {
-            r.to_string()
-        },
-    )
-}
-
-fn decimal_str_to_u128(s: &str) -> u128 {
-    s.parse::<u128>().unwrap_or(0)
-}
-
-fn estimate_quotient_digit(remainder: &str, divisor: &str) -> u8 {
-    // Binary search for the digit 0..9.
-    let mut lo = 0u8;
-    let mut hi = 9u8;
-    let mut result = 0u8;
-
-    while lo <= hi {
-        let mid = lo + (hi - lo) / 2;
-        let product = multiply_decimal_by_digit(divisor, mid);
-        let product_trimmed = product.trim_start_matches('0');
-        let product_str = if product_trimmed.is_empty() {
-            "0"
-        } else {
-            product_trimmed
-        };
-
-        if compare_decimal(product_str, remainder) <= 0 {
-            result = mid;
-            if mid == 9 {
-                break;
-            }
-            lo = mid + 1;
-        } else {
-            if mid == 0 {
-                break;
-            }
-            hi = mid - 1;
-        }
-    }
-    result
-}
-
-fn compare_decimal(a: &str, b: &str) -> i32 {
-    let a = a.trim_start_matches('0');
-    let b = b.trim_start_matches('0');
-    let a = if a.is_empty() { "0" } else { a };
-    let b = if b.is_empty() { "0" } else { b };
-
-    if a.len() != b.len() {
-        return if a.len() < b.len() { -1 } else { 1 };
-    }
-    if a < b {
-        -1
-    } else if a > b {
-        1
-    } else {
-        0
-    }
-}
-
-fn multiply_decimal_by_digit(a: &str, digit: u8) -> String {
-    if digit == 0 {
-        return "0".to_string();
-    }
-    let a_bytes = a.as_bytes();
-    let mut result = Vec::with_capacity(a_bytes.len() + 1);
-    let mut carry = 0u32;
-
-    for &b in a_bytes.iter().rev() {
-        let d = (b - b'0') as u32;
-        let prod = d * digit as u32 + carry;
-        result.push((prod % 10) as u8 + b'0');
-        carry = prod / 10;
-    }
-    if carry > 0 {
-        result.push(carry as u8 + b'0');
-    }
-
-    result.reverse();
-    String::from_utf8(result).unwrap_or_else(|_| "0".to_string())
-}
-
-fn subtract_decimal(a: &str, b: &str) -> String {
-    let a_bytes: Vec<u8> = a.bytes().collect();
-    let b_bytes: Vec<u8> = b.bytes().collect();
-
-    let len = a_bytes.len().max(b_bytes.len());
-    let mut result = Vec::with_capacity(len);
-    let mut borrow: i32 = 0;
-
-    for i in 0..len {
-        let ad = if i < a_bytes.len() {
-            (a_bytes[a_bytes.len() - 1 - i] - b'0') as i32
-        } else {
-            0
-        };
-        let bd = if i < b_bytes.len() {
-            (b_bytes[b_bytes.len() - 1 - i] - b'0') as i32
-        } else {
-            0
-        };
-        let mut diff = ad - bd - borrow;
-        if diff < 0 {
-            diff += 10;
-            borrow = 1;
-        } else {
-            borrow = 0;
-        }
-        result.push(diff as u8 + b'0');
-    }
-
-    result.reverse();
-    let s = String::from_utf8(result).unwrap_or_else(|_| "0".to_string());
-    let trimmed = s.trim_start_matches('0');
-    if trimmed.is_empty() {
-        "0".to_string()
-    } else {
-        trimmed.to_string()
-    }
-}
-
-fn bd_add(a: &BigDecimal, b: &BigDecimal) -> BigDecimal {
-    let (a, b) = equalize_scales(a, b);
-    let scale = a.scale;
-
-    if a.negative == b.negative {
-        let limbs = add_abs(&a.limbs, &b.limbs);
-        let mut r = BigDecimal {
-            negative: a.negative,
-            limbs,
-            scale,
-        };
-        r.normalize();
-        r
-    } else {
-        match cmp_limbs(&a.limbs, &b.limbs) {
-            std::cmp::Ordering::Less => {
-                let limbs = sub_abs(&b.limbs, &a.limbs);
-                let mut r = BigDecimal {
-                    negative: b.negative,
-                    limbs,
-                    scale,
-                };
-                r.normalize();
-                r
-            }
-            std::cmp::Ordering::Greater => {
-                let limbs = sub_abs(&a.limbs, &b.limbs);
-                let mut r = BigDecimal {
-                    negative: a.negative,
-                    limbs,
-                    scale,
-                };
-                r.normalize();
-                r
-            }
-            std::cmp::Ordering::Equal => BigDecimal {
-                negative: false,
-                limbs: vec![0],
-                scale,
-            },
-        }
-    }
-}
-
-fn bd_sub(a: &BigDecimal, b: &BigDecimal) -> BigDecimal {
-    bd_add(a, &b.negate())
-}
-
-fn bd_mul(a: &BigDecimal, b: &BigDecimal, result_scale: usize) -> BigDecimal {
-    let limbs = mul_abs(&a.limbs, &b.limbs);
-    let raw_scale = a.scale + b.scale;
-    let negative = a.negative != b.negative;
-
-    let mut r = BigDecimal {
-        negative,
-        limbs,
-        scale: raw_scale,
-    };
-
-    // Truncate to result_scale.
-    if raw_scale > result_scale {
-        let diff = raw_scale - result_scale;
-        // Divide limbs by 10^diff to truncate.
-        divide_by_pow10(&mut r.limbs, diff);
-        r.scale = result_scale;
-    }
-
-    r.normalize();
-    r
-}
-
-fn divide_by_pow10(limbs: &mut Vec<u64>, n: usize) {
-    if n == 0 {
-        return;
-    }
-
-    let full_limbs = n / LIMB_DIGITS;
-    let remainder = n % LIMB_DIGITS;
-
-    // Remove `full_limbs` least-significant limbs.
-    for _ in 0..full_limbs {
-        if limbs.len() > 1 {
-            limbs.remove(0);
-        } else {
-            limbs[0] = 0;
-            return;
-        }
-    }
-
-    // Divide remaining by 10^remainder.
-    if remainder > 0 {
-        let divisor = 10u64.pow(remainder as u32);
-        let mut carry = 0u64;
-        for limb in limbs.iter_mut().rev() {
-            let val = carry * LIMB_BASE + *limb;
-            *limb = val / divisor;
-            carry = val % divisor;
-        }
-    }
-
-    while limbs.len() > 1 && limbs.last() == Some(&0) {
-        limbs.pop();
-    }
-}
-
-fn bd_div(a: &BigDecimal, b: &BigDecimal, scale: usize) -> Option<BigDecimal> {
-    if b.is_zero() {
-        return None;
-    }
-
-    // To compute a/b with `scale` decimal places, we compute
-    // (a * 10^(scale + b.scale - a.scale + extra)) / b_unscaled,
-    // then the result has `scale` decimal places.
-
-    let extra = scale + b.scale;
-    let total_scale = extra.saturating_sub(a.scale);
-
-    let mut a_limbs = a.limbs.clone();
-    multiply_by_pow10(&mut a_limbs, total_scale);
-
-    let (q_limbs, _r_limbs) = div_abs(&a_limbs, &b.limbs)?;
-
-    let negative = a.negative != b.negative;
-
-    let mut r = BigDecimal {
-        negative,
-        limbs: q_limbs,
-        scale,
-    };
-    r.normalize();
-    Some(r)
-}
-
-fn bd_modulo(a: &BigDecimal, b: &BigDecimal, scale: usize) -> Option<BigDecimal> {
-    // a % b = a - (a/b)*b, where a/b is truncated to integer.
-    let q = bd_div(a, b, 0)?;
-    let product = bd_mul(&q, b, scale);
-    Some(bd_sub(a, &product))
-}
-
-fn bd_pow(base: &BigDecimal, exp: &BigDecimal, scale: usize) -> BigDecimal {
-    // Only support integer exponents.
-    // Convert exp to i64.
-    let exp_str = exp.to_string_with_scale(0);
-    let exp_val: i64 = exp_str.parse().unwrap_or(0);
-
-    if exp_val == 0 {
-        return BigDecimal::one();
-    }
-
-    let negative_exp = exp_val < 0;
-    let exp_abs = exp_val.unsigned_abs();
-
-    // Exponentiation by squaring.
-    let mut result = BigDecimal::one();
-    let mut base = base.clone();
-    let mut e = exp_abs;
-
-    while e > 0 {
-        if e & 1 == 1 {
-            result = bd_mul(&result, &base, scale);
-        }
-        base = bd_mul(&base, &base, scale);
-        e >>= 1;
-    }
-
-    if negative_exp {
-        bd_div(&BigDecimal::one(), &result, scale).unwrap_or_else(BigDecimal::zero)
-    } else {
-        result
-    }
-}
-
-fn bd_sqrt(a: &BigDecimal, scale: usize) -> Option<BigDecimal> {
-    if a.negative {
-        return None; // sqrt of negative
-    }
-    if a.is_zero() {
-        return Some(BigDecimal {
-            negative: false,
-            limbs: vec![0],
-            scale,
-        });
-    }
-
-    // Newton's method: x_{n+1} = (x_n + a/x_n) / 2
-    // Start with a rough estimate.
-    let two = BigDecimal {
-        negative: false,
-        limbs: vec![2],
-        scale: 0,
-    };
-
-    // Initial guess: use f64 for a rough starting point.
-    let a_str = a.to_string_with_scale(a.scale);
-    let a_f64: f64 = a_str.parse().unwrap_or(1.0);
-    let guess_f64 = a_f64.sqrt();
-    let guess_str = format!("{guess_f64:.prec$}", prec = scale + 2);
-    let mut x = BigDecimal::parse(&guess_str).unwrap_or_else(BigDecimal::one);
-
-    let work_scale = scale + 4; // extra precision for convergence
-
-    for _ in 0..100 {
-        // x_new = (x + a/x) / 2
-        let a_over_x = match bd_div(a, &x, work_scale) {
-            Some(v) => v,
-            None => break,
-        };
-        let sum = bd_add(&x, &a_over_x);
-        let x_new = match bd_div(&sum, &two, work_scale) {
-            Some(v) => v,
-            None => break,
-        };
-
-        // Check convergence: if x_new == x at scale+2 digits, we're done.
-        let x_str = x.to_string_with_scale(scale + 2);
-        let xn_str = x_new.to_string_with_scale(scale + 2);
-        if x_str == xn_str {
-            x = x_new;
-            break;
-        }
-        x = x_new;
-    }
-
-    // Truncate to requested scale.
-    x.scale = work_scale;
-    let result_str = x.to_string_with_scale(scale);
-    Some(BigDecimal::parse(&result_str).unwrap_or_else(BigDecimal::zero))
-}
-
-fn bd_compare(a: &BigDecimal, b: &BigDecimal) -> std::cmp::Ordering {
-    if a.negative && !b.negative {
-        if a.is_zero() && b.is_zero() {
-            return std::cmp::Ordering::Equal;
-        }
-        return std::cmp::Ordering::Less;
-    }
-    if !a.negative && b.negative {
-        if a.is_zero() && b.is_zero() {
-            return std::cmp::Ordering::Equal;
-        }
-        return std::cmp::Ordering::Greater;
-    }
-
-    let abs_cmp = a.cmp_abs(b);
-    if a.negative {
-        abs_cmp.reverse()
-    } else {
-        abs_cmp
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Tokenizer
-// ---------------------------------------------------------------------------
-
-#[derive(Debug, Clone, PartialEq)]
+use std::process::ExitCode;
+
+// -------------------------------------------------------------------------
+// The numbers live in the `bignum` crate
+// -------------------------------------------------------------------------
+//
+// `BigInt` moved there first, so that `bc`, `dc`, `genius-cli` and `expr` could
+// not disagree about what an exact integer is. `Decimal` -- this file's former
+// private `BcNum`, a `BigInt` mantissa and a decimal scale -- followed for the
+// same reason and a sharper one: `dc` had no equivalent at all and computed in
+// `f64`, so the two halves of one calculator disagreed above 2^53.
+//
+// The lift changed three things, and every one of them is visible from here:
+// `div`, `modulo` and `sqrt` now return a `Result` instead of printing to
+// stderr and handing back zero; the parse and format paths no longer index or
+// slice; and `Ord` is implemented, so `1.5 == 1.50` and the relational
+// operators go through it. See `bignum::decimal` for the reasoning.
+
+use bignum::{Decimal, DecimalError};
+
+// -------------------------------------------------------------------------
+// Lexer
+// -------------------------------------------------------------------------
+
+#[derive(Clone, Debug, PartialEq)]
 enum Token {
     Number(String),
+    StringLit(String),
     Ident(String),
+    // Operators
     Plus,
     Minus,
     Star,
     Slash,
     Percent,
     Caret,
-    LParen,
-    RParen,
-    LBrace,
-    RBrace,
-    Semicolon,
-    Newline,
+    // Assignment operators
     Assign,
     PlusAssign,
     MinusAssign,
@@ -900,190 +61,392 @@ enum Token {
     SlashAssign,
     PercentAssign,
     CaretAssign,
-    Eq,
-    Ne,
-    Lt,
-    Gt,
-    Le,
-    Ge,
+    // Increment/decrement
     PlusPlus,
     MinusMinus,
+    // Comparison
+    EqEq,
+    NotEq,
+    Lt,
+    Gt,
+    LtEq,
+    GtEq,
+    // Logical
     Not,
     And,
     Or,
+    // Delimiters
+    LParen,
+    RParen,
+    LBrace,
+    RBrace,
+    LBracket,
+    RBracket,
+    Semicolon,
     Comma,
+    Newline,
     // Keywords
     If,
     Else,
     While,
     For,
-    Print,
-    Quit,
+    Define,
+    Return,
+    Auto,
     Break,
     Continue,
-    Return,
+    Quit,
+    Print,
+    // End of input
     Eof,
 }
 
-fn tokenize(input: &str) -> Vec<Token> {
-    let mut tokens = Vec::new();
-    let chars: Vec<char> = input.chars().collect();
-    let len = chars.len();
-    let mut i = 0;
+struct Lexer<'a> {
+    input: &'a [u8],
+    pos: usize,
+}
 
-    while i < len {
-        let c = chars[i];
-
-        // Skip whitespace (except newlines).
-        if c == ' ' || c == '\t' || c == '\r' {
-            i += 1;
-            continue;
+impl<'a> Lexer<'a> {
+    fn new(input: &'a str) -> Self {
+        Self {
+            input: input.as_bytes(),
+            pos: 0,
         }
-
-        // Comments: # to end of line.
-        if c == '#' {
-            while i < len && chars[i] != '\n' {
-                i += 1;
-            }
-            continue;
-        }
-
-        // Block comments: /* ... */
-        if c == '/' && i + 1 < len && chars[i + 1] == '*' {
-            i += 2;
-            while i + 1 < len && !(chars[i] == '*' && chars[i + 1] == '/') {
-                i += 1;
-            }
-            if i + 1 < len {
-                i += 2; // skip */
-            }
-            continue;
-        }
-
-        if c == '\n' {
-            tokens.push(Token::Newline);
-            i += 1;
-            continue;
-        }
-
-        // Numbers: digits and dots.
-        if c.is_ascii_digit() || (c == '.' && i + 1 < len && chars[i + 1].is_ascii_digit()) {
-            let start = i;
-            while i < len && (chars[i].is_ascii_digit() || chars[i] == '.') {
-                i += 1;
-            }
-            tokens.push(Token::Number(chars[start..i].iter().collect()));
-            continue;
-        }
-
-        // Identifiers and keywords.
-        if c.is_ascii_alphabetic() || c == '_' {
-            let start = i;
-            while i < len && (chars[i].is_ascii_alphanumeric() || chars[i] == '_') {
-                i += 1;
-            }
-            let word: String = chars[start..i].iter().collect();
-            let tok = match word.as_str() {
-                "if" => Token::If,
-                "else" => Token::Else,
-                "while" => Token::While,
-                "for" => Token::For,
-                "print" => Token::Print,
-                "quit" | "halt" => Token::Quit,
-                "break" => Token::Break,
-                "continue" => Token::Continue,
-                "return" => Token::Return,
-                _ => Token::Ident(word),
-            };
-            tokens.push(tok);
-            continue;
-        }
-
-        // Two-character operators.
-        if i + 1 < len {
-            let two: String = chars[i..i + 2].iter().collect();
-            let tok = match two.as_str() {
-                "+=" => Some(Token::PlusAssign),
-                "-=" => Some(Token::MinusAssign),
-                "*=" => Some(Token::StarAssign),
-                "/=" => Some(Token::SlashAssign),
-                "%=" => Some(Token::PercentAssign),
-                "^=" => Some(Token::CaretAssign),
-                "==" => Some(Token::Eq),
-                "!=" => Some(Token::Ne),
-                "<=" => Some(Token::Le),
-                ">=" => Some(Token::Ge),
-                "++" => Some(Token::PlusPlus),
-                "--" => Some(Token::MinusMinus),
-                "&&" => Some(Token::And),
-                "||" => Some(Token::Or),
-                _ => None,
-            };
-            if let Some(t) = tok {
-                tokens.push(t);
-                i += 2;
-                continue;
-            }
-        }
-
-        // Single-character operators.
-        let tok = match c {
-            '+' => Token::Plus,
-            '-' => Token::Minus,
-            '*' => Token::Star,
-            '/' => Token::Slash,
-            '%' => Token::Percent,
-            '^' => Token::Caret,
-            '(' => Token::LParen,
-            ')' => Token::RParen,
-            '{' => Token::LBrace,
-            '}' => Token::RBrace,
-            ';' => Token::Semicolon,
-            '=' => Token::Assign,
-            '<' => Token::Lt,
-            '>' => Token::Gt,
-            '!' => Token::Not,
-            ',' => Token::Comma,
-            _ => {
-                i += 1;
-                continue; // skip unknown characters
-            }
-        };
-        tokens.push(tok);
-        i += 1;
     }
 
-    tokens.push(Token::Eof);
-    tokens
+    fn peek_byte(&self) -> Option<u8> {
+        self.input.get(self.pos).copied()
+    }
+
+    /// The byte `offset` positions past the cursor, or `None` past the end.
+    ///
+    /// The lexer's lookahead is all one or two bytes deep, and every site that
+    /// wants it used to spell it `self.pos + n < self.input.len() &&
+    /// self.input[self.pos + n] == …` — an addition that can overflow and an
+    /// index that can panic, repeated eight times, each repetition another
+    /// chance to get the bound wrong. One accessor that cannot do either is
+    /// both shorter at the call site and impossible to misuse.
+    fn peek_at(&self, offset: usize) -> Option<u8> {
+        self.input.get(self.pos.checked_add(offset)?).copied()
+    }
+
+    /// Move the cursor forward `n` bytes, stopping at the end of the input.
+    fn bump(&mut self, n: usize) {
+        self.pos = self.pos.saturating_add(n).min(self.input.len());
+    }
+
+    /// The bytes from `start` to the cursor, as text.
+    ///
+    /// `start` is always a cursor value this lexer produced, so the range is
+    /// in bounds and lies on a token boundary; `get` rather than a slice
+    /// expression states that without asking the reader to trust it.
+    fn slice_from(&self, start: usize) -> &str {
+        self.input
+            .get(start..self.pos)
+            .and_then(|bytes| std::str::from_utf8(bytes).ok())
+            .unwrap_or("")
+    }
+
+    fn advance(&mut self) -> Option<u8> {
+        let b = self.peek_byte();
+        if b.is_some() {
+            self.bump(1);
+        }
+        b
+    }
+
+    fn skip_whitespace_and_comments(&mut self) {
+        loop {
+            // Skip spaces and tabs (but not newlines -- they are significant).
+            while let Some(b) = self.peek_byte() {
+                if b == b' ' || b == b'\t' || b == b'\r' || b == b'\\' {
+                    // A backslash-newline is a line continuation: both bytes go.
+                    if b == b'\\' && self.peek_at(1) == Some(b'\n') {
+                        self.bump(2);
+                    } else {
+                        self.bump(1);
+                    }
+                } else {
+                    break;
+                }
+            }
+            // Skip /* ... */ comments.
+            if self.peek_byte() == Some(b'/') && self.peek_at(1) == Some(b'*') {
+                self.bump(2);
+                loop {
+                    match (self.peek_byte(), self.peek_at(1)) {
+                        // An unterminated comment runs to end of input, which
+                        // is what `None` here means; stop rather than spin.
+                        (None, _) | (_, None) => {
+                            self.bump(1);
+                            break;
+                        }
+                        (Some(b'*'), Some(b'/')) => {
+                            self.bump(2);
+                            break;
+                        }
+                        _ => self.bump(1),
+                    }
+                }
+                continue;
+            }
+            // Skip # comments.
+            if let Some(b'#') = self.peek_byte() {
+                while let Some(b) = self.peek_byte() {
+                    if b == b'\n' {
+                        break;
+                    }
+                    self.bump(1);
+                }
+                continue;
+            }
+            break;
+        }
+    }
+
+    fn next_token(&mut self) -> Token {
+        self.skip_whitespace_and_comments();
+
+        let b = match self.peek_byte() {
+            Some(b) => b,
+            None => return Token::Eof,
+        };
+
+        // Newlines.
+        if b == b'\n' {
+            self.advance();
+            return Token::Newline;
+        }
+
+        // Numbers: digits, leading dot-digit, or uppercase A-F (hex digit
+        // values 10-15 in bc's number syntax).
+        if b.is_ascii_digit()
+            || (b'A'..=b'F').contains(&b)
+            || (b == b'.' && self.peek_at(1).is_some_and(|n| n.is_ascii_hexdigit()))
+        {
+            return self.read_number();
+        }
+
+        // String literals.
+        if b == b'"' {
+            return self.read_string();
+        }
+
+        // Identifiers and keywords (bc identifiers use lowercase + underscore).
+        if b.is_ascii_lowercase() || b == b'_' {
+            return self.read_ident();
+        }
+
+        // Operators and punctuation.
+        self.advance();
+        match b {
+            b'+' => {
+                if self.peek_byte() == Some(b'+') {
+                    self.advance();
+                    Token::PlusPlus
+                } else if self.peek_byte() == Some(b'=') {
+                    self.advance();
+                    Token::PlusAssign
+                } else {
+                    Token::Plus
+                }
+            }
+            b'-' => {
+                if self.peek_byte() == Some(b'-') {
+                    self.advance();
+                    Token::MinusMinus
+                } else if self.peek_byte() == Some(b'=') {
+                    self.advance();
+                    Token::MinusAssign
+                } else {
+                    Token::Minus
+                }
+            }
+            b'*' => {
+                if self.peek_byte() == Some(b'=') {
+                    self.advance();
+                    Token::StarAssign
+                } else {
+                    Token::Star
+                }
+            }
+            b'/' => {
+                if self.peek_byte() == Some(b'=') {
+                    self.advance();
+                    Token::SlashAssign
+                } else {
+                    Token::Slash
+                }
+            }
+            b'%' => {
+                if self.peek_byte() == Some(b'=') {
+                    self.advance();
+                    Token::PercentAssign
+                } else {
+                    Token::Percent
+                }
+            }
+            b'^' => {
+                if self.peek_byte() == Some(b'=') {
+                    self.advance();
+                    Token::CaretAssign
+                } else {
+                    Token::Caret
+                }
+            }
+            b'=' => {
+                if self.peek_byte() == Some(b'=') {
+                    self.advance();
+                    Token::EqEq
+                } else {
+                    Token::Assign
+                }
+            }
+            b'!' => {
+                if self.peek_byte() == Some(b'=') {
+                    self.advance();
+                    Token::NotEq
+                } else {
+                    Token::Not
+                }
+            }
+            b'<' => {
+                if self.peek_byte() == Some(b'=') {
+                    self.advance();
+                    Token::LtEq
+                } else {
+                    Token::Lt
+                }
+            }
+            b'>' => {
+                if self.peek_byte() == Some(b'=') {
+                    self.advance();
+                    Token::GtEq
+                } else {
+                    Token::Gt
+                }
+            }
+            b'&' => {
+                if self.peek_byte() == Some(b'&') {
+                    self.advance();
+                }
+                Token::And
+            }
+            b'|' => {
+                if self.peek_byte() == Some(b'|') {
+                    self.advance();
+                }
+                Token::Or
+            }
+            b'(' => Token::LParen,
+            b')' => Token::RParen,
+            b'{' => Token::LBrace,
+            b'}' => Token::RBrace,
+            b'[' => Token::LBracket,
+            b']' => Token::RBracket,
+            b';' => Token::Semicolon,
+            b',' => Token::Comma,
+            _ => {
+                // Unknown character, skip.
+                self.next_token()
+            }
+        }
+    }
+
+    fn read_number(&mut self) -> Token {
+        let start = self.pos;
+        // bc numbers: digits, hex digits (for bases > 10 using uppercase A-F),
+        // and at most one decimal point.
+        let mut has_dot = false;
+        while let Some(b) = self.peek_byte() {
+            if b.is_ascii_digit() || (b'A'..=b'F').contains(&b) {
+                self.advance();
+            } else if b == b'.' && !has_dot {
+                has_dot = true;
+                self.advance();
+            } else {
+                break;
+            }
+        }
+        Token::Number(self.slice_from(start).to_string())
+    }
+
+    /// Read a string literal.
+    ///
+    /// A `bc` string runs to the very next `"` and holds exactly the bytes
+    /// between the quotes — there is no escape here, not even for the quote
+    /// itself, so `"a\"b"` is the string `a\` followed by the syntax error
+    /// GNU `bc` reports for the stray `b"`. Escapes are a property of
+    /// `print`, not of the literal (see [`Interp::print_escaped`]), which is
+    /// why `"a\nb"` on its own line writes four characters while
+    /// `print "a\nb"` writes three.
+    fn read_string(&mut self) -> Token {
+        self.advance(); // skip opening "
+        let mut s = String::new();
+        while let Some(b) = self.peek_byte() {
+            self.advance();
+            if b == b'"' {
+                break;
+            }
+            s.push(b as char);
+        }
+        Token::StringLit(s)
+    }
+
+    fn read_ident(&mut self) -> Token {
+        let start = self.pos;
+        while let Some(b) = self.peek_byte() {
+            if b.is_ascii_alphanumeric() || b == b'_' {
+                self.advance();
+            } else {
+                break;
+            }
+        }
+        match self.slice_from(start) {
+            "if" => Token::If,
+            "else" => Token::Else,
+            "while" => Token::While,
+            "for" => Token::For,
+            "define" => Token::Define,
+            "return" => Token::Return,
+            "auto" => Token::Auto,
+            "break" => Token::Break,
+            "continue" => Token::Continue,
+            "quit" => Token::Quit,
+            "print" => Token::Print,
+            other => Token::Ident(other.to_string()),
+        }
+    }
 }
 
-// ---------------------------------------------------------------------------
+// -------------------------------------------------------------------------
 // AST
-// ---------------------------------------------------------------------------
+// -------------------------------------------------------------------------
 
-// PrintExpr deliberately keeps the Expr suffix: it is the AST node for bc's
-// `print` keyword (which prints a list of expressions). Renaming to `Print`
-// would clash with `Stmt::Print` in callers that bring both into scope.
-#[allow(clippy::enum_variant_names)]
-#[derive(Debug, Clone)]
+#[derive(Clone, Debug)]
 enum Expr {
-    Number(BigDecimal),
-    Variable(String),
-    BinaryOp(Box<Expr>, BinOp, Box<Expr>),
+    Number(String),
+    StringLit(String),
+    Var(String),
+    ArrayAccess(String, Box<Expr>),
+    /// `last` or `.`
+    Last,
     UnaryMinus(Box<Expr>),
     UnaryNot(Box<Expr>),
-    Assign(String, Box<Expr>),
-    CompoundAssign(String, BinOp, Box<Expr>),
-    PreIncrement(String),
-    PreDecrement(String),
-    PostIncrement(String),
-    PostDecrement(String),
-    FuncCall(String, Vec<Expr>),
-    /// Print expression (bc `print` keyword).
-    PrintExpr(Vec<Expr>),
+    BinOp(Box<Expr>, BinOp, Box<Expr>),
+    Assign(Box<Expr>, Box<Expr>),
+    OpAssign(Box<Expr>, BinOp, Box<Expr>),
+    PreInc(Box<Expr>),
+    PreDec(Box<Expr>),
+    PostInc(Box<Expr>),
+    PostDec(Box<Expr>),
+    Call(String, Vec<Expr>),
+    /// Comparison operators return 0 or 1.
+    Compare(Box<Expr>, CmpOp, Box<Expr>),
+    Logical(Box<Expr>, LogOp, Box<Expr>),
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 enum BinOp {
     Add,
     Sub,
@@ -1091,31 +454,48 @@ enum BinOp {
     Div,
     Mod,
     Pow,
+}
+
+#[derive(Clone, Debug)]
+enum CmpOp {
     Eq,
     Ne,
     Lt,
     Gt,
     Le,
     Ge,
+}
+
+#[derive(Clone, Debug)]
+enum LogOp {
     And,
     Or,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone, Debug)]
 enum Stmt {
     Expr(Expr),
-    If(Expr, Vec<Stmt>, Vec<Stmt>),
+    Print(Vec<PrintItem>),
+    If(Expr, Vec<Stmt>, Option<Vec<Stmt>>),
     While(Expr, Vec<Stmt>),
     For(Option<Expr>, Option<Expr>, Option<Expr>, Vec<Stmt>),
+    Return(Option<Expr>),
     Break,
     Continue,
+    Quit,
+    FuncDef(String, Vec<String>, Vec<String>, Vec<Stmt>),
     Block(Vec<Stmt>),
-    Empty,
 }
 
-// ---------------------------------------------------------------------------
+#[derive(Clone, Debug)]
+enum PrintItem {
+    Expr(Expr),
+    StringLit(String),
+}
+
+// -------------------------------------------------------------------------
 // Parser
-// ---------------------------------------------------------------------------
+// -------------------------------------------------------------------------
 
 struct Parser {
     tokens: Vec<Token>,
@@ -1123,36 +503,35 @@ struct Parser {
 }
 
 impl Parser {
-    fn new(tokens: Vec<Token>) -> Self {
-        Parser { tokens, pos: 0 }
+    fn new(input: &str) -> Self {
+        let mut lexer = Lexer::new(input);
+        let mut tokens = Vec::new();
+        loop {
+            let tok = lexer.next_token();
+            let is_eof = tok == Token::Eof;
+            tokens.push(tok);
+            if is_eof {
+                break;
+            }
+        }
+        Self { tokens, pos: 0 }
     }
 
     fn peek(&self) -> &Token {
-        if self.pos < self.tokens.len() {
-            &self.tokens[self.pos]
-        } else {
-            &Token::Eof
-        }
+        self.tokens.get(self.pos).unwrap_or(&Token::Eof)
     }
 
     fn advance(&mut self) -> Token {
-        if self.pos < self.tokens.len() {
-            let tok = self.tokens[self.pos].clone();
-            self.pos += 1;
-            tok
-        } else {
-            Token::Eof
-        }
-    }
-
-    fn skip_newlines(&mut self) {
-        while matches!(self.peek(), Token::Newline) {
-            self.advance();
-        }
+        let tok = self.tokens.get(self.pos).cloned().unwrap_or(Token::Eof);
+        // Saturating rather than wrapping: at the end of input `peek` already
+        // answers `Eof` for any position past the last token, so a cursor that
+        // stops advancing is exactly the right behaviour, whereas one that
+        // wraps to zero would send the parser back to the start of the program.
+        self.pos = self.pos.saturating_add(1);
+        tok
     }
 
     fn expect(&mut self, expected: &Token) -> bool {
-        self.skip_newlines();
         if self.peek() == expected {
             self.advance();
             true
@@ -1161,36 +540,52 @@ impl Parser {
         }
     }
 
+    fn skip_newlines(&mut self) {
+        while *self.peek() == Token::Newline || *self.peek() == Token::Semicolon {
+            self.advance();
+        }
+    }
+
     fn parse_program(&mut self) -> Vec<Stmt> {
         let mut stmts = Vec::new();
-        loop {
+        self.skip_newlines();
+        while *self.peek() != Token::Eof {
+            if let Some(stmt) = self.parse_stmt() {
+                stmts.push(stmt);
+            }
             self.skip_newlines();
-            if matches!(self.peek(), Token::Eof) {
-                break;
-            }
-            match self.parse_stmt() {
-                Some(s) => stmts.push(s),
-                None => {
-                    // Skip unrecognized tokens.
-                    self.advance();
-                }
-            }
         }
         stmts
     }
 
     fn parse_stmt(&mut self) -> Option<Stmt> {
         self.skip_newlines();
-
         match self.peek().clone() {
-            Token::If => self.parse_if(),
-            Token::While => self.parse_while(),
-            Token::For => self.parse_for(),
-            Token::LBrace => self.parse_block(),
+            Token::Eof => None,
             Token::Quit => {
                 self.advance();
                 self.skip_terminator();
-                Some(Stmt::Expr(Expr::FuncCall("quit".to_string(), vec![])))
+                Some(Stmt::Quit)
+            }
+            Token::Print => {
+                self.advance();
+                let items = self.parse_print_list();
+                self.skip_terminator();
+                Some(Stmt::Print(items))
+            }
+            Token::If => Some(self.parse_if()),
+            Token::While => Some(self.parse_while()),
+            Token::For => Some(self.parse_for()),
+            Token::Define => Some(self.parse_define()),
+            Token::Return => {
+                self.advance();
+                let expr = if self.is_expr_start() {
+                    Some(self.parse_expr())
+                } else {
+                    None
+                };
+                self.skip_terminator();
+                Some(Stmt::Return(expr))
             }
             Token::Break => {
                 self.advance();
@@ -1202,1476 +597,2795 @@ impl Parser {
                 self.skip_terminator();
                 Some(Stmt::Continue)
             }
-            Token::Print => {
+            Token::LBrace => {
                 self.advance();
-                let mut exprs = Vec::new();
-                loop {
-                    if matches!(self.peek(), Token::Newline | Token::Semicolon | Token::Eof) {
-                        break;
-                    }
-                    if let Some(e) = self.parse_expr() {
-                        exprs.push(e);
-                    }
-                    if !matches!(self.peek(), Token::Comma) {
-                        break;
-                    }
-                    self.advance(); // skip comma
-                }
-                self.skip_terminator();
-                Some(Stmt::Expr(Expr::PrintExpr(exprs)))
-            }
-            Token::Eof => None,
-            Token::Semicolon | Token::Newline => {
-                self.advance();
-                Some(Stmt::Empty)
+                let body = self.parse_stmt_list();
+                self.expect(&Token::RBrace);
+                Some(Stmt::Block(body))
             }
             _ => {
-                let expr = self.parse_expr()?;
-                self.skip_terminator();
-                Some(Stmt::Expr(expr))
+                if self.is_expr_start() {
+                    let expr = self.parse_expr();
+                    self.skip_terminator();
+                    Some(Stmt::Expr(expr))
+                } else {
+                    // Skip unexpected token.
+                    self.advance();
+                    None
+                }
             }
         }
     }
 
     fn skip_terminator(&mut self) {
-        while matches!(self.peek(), Token::Semicolon | Token::Newline) {
+        if *self.peek() == Token::Newline || *self.peek() == Token::Semicolon {
             self.advance();
         }
     }
 
-    fn parse_if(&mut self) -> Option<Stmt> {
+    fn is_expr_start(&self) -> bool {
+        matches!(
+            self.peek(),
+            Token::Number(_)
+                | Token::StringLit(_)
+                | Token::Ident(_)
+                | Token::LParen
+                | Token::Minus
+                | Token::Not
+                | Token::PlusPlus
+                | Token::MinusMinus
+        )
+    }
+
+    fn parse_print_list(&mut self) -> Vec<PrintItem> {
+        let mut items = Vec::new();
+        loop {
+            match self.peek().clone() {
+                Token::StringLit(s) => {
+                    self.advance();
+                    items.push(PrintItem::StringLit(s));
+                }
+                _ if self.is_expr_start() => {
+                    let expr = self.parse_expr();
+                    items.push(PrintItem::Expr(expr));
+                }
+                _ => break,
+            }
+            if *self.peek() == Token::Comma {
+                self.advance();
+            } else {
+                break;
+            }
+        }
+        items
+    }
+
+    fn parse_if(&mut self) -> Stmt {
         self.advance(); // consume 'if'
         self.expect(&Token::LParen);
-        let cond = self.parse_expr()?;
+        let cond = self.parse_expr();
         self.expect(&Token::RParen);
         self.skip_newlines();
-
-        let then_block = if matches!(self.peek(), Token::LBrace) {
-            match self.parse_block()? {
-                Stmt::Block(stmts) => stmts,
-                s => vec![s],
-            }
-        } else {
-            vec![self.parse_stmt()?]
-        };
-
+        let then_body = self.parse_block_or_stmt();
         self.skip_newlines();
-        let else_block = if matches!(self.peek(), Token::Else) {
+        let else_body = if *self.peek() == Token::Else {
             self.advance();
             self.skip_newlines();
-            if matches!(self.peek(), Token::LBrace) {
-                match self.parse_block()? {
-                    Stmt::Block(stmts) => stmts,
-                    s => vec![s],
-                }
-            } else if matches!(self.peek(), Token::If) {
-                vec![self.parse_if()?]
-            } else {
-                vec![self.parse_stmt()?]
-            }
+            Some(self.parse_block_or_stmt())
         } else {
-            vec![]
+            None
         };
-
-        Some(Stmt::If(cond, then_block, else_block))
+        Stmt::If(cond, then_body, else_body)
     }
 
-    fn parse_while(&mut self) -> Option<Stmt> {
+    fn parse_while(&mut self) -> Stmt {
         self.advance(); // consume 'while'
         self.expect(&Token::LParen);
-        let cond = self.parse_expr()?;
+        let cond = self.parse_expr();
         self.expect(&Token::RParen);
         self.skip_newlines();
-
-        let body = if matches!(self.peek(), Token::LBrace) {
-            match self.parse_block()? {
-                Stmt::Block(stmts) => stmts,
-                s => vec![s],
-            }
-        } else {
-            vec![self.parse_stmt()?]
-        };
-
-        Some(Stmt::While(cond, body))
+        let body = self.parse_block_or_stmt();
+        Stmt::While(cond, body)
     }
 
-    fn parse_for(&mut self) -> Option<Stmt> {
+    fn parse_for(&mut self) -> Stmt {
         self.advance(); // consume 'for'
         self.expect(&Token::LParen);
-
-        let init = if matches!(self.peek(), Token::Semicolon) {
-            None
+        let init = if self.is_expr_start() {
+            Some(self.parse_expr())
         } else {
-            self.parse_expr()
+            None
         };
         self.expect(&Token::Semicolon);
-
-        let cond = if matches!(self.peek(), Token::Semicolon) {
-            None
+        let cond = if self.is_expr_start() {
+            Some(self.parse_expr())
         } else {
-            self.parse_expr()
+            None
         };
         self.expect(&Token::Semicolon);
-
-        let update = if matches!(self.peek(), Token::RParen) {
-            None
+        let step = if self.is_expr_start() {
+            Some(self.parse_expr())
         } else {
-            self.parse_expr()
+            None
         };
         self.expect(&Token::RParen);
         self.skip_newlines();
-
-        let body = if matches!(self.peek(), Token::LBrace) {
-            match self.parse_block()? {
-                Stmt::Block(stmts) => stmts,
-                s => vec![s],
-            }
-        } else {
-            vec![self.parse_stmt()?]
-        };
-
-        Some(Stmt::For(init, cond, update, body))
+        let body = self.parse_block_or_stmt();
+        Stmt::For(init, cond, step, body)
     }
 
-    fn parse_block(&mut self) -> Option<Stmt> {
-        self.advance(); // consume '{'
-        let mut stmts = Vec::new();
-        loop {
-            self.skip_newlines();
-            if matches!(self.peek(), Token::RBrace | Token::Eof) {
-                break;
-            }
-            if let Some(s) = self.parse_stmt() {
-                stmts.push(s);
+    fn parse_define(&mut self) -> Stmt {
+        self.advance(); // consume 'define'
+        let name = match self.advance() {
+            Token::Ident(s) => s,
+            _ => "unknown".to_string(),
+        };
+        self.expect(&Token::LParen);
+        let mut params = Vec::new();
+        while let Token::Ident(p) = self.peek().clone() {
+            self.advance();
+            params.push(p);
+            if *self.peek() == Token::Comma {
+                self.advance();
             } else {
                 break;
             }
         }
+        self.expect(&Token::RParen);
+        self.skip_newlines();
+        self.expect(&Token::LBrace);
+        self.skip_newlines();
+
+        // Parse optional 'auto' declarations.
+        let mut auto_vars = Vec::new();
+        if *self.peek() == Token::Auto {
+            self.advance();
+            while let Token::Ident(v) = self.peek().clone() {
+                self.advance();
+                auto_vars.push(v);
+                if *self.peek() == Token::Comma {
+                    self.advance();
+                } else {
+                    break;
+                }
+            }
+            self.skip_terminator();
+        }
+
+        let body = self.parse_stmt_list();
         self.expect(&Token::RBrace);
-        Some(Stmt::Block(stmts))
+        Stmt::FuncDef(name, params, auto_vars, body)
     }
 
-    fn parse_expr(&mut self) -> Option<Expr> {
+    fn parse_block_or_stmt(&mut self) -> Vec<Stmt> {
+        if *self.peek() == Token::LBrace {
+            self.advance();
+            let stmts = self.parse_stmt_list();
+            self.expect(&Token::RBrace);
+            stmts
+        } else if let Some(stmt) = self.parse_stmt() {
+            vec![stmt]
+        } else {
+            Vec::new()
+        }
+    }
+
+    fn parse_stmt_list(&mut self) -> Vec<Stmt> {
+        let mut stmts = Vec::new();
+        self.skip_newlines();
+        while *self.peek() != Token::RBrace && *self.peek() != Token::Eof {
+            if let Some(stmt) = self.parse_stmt() {
+                stmts.push(stmt);
+            }
+            self.skip_newlines();
+        }
+        stmts
+    }
+
+    // Expression parsing with precedence climbing.
+
+    fn parse_expr(&mut self) -> Expr {
         self.parse_assignment()
     }
 
-    fn parse_assignment(&mut self) -> Option<Expr> {
-        let left = self.parse_or()?;
-
+    fn parse_assignment(&mut self) -> Expr {
+        let lhs = self.parse_or();
         match self.peek().clone() {
             Token::Assign => {
                 self.advance();
-                if let Expr::Variable(name) = left {
-                    let right = self.parse_assignment()?;
-                    Some(Expr::Assign(name, Box::new(right)))
-                } else {
-                    // Assignment to non-variable — treat as expression.
-                    Some(left)
-                }
+                let rhs = self.parse_assignment();
+                Expr::Assign(Box::new(lhs), Box::new(rhs))
             }
             Token::PlusAssign => {
                 self.advance();
-                if let Expr::Variable(name) = left {
-                    let right = self.parse_assignment()?;
-                    Some(Expr::CompoundAssign(name, BinOp::Add, Box::new(right)))
-                } else {
-                    Some(left)
-                }
+                let rhs = self.parse_assignment();
+                Expr::OpAssign(Box::new(lhs), BinOp::Add, Box::new(rhs))
             }
             Token::MinusAssign => {
                 self.advance();
-                if let Expr::Variable(name) = left {
-                    let right = self.parse_assignment()?;
-                    Some(Expr::CompoundAssign(name, BinOp::Sub, Box::new(right)))
-                } else {
-                    Some(left)
-                }
+                let rhs = self.parse_assignment();
+                Expr::OpAssign(Box::new(lhs), BinOp::Sub, Box::new(rhs))
             }
             Token::StarAssign => {
                 self.advance();
-                if let Expr::Variable(name) = left {
-                    let right = self.parse_assignment()?;
-                    Some(Expr::CompoundAssign(name, BinOp::Mul, Box::new(right)))
-                } else {
-                    Some(left)
-                }
+                let rhs = self.parse_assignment();
+                Expr::OpAssign(Box::new(lhs), BinOp::Mul, Box::new(rhs))
             }
             Token::SlashAssign => {
                 self.advance();
-                if let Expr::Variable(name) = left {
-                    let right = self.parse_assignment()?;
-                    Some(Expr::CompoundAssign(name, BinOp::Div, Box::new(right)))
-                } else {
-                    Some(left)
-                }
+                let rhs = self.parse_assignment();
+                Expr::OpAssign(Box::new(lhs), BinOp::Div, Box::new(rhs))
             }
             Token::PercentAssign => {
                 self.advance();
-                if let Expr::Variable(name) = left {
-                    let right = self.parse_assignment()?;
-                    Some(Expr::CompoundAssign(name, BinOp::Mod, Box::new(right)))
-                } else {
-                    Some(left)
-                }
+                let rhs = self.parse_assignment();
+                Expr::OpAssign(Box::new(lhs), BinOp::Mod, Box::new(rhs))
             }
             Token::CaretAssign => {
                 self.advance();
-                if let Expr::Variable(name) = left {
-                    let right = self.parse_assignment()?;
-                    Some(Expr::CompoundAssign(name, BinOp::Pow, Box::new(right)))
-                } else {
-                    Some(left)
-                }
+                let rhs = self.parse_assignment();
+                Expr::OpAssign(Box::new(lhs), BinOp::Pow, Box::new(rhs))
             }
-            _ => Some(left),
+            _ => lhs,
         }
     }
 
-    fn parse_or(&mut self) -> Option<Expr> {
-        let mut left = self.parse_and_expr()?;
-        while matches!(self.peek(), Token::Or) {
+    fn parse_or(&mut self) -> Expr {
+        let mut lhs = self.parse_and();
+        while *self.peek() == Token::Or {
             self.advance();
-            let right = self.parse_and_expr()?;
-            left = Expr::BinaryOp(Box::new(left), BinOp::Or, Box::new(right));
+            let rhs = self.parse_and();
+            lhs = Expr::Logical(Box::new(lhs), LogOp::Or, Box::new(rhs));
         }
-        Some(left)
+        lhs
     }
 
-    fn parse_and_expr(&mut self) -> Option<Expr> {
-        let mut left = self.parse_comparison()?;
-        while matches!(self.peek(), Token::And) {
+    fn parse_and(&mut self) -> Expr {
+        let mut lhs = self.parse_comparison();
+        while *self.peek() == Token::And {
             self.advance();
-            let right = self.parse_comparison()?;
-            left = Expr::BinaryOp(Box::new(left), BinOp::And, Box::new(right));
+            let rhs = self.parse_comparison();
+            lhs = Expr::Logical(Box::new(lhs), LogOp::And, Box::new(rhs));
         }
-        Some(left)
+        lhs
     }
 
-    fn parse_comparison(&mut self) -> Option<Expr> {
-        let mut left = self.parse_additive()?;
+    fn parse_comparison(&mut self) -> Expr {
+        let lhs = self.parse_add();
+        let op = match self.peek() {
+            Token::EqEq => CmpOp::Eq,
+            Token::NotEq => CmpOp::Ne,
+            Token::Lt => CmpOp::Lt,
+            Token::Gt => CmpOp::Gt,
+            Token::LtEq => CmpOp::Le,
+            Token::GtEq => CmpOp::Ge,
+            _ => return lhs,
+        };
+        self.advance();
+        let rhs = self.parse_add();
+        Expr::Compare(Box::new(lhs), op, Box::new(rhs))
+    }
 
+    fn parse_add(&mut self) -> Expr {
+        let mut lhs = self.parse_mul();
         loop {
-            let op = match self.peek() {
-                Token::Eq => BinOp::Eq,
-                Token::Ne => BinOp::Ne,
-                Token::Lt => BinOp::Lt,
-                Token::Gt => BinOp::Gt,
-                Token::Le => BinOp::Le,
-                Token::Ge => BinOp::Ge,
+            match self.peek() {
+                Token::Plus => {
+                    self.advance();
+                    let rhs = self.parse_mul();
+                    lhs = Expr::BinOp(Box::new(lhs), BinOp::Add, Box::new(rhs));
+                }
+                Token::Minus => {
+                    self.advance();
+                    let rhs = self.parse_mul();
+                    lhs = Expr::BinOp(Box::new(lhs), BinOp::Sub, Box::new(rhs));
+                }
                 _ => break,
-            };
-            self.advance();
-            let right = self.parse_additive()?;
-            left = Expr::BinaryOp(Box::new(left), op, Box::new(right));
+            }
         }
-
-        Some(left)
+        lhs
     }
 
-    fn parse_additive(&mut self) -> Option<Expr> {
-        let mut left = self.parse_multiplicative()?;
-
+    fn parse_mul(&mut self) -> Expr {
+        let mut lhs = self.parse_power();
         loop {
-            let op = match self.peek() {
-                Token::Plus => BinOp::Add,
-                Token::Minus => BinOp::Sub,
+            match self.peek() {
+                Token::Star => {
+                    self.advance();
+                    let rhs = self.parse_power();
+                    lhs = Expr::BinOp(Box::new(lhs), BinOp::Mul, Box::new(rhs));
+                }
+                Token::Slash => {
+                    self.advance();
+                    let rhs = self.parse_power();
+                    lhs = Expr::BinOp(Box::new(lhs), BinOp::Div, Box::new(rhs));
+                }
+                Token::Percent => {
+                    self.advance();
+                    let rhs = self.parse_power();
+                    lhs = Expr::BinOp(Box::new(lhs), BinOp::Mod, Box::new(rhs));
+                }
                 _ => break,
-            };
-            self.advance();
-            let right = self.parse_multiplicative()?;
-            left = Expr::BinaryOp(Box::new(left), op, Box::new(right));
+            }
         }
-
-        Some(left)
+        lhs
     }
 
-    fn parse_multiplicative(&mut self) -> Option<Expr> {
-        let mut left = self.parse_power()?;
-
-        loop {
-            let op = match self.peek() {
-                Token::Star => BinOp::Mul,
-                Token::Slash => BinOp::Div,
-                Token::Percent => BinOp::Mod,
-                _ => break,
-            };
+    fn parse_power(&mut self) -> Expr {
+        let base = self.parse_unary();
+        if *self.peek() == Token::Caret {
             self.advance();
-            let right = self.parse_power()?;
-            left = Expr::BinaryOp(Box::new(left), op, Box::new(right));
-        }
-
-        Some(left)
-    }
-
-    fn parse_power(&mut self) -> Option<Expr> {
-        let base = self.parse_unary()?;
-
-        if matches!(self.peek(), Token::Caret) {
-            self.advance();
-            let exp = self.parse_power()?; // right-associative
-            Some(Expr::BinaryOp(Box::new(base), BinOp::Pow, Box::new(exp)))
+            let exp = self.parse_unary(); // Right-associative.
+            Expr::BinOp(Box::new(base), BinOp::Pow, Box::new(exp))
         } else {
-            Some(base)
+            base
         }
     }
 
-    fn parse_unary(&mut self) -> Option<Expr> {
+    fn parse_unary(&mut self) -> Expr {
         match self.peek().clone() {
             Token::Minus => {
                 self.advance();
-                let operand = self.parse_unary()?;
-                Some(Expr::UnaryMinus(Box::new(operand)))
+                let expr = self.parse_unary();
+                Expr::UnaryMinus(Box::new(expr))
             }
             Token::Not => {
                 self.advance();
-                let operand = self.parse_unary()?;
-                Some(Expr::UnaryNot(Box::new(operand)))
+                let expr = self.parse_unary();
+                Expr::UnaryNot(Box::new(expr))
             }
             Token::PlusPlus => {
                 self.advance();
-                if let Token::Ident(name) = self.peek().clone() {
-                    self.advance();
-                    Some(Expr::PreIncrement(name))
-                } else {
-                    None
-                }
+                let expr = self.parse_postfix();
+                Expr::PreInc(Box::new(expr))
             }
             Token::MinusMinus => {
                 self.advance();
-                if let Token::Ident(name) = self.peek().clone() {
-                    self.advance();
-                    Some(Expr::PreDecrement(name))
-                } else {
-                    None
-                }
+                let expr = self.parse_postfix();
+                Expr::PreDec(Box::new(expr))
             }
             _ => self.parse_postfix(),
         }
     }
 
-    fn parse_postfix(&mut self) -> Option<Expr> {
-        let expr = self.parse_primary()?;
-
-        match self.peek().clone() {
-            Token::PlusPlus => {
-                if let Expr::Variable(name) = expr {
+    fn parse_postfix(&mut self) -> Expr {
+        let mut expr = self.parse_primary();
+        loop {
+            match self.peek() {
+                Token::PlusPlus => {
                     self.advance();
-                    Some(Expr::PostIncrement(name))
-                } else {
-                    Some(expr)
+                    expr = Expr::PostInc(Box::new(expr));
                 }
-            }
-            Token::MinusMinus => {
-                if let Expr::Variable(name) = expr {
+                Token::MinusMinus => {
                     self.advance();
-                    Some(Expr::PostDecrement(name))
-                } else {
-                    Some(expr)
+                    expr = Expr::PostDec(Box::new(expr));
                 }
+                _ => break,
             }
-            _ => Some(expr),
         }
+        expr
     }
 
-    fn parse_primary(&mut self) -> Option<Expr> {
+    fn parse_primary(&mut self) -> Expr {
         match self.peek().clone() {
             Token::Number(s) => {
                 self.advance();
-                let bd = BigDecimal::parse(&s).unwrap_or_else(BigDecimal::zero);
-                Some(Expr::Number(bd))
+                Expr::Number(s)
+            }
+            Token::StringLit(s) => {
+                self.advance();
+                Expr::StringLit(s)
             }
             Token::Ident(name) => {
                 self.advance();
+                if name == "last" {
+                    return Expr::Last;
+                }
                 // Check for function call.
-                if matches!(self.peek(), Token::LParen) {
+                if *self.peek() == Token::LParen {
                     self.advance();
                     let mut args = Vec::new();
-                    if !matches!(self.peek(), Token::RParen) {
-                        if let Some(arg) = self.parse_expr() {
-                            args.push(arg);
-                        }
-                        while matches!(self.peek(), Token::Comma) {
+                    if *self.peek() != Token::RParen {
+                        args.push(self.parse_expr());
+                        while *self.peek() == Token::Comma {
                             self.advance();
-                            if let Some(arg) = self.parse_expr() {
-                                args.push(arg);
-                            }
+                            args.push(self.parse_expr());
                         }
                     }
                     self.expect(&Token::RParen);
-                    Some(Expr::FuncCall(name, args))
-                } else {
-                    Some(Expr::Variable(name))
+                    return Expr::Call(name, args);
                 }
+                // Check for array access.
+                if *self.peek() == Token::LBracket {
+                    self.advance();
+                    let idx = self.parse_expr();
+                    self.expect(&Token::RBracket);
+                    return Expr::ArrayAccess(name, Box::new(idx));
+                }
+                Expr::Var(name)
             }
             Token::LParen => {
                 self.advance();
-                let expr = self.parse_expr()?;
+                let expr = self.parse_expr();
                 self.expect(&Token::RParen);
-                Some(expr)
+                expr
             }
-            _ => None,
+            _ => {
+                // Return zero for unexpected tokens.
+                Expr::Number("0".to_string())
+            }
         }
     }
 }
 
-// ---------------------------------------------------------------------------
+// -------------------------------------------------------------------------
 // Interpreter
-// ---------------------------------------------------------------------------
+// -------------------------------------------------------------------------
 
-enum ControlFlow {
-    None,
-    Break,
-    Continue,
-    Quit,
+#[derive(Clone, Debug)]
+struct FuncDef {
+    params: Vec<String>,
+    auto_vars: Vec<String>,
+    body: Vec<Stmt>,
 }
 
+/// Control flow signals from statement execution.
+enum StmtResult {
+    Normal,
+    Return(Decimal),
+    Break,
+    Continue,
+}
+
+/// What a loop should do after running its body once.
+enum LoopFlow {
+    /// Go round again — the body ended normally or hit `continue`.
+    Continue,
+    Break,
+    Return(Decimal),
+}
+
+/// Something that makes the rest of the current statement meaningless.
+///
+/// Before `Decimal` moved to `bignum`, there was no such type: a division by
+/// zero printed to stderr from inside the arithmetic and returned zero, so
+/// `x = 1/0 + 5` assigned 5 and the program carried on as though the user had
+/// written `0`. That is the one outcome a calculator must not have. These
+/// propagate to [`Interpreter::run`], which prints them and abandons the rest of
+/// the input line — which is what GNU `bc` does.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum RuntimeError {
+    /// The arithmetic itself could not produce a value.
+    Math(DecimalError),
+    /// A call to a name that is neither a builtin nor a defined function.
+    UndefinedFunction(String),
+    /// `l(x)` for `x <= 0`, where the logarithm is not defined over the reals.
+    LogOfNonPositive,
+}
+
+impl From<DecimalError> for RuntimeError {
+    fn from(e: DecimalError) -> Self {
+        Self::Math(e)
+    }
+}
+
+impl std::fmt::Display for RuntimeError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Math(e) => write!(f, "{e}"),
+            Self::UndefinedFunction(name) => write!(f, "undefined function {name}"),
+            Self::LogOfNonPositive => f.write_str("log of non-positive number"),
+        }
+    }
+}
+
+/// The result of evaluating an expression: a number, or the reason there is not
+/// one.
+type Eval = Result<Decimal, RuntimeError>;
+
 struct Interpreter {
-    variables: HashMap<String, BigDecimal>,
+    /// Named variables.
+    vars: HashMap<String, Decimal>,
+    /// Array variables: name -> (index -> value).
+    arrays: HashMap<String, HashMap<String, Decimal>>,
+    /// User-defined functions.
+    funcs: HashMap<String, FuncDef>,
+    /// scale, ibase, obase.
     scale: usize,
-    ibase: usize,
-    obase: usize,
-    last: BigDecimal,
+    ibase: u32,
+    obase: u32,
+    /// Last printed value.
+    last: Decimal,
+    /// Whether the math library is loaded (-l flag).
+    math_lib: bool,
+    /// Digits per line before a printed number is continued with a `\`.
+    ///
+    /// Already converted from `BC_LINE_LENGTH` by [`wrap_chunk`], because the
+    /// two are not the same number: `bc` keeps the backslash *inside* the
+    /// stated width, so `BC_LINE_LENGTH=10` puts 8 digits on a line. Zero
+    /// disables the break; see [`bignum::wrap_number`].
+    wrap_chunk: usize,
+    /// When set, output is captured here instead of going to stdout.
+    /// Used by tests to verify output without I/O.
+    #[cfg(test)]
+    output_buf: Vec<String>,
 }
 
 impl Interpreter {
-    fn new() -> Self {
-        Interpreter {
-            variables: HashMap::new(),
-            scale: 0,
+    fn new(math_lib: bool) -> Self {
+        let scale = if math_lib { 20 } else { 0 };
+        Self {
+            vars: HashMap::new(),
+            arrays: HashMap::new(),
+            funcs: HashMap::new(),
+            scale,
             ibase: 10,
             obase: 10,
-            last: BigDecimal::zero(),
+            last: Decimal::zero(),
+            math_lib,
+            wrap_chunk: line_length_from_env("BC_LINE_LENGTH"),
+            #[cfg(test)]
+            output_buf: Vec::new(),
         }
     }
 
-    fn get_var(&self, name: &str) -> BigDecimal {
+    /// Render a value for output: in `obase`, then broken across lines.
+    ///
+    /// Every path that prints a number goes through here, which is what keeps
+    /// `1/3` in a `print` statement and `1/3` on a line of its own from being
+    /// written two different ways.
+    fn render(&self, val: &Decimal) -> String {
+        bignum::wrap_number(&val.format(self.obase), self.wrap_chunk)
+    }
+
+    /// Output a line (with trailing newline).  In test mode, captured to
+    /// `output_buf`; otherwise printed to stdout.
+    fn output_line(&mut self, s: &str) {
+        #[cfg(test)]
+        {
+            self.output_buf.push(s.to_string());
+        }
+        #[cfg(not(test))]
+        {
+            println!("{}", s);
+        }
+    }
+
+    /// Output a string fragment (no trailing newline).  In test mode, captured
+    /// to `output_buf`; otherwise printed to stdout.
+    fn output_str(&mut self, s: &str) {
+        #[cfg(test)]
+        {
+            self.output_buf.push(s.to_string());
+        }
+        #[cfg(not(test))]
+        {
+            print!("{}", s);
+            let _ = io::stdout().flush();
+        }
+    }
+
+    /// Report something the program can carry on past, on stderr.
+    ///
+    /// A warning is not a value, so it never goes through `output_str` and is
+    /// not captured in tests: a caller redirecting stdout must not find
+    /// diagnostics mixed into the numbers.
+    fn warn(&self, message: &str) {
+        eprintln!("Runtime warning (func=(main)): {message}");
+    }
+
+    fn get_var(&self, name: &str) -> Decimal {
         match name {
-            "scale" => BigDecimal::parse(&self.scale.to_string()).unwrap_or_else(BigDecimal::zero),
-            "ibase" => BigDecimal::parse(&self.ibase.to_string()).unwrap_or_else(BigDecimal::zero),
-            "obase" => BigDecimal::parse(&self.obase.to_string()).unwrap_or_else(BigDecimal::zero),
-            "last" | "." => self.last.clone(),
-            _ => self
-                .variables
-                .get(name)
-                .cloned()
-                .unwrap_or_else(BigDecimal::zero),
+            "scale" => Decimal::from_i64(self.scale as i64),
+            "ibase" => Decimal::from_i64(self.ibase as i64),
+            "obase" => Decimal::from_i64(self.obase as i64),
+            _ => self.vars.get(name).cloned().unwrap_or_else(Decimal::zero),
         }
     }
 
-    fn set_var(&mut self, name: &str, val: BigDecimal) {
+    fn set_var(&mut self, name: &str, val: Decimal) {
         match name {
             "scale" => {
-                let s = val.to_string_with_scale(0);
-                self.scale = s.parse::<usize>().unwrap_or(0);
+                let v = val.rescale(0);
+                let s = v.digits.to_string_base10();
+                self.scale = s.trim_start_matches('-').parse::<usize>().unwrap_or(0);
             }
             "ibase" => {
-                let s = val.to_string_with_scale(0);
-                self.ibase = s.parse::<usize>().unwrap_or(10).clamp(2, 16);
+                let v = val.rescale(0);
+                let s = v.digits.to_string_base10();
+                let b = s.trim_start_matches('-').parse::<u32>().unwrap_or(10);
+                if (2..=16).contains(&b) {
+                    self.ibase = b;
+                }
             }
             "obase" => {
-                let s = val.to_string_with_scale(0);
-                self.obase = s.parse::<usize>().unwrap_or(10).clamp(2, 16);
-            }
-            "last" | "." => {
-                self.last = val;
+                let v = val.rescale(0);
+                let s = v.digits.to_string_base10();
+                let b = s.trim_start_matches('-').parse::<u32>().unwrap_or(10);
+                // There is no upper limit: past sixteen a digit is written as
+                // a decimal group rather than a character (`obase=36; 1295`
+                // is ` 35 35`), so every base has a notation. GNU accepts
+                // 2^30 and clamps anything below two up to two with a warning
+                // on stderr rather than refusing it.
+                if v.is_negative() || b < 2 {
+                    self.warn("obase too small, set to 2");
+                    self.obase = 2;
+                } else {
+                    self.obase = b;
+                }
             }
             _ => {
-                self.variables.insert(name.to_string(), val);
+                self.vars.insert(name.to_string(), val);
             }
         }
     }
 
-    fn run_stmts(&mut self, stmts: &[Stmt]) -> ControlFlow {
+    fn get_array(&self, name: &str, idx: &str) -> Decimal {
+        self.arrays
+            .get(name)
+            .and_then(|m| m.get(idx))
+            .cloned()
+            .unwrap_or_else(Decimal::zero)
+    }
+
+    fn set_array(&mut self, name: &str, idx: &str, val: Decimal) {
+        self.arrays
+            .entry(name.to_string())
+            .or_default()
+            .insert(idx.to_string(), val);
+    }
+
+    /// Execute a parsed program.
+    ///
+    /// This is the only place a `RuntimeError` is printed, and the granularity
+    /// of recovery is the **top-level statement**: a failure abandons the
+    /// statement it happened in — including the whole of a loop or an `if` it
+    /// was nested inside, and the frame of any function it was inside — and
+    /// then execution resumes at the next statement. Nothing partial is
+    /// printed, and nothing computed from a value that was never produced is
+    /// either.
+    ///
+    /// The alternative, abandoning the entire program, would make one mistyped
+    /// expression discard the rest of a script; the alternative in the other
+    /// direction, resuming inside the failed statement, is not available — the
+    /// value it needed does not exist. See `design-decisions.md` §323.
+    fn run(&mut self, stmts: &[Stmt]) {
         for stmt in stmts {
-            match self.run_stmt(stmt) {
-                ControlFlow::None => {}
-                cf => return cf,
+            match self.exec_stmt(stmt) {
+                Ok(StmtResult::Normal) => {}
+                // `break`, `continue` or `return` outside any enclosing
+                // construct ends the program, as there is nothing to return to.
+                Ok(_) => return,
+                Err(e) => eprintln!("Runtime error: {e}"),
             }
         }
-        ControlFlow::None
     }
 
-    fn run_stmt(&mut self, stmt: &Stmt) -> ControlFlow {
+    fn exec_stmt(&mut self, stmt: &Stmt) -> Result<StmtResult, RuntimeError> {
         match stmt {
-            Stmt::Empty => ControlFlow::None,
-
-            Stmt::Expr(expr) => match expr {
-                Expr::PrintExpr(exprs) => {
-                    let stdout = io::stdout();
-                    let mut out = stdout.lock();
-                    for e in exprs {
-                        let val = self.eval(e);
-                        let _ = write!(out, "{}", val.to_string_with_scale(self.scale));
-                    }
-                    let _ = writeln!(out);
-                    ControlFlow::None
+            Stmt::Expr(expr) => {
+                let val = self.eval(expr)?;
+                // In bc, a bare expression prints its value.
+                // But assignments don't print (they are silent).
+                if !suppresses_auto_print(expr) {
+                    let formatted = self.render(&val);
+                    self.output_line(&formatted);
                 }
-                Expr::FuncCall(name, _) if name == "quit" => ControlFlow::Quit,
-                Expr::Assign(_, _)
-                | Expr::CompoundAssign(_, _, _)
-                | Expr::PreIncrement(_)
-                | Expr::PreDecrement(_)
-                | Expr::PostIncrement(_)
-                | Expr::PostDecrement(_) => {
-                    self.eval(expr);
-                    ControlFlow::None
-                }
-                _ => {
-                    let val = self.eval(expr);
-                    self.last = val.clone();
-                    println!("{}", val.to_string_with_scale(self.scale));
-                    ControlFlow::None
-                }
-            },
-
-            Stmt::If(cond, then_body, else_body) => {
-                let cond_val = self.eval(cond);
-                if !cond_val.is_zero() {
-                    self.run_stmts(then_body)
-                } else {
-                    self.run_stmts(else_body)
-                }
+                self.last = val;
+                Ok(StmtResult::Normal)
             }
-
-            Stmt::While(cond, body) => {
-                let mut iteration = 0u64;
-                loop {
-                    let cond_val = self.eval(cond);
-                    if cond_val.is_zero() {
-                        break;
-                    }
-                    match self.run_stmts(body) {
-                        ControlFlow::Break => break,
-                        ControlFlow::Quit => return ControlFlow::Quit,
-                        ControlFlow::Continue | ControlFlow::None => {}
-                    }
-                    iteration += 1;
-                    if iteration > 10_000_000 {
-                        eprintln!("bc: infinite loop detected (> 10M iterations)");
-                        break;
-                    }
-                }
-                ControlFlow::None
-            }
-
-            Stmt::For(init, cond, update, body) => {
-                if let Some(init_expr) = init {
-                    self.eval(init_expr);
-                }
-                let mut iteration = 0u64;
-                loop {
-                    if let Some(cond_expr) = cond {
-                        let cond_val = self.eval(cond_expr);
-                        if cond_val.is_zero() {
-                            break;
+            Stmt::Print(items) => {
+                for item in items {
+                    match item {
+                        PrintItem::StringLit(s) => {
+                            let text = print_escaped(s);
+                            self.output_str(&text);
+                        }
+                        PrintItem::Expr(expr) => {
+                            let val = self.eval(expr)?;
+                            let formatted = self.render(&val);
+                            self.output_str(&formatted);
+                            self.last = val;
                         }
                     }
-                    match self.run_stmts(body) {
-                        ControlFlow::Break => break,
-                        ControlFlow::Quit => return ControlFlow::Quit,
-                        ControlFlow::Continue | ControlFlow::None => {}
+                }
+                #[cfg(not(test))]
+                {
+                    let _ = io::stdout().flush();
+                }
+                Ok(StmtResult::Normal)
+            }
+            Stmt::If(cond, then_body, else_body) => {
+                let val = self.eval(cond)?;
+                let branch = if val.is_zero() {
+                    else_body.as_ref()
+                } else {
+                    Some(then_body)
+                };
+                if let Some(body) = branch {
+                    for s in body {
+                        match self.exec_stmt(s)? {
+                            StmtResult::Normal => {}
+                            other => return Ok(other),
+                        }
                     }
-                    if let Some(update_expr) = update {
-                        self.eval(update_expr);
+                }
+                Ok(StmtResult::Normal)
+            }
+            Stmt::While(cond, body) => {
+                while !self.eval(cond)?.is_zero() {
+                    match self.exec_body(body)? {
+                        LoopFlow::Continue => {}
+                        LoopFlow::Break => break,
+                        LoopFlow::Return(v) => return Ok(StmtResult::Return(v)),
                     }
-                    iteration += 1;
-                    if iteration > 10_000_000 {
-                        eprintln!("bc: infinite loop detected (> 10M iterations)");
+                }
+                Ok(StmtResult::Normal)
+            }
+            Stmt::For(init, cond, step, body) => {
+                if let Some(init_expr) = init {
+                    self.eval(init_expr)?;
+                }
+                loop {
+                    if let Some(cond_expr) = cond
+                        && self.eval(cond_expr)?.is_zero()
+                    {
                         break;
                     }
+                    match self.exec_body(body)? {
+                        LoopFlow::Continue => {}
+                        LoopFlow::Break => break,
+                        LoopFlow::Return(v) => return Ok(StmtResult::Return(v)),
+                    }
+                    if let Some(step_expr) = step {
+                        self.eval(step_expr)?;
+                    }
                 }
-                ControlFlow::None
+                Ok(StmtResult::Normal)
             }
-
-            Stmt::Break => ControlFlow::Break,
-            Stmt::Continue => ControlFlow::Continue,
-
-            Stmt::Block(stmts) => self.run_stmts(stmts),
+            Stmt::Return(expr) => {
+                let val = match expr {
+                    Some(e) => self.eval(e)?,
+                    None => Decimal::zero(),
+                };
+                Ok(StmtResult::Return(val))
+            }
+            Stmt::Break => Ok(StmtResult::Break),
+            Stmt::Continue => Ok(StmtResult::Continue),
+            Stmt::Quit => {
+                process::exit(0);
+            }
+            Stmt::FuncDef(name, params, auto_vars, body) => {
+                self.funcs.insert(
+                    name.clone(),
+                    FuncDef {
+                        params: params.clone(),
+                        auto_vars: auto_vars.clone(),
+                        body: body.clone(),
+                    },
+                );
+                Ok(StmtResult::Normal)
+            }
+            Stmt::Block(stmts) => {
+                for s in stmts {
+                    match self.exec_stmt(s)? {
+                        StmtResult::Normal => {}
+                        other => return Ok(other),
+                    }
+                }
+                Ok(StmtResult::Normal)
+            }
         }
     }
 
-    fn eval(&mut self, expr: &Expr) -> BigDecimal {
+    /// Run one pass of a loop body and say what the loop should do next.
+    ///
+    /// `while` and `for` differ only in their headers; sharing the body keeps
+    /// `continue` meaning "next iteration" in both, which is easy to get wrong
+    /// when the two are written out separately — `for`'s step expression must
+    /// still run.
+    fn exec_body(&mut self, body: &[Stmt]) -> Result<LoopFlow, RuntimeError> {
+        for s in body {
+            match self.exec_stmt(s)? {
+                StmtResult::Normal => {}
+                StmtResult::Break => return Ok(LoopFlow::Break),
+                StmtResult::Continue => return Ok(LoopFlow::Continue),
+                StmtResult::Return(v) => return Ok(LoopFlow::Return(v)),
+            }
+        }
+        Ok(LoopFlow::Continue)
+    }
+
+    fn eval(&mut self, expr: &Expr) -> Eval {
         match expr {
-            Expr::Number(n) => n.clone(),
-
-            Expr::Variable(name) => self.get_var(name),
-
-            Expr::BinaryOp(left, op, right) => {
-                let lv = self.eval(left);
-                let rv = self.eval(right);
-                self.eval_binop(&lv, *op, &rv)
+            Expr::Number(s) => Ok(Decimal::parse(s, self.ibase)),
+            Expr::StringLit(s) => {
+                // In bc, strings in expression context are printed.
+                self.output_str(s);
+                Ok(Decimal::zero())
             }
-
-            Expr::UnaryMinus(inner) => {
-                let v = self.eval(inner);
-                v.negate()
+            Expr::Var(name) => Ok(self.get_var(name)),
+            Expr::ArrayAccess(name, idx) => {
+                let idx_str = self.index_of(idx)?;
+                Ok(self.get_array(name, &idx_str))
             }
-
-            Expr::UnaryNot(inner) => {
-                let v = self.eval(inner);
-                if v.is_zero() {
-                    BigDecimal::one()
-                } else {
-                    BigDecimal::zero()
-                }
+            Expr::Last => Ok(self.last.clone()),
+            Expr::UnaryMinus(e) => Ok(self.eval(e)?.negate()),
+            Expr::UnaryNot(e) => Ok(Self::boolean(self.eval(e)?.is_zero())),
+            Expr::BinOp(lhs, op, rhs) => {
+                let a = self.eval(lhs)?;
+                let b = self.eval(rhs)?;
+                self.apply(&a, *op, &b)
             }
-
-            Expr::Assign(name, value) => {
-                let v = self.eval(value);
-                self.set_var(name, v.clone());
-                v
+            Expr::Assign(target, val_expr) => {
+                let val = self.eval(val_expr)?;
+                self.assign_to(target, val.clone())?;
+                Ok(val)
             }
-
-            Expr::CompoundAssign(name, op, value) => {
-                let current = self.get_var(name);
-                let rhs = self.eval(value);
-                let result = self.eval_binop(&current, *op, &rhs);
-                self.set_var(name, result.clone());
-                result
+            Expr::OpAssign(target, op, val_expr) => {
+                let current = self.eval_lvalue(target)?;
+                let rhs = self.eval(val_expr)?;
+                let result = self.apply(&current, *op, &rhs)?;
+                self.assign_to(target, result.clone())?;
+                Ok(result)
             }
-
-            Expr::PreIncrement(name) => {
-                let current = self.get_var(name);
-                let result = bd_add(&current, &BigDecimal::one());
-                self.set_var(name, result.clone());
-                result
+            Expr::PreInc(e) => {
+                let val = self.eval_lvalue(e)?.add(&Decimal::from_i64(1));
+                self.assign_to(e, val.clone())?;
+                Ok(val)
             }
-
-            Expr::PreDecrement(name) => {
-                let current = self.get_var(name);
-                let result = bd_sub(&current, &BigDecimal::one());
-                self.set_var(name, result.clone());
-                result
+            Expr::PreDec(e) => {
+                let val = self.eval_lvalue(e)?.sub(&Decimal::from_i64(1));
+                self.assign_to(e, val.clone())?;
+                Ok(val)
             }
-
-            Expr::PostIncrement(name) => {
-                let current = self.get_var(name);
-                let incremented = bd_add(&current, &BigDecimal::one());
-                self.set_var(name, incremented);
-                current
+            Expr::PostInc(e) => {
+                let val = self.eval_lvalue(e)?;
+                let new_val = val.add(&Decimal::from_i64(1));
+                self.assign_to(e, new_val)?;
+                Ok(val)
             }
-
-            Expr::PostDecrement(name) => {
-                let current = self.get_var(name);
-                let decremented = bd_sub(&current, &BigDecimal::one());
-                self.set_var(name, decremented);
-                current
+            Expr::PostDec(e) => {
+                let val = self.eval_lvalue(e)?;
+                let new_val = val.sub(&Decimal::from_i64(1));
+                self.assign_to(e, new_val)?;
+                Ok(val)
             }
-
-            Expr::FuncCall(name, args) => match name.as_str() {
-                "sqrt" => {
-                    if args.is_empty() {
-                        eprintln!("bc: sqrt requires an argument");
-                        return BigDecimal::zero();
+            Expr::Call(name, args) => self.call_func(name, args),
+            Expr::Compare(lhs, op, rhs) => {
+                let a = self.eval(lhs)?;
+                let b = self.eval(rhs)?;
+                // `Decimal`'s ordering is by value, so `1.5` and `1.50` compare
+                // equal here even though they are stored differently.
+                let ord = a.cmp(&b);
+                Ok(Self::boolean(match op {
+                    CmpOp::Eq => ord.is_eq(),
+                    CmpOp::Ne => ord.is_ne(),
+                    CmpOp::Lt => ord.is_lt(),
+                    CmpOp::Gt => ord.is_gt(),
+                    CmpOp::Le => ord.is_le(),
+                    CmpOp::Ge => ord.is_ge(),
+                }))
+            }
+            // Both operators short-circuit, which is not merely an
+            // optimisation: `x != 0 && 1/x > 2` must not evaluate the division
+            // when `x` is zero, or it reports a runtime error the user's guard
+            // was written to prevent.
+            Expr::Logical(lhs, op, rhs) => match op {
+                LogOp::And => {
+                    if self.eval(lhs)?.is_zero() {
+                        return Ok(Decimal::zero());
                     }
-                    let v = self.eval(&args[0]);
-                    bd_sqrt(&v, self.scale).unwrap_or_else(|| {
-                        eprintln!("bc: square root of negative number");
-                        BigDecimal::zero()
-                    })
+                    Ok(Self::boolean(!self.eval(rhs)?.is_zero()))
                 }
-                "length" => {
-                    if args.is_empty() {
-                        return BigDecimal::zero();
+                LogOp::Or => {
+                    if !self.eval(lhs)?.is_zero() {
+                        return Ok(Decimal::from_i64(1));
                     }
-                    let v = self.eval(&args[0]);
-                    let s = v.to_string_with_scale(v.scale);
-                    let digits: usize = s.chars().filter(|c| c.is_ascii_digit()).count();
-                    BigDecimal::parse(&digits.to_string()).unwrap_or_else(BigDecimal::zero)
-                }
-                "scale" => {
-                    if args.is_empty() {
-                        return BigDecimal::parse(&self.scale.to_string())
-                            .unwrap_or_else(BigDecimal::zero);
-                    }
-                    let v = self.eval(&args[0]);
-                    BigDecimal::parse(&v.scale.to_string()).unwrap_or_else(BigDecimal::zero)
-                }
-                "quit" => {
-                    process::exit(0);
-                }
-                _ => {
-                    eprintln!("bc: undefined function: {name}");
-                    BigDecimal::zero()
+                    Ok(Self::boolean(!self.eval(rhs)?.is_zero()))
                 }
             },
-
-            Expr::PrintExpr(exprs) => {
-                let stdout = io::stdout();
-                let mut out = stdout.lock();
-                let mut last = BigDecimal::zero();
-                for e in exprs {
-                    let val = self.eval(e);
-                    let _ = write!(out, "{}", val.to_string_with_scale(self.scale));
-                    last = val;
-                }
-                let _ = writeln!(out);
-                last
-            }
         }
     }
 
-    fn eval_binop(&self, lv: &BigDecimal, op: BinOp, rv: &BigDecimal) -> BigDecimal {
-        match op {
-            BinOp::Add => bd_add(lv, rv),
-            BinOp::Sub => bd_sub(lv, rv),
-            BinOp::Mul => bd_mul(lv, rv, self.scale),
-            BinOp::Div => match bd_div(lv, rv, self.scale) {
-                Some(r) => r,
-                None => {
-                    eprintln!("bc: division by zero");
-                    BigDecimal::zero()
+    /// bc's spelling of a truth value: 1 or 0, as a number like any other.
+    fn boolean(b: bool) -> Decimal {
+        if b {
+            Decimal::from_i64(1)
+        } else {
+            Decimal::zero()
+        }
+    }
+
+    /// One binary operator, at the interpreter's current scale.
+    ///
+    /// `a op b` and `a op= b` are the same arithmetic, so they are the same
+    /// code — and there is exactly one place where a division by zero becomes a
+    /// `RuntimeError` rather than two that could drift apart.
+    fn apply(&self, a: &Decimal, op: BinOp, b: &Decimal) -> Eval {
+        let scale = self.scale;
+        Ok(match op {
+            BinOp::Add => a.add(b),
+            BinOp::Sub => a.sub(b),
+            // `multiply`, not `mul`: POSIX gives a product the scale
+            // min(a + b, max(scale, a, b)), so `scale = 0; 1.5 * 1.5` is 2.2
+            // rather than 2. `scale` governs division, where digits have to be
+            // invented, not multiplication, where they are already there.
+            BinOp::Mul => a.multiply(b, scale),
+            BinOp::Div => a.div(b, scale)?,
+            BinOp::Mod => a.modulo(b, scale)?,
+            BinOp::Pow => a.pow(b, scale)?,
+        })
+    }
+
+    /// An array subscript, rendered as the string the map is keyed by.
+    ///
+    /// Always base ten, never `obase`: the key is an internal identity, and
+    /// keying it by the *output* base would make `a[10]` and `a[16]` the same
+    /// element after `obase=16`.
+    fn index_of(&mut self, idx: &Expr) -> Result<String, RuntimeError> {
+        Ok(self.eval(idx)?.rescale(0).format(10))
+    }
+
+    fn eval_lvalue(&mut self, expr: &Expr) -> Eval {
+        match expr {
+            Expr::Var(name) => Ok(self.get_var(name)),
+            Expr::ArrayAccess(name, idx) => {
+                let idx_str = self.index_of(idx)?;
+                Ok(self.get_array(name, &idx_str))
+            }
+            _ => self.eval(expr),
+        }
+    }
+
+    fn assign_to(&mut self, target: &Expr, val: Decimal) -> Result<(), RuntimeError> {
+        match target {
+            Expr::Var(name) => self.set_var(name, val),
+            Expr::ArrayAccess(name, idx) => {
+                let idx_str = self.index_of(idx)?;
+                self.set_array(name, &idx_str, val);
+            }
+            _ => {} // Cannot assign to non-lvalue.
+        }
+        Ok(())
+    }
+
+    fn call_func(&mut self, name: &str, args: &[Expr]) -> Eval {
+        /// The first argument, or zero — bc's own reading of a call with none.
+        macro_rules! arg0 {
+            () => {
+                match args.first() {
+                    Some(a) => self.eval(a)?,
+                    None => return Ok(Decimal::zero()),
                 }
-            },
-            BinOp::Mod => match bd_modulo(lv, rv, self.scale) {
-                Some(r) => r,
-                None => {
-                    eprintln!("bc: division by zero");
-                    BigDecimal::zero()
+            };
+        }
+
+        // Built-in functions.
+        match name {
+            "sqrt" => return Ok(arg0!().sqrt(self.scale)?),
+            "length" => return Ok(Decimal::from_i64(arg0!().length() as i64)),
+            "scale" if !args.is_empty() => return Ok(Decimal::from_i64(arg0!().scale as i64)),
+            "read" => {
+                let mut line = String::new();
+                let _ = io::stdin().read_line(&mut line);
+                return Ok(Decimal::parse(line.trim(), self.ibase));
+            }
+            _ => {}
+        }
+
+        // Math library functions (available with -l). Each argument is bound to
+        // a local before the call, because evaluating it borrows the
+        // interpreter mutably and the builtin borrows it again.
+        if self.math_lib {
+            match name {
+                "s" => {
+                    let x = arg0!();
+                    return self.builtin_sin(x);
                 }
-            },
-            BinOp::Pow => bd_pow(lv, rv, self.scale),
-            BinOp::Eq => bool_to_bd(bd_compare(lv, rv) == std::cmp::Ordering::Equal),
-            BinOp::Ne => bool_to_bd(bd_compare(lv, rv) != std::cmp::Ordering::Equal),
-            BinOp::Lt => bool_to_bd(bd_compare(lv, rv) == std::cmp::Ordering::Less),
-            BinOp::Gt => bool_to_bd(bd_compare(lv, rv) == std::cmp::Ordering::Greater),
-            BinOp::Le => bool_to_bd(bd_compare(lv, rv) != std::cmp::Ordering::Greater),
-            BinOp::Ge => bool_to_bd(bd_compare(lv, rv) != std::cmp::Ordering::Less),
-            BinOp::And => bool_to_bd(!lv.is_zero() && !rv.is_zero()),
-            BinOp::Or => bool_to_bd(!lv.is_zero() || !rv.is_zero()),
+                "c" => {
+                    let x = arg0!();
+                    return self.builtin_cos(x);
+                }
+                "a" => {
+                    let x = arg0!();
+                    return self.builtin_atan(x);
+                }
+                "l" => {
+                    let x = arg0!();
+                    return self.builtin_ln(&x);
+                }
+                "e" => {
+                    let x = arg0!();
+                    return self.builtin_exp(&x);
+                }
+                "j" => {
+                    let (Some(n_expr), Some(x_expr)) = (args.first(), args.get(1)) else {
+                        return Ok(Decimal::zero());
+                    };
+                    let n = self.eval(n_expr)?;
+                    let x = self.eval(x_expr)?;
+                    return self.builtin_bessel(&n, &x);
+                }
+                _ => {}
+            }
+        }
+
+        // User-defined function.
+        let Some(func) = self.funcs.get(name).cloned() else {
+            return Err(RuntimeError::UndefinedFunction(name.to_string()));
+        };
+
+        // Evaluate arguments *before* the parameters are bound, so that an
+        // argument mentioning a variable the function also takes as a parameter
+        // sees the caller's value rather than a half-built frame.
+        let mut arg_vals = Vec::with_capacity(args.len());
+        for a in args {
+            arg_vals.push(self.eval(a)?);
+        }
+
+        // Save variables that will be shadowed.
+        let mut saved = Vec::new();
+        for (i, param) in func.params.iter().enumerate() {
+            saved.push((param.clone(), self.vars.get(param).cloned()));
+            let val = arg_vals.get(i).cloned().unwrap_or_else(Decimal::zero);
+            self.vars.insert(param.clone(), val);
+        }
+        for auto_var in &func.auto_vars {
+            saved.push((auto_var.clone(), self.vars.get(auto_var).cloned()));
+            self.vars.insert(auto_var.clone(), Decimal::zero());
+        }
+
+        // Execute body. The result is held rather than returned, because the
+        // frame has to be torn down on the failing path too: a `?` here would
+        // leave the caller's variables shadowed by the callee's for the rest of
+        // the session.
+        let mut outcome = Ok(Decimal::zero());
+        for s in &func.body {
+            match self.exec_stmt(s) {
+                Ok(StmtResult::Normal) => {}
+                Ok(StmtResult::Return(v)) => {
+                    outcome = Ok(v);
+                    break;
+                }
+                Ok(StmtResult::Break | StmtResult::Continue) => break,
+                Err(e) => {
+                    outcome = Err(e);
+                    break;
+                }
+            }
+        }
+
+        // Restore saved variables.
+        for (name_key, old_val) in saved {
+            match old_val {
+                Some(v) => {
+                    self.vars.insert(name_key, v);
+                }
+                None => {
+                    self.vars.remove(&name_key);
+                }
+            }
+        }
+
+        outcome
+    }
+
+    // -----------------------------------------------------------------
+    // Math library built-in functions (Taylor series implementations)
+    // -----------------------------------------------------------------
+    //
+    // Every division below is by a term the series itself produced: a loop
+    // counter, a factorial, a literal, or a quantity the enclosing branch has
+    // just shown to be non-zero. None of them can be driven to zero by the
+    // user's expression, and each site says which case it is. They still go
+    // through the fallible `div`, and the `?` still propagates -- an argument
+    // that cannot be zero is a claim about this code, and if the claim is ever
+    // wrong the user gets "Runtime error: divide by zero" rather than a series
+    // that quietly converges to the wrong number.
+    //
+    // The working scale is the user's plus five guard digits, so the truncation
+    // in each term does not accumulate into the digits that get printed.
+
+    /// The extra digits carried through an iterative series.
+    ///
+    /// Each term truncates, and a hundred truncations at the output scale would
+    /// show in the last digit or two. Five guard digits is what `bc`'s own
+    /// library uses.
+    const GUARD_DIGITS: usize = 5;
+
+    fn working_scale(&self) -> usize {
+        self.scale.saturating_add(Self::GUARD_DIGITS)
+    }
+
+    /// sin(x) using Taylor series.
+    fn builtin_sin(&self, x: Decimal) -> Eval {
+        let scale = self.working_scale();
+        // Reduce x modulo 2*pi for better convergence.
+        let x = self.reduce_angle(&x, scale)?;
+
+        let mut result = Decimal::zero();
+        let mut term = x.clone();
+        let mut n = 1i64;
+        let neg_one = Decimal::from_i64(-1);
+
+        for _ in 0..50 {
+            result = result.add(&term);
+            n = n.saturating_add(2);
+            // (n-1)*n for odd n >= 3, so at least 6 -- never zero.
+            let denom = Decimal::from_i64(n.saturating_sub(1).saturating_mul(n));
+            term = term.mul(&x, scale).mul(&x, scale);
+            term = term.div(&denom, scale)?;
+            term = term.mul(&neg_one, scale);
+            if term.is_negligible(scale) {
+                break;
+            }
+        }
+        Ok(result.rescale(self.scale))
+    }
+
+    /// cos(x) using Taylor series.
+    fn builtin_cos(&self, x: Decimal) -> Eval {
+        let scale = self.working_scale();
+        let x = self.reduce_angle(&x, scale)?;
+
+        let mut result = Decimal::zero();
+        let mut term = Decimal::one();
+        let mut n = 0i64;
+        let neg_one = Decimal::from_i64(-1);
+
+        for _ in 0..50 {
+            result = result.add(&term);
+            n = n.saturating_add(2);
+            // (n-1)*n for even n >= 2, so at least 2 -- never zero.
+            let denom = Decimal::from_i64(n.saturating_sub(1).saturating_mul(n));
+            term = term.mul(&x, scale).mul(&x, scale);
+            term = term.div(&denom, scale)?;
+            term = term.mul(&neg_one, scale);
+            if term.is_negligible(scale) {
+                break;
+            }
+        }
+        Ok(result.rescale(self.scale))
+    }
+
+    /// atan(x) using Taylor series (converges for |x| <= 1).
+    /// For |x| > 1, use identity: atan(x) = pi/2 - atan(1/x).
+    fn builtin_atan(&self, x: Decimal) -> Eval {
+        let scale = self.working_scale();
+        let one = Decimal::from_i64(1);
+
+        if x.abs() > one {
+            let pi_half = self.compute_pi(scale)?.div(&Decimal::from_i64(2), scale)?;
+            // |x| > 1 is exactly the branch condition, so x is not zero.
+            let inv = one.div(&x, scale)?;
+            let atan_inv = self.atan_series(&inv, scale)?;
+            let result = if x.is_negative() {
+                pi_half.negate().sub(&atan_inv)
+            } else {
+                pi_half.sub(&atan_inv)
+            };
+            return Ok(result.rescale(self.scale));
+        }
+        Ok(self.atan_series(&x, scale)?.rescale(self.scale))
+    }
+
+    fn atan_series(&self, x: &Decimal, scale: usize) -> Eval {
+        let mut result = Decimal::zero();
+        let mut term = x.clone();
+        let x_sq = x.mul(x, scale);
+        let neg_one = Decimal::from_i64(-1);
+
+        for i in 0..100i64 {
+            // 2i+1 is odd, so never zero.
+            let denom = Decimal::from_i64(i.saturating_mul(2).saturating_add(1));
+            let contrib = term.div(&denom, scale)?;
+            result = result.add(&contrib);
+            term = term.mul(&x_sq, scale).mul(&neg_one, scale);
+            if term.is_negligible(scale) {
+                break;
+            }
+        }
+        Ok(result)
+    }
+
+    /// Natural logarithm using series: ln(x) = 2 * sum( ((x-1)/(x+1))^(2k+1) / (2k+1) ).
+    fn builtin_ln(&self, x: &Decimal) -> Eval {
+        if x.is_zero() || x.is_negative() {
+            return Err(RuntimeError::LogOfNonPositive);
+        }
+        let scale = self.working_scale();
+        let one = Decimal::from_i64(1);
+
+        // ln(x) = ln(m * 2^e) = ln(m) + e*ln(2): halve or double until the
+        // argument is in [0.5, 2), where the series converges quickly.
+        let two = Decimal::from_i64(2);
+        let mut val = x.clone();
+        let mut exp_count: i64 = 0;
+
+        while val > two {
+            val = val.div(&two, scale)?;
+            exp_count = exp_count.saturating_add(1);
+        }
+        let half = one.div(&two, scale)?;
+        while val < half {
+            val = val.mul(&two, scale);
+            exp_count = exp_count.saturating_sub(1);
+        }
+
+        // Now compute ln(val) using the series.
+        let num = val.sub(&one);
+        // val is in [0.5, 2] and positive, so val+1 is at least 1.5.
+        let den = val.add(&one);
+        let ratio = num.div(&den, scale)?;
+        let ratio_sq = ratio.mul(&ratio, scale);
+
+        let mut result = Decimal::zero();
+        let mut term = ratio.clone();
+
+        for i in 0..100i64 {
+            // 2i+1 is odd, so never zero.
+            let denom = Decimal::from_i64(i.saturating_mul(2).saturating_add(1));
+            let contrib = term.div(&denom, scale)?;
+            result = result.add(&contrib);
+            term = term.mul(&ratio_sq, scale);
+            if term.is_negligible(scale) {
+                break;
+            }
+        }
+        result = result.mul(&two, scale);
+
+        // Add back the exp_count * ln(2).
+        if exp_count != 0 {
+            let ln2 = self.compute_ln2(scale)?;
+            result = result.add(&ln2.mul(&Decimal::from_i64(exp_count), scale));
+        }
+        Ok(result.rescale(self.scale))
+    }
+
+    /// e^x using Taylor series.
+    fn builtin_exp(&self, x: &Decimal) -> Eval {
+        let scale = self.working_scale();
+        let mut result = Decimal::one();
+        let mut term = Decimal::one();
+
+        for n in 1..100 {
+            term = term.mul(x, scale);
+            // n starts at 1, so never zero.
+            term = term.div(&Decimal::from_i64(n), scale)?;
+            result = result.add(&term);
+            if term.is_negligible(scale) {
+                break;
+            }
+        }
+        Ok(result.rescale(self.scale))
+    }
+
+    /// Bessel function J(n, x) using series expansion.
+    fn builtin_bessel(&self, n: &Decimal, x: &Decimal) -> Eval {
+        let scale = self.working_scale();
+        let n_int = {
+            let s = n.rescale(0).format(10);
+            s.parse::<i64>().unwrap_or(0).unsigned_abs()
+        };
+
+        let x_half = x.div(&Decimal::from_i64(2), scale)?;
+        let neg_x_sq_4 = x.mul(x, scale).negate().div(&Decimal::from_i64(4), scale)?;
+
+        // (x/2)^n / n!
+        let mut pow = Decimal::one();
+        for _ in 0..n_int {
+            pow = pow.mul(&x_half, scale);
+        }
+        // A factorial of non-negative integers, so at least 1 -- never zero.
+        let mut factorial = Decimal::one();
+        for i in 1..=n_int {
+            factorial = factorial.mul(&Decimal::from_i64(i as i64), scale);
+        }
+        let mut term = pow.div(&factorial, scale)?;
+        let mut result = term.clone();
+
+        for k in 1i64..100 {
+            // term *= -x^2/4 / (k * (n + k)); k >= 1 and n >= 0, so never zero.
+            let denom = Decimal::from_i64(
+                k.saturating_mul(i64::try_from(n_int).unwrap_or(i64::MAX).saturating_add(k)),
+            );
+            term = term.mul(&neg_x_sq_4, scale).div(&denom, scale)?;
+            result = result.add(&term);
+            if term.is_negligible(scale) {
+                break;
+            }
+        }
+        Ok(result.rescale(self.scale))
+    }
+
+    /// Compute pi to the given scale using Machin's formula:
+    /// pi/4 = 4*atan(1/5) - atan(1/239).
+    fn compute_pi(&self, scale: usize) -> Eval {
+        let one = Decimal::from_i64(1);
+        let four = Decimal::from_i64(4);
+        let a1 = one.div(&Decimal::from_i64(5), scale)?;
+        let a2 = one.div(&Decimal::from_i64(239), scale)?;
+        let t1 = self.atan_series(&a1, scale)?;
+        let t2 = self.atan_series(&a2, scale)?;
+        Ok(four.mul(&t1, scale).sub(&t2).mul(&four, scale))
+    }
+
+    /// Compute ln(2) to the given scale.
+    fn compute_ln2(&self, scale: usize) -> Eval {
+        let one = Decimal::from_i64(1);
+        let two = Decimal::from_i64(2);
+        // ln(2) via the series for ln((1+y)/(1-y)) where y = 1/3.
+        let num = two.sub(&one); // 1
+        let den = two.add(&one); // 3
+        let ratio = num.div(&den, scale)?;
+        let ratio_sq = ratio.mul(&ratio, scale);
+        let mut result = Decimal::zero();
+        let mut term = ratio.clone();
+        for i in 0..100i64 {
+            // 2i+1 is odd, so never zero.
+            let denom = Decimal::from_i64(i.saturating_mul(2).saturating_add(1));
+            let contrib = term.div(&denom, scale)?;
+            result = result.add(&contrib);
+            term = term.mul(&ratio_sq, scale);
+            if term.is_negligible(scale) {
+                break;
+            }
+        }
+        Ok(result.mul(&two, scale))
+    }
+
+    /// Reduce angle modulo 2*pi for trig functions.
+    fn reduce_angle(&self, x: &Decimal, scale: usize) -> Eval {
+        let two_pi = self.compute_pi(scale)?.mul(&Decimal::from_i64(2), scale);
+        // pi is a computed value rather than a constant, so at scale 0 it can
+        // legitimately truncate to zero. Reducing by nothing is the right
+        // answer there, and it is also what keeps the division below safe.
+        if two_pi.is_zero() || x.abs() <= two_pi {
+            return Ok(x.clone());
+        }
+        let q = x.div(&two_pi, 0)?.rescale(0);
+        Ok(x.sub(&q.mul(&two_pi, scale)))
+    }
+}
+
+/// How many digits `bc` puts on a line, given a `BC_LINE_LENGTH` of `n`.
+///
+/// `bc` counts the continuation backslash against the stated width and then
+/// leaves one column beyond it unused, so `BC_LINE_LENGTH=10` emits nine
+/// columns: eight digits and a `\`. That is one digit narrower than `dc` makes
+/// of the same number, which is why the arithmetic lives in each front-end
+/// rather than in `bignum` (see [`bignum::wrap_number`]).
+///
+/// Below 3 there is no room to make progress, and `bc` stops wrapping entirely
+/// rather than emitting a backslash per digit — as does `BC_LINE_LENGTH=0`,
+/// the documented way for a script to ask for one long number.
+fn wrap_chunk(line_length: usize) -> usize {
+    if line_length < 3 {
+        return 0;
+    }
+    line_length.saturating_sub(2)
+}
+
+/// The output line length, from the environment or the traditional default.
+///
+/// A setting that is not a number is ignored rather than rejected: a malformed
+/// environment should not stop a calculator from calculating.
+fn line_length_from_env(var: &str) -> usize {
+    let stated = env::var(var)
+        .ok()
+        .and_then(|v| v.trim().parse::<usize>().ok())
+        .unwrap_or(bignum::DEFAULT_LINE_LENGTH);
+    wrap_chunk(stated)
+}
+
+/// Apply `print`'s escape table to a string literal.
+///
+/// Only `print` interprets escapes; a bare string statement writes its bytes
+/// as they were typed. This is not a subtlety we invented — it is what GNU
+/// `bc` 1.07.1 does, and `scripts/calc-diff.sh` compares against it:
+///
+/// | source | `print "…"` | `"…"` alone |
+/// |---|---|---|
+/// | `a\nb` | `a`, newline, `b` | `a`, `\`, `n`, `b` |
+/// | `a\\b` | `a\b` | `a\\b` |
+///
+/// An escape that is not in the table takes *both* characters with it —
+/// `print "a\vb"` writes `ab`, not `a\vb` — as does a backslash with nothing
+/// after it. That is deliberate on GNU's part (it is how `\` at end of line
+/// continues a string) and a program that relies on an unknown escape
+/// surviving would break differently on the two implementations, so we match
+/// it rather than improve on it.
+fn print_escaped(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars();
+    while let Some(c) = chars.next() {
+        if c != '\\' {
+            out.push(c);
+            continue;
+        }
+        match chars.next() {
+            Some('a') => out.push('\x07'),
+            Some('b') => out.push('\x08'),
+            Some('f') => out.push('\x0c'),
+            Some('n') => out.push('\n'),
+            // `\q` is bc's way of writing a quote, since the lexer ends a
+            // string at the first unescaped `"` and there is no escaped one.
+            Some('q') => out.push('"'),
+            Some('r') => out.push('\r'),
+            Some('t') => out.push('\t'),
+            Some('\\') => out.push('\\'),
+            // Both characters are dropped: an unknown escape, and a trailing
+            // backslash with nothing to escape.
+            Some(_) | None => {}
+        }
+    }
+    out
+}
+
+/// Whether a bare expression statement prints nothing of its own.
+///
+/// bc echoes the value of any expression written as a statement, *except* an
+/// assignment (which is silent, so that `x = 1` does not print) and a string
+/// literal (which writes its own text and has no value to echo).
+///
+/// `++`/`--` are *not* assignments for this purpose: GNU `bc` prints `10` for
+/// `x = 10; x++` and `11` for `x = 10; ++x`, which falls straight out of each
+/// operator's value once the statement is allowed to echo at all. Only a real
+/// `=` is silent, so `y = x++` prints nothing while `x++` prints the old `x`.
+fn suppresses_auto_print(expr: &Expr) -> bool {
+    matches!(
+        expr,
+        Expr::Assign(_, _)
+            | Expr::OpAssign(_, _, _)
+            // A bare string statement -- `"hello"` -- writes the string and
+            // nothing else. Evaluating it returns zero for want of anything
+            // better, and printing that zero as well made every string
+            // statement emit a stray `0` after its text.
+            | Expr::StringLit(_)
+    )
+}
+
+/// How many `{` in `text` are still unclosed.
+///
+/// Interactive bc reads a `define` or a multi-line `while` across several
+/// lines, so it has to know when the construct is finished before it can parse
+/// anything. Counting the brace *characters* is the obvious way and is wrong:
+/// `print "{"` would leave the count at one and swallow every following line
+/// until the user typed a `}` that was never part of any block. Running the
+/// lexer instead costs a re-scan of a buffer that is at most a few lines long,
+/// and gets strings, `#` comments and `/* */` comments right by construction,
+/// because that is the one piece of code in this program that already knows
+/// what a brace inside a string is.
+fn open_brace_depth(text: &str) -> i32 {
+    let mut lexer = Lexer::new(text);
+    let mut depth: i32 = 0;
+    loop {
+        match lexer.next_token() {
+            Token::LBrace => depth = depth.saturating_add(1),
+            Token::RBrace => depth = depth.saturating_sub(1),
+            Token::Eof => return depth,
+            _ => {}
         }
     }
 }
 
-fn bool_to_bd(b: bool) -> BigDecimal {
-    if b {
-        BigDecimal::one()
-    } else {
-        BigDecimal::zero()
-    }
+// -------------------------------------------------------------------------
+// The command line
+// -------------------------------------------------------------------------
+//
+// Every sentence and every exit status below was *measured* against GNU bc
+// 1.07.1 through WSL, not recalled -- and recall was wrong three times, in
+// ways that matter:
+//
+//   * `-e` and `-f` **do not exist** in GNU bc. `bc -e 2+2` answers
+//     `invalid option -- 'e'` and exits 1. Our `-e` is a SlateOS extension
+//     (it is Gavin Howard's bc that has one), and is marked as such in the
+//     usage text so nobody ports a script to a GNU host expecting it.
+//   * The long-option table is **alphabetical** and has eight entries, one of
+//     which (`--compile`) the usage text does not mention. Measured with
+//     `bc --=x`, whose empty prefix matches every entry and so prints the
+//     table in declaration order:
+//
+//         bc: option '--=x' is ambiguous; possibilities: '--compile'
+//         '--help' '--interactive' '--mathlib' '--quiet' '--standard'
+//         '--version' '--warn'
+//
+//   * A file that will not open is `File NAME is unavailable.` -- with **no**
+//     `bc: ` prefix, and it **stops the run**: `bc good.bc missing.bc
+//     good.bc` runs the first file, reports the second and never reaches the
+//     third, exiting 1. The previous code here printed a different sentence,
+//     kept going, and exited **0**.
+//
+// Two further behaviours were measured because no amount of reading the
+// manual settles them:
+//
+//   * A file operand does **not** end the run. `printf '9+9\n' | bc a.bc`
+//     prints a.bc's output and then evaluates standard input, in one
+//     interpreter, so a file may define functions a later session uses.
+//   * A bare `-` is **not** standard input; it is a file name that fails to
+//     open, and is reported exactly like any other. The comment that used to
+//     sit on the operand arm claiming otherwise was wrong.
+//
+// The one deliberate deviation is quoting: GNU prints the name bare, so a
+// file called `x⏎bc: /etc/shadow: Permission denied` forges a line bc never
+// wrote. Names go through `quoteaf_os` for the reason set out in
+// `coreutils::quote` -- the same deviation every other utility here makes.
+
+/// Exits 1 on a bad command line, measured with `bc --zzz-bogus; echo $?`.
+const BC: Program = Program::new("bc", 1);
+
+/// GNU's usage block, reduced to what this bc actually does, and printed on
+/// **stdout** even when it follows a diagnostic on stderr -- which is what
+/// GNU does, because `getopt_long` writes the sentence and the program's own
+/// `usage()` writes this.
+const USAGE: &str = "\
+usage: bc [options] [file ...]
+  -h  --help         print this usage and exit
+  -i  --interactive  force interactive mode
+  -l  --mathlib      use the predefined math routines
+  -q  --quiet        don't print initial banner
+  -w  --warn         warn about non-standard bc constructs (accepted, no-op)
+  -v  --version      print version information and exit
+  -e  --expression EXPR   evaluate EXPR (a SlateOS extension; GNU bc has none)";
+
+/// The long options **in GNU's declaration order**, which is observable
+/// because `getopt_long` lists an ambiguous prefix's candidates in it.
+/// Measured with `bc --=x`; `expression` is ours and is inserted where
+/// alphabetical order puts it, so the list still reads as GNU's does.
+///
+/// The two we refuse are listed rather than omitted, because the table is
+/// what decides whether an abbreviation is ambiguous: drop `--standard` and
+/// `--s` would silently resolve to `--standard`'s neighbour instead of being
+/// refused.
+const LONG_OPTIONS: &[(&str, Long)] = &[
+    ("compile", Long::Compile),
+    ("expression", Long::Expression),
+    ("help", Long::Help),
+    ("interactive", Long::Interactive),
+    ("mathlib", Long::Mathlib),
+    ("quiet", Long::Quiet),
+    ("standard", Long::Standard),
+    ("version", Long::Version),
+    ("warn", Long::Warn),
+];
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Long {
+    Compile,
+    Expression,
+    Help,
+    Interactive,
+    Mathlib,
+    Quiet,
+    Standard,
+    Version,
+    Warn,
 }
 
-// ---------------------------------------------------------------------------
-// Main
-// ---------------------------------------------------------------------------
+/// One thing to evaluate, kept in command-line order.
+///
+/// Ordered rather than "expressions first, then files" because the
+/// interpreter is one piece of state: `bc -e 'define f(x){return x*2}'
+/// use.bc` and `bc use.bc -e '…'` are different programs, and the order the
+/// user typed is the only defensible reading of which one they meant.
+#[derive(Clone, PartialEq, Eq, Debug)]
+enum Input {
+    /// `-e EXPR`. Bytes, because an argument need not be UTF-8 and the
+    /// diagnostic for one that is not should name it rather than panic.
+    Expression(Vec<u8>),
+    File(OsString),
+}
 
-/// Parsed bc command-line arguments.
-#[cfg_attr(test, derive(Debug, PartialEq, Eq))]
-#[derive(Default)]
-struct BcArgs {
-    quiet: bool,
+/// What the command line asked for.
+#[derive(PartialEq, Eq, Debug)]
+enum Request {
+    Run(Settings),
+    Help,
+    Version,
+}
+
+#[derive(Default, PartialEq, Eq, Debug)]
+struct Settings {
     math_lib: bool,
-    files: Vec<String>,
+    quiet: bool,
+    /// `-i`: behave as if standard input were a terminal.
+    force_interactive: bool,
+    inputs: Vec<Input>,
 }
 
-fn parse_args(args: &[String]) -> Result<BcArgs, String> {
-    let mut out = BcArgs::default();
-    for arg in args {
-        match arg.as_str() {
-            "-q" | "--quiet" => out.quiet = true,
-            "-l" | "--mathlib" => out.math_lib = true,
-            other if other.starts_with('-') && other.len() > 1 => {
-                return Err(format!("unknown option: {other}"));
-            }
-            _ => out.files.push(arg.clone()),
-        }
+impl Settings {
+    /// Whether standard input is read after the operands.
+    ///
+    /// GNU always reads it, because GNU has no `-e`. Ours stops after an
+    /// explicit expression, since `bc -e '2+2'` dropping into an interactive
+    /// session is nobody's behaviour -- but a plain `bc file.bc` continues to
+    /// standard input exactly as GNU's does.
+    fn reads_stdin(&self) -> bool {
+        !self
+            .inputs
+            .iter()
+            .any(|input| matches!(input, Input::Expression(_)))
     }
-    Ok(out)
 }
 
-fn main() {
-    let args: Vec<String> = env::args().skip(1).collect();
-    let BcArgs {
-        quiet,
-        math_lib,
-        files,
-    } = match parse_args(&args) {
-        Ok(p) => p,
-        Err(msg) => {
-            eprintln!("bc: {msg}");
-            process::exit(1);
+/// A command line that cannot be run.
+#[derive(Debug)]
+enum Refusal {
+    Getopt(getopt::Error),
+    /// A flag GNU implements and we do not. Refused rather than ignored,
+    /// because its absence changes the answer -- see [`Refusal::report`].
+    Unimplemented(&'static str),
+}
+
+impl Refusal {
+    fn report(&self) -> ExitCode {
+        let status = match self {
+            Self::Getopt(e) => {
+                eprintln!("bc: {}", e.sentence);
+                // GNU prints the sentence on stderr and the usage block on
+                // stdout, from two different pieces of code. Reproduced
+                // rather than tidied: a script doing `bc -x 2>/dev/null`
+                // still sees the usage, as it does upstream.
+                println!("{USAGE}");
+                e.status
+            }
+            Self::Unimplemented(message) => {
+                eprintln!("bc: {message}");
+                println!("{USAGE}");
+                1
+            }
+        };
+        ExitCode::from(u8::try_from(status).unwrap_or(1))
+    }
+}
+
+/// A failure while evaluating, which ends the run the way GNU's does.
+///
+/// The variants carry the *name*, not a rendered sentence, so that the choice
+/// between `quoteaf_os` and `quotef_os` is made in one place by the shape of
+/// the sentence the name lands in — which is the rule `coreutils::quote`
+/// states and the rule a caller assembling its own string always gets wrong.
+#[derive(Debug)]
+enum Trouble {
+    /// GNU's `File %s is unavailable.`, quoted per this tree's policy.
+    Unavailable(OsString),
+    /// Ours alone: GNU's lexer is byte-oriented and ours needs `&str`, so a
+    /// source file that is not UTF-8 is refused instead of being silently
+    /// truncated at the first bad byte -- which is what the old `lines()`
+    /// loop did, exiting 0 with a partial answer. Tracked in
+    /// `known-issues.md` as a limitation to remove by making the lexer take
+    /// bytes.
+    FileNotUtf8(OsString),
+    /// The same, for an argument rather than a file: `bc -e $'\xe9'`.
+    ExpressionNotUtf8,
+    /// The same again, for the session on standard input.
+    StdinNotUtf8,
+    /// A read on standard input that failed for a reason other than EOF.
+    StdinRead(String),
+}
+
+impl Trouble {
+    fn report(&self) -> ExitCode {
+        match self {
+            // Mid-sentence, so the quotes are never elided: a bare name would
+            // blur into the words either side of it.
+            Self::Unavailable(name) => eprintln!("File {} is unavailable.", quoteaf_os(name)),
+            // Ends the clause, so it takes the bare form when it can, exactly
+            // as `wc: missing.txt: No such file or directory` does.
+            Self::FileNotUtf8(name) => eprintln!("bc: {}: not valid UTF-8", quotef_os(name)),
+            Self::ExpressionNotUtf8 => eprintln!("bc: -e expression: not valid UTF-8"),
+            Self::StdinNotUtf8 => eprintln!("bc: standard input: not valid UTF-8"),
+            Self::StdinRead(message) => eprintln!("bc: standard input: {message}"),
         }
+        ExitCode::FAILURE
+    }
+}
+
+// -------------------------------------------------------------------------
+// Main entry point
+// -------------------------------------------------------------------------
+
+fn main() -> ExitCode {
+    // `args_os`, not `args`: `env::args()` panics on an argument that is not
+    // UTF-8, so `bc $'caf\xe9.bc'` aborted before the file name could even be
+    // reported. A path may hold every byte but `/` and NUL.
+    let args: Vec<OsString> = env::args_os().skip(1).collect();
+    let settings = match parse_args(&args) {
+        Err(refusal) => return refusal.report(),
+        Ok(Request::Help) => {
+            println!("{USAGE}");
+            return ExitCode::SUCCESS;
+        }
+        Ok(Request::Version) => {
+            println!("bc (SlateOS coreutils) 0.1.0");
+            return ExitCode::SUCCESS;
+        }
+        Ok(Request::Run(settings)) => settings,
     };
 
-    if !quiet {
-        eprintln!("bc 1.0 (slateos coreutils)");
-        eprintln!("Type \"quit\" to exit.");
-    }
+    let mut interp = Interpreter::new(settings.math_lib);
 
-    let mut interp = Interpreter::new();
-
-    // -l sets scale to 20 and loads math library functions.
-    if math_lib {
-        interp.scale = 20;
-    }
-
-    // Process files.
-    for path in &files {
-        match fs::read_to_string(path) {
-            Ok(content) => {
-                if run_input(&mut interp, &content) {
-                    return;
-                }
-            }
-            Err(e) => {
-                eprintln!("bc: {}: {e}", quotef_os(path));
-                process::exit(1);
-            }
-        }
-    }
-
-    // Interactive mode: read from stdin.
+    // Whether input is a terminal, not whether the *environment* looks like
+    // one. `TERM` is inherited by every child of a terminal session, pipes
+    // included, so the previous probe said "interactive" for
+    // `echo 1+1 | bc` -- and the banner went into the caller's captured
+    // output, ahead of the answer. `$(echo 1+1 | bc)` is the single most
+    // common way this program is used.
     let stdin = io::stdin();
-    let stdout = io::stdout();
-    let reader = BufReader::new(stdin.lock());
-    // Read lines, handling line continuation with backslash.
-    let mut continued = String::new();
-    for line in reader.lines() {
-        match line {
-            Ok(l) => {
-                if l.ends_with('\\') {
-                    continued.push_str(&l[..l.len() - 1]);
-                    continued.push(' ');
-                    continue;
-                }
+    let interactive = settings.force_interactive || {
+        use std::io::IsTerminal;
+        stdin.is_terminal()
+    };
 
-                let full_line = if continued.is_empty() {
-                    l
-                } else {
-                    let mut full = std::mem::take(&mut continued);
-                    full.push_str(&l);
-                    full
-                };
+    // Before the operands, as GNU's is: the banner introduces the session,
+    // and there is no session to introduce when `-e` ends the run.
+    if !settings.quiet && interactive && settings.reads_stdin() {
+        println!("bc (SlateOS coreutils) 0.1.0");
+        println!("Type 'quit' to exit.");
+    }
 
-                if run_input(&mut interp, &full_line) {
-                    return;
-                }
-                let _ = stdout.lock().flush();
-            }
-            Err(_) => break,
+    for input in &settings.inputs {
+        // Stop at the first one that fails, which is GNU's behaviour and the
+        // only safe one: a later file that uses a function an unreadable
+        // earlier file was to have defined would otherwise compute a wrong
+        // answer rather than report the missing file.
+        if let Err(trouble) = eval_input(&mut interp, input) {
+            return trouble.report();
         }
     }
+
+    if settings.reads_stdin()
+        && let Err(trouble) = eval_stdin(&mut interp, &stdin)
+    {
+        return trouble.report();
+    }
+
+    ExitCode::SUCCESS
 }
 
-/// Run input through the tokenizer/parser/interpreter.
-/// Returns true if quit was requested.
-fn run_input(interp: &mut Interpreter, input: &str) -> bool {
-    let tokens = tokenize(input);
-    let mut parser = Parser::new(tokens);
+/// Run one `-e` expression or one file operand.
+fn eval_input(interp: &mut Interpreter, input: &Input) -> Result<(), Trouble> {
+    // The second element is what to blame if the bytes turn out not to be
+    // UTF-8, which for `-e` is the command line rather than any file.
+    let (text, blame) = match input {
+        Input::Expression(bytes) => (bytes.clone(), Trouble::ExpressionNotUtf8),
+        Input::File(path) => {
+            // `read`, not `read_to_string`: the latter reports an invalid byte
+            // as an *open* failure, so `bc data.bin` claimed the file could
+            // not be opened when it had been opened and read in full.
+            let bytes = std::fs::read(path).map_err(|_| Trouble::Unavailable(path.clone()))?;
+            (bytes, Trouble::FileNotUtf8(path.clone()))
+        }
+    };
+    let text = String::from_utf8(text).map_err(|_| blame)?;
+    let mut parser = Parser::new(&text);
     let stmts = parser.parse_program();
+    interp.run(&stmts);
+    Ok(())
+}
 
-    for stmt in &stmts {
-        if let ControlFlow::Quit = interp.run_stmt(stmt) {
-            return true;
+/// The interactive/pipe session: read until EOF, evaluating each construct as
+/// soon as its braces balance.
+fn eval_stdin(interp: &mut Interpreter, stdin: &io::Stdin) -> Result<(), Trouble> {
+    let mut handle = stdin.lock();
+    let mut buffer = String::new();
+
+    loop {
+        // Bytes, then one explicit UTF-8 check. `BufRead::lines()` yields
+        // `io::Result<String>` and the old loop answered a decoding failure
+        // with `break` -- so one stray byte in a piped script silently
+        // truncated the program and still exited 0.
+        let mut raw: Vec<u8> = Vec::new();
+        match handle.read_until(b'\n', &mut raw) {
+            Ok(0) => break,
+            Ok(_) => {}
+            // Reported, not swallowed. `break` here -- which is what the old
+            // loop did -- turns a failed read into a normal end of input, so
+            // a truncated program is evaluated and the run exits 0.
+            Err(e) => return Err(Trouble::StdinRead(strerror(&e))),
+        }
+        let Ok(line) = String::from_utf8(raw) else {
+            return Err(Trouble::StdinNotUtf8);
+        };
+        // One `\n` and then one `\r`, which is exactly what `BufRead::lines()`
+        // strips. `trim_end_matches` would eat a run of them, so a line whose
+        // data genuinely ends in `\r\r` would come back shorter than it was.
+        let line = line.strip_suffix('\n').unwrap_or(&line);
+        let line = line.strip_suffix('\r').unwrap_or(line);
+        buffer.push_str(line);
+        buffer.push('\n');
+
+        // Once the braces balance, the construct is complete: parse and run it.
+        if open_brace_depth(&buffer) <= 0 {
+            let input = std::mem::take(&mut buffer);
+            let mut parser = Parser::new(&input);
+            let stmts = parser.parse_program();
+            interp.run(&stmts);
         }
     }
-    false
+
+    // Process any remaining buffer.
+    if !buffer.is_empty() {
+        let mut parser = Parser::new(&buffer);
+        let stmts = parser.parse_program();
+        interp.run(&stmts);
+    }
+    Ok(())
 }
+
+// -------------------------------------------------------------------- parsing
+
+fn parse_args(args: &[OsString]) -> Result<Request, Refusal> {
+    let mut settings = Settings::default();
+    let mut only_operands = false;
+    let mut at = 0usize;
+
+    while let Some(arg) = args.get(at) {
+        at = at.saturating_add(1);
+        if only_operands {
+            settings.inputs.push(Input::File(arg.clone()));
+            continue;
+        }
+        let bytes = arg_bytes(arg);
+
+        if bytes == b"--" {
+            only_operands = true;
+        } else if bytes == b"-" || bytes.first() != Some(&b'-') {
+            // A bare `-` is a file name, not standard input: GNU answers
+            // `bc -` with `File - is unavailable.` and exits 1.
+            settings.inputs.push(Input::File(arg.clone()));
+        } else if let Some(body) = bytes.strip_prefix(b"--") {
+            if let Some(request) = long_option(body, &bytes, args, &mut at, &mut settings)? {
+                return Ok(request);
+            }
+        } else if let Some(request) = short_options(&bytes, args, &mut at, &mut settings)? {
+            return Ok(request);
+        }
+    }
+
+    Ok(Request::Run(settings))
+}
+
+/// The two flags GNU implements and this bc does not.
+///
+/// They are refused rather than accepted-and-ignored because their absence
+/// **changes the answer**: `-s` makes non-standard constructs errors, so
+/// silently ignoring it runs a program POSIX bc would have rejected (measured:
+/// `echo 'print 1,2' | bc -s` prints `(standard_in) 1: Error: print statement`
+/// and computes nothing, while plain `bc` prints `12`), and `-c` emits dc code
+/// instead of results. `-w` is the counter-example and is accepted as a no-op
+/// -- ignoring it omits an advisory on stderr and leaves every computed value
+/// identical, so refusing `bc -w` would break working scripts to no purpose.
+///
+/// The rule, stated as a property of the flag rather than of this utility:
+/// **refuse when ignoring it would change a computed value or an exit status,
+/// accept when it would only omit an advisory.** See `design-decisions.md`
+/// §361; the work to implement them properly is in `todo.txt`.
+const NO_STANDARD: Refusal =
+    Refusal::Unimplemented("-s/--standard (reject non-standard constructs) is not implemented");
+const NO_COMPILE: Refusal =
+    Refusal::Unimplemented("-c/--compile (emit dc code) is not implemented");
+
+/// One `--name`, `--name=value` or `--name value` argument.
+fn long_option(
+    body: &[u8],
+    whole: &[u8],
+    args: &[OsString],
+    next: &mut usize,
+    settings: &mut Settings,
+) -> Result<Option<Request>, Refusal> {
+    // Split before resolving, so the *name* is what gets matched and the whole
+    // argument is what gets echoed back when it resolves to nothing.
+    let (typed, inline) = match body.iter().position(|&c| c == b'=') {
+        Some(at) => (
+            body.get(..at).unwrap_or_default(),
+            Some(body.get(at.saturating_add(1)..).unwrap_or_default()),
+        ),
+        None => (body, None),
+    };
+    // Every option name is ASCII, so a name that is not UTF-8 matches none of
+    // them and takes the unrecognised path, reported as the bytes typed.
+    let typed =
+        std::str::from_utf8(typed).map_err(|_| Refusal::Getopt(BC.unrecognized_option(whole)))?;
+    let (name, which) = BC
+        .resolve_long(typed, whole, LONG_OPTIONS)
+        .map_err(Refusal::Getopt)?;
+
+    match which {
+        Long::Standard => return Err(NO_STANDARD),
+        Long::Compile => return Err(NO_COMPILE),
+        _ => {}
+    }
+
+    if which == Long::Expression {
+        let value = match inline {
+            Some(value) => value.to_vec(),
+            None => {
+                let Some(separate) = args.get(*next) else {
+                    return Err(Refusal::Getopt(BC.long_missing_argument(name)));
+                };
+                *next = next.saturating_add(1);
+                arg_bytes(separate)
+            }
+        };
+        settings.inputs.push(Input::Expression(value));
+        return Ok(None);
+    }
+
+    if inline.is_some() {
+        return Err(Refusal::Getopt(BC.long_unwanted_argument(name)));
+    }
+    match which {
+        Long::Mathlib => settings.math_lib = true,
+        Long::Quiet => settings.quiet = true,
+        Long::Interactive => settings.force_interactive = true,
+        // Accepted and deliberately does nothing; see `refuse`.
+        Long::Warn => {}
+        Long::Help => return Ok(Some(Request::Help)),
+        Long::Version => return Ok(Some(Request::Version)),
+        Long::Compile | Long::Expression | Long::Standard => {}
+    }
+    Ok(None)
+}
+
+/// One `-abc` cluster.
+///
+/// Bytes, not `char`s: `-é` is two bytes, and iterating `char`s would report
+/// `invalid option -- 'é'`, an option nobody typed. The old loop did exactly
+/// that, and also *continued* past an unknown flag and exited 0.
+fn short_options(
+    bytes: &[u8],
+    args: &[OsString],
+    next: &mut usize,
+    settings: &mut Settings,
+) -> Result<Option<Request>, Refusal> {
+    let cluster = bytes.get(1..).unwrap_or_default();
+    let mut at = 0usize;
+    while let Some(&c) = cluster.get(at) {
+        match c {
+            b'l' => settings.math_lib = true,
+            b'q' => settings.quiet = true,
+            b'i' => settings.force_interactive = true,
+            b'w' => {}
+            b's' => return Err(NO_STANDARD),
+            b'c' => return Err(NO_COMPILE),
+            b'h' => return Ok(Some(Request::Help)),
+            b'v' => return Ok(Some(Request::Version)),
+            b'e' => {
+                // A *required* argument: the rest of the cluster if there is
+                // one, otherwise the whole of the next argument. `bc -e` with
+                // nothing after it used to become an interactive session,
+                // because the missing argument was an `Option` nobody checked.
+                let rest = cluster.get(at.saturating_add(1)..).unwrap_or_default();
+                let value = if rest.is_empty() {
+                    let Some(separate) = args.get(*next) else {
+                        return Err(Refusal::Getopt(BC.short_missing_argument(b'e')));
+                    };
+                    *next = next.saturating_add(1);
+                    arg_bytes(separate)
+                } else {
+                    rest.to_vec()
+                };
+                settings.inputs.push(Input::Expression(value));
+                return Ok(None);
+            }
+            _ => return Err(Refusal::Getopt(BC.invalid_option(c))),
+        }
+        at = at.saturating_add(1);
+    }
+    Ok(None)
+}
+
+#[cfg(unix)]
+fn arg_bytes(arg: &OsString) -> Vec<u8> {
+    use std::os::unix::ffi::OsStrExt;
+    arg.as_bytes().to_vec()
+}
+
+#[cfg(not(unix))]
+fn arg_bytes(arg: &OsString) -> Vec<u8> {
+    arg.to_string_lossy().into_owned().into_bytes()
+}
+
+// -------------------------------------------------------------------------
+// Tests
+// -------------------------------------------------------------------------
 
 #[cfg(test)]
 #[allow(
     clippy::unwrap_used,
+    clippy::expect_used,
     clippy::panic,
-    clippy::indexing_slicing,
-    clippy::arithmetic_side_effects
+    clippy::indexing_slicing
 )]
 mod tests {
     use super::*;
 
-    fn s(items: &[&str]) -> Vec<String> {
-        items.iter().map(|s| (*s).to_string()).collect()
+    // Helper: evaluate an expression string and return the formatted result.
+    fn eval_expr(input: &str) -> String {
+        let mut interp = Interpreter::new(false);
+        let mut parser = Parser::new(input);
+        let stmts = parser.parse_program();
+        // For tests: the last value is stored in `last`. A failing statement
+        // is unwrapped rather than ignored -- a test that expects a value and
+        // silently gets the previous one is worse than a test that fails.
+        for stmt in &stmts {
+            interp.exec_stmt(stmt).expect("statement failed");
+        }
+        interp.last.format(interp.obase)
     }
 
-    fn bd(text: &str) -> BigDecimal {
-        BigDecimal::parse(text).expect("parse")
+    #[allow(dead_code)]
+    fn eval_expr_ml(input: &str) -> String {
+        let mut interp = Interpreter::new(true);
+        let mut parser = Parser::new(input);
+        let stmts = parser.parse_program();
+        for stmt in &stmts {
+            interp.exec_stmt(stmt).expect("statement failed");
+        }
+        interp.last.format(interp.obase)
     }
 
-    fn show(v: &BigDecimal, scale: usize) -> String {
-        v.to_string_with_scale(scale)
+    // Capture output from the interpreter.  Uses the output_buf field that
+    // is active in test builds.
+    fn capture_output(input: &str) -> Vec<String> {
+        let mut interp = Interpreter::new(false);
+        let mut parser = Parser::new(input);
+        let stmts = parser.parse_program();
+        interp.run(&stmts);
+        interp.output_buf
     }
 
-    // ---------- parse_args ----------
-
-    #[test]
-    fn parse_args_empty_defaults() {
-        let p = parse_args(&[]).unwrap();
-        assert!(!p.quiet);
-        assert!(!p.math_lib);
-        assert!(p.files.is_empty());
-    }
-
-    #[test]
-    fn parse_args_quiet() {
-        let p = parse_args(&s(&["-q"])).unwrap();
-        assert!(p.quiet);
-        let p = parse_args(&s(&["--quiet"])).unwrap();
-        assert!(p.quiet);
-    }
-
-    #[test]
-    fn parse_args_math_lib() {
-        let p = parse_args(&s(&["-l"])).unwrap();
-        assert!(p.math_lib);
-        let p = parse_args(&s(&["--mathlib"])).unwrap();
-        assert!(p.math_lib);
-    }
-
-    #[test]
-    fn parse_args_files_accumulate() {
-        let p = parse_args(&s(&["a.bc", "b.bc"])).unwrap();
-        assert_eq!(p.files, vec!["a.bc".to_string(), "b.bc".to_string()]);
-    }
-
-    #[test]
-    fn parse_args_combined_flags() {
-        let p = parse_args(&s(&["-q", "-l", "a.bc"])).unwrap();
-        assert!(p.quiet);
-        assert!(p.math_lib);
-        assert_eq!(p.files, vec!["a.bc".to_string()]);
-    }
-
-    #[test]
-    fn parse_args_unknown_flag_errors() {
-        let err = parse_args(&s(&["-z"])).unwrap_err();
-        assert!(err.contains("unknown option"));
-    }
-
-    #[test]
-    fn parse_args_bare_dash_is_treated_as_file() {
-        // Single "-" is a conventional "stdin" marker; we just store it.
-        let p = parse_args(&s(&["-"])).unwrap();
-        assert_eq!(p.files, vec!["-".to_string()]);
-    }
-
-    // ---------- BigDecimal::parse ----------
-
-    #[test]
-    fn parse_simple_integer() {
-        let v = bd("42");
-        assert!(!v.negative);
-        assert_eq!(v.scale, 0);
-        assert_eq!(show(&v, 0), "42");
-    }
-
-    #[test]
-    fn parse_negative_integer() {
-        let v = bd("-7");
-        assert!(v.negative);
-        assert_eq!(show(&v, 0), "-7");
-    }
-
-    #[test]
-    fn parse_explicit_positive_sign() {
-        let v = bd("+5");
-        assert!(!v.negative);
-        assert_eq!(show(&v, 0), "5");
-    }
-
-    #[test]
-    fn parse_decimal_value() {
-        let v = bd("3.14");
-        assert_eq!(v.scale, 2);
-        assert_eq!(show(&v, 2), "3.14");
-    }
-
-    #[test]
-    fn parse_zero() {
-        let v = bd("0");
-        assert!(v.is_zero());
-        assert!(!v.negative);
-    }
-
-    #[test]
-    fn parse_negative_zero_renders_as_zero() {
-        // After normalization, -0 should render as 0.
-        let mut v = bd("-0");
-        v.normalize();
-        assert_eq!(show(&v, 0), "0");
-    }
-
-    #[test]
-    fn parse_with_whitespace_trimmed() {
-        assert_eq!(show(&bd("  100  "), 0), "100");
-    }
-
-    #[test]
-    fn parse_empty_string_is_none() {
-        assert!(BigDecimal::parse("").is_none());
-        assert!(BigDecimal::parse("   ").is_none());
-    }
-
-    #[test]
-    fn parse_garbage_is_none() {
-        assert!(BigDecimal::parse("abc").is_none());
-        assert!(BigDecimal::parse("1.2.3").is_none());
-    }
-
-    #[test]
-    fn parse_leading_zeros_stripped() {
-        assert_eq!(show(&bd("00042"), 0), "42");
-    }
-
-    #[test]
-    fn parse_large_value_above_one_limb() {
-        // 10 billion exceeds the 10^9 limb base, so spans two limbs.
-        let v = bd("10000000000");
-        assert_eq!(show(&v, 0), "10000000000");
-    }
-
-    // ---------- to_string_with_scale ----------
-
-    #[test]
-    fn display_pads_fractional_zeros() {
-        let v = bd("1.5");
-        assert_eq!(v.to_string_with_scale(4), "1.5000");
-    }
-
-    #[test]
-    fn display_truncates_to_lower_scale() {
-        let v = bd("1.234567");
-        assert_eq!(v.to_string_with_scale(2), "1.23");
-    }
-
-    #[test]
-    fn display_value_less_than_one() {
-        let v = bd("0.5");
-        assert_eq!(v.to_string_with_scale(1), "0.5");
-    }
-
-    // ---------- truncate_or_pad ----------
-
-    #[test]
-    fn truncate_or_pad_shorter_pads_with_zeros() {
-        assert_eq!(truncate_or_pad("12", 5), "12000");
-    }
-
-    #[test]
-    fn truncate_or_pad_longer_truncates() {
-        assert_eq!(truncate_or_pad("12345", 2), "12");
-    }
-
-    #[test]
-    fn truncate_or_pad_exact_passes_through() {
-        assert_eq!(truncate_or_pad("abc", 3), "abc");
-    }
-
-    // ---------- digits_to_limbs / limbs_to_digits round trip ----------
-
-    #[test]
-    fn digits_limbs_roundtrip_single_limb() {
-        let limbs = digits_to_limbs("12345");
-        assert_eq!(limbs_to_digits(&limbs), "12345");
-    }
-
-    #[test]
-    fn digits_limbs_roundtrip_multi_limb() {
-        let limbs = digits_to_limbs("123456789012345678");
-        assert_eq!(limbs_to_digits(&limbs), "123456789012345678");
-    }
-
-    #[test]
-    fn digits_limbs_roundtrip_large() {
-        let big = "1234567890".repeat(10);
-        let limbs = digits_to_limbs(&big);
-        assert_eq!(limbs_to_digits(&limbs), big);
-    }
-
-    // ---------- cmp_limbs ----------
-
-    #[test]
-    fn cmp_limbs_orderings() {
-        use std::cmp::Ordering;
-        assert_eq!(cmp_limbs(&[1], &[2]), Ordering::Less);
-        assert_eq!(cmp_limbs(&[2], &[1]), Ordering::Greater);
-        assert_eq!(cmp_limbs(&[5, 0], &[5]), Ordering::Equal);
-        // Higher limb count with a non-zero top limb beats single-limb.
-        assert_eq!(cmp_limbs(&[0, 1], &[999]), Ordering::Greater);
-    }
-
-    // ---------- bd_add / bd_sub ----------
-
-    #[test]
-    fn add_positive_integers() {
-        assert_eq!(show(&bd_add(&bd("12"), &bd("30")), 0), "42");
-    }
-
-    #[test]
-    fn add_with_decimals_aligns_scale() {
-        assert_eq!(show(&bd_add(&bd("1.5"), &bd("2.25")), 2), "3.75");
-    }
-
-    #[test]
-    fn add_opposite_signs_subtracts() {
-        assert_eq!(show(&bd_add(&bd("10"), &bd("-3")), 0), "7");
-        assert_eq!(show(&bd_add(&bd("-10"), &bd("3")), 0), "-7");
-    }
-
-    #[test]
-    fn add_equal_magnitudes_opposite_signs_is_zero() {
-        let r = bd_add(&bd("5"), &bd("-5"));
-        assert!(r.is_zero());
-    }
-
-    #[test]
-    fn sub_basic() {
-        assert_eq!(show(&bd_sub(&bd("100"), &bd("58")), 0), "42");
-    }
-
-    #[test]
-    fn sub_negative_minus_negative() {
-        // -3 - (-1) = -2
-        assert_eq!(show(&bd_sub(&bd("-3"), &bd("-1")), 0), "-2");
-    }
-
-    #[test]
-    fn sub_borrow_across_limb_boundary() {
-        // 10^9 - 1 forces a borrow into the next limb on subtraction.
-        assert_eq!(show(&bd_sub(&bd("1000000000"), &bd("1")), 0), "999999999");
-    }
-
-    // ---------- bd_mul ----------
-
-    #[test]
-    fn mul_basic_integer() {
-        assert_eq!(show(&bd_mul(&bd("6"), &bd("7"), 0), 0), "42");
-    }
-
-    #[test]
-    fn mul_negative_times_positive_negative() {
-        assert_eq!(show(&bd_mul(&bd("-3"), &bd("4"), 0), 0), "-12");
-    }
-
-    #[test]
-    fn mul_negative_times_negative_positive() {
-        assert_eq!(show(&bd_mul(&bd("-3"), &bd("-4"), 0), 0), "12");
-    }
-
-    #[test]
-    fn mul_decimal_truncates_to_scale() {
-        // 1.5 * 1.5 = 2.25, with scale=1 truncates to 2.2.
-        assert_eq!(show(&bd_mul(&bd("1.5"), &bd("1.5"), 1), 1), "2.2");
-    }
-
-    #[test]
-    fn mul_by_zero_is_zero() {
-        assert!(bd_mul(&bd("1234"), &bd("0"), 0).is_zero());
-    }
-
-    // ---------- bd_div / bd_modulo ----------
-
-    #[test]
-    fn div_integer_truncates_with_scale_zero() {
-        // 10 / 3 with scale=0 truncates to 3.
-        let q = bd_div(&bd("10"), &bd("3"), 0).unwrap();
-        assert_eq!(show(&q, 0), "3");
-    }
-
-    #[test]
-    fn div_with_scale_two() {
-        // 10 / 4 with scale=2 = 2.50.
-        let q = bd_div(&bd("10"), &bd("4"), 2).unwrap();
-        assert_eq!(show(&q, 2), "2.50");
-    }
-
-    #[test]
-    fn div_by_zero_returns_none() {
-        assert!(bd_div(&bd("5"), &bd("0"), 0).is_none());
-    }
-
-    #[test]
-    fn div_negative_dividend_yields_negative() {
-        let q = bd_div(&bd("-12"), &bd("4"), 0).unwrap();
-        assert_eq!(show(&q, 0), "-3");
-    }
-
-    #[test]
-    fn modulo_basic() {
-        let m = bd_modulo(&bd("10"), &bd("3"), 0).unwrap();
-        assert_eq!(show(&m, 0), "1");
-    }
-
-    #[test]
-    fn modulo_by_zero_returns_none() {
-        assert!(bd_modulo(&bd("5"), &bd("0"), 0).is_none());
+    fn capture_output_ml(input: &str) -> Vec<String> {
+        let mut interp = Interpreter::new(true);
+        let mut parser = Parser::new(input);
+        let stmts = parser.parse_program();
+        interp.run(&stmts);
+        interp.output_buf
     }
 
-    // ---------- bd_pow ----------
+    // The number type's own tests live with the type, in `bignum::decimal` --
+    // parsing, truncation, the error cases and exactness past 2^53 are
+    // properties of `Decimal`, not of `bc`, and duplicating them here would
+    // mean two suites to update and the chance of them disagreeing. What
+    // follows is `bc`: the lexer, the parser, and the interpreter's use of the
+    // number type.
 
-    #[test]
-    fn pow_zero_exponent_is_one() {
-        assert_eq!(show(&bd_pow(&bd("12345"), &bd("0"), 0), 0), "1");
-    }
+    // --- Reading input: where one line ends and the next construct begins ---
 
     #[test]
-    fn pow_basic_squared() {
-        assert_eq!(show(&bd_pow(&bd("7"), &bd("2"), 0), 0), "49");
+    fn a_brace_inside_a_string_does_not_open_a_block() {
+        // Interactive bc decides a construct is complete when its braces
+        // balance. Counting brace *characters* meant `print "{"` opened a
+        // block that nothing would ever close, and every line the user typed
+        // afterwards was swallowed into a buffer that never ran.
+        assert_eq!(open_brace_depth("print \"{\"\n"), 0);
+        assert_eq!(open_brace_depth("print \"}\"\n"), 0);
+        assert_eq!(open_brace_depth("s = \"{{{\"\n"), 0);
     }
 
     #[test]
-    fn pow_basic_cubed() {
-        assert_eq!(show(&bd_pow(&bd("3"), &bd("4"), 0), 0), "81");
+    fn a_brace_inside_a_comment_does_not_open_a_block() {
+        assert_eq!(open_brace_depth("1 + 1 # }\n"), 0);
+        assert_eq!(open_brace_depth("1 + 1 /* { */\n"), 0);
     }
 
     #[test]
-    fn pow_negative_base_odd_exp_is_negative() {
-        assert_eq!(show(&bd_pow(&bd("-2"), &bd("3"), 0), 0), "-8");
+    fn an_unfinished_block_reports_its_open_braces() {
+        assert_eq!(open_brace_depth("define f(x) {\n"), 1);
+        assert_eq!(open_brace_depth("define f(x) {\n  if (x) {\n"), 2);
+        assert_eq!(open_brace_depth("define f(x) {\n  return(x)\n}\n"), 0);
     }
 
     #[test]
-    fn pow_negative_base_even_exp_is_positive() {
-        assert_eq!(show(&bd_pow(&bd("-2"), &bd("4"), 0), 0), "16");
+    fn an_unterminated_comment_or_string_still_terminates_the_scan() {
+        // Both of these run to end of input. The lexer must reach `Eof`
+        // rather than spin, or the interactive loop hangs on a typo.
+        assert_eq!(open_brace_depth("1 /* never closed"), 0);
+        assert_eq!(open_brace_depth("\"never closed"), 0);
+        assert_eq!(open_brace_depth("{ /* never closed"), 1);
     }
 
-    // ---------- bd_sqrt ----------
+    // --- Expression evaluation tests ---
 
     #[test]
-    fn sqrt_perfect_square() {
-        let r = bd_sqrt(&bd("144"), 0).unwrap();
-        assert_eq!(show(&r, 0), "12");
+    fn test_simple_add() {
+        assert_eq!(eval_expr("2+3"), "5");
     }
 
     #[test]
-    fn sqrt_of_zero() {
-        let r = bd_sqrt(&bd("0"), 5).unwrap();
-        assert!(r.is_zero());
+    fn test_simple_mul() {
+        assert_eq!(eval_expr("6*7"), "42");
     }
 
     #[test]
-    fn sqrt_of_negative_is_none() {
-        assert!(bd_sqrt(&bd("-4"), 0).is_none());
+    fn test_precedence() {
+        assert_eq!(eval_expr("2+3*4"), "14");
     }
 
     #[test]
-    fn sqrt_of_two_approximate() {
-        // sqrt(2) ≈ 1.41421356...  Verify the first few digits.
-        let r = bd_sqrt(&bd("2"), 5).unwrap();
-        let text = show(&r, 5);
-        assert!(text.starts_with("1.4142"), "got {text}");
+    fn test_parens() {
+        assert_eq!(eval_expr("(2+3)*4"), "20");
     }
 
-    // ---------- bd_compare ----------
-
     #[test]
-    fn compare_basic_orderings() {
-        use std::cmp::Ordering;
-        assert_eq!(bd_compare(&bd("1"), &bd("2")), Ordering::Less);
-        assert_eq!(bd_compare(&bd("2"), &bd("1")), Ordering::Greater);
-        assert_eq!(bd_compare(&bd("1.5"), &bd("1.5")), Ordering::Equal);
+    fn test_power() {
+        assert_eq!(eval_expr("2^10"), "1024");
     }
 
     #[test]
-    fn compare_negative_vs_positive() {
-        use std::cmp::Ordering;
-        assert_eq!(bd_compare(&bd("-1"), &bd("1")), Ordering::Less);
-        assert_eq!(bd_compare(&bd("-1"), &bd("-2")), Ordering::Greater);
+    fn test_unary_minus() {
+        assert_eq!(eval_expr("-5+10"), "5");
     }
 
-    // ---------- bool_to_bd ----------
+    // --- Variable tests ---
 
     #[test]
-    fn bool_true_is_one() {
-        assert_eq!(show(&bool_to_bd(true), 0), "1");
+    fn test_variable_assign_and_use() {
+        let output = capture_output("x=5\nx+3");
+        assert_eq!(output, vec!["8"]);
     }
 
     #[test]
-    fn bool_false_is_zero() {
-        assert_eq!(show(&bool_to_bd(false), 0), "0");
+    fn test_scale_variable() {
+        let output = capture_output("scale=5\n10/3");
+        assert_eq!(output, vec!["3.33333"]);
     }
 
-    // ---------- BigDecimal::negate ----------
-
+    // `++`/`--` written as a statement *do* echo, unlike `=`. The two tests
+    // below used to assert that they were silent, which is what GNU bc
+    // 1.07.1 disagrees with: `x=5; x++; x` prints `5` then `6`.
     #[test]
-    fn negate_positive_becomes_negative() {
-        let v = bd("5").negate();
-        assert!(v.negative);
-        assert_eq!(show(&v, 0), "-5");
+    fn test_increment() {
+        // `x++` echoes the value before the increment, then `x` is 6.
+        assert_eq!(capture_output("x=5\nx++\nx"), vec!["5", "6"]);
+        assert_eq!(capture_output("x=5\nx--\nx"), vec!["5", "4"]);
     }
 
     #[test]
-    fn negate_zero_stays_zero_unsigned() {
-        let v = bd("0").negate();
-        assert!(!v.negative);
-        assert!(v.is_zero());
+    fn test_pre_increment() {
+        // `++x` echoes the value after the increment.
+        assert_eq!(capture_output("x=5\n++x\nx"), vec!["6", "6"]);
+        assert_eq!(capture_output("x=5\n--x\nx"), vec!["4", "4"]);
     }
-
-    // ---------- tokenize ----------
 
     #[test]
-    fn tokenize_number() {
-        let t = tokenize("42");
-        assert_eq!(t, vec![Token::Number("42".to_string()), Token::Eof]);
+    fn an_increment_inside_an_assignment_stays_silent() {
+        // Only the outermost operator decides: `=` is silent even though the
+        // `++` it wraps would have echoed on its own.
+        assert_eq!(capture_output("x=5\ny=x++\ny\nx"), vec!["5", "6"]);
     }
 
     #[test]
-    fn tokenize_decimal_number() {
-        let t = tokenize("3.14");
-        assert_eq!(t, vec![Token::Number("3.14".to_string()), Token::Eof]);
+    fn a_bare_string_statement_does_not_interpret_escapes() {
+        // Escapes belong to `print`, not to the literal. GNU bc writes four
+        // characters for `"a\nb"` on its own line and three for the same
+        // string given to `print`.
+        assert_eq!(capture_output("\"a\\nb\""), vec!["a\\nb"]);
+        assert_eq!(capture_output("print \"a\\nb\""), vec!["a\nb"]);
+        // `\q` is the only way to get a quote out, since the lexer ends a
+        // string at the very next `"`.
+        assert_eq!(capture_output("print \"a\\qb\""), vec!["a\"b"]);
+        // An escape that is not in the table takes both characters with it.
+        assert_eq!(capture_output("print \"a\\vb\""), vec!["ab"]);
+        assert_eq!(capture_output("print \"a\\\\b\""), vec!["a\\b"]);
     }
 
     #[test]
-    fn tokenize_arithmetic_operators() {
-        let t = tokenize("+-*/^%");
+    fn a_base_above_sixteen_prints_digits_as_decimal_groups() {
+        // Measured against GNU bc 1.07.1; see `Decimal::format_grouped`.
+        assert_eq!(capture_output("obase=36\n1295"), vec![" 35 35"]);
+        assert_eq!(capture_output("obase=36\n1"), vec![" 01"]);
+        assert_eq!(capture_output("obase=36\n0"), vec!["0"]);
+        assert_eq!(capture_output("obase=36\n-1295"), vec!["- 35 35"]);
+        assert_eq!(capture_output("obase=100\n12345"), vec![" 01 23 45"]);
+        assert_eq!(capture_output("obase=17\n255"), vec![" 15 00"]);
+        assert_eq!(capture_output("obase=1000\n999999"), vec![" 999 999"]);
+        // The `.` stands in for the first fractional digit's space.
         assert_eq!(
-            t,
-            vec![
-                Token::Plus,
-                Token::Minus,
-                Token::Star,
-                Token::Slash,
-                Token::Caret,
-                Token::Percent,
-                Token::Eof,
-            ]
+            capture_output("scale=4\nobase=20\n1/2"),
+            vec![".10 00 00 00"]
+        );
+    }
+
+    // --- Function definition tests ---
+
+    #[test]
+    fn test_user_function() {
+        let output = capture_output("define double(x) { return 2*x }\ndouble(21)");
+        assert_eq!(output, vec!["42"]);
+    }
+
+    #[test]
+    fn test_recursive_function() {
+        let output = capture_output(
+            "define fact(n) { if (n <= 1) return 1\nreturn n * fact(n-1) }\nfact(10)",
+        );
+        assert_eq!(output, vec!["3628800"]);
+    }
+
+    // --- Control flow tests ---
+
+    #[test]
+    fn test_if_true() {
+        let output = capture_output("if (1) 42");
+        assert_eq!(output, vec!["42"]);
+    }
+
+    #[test]
+    fn test_if_false() {
+        let output = capture_output("if (0) 42");
+        assert!(output.is_empty());
+    }
+
+    #[test]
+    fn test_while_loop() {
+        let output = capture_output("x=0\nwhile (x < 5) { x = x + 1 }\nx");
+        assert_eq!(output, vec!["5"]);
+    }
+
+    #[test]
+    fn test_for_loop() {
+        let output = capture_output("s=0\nfor (i=1; i<=10; i=i+1) { s = s + i }\ns");
+        assert_eq!(output, vec!["55"]);
+    }
+
+    // --- Comparison tests ---
+
+    #[test]
+    fn test_comparison_eq() {
+        assert_eq!(eval_expr("5 == 5"), "1");
+        assert_eq!(eval_expr("5 == 6"), "0");
+    }
+
+    #[test]
+    fn test_comparison_ne() {
+        assert_eq!(eval_expr("5 != 6"), "1");
+        assert_eq!(eval_expr("5 != 5"), "0");
+    }
+
+    #[test]
+    fn test_comparison_lt() {
+        assert_eq!(eval_expr("3 < 5"), "1");
+        assert_eq!(eval_expr("5 < 3"), "0");
+    }
+
+    #[test]
+    fn test_comparison_gt() {
+        assert_eq!(eval_expr("5 > 3"), "1");
+        assert_eq!(eval_expr("3 > 5"), "0");
+    }
+
+    #[test]
+    fn test_comparison_le() {
+        assert_eq!(eval_expr("5 <= 5"), "1");
+        assert_eq!(eval_expr("6 <= 5"), "0");
+    }
+
+    #[test]
+    fn test_comparison_ge() {
+        assert_eq!(eval_expr("5 >= 5"), "1");
+        assert_eq!(eval_expr("4 >= 5"), "0");
+    }
+
+    // --- Base conversion tests ---
+
+    #[test]
+    fn test_obase_hex() {
+        let output = capture_output("obase=16\n255");
+        assert_eq!(output, vec!["FF"]);
+    }
+
+    #[test]
+    fn test_ibase_hex() {
+        let output = capture_output("ibase=16\nFF");
+        assert_eq!(output, vec!["255"]);
+    }
+
+    #[test]
+    fn test_obase_binary() {
+        let output = capture_output("obase=2\n10");
+        assert_eq!(output, vec!["1010"]);
+    }
+
+    // --- Math library tests (need -l) ---
+
+    #[test]
+    fn test_sqrt_builtin() {
+        let output = capture_output_ml("scale=10\nsqrt(2)");
+        assert!(!output.is_empty());
+        let s = &output[0];
+        assert!(s.starts_with("1.414213562"), "got: {}", s);
+    }
+
+    #[test]
+    fn test_exp_of_zero() {
+        // Exact, but still reported to the ten places `scale` asked for: the
+        // library's final step is a division, and a division has exactly
+        // `scale` places whether or not the last of them are zero.
+        let output = capture_output_ml("scale=10\ne(0)");
+        assert!(!output.is_empty());
+        assert_eq!(output[0], "1.0000000000");
+    }
+
+    #[test]
+    fn test_exp_of_one() {
+        let output = capture_output_ml("scale=10\ne(1)");
+        assert!(!output.is_empty());
+        let s = &output[0];
+        assert!(s.starts_with("2.71828182"), "got: {}", s);
+    }
+
+    // --- Arbitrary precision test ---
+
+    #[test]
+    fn test_large_factorial() {
+        let output =
+            capture_output("define fact(n) { if (n <= 1) return 1\nreturn n*fact(n-1) }\nfact(20)");
+        assert_eq!(output, vec!["2432902008176640000"]);
+    }
+
+    #[test]
+    fn test_large_power() {
+        let output = capture_output("2^100");
+        assert_eq!(output, vec!["1267650600228229401496703205376"]);
+    }
+
+    // --- Edge cases ---
+
+    #[test]
+    fn a_division_by_zero_prints_nothing_and_abandons_the_line() {
+        // This test previously asserted `["0"]` -- that `10/0` printed zero --
+        // which is what the arithmetic used to return after complaining to
+        // stderr. It is the one answer a calculator must not give: `x = 1/0`
+        // assigned 0 and every later line computed with it.
+        assert!(capture_output("10/0").is_empty());
+        assert!(capture_output("10%0").is_empty());
+        // The statement is abandoned whole -- `1/0 + 5` does not print 5 --
+        // but the next statement still runs.
+        assert!(capture_output("1/0 + 5").is_empty());
+        assert_eq!(capture_output("1/0\n7"), vec!["7"]);
+    }
+
+    #[test]
+    fn a_failure_inside_a_loop_abandons_the_whole_loop() {
+        // Not just the iteration: resuming the loop would run every remaining
+        // iteration through the same failing division, printing the diagnostic
+        // once per pass.
+        let output = capture_output("for (i = 0; i < 3; i++) { i / 0 }\n\"done\"");
+        assert_eq!(output, vec!["done"]);
+    }
+
+    #[test]
+    fn a_failed_line_leaves_the_session_usable() {
+        // A runtime error abandons its line, not the interpreter: the variables
+        // set before it keep their values and the next line still runs.
+        let output = capture_output("x = 5\nx / 0\nx + 1");
+        assert_eq!(output, vec!["6"]);
+    }
+
+    #[test]
+    fn an_error_inside_a_function_does_not_leave_its_frame_behind() {
+        // The callee's parameter shadows the caller's `x`. If the failing path
+        // skipped the frame teardown, `x` would still read 99 afterwards.
+        let output = capture_output("define f(x) { return (x / 0) }\nx = 5\nf(99)\nx");
+        assert_eq!(output, vec!["5"]);
+    }
+
+    #[test]
+    fn a_guard_short_circuits_before_the_division_it_guards() {
+        // `x != 0 && 1/x` must not evaluate the division when x is zero, or the
+        // guard the user wrote would report the error it exists to prevent.
+        let output = capture_output("x = 0\nif (x != 0 && 1/x > 2) { print \"big\\n\" }\n42");
+        assert_eq!(output, vec!["42"]);
+    }
+
+    #[test]
+    fn test_empty_input() {
+        let output = capture_output("");
+        assert!(output.is_empty());
+    }
+
+    #[test]
+    fn test_comments() {
+        let output = capture_output("/* this is a comment */\n5+3 # inline comment");
+        assert_eq!(output, vec!["8"]);
+    }
+
+    #[test]
+    fn test_multiline_function() {
+        let input = r"
+define sum_to(n) {
+    auto s, i
+    s = 0
+    for (i = 1; i <= n; i = i + 1) {
+        s = s + i
+    }
+    return s
+}
+sum_to(100)
+";
+        let output = capture_output(input);
+        assert_eq!(output, vec!["5050"]);
+    }
+
+    #[test]
+    fn test_nested_functions() {
+        let input = r"
+define square(x) { return x*x }
+define sum_of_squares(a, b) { return square(a) + square(b) }
+sum_of_squares(3, 4)
+";
+        let output = capture_output(input);
+        assert_eq!(output, vec!["25"]);
+    }
+
+    #[test]
+    fn test_break_in_loop() {
+        let input = r"
+x = 0
+while (1) {
+    x = x + 1
+    if (x == 5) break
+}
+x
+";
+        let output = capture_output(input);
+        assert_eq!(output, vec!["5"]);
+    }
+
+    #[test]
+    fn test_continue_in_loop() {
+        let input = r"
+s = 0
+for (i = 1; i <= 10; i = i + 1) {
+    if (i % 2 == 0) continue
+    s = s + i
+}
+s
+";
+        // Sum of odd numbers 1+3+5+7+9 = 25
+        let output = capture_output(input);
+        assert_eq!(output, vec!["25"]);
+    }
+
+    #[test]
+    fn test_logical_and() {
+        assert_eq!(eval_expr("1 && 1"), "1");
+        assert_eq!(eval_expr("1 && 0"), "0");
+        assert_eq!(eval_expr("0 && 1"), "0");
+    }
+
+    #[test]
+    fn test_logical_or() {
+        assert_eq!(eval_expr("0 || 1"), "1");
+        assert_eq!(eval_expr("0 || 0"), "0");
+        assert_eq!(eval_expr("1 || 0"), "1");
+    }
+
+    #[test]
+    fn test_not_operator() {
+        assert_eq!(eval_expr("!0"), "1");
+        assert_eq!(eval_expr("!1"), "0");
+        assert_eq!(eval_expr("!42"), "0");
+    }
+
+    #[test]
+    fn test_compound_assignment() {
+        let output = capture_output("x=10\nx+=5\nx");
+        assert_eq!(output, vec!["15"]);
+    }
+
+    #[test]
+    fn test_string_in_print() {
+        // Just verifying print with string doesn't crash.
+        let mut interp = Interpreter::new(false);
+        let mut parser = Parser::new("print \"hello\\n\"");
+        let stmts = parser.parse_program();
+        interp.run(&stmts);
+    }
+
+    #[test]
+    fn test_if_else() {
+        let output = capture_output("if (0) 1 else 2");
+        assert_eq!(output, vec!["2"]);
+    }
+
+    #[test]
+    fn test_negative_exponent() {
+        // A negative exponent is `1/(a^|b|)`, a division, so the result has
+        // exactly `scale` places -- `.125` padded to five, not trimmed to three.
+        let output = capture_output("scale=5\n2^-3");
+        assert_eq!(output, vec![".12500"]);
+    }
+
+    #[test]
+    fn the_stated_line_length_leaves_a_column_beyond_the_backslash() {
+        // Measured against GNU bc 1.07.1: `BC_LINE_LENGTH=10` emits nine
+        // columns, eight digits and a `\`, and the default 70 gives 68 digits.
+        // GNU *dc* puts one more on each line from the same source tarball,
+        // which is why this conversion lives here and not in `bignum`.
+        assert_eq!(wrap_chunk(10), 8);
+        assert_eq!(wrap_chunk(70), 68);
+        assert_eq!(wrap_chunk(4), 2);
+        assert_eq!(wrap_chunk(3), 1);
+        // Below 3, GNU bc stops wrapping rather than emitting a backslash per
+        // digit -- `BC_LINE_LENGTH=2` prints 2^40 on one line.
+        assert_eq!(wrap_chunk(2), 0);
+        assert_eq!(wrap_chunk(1), 0);
+        assert_eq!(wrap_chunk(0), 0);
+    }
+
+    #[test]
+    fn a_long_number_is_continued_at_the_width_bc_uses() {
+        // End to end through `render`, at the default width: 2^1000 is 302
+        // digits, so four lines of 68 and a last of 30, each continued line 69
+        // columns wide including the backslash. Verified against GNU bc.
+        let interp = Interpreter::new(false);
+        let value = Decimal::parse("2", 10)
+            .pow(&Decimal::parse("1000", 10), 0)
+            .expect("2^1000");
+        let rendered = interp.render(&value);
+        let lines: Vec<&str> = rendered.split('\n').collect();
+        assert_eq!(lines.len(), 5);
+        for line in lines.iter().take(4) {
+            assert_eq!(line.len(), 69);
+            assert!(line.ends_with('\\'));
+        }
+        assert_eq!(lines[4].len(), 30);
+        let rejoined: String = lines
+            .iter()
+            .map(|l| l.strip_suffix('\\').unwrap_or(l))
+            .collect();
+        assert_eq!(rejoined.len(), 302);
+        assert!(rejoined.ends_with("069376"));
+    }
+
+    // ---------------------------------------------------------------------
+    // The command line
+    // ---------------------------------------------------------------------
+    //
+    // Every expectation below was measured against GNU bc 1.07.1 through WSL
+    // and is cited in the comment on the test that locks it in. The tests
+    // that assert a *sentence* are asserting glibc's, reached through
+    // `coreutils::getopt`, not a sentence invented here.
+
+    fn parse(argv: &[&str]) -> Result<Request, Refusal> {
+        let args: Vec<OsString> = argv.iter().map(OsString::from).collect();
+        parse_args(&args)
+    }
+
+    fn settings(argv: &[&str]) -> Settings {
+        match parse(argv) {
+            Ok(Request::Run(s)) => s,
+            other => panic!("expected a run, got {other:?}"),
+        }
+    }
+
+    fn refusal(argv: &[&str]) -> Refusal {
+        match parse(argv) {
+            Err(refusal) => refusal,
+            other => panic!("expected a refusal, got {other:?}"),
+        }
+    }
+
+    fn getopt_sentence(argv: &[&str]) -> String {
+        match refusal(argv) {
+            Refusal::Getopt(e) => e.sentence,
+            other => panic!("expected a getopt error, got {other:?}"),
+        }
+    }
+
+    fn file(name: &str) -> Input {
+        Input::File(OsString::from(name))
+    }
+
+    fn expr(text: &str) -> Input {
+        Input::Expression(text.as_bytes().to_vec())
+    }
+
+    #[test]
+    fn no_arguments_reads_standard_input() {
+        let s = settings(&[]);
+        assert_eq!(s, Settings::default());
+        assert!(s.reads_stdin());
+    }
+
+    #[test]
+    fn short_flags_cluster() {
+        let s = settings(&["-lq"]);
+        assert!(s.math_lib);
+        assert!(s.quiet);
+        assert_eq!(settings(&["-l", "-q"]), s);
+        assert_eq!(settings(&["--mathlib", "--quiet"]), s);
+    }
+
+    #[test]
+    fn interactive_is_forced_by_i_and_by_the_long_name() {
+        assert!(settings(&["-i"]).force_interactive);
+        assert!(settings(&["--interactive"]).force_interactive);
+        assert!(!settings(&[]).force_interactive);
+    }
+
+    #[test]
+    fn warn_is_accepted_and_does_nothing() {
+        // Measured: `-w` only adds an advisory on stderr -- `echo 'print 1,2'
+        // | bc -w` still prints `12` -- so ignoring it cannot change an
+        // answer, which is why it is the one unimplemented flag not refused.
+        assert_eq!(settings(&["-w"]), Settings::default());
+        assert_eq!(settings(&["--warn"]), Settings::default());
+    }
+
+    #[test]
+    fn standard_and_compile_are_refused_rather_than_ignored() {
+        // Both change the answer if ignored, so a bc that quietly accepted
+        // them would run a program POSIX bc rejects, or print results where
+        // dc code was asked for.
+        for argv in [
+            &["-s"][..],
+            &["--standard"][..],
+            &["-c"][..],
+            &["--compile"][..],
+        ] {
+            match refusal(argv) {
+                Refusal::Unimplemented(message) => assert!(
+                    message.contains("is not implemented"),
+                    "{argv:?} -> {message}"
+                ),
+                other => panic!("{argv:?} should be refused, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn operands_are_files_in_the_order_typed() {
+        let s = settings(&["a.bc", "b.bc"]);
+        assert_eq!(s.inputs, vec![file("a.bc"), file("b.bc")]);
+        assert!(s.reads_stdin(), "GNU reads stdin after the operands");
+    }
+
+    #[test]
+    fn a_bare_dash_is_a_file_name_and_not_standard_input() {
+        // Measured: `printf '3+3\n' | bc -` answers `File - is unavailable.`
+        // and exits 1. It never reads the pipe.
+        assert_eq!(settings(&["-"]).inputs, vec![file("-")]);
+    }
+
+    #[test]
+    fn double_dash_ends_the_options() {
+        assert_eq!(settings(&["--", "-l"]).inputs, vec![file("-l")]);
+        assert!(!settings(&["--", "-l"]).math_lib);
+    }
+
+    #[test]
+    fn expressions_and_files_keep_command_line_order() {
+        assert_eq!(
+            settings(&["-e", "1+1", "a.bc", "-e", "2+2"]).inputs,
+            vec![expr("1+1"), file("a.bc"), expr("2+2")]
         );
     }
 
     #[test]
-    fn tokenize_grouping() {
-        let t = tokenize("(){}");
+    fn every_spelling_of_an_expression_argument_is_accepted() {
+        let want = vec![expr("1+1")];
+        assert_eq!(settings(&["-e", "1+1"]).inputs, want);
+        assert_eq!(settings(&["-e1+1"]).inputs, want);
+        assert_eq!(settings(&["--expression", "1+1"]).inputs, want);
+        assert_eq!(settings(&["--expression=1+1"]).inputs, want);
+    }
+
+    #[test]
+    fn an_expression_suppresses_the_standard_input_session() {
+        // Ours, not GNU's -- GNU has no `-e` at all. `bc -e '2+2'` dropping
+        // into an interactive session is nobody's behaviour.
+        assert!(!settings(&["-e", "2+2"]).reads_stdin());
+        assert!(!settings(&["a.bc", "-e", "2+2"]).reads_stdin());
+        assert!(settings(&["a.bc"]).reads_stdin());
+    }
+
+    #[test]
+    fn a_missing_expression_argument_is_an_error_not_a_session() {
+        // The old parser wrote `args.next()` into an `Option` nobody checked,
+        // so `bc -e` silently became an interactive bc.
         assert_eq!(
-            t,
-            vec![
-                Token::LParen,
-                Token::RParen,
-                Token::LBrace,
-                Token::RBrace,
-                Token::Eof,
-            ]
+            getopt_sentence(&["-e"]),
+            "option requires an argument -- 'e'"
+        );
+        assert_eq!(
+            getopt_sentence(&["--expression"]),
+            "option '--expression' requires an argument"
         );
     }
 
     #[test]
-    fn tokenize_comparison_operators() {
-        let t = tokenize("== != <= >= < >");
+    fn an_unknown_short_option_stops_the_run() {
+        // Measured: `bc -Z` prints `bc: invalid option -- 'Z'` on stderr, the
+        // usage block on stdout, and exits 1. The old parser printed
+        // `bc: unknown option: -Z`, carried on, and exited 0.
+        assert_eq!(getopt_sentence(&["-Z"]), "invalid option -- 'Z'");
+        match refusal(&["-Z"]) {
+            Refusal::Getopt(e) => assert_eq!(e.status, 1),
+            other => panic!("expected a getopt error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn an_unknown_long_option_echoes_what_was_typed() {
+        assert_eq!(getopt_sentence(&["--zzz"]), "unrecognized option '--zzz'");
+        // `=VALUE` and all, because nothing resolved to name instead.
         assert_eq!(
-            t,
-            vec![
-                Token::Eq,
-                Token::Ne,
-                Token::Le,
-                Token::Ge,
-                Token::Lt,
-                Token::Gt,
-                Token::Eof,
-            ]
+            getopt_sentence(&["--zzz=1"]),
+            "unrecognized option '--zzz=1'"
         );
     }
 
     #[test]
-    fn tokenize_compound_assignments() {
-        let t = tokenize("+= -= *= /= %= ^=");
+    fn an_ambiguous_abbreviation_lists_the_table_in_gnus_order() {
+        // Measured with `bc --=x`, whose empty prefix matches every entry:
+        // GNU's table is alphabetical. `--expression` is ours and sits where
+        // alphabetical order puts it, between `--compile` and `--help`.
         assert_eq!(
-            t,
-            vec![
-                Token::PlusAssign,
-                Token::MinusAssign,
-                Token::StarAssign,
-                Token::SlashAssign,
-                Token::PercentAssign,
-                Token::CaretAssign,
-                Token::Eof,
-            ]
+            getopt_sentence(&["--=x"]),
+            "option '--=x' is ambiguous; possibilities: '--compile' \
+             '--expression' '--help' '--interactive' '--mathlib' '--quiet' \
+             '--standard' '--version' '--warn'"
         );
     }
 
     #[test]
-    fn tokenize_increment_decrement() {
-        let t = tokenize("++ --");
-        assert_eq!(t, vec![Token::PlusPlus, Token::MinusMinus, Token::Eof]);
+    fn an_unambiguous_abbreviation_resolves() {
+        assert!(settings(&["--math"]).math_lib);
+        // `--q` is unique, `--warn` and `--version` share no prefix with it.
+        assert!(settings(&["--q"]).quiet);
     }
 
     #[test]
-    fn tokenize_keywords() {
-        let t = tokenize("if else while for print quit");
+    fn a_flag_that_takes_nothing_refuses_a_value() {
         assert_eq!(
-            t,
-            vec![
-                Token::If,
-                Token::Else,
-                Token::While,
-                Token::For,
-                Token::Print,
-                Token::Quit,
-                Token::Eof,
-            ]
+            getopt_sentence(&["--mathlib=1"]),
+            "option '--mathlib' doesn't allow an argument"
         );
     }
 
     #[test]
-    fn tokenize_identifier() {
-        let t = tokenize("foo_bar1");
-        assert_eq!(t, vec![Token::Ident("foo_bar1".to_string()), Token::Eof]);
+    fn help_and_version_are_requests_rather_than_settings() {
+        assert_eq!(parse(&["-h"]).ok(), Some(Request::Help));
+        assert_eq!(parse(&["--help"]).ok(), Some(Request::Help));
+        assert_eq!(parse(&["-v"]).ok(), Some(Request::Version));
+        assert_eq!(parse(&["--version"]).ok(), Some(Request::Version));
+        // They win from inside a cluster too, and before a later bad option.
+        assert_eq!(parse(&["-lh"]).ok(), Some(Request::Help));
     }
 
     #[test]
-    fn tokenize_line_comment_skipped() {
-        let t = tokenize("1 # comment\n2");
-        assert_eq!(
-            t,
-            vec![
-                Token::Number("1".to_string()),
-                Token::Newline,
-                Token::Number("2".to_string()),
-                Token::Eof,
-            ]
+    fn the_usage_block_names_every_flag_the_parser_accepts() {
+        // A usage text that drifts from the parser is how a user learns an
+        // option exists only by reading the source.
+        for flag in ["-h", "-i", "-l", "-q", "-w", "-v", "-e"] {
+            assert!(USAGE.contains(flag), "usage does not mention {flag}");
+        }
+        assert!(
+            USAGE.contains("SlateOS extension"),
+            "-e is not GNU's and the usage must say so"
         );
     }
 
     #[test]
-    fn tokenize_block_comment_skipped() {
-        let t = tokenize("1 /* block */ 2");
-        assert_eq!(
-            t,
-            vec![
-                Token::Number("1".to_string()),
-                Token::Number("2".to_string()),
-                Token::Eof,
-            ]
-        );
-    }
-
-    #[test]
-    fn tokenize_whitespace_ignored() {
-        let t = tokenize("  \t1  \t  2  ");
-        assert_eq!(
-            t,
-            vec![
-                Token::Number("1".to_string()),
-                Token::Number("2".to_string()),
-                Token::Eof,
-            ]
-        );
-    }
-
-    // ---------- run_input (end-to-end via Interpreter) ----------
-
-    #[test]
-    fn run_input_quit_returns_true() {
-        let mut interp = Interpreter::new();
-        assert!(run_input(&mut interp, "quit"));
-    }
-
-    #[test]
-    fn run_input_simple_assignment_persists_in_vars() {
-        let mut interp = Interpreter::new();
-        // Assignment is a statement that does not print; check the var is set.
-        let quit = run_input(&mut interp, "x = 41 + 1");
-        assert!(!quit);
-        let v = interp.get_var("x");
-        assert_eq!(show(&v, 0), "42");
-    }
-
-    #[test]
-    fn run_input_sets_scale_special_var() {
-        let mut interp = Interpreter::new();
-        let _ = run_input(&mut interp, "scale = 5");
-        assert_eq!(interp.scale, 5);
-    }
-
-    #[test]
-    fn run_input_empty_is_noop() {
-        let mut interp = Interpreter::new();
-        assert!(!run_input(&mut interp, ""));
-        assert!(!run_input(&mut interp, "   \n   "));
+    fn a_non_utf8_argument_is_a_file_name_rather_than_a_panic() {
+        // `env::args()` panics on one of these, which is what made
+        // `bc $'caf\xe9.bc'` abort before it could name the file. This test
+        // can only build the byte string on a platform whose `OsString` takes
+        // one, so it is Unix-only -- but the parser it exercises is not.
+        #[cfg(unix)]
+        {
+            use std::os::unix::ffi::OsStringExt;
+            let arg = OsString::from_vec(b"caf\xe9.bc".to_vec());
+            let parsed = match parse_args(&[arg.clone()]) {
+                Ok(Request::Run(s)) => s,
+                other => panic!("expected a run, got {other:?}"),
+            };
+            assert_eq!(parsed.inputs, vec![Input::File(arg)]);
+        }
     }
 }

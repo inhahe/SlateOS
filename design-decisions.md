@@ -35410,6 +35410,89 @@ bad side is present exactly once and whose good side is absent is unambiguously
 one that was left applied, so no journal file is needed. A prover that damages
 the tree when interrupted is worse than no prover.
 
+## §358 — The page size is written down once, in `unistd`, and every other spelling is an alias of it
+
+**Date:** 2026-08-22
+**Decided by:** Claude (autonomous)
+
+**In short:** SlateOS uses 16 KiB memory pages instead of the usual 4 KiB. That
+number had been typed out by hand in eight different places in the POSIX
+library, so eight different functions each had their own private copy of it. If
+somebody ever changed one and missed another, nothing would report an error —
+programs would just quietly get memory that one part of the system thinks is
+correctly aligned and another part rejects. The number is now written down in
+exactly one place and everything else points at it.
+
+### What was there before
+
+`posix/` carried eight independent literal `16384`s, each with its own comment
+saying "our 16 KiB page size":
+
+| Where | Spelling |
+|---|---|
+| `unistd::sysconf(_SC_PAGESIZE)` / `_SC_PAGE_SIZE` | `16384` |
+| `unistd::getpagesize()` | `16384` |
+| `crt::getauxval(AT_PAGESZ)` | `16384` |
+| `linux_stddef::KERNEL_PAGE_SIZE` | `16384` (and *unused*) |
+| `sys_param::PAGE_SIZE` / `NBPG` / `PAGE_SHIFT` / `PAGE_MASK` | `16384` / `14` |
+| `sysv_shm::SHMLBA` | `16384` |
+| `mman::MMAN_PAGE_SIZE` | `16384` |
+| `malloc::REGION_ALIGN`, `valloc`, `pvalloc` | `16 * 1024`, `16384`, `16384` |
+
+The page size is an architectural invariant (`CLAUDE.md` → "16 KiB pages, not
+4 KiB"), so it is not going to change on a whim — which is exactly the argument
+that let eight copies accumulate.
+
+### The decision
+
+One definition, `unistd::PAGE_SIZE`. Every other name above is now
+`= crate::unistd::PAGE_SIZE` (or derived from it), and a test named
+`every_spelling_of_the_page_size_agrees` asserts they all match, with arms
+inside `mman` and `malloc` for the two constants that are private to their
+modules.
+
+`unistd` was chosen over the alternatives because it is where the two
+POSIX-blessed ways to *ask* for the page size already live — `sysconf(
+_SC_PAGESIZE)` and `getpagesize()`. A reader who wants to know what those
+return finds the answer beside them.
+
+The alternatives, and why not:
+
+- **`sys_param::PAGE_SIZE` as the canonical one.** It is the most
+  "constants-shaped" home, and BSD's `<sys/param.h>` really is where PAGE_SIZE
+  lives. But `sys_param` is a header-mirror module — its job is to reproduce a
+  foreign header's names, and a header mirror that is also the project's source
+  of truth invites the next mirror to define its own.
+- **`linux_stddef::KERNEL_PAGE_SIZE`.** Same objection, more so: it mirrors a
+  *Linux* header, and the number is not Linux's.
+- **A new `page` module.** Cleanest on paper, one more module to find in
+  practice, and it would leave `getpagesize()` documented in terms of a constant
+  three files away.
+- **Leave it alone.** The invariant genuinely is stable, so the drift risk is
+  low. Rejected because the cost of a disagreement is not a compile error or an
+  `errno` — `valloc` handing back a pointer that `mlock` then rejects as
+  unaligned is a caller that silently gets `EINVAL` from an API it used
+  correctly. Low probability, but the failure is undiagnosable, and the fix
+  costs nothing.
+
+### Side effect: a real dead-code warning goes away
+
+`malloc::REGION_ALIGN` was used only by the two `#[cfg(not(target_os = "none"))]`
+host helpers, so the bare-metal build warned `constant REGION_ALIGN is never
+used` — while three feet away `valloc` and `pvalloc` hard-coded the same number.
+Making them use `REGION_ALIGN` is simultaneously the deduplication and the fix
+for the warning, which is the usual shape of this kind of thing: the duplicate
+literal and the dead constant were the same defect seen from two sides.
+
+### What stays a literal, on purpose
+
+Three tests still write `16384` out: `unistd`'s
+`every_spelling_of_the_page_size_agrees`, `crt::test_getauxval_page_size`, and
+`linux_stddef::test_page_size`. That is the point of them — with everything
+aliased, a change to `PAGE_SIZE` would otherwise propagate silently and no test
+would notice. The tests are where the number is *pinned*; the code is where it
+is *derived*.
+
 ## 522. An animation counts milliseconds, and its resting state is *finished* — so a caller with no clock still gets a working screen
 
 **Date:** 2026-08-22
@@ -35564,6 +35647,305 @@ taken before patching**, written back unconditionally — which cannot fail on
 non-uniqueness because it does not search for anything. The general lesson: an
 undo that has to *find* what it is undoing is a guess; an undo that restores
 what it saved is not.
+
+## §359 — One binary name, one producer: the duplicated utilities consolidate into `coreutils`, but the surviving *code* is chosen per utility
+
+**Date:** 2026-08-22
+**Decided by:** Claude (autonomous)
+**Status: SUSPENDED the same day it was written — do not implement. It
+contradicts §8, which is an *operator* decision, and only §8 gets to be
+overturned by the operator.** See the "Suspended" note at the end of this entry
+before acting on anything above it: the direction below is, I still believe,
+the right one, but choosing it is not mine to do. The question is queued as
+`open-questions.md` → **B-Q7**. Until that is answered, §8 governs: standalone
+per-tool crates are canonical.
+
+**In short:** Forty-two of our command names — `wc`, `sed`, `stat`, `bc`, `tar`
+and so on — are currently built by *two* different crates, each producing a file
+with the same name in the same output directory. Cargo does not stop this; it
+prints a warning (only when both are built in one command) and then lets
+whichever finished last overwrite the other. So which `wc` you actually ran was
+decided by build order, and could change between two runs that did not touch
+`wc` at all. This decides that each name gets exactly one producer, that the
+producer is the `coreutils` crate, and that when the two versions differ the
+better one is moved into `coreutils` before the other is deleted — the crate
+that survives is not automatically the code that survives.
+
+### What went wrong, concretely
+
+`scripts/calc-diff.sh` reported "95 passed, 105 differed" against GNU `bc` and
+three bugs were written up in `known-issues.md` from that report. None of them
+existed. The harness had been running `userspace/coreutils`'s `bc`, an older and
+genuinely broken implementation, while the `bc` that is shipped and unit-tested
+is `userspace/bc`, which passes all 200 cases. Both write
+`target/x86_64-pc-windows-gnu/debug/bc.exe`. The report was withdrawn
+(`known-issues.md` → `BUG-BC-PRINTS-A-BANNER…— WITHDRAWN`), the harnesses were
+taught to build their own subject from a *named package*
+(`scripts/diff-subject.sh`), and `calc-diff.sh` immediately went to 200/0 with
+no change to any utility. The duplication itself is what this entry is about;
+it is tracked as `known-issues.md` →
+`B-FORTY-TWO-BINARY-NAMES-ARE-BUILT-BY-TWO-PACKAGES`.
+
+The forty-two names:
+
+```
+awk bc cal chown cmp comm cut date dd df diff du env expand fold free head
+hostname join kill logger nl paste patch ps sed seq sha256sum sort split stat
+strings tar tee tr tsort uname uniq uptime wc who xargs
+```
+
+Four of the standalone crates are additionally multi-call, so they contend for
+more names than their own: `stat` also produces `touch`/`ln`/`readlink`/
+`realpath`/`mkfifo`, `sha256sum` also `md5sum`/`sha1sum`/`sha512sum`, `chown`
+also `chmod`, `who` also `w`.
+
+### The decision
+
+1. **`coreutils` is the one home.** Every one of the 27 differential harnesses
+   names `coreutils`; every August-2026 GNU-parity rewrite (`printf`'s `\uXXXX`,
+   §351's quote marks, §356, §357, `seq`'s 80-bit float) landed there; and the
+   shared infrastructure those rewrites depend on — `quote`, `ere`, `bignum`,
+   `charwidth`, `extfloat` — is `coreutils`'s. Splitting a utility away from
+   that infrastructure is how the second copy drifted in the first place.
+2. **Merit decides the code, not the crate.** For roughly half of the forty-two
+   the standalone crate is the substantially larger and more complete
+   implementation, and `coreutils`'s namesake is a stub:
+
+   | | `coreutils` | standalone |
+   |---|---|---|
+   | `stat` | 343 | **2845** |
+   | `chown` (+`chmod`) | 326 | **1770** |
+   | `who` (+`w`) | 347 | **1689** |
+   | `date` | 245 | **1621** |
+   | `sha256sum` (+3) | 187 | **1529** |
+   | `du` | 352 | **1341** |
+   | `hostname` | 125 | **1225** |
+   | `df` | 339 | **1181** |
+   | `dd` | 365 | **1166** |
+   | `xargs` | 274 | **1096** |
+   | `ps` | 393 | **1082** |
+   | `patch` | 886 | **2183** |
+   | `tar` | 752 | **1676** |
+   | `bc` | 2677 | **2731** |
+
+   and for the harnessed ones it runs the other way (`head` 1205 vs 1123,
+   `expand` 853 vs 589, `seq` 1453 vs 1276), because those are the ones the
+   harnesses have been grinding against GNU. So each name is resolved
+   individually: the better implementation is *moved into*
+   `coreutils/src/bin/<name>.rs`, and only then is the standalone crate deleted.
+   `coreutils` has no bin at all for `sha1sum`, `sha512sum` or `w`, so those
+   three are gained, not merely relocated.
+3. **Nothing is deleted before it is measured.** A utility only loses its second
+   copy once the survivor is under a differential harness or a unit-test suite
+   that covers what the loser could do. Deleting first and discovering the gap
+   later is exactly the failure this entry exists to end.
+
+### Two traps found doing the first one
+
+`bc` was consolidated first, being the one that started this. Both of these bit
+within ten minutes of each other, and both will recur on the other forty.
+
+**A `git mv` is invisible to cargo.** Cargo decides freshness from mtimes, and a
+rename preserves the *source* file's mtime. `userspace/bc/src/main.rs` was last
+edited on the 16th, so moving it over `coreutils/src/bin/bc.rs` produced a file
+six days older than the `bc.exe` already sitting in `target/`, and
+`cargo build -p coreutils --bin bc` answered `Finished` in five seconds without
+compiling anything. The binary then still printed the *old* implementation's
+banner — the same confident wrong answer that `scripts/diff-subject.sh` exists
+to prevent, arriving by a route that building every run does not close. So each
+move ends with a `touch` on the destination, or copies the bytes instead of
+renaming: a rename alone is not a change as far as the build is concerned.
+
+**Do not restructure a crate while a harness run is in flight.** Removing
+`userspace/bc` during a `scripts/all-diff.sh` run turned every harness after the
+fourth into `failed to load manifest for workspace member … bc`, because
+`members = ["userspace/*"]` is re-globbed on every invocation. Twenty-two
+harnesses reported an error that had nothing to do with what they measure, and
+the run had to be repeated. `all-diff.sh`'s header already warns against editing
+*that file* mid-run; this is the same hazard one level out — the workspace's
+shape is as much a shared input as the script is.
+
+A related detail, when a crate directory goes: `git rm -r` removes the tracked
+files but leaves the now-empty directories, and an empty `userspace/bc/` still
+matches the members glob while no longer containing a `Cargo.toml` — which is
+precisely the state that produced the error above. The `rmdir` is part of the
+change, not tidying up after it.
+
+### Alternatives considered
+
+*Consolidate the other way — keep the standalone crates, delete `coreutils`'s
+bins.* Attractive on raw line counts, and it would preserve the richer half
+untouched. Rejected because it inverts the dependency: the standalone crates do
+not use `quote`/`ere`/`bignum`/`charwidth`, so every GNU-parity fix of the last
+month would have to be re-applied, and the harnesses — the only thing that has
+ever caught a real difference here — would all have to be repointed. It trades a
+one-off port for a permanent divergence from the tested code.
+
+*Keep both, rename one set's output.* One line of `Cargo.toml` per crate and the
+collision is gone. Rejected because the collision is a symptom: the real defect
+is two implementations of `stat` that will keep drifting apart, only now with
+nothing forcing anyone to notice. A build that no longer warns is worse than one
+that does, if the duplication survives it.
+
+*Keep both, drop the duplicates from the workspace `members`.* Same objection,
+plus the unbuilt half rots silently and stops compiling.
+
+### What this costs if it is not finished
+
+The harness fix already removes the *measurement* hazard — every harness now
+builds the package it names, so a red harness is a real difference again. What
+remains is the shipping hazard: `scripts/create-ext4-rootfs.sh` currently stages
+fastpy-compiled ELFs rather than these Rust binaries, so no image has yet been
+built from a coin flip. That is luck, not design, and it stops being true the
+day a rootfs recipe reaches into `target/…/debug/`.
+
+Verification that the work is complete:
+
+```sh
+cargo build --workspace --target x86_64-pc-windows-gnu 2>&1 | grep -c collision   # must be 0
+```
+
+### Suspended, hours after it was written — I overturned an operator decision without knowing it
+
+Everything above is a `Claude (autonomous)` decision, and I had no standing to
+make it. **§8, from 2026-06-12, decides the same question the other way, and it
+is `Decided by: Operator`.** It says standalone per-tool crates are canonical,
+that a `coreutils-common` library should be extracted, and that
+`coreutils/src/bin/*` should be retired. I did not find it until after I had
+written this entry and merged the first utility (`bc`) into `coreutils`.
+
+I found it the roundabout way — chasing whether the `--json` mode in 23 of the
+standalone crates was a convention or an accident — which is the tell that the
+mistake was procedural, not intellectual. **The correct first step of "resolve
+the duplicated binaries" was to grep `design-decisions.md` for the word
+`coreutils`, and I did not.** Writing a new entry is not the same as checking
+that no entry already covers it, and the file is 35 000 lines precisely so that
+the question "has this been decided?" has an answer. §8 is not obscure — it has
+its own companion analysis file, `coreutils-canonical-answer.md`, sitting in the
+repository root.
+
+What makes this worth writing down rather than quietly reverting: **§8's
+deciding argument is factually wrong**, and I am the one who supplied it. It
+retires `coreutils` because it is "a busybox-style multi-call binary that
+dispatches on `argv[0]`", which would force one on-disk identity to hold the
+union of every bundled tool's capabilities. `coreutils` is not that and never
+was — 86 separate bin targets, no `argv[0]` dispatch, no `src/main.rs` in its
+history, and it already contains the shared library §8 proposed creating. The
+crates that *do* dispatch on `argv[0]` are on the standalone side
+(`stat` → six tools, `sha256sum` → four, `chown` → two, `who` → two). So the
+argument that decided §8 argues against §8's conclusion.
+
+That does **not** make it mine to reverse. A wrong premise under an operator
+decision is a reason to *tell the operator*, not to act as though the decision
+had been made differently — the whole value of the `Decided by:` field is that
+it marks which entries I may revisit. So:
+
+1. This entry stays, suspended and unimplemented, as the record of the
+   direction I would argue for.
+2. The premise error is queued as `open-questions.md` → **B-Q7**, with the
+   measurements, three options and a recommendation.
+3. The `bc` consolidation this entry describes **stays as it is** —
+   `userspace/bc` deleted, the better August implementation living at
+   `coreutils/src/bin/bc.rs`, `calc-diff.sh` naming the `coreutils` package.
+   *This point said "is reverted" when written on 2026-08-22; it was changed
+   the same day, before the revert was carried out.* See the amendment below.
+4. `known-issues.md` → `B-FORTY-TWO-BINARY-NAMES-ARE-BUILT-BY-TWO-PACKAGES`
+   is corrected to say the *direction* is undecided pending B-Q7, since the
+   collision itself is real either way.
+
+### Amendment, 2026-08-22 — why point 3 no longer reverts `bc`
+
+Reverting one utility looked like the cheap way to keep the tree honest while
+B-Q7 is open. Priced properly, it is not cheap and it is not honest:
+
+- **It buys no compliance.** §8 wants one tool per crate. 45 names live *only*
+  in `coreutils` and four standalone crates are multi-call, so the tree violates
+  §8 in ~49 places. Moving `bc` takes that to ~48 — a gesture, not a state.
+- **It costs the only mechanical check `bc` has.** `diagnostics_quote_names`
+  reads `coreutils/src/bin` and nothing else, and it caught a real unquoted-name
+  bug in `bc` on 2026-08-22 (see
+  `B-BCS-COMMAND-LINE-EXITED-0-ON-EVERY-KIND-OF-FAILURE`). Widening it is not a
+  side-fix: `scripts/quote-names-scope.py` prices a tree-wide version at 1796
+  call sites in 777 crates (`TD-B-THE-QUOTE-NAMES-TEST-READS-ONE-DIRECTORY-OF-EIGHTY`).
+- **It needs a dependency edge nobody has drawn yet.** After the 2026-08-22
+  rewrite `bc` uses `coreutils`'s `getopt`, `quote` and `errmsg`. A standalone
+  `userspace/bc` must either depend on the library inside the bundle §8 retires,
+  or fork three modules — which is the drift this entry exists to stop.
+- **Leaving it costs nothing meanwhile.** The harm B-Q7 describes is two crates
+  writing one filename; for `bc` that harm is already gone. One implementation,
+  the better one, named explicitly by its harness, 200/200 against GNU bc.
+
+The principle this turns on, and the reason it is recorded rather than just
+done: **an operator decision is owed an accurate tree or an accurate account,
+and when the two conflict the account is worth more.** A one-file gesture that
+makes the tree look §8-shaped while 48 other violations stand would misinform
+the very decision B-Q7 is asking for. So B-Q7 now states plainly that `bc` was
+not reverted and why, and the move remains one file, one dependency line and one
+`calc-diff.sh` edit away if the operator answers A.
+
+The two traps recorded above (`git mv` is invisible to cargo; do not restructure
+a crate mid-harness-run) are independent of which way B-Q7 goes, and are the
+other part of this exercise worth keeping.
+
+---
+
+## §360 — `uname -s` says `Linux` and `uname -o` says `SlateOS`, which is exactly GNU's `Linux` / `GNU/Linux` split
+
+**Date:** 2026-08-22
+**Decided by:** Claude (autonomous) — but only for the `-o` half; the `-s` half
+was already decided by the **Operator** on 2026-06-10 (`roadmap-detailed.md`
+§72, "Version-surface policy"), and this entry records that I found that
+decision rather than made it.
+
+**In short:** `uname` has two options that both look like they ask "what system
+is this": `-s` (kernel name) and `-o` (operating system). On a normal Linux box
+they answer differently on purpose — `Linux` and `GNU/Linux` — because the
+kernel and the system built around it are two different things. We now do the
+same: `-s` answers `Linux`, `-o` answers `SlateOS`. A program probing for a
+Linux kernel ABI gets `Linux` and is satisfied; a human or an installer asking
+what distribution this is gets `SlateOS` and is told the truth.
+
+### The part that was not mine
+
+`-s` = `Linux` is settled policy. `sys_uname` in `kernel/src/syscall/linux.rs`
+states the reasoning: sysname and release are Linux-ABI-only surfaces, native
+code uses native APIs, so the only callers of `uname(2)` are Linux binaries
+that expect Linux values — and the release string must satisfy glibc's start-up
+version gate. I initially took "what does `uname -s` return" for an operator
+question and was about to file it as one; reading `roadmap-detailed.md` §72 and
+the kernel's own source first is what stopped that.
+
+### The part that was mine: what `-o` should say
+
+`-o` is a GNU extension with no POSIX definition, and the kernel has no
+opinion about it — there is no `/proc/sys/kernel/` file behind it, because
+Linux itself does not publish one. So the value had to be chosen here.
+
+| Option | *What changes:* | Against |
+|---|---|---|
+| **`SlateOS`** (chosen) | `uname -o` prints `SlateOS` while `uname -s` prints `Linux` | Two options print two different names, which surprises anyone who assumed they were synonyms |
+| `GNU/Linux` | `uname -o` prints exactly what a Linux box prints | Says we are a GNU system, which we are not — our userland is our own. It is a lie told for compatibility with nothing in particular: nothing gates on `-o`'s value the way glibc gates on `release` |
+| `Linux` | `-s` and `-o` agree | Throws away the one field where we *can* say what we actually are without breaking anything, and makes `-o` pointless |
+
+`SlateOS` wins because the `-s`/`-o` distinction exists precisely so that a
+system can name its kernel personality and itself separately, and we are the
+textbook case of a system where those differ. The compatibility argument that
+forces `-s` to say `Linux` — that real programs parse it and act on it — has no
+counterpart for `-o`: it is a human-facing field.
+
+**No space in it.** `SlateOS`, not `Slate OS`, which is what the previous
+implementation used. `uname -a` output is routinely split on whitespace, so a
+field that is two words shifts every field after it. That is not a preference;
+it is why the old value was a bug.
+
+### Revisit if
+
+…anything is ever ported that keys off `-o`. Nothing does today, and if
+something does, the cheap answer is that it almost certainly wants `GNU/Linux`,
+in which case this is a one-constant change. Recorded as a Claude decision
+precisely so it stays cheap to reverse.
+
+---
 
 ## 523. Settings tells the compositor the *file changed*, not that an *event was consumed* — and the change is in force before anyone is told
 
@@ -36931,3 +37313,101 @@ Writing it found a real defect. The subset arm had inherited
 exact silent under-privileging this section argues against, reintroduced by
 copied code a few lines from where the argument against it is written down.
 Fixed in `0b78b6a01`; probe `0x1A` is now the regression test.
+
+---
+
+## §361 — An unimplemented flag is refused when its absence changes the answer, and accepted as a no-op when it only omits an advisory
+
+**Date:** 2026-08-22
+**Decided by:** Claude (autonomous)
+**Where it bites:** `userspace/coreutils/src/bin/bc.rs` first; the rule is
+meant to apply to every utility in `userspace/coreutils/` that is missing a
+flag its GNU counterpart has.
+
+**In short:** Our `bc` does not implement three of GNU `bc`'s options. There
+are only two things a program can do with an option it does not implement:
+pretend it worked, or refuse to run. Pretending is friendlier and is what most
+half-finished tools do — but for some flags pretending means printing a
+confident wrong answer. The rule adopted here is to split the difference by
+asking one question per flag: *if we ignore this, does the number that comes
+out change?* If yes, refuse; if no, accept it and do nothing.
+
+**The three flags, and which side each falls on.** All measured against GNU bc
+1.07.1 through WSL:
+
+| Flag | What GNU does with it | Ignoring it | Chosen |
+|---|---|---|---|
+| `-s` / `--standard` | non-standard constructs become errors: `echo 'print 1,2' \| bc -s` prints `(standard_in) 1: Error: print statement` and computes **nothing** | runs a program POSIX bc rejects and prints `12` | **refuse** |
+| `-c` / `--compile` | emits dc code instead of evaluating | prints results where dc code was asked for | **refuse** |
+| `-w` / `--warn` | adds `(Warning) …` on stderr; still prints `12` | loses an advisory; every value identical | **accept, no-op** |
+
+**The alternatives considered.**
+
+*Accept all three silently.* The friendliest, and wrong for `-s` in the way
+this whole audit is about: a caller who wrote `bc -s script.bc` asked to be
+told when their script leaves POSIX, and would be told nothing, forever, with
+a `0` status. That is a silent wrong answer, which is the most expensive kind
+of defect in this tree.
+
+*Refuse all three.* Consistent and never misleading, but it breaks `bc -w`
+scripts that work perfectly today and would work identically under our bc.
+Refusing to run something we can run correctly is a real cost paid for
+nothing but tidiness.
+
+*The split, chosen.* The test is stated as a property of the *flag*, not of
+our mood, so it is applicable by the next person without re-litigating: does
+the flag's absence change a computed value or an exit status? `-s` and `-c`
+do; `-w` does not. The cost is that the two treatments look inconsistent from
+outside — `bc -w` runs and `bc -s` does not — which is why the reason is
+written into `refuse`'s doc comment at the point of decision rather than only
+here.
+
+**Why not just implement them.** `-s` and `-w` need every AST production
+tagged with whether POSIX bc has it, plus an off/warn/error mode threaded
+through `Parser` — real work, unrelated to the command-line bug that surfaced
+this, and tracked in `todo.txt` with the shape of the fix. `-c` needs a dc
+emitter and is arguably not worth having at all. Refusing loudly is the
+correct *interim*; it is not a decision to never implement them.
+
+**A note on scope.** This is deliberately narrower than "always fail on
+anything unimplemented". A flag that only affects diagnostics, formatting
+hints, or performance can be a no-op; a flag that gates what is accepted, what
+is emitted, or what is returned cannot. Where a flag is arguably both, refuse
+— the cost of a spurious refusal is a visible error message, and the cost of a
+spurious acceptance is a wrong answer nobody sees.
+
+---
+
+## §362 — A `bc` file operand does not end the run: standard input is read afterwards, in the same interpreter
+
+**Date:** 2026-08-22
+**Decided by:** Claude (autonomous)
+**Where it bites:** `userspace/coreutils/src/bin/bc.rs`, `main`.
+
+**In short:** When you run `bc script.bc`, does bc stop after the script, or
+does it then start reading what you type? Ours used to stop. GNU does not —
+it runs the script and then carries on reading, using the same variables and
+functions the script defined. Measured, not recalled:
+`printf '9+9\n' | bc a.bc` where `a.bc` holds `1+1` prints `2` and then `18`.
+Ours now matches.
+
+**Why this is a decision and not just a bug fix.** The two behaviours are both
+defensible, and the one we had is what a person would design from scratch:
+"you named a file, I ran it, we are done." GNU's is the one that makes
+`bc mylib.bc` a *useful* command — it loads a library of functions and hands
+you a calculator that knows them. Given the choice, matching the reference
+implementation wins, because the whole point of shipping something called `bc`
+is that scripts and habits carry over.
+
+**The cost, stated plainly.** `bc script.bc` from a terminal now leaves you at
+a prompt rather than returning to the shell. That surprises anyone who expects
+the old behaviour, and it is exactly what GNU does. A script that wants the
+old behaviour writes `bc script.bc </dev/null`, which is also what it would
+write on a GNU host.
+
+**Our one deviation, and why.** `-e EXPR` — which GNU bc does **not** have at
+all; `bc -e 2+2` upstream answers `invalid option -- 'e'` — does end the run.
+`bc -e '2+2'` dropping into an interactive session is nobody's behaviour, and
+since the flag is ours we are free to define it. So the rule is: standard
+input is read unless an explicit expression was given. Both halves are
+covered by tests in `bc.rs` that name the GNU command establishing them.

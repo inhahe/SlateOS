@@ -11,7 +11,26 @@
 //! `MetadataExt`).  Listing and extraction are platform-independent at
 //! the parsing level; the cross-platform helpers
 //! (`parse_args`, `parse_octal`, `extract_string`, `TarHeader`,
-//! `list_archive`) are exercised by unit tests on every host.
+//! `list_archive`, `sanitize_member_name`) are exercised by unit tests on
+//! every host.
+//!
+//! # An archive is untrusted input
+//!
+//! The member names in a tar file are chosen by whoever made it, and an
+//! extractor that believes them will write wherever it is told. This one used
+//! to: `fs::write(&name, ...)` with `name` straight out of the header, so a
+//! member called `../../etc/passwd` or `/etc/shadow` was written there, and
+//! `-C` was no protection at all — an absolute name ignores the current
+//! directory entirely. That is the "tar slip" class of vulnerability, and
+//! `tar -xf` on a downloaded archive is exactly the situation it exists for.
+//! `sanitize_member_name` now stands between the header and the filesystem:
+//! every member is forced to be a relative path with no `..` in it, and one
+//! that cannot be is refused rather than adjusted. See `known-issues.md` →
+//! `B-tar-EXTRACTS-OUTSIDE-THE-DESTINATION-DIRECTORY`.
+//!
+//! The related rule is that a failed write is never silent. Creating an
+//! archive that could not be written, or extracting a member that could not
+//! be created, exits 2 (GNU's fatal-error status), not 0.
 
 use coreutils::quote::quotef_os;
 use std::env;
@@ -19,6 +38,11 @@ use std::fs::{self, File};
 use std::io::{self, Read, Write};
 use std::path::Path;
 use std::process;
+
+/// GNU tar's exit status for "a fatal error occurred". Used for every failure
+/// that leaves the archive or the extracted tree incomplete, because a caller
+/// that only sees 0 has no way to discover that half its files are missing.
+const EXIT_FATAL: i32 = 2;
 
 // ============================================================================
 // argv parsing — pure, cross-platform
@@ -91,28 +115,34 @@ fn main() {
         }
     };
 
-    if parsed.create {
+    // Every mode returns its own status rather than exiting inline, so that
+    // "some members failed" survives to the caller. A tool that reports 0
+    // after writing half an archive is worse than one that fails outright:
+    // the script that invoked it deletes the source and moves on.
+    let status = if parsed.create {
         #[cfg(unix)]
         {
-            do_create(&parsed.archive_file, &parsed.files, parsed.verbose);
+            do_create(&parsed.archive_file, &parsed.files, parsed.verbose)
         }
         #[cfg(not(unix))]
         {
             eprintln!("tar: create mode is unix-only on this build");
-            process::exit(1);
+            EXIT_FATAL
         }
     } else if parsed.extract {
         do_extract(
             &parsed.archive_file,
             parsed.directory.as_deref(),
             parsed.verbose,
-        );
+        )
     } else if parsed.list {
-        do_list_main(&parsed.archive_file);
+        do_list_main(&parsed.archive_file)
     } else {
         eprintln!("tar: must specify -c, -x, or -t");
-        process::exit(1);
-    }
+        1
+    };
+
+    process::exit(status);
 }
 
 // ============================================================================
@@ -223,25 +253,106 @@ impl TarHeader {
     }
 }
 
+/// Reduce an archive member name to a path that cannot escape the current
+/// directory, or refuse it.
+///
+/// Two things a hostile (or merely careless) archive can do are handled
+/// differently on purpose:
+///
+/// * **A leading `/`** is *stripped*, with the same reasoning as GNU tar's
+///   "Removing leading `/' from member names": archives of system trees are
+///   routinely made with absolute paths and are perfectly safe to unpack
+///   relative to somewhere else, so refusing them would break a common case
+///   for no gain. Note this is not cosmetic — `Path::join` with an absolute
+///   path *discards* the base, so an unstripped `/etc/passwd` would ignore
+///   `-C` entirely.
+/// * **A `..` component** is *refused*, and the member is skipped. It cannot
+///   be stripped safely: `a/../b` looks equivalent to `b` only if `a` is a
+///   real directory and not a symlink, and the archive is precisely the thing
+///   we are not willing to trust about that. Refusing costs a rare, loud
+///   failure; guessing costs an arbitrary file write.
+///
+/// `.` components and repeated slashes are dropped, since they name the same
+/// path and only serve to disguise the two cases above.
+///
+/// The `..` test also splits on `\`, which is *not* a separator in this OS
+/// (`design.txt`: paths allow every byte but `/` and NUL). That is defence in
+/// depth for the host builds this file is unit-tested on, where `..\..\x` does
+/// traverse. The rebuilt name still joins with `/` only, so a slateos file
+/// legitimately containing a backslash keeps its name; the sole casualty is a
+/// file with a literal `..\` component, which is refused rather than silently
+/// renamed.
+fn sanitize_member_name(raw: &str) -> Result<String, String> {
+    let mut parts: Vec<&str> = Vec::new();
+    for component in raw.split('/') {
+        if component.is_empty() || component == "." {
+            // A leading empty component is the absolute-path `/`; an interior
+            // one is a doubled slash. Both are dropped.
+            continue;
+        }
+        if component == ".." || component.split('\\').any(|p| p == "..") {
+            return Err(format!(
+                "refusing to extract '{raw}': member name escapes the destination directory"
+            ));
+        }
+        parts.push(component);
+    }
+    if parts.is_empty() {
+        return Err(format!("refusing to extract '{raw}': empty member name"));
+    }
+    Ok(parts.join("/"))
+}
+
 #[cfg(unix)]
-fn do_create(archive_file: &Option<String>, files: &[String], verbose: bool) {
+fn do_create(archive_file: &Option<String>, files: &[String], verbose: bool) -> i32 {
     let mut out: Box<dyn Write> = match archive_file {
         Some(path) => match File::create(path) {
             Ok(f) => Box::new(f),
             Err(e) => {
                 eprintln!("tar: {}: {e}", quotef_os(path));
-                process::exit(1);
+                return EXIT_FATAL;
             }
         },
         None => Box::new(io::stdout()),
     };
 
-    fn add_file(path: &Path, name: &str, out: &mut dyn Write, verbose: bool) {
+    /// Report a write failure once and give up on the archive. There is no
+    /// point continuing: every later member would land at the wrong offset,
+    /// producing a file that looks like an archive and is not one.
+    fn write_or_fail(out: &mut dyn Write, buf: &[u8], status: &mut i32) -> bool {
+        match out.write_all(buf) {
+            Ok(()) => true,
+            Err(e) => {
+                eprintln!("tar: write error: {e}");
+                *status = EXIT_FATAL;
+                false
+            }
+        }
+    }
+
+    fn add_file(path: &Path, name: &str, out: &mut dyn Write, verbose: bool, status: &mut i32) {
         use std::os::unix::fs::MetadataExt;
         let meta = match fs::metadata(path) {
             Ok(m) => m,
             Err(e) => {
                 eprintln!("tar: {}: {e}", quotef_os(name));
+                *status = EXIT_FATAL;
+                return;
+            }
+        };
+
+        // The header commits to a length, so the body must be exactly that
+        // many bytes however the read goes. Writing fewer would not merely
+        // truncate this member: the extractor reads a fixed number of blocks
+        // per header, so every subsequent member would be read from the wrong
+        // offset and the whole archive after this point would be garbage.
+        let declared = meta.len();
+
+        let mut f = match File::open(path) {
+            Ok(f) => f,
+            Err(e) => {
+                eprintln!("tar: {}: {e}", quotef_os(name));
+                *status = EXIT_FATAL;
                 return;
             }
         };
@@ -251,34 +362,71 @@ fn do_create(archive_file: &Option<String>, files: &[String], verbose: bool) {
         TarHeader::set_octal(&mut header.mode, u64::from(meta.mode()) & 0o7777);
         TarHeader::set_octal(&mut header.uid, u64::from(meta.uid()));
         TarHeader::set_octal(&mut header.gid, u64::from(meta.gid()));
-        TarHeader::set_octal(&mut header.size, meta.len());
-        TarHeader::set_octal(&mut header.mtime, meta.mtime() as u64);
+        TarHeader::set_octal(&mut header.size, declared);
+        TarHeader::set_octal(&mut header.mtime, meta.mtime().unsigned_abs());
         header.typeflag = b'0';
         header.magic = *b"ustar\0";
         header.version = *b"00";
         header.compute_checksum();
-        let _ = out.write_all(header.as_bytes());
+        if !write_or_fail(out, header.as_bytes(), status) {
+            return;
+        }
 
         if verbose {
             eprintln!("{name}");
         }
 
-        if let Ok(mut f) = File::open(path) {
-            let mut buf = [0u8; BLOCK_SIZE];
-            loop {
-                let n = f.read(&mut buf).unwrap_or(0);
-                if n == 0 {
-                    break;
+        let mut remaining = declared;
+        let mut buf = [0u8; BLOCK_SIZE];
+        let mut short = false;
+        while remaining > 0 {
+            let want = usize::try_from(remaining)
+                .unwrap_or(BLOCK_SIZE)
+                .min(BLOCK_SIZE);
+            let mut filled = 0usize;
+            while filled < want && !short {
+                match f.read(buf.get_mut(filled..want).unwrap_or(&mut [])) {
+                    // Only 0 means end of file. A short read is ordinary — the
+                    // previous code took any single `read` as the whole block
+                    // and NUL-padded the rest, so a file delivered in pieces
+                    // was archived with holes punched through it.
+                    Ok(0) => short = true,
+                    Ok(n) => filled = filled.saturating_add(n),
+                    Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+                    Err(e) => {
+                        eprintln!("tar: {}: {e}", quotef_os(name));
+                        *status = EXIT_FATAL;
+                        short = true;
+                    }
                 }
-                if let Some(zero) = buf.get_mut(n..) {
-                    zero.fill(0);
-                }
-                let _ = out.write_all(&buf);
             }
+            if let Some(pad) = buf.get_mut(filled..) {
+                pad.fill(0);
+            }
+            if !write_or_fail(out, &buf, status) {
+                return;
+            }
+            remaining = remaining.saturating_sub(want as u64);
+        }
+        if short {
+            // The file shrank between `metadata` and the read, or never had
+            // the length it claimed. The archive stays well-formed because the
+            // remaining blocks were padded, but it no longer holds the file.
+            eprintln!(
+                "tar: {}: file shorter than expected; padded with zeros",
+                quotef_os(name)
+            );
+            *status = EXIT_FATAL;
         }
     }
 
-    fn add_directory_recursive(dir: &Path, prefix: &str, out: &mut dyn Write, verbose: bool) {
+    fn add_directory_recursive(
+        dir: &Path,
+        prefix: &str,
+        out: &mut dyn Write,
+        verbose: bool,
+        status: &mut i32,
+    ) {
         let mut header = TarHeader::new();
         let name = format!("{prefix}/");
         header.set_name(&name);
@@ -291,46 +439,96 @@ fn do_create(archive_file: &Option<String>, files: &[String], verbose: bool) {
         header.magic = *b"ustar\0";
         header.version = *b"00";
         header.compute_checksum();
-        let _ = out.write_all(header.as_bytes());
+        if !write_or_fail(out, header.as_bytes(), status) {
+            return;
+        }
 
         if verbose {
             eprintln!("{name}");
         }
 
-        if let Ok(entries) = fs::read_dir(dir) {
-            for entry in entries.flatten() {
-                let entry_path = entry.path();
-                let entry_name = format!("{prefix}/{}", entry.file_name().to_string_lossy());
-                if entry_path.is_dir() {
-                    add_directory_recursive(&entry_path, &entry_name, out, verbose);
-                } else {
-                    add_file(&entry_path, &entry_name, out, verbose);
+        let entries = match fs::read_dir(dir) {
+            Ok(e) => e,
+            Err(e) => {
+                // Previously `if let Ok(entries)`, so an unreadable directory
+                // produced an archive silently missing its whole subtree.
+                eprintln!("tar: {}: {e}", quotef_os(prefix));
+                *status = EXIT_FATAL;
+                return;
+            }
+        };
+        // Sorted so that archiving the same tree twice produces the same
+        // bytes; `read_dir` order is whatever the filesystem feels like.
+        let mut children: Vec<(String, std::path::PathBuf)> = Vec::new();
+        for entry in entries {
+            match entry {
+                Ok(e) => children.push((e.file_name().to_string_lossy().into_owned(), e.path())),
+                Err(e) => {
+                    eprintln!("tar: {}: {e}", quotef_os(prefix));
+                    *status = EXIT_FATAL;
                 }
+            }
+        }
+        children.sort();
+        for (file_name, entry_path) in children {
+            let entry_name = format!("{prefix}/{file_name}");
+            if entry_path.is_dir() {
+                add_directory_recursive(&entry_path, &entry_name, out, verbose, status);
+            } else {
+                add_file(&entry_path, &entry_name, out, verbose, status);
             }
         }
     }
 
+    let mut status = 0;
     for path_str in files {
         let path = Path::new(path_str);
         if path.is_dir() {
-            add_directory_recursive(path, path_str, &mut out, verbose);
+            add_directory_recursive(path, path_str, &mut out, verbose, &mut status);
         } else {
-            add_file(path, path_str, &mut out, verbose);
+            add_file(path, path_str, &mut out, verbose, &mut status);
         }
     }
 
     let zero_block = [0u8; BLOCK_SIZE];
-    let _ = out.write_all(&zero_block);
-    let _ = out.write_all(&zero_block);
+    let _ = write_or_fail(&mut out, &zero_block, &mut status)
+        && write_or_fail(&mut out, &zero_block, &mut status);
+    // The end-of-archive marker is the last thing written, so a flush that
+    // fails here loses precisely the bytes that make the file a valid archive.
+    if let Err(e) = out.flush() {
+        eprintln!("tar: write error: {e}");
+        status = EXIT_FATAL;
+    }
+    status
 }
 
-fn do_extract(archive_file: &Option<String>, directory: Option<&str>, verbose: bool) {
+/// Number of 512-byte blocks a member of `size` bytes occupies.
+fn data_blocks(size: u64) -> u64 {
+    size.saturating_add(BLOCK_SIZE as u64 - 1)
+        .saturating_div(BLOCK_SIZE as u64)
+}
+
+/// Consume and discard a member's data blocks so the next header is read from
+/// the right offset. Returns false if the archive ended early.
+fn skip_data(input: &mut dyn Read, size: u64) -> bool {
+    let mut block = [0u8; BLOCK_SIZE];
+    for _ in 0..data_blocks(size) {
+        if input.read_exact(&mut block).is_err() {
+            return false;
+        }
+    }
+    true
+}
+
+fn do_extract(archive_file: &Option<String>, directory: Option<&str>, verbose: bool) -> i32 {
+    // The archive is opened before the `-C` chdir, so its own path is resolved
+    // against the directory the user was standing in, as GNU does.
     let mut input: Box<dyn Read> = match archive_file {
         Some(path) => match File::open(path) {
             Ok(f) => Box::new(f),
             Err(e) => {
                 eprintln!("tar: {}: {e}", quotef_os(path));
-                process::exit(1);
+                return EXIT_FATAL;
             }
         },
         None => Box::new(io::stdin()),
@@ -340,8 +538,11 @@ fn do_extract(archive_file: &Option<String>, directory: Option<&str>, verbose: b
         && let Err(e) = env::set_current_dir(dir)
     {
         eprintln!("tar: {}: {e}", quotef_os(dir));
-        process::exit(1);
+        return EXIT_FATAL;
     }
+
+    let mut status = 0;
+    let mut warned_absolute = false;
 
     loop {
         let mut header_buf = [0u8; BLOCK_SIZE];
@@ -353,65 +554,139 @@ fn do_extract(archive_file: &Option<String>, directory: Option<&str>, verbose: b
             break;
         }
 
-        let name = extract_string(header_buf.get(..100).unwrap_or(&[]));
+        let raw_name = extract_string(header_buf.get(..100).unwrap_or(&[]));
         let size = parse_octal(header_buf.get(124..136).unwrap_or(&[]));
         let typeflag = header_buf.get(156).copied().unwrap_or(0);
 
-        if name.is_empty() {
+        if raw_name.is_empty() {
             break;
         }
+
+        // GNU prints this once, not once per member, and only when it applies.
+        if raw_name.starts_with('/') && !warned_absolute {
+            eprintln!("tar: Removing leading '/' from member names");
+            warned_absolute = true;
+        }
+
+        // Nothing below may use `raw_name` as a path. It is attacker-chosen.
+        let name = match sanitize_member_name(&raw_name) {
+            Ok(n) => n,
+            Err(e) => {
+                eprintln!("tar: {e}");
+                status = EXIT_FATAL;
+                if !skip_data(input.as_mut(), size) {
+                    break;
+                }
+                continue;
+            }
+        };
 
         if verbose {
             eprintln!("{name}");
         }
 
         match typeflag {
-            b'5' | b'\0' if name.ends_with('/') => {
-                let _ = fs::create_dir_all(&name);
+            b'5' | b'\0' if raw_name.ends_with('/') => {
+                if let Err(e) = fs::create_dir_all(&name) {
+                    eprintln!("tar: {}: {e}", quotef_os(&name));
+                    status = EXIT_FATAL;
+                }
             }
             b'0' | b'\0' => {
-                if let Some(parent) = Path::new(&name).parent() {
-                    let _ = fs::create_dir_all(parent);
-                }
-
-                let blocks = size
-                    .saturating_add(BLOCK_SIZE as u64 - 1)
-                    .saturating_div(BLOCK_SIZE as u64);
-                let mut file_data = Vec::with_capacity(usize::try_from(size).unwrap_or(0));
-
-                for _ in 0..blocks {
-                    let mut block = [0u8; BLOCK_SIZE];
-                    if input.read_exact(&mut block).is_err() {
-                        break;
-                    }
-                    file_data.extend_from_slice(&block);
-                }
-
-                file_data.truncate(usize::try_from(size).unwrap_or(0));
-                if let Err(e) = fs::write(&name, &file_data) {
-                    eprintln!("tar: {}: {e}", quotef_os(name));
+                if !extract_regular_file(input.as_mut(), &name, size, &mut status) {
+                    break;
                 }
             }
-            _ => {
-                let blocks = size
-                    .saturating_add(BLOCK_SIZE as u64 - 1)
-                    .saturating_div(BLOCK_SIZE as u64);
-                for _ in 0..blocks {
-                    let mut block = [0u8; BLOCK_SIZE];
-                    let _ = input.read_exact(&mut block);
+            other => {
+                // Hard links, symlinks, devices, FIFOs and the GNU long-name
+                // extensions all land here. Skipping them keeps the stream in
+                // sync, but the extracted tree is then not the archive, so say
+                // so rather than pretending it worked.
+                eprintln!(
+                    "tar: {}: unsupported entry type '{}'; skipped",
+                    quotef_os(&name),
+                    char::from(other)
+                );
+                status = EXIT_FATAL;
+                if !skip_data(input.as_mut(), size) {
+                    break;
                 }
             }
         }
     }
+    status
 }
 
-fn do_list_main(archive_file: &Option<String>) {
+/// Stream one regular member out of `input` into `name`. Returns false when
+/// the archive ended mid-member, which means the outer loop must stop.
+///
+/// This streams rather than buffering. The previous version did
+/// `Vec::with_capacity(size)` from the header's own size field, so an archive
+/// whose header claimed 2^40 bytes made this program try to reserve a
+/// terabyte before reading a single block — a one-line denial of service
+/// costing the attacker 512 bytes of file.
+fn extract_regular_file(input: &mut dyn Read, name: &str, size: u64, status: &mut i32) -> bool {
+    if let Some(parent) = Path::new(name).parent()
+        && !parent.as_os_str().is_empty()
+        && let Err(e) = fs::create_dir_all(parent)
+    {
+        eprintln!("tar: {}: {e}", quotef_os(parent));
+        *status = EXIT_FATAL;
+        return skip_data(input, size);
+    }
+
+    let mut file = match File::create(name) {
+        Ok(f) => Some(f),
+        Err(e) => {
+            // Still consume the data: the archive may hold members after this
+            // one, and abandoning the stream would lose them too.
+            eprintln!("tar: {}: {e}", quotef_os(name));
+            *status = EXIT_FATAL;
+            None
+        }
+    };
+
+    let mut remaining = size;
+    let mut block = [0u8; BLOCK_SIZE];
+    for _ in 0..data_blocks(size) {
+        if input.read_exact(&mut block).is_err() {
+            eprintln!("tar: {}: unexpected end of archive", quotef_os(name));
+            *status = EXIT_FATAL;
+            return false;
+        }
+        let take = usize::try_from(remaining)
+            .unwrap_or(BLOCK_SIZE)
+            .min(BLOCK_SIZE);
+        remaining = remaining.saturating_sub(take as u64);
+        if let Some(f) = file.as_mut()
+            && let Err(e) = f.write_all(block.get(..take).unwrap_or(&[]))
+        {
+            eprintln!("tar: {}: {e}", quotef_os(name));
+            *status = EXIT_FATAL;
+            // Drop the handle so the rest of the member is only skipped, but
+            // keep reading so the following headers stay aligned.
+            file = None;
+        }
+    }
+    // Buffered data is not the issue here (`File` is unbuffered), but a
+    // filesystem that reports a write error at close would otherwise be
+    // ignored, which is the same defect as the discarded `write_all` above.
+    if let Some(mut f) = file
+        && let Err(e) = f.flush()
+    {
+        eprintln!("tar: {}: {e}", quotef_os(name));
+        *status = EXIT_FATAL;
+    }
+    true
+}
+
+fn do_list_main(archive_file: &Option<String>) -> i32 {
     let input: Box<dyn Read> = match archive_file {
         Some(path) => match File::open(path) {
             Ok(f) => Box::new(f),
             Err(e) => {
                 eprintln!("tar: {}: {e}", quotef_os(path));
-                process::exit(1);
+                return EXIT_FATAL;
             }
         },
         None => Box::new(io::stdin()),
@@ -419,7 +694,16 @@ fn do_list_main(archive_file: &Option<String>) {
 
     let stdout = io::stdout();
     let mut out = stdout.lock();
-    let _ = list_archive(input, &mut out);
+    if let Err(e) = list_archive(input, &mut out).and_then(|()| out.flush()) {
+        // `tar -tf big.tar | head -5` closes the pipe on purpose; that is how
+        // a pipeline ends, not a failure of this program.
+        if e.kind() == io::ErrorKind::BrokenPipe {
+            return 0;
+        }
+        eprintln!("tar: 'standard output': {e}");
+        return EXIT_FATAL;
+    }
+    0
 }
 
 /// List the names of all archive members read from `input` to `out`.
@@ -445,12 +729,12 @@ fn list_archive(mut input: impl Read, out: &mut impl Write) -> io::Result<()> {
             break;
         }
 
+        // Listing shows the name as stored, not the sanitized one: the point
+        // of `tar -t` is to tell you what is in the archive, and a member
+        // called `../../etc/passwd` is exactly what you want to be shown.
         writeln!(out, "{name}")?;
 
-        let blocks = size
-            .saturating_add(BLOCK_SIZE as u64 - 1)
-            .saturating_div(BLOCK_SIZE as u64);
-        for _ in 0..blocks {
+        for _ in 0..data_blocks(size) {
             let mut block = [0u8; BLOCK_SIZE];
             if input.read_exact(&mut block).is_err() {
                 return Ok(());
@@ -565,6 +849,97 @@ mod tests {
         let a = parse_args(&s(&["-c", "f1", "f2"])).unwrap();
         assert!(a.create);
         assert_eq!(a.files, vec!["f1", "f2"]);
+    }
+
+    // ---------------- sanitize_member_name ----------------
+    //
+    // Every case here was a file written outside the destination directory
+    // before the sanitizer existed. See known-issues.md ->
+    // B-tar-EXTRACTS-OUTSIDE-THE-DESTINATION-DIRECTORY.
+
+    #[test]
+    fn sanitize_plain_relative_name_unchanged() {
+        assert_eq!(sanitize_member_name("a/b/c.txt").unwrap(), "a/b/c.txt");
+        assert_eq!(sanitize_member_name("file.txt").unwrap(), "file.txt");
+    }
+
+    #[test]
+    fn sanitize_strips_leading_slash() {
+        // Critical: `Path::join` with an absolute path throws the base away,
+        // so an unstripped name would ignore `-C` entirely.
+        assert_eq!(sanitize_member_name("/etc/passwd").unwrap(), "etc/passwd");
+        assert_eq!(sanitize_member_name("///etc/passwd").unwrap(), "etc/passwd");
+    }
+
+    #[test]
+    fn sanitize_drops_dot_and_doubled_slashes() {
+        assert_eq!(sanitize_member_name("./a//b/./c").unwrap(), "a/b/c");
+    }
+
+    #[test]
+    fn sanitize_refuses_leading_dotdot() {
+        assert!(sanitize_member_name("../../etc/passwd").is_err());
+    }
+
+    #[test]
+    fn sanitize_refuses_interior_dotdot() {
+        // `a/../b` is only equivalent to `b` if `a` is a real directory and
+        // not a symlink -- which the archive is the last thing to trust about.
+        assert!(sanitize_member_name("a/../../etc/passwd").is_err());
+        assert!(sanitize_member_name("a/../b").is_err());
+    }
+
+    #[test]
+    fn sanitize_refuses_absolute_dotdot_combination() {
+        assert!(sanitize_member_name("/../../root/.ssh/authorized_keys").is_err());
+    }
+
+    #[test]
+    fn sanitize_refuses_backslash_traversal() {
+        // Not a separator on this OS, but this file's tests -- and any host
+        // build -- run where it is.
+        assert!(sanitize_member_name("..\\..\\windows\\system32\\x").is_err());
+        assert!(sanitize_member_name("a/..\\b").is_err());
+    }
+
+    #[test]
+    fn sanitize_keeps_a_lone_backslash_in_a_name() {
+        // A slateos filename may contain a backslash; only a `..` component
+        // is refused, and the name is rebuilt with `/` alone.
+        assert_eq!(sanitize_member_name("a/b\\c").unwrap(), "a/b\\c");
+    }
+
+    #[test]
+    fn sanitize_refuses_names_that_reduce_to_nothing() {
+        assert!(sanitize_member_name("").is_err());
+        assert!(sanitize_member_name("/").is_err());
+        assert!(sanitize_member_name("./.").is_err());
+    }
+
+    #[test]
+    fn sanitize_allows_dotfiles_and_names_starting_with_dots() {
+        // `..foo` and `...` are ordinary names, not traversal.
+        assert_eq!(sanitize_member_name(".bashrc").unwrap(), ".bashrc");
+        assert_eq!(sanitize_member_name("a/..foo").unwrap(), "a/..foo");
+        assert_eq!(sanitize_member_name("a/...").unwrap(), "a/...");
+    }
+
+    // ---------------- data_blocks ----------------
+
+    #[test]
+    fn data_blocks_rounds_up() {
+        assert_eq!(data_blocks(0), 0);
+        assert_eq!(data_blocks(1), 1);
+        assert_eq!(data_blocks(512), 1);
+        assert_eq!(data_blocks(513), 2);
+        assert_eq!(data_blocks(1024), 2);
+    }
+
+    #[test]
+    fn data_blocks_does_not_overflow() {
+        // A hostile header can name any u64; this must not wrap to 0 blocks
+        // and desynchronise the reader.
+        assert!(data_blocks(u64::MAX) > 0);
     }
 
     // ---------------- extract_string / parse_octal ----------------

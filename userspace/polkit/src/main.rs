@@ -1562,14 +1562,18 @@ fn run_main() -> i32 {
     let sub_args: Vec<String> = match args.split_first() {
         None => Vec::new(),
         Some((_argv0, after_argv0)) => match after_argv0.split_first() {
-            Some((
-                sub,
-                after_sub,
-            )) if matches!(
-                sub.as_str(),
-                "daemon" | "polkitd" | "exec" | "pkexec" | "action" | "pkaction" | "check"
-                    | "pkcheck"
-            ) =>
+            Some((sub, after_sub))
+                if matches!(
+                    sub.as_str(),
+                    "daemon"
+                        | "polkitd"
+                        | "exec"
+                        | "pkexec"
+                        | "action"
+                        | "pkaction"
+                        | "check"
+                        | "pkcheck"
+                ) =>
             {
                 after_sub.to_vec()
             }
@@ -1635,12 +1639,38 @@ mod tests {
     // to every other prompt's limit — at a prompt that asks for an
     // administrator's password and prints the names to try first.
 
+    /// A clock that never advances.
+    ///
+    /// Every test here that earns a rate-limit delay stops at the *first*
+    /// failure that produces one — `FREE_ATTEMPTS + 1`, which
+    /// `authlib::delay_for` maps to `1 << 0` = **one second**. But the real
+    /// clock is `SystemTime::now().as_secs()`, in *whole* seconds, so a
+    /// one-second delay is really "the remainder of the current second":
+    /// anywhere from ~0 to 1 s depending on where the last failure landed. Do
+    /// anything slow before asserting — `admin_with_password` runs a real KDF,
+    /// which is designed to be slow — and on a machine with every core busy
+    /// (which under `cargo test --workspace` is always) the delay has
+    /// legitimately expired by the time the assertion looks.
+    ///
+    /// Nothing is wrong with `authlib`: a one-second delay expiring after one
+    /// second is the specification. The tests were asserting a time-bounded
+    /// property without controlling time. None of the properties under test
+    /// here — "a delay earned at another prompt is honoured", "the tally stays
+    /// at zero" — has anything to do with wall time, so the fix is to remove
+    /// time from them rather than to widen the window and make the race rarer.
+    fn frozen_clock() -> u64 {
+        // Any fixed value; only differences matter, and there are none.
+        1_700_000_000
+    }
+
     /// An `Authenticator` with no store behind it: the two paths do not exist,
     /// so no test can read the real `/etc/users.yaml` or write the real
     /// faillock file. The tally lives in memory for the life of the value.
+    ///
+    /// The clock is frozen — see `frozen_clock`.
     fn scratch_authenticator() -> authlib::Authenticator {
         let missing = std::path::Path::new("/nonexistent/polkit-tests");
-        authlib::Authenticator::with_stores(missing, missing)
+        authlib::Authenticator::with_stores(missing, missing).with_clock(frozen_clock)
     }
 
     /// Enough failures to be past the free allowance and unambiguously into
@@ -1761,16 +1791,13 @@ mod tests {
             auth.note_failure("alice");
         }
 
-        let refusal = refusal_before_prompting(&mut auth, &locked)
-            .expect("a delayed caller is refused");
+        let refusal =
+            refusal_before_prompting(&mut auth, &locked).expect("a delayed caller is refused");
         assert!(
             !refusal.contains("locked"),
             "the limit disclosed what it was meant to hide: {refusal}"
         );
-        assert!(
-            !refusal.contains("alice"),
-            "leaked the username: {refusal}"
-        );
+        assert!(!refusal.contains("alice"), "leaked the username: {refusal}");
         assert!(
             !refusal.chars().any(|c| c.is_ascii_digit()),
             "leaked a countdown: {refusal}"
@@ -1783,26 +1810,43 @@ mod tests {
     /// pointed at one file stand in for two programs.
     #[test]
     fn polkit_honours_a_delay_earned_at_another_prompt() {
-        let dir = std::env::temp_dir().join("polkit-faillock-share-test");
+        // Tagged with the clock, not a fixed name: two runs of this test on one
+        // machine — two lanes, or a re-run started before the first finished —
+        // would otherwise `remove_dir_all` each other's fixture mid-test, since
+        // opening the directory begins by deleting it.
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_nanos());
+        let dir = std::env::temp_dir().join(format!("polkit-faillock-share-test-{stamp}"));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("a scratch directory under the temp dir");
         let faillock = dir.join("faillock");
         let missing = std::path::Path::new("/nonexistent/polkit-tests");
 
+        // Build the admin *before* earning the delay. `set_password_with_salt`
+        // runs a real KDF, and with a frozen clock it no longer matters — but
+        // leaving slow work between earning a delay and checking it is the
+        // shape that made this flaky, so it does not belong there either way.
+        let admin = admin_with_password("alice", "hunter2");
+
         // `login` (or `su`, or `sudo`) burns through the allowance.
         {
-            let mut elsewhere =
-                authlib::Authenticator::with_stores(missing, missing).with_faillock(&faillock);
+            let mut elsewhere = authlib::Authenticator::with_stores(missing, missing)
+                .with_faillock(&faillock)
+                .with_clock(frozen_clock);
             while elsewhere.rate_limited("alice").is_none() {
                 elsewhere.note_failure("alice");
             }
         }
 
         // `polkit` starts fresh, reads the same file, and refuses — even the
-        // correct password does not skip a wait earned elsewhere.
-        let admin = admin_with_password("alice", "hunter2");
-        let mut auth =
-            authlib::Authenticator::with_stores(missing, missing).with_faillock(&faillock);
+        // correct password does not skip a wait earned elsewhere.  Both
+        // authenticators must share the frozen clock: the faillock file records
+        // an *absolute* failure time, so a reader on a different clock would
+        // compute a different remaining delay from the same bytes.
+        let mut auth = authlib::Authenticator::with_stores(missing, missing)
+            .with_faillock(&faillock)
+            .with_clock(frozen_clock);
         assert!(
             refusal_before_prompting(&mut auth, &admin).is_some(),
             "a delay earned at another prompt must be honoured here"
@@ -2079,13 +2123,13 @@ mod tests {
 
     #[test]
     fn test_parse_rules_basic() {
-        let rules_text = r#"
+        let rules_text = r"
 # Allow alice to run anything under org.slateos.pkexec
 - action: org.slateos.pkexec.*
   user: alice
   result: yes
   priority: 10
-"#;
+";
         let rules = parse_rules_file(rules_text);
         assert_eq!(rules.len(), 1);
         assert_eq!(rules[0].action_pattern, "org.slateos.pkexec.*");
@@ -2097,12 +2141,12 @@ mod tests {
 
     #[test]
     fn test_parse_rules_group() {
-        let rules_text = r#"
+        let rules_text = r"
 - action: org.slateos.mount.*
   group: storage
   result: auth_self
   priority: 50
-"#;
+";
         let rules = parse_rules_file(rules_text);
         assert_eq!(rules.len(), 1);
         assert_eq!(rules[0].group, Some("storage".to_string()));
@@ -2111,7 +2155,7 @@ mod tests {
 
     #[test]
     fn test_parse_rules_multiple() {
-        let rules_text = r#"
+        let rules_text = r"
 - action: org.slateos.a
   user: bob
   result: yes
@@ -2121,7 +2165,7 @@ mod tests {
   user: charlie
   result: no
   priority: 2
-"#;
+";
         let rules = parse_rules_file(rules_text);
         assert_eq!(rules.len(), 2);
         assert_eq!(rules[0].action_pattern, "org.slateos.a");

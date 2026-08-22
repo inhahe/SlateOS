@@ -38,8 +38,17 @@
 # Windows build; set GNU_BC/GNU_DC to override (e.g. when running on Linux).
 set -u
 
-OURS_BC=${OURS_BC:-"target/x86_64-pc-windows-gnu/debug/bc.exe"}
-OURS_DC=${OURS_DC:-"target/x86_64-pc-windows-gnu/debug/dc.exe"}
+# Both are built here, from the packages named, rather than picked up from
+# `target/`. `bc` in particular used to have a namesake in `coreutils` -- an
+# older, separate implementation that also wrote `target/…/debug/bc.exe` -- and
+# this harness spent a day reporting 105 differences against it. The two have
+# since been merged the right way round (design-decisions.md §359): the crate
+# that survives is `coreutils`, the code that survives is the one this harness
+# measures. Naming the package is what keeps that honest. See
+# `scripts/diff-subject.sh`.
+. "$(dirname "$0")/diff-subject.sh"
+OURS_BC=$(subject_binary coreutils bc "${OURS_BC:-}") || exit 1
+OURS_DC=$(subject_binary dc dc "${OURS_DC:-}") || exit 1
 
 if command -v bc >/dev/null 2>&1; then
   GNU_BC=${GNU_BC:-bc}

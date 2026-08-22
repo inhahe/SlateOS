@@ -3093,9 +3093,30 @@ mod tests {
 
     use scratchdir::ScratchDir;
 
+    /// A clock that never advances.
+    ///
+    /// `repeated_guesses_are_rate_limited` earns the *smallest* delay the
+    /// escalation can produce: it fails `FREE_ATTEMPTS + 1` times, which
+    /// `authlib::delay_for` maps to `1 << 0` = one second. But the real clock
+    /// is `SystemTime::now().as_secs()` — whole seconds — so that "one second"
+    /// is really the remainder of the current second, anywhere from ~0 to 1 s.
+    /// The loop that earns it runs `FREE_ATTEMPTS + 1` shadow verifications and
+    /// the assertion runs one more, each a deliberately-slow password hash; on
+    /// a machine with every core busy the window is gone before the assertion
+    /// looks.
+    ///
+    /// `authlib` is correct — a one-second delay expiring after one second is
+    /// the specification — so the fix is to take wall time out of a property
+    /// that never depended on it, rather than to earn a longer delay and make
+    /// the race rare instead of impossible.
+    fn frozen_clock() -> u64 {
+        // Any fixed value; only differences matter, and there are none.
+        1_700_000_000
+    }
+
     /// An `Authenticator` over a throwaway `/etc/shadow` holding one line. The
     /// users.yaml path deliberately does not exist, so the shadow branch is
-    /// the one under test.
+    /// the one under test. The clock is frozen — see `frozen_clock`.
     ///
     /// The returned `ScratchDir` is a guard: it must stay bound for as long as the
     /// `Authenticator` is used, because dropping it deletes the shadow file the
@@ -3105,7 +3126,10 @@ mod tests {
         let shadow = dir.path("shadow");
         fs::write(&shadow, line).expect("write shadow");
         let missing = dir.path("no_such_users.yaml");
-        (authlib::Authenticator::with_stores(&missing, &shadow), dir)
+        (
+            authlib::Authenticator::with_stores(&missing, &shadow).with_clock(frozen_clock),
+            dir,
+        )
     }
 
     /// The fixture's own wiring, which a shared guard cannot check for us.

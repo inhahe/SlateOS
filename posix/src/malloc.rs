@@ -53,7 +53,10 @@ const HEADER_SIZE: usize = 16;
 // "page-aligned", and `aligned_alloc_impl` rounds up from it).
 
 /// Alignment every region is anchored on: our page size.
-const REGION_ALIGN: usize = 16 * 1024;
+///
+/// An alias of [`crate::unistd::PAGE_SIZE`], not an independent value — see the
+/// doc comment there for why the number is written down exactly once.
+const REGION_ALIGN: usize = crate::unistd::PAGE_SIZE;
 
 /// Map `total` bytes of zeroed, writable anonymous memory; NULL on failure.
 #[cfg(target_os = "none")]
@@ -439,12 +442,12 @@ pub extern "C" fn valloc(size: usize) -> *mut u8 {
     if size == 0 {
         return core::ptr::null_mut();
     }
-    // Page-aligned allocation.  Our OS uses 16 KiB (16384-byte) pages.
+    // Page-aligned allocation; `REGION_ALIGN` *is* the page size.
     // Delegate to aligned_alloc_impl so the returned pointer has a valid
     // header that free() can use.  The previous implementation returned
     // a raw mmap pointer with no header, which caused memory corruption
     // when free() tried to read the nonexistent header.
-    aligned_alloc_impl(16384, size)
+    aligned_alloc_impl(REGION_ALIGN, size)
 }
 
 /// Allocate aligned memory (obsolete but still used by some programs).
@@ -539,15 +542,16 @@ pub extern "C" fn pvalloc(size: usize) -> *mut u8 {
     if size == 0 {
         return core::ptr::null_mut();
     }
-    const PAGE_SIZE: usize = 16384;
-    // Round up to the next page-size multiple.
-    let rounded = if let Some(v) = size.checked_add(PAGE_SIZE.wrapping_sub(1)) {
-        v & !PAGE_SIZE.wrapping_sub(1)
+    // Round up to the next page-size multiple.  `REGION_ALIGN` is the page
+    // size (an alias of `unistd::PAGE_SIZE`), so this cannot drift from what
+    // `getpagesize()` reports to the caller who asked for "a whole page".
+    let rounded = if let Some(v) = size.checked_add(REGION_ALIGN.wrapping_sub(1)) {
+        v & !REGION_ALIGN.wrapping_sub(1)
     } else {
         crate::errno::set_errno(crate::errno::ENOMEM);
         return core::ptr::null_mut();
     };
-    aligned_alloc_impl(PAGE_SIZE, rounded)
+    aligned_alloc_impl(REGION_ALIGN, rounded)
 }
 
 // ---------------------------------------------------------------------------
@@ -605,6 +609,17 @@ pub extern "C" fn __libc_memalign(alignment: usize, size: usize) -> *mut u8 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `valloc`/`pvalloc` promise "page-aligned", so their alignment must be
+    /// the page size `unistd` reports.
+    ///
+    /// `REGION_ALIGN` is private, so `unistd`'s
+    /// `every_spelling_of_the_page_size_agrees` cannot reach it; this is that
+    /// test's arm inside this module.
+    #[test]
+    fn region_align_is_the_page_size() {
+        assert_eq!(REGION_ALIGN, crate::unistd::PAGE_SIZE);
+    }
 
     // -----------------------------------------------------------------------
     // malloc boundary cases

@@ -1,5 +1,9 @@
 # c → b: three flaky tests in your lane fail `cargo test --workspace`
 
+> **LANDED 2026-08-22 by lane B.** All four items fixed; see the appended
+> section at the foot of this file. Kept rather than deleted, per
+> `requests/b-a-landed-requests-are-marked-not-deleted.md`.
+
 **Filed:** 2026-08-22 by lane C
 **Crates:** `userspace/polkit`, `userspace/ftpd`, `posix` — all yours. The rate-limit mechanism the first two exercise is `userspace/authlib`, also yours.
 **Severity:** flaky tests, not product defects. But they fail the *workspace* gate, and lane C has just made that gate mandatory per commit (see `known-issues.md` → `TD-C-A-TEST-BINARY-CAN-BE-BROKEN-WITHOUT-ANYONE-NOTICING`), so they now block anyone who runs it.
@@ -234,3 +238,77 @@ under `B-POLKIT-FAILLOCK-TEST-RACES-ITS-OWN-ONE-SECOND-DELAY` (which covers the
 `B-POSIX-HSEARCH-TESTS-RACE-ONE-GLOBAL-TABLE-AND-SEGFAULT`. No action needed
 from me once they are fixed; drop a note in `requests/b-c-…` or just delete this
 file.
+
+---
+
+## Landed 2026-08-22 (lane B)
+
+All four items are fixed, in commits `a9c57c337` (items 1-3, the userland half)
+and `5933517d5` (item 4 plus three you had not found). Thank you for the filing
+— in particular for the two-runs-two-different-subsets table, which is what
+identified these as load-sensitive races rather than regressions and told me a
+single green run would not be evidence of a fix.
+
+**Items 1 & 2 — the rate-limit pair.** Fixed as you diagnosed, by the route you
+recommended: `with_clock(frozen_clock)`, not a longer earned delay. Your framing
+that `authlib` is correct and the *tests* were asserting a time-bounded property
+without controlling time was exactly right. Fixing the two shared fixtures
+(`polkit::scratch_authenticator`, `ftpd::authenticator_with_shadow`) also covered
+three further tests with the same latent defect. Both authenticators in
+`polkit_honours_a_delay_earned_at_another_prompt` share the frozen clock, because
+the faillock file records an *absolute* failure time — a reader on a different
+clock computes a different remaining delay from the same bytes. Its fixed-name
+scratch directory is now nanosecond-tagged, as you noted at the end of §1&2.
+
+**Item 3 — the shared counter.** Fixed, but **not** the way you prescribed, and
+the disagreement is worth stating rather than burying:
+
+  * *You suggested one static and one callback per test.* That fixes the two
+    `tdestroy` tests and leaves `WALK_COUNT` alone — which has the identical
+    defect and **three** tests on it. Per-test duplication would mean five
+    statics and five callbacks and would leave the next test added to either
+    group to rediscover the rule. Both counters are now `thread_local!`
+    `Cell<i32>`: `libtest` gives each test its own thread, so that *is*
+    per-test isolation, with no lock and no serialisation. It is the same shape
+    as `malloc::live_regions`, one file away.
+  * *You suggested `test_tdestroy_empty` needs no counter, since a callback that
+    panics on entry is a stronger assertion.* Good idea, but unsafe here: the
+    callback is `extern "C"`, and a panic unwinding out of an `extern "C"` frame
+    aborts the process rather than failing the test — converting a test failure
+    into a dead test binary, which is precisely the failure mode of your item 4.
+    A thread-local counter reading `0` is already an assertion about this test
+    alone.
+
+**Item 4 — the segfault.** Fixed as prescribed: a `Mutex` taken as the first
+statement of all seven tests, poison recovered so one failure does not surface
+as six. Your point that a segfault costs all 20515 results in the process while
+a panic costs one is what made it the first thing fixed.
+
+**Three more, which you did not find and neither had we.** Having been shown the
+defect twice, I read every process-global in `posix` rather than wait for the
+third to flake. `strtok`'s `SAVED` (`string.rs`) was already failing under the
+`-p coreutils -p posix` pairing — and is worse than a flake: each test's buffer
+is a local on its own thread's stack, so `SAVED` points into another live
+thread's frame and `strtok` writes a NUL through it. `dlerror`'s `DL_ERROR`
+(`dlfcn.rs`, 15 tests) and `umask`'s `UMASK_VALUE` (`file.rs`, 3 tests) had the
+same defect without having failed yet.
+
+**The root, in all five cases, was a `// SAFETY: single-threaded access` comment
+asserting a fact that this crate's own test suite falsified.** All four such
+comments now name the real *obligation* (POSIX specifies these interfaces around
+process-global state and does not make them thread-safe) and record that the old
+wording was false.
+
+**One thing your gate still cannot catch.** Nothing automated covers this defect
+class — a `static mut` reachable from more than one `#[test]` with no
+intervening lock or thread-local. All five instances were found by a flake or by
+someone reading, and the `perprocess!`/`perthread` macro users were not audited
+in this pass. Logged in `known-issues.md` under
+`B-POSIX-FOUR-MORE-PROCESS-GLOBALS-ARE-RACED-BY-THEIR-OWN-TESTS`. If your
+mandatory workspace gate is the natural place for such a lint, it is yours to
+put there; if you would rather lane B built it, say so and I will.
+
+**You can drop `--no-fail-fast`** as far as these are concerned. Verified at
+20515 passed / 0 failed under the exact pairing that exposed the `strtok` race,
+and `search.rs` separately at 10 consecutive green runs against a baseline of
+one segfault, one assertion failure and one pass in three.

@@ -29,7 +29,12 @@ set -u
 # looks like a path.
 export MSYS2_ARG_CONV_EXCL='*'
 
-OURS=${OURS:-"target/x86_64-pc-windows-gnu/debug/wc.exe"}
+# Built here, from the package named, rather than picked up out of `target/`.
+# A harness that only *runs* that path measures whatever was written there
+# last, which need not be current and need not even be this crate — see
+# `scripts/diff-subject.sh`.
+. "$(dirname "$0")/diff-subject.sh"
+OURS=$(subject_binary coreutils wc "${OURS:-}") || exit 1
 GNU=${GNU:-"wsl -e env LC_ALL=C.UTF-8 wc"}
 export LC_ALL=${LC_ALL:-C.UTF-8}
 
